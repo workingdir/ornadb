@@ -1702,6 +1702,7 @@ impl Context<'_, '_> {
             ("partition", [Value::List(values), predicate]) => {
                 self.partition(values, predicate, depth)
             }
+            ("group_by", [Value::List(values), key]) => self.group_by(values, key, depth),
             ("zip", [Value::List(left), Value::List(right)]) => self.zipped(left, right, false),
             ("zip_exact", [Value::List(left), Value::List(right)]) => {
                 self.zipped(left, right, true)
@@ -1725,6 +1726,7 @@ impl Context<'_, '_> {
             ("chunk", [_, _])
             | ("flatten" | "unique" | "pairs", [_])
             | ("partition", [_, _])
+            | ("group_by", [_, _])
             | ("zip" | "zip_exact", [_, _])
             | ("window", [_, _] | [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
@@ -1777,6 +1779,58 @@ impl Context<'_, '_> {
             Value::List(matching),
             Value::List(remaining),
         ]))
+    }
+    fn group_by(
+        &mut self,
+        values: &[Value],
+        key: &Value,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let mut groups = Vec::<(Value, Vec<Value>)>::new();
+        for value in values {
+            // Classify once, in input order. The returned key must have an
+            // explicit total comparison; canonical encoding alone is not a
+            // substitute for the library's lawful-key requirement.
+            let group_key = self.invoke_predicate(key, value.clone(), depth + 1)?;
+            lawful_group_key(&group_key)?;
+            let mut matched = false;
+            for (existing_key, rows) in &mut groups {
+                match compare_group_keys(existing_key, &group_key)? {
+                    std::cmp::Ordering::Equal => {
+                        rows.push(value.clone());
+                        self.items(rows.len())?;
+                        matched = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if !matched {
+                self.items(groups.len() + 1)?;
+                groups.push((group_key, vec![value.clone()]));
+            }
+        }
+
+        // Insertion sort keeps the ordering decision fallible and avoids
+        // accepting an incidental host ordering for source values.
+        for index in 1..groups.len() {
+            let mut current = index;
+            while current > 0
+                && compare_group_keys(&groups[current - 1].0, &groups[current].0)?
+                    == std::cmp::Ordering::Greater
+            {
+                groups.swap(current - 1, current);
+                current -= 1;
+            }
+        }
+        self.items(groups.len())?;
+        Ok(Value::List(
+            groups
+                .into_iter()
+                .map(|(key, rows)| Value::Tuple(vec![key, Value::List(rows)]))
+                .collect(),
+        ))
     }
     fn invoke_predicate(
         &mut self,
@@ -2137,6 +2191,7 @@ fn named_arguments(
         "chunk" => &["values", "size"],
         "flatten" | "unique" | "pairs" => &["values"],
         "partition" => &["values", "predicate"],
+        "group_by" => &["values", "key"],
         "zip" | "zip_exact" => &["left", "right"],
         "window" => match values.len() {
             2 => &["values", "size"],
@@ -2270,6 +2325,34 @@ fn compare_values(left: &Value, right: &Value) -> Result<std::cmp::Ordering, Eva
         (Value::Float(a), Value::Float(b)) => f64::from_bits(*a)
             .partial_cmp(&f64::from_bits(*b))
             .ok_or_else(|| error("ORNA-EVAL-VALUE")),
+        _ => Err(error("ORNA-EVAL-TYPE")),
+    }
+}
+fn lawful_group_key(value: &Value) -> Result<(), EvaluationError> {
+    match value {
+        Value::Bool(_) | Value::Int(_) | Value::Decimal(_) | Value::String(_) => Ok(()),
+        Value::Tuple(values) => values.iter().try_for_each(lawful_group_key),
+        _ => Err(error("ORNA-EVAL-TYPE")),
+    }
+}
+fn compare_group_keys(left: &Value, right: &Value) -> Result<std::cmp::Ordering, EvaluationError> {
+    match (left, right) {
+        (Value::Bool(left), Value::Bool(right)) => Ok(left.cmp(right)),
+        (Value::Int(left), Value::Int(right)) => Ok(left.cmp(right)),
+        (Value::Decimal(left), Value::Decimal(right)) => compare_values(
+            &Value::Decimal(left.clone()),
+            &Value::Decimal(right.clone()),
+        ),
+        (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
+        (Value::Tuple(left), Value::Tuple(right)) => {
+            for (left, right) in left.iter().zip(right) {
+                let ordering = compare_group_keys(left, right)?;
+                if ordering != std::cmp::Ordering::Equal {
+                    return Ok(ordering);
+                }
+            }
+            Ok(left.len().cmp(&right.len()))
+        }
         _ => Err(error("ORNA-EVAL-TYPE")),
     }
 }
