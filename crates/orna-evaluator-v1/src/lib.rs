@@ -2043,6 +2043,7 @@ impl Context<'_, '_> {
             ("union", [Value::List(left), Value::List(right)]) => self.union(left, right),
             ("count", [Value::List(values)]) => self.count(values),
             ("first", [Value::List(values)]) => self.first(values),
+            ("sum", [Value::List(values)]) => self.sum(values),
             ("one", [Value::List(values)]) => self.one(values, None, depth),
             ("one", [Value::List(values), predicate]) => self.one(values, Some(predicate), depth),
             ("every", [Value::List(values), predicate]) => self.every(values, predicate, depth),
@@ -2082,7 +2083,7 @@ impl Context<'_, '_> {
                 self.windows(values, size, step)
             }
             ("chunk", [_, _])
-            | ("flatten" | "distinct" | "unique" | "pairs" | "count" | "first", [_])
+            | ("flatten" | "distinct" | "unique" | "pairs" | "count" | "first" | "sum", [_])
             | ("one", [_] | [_, _])
             | ("every" | "exists", [_, _])
             | ("count", [_, _])
@@ -2174,6 +2175,19 @@ impl Context<'_, '_> {
     fn count(&self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
         Ok(Value::Int(BigInt::from(values.len())))
+    }
+    fn sum(&self, values: &[Value]) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let mut total = BigInt::ZERO;
+        for value in values {
+            let Value::Int(value) = value else {
+                // Decimal, Float, Money and affine quantities remain outside
+                // this evaluator slice until their runtime contracts exist.
+                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+            };
+            total = self.integer(&total + value)?;
+        }
+        Ok(Value::Int(total))
     }
     fn first(&self, values: &[Value]) -> Result<Value, EvaluationError> {
         Ok(values.first().cloned().unwrap_or(Value::Null))
@@ -2757,6 +2771,7 @@ fn named_arguments(
         "normalise" => &["value", "form"],
         "chunk" => &["values", "size"],
         "flatten" | "distinct" | "unique" | "pairs" | "count" => &["values"],
+        "sum" => &["rows"],
         "first" => &["rows"],
         "one" => match values.len() {
             1 => &["rows"],
@@ -2831,7 +2846,7 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
     };
     matches!(
         text.as_str(),
-        "first" | "one" | "every" | "exists" | "map" | "flat_map"
+        "first" | "one" | "sum" | "every" | "exists" | "map" | "flat_map"
     )
     .then_some(text.as_str())
 }
