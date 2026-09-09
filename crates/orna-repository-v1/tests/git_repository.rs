@@ -1681,7 +1681,7 @@ fn restarted_force_discard_recovery_requires_the_recorded_canonical_witness() {
 }
 
 #[test]
-fn force_checkout_execution_without_recoverable_transition_state_fails_closed() {
+fn force_checkout_discards_only_the_consented_paths_and_carries_unrelated_state() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
     git(root.path(), &["branch", "experiment"]);
@@ -1693,6 +1693,8 @@ fn force_checkout_execution_without_recoverable_transition_state_fails_closed() 
 
     fs::write(root.path().join("ordinary.txt"), "staged discard\n").unwrap();
     git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "staged preserve\n").unwrap();
+    git(root.path(), &["add", "main.orna"]);
     fs::write(root.path().join("main.orna"), "unstaged preserve\n").unwrap();
     fs::write(root.path().join("untracked.txt"), "untracked preserve\n").unwrap();
     let plan = repo
@@ -1703,19 +1705,66 @@ fn force_checkout_execution_without_recoverable_transition_state_fails_closed() 
         .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
         .unwrap();
     repo.persist_validated_checkout_discard(&discard).unwrap();
-    let before = git_state(&repo, root.path());
-
-    assert!(matches!(
-        repo.execute_validated_force_checkout(&discard),
-        Err(orna_repository_v1::RepositoryError::CheckoutExecutionUnsafe)
-    ));
-    assert_eq!(git_state(&repo, root.path()), before);
-    assert!(repo.has_pending_pre_execution_checkout().unwrap());
-    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+    repo.execute_validated_force_checkout(&discard).unwrap();
+    assert!(!repo.has_pending_pre_execution_checkout().unwrap());
     assert_eq!(
-        git(root.path(), &["show", ":ordinary.txt"]),
-        "staged discard"
+        git(root.path(), &["branch", "--show-current"]),
+        "experiment"
     );
+    assert_eq!(git(root.path(), &["show", ":ordinary.txt"]), "target");
+    assert_eq!(git(root.path(), &["show", ":main.orna"]), "staged preserve");
+    assert_eq!(
+        fs::read_to_string(root.path().join("main.orna")).unwrap(),
+        "unstaged preserve\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
+        "untracked preserve\n"
+    );
+}
+
+#[test]
+fn interrupted_force_checkout_recovers_only_the_recorded_applied_generation() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+
+    fs::write(root.path().join("ordinary.txt"), "staged discard\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "staged preserve\n").unwrap();
+    git(root.path(), &["add", "main.orna"]);
+    fs::write(root.path().join("main.orna"), "unstaged preserve\n").unwrap();
+    fs::write(root.path().join("untracked.txt"), "untracked preserve\n").unwrap();
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(40))
+        .unwrap();
+    let token = plan.force_token();
+    let discard = repo
+        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .unwrap();
+    repo.persist_validated_checkout_discard(&discard).unwrap();
+
+    let mut interrupt = || Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired);
+    assert!(matches!(
+        repo.execute_validated_force_checkout_with_test_hook(&discard, &mut interrupt),
+        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
+    ));
+    assert!(repo.has_pending_pre_execution_checkout().unwrap());
+
+    let restarted = Repository::discover(root.path()).unwrap();
+    restarted.recover_pre_execution_checkout().unwrap();
+    assert!(!restarted.has_pending_pre_execution_checkout().unwrap());
+    assert_eq!(
+        git(root.path(), &["branch", "--show-current"]),
+        "experiment"
+    );
+    assert_eq!(git(root.path(), &["show", ":ordinary.txt"]), "target");
+    assert_eq!(git(root.path(), &["show", ":main.orna"]), "staged preserve");
     assert_eq!(
         fs::read_to_string(root.path().join("main.orna")).unwrap(),
         "unstaged preserve\n"
