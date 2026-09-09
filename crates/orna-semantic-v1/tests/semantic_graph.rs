@@ -2308,6 +2308,57 @@ fn authoritative_ranges_fixture_accepts_numeric_membership_and_integer_list_slic
 }
 
 #[test]
+fn finite_list_distinct_and_union_preserve_types_and_reject_invalid_inputs() {
+    let valid = analyze(&[ModuleInput::new(
+        "collections.orna",
+        r#"
+            pub fn dedupe(values: [Int]) = values | distinct;
+            pub fn combine(left: [Int], right: [Int]) = left | union(right);
+            pub fn combine_named(left: [Int], right: [Int]) = left | union(right: right);
+        "#,
+    )]);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
+    let module = valid.modules.values().next().unwrap();
+    assert!(matches!(
+        &module.symbols["dedupe"].ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::List(Box::new(Type::Int))
+    ));
+    assert!(matches!(
+        &module.symbols["combine"].ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::List(Box::new(Type::Int))
+    ));
+    assert!(matches!(
+        &module.symbols["combine_named"].ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::List(Box::new(Type::Int))
+    ));
+
+    let invalid = analyze(&[
+        ModuleInput::new("float.orna", "fn bad(values: [Float]) = values | distinct;"),
+        ModuleInput::new(
+            "mismatched.orna",
+            "fn bad(left: [Int], right: [Str]) = left | union(right);",
+        ),
+        ModuleInput::new("scalar.orna", "fn bad(values: [Int]) = values | union(1);"),
+        ModuleInput::new(
+            "relation.orna",
+            "table Reading(id: Int) { value: Int, } fn bad() = Reading | distinct;",
+        ),
+    ]);
+    assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
+    assert!(
+        invalid
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message().contains("default Float equality")),
+        "{:?}",
+        invalid.diagnostics
+    );
+}
+
+#[test]
 fn optional_numeric_ranges_infer_from_endpoints_or_expected_range_context() {
     let result = analyze(&[ModuleInput::new(
         "optional-ranges.orna",

@@ -4773,6 +4773,53 @@ fn infer_success_pipeline(
         && let Expr::Name { text, .. } = callee.as_ref()
     {
         match (text.as_str(), arguments.as_slice()) {
+            ("distinct", []) => {
+                if is_default_float_equality_type(element) {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "distinct requires a lawful equality key; default Float equality is unavailable",
+                    ));
+                    return Inferred {
+                        ty: Type::Error,
+                        effects: input.effects,
+                    };
+                }
+                return Inferred {
+                    ty: input.ty,
+                    effects: input.effects,
+                };
+            }
+            ("union", [argument])
+                if argument.name.is_none() || argument.name.as_deref() == Some("right") =>
+            {
+                let right = infer(&argument.value, scope, local, diagnostics);
+                let mut effects = input.effects;
+                effects.join(&right.effects);
+                let Type::List(right_element) = right.ty else {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "union requires a list with a compatible element type",
+                    ));
+                    return Inferred {
+                        ty: Type::Error,
+                        effects,
+                    };
+                };
+                if !types_match(element, &right_element) {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "union requires lists with compatible element types",
+                    ));
+                    return Inferred {
+                        ty: Type::Error,
+                        effects,
+                    };
+                }
+                return Inferred {
+                    ty: input.ty,
+                    effects,
+                };
+            }
             ("sort_by", [argument]) if argument.name.is_none() => {
                 let callback = infer_callback(
                     &argument.value,
@@ -4798,6 +4845,25 @@ fn infer_success_pipeline(
             _ => {}
         }
     }
+    if let Expr::Name { text, .. } = rhs
+        && text == "distinct"
+        && let Type::List(element) = &input.ty
+    {
+        if is_default_float_equality_type(element) {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "distinct requires a lawful equality key; default Float equality is unavailable",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects: input.effects,
+            };
+        }
+        return Inferred {
+            ty: input.ty,
+            effects: input.effects,
+        };
+    }
     if let Expr::Call {
         callee, arguments, ..
     } = rhs
@@ -4810,7 +4876,7 @@ fn infer_success_pipeline(
             _ => unreachable!("pipeline collection operation must be named"),
         };
         let ty = match arguments.as_slice() {
-            [argument] if argument.name.is_none() => {
+            [argument] if argument.name.is_none() || argument.name.as_deref() == Some("count") => {
                 let count = infer(&argument.value, scope, local, diagnostics);
                 effects.join(&count.effects);
                 if count.ty == Type::Int && !is_negative_integer_constant(&argument.value) {
@@ -5069,6 +5135,10 @@ fn infer_success_pipeline(
         effects.may_fail = true;
     }
     Inferred { ty, effects }
+}
+
+fn is_default_float_equality_type(ty: &Type) -> bool {
+    matches!(ty, Type::Float) || matches!(ty, Type::Applied { base, .. } if base == "Float")
 }
 
 fn infer_recovery_pipeline(
