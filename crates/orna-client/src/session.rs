@@ -25,6 +25,19 @@ pub struct TerminalSessionDriver<R, W> {
     state: SessionInputState,
     root_invocation_id: InvocationId,
     call_stream: u64,
+    last_completed: Option<CompletedInputRequest>,
+}
+
+/// The last terminal response retained solely for serial request replay.
+///
+/// A session accepts one request at a time.  Retaining the immediately
+/// completed exchange lets a host recover a lost response without consuming a
+/// second line of local input.  A later request proves the prior response was
+/// observed, so no unbounded replay cache is needed.
+#[derive(Clone, Debug)]
+struct CompletedInputRequest {
+    request: InputRequested,
+    response: SessionClientFrame,
 }
 
 impl<R, W> TerminalSessionDriver<R, W> {
@@ -43,6 +56,7 @@ impl<R, W> TerminalSessionDriver<R, W> {
             state,
             root_invocation_id,
             call_stream,
+            last_completed: None,
         })
     }
 
@@ -59,6 +73,15 @@ impl<R, W> TerminalSessionDriver<R, W> {
             || request.call_stream != self.call_stream
         {
             return Err(TerminalSessionDriverError::MismatchedRequest);
+        }
+        if let Some(completed) = &self.last_completed
+            && request.request_invocation_id == completed.request.request_invocation_id
+        {
+            return if request == completed.request {
+                Ok(completed.response.clone())
+            } else {
+                Err(TerminalSessionDriverError::ReplayedRequestMismatch)
+            };
         }
         self.state
             .request(request.request_invocation_id)
@@ -86,6 +109,10 @@ impl<R, W> TerminalSessionDriver<R, W> {
         self.state
             .accept(&frame)
             .map_err(TerminalSessionDriverError::State)?;
+        self.last_completed = Some(CompletedInputRequest {
+            request,
+            response: frame.clone(),
+        });
         Ok(frame)
     }
 
@@ -137,6 +164,8 @@ pub enum TerminalSessionDriverError {
     State(SessionStateError),
     /// The request belongs to another root or stream.
     MismatchedRequest,
+    /// A completed request identity was replayed with different request data.
+    ReplayedRequestMismatch,
 }
 
 impl fmt::Display for TerminalSessionDriverError {
@@ -147,6 +176,9 @@ impl fmt::Display for TerminalSessionDriverError {
             Self::MismatchedRequest => {
                 formatter.write_str("terminal session request identity is invalid")
             }
+            Self::ReplayedRequestMismatch => {
+                formatter.write_str("terminal session replay request does not match")
+            }
         }
     }
 }
@@ -156,7 +188,7 @@ impl Error for TerminalSessionDriverError {
         match self {
             Self::Protocol(error) => Some(error),
             Self::State(error) => Some(error),
-            Self::MismatchedRequest => None,
+            Self::MismatchedRequest | Self::ReplayedRequestMismatch => None,
         }
     }
 }
