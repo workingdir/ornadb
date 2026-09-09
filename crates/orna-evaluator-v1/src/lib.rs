@@ -1795,7 +1795,7 @@ impl Context<'_, '_> {
             }
         }
         values.extend(explicit);
-        let values = named_arguments(name, arguments, values, implicit)?;
+        let values = named_arguments(name, arguments, values, implicit, collection.is_some())?;
         if math.is_some() {
             self.math(name, values)
         } else if bits.is_some() {
@@ -2043,6 +2043,7 @@ impl Context<'_, '_> {
             ("union", [Value::List(left), Value::List(right)]) => self.union(left, right),
             ("count", [Value::List(values)]) => self.count(values),
             ("first", [Value::List(values)]) => self.first(values),
+            ("min" | "max", [Value::List(values)]) => self.extreme(name, values),
             ("sum", [Value::List(values)]) => self.sum(values),
             ("one", [Value::List(values)]) => self.one(values, None, depth),
             ("one", [Value::List(values), predicate]) => self.one(values, Some(predicate), depth),
@@ -2083,7 +2084,11 @@ impl Context<'_, '_> {
                 self.windows(values, size, step)
             }
             ("chunk", [_, _])
-            | ("flatten" | "distinct" | "unique" | "pairs" | "count" | "first" | "sum", [_])
+            | (
+                "flatten" | "distinct" | "unique" | "pairs" | "count" | "first" | "min" | "max"
+                | "sum",
+                [_],
+            )
             | ("one", [_] | [_, _])
             | ("every" | "exists", [_, _])
             | ("count", [_, _])
@@ -2188,6 +2193,34 @@ impl Context<'_, '_> {
             total = self.integer(&total + value)?;
         }
         Ok(Value::Int(total))
+    }
+    fn extreme(&self, name: &str, values: &[Value]) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let mut candidate = None;
+        for value in values {
+            let Value::Int(value) = value else {
+                // Float total-order, Decimal, Money and affine aggregation
+                // remain outside this evaluator slice until their runtime
+                // contracts exist. Mixed or otherwise invalid element shapes
+                // fail closed rather than receiving incidental host ordering.
+                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+            };
+            let replace = candidate.as_ref().is_none_or(|current: &BigInt| {
+                if name == "min" {
+                    value < current
+                } else {
+                    value > current
+                }
+            });
+            if replace {
+                // Strict comparison above deliberately retains the first
+                // equal candidate, preserving observable input order.
+                candidate = Some(value.clone());
+            }
+        }
+        Ok(candidate.map_or(Value::Null, |value| {
+            Value::Option(Some(Box::new(Value::Int(value))))
+        }))
     }
     fn first(&self, values: &[Value]) -> Result<Value, EvaluationError> {
         Ok(values.first().cloned().unwrap_or(Value::Null))
@@ -2753,12 +2786,14 @@ fn named_arguments(
     arguments: &[orna_syntax_v1::Argument],
     values: Vec<Value>,
     implicit: usize,
+    collection: bool,
 ) -> Result<Vec<Value>, EvaluationError> {
     if arguments.iter().all(|argument| argument.name.is_none()) {
         return Ok(values);
     }
     let expected: &[&str] = match function {
         "increment" | "decrement" | "is_zero" => &["value"],
+        "min" | "max" if collection => &["rows"],
         "min" | "max" => &["left", "right"],
         "clamp" => &["value", "min", "max"],
         "trim" | "lower" | "upper" => &["value"],
@@ -2846,7 +2881,7 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
     };
     matches!(
         text.as_str(),
-        "first" | "one" | "sum" | "every" | "exists" | "map" | "flat_map"
+        "first" | "one" | "min" | "max" | "sum" | "every" | "exists" | "map" | "flat_map"
     )
     .then_some(text.as_str())
 }
