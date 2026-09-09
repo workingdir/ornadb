@@ -14,8 +14,8 @@ use crate::{
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
     EffectHandler, Environment, EvaluationError, Functions, Limits as EvaluatorLimits,
-    PureFunction as RetainedFunction, evaluate_expression_with_functions, evaluate_with_functions,
-    invoke_named, invoke_named_with_effects,
+    PureFunction as RetainedFunction, StepBudget, evaluate_expression_with_functions,
+    evaluate_with_functions, invoke_named, invoke_named_with_effects,
 };
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
 use orna_repository_v1::Repository;
@@ -1049,13 +1049,27 @@ impl TransactionalEvaluator {
                 mutations: &mut mutations,
                 next_mutation: 0,
                 limits,
+                activation_budget: None,
             };
-            invoke_named_with_effects(&entry, &functions, arguments, limits, &mut effects).and_then(
-                |_| {
-                    validate_table_assertions(activation, table_assertions, &functions, limits)?;
-                    validate_module_assertions(activation, module_assertions, &functions, limits)
-                },
-            )
+            let result =
+                invoke_named_with_effects(&entry, &functions, arguments, limits, &mut effects);
+            let mut budget = effects.activation_budget.take();
+            result.and_then(|_| {
+                validate_table_assertions(
+                    activation,
+                    table_assertions,
+                    &functions,
+                    limits,
+                    &mut budget,
+                )?;
+                validate_module_assertions(
+                    activation,
+                    module_assertions,
+                    &functions,
+                    limits,
+                    &mut budget,
+                )
+            })
         });
         match result {
             Ok(()) => Ok(mutations),
@@ -2587,6 +2601,7 @@ struct TableEffectHandler<'activation, 'runtime> {
     mutations: &'activation mut Vec<TableMutation>,
     next_mutation: u64,
     limits: EvaluatorLimits,
+    activation_budget: Option<StepBudget>,
 }
 
 impl EffectHandler for TableEffectHandler<'_, '_> {
@@ -2600,7 +2615,29 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
             .activation
             .savepoint()
             .map_err(|error| transaction_error(table_error_code(error)))?;
-        let result = self.handle_inner(callee, arguments);
+        let result = self.handle_inner_with_budget(callee, arguments, None);
+        if result.is_err() {
+            self.activation
+                .rollback_to(savepoint)
+                .map_err(|error| transaction_error(table_error_code(error)))?;
+            self.mutations.truncate(mutation_len);
+        }
+        result
+    }
+
+    fn handle_with_budget(
+        &mut self,
+        callee: &Expr,
+        arguments: &[Value],
+        budget: &mut StepBudget,
+    ) -> Result<Option<Value>, EvaluationError> {
+        let mutation_len = self.mutations.len();
+        let savepoint = self
+            .activation
+            .savepoint()
+            .map_err(|error| transaction_error(table_error_code(error)))?;
+        let result = self.handle_inner_with_budget(callee, arguments, Some(budget));
+        self.activation_budget = Some(*budget);
         if result.is_err() {
             self.activation
                 .rollback_to(savepoint)
@@ -2612,10 +2649,11 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
 }
 
 impl TableEffectHandler<'_, '_> {
-    fn handle_inner(
+    fn handle_inner_with_budget(
         &mut self,
         callee: &Expr,
         arguments: &[Value],
+        mut budget: Option<&mut StepBudget>,
     ) -> Result<Option<Value>, EvaluationError> {
         if matches!(
             callee,
@@ -2646,6 +2684,7 @@ impl TableEffectHandler<'_, '_> {
                 .candidate_relation(table)
                 .map_err(|error| transaction_error(table_error_code(error)))?
             {
+                debit_effect_step(&mut budget)?;
                 candidate_rows = candidate_rows
                     .checked_add(1)
                     .ok_or_else(|| transaction_error("ORNA-EVAL-LIMIT"))?;
@@ -2711,14 +2750,16 @@ impl TableEffectHandler<'_, '_> {
                 .get_key_value(table)
                 .map(|(table, _)| table)
                 .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-ARGUMENT"))?;
-            let windows = self
+            let mut rows = Vec::new();
+            for (_, row) in self
                 .activation
                 .candidate_relation(table)
                 .map_err(|error| transaction_error(table_error_code(error)))?
-                .map(|(_, row)| row)
-                .window(size, step)
-                .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ARGUMENT"))?
-                .collect::<Vec<_>>();
+            {
+                debit_effect_step(&mut budget)?;
+                rows.push(row);
+            }
+            let windows = relation_windows(rows, size, step)?;
             return match name.as_str() {
                 "window_count" => Ok(Some(Value::int(BigInt::from(windows.len())))),
                 "window" => Value::new(OvbRaw::Array(
@@ -2752,12 +2793,19 @@ impl TableEffectHandler<'_, '_> {
             if !self.key_fields.contains_key(table) {
                 return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
             }
-            let count = self
+            let mut count = 0usize;
+            for (_, row) in self
                 .activation
                 .candidate_relation(table)
                 .map_err(|error| transaction_error(table_error_code(error)))?
-                .filter(|(_, row)| record_field(row, field).as_ref() == Some(expected))
-                .count();
+            {
+                debit_effect_step(&mut budget)?;
+                if record_field(&row, field).as_ref() == Some(expected) {
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(|| transaction_error("ORNA-EVAL-LIMIT"))?;
+                }
+            }
             return Ok(Some(Value::int(BigInt::from(count))));
         }
         if matches!(
@@ -2778,20 +2826,24 @@ impl TableEffectHandler<'_, '_> {
             if !self.key_fields.contains_key(table) {
                 return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
             }
-            let mut matches = self
+            let mut found = None;
+            for (_, row) in self
                 .activation
                 .candidate_relation(table)
                 .map_err(|error| transaction_error(table_error_code(error)))?
-                .filter_map(|(_, row)| {
-                    (record_field(&row, field).as_ref() == Some(expected)).then_some(row)
-                });
-            let Some(row) = matches.next() else {
-                return Err(transaction_error("ORNA-EVAL-RELATION-ONE-ZERO"));
-            };
-            if matches.next().is_some() {
-                return Err(transaction_error("ORNA-EVAL-RELATION-ONE-MULTIPLE"));
+            {
+                debit_effect_step(&mut budget)?;
+                if record_field(&row, field).as_ref() != Some(expected) {
+                    continue;
+                }
+                if found.is_some() {
+                    return Err(transaction_error("ORNA-EVAL-RELATION-ONE-MULTIPLE"));
+                }
+                found = Some(row);
             }
-            return Ok(Some(row));
+            return found
+                .map(Some)
+                .ok_or_else(|| transaction_error("ORNA-EVAL-RELATION-ONE-ZERO"));
         }
         let Expr::Field { base, name, .. } = callee else {
             return Ok(None);
@@ -2811,11 +2863,17 @@ impl TableEffectHandler<'_, '_> {
                 if !arguments.is_empty() {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 }
-                let count = self
+                let mut count = 0usize;
+                for _ in self
                     .activation
                     .candidate_relation(table)
                     .map_err(|error| transaction_error(table_error_code(error)))?
-                    .count();
+                {
+                    debit_effect_step(&mut budget)?;
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(|| transaction_error("ORNA-EVAL-LIMIT"))?;
+                }
                 Ok(Some(Value::int(BigInt::from(count))))
             }
             "first" => {
@@ -2826,8 +2884,9 @@ impl TableEffectHandler<'_, '_> {
                     .activation
                     .candidate_relation(table)
                     .map_err(|error| transaction_error(table_error_code(error)))?
-                    .map(|(_, row)| row)
-                    .first();
+                    .next()
+                    .map(|(_, row)| debit_effect_step(&mut budget).map(|()| row))
+                    .transpose()?;
                 let mut option = vec![OvbRaw::Int(BigInt::from(u8::from(first.is_some())))];
                 if let Some(row) = first {
                     option.push(row.raw().clone());
@@ -3004,6 +3063,28 @@ fn relation_window_arguments(arguments: &[Value]) -> Result<(&str, usize, usize)
         .filter(|step| *step > 0)
         .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-ARGUMENT"))?;
     Ok((table, size, step))
+}
+
+fn relation_windows(
+    rows: Vec<Value>,
+    size: usize,
+    step: usize,
+) -> Result<Vec<Vec<Value>>, EvaluationError> {
+    if size == 0 || step == 0 {
+        return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+    }
+    let mut windows = Vec::new();
+    let mut offset = 0usize;
+    while offset
+        .checked_add(size)
+        .is_some_and(|end| end <= rows.len())
+    {
+        windows.push(rows[offset..offset + size].to_vec());
+        offset = offset
+            .checked_add(step)
+            .ok_or_else(|| transaction_error("ORNA-EVAL-LIMIT"))?;
+    }
+    Ok(windows)
 }
 
 fn admit_transaction_source(
@@ -4211,6 +4292,7 @@ fn validate_table_assertions(
     assertions: &TableAssertions,
     functions: &Functions,
     limits: EvaluatorLimits,
+    budget: &mut Option<StepBudget>,
 ) -> Result<(), EvaluationError> {
     for (table, assertions) in assertions {
         for assertion in assertions {
@@ -4220,6 +4302,7 @@ fn validate_table_assertions(
                 .candidate_relation(table)
                 .map_err(|error| transaction_error(table_error_code(error)))?
             {
+                debit_host_step(budget)?;
                 let environment = Environment::from([(binding.to_owned(), row)]);
                 let value = evaluate_with_functions(predicate, &environment, functions, limits)?;
                 match kind {
@@ -4254,6 +4337,7 @@ fn validate_module_assertions(
     assertions: &[Expr],
     functions: &Functions,
     limits: EvaluatorLimits,
+    budget: &mut Option<StepBudget>,
 ) -> Result<(), EvaluationError> {
     for assertion in assertions {
         let value = evaluate_module_assertion(
@@ -4262,6 +4346,7 @@ fn validate_module_assertions(
             &Environment::new(),
             functions,
             limits,
+            budget,
         )?;
         if !matches!(value.raw(), OvbRaw::Bool(true)) {
             return Err(transaction_error("ORNA-EVAL-MODULE-ASSERT"));
@@ -4276,6 +4361,7 @@ fn evaluate_module_assertion(
     environment: &Environment,
     functions: &Functions,
     limits: EvaluatorLimits,
+    budget: &mut Option<StepBudget>,
 ) -> Result<Value, EvaluationError> {
     let Some((kind, table, binding, body)) = module_assertion_quantifier(expression) else {
         return evaluate_with_functions(expression, environment, functions, limits);
@@ -4287,10 +4373,12 @@ fn evaluate_module_assertion(
     match kind {
         ModuleAssertionKind::Every => {
             for (_, row) in relation {
+                debit_host_step(budget)?;
                 let mut local = environment.clone();
                 local.insert(binding.to_owned(), row);
                 if !matches!(
-                    evaluate_module_assertion(activation, body, &local, functions, limits)?.raw(),
+                    evaluate_module_assertion(activation, body, &local, functions, limits, budget)?
+                        .raw(),
                     OvbRaw::Bool(true)
                 ) {
                     return canonical_bool(false);
@@ -4300,10 +4388,12 @@ fn evaluate_module_assertion(
         }
         ModuleAssertionKind::Exists => {
             for (_, row) in relation {
+                debit_host_step(budget)?;
                 let mut local = environment.clone();
                 local.insert(binding.to_owned(), row);
                 if matches!(
-                    evaluate_module_assertion(activation, body, &local, functions, limits)?.raw(),
+                    evaluate_module_assertion(activation, body, &local, functions, limits, budget)?
+                        .raw(),
                     OvbRaw::Bool(true)
                 ) {
                     return canonical_bool(true);
@@ -4312,6 +4402,20 @@ fn evaluate_module_assertion(
             canonical_bool(false)
         }
     }
+}
+
+fn debit_effect_step(budget: &mut Option<&mut StepBudget>) -> Result<(), EvaluationError> {
+    if let Some(budget) = budget {
+        budget.debit(1)?;
+    }
+    Ok(())
+}
+
+fn debit_host_step(budget: &mut Option<StepBudget>) -> Result<(), EvaluationError> {
+    if let Some(budget) = budget {
+        budget.debit(1)?;
+    }
+    Ok(())
 }
 
 fn canonical_bool(value: bool) -> Result<Value, EvaluationError> {
