@@ -2045,6 +2045,8 @@ impl Context<'_, '_> {
             ("first", [Value::List(values)]) => self.first(values),
             ("one", [Value::List(values)]) => self.one(values, None, depth),
             ("one", [Value::List(values), predicate]) => self.one(values, Some(predicate), depth),
+            ("every", [Value::List(values), predicate]) => self.every(values, predicate, depth),
+            ("exists", [Value::List(values), predicate]) => self.exists(values, predicate, depth),
             ("take", [Value::List(values), Value::Int(count)]) => self.take(values, count),
             ("drop", [Value::List(values), Value::Int(count)]) => self.drop(values, count),
             ("map", [Value::List(values), transform]) => self.map(values, transform, depth),
@@ -2082,6 +2084,7 @@ impl Context<'_, '_> {
             ("chunk", [_, _])
             | ("flatten" | "distinct" | "unique" | "pairs" | "count" | "first", [_])
             | ("one", [_] | [_, _])
+            | ("every" | "exists", [_, _])
             | ("count", [_, _])
             | ("union", [_, _])
             | ("take", [_, _])
@@ -2207,6 +2210,38 @@ impl Context<'_, '_> {
             }
         }
         matching.ok_or_else(|| error("ORNA-EVAL-RELATION-ONE-ZERO"))
+    }
+    fn every(
+        &mut self,
+        values: &[Value],
+        predicate: &Value,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        for value in values {
+            match self.invoke_predicate(predicate, value.clone(), depth + 1)? {
+                Value::Bool(true) => {}
+                Value::Bool(false) => return Ok(Value::Bool(false)),
+                _ => return Err(error("ORNA-EVAL-TYPE")),
+            }
+        }
+        Ok(Value::Bool(true))
+    }
+    fn exists(
+        &mut self,
+        values: &[Value],
+        predicate: &Value,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        for value in values {
+            match self.invoke_predicate(predicate, value.clone(), depth + 1)? {
+                Value::Bool(true) => return Ok(Value::Bool(true)),
+                Value::Bool(false) => {}
+                _ => return Err(error("ORNA-EVAL-TYPE")),
+            }
+        }
+        Ok(Value::Bool(false))
     }
     fn take(&self, values: &[Value], count: &BigInt) -> Result<Value, EvaluationError> {
         if count.is_negative() {
@@ -2728,6 +2763,7 @@ fn named_arguments(
             2 => &["rows", "predicate"],
             _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
         },
+        "every" | "exists" => &["rows", "predicate"],
         "union" => &["left", "right"],
         "take" => &["values", "count"],
         "drop" => &["values", "count"],
@@ -2793,7 +2829,11 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
     let Expr::Name { text, .. } = expression else {
         return None;
     };
-    matches!(text.as_str(), "first" | "one" | "map" | "flat_map").then_some(text.as_str())
+    matches!(
+        text.as_str(),
+        "first" | "one" | "every" | "exists" | "map" | "flat_map"
+    )
+    .then_some(text.as_str())
 }
 
 fn standard_name<'a>(expression: &'a Expr, module: &str) -> Option<&'a str> {
