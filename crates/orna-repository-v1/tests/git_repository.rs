@@ -3657,6 +3657,51 @@ fn compact_runtime_fence_rejects_a_runtime_failure_without_mutation() {
 }
 
 #[test]
+fn compact_runtime_fence_rejects_signed_receipt_with_mismatched_frozen_proof() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let signing_key = compact_receipt_signing_key();
+    provision_compact_receipt_trust_root(&repo, &signing_key);
+    let table = Uuid::new_v4();
+    let intent = [50; 16];
+    let plan = compact_plan(
+        &repo,
+        table,
+        intent,
+        &[compact_segment(table, 1, b"compact object\n".to_vec())],
+    );
+    let pending = repo.publish_compact_repository_boundary(plan).unwrap();
+    let mismatched_watermark = [51; 32];
+    let signing_bytes = CompactRuntimeReceipt::signing_bytes(
+        pending.runtime_intent_id(),
+        mismatched_watermark,
+        pending.commit(),
+        pending.journal_verifier(),
+    )
+    .unwrap();
+    let receipt = CompactRuntimeReceipt::new(
+        pending.runtime_intent_id(),
+        mismatched_watermark,
+        pending.commit().clone(),
+        pending.journal_verifier(),
+        signing_key.sign(&signing_bytes).to_bytes(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        repo.finish_compact_with_receipt(&receipt),
+        Err(orna_repository_v1::RepositoryError::RuntimeCompletionRequired)
+    ));
+    assert!(matches!(
+        repo.recover_compact_publication_boundary().unwrap(),
+        Some(orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(ref value))
+            if value == &pending
+    ));
+    assert!(repo.read_publication_journal().unwrap().is_some());
+    assert_eq!(repo.head().unwrap(), Some(pending.commit().clone()));
+}
+
+#[test]
 fn compact_runtime_fence_rejects_ref_drift_before_cleanup() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
