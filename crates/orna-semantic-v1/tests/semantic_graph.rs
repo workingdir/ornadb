@@ -2265,12 +2265,12 @@ fn stream_from_list_requires_the_closed_named_identity_argument() {
 }
 
 #[test]
-fn authoritative_ranges_fixture_accepts_only_numeric_membership_and_list_take() {
+fn authoritative_ranges_fixture_accepts_numeric_membership_and_integer_list_take() {
     let result = analyze(&[ModuleInput::new(
         "ranges.orna",
         r#"
             pub fn inside(value: Int) = value in 1..=5;
-            pub fn first_ten(values: [Int]) = values | take(0..10);
+            pub fn first_ten(values: [Int]) = values | take(10);
         "#,
     )]);
 
@@ -2292,6 +2292,8 @@ fn authoritative_ranges_fixture_accepts_only_numeric_membership_and_list_take() 
             "table-take.orna",
             "table Reading(id: Int) { value: Int, } fn bad() = Reading | take(0..10);",
         ),
+        ModuleInput::new("range-take.orna", "fn bad() = [1, 2, 3] | take(0..10);"),
+        ModuleInput::new("negative-take.orna", "fn bad() = [1, 2, 3] | take(-1);"),
     ]);
     assert!(has(&invalid, DIAG_TYPE));
     assert!(has(&invalid, DIAG_UNSUPPORTED));
