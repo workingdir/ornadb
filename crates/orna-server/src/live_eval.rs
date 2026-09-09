@@ -555,6 +555,29 @@ mod tests {
     }
 
     #[test]
+    fn eval_rejects_client_result_envelopes_without_creating_session_state() {
+        let (mut application, expiries, _, _, _, _) = application();
+        let session = [8; 16];
+        let session_id = SessionId::new(session);
+        expiries.borrow_mut().insert(session_id, 100);
+
+        assert_eq!(
+            application.eval(
+                session,
+                [9; 16],
+                &Message::Result {
+                    status: ResultStatus::Success,
+                    value: None,
+                    fingerprint: [10; 32],
+                    diagnostic: None,
+                },
+            ),
+            Err(Error::InvalidMessage)
+        );
+        assert!(!application.sessions.contains_key(&session_id));
+    }
+
+    #[test]
     fn sessions_are_isolated_and_context_remains_pinned() {
         let (mut application, expiries, database_id, _, _, _) = application();
         let first = [17; 16];
