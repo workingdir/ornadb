@@ -361,6 +361,11 @@ pub enum CommitIntent {
         expected_version: u64,
         diagnostic: SafeDiagnostic,
     },
+    /// Cancels an admitted replay without changing the live checkpoint.
+    ReplayCancel {
+        failure: FailureIdentity,
+        expected_version: u64,
+    },
     Resolve {
         failure: FailureIdentity,
         expected_version: u64,
@@ -406,6 +411,9 @@ pub enum CommitResult {
         failure: FailureRecord,
     },
     ReplayFailed {
+        failure: FailureRecord,
+    },
+    ReplayCancelled {
         failure: FailureRecord,
     },
     Resolved {
@@ -887,6 +895,26 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 record.status = FailureStatus::Skipped;
                 record.diagnostic = diagnostic;
                 CommitResult::ReplayFailed {
+                    failure: record.clone(),
+                }
+            }
+            CommitIntent::ReplayCancel {
+                failure,
+                expected_version,
+            } => {
+                let Some(record) = self.failures.get_mut(&failure) else {
+                    return CommitResult::Rejected(RejectReason::FailureMissing);
+                };
+                if record.version != expected_version {
+                    return CommitResult::Rejected(RejectReason::StaleFailure);
+                }
+                if record.status != FailureStatus::Replaying {
+                    return CommitResult::Rejected(RejectReason::RetryNotAllowed);
+                }
+                record.version += 1;
+                record.attempts += 1;
+                record.status = FailureStatus::Skipped;
+                CommitResult::ReplayCancelled {
                     failure: record.clone(),
                 }
             }
@@ -1413,6 +1441,61 @@ mod tests {
         assert_eq!(failed_again.identity, failure.identity);
         assert_eq!(failed_again.attempts, 2);
         assert_eq!(failed_again.status, FailureStatus::Skipped);
+    }
+
+    #[test]
+    fn replay_cancellation_is_version_fenced_and_preserves_live_checkpoint() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let item = delivery("receipt:zero", "resume:one");
+        let failure = acquire_and_fail(&mut backend, item.clone());
+        let lease = acquire_skip(&mut backend, item.clone());
+        assert!(matches!(
+            backend.apply(CommitIntent::Skip {
+                lease,
+                expected: expected(&backend, &item),
+                expected_failure_version: failure.version,
+            }),
+            CommitResult::CheckpointAdvanced { .. }
+        ));
+        let before_checkpoint = backend.checkpoint(&item.checkpoint_key());
+        let replay = match backend.apply(CommitIntent::Replay {
+            failure: failure.identity.clone(),
+            expected_version: failure.version + 1,
+        }) {
+            CommitResult::ReplayGranted { grant } => grant,
+            result => panic!("unexpected result: {result:?}"),
+        };
+
+        assert_eq!(
+            backend.apply(CommitIntent::ReplayCancel {
+                failure: replay.failure.clone(),
+                expected_version: replay.version - 1,
+            }),
+            CommitResult::Rejected(RejectReason::StaleFailure)
+        );
+        assert_eq!(
+            backend.checkpoint(&item.checkpoint_key()),
+            before_checkpoint
+        );
+        assert_eq!(
+            backend.failure(&failure.identity).unwrap().status,
+            FailureStatus::Replaying
+        );
+
+        let cancelled = match backend.apply(CommitIntent::ReplayCancel {
+            failure: replay.failure,
+            expected_version: replay.version,
+        }) {
+            CommitResult::ReplayCancelled { failure } => failure,
+            result => panic!("unexpected result: {result:?}"),
+        };
+        assert_eq!(cancelled.identity, failure.identity);
+        assert_eq!(cancelled.attempts, 2);
+        assert_eq!(cancelled.status, FailureStatus::Skipped);
+        assert_eq!(
+            backend.checkpoint(&item.checkpoint_key()),
+            before_checkpoint
+        );
     }
 
     #[test]
