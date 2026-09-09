@@ -2996,6 +2996,11 @@ fn infer(
                 return inferred;
             }
             if let Some(inferred) =
+                infer_finite_list_collection_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
                 infer_relation_call(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
@@ -4510,6 +4515,174 @@ fn infer_stream_from_list(
     })
 }
 
+fn finite_list_collection_operation(callee: &Expr) -> Option<&str> {
+    let path = qualified_path(callee)?;
+    match path.as_slice() {
+        ["map"]
+        | ["flat_map"]
+        | ["std", "collection", "map"]
+        | ["std", "collection", "flat_map"] => path.last().copied(),
+        _ => None,
+    }
+}
+
+fn infer_finite_list_collection_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let path = qualified_path(callee)?;
+    if !matches!(
+        path.as_slice(),
+        ["std", "collection", "map"] | ["std", "collection", "flat_map"]
+    ) {
+        return None;
+    }
+    Some(infer_finite_list_collection(
+        path.last().copied().expect("collection operation path"),
+        None,
+        arguments,
+        scope,
+        local,
+        diagnostics,
+    ))
+}
+
+/// Checks the finite-list overload of the standard collection mapper. A
+/// pipeline supplies `rows` as its implicit first argument; direct calls use
+/// the same `rows`/`transform` names and ordinary positional insertion.
+fn infer_finite_list_collection(
+    operation: &str,
+    input: Option<Inferred>,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let pipeline = input.is_some();
+    let mut slots = [None, None];
+    let mut malformed = false;
+    let mut positional = usize::from(pipeline);
+    let mut named_started = false;
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = match argument.name.as_deref() {
+            Some("rows") => {
+                named_started = true;
+                Some(0)
+            }
+            Some("transform") => {
+                named_started = true;
+                Some(1)
+            }
+            Some(_) => {
+                malformed = true;
+                None
+            }
+            None if named_started || positional >= slots.len() => {
+                malformed = true;
+                None
+            }
+            None => {
+                let slot = positional;
+                positional += 1;
+                Some(slot)
+            }
+        };
+        if let Some(slot) = slot {
+            if pipeline && slot == 0 {
+                malformed = true;
+            } else if slots[slot].replace(index).is_some() {
+                malformed = true;
+            }
+        }
+    }
+    if pipeline {
+        if slots[0].is_some() {
+            malformed = true;
+        }
+    } else if slots[0].is_none() {
+        malformed = true;
+    }
+    if slots[1].is_none() {
+        malformed = true;
+    }
+
+    let mut effects = input
+        .as_ref()
+        .map(|input| input.effects.clone())
+        .unwrap_or_default();
+    let row = if let Some(input) = input {
+        input.ty
+    } else if let Some(index) = slots[0] {
+        let row = infer(&arguments[index].value, scope, local, diagnostics);
+        effects.join(&row.effects);
+        row.ty
+    } else {
+        for argument in arguments {
+            let value = infer(&argument.value, scope, local, diagnostics);
+            effects.join(&value.effects);
+        }
+        Type::Error
+    };
+    let callback = slots[1].map(|index| {
+        let element = match &row {
+            Type::List(element) => element.as_ref().clone(),
+            _ => Type::Error,
+        };
+        let callback = infer_finite_list_callback(
+            &arguments[index].value,
+            element,
+            Type::Error,
+            scope,
+            local,
+            diagnostics,
+        );
+        effects.join(&callback.effects);
+        callback
+    });
+
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("std.collection {operation} arguments do not match its static signature"),
+        ));
+    }
+    if !matches!(&row, Type::List(_)) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("std.collection {operation} requires a finite list"),
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+    let Some(callback) = callback else {
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    let ty = match operation {
+        "map" => Type::List(Box::new(callback.ty)),
+        "flat_map" => match callback.ty {
+            Type::List(element) => Type::List(element),
+            Type::Error => Type::Error,
+            _ => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "std.collection flat_map transform must return a finite list",
+                ));
+                Type::Error
+            }
+        },
+        _ => unreachable!("finite list collection operation was checked"),
+    };
+    Inferred { ty, effects }
+}
+
 fn infer_relation_call(
     callee: &Expr,
     arguments: &[orna_syntax_v1::Argument],
@@ -4765,6 +4938,21 @@ fn infer_success_pipeline(
             ty: window.ty,
             effects,
         };
+    }
+    if matches!(&input.ty, Type::List(_))
+        && let Expr::Call {
+            callee, arguments, ..
+        } = rhs
+        && let Some(operation) = finite_list_collection_operation(callee)
+    {
+        return infer_finite_list_collection(
+            operation,
+            Some(input),
+            arguments,
+            scope,
+            local,
+            diagnostics,
+        );
     }
     if let Type::List(element) = &input.ty
         && let Expr::Call {
@@ -5058,6 +5246,52 @@ fn infer_success_pipeline(
         effects.join(&callback.effects);
         return Inferred {
             ty: Type::Relation(Box::new(callback.ty)),
+            effects,
+        };
+    }
+    if !is_stream && text == "flat_map" {
+        let [argument] = arguments.as_slice() else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "relation flat_map requires one transform callback",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects: input.effects,
+            };
+        };
+        if argument.name.is_some() && argument.name.as_deref() != Some("transform") {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "relation flat_map argument name does not match its static signature",
+            ));
+        }
+        let callback = infer_callback(
+            &argument.value,
+            element,
+            Type::Error,
+            scope,
+            local,
+            diagnostics,
+        );
+        let mut effects = input.effects;
+        effects.join(&callback.effects);
+        let output = match callback.ty {
+            Type::List(element) | Type::Relation(element) => *element,
+            Type::Error => Type::Error,
+            _ => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "relation flat_map transform must return a finite collection",
+                ));
+                return Inferred {
+                    ty: Type::Error,
+                    effects,
+                };
+            }
+        };
+        return Inferred {
+            ty: Type::Relation(Box::new(output)),
             effects,
         };
     }
@@ -5447,6 +5681,48 @@ fn infer_callback(
     let inferred = infer(body, scope, &callback_locals, diagnostics);
     require_same(&result, &inferred.ty, diagnostics);
     inferred
+}
+
+fn infer_finite_list_callback(
+    expression: &Expr,
+    parameter: Type,
+    result: Type,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if matches!(expression, Expr::Lambda { .. }) {
+        return infer_callback(expression, parameter, result, scope, local, diagnostics);
+    }
+    let callback = infer(expression, scope, local, diagnostics);
+    let Type::Function {
+        parameters,
+        result: callback_result,
+        ..
+    } = callback.ty
+    else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "finite-list collection callback must be a one-parameter function",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: callback.effects,
+        };
+    };
+    if parameters.len() != 1 {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "finite-list collection callback must take one parameter",
+        ));
+    } else {
+        require_same(&parameter, &parameters[0], diagnostics);
+    }
+    require_same(&result, &callback_result, diagnostics);
+    Inferred {
+        ty: *callback_result,
+        effects: callback.effects,
+    }
 }
 
 /// Resolves the small, intrinsic associated-operation surface of a table.
