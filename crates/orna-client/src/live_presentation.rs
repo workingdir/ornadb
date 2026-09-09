@@ -138,6 +138,16 @@ impl WatchPresentation {
         }
     }
 
+    /// Fences retained visible state when its transport resubscribes.  The
+    /// caller performs the existing subscription exchange; this boundary does
+    /// not create a new wire message or retain anything for replay.  Until the
+    /// peer supplies a complete current snapshot, deltas from either side of
+    /// the connection boundary are discarded.
+    pub fn begin_resubscription(&mut self) {
+        self.awaiting_snapshot = true;
+        self.resync_intent = None;
+    }
+
     /// Accepts only host Snapshot or Delta frames for this watch. The complete
     /// frame is revalidated at the negotiated boundary before any state change.
     pub fn receive(
