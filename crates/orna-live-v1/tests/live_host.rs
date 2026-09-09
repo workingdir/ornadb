@@ -2222,15 +2222,26 @@ fn websocket_upgrade_abort_preserves_attachment_and_consumes_reservation() {
     assert!(transport.acknowledge_retired_attachment([6; 16]));
     assert!(!transport.acknowledge_retired_attachment([6; 16]));
     assert_eq!(
-        block_on(transport.commit_websocket_upgrade(aborted, 3)),
-        Err(Error::Closed)
-    );
-
-    assert_eq!(
         block_on(transport.upgrade(websocket_upgrade(1, &credential), [6; 16], 3)).status,
         101
     );
     assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
+    // The acknowledged candidate identity is reusable by a later committed
+    // handoff, but its consumed reservation must remain inert. In particular,
+    // a stale terminal replay cannot consume or retire the new attachment.
+    assert_eq!(
+        block_on(transport.commit_websocket_upgrade(aborted, 4)),
+        Err(Error::Closed)
+    );
+    assert!(
+        block_on(transport.receive(
+            &mut WebSocketState::new([6; 16]),
+            4,
+            &masked(true, 2, &unsubscribe()),
+        ))
+        .is_ok()
+    );
+    assert_eq!(transport.take_retired_attachments(), Vec::<[u8; 16]>::new());
 }
 
 #[test]
