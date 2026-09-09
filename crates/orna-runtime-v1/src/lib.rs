@@ -4097,6 +4097,12 @@ impl RuntimeState {
         if changed != 1 {
             return Err(RuntimeError::OwnerLost);
         }
+        // A retrying delivery can be returned to `Failed` only when the
+        // durable execution lease and its retry claim still describe the same
+        // retained failure.  The writer fence prevents the old owner from
+        // committing after this point, but it is not authority to reinterpret
+        // malformed attempt state as an interrupted callback.
+        validate_recoverable_stream_attempts(&transaction).await?;
         transaction
             .execute("DELETE FROM stream_lease", ())
             .await
@@ -8007,6 +8013,77 @@ async fn has_blocking_stream_failure(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?
         .is_some())
+}
+
+/// Verifies the durable evidence needed to reopen abandoned stream attempts.
+///
+/// A writer takeover fences the former runtime owner, which is the authority
+/// that prevents a displaced callback from committing.  For a `Retrying`
+/// delivery, the corresponding delivery lease and retry claim are the
+/// remaining durable evidence that the row was the one admitted callback.
+/// Without that exact tuple, recovery must leave all state untouched rather
+/// than guessing which delivery an administrative retry represented.
+/// `Replaying` has no live-checkpoint lease by design, so it is recovered only
+/// when it has not been confused with a retry claim for that same failure.
+async fn validate_recoverable_stream_attempts(connection: &Connection) -> Result<(), RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT failure.identity_id, failure.key_id, failure.delivery_position,
+                    failure.successor_position, failure.status,
+                    lease.delivery_position, lease.successor_position, lease.purpose,
+                    claim.identity_id
+             FROM stream_failure AS failure
+             LEFT JOIN stream_lease AS lease ON lease.key_id = failure.key_id
+             LEFT JOIN stream_retry_claim AS claim
+               ON claim.key_id = failure.key_id
+              AND claim.identity_id = failure.identity_id
+             WHERE failure.status IN (?1, ?2)
+             ORDER BY failure.identity_id",
+            params![
+                encode_status(FailureStatus::Retrying),
+                encode_status(FailureStatus::Replaying),
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let identity: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let key: String = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let delivery: String = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let successor: String = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if identity.is_empty() || key.is_empty() || delivery.is_empty() || successor.is_empty() {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let status = decode_status(row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let leased_delivery: Option<String> =
+            row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let leased_successor: Option<String> =
+            row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let purpose: Option<i64> = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let claimed: Option<String> = row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        match status {
+            FailureStatus::Retrying => {
+                if leased_delivery.as_deref() != Some(delivery.as_str())
+                    || leased_successor.as_deref() != Some(successor.as_str())
+                    || purpose.map(decode_purpose).transpose()? != Some(LeasePurpose::Deliver)
+                    || claimed.as_deref() != Some(identity.as_str())
+                {
+                    return Err(RuntimeError::RecoveryInvalid);
+                }
+            }
+            FailureStatus::Replaying => {
+                if claimed.as_deref() == Some(identity.as_str()) {
+                    return Err(RuntimeError::RecoveryInvalid);
+                }
+            }
+            _ => return Err(RuntimeError::RecoveryInvalid),
+        }
+    }
+    Ok(())
 }
 
 async fn load_stream_failure(
@@ -12693,6 +12770,84 @@ mod tests {
                 .unwrap(),
             CommitResult::RetryScheduled { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn recovery_refuses_retry_without_its_durable_claim() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("retry-recovery-claim", "retry-recovery-next");
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let retrying = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream acquire result: {other:?}"),
+            };
+            let failed = match stream
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::DecodeRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(vec![1, 2, 3]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected stream failure result: {other:?}"),
+            };
+            match stream
+                .apply_async(CommitIntent::Retry {
+                    failure: failed.identity,
+                    expected_version: failed.version,
+                    expected,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::RetryScheduled { failure } => failure,
+                other => panic!("unexpected stream retry result: {other:?}"),
+            }
+        };
+        state
+            .connection
+            .execute(
+                "DELETE FROM stream_retry_claim WHERE key_id = ?1",
+                params![stream_key_id(&delivery.checkpoint_key())],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.recover_abandoned(id(4), id(5)).await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        assert_eq!(state.current_lease().await.unwrap(), Some(writer));
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_async(&retrying.identity)
+                .await
+                .unwrap()
+                .expect("retry remains fenced")
+                .status,
+            FailureStatus::Retrying
+        );
     }
 
     #[tokio::test]
