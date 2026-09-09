@@ -3305,69 +3305,135 @@ fn admitted_transaction_module(
 /// spell, rather than an undocumented table member.
 fn lower_relation_bindings(functions: &Functions, table_keys: &TableKeys) -> Functions {
     let mut materialized = functions.clone();
-    for function in materialized.values_mut() {
-        lower_relation_expression(&mut function.body, table_keys);
+    for (name, function) in materialized.iter_mut() {
+        let mut shadowed = BTreeSet::new();
+        for parameter in &function.parameters {
+            shadowed.extend(relation_pattern_names(&parameter.pattern));
+        }
+        lower_relation_expression_with_resolution(
+            &mut function.body,
+            table_keys,
+            functions,
+            name.rsplit_once('.').map(|(namespace, _)| namespace),
+            &shadowed,
+        );
     }
     materialized
 }
 
-fn lower_relation_expression(expression: &mut Expr, table_keys: &TableKeys) {
-    if let Some(lowered) = relation_integer_aggregate(expression, table_keys)
-        .or_else(|| relation_window_count(expression, table_keys))
-        .or_else(|| relation_lookup(expression, table_keys))
-        .or_else(|| relation_filtered_one(expression, table_keys))
-        .or_else(|| relation_filter_count(expression, table_keys))
-        .or_else(|| relation_count(expression, table_keys))
-        .or_else(|| relation_window(expression, table_keys))
+fn lower_relation_expression_with_resolution(
+    expression: &mut Expr,
+    table_keys: &TableKeys,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
+) {
+    if let Some(lowered) =
+        relation_integer_aggregate(expression, table_keys, functions, namespace, shadowed)
+            .or_else(|| relation_window_count(expression, table_keys))
+            .or_else(|| relation_lookup(expression, table_keys))
+            .or_else(|| relation_filtered_one(expression, table_keys))
+            .or_else(|| relation_filter_count(expression, table_keys))
+            .or_else(|| relation_count(expression, table_keys))
+            .or_else(|| relation_window(expression, table_keys))
     {
         *expression = lowered;
         return;
     }
     match expression {
         Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
-            lower_relation_expression(rhs, table_keys);
+            lower_relation_expression_with_resolution(
+                rhs, table_keys, functions, namespace, shadowed,
+            );
         }
         Expr::Range { lower, upper, .. } => {
             for endpoint in [lower, upper].into_iter().flatten() {
-                lower_relation_expression(endpoint, table_keys);
+                lower_relation_expression_with_resolution(
+                    endpoint, table_keys, functions, namespace, shadowed,
+                );
             }
         }
         Expr::Binary { lhs, rhs, .. } => {
-            lower_relation_expression(lhs, table_keys);
-            lower_relation_expression(rhs, table_keys);
+            lower_relation_expression_with_resolution(
+                lhs, table_keys, functions, namespace, shadowed,
+            );
+            lower_relation_expression_with_resolution(
+                rhs, table_keys, functions, namespace, shadowed,
+            );
         }
         Expr::Call {
             callee, arguments, ..
         } => {
-            lower_relation_expression(callee, table_keys);
+            lower_relation_expression_with_resolution(
+                callee, table_keys, functions, namespace, shadowed,
+            );
             for argument in arguments {
-                lower_relation_expression(&mut argument.value, table_keys);
+                lower_relation_expression_with_resolution(
+                    &mut argument.value,
+                    table_keys,
+                    functions,
+                    namespace,
+                    shadowed,
+                );
             }
         }
         Expr::Index { base, index, .. } => {
-            lower_relation_expression(base, table_keys);
-            lower_relation_expression(index, table_keys);
+            lower_relation_expression_with_resolution(
+                base, table_keys, functions, namespace, shadowed,
+            );
+            lower_relation_expression_with_resolution(
+                index, table_keys, functions, namespace, shadowed,
+            );
         }
-        Expr::Field { base, .. } => lower_relation_expression(base, table_keys),
+        Expr::Field { base, .. } => lower_relation_expression_with_resolution(
+            base, table_keys, functions, namespace, shadowed,
+        ),
         Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
             for element in elements {
-                lower_relation_expression(element, table_keys);
+                lower_relation_expression_with_resolution(
+                    element, table_keys, functions, namespace, shadowed,
+                );
             }
         }
         Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
             for field in fields {
-                lower_relation_expression(&mut field.value, table_keys);
+                lower_relation_expression_with_resolution(
+                    &mut field.value,
+                    table_keys,
+                    functions,
+                    namespace,
+                    shadowed,
+                );
             }
         }
-        Expr::Lambda { body, .. } => lower_relation_expression(body, table_keys),
+        Expr::Lambda {
+            parameters, body, ..
+        } => {
+            let mut shadowed = shadowed.clone();
+            for parameter in parameters {
+                shadowed.extend(relation_pattern_names(&parameter.pattern));
+            }
+            lower_relation_expression_with_resolution(
+                body, table_keys, functions, namespace, &shadowed,
+            );
+        }
         Expr::Block {
             statements, tail, ..
         } => {
+            let mut shadowed = shadowed.clone();
             for statement in statements {
-                lower_relation_statement(statement, table_keys);
+                lower_relation_statement_with_resolution(
+                    statement,
+                    table_keys,
+                    functions,
+                    namespace,
+                    &mut shadowed,
+                );
             }
             if let Some(tail) = tail {
-                lower_relation_expression(tail, table_keys);
+                lower_relation_expression_with_resolution(
+                    tail, table_keys, functions, namespace, &shadowed,
+                );
             }
         }
         Expr::Control {
@@ -3377,7 +3443,9 @@ fn lower_relation_expression(expression: &mut Expr, table_keys: &TableKeys) {
             ..
         } => {
             for expression in [condition, body, alternate].into_iter().flatten() {
-                lower_relation_expression(expression, table_keys);
+                lower_relation_expression_with_resolution(
+                    expression, table_keys, functions, namespace, shadowed,
+                );
             }
         }
         Expr::Name { .. }
@@ -3387,14 +3455,77 @@ fn lower_relation_expression(expression: &mut Expr, table_keys: &TableKeys) {
     }
 }
 
-fn relation_integer_aggregate(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
+fn relation_pattern_names(pattern: &Pattern) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    fn collect(pattern: &Pattern, names: &mut BTreeSet<String>) {
+        match pattern {
+            Pattern::Name(name, _) => {
+                if name != "_" {
+                    names.insert(name.clone());
+                }
+            }
+            Pattern::Tuple { elements, .. } | Pattern::List { elements, .. } => {
+                for pattern in elements {
+                    collect(pattern, names);
+                }
+            }
+            Pattern::Record { fields, .. } => {
+                for (name, pattern, _) in fields {
+                    if let Some(pattern) = pattern {
+                        collect(pattern, names);
+                    } else {
+                        names.insert(name.clone());
+                    }
+                }
+            }
+            Pattern::Constructor {
+                arguments, fields, ..
+            } => {
+                for pattern in arguments {
+                    collect(pattern, names);
+                }
+                for field in fields {
+                    if let Some(pattern) = &field.pattern {
+                        collect(pattern, names);
+                    } else {
+                        names.insert(field.name.clone());
+                    }
+                }
+            }
+            Pattern::Wildcard(_) | Pattern::Literal { .. } => {}
+        }
+    }
+    collect(pattern, &mut names);
+    names
+}
+
+fn root_relation_intrinsic_is_unshadowed(
+    name: &str,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
+) -> bool {
+    !shadowed.contains(name)
+        && !functions.contains_key(name)
+        && namespace
+            .map(|namespace| !functions.contains_key(&format!("{namespace}.{name}")))
+            .unwrap_or(true)
+}
+
+fn relation_integer_aggregate(
+    expression: &Expr,
+    table_keys: &TableKeys,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
+) -> Option<Expr> {
     let Expr::Binary { lhs, op, rhs, .. } = expression else {
         return None;
     };
     if op != "|" {
         return None;
     }
-    let operation = relation_integer_aggregate_operation(rhs)?;
+    let operation = relation_integer_aggregate_operation(rhs, functions, namespace, shadowed)?;
     let Expr::Binary {
         lhs: relation,
         op: map_op,
@@ -3420,7 +3551,9 @@ fn relation_integer_aggregate(expression: &Expr, table_keys: &TableKeys) -> Opti
     else {
         return None;
     };
-    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "map") {
+    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "map")
+        || !root_relation_intrinsic_is_unshadowed("map", functions, namespace, shadowed)
+    {
         return None;
     }
     let [argument] = arguments.as_slice() else {
@@ -3496,29 +3629,61 @@ fn relation_integer_aggregate(expression: &Expr, table_keys: &TableKeys) -> Opti
     })
 }
 
-fn relation_integer_aggregate_operation(expression: &Expr) -> Option<&str> {
+fn relation_integer_aggregate_operation<'a>(
+    expression: &'a Expr,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
+) -> Option<&'a str> {
     match expression {
-        Expr::Name { text, .. } if matches!(text.as_str(), "min" | "max" | "sum") => Some(text),
+        Expr::Name { text, .. }
+            if matches!(text.as_str(), "min" | "max" | "sum")
+                && root_relation_intrinsic_is_unshadowed(text, functions, namespace, shadowed) =>
+        {
+            Some(text)
+        }
         Expr::Call {
             callee, arguments, ..
         } if arguments.is_empty() => match callee.as_ref() {
-            Expr::Name { text, .. } if matches!(text.as_str(), "min" | "max" | "sum") => Some(text),
+            Expr::Name { text, .. }
+                if matches!(text.as_str(), "min" | "max" | "sum")
+                    && root_relation_intrinsic_is_unshadowed(
+                        text, functions, namespace, shadowed,
+                    ) =>
+            {
+                Some(text)
+            }
             _ => None,
         },
         _ => None,
     }
 }
 
-fn lower_relation_statement(statement: &mut Statement, table_keys: &TableKeys) {
+fn lower_relation_statement_with_resolution(
+    statement: &mut Statement,
+    table_keys: &TableKeys,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &mut BTreeSet<String>,
+) {
     match statement {
-        Statement::Let { value, .. }
-        | Statement::Assert { value, .. }
+        Statement::Let { pattern, value, .. } => {
+            lower_relation_expression_with_resolution(
+                value, table_keys, functions, namespace, shadowed,
+            );
+            shadowed.extend(relation_pattern_names(pattern));
+        }
+        Statement::Assert { value, .. }
         | Statement::Assignment { value, .. }
         | Statement::Expression { value, .. }
-        | Statement::Control { value, .. } => lower_relation_expression(value, table_keys),
+        | Statement::Control { value, .. } => lower_relation_expression_with_resolution(
+            value, table_keys, functions, namespace, shadowed,
+        ),
         Statement::Return { value, .. } | Statement::Break { value, .. } => {
             if let Some(value) = value {
-                lower_relation_expression(value, table_keys);
+                lower_relation_expression_with_resolution(
+                    value, table_keys, functions, namespace, shadowed,
+                );
             }
         }
         Statement::Continue { .. } => {}
@@ -5041,7 +5206,8 @@ mod bounded_tests {
 #[cfg(test)]
 mod durable_tests {
     use super::{
-        DurableTransactionalEvaluator, RunningTableRequestDisposition, SourceUnit, StageOutcome,
+        DurableTransactionalEvaluator, Functions, RunningTableRequestDisposition, SourceUnit,
+        StageOutcome, admitted_transaction_module, lower_relation_bindings,
         replay_request_terminal, request_terminal,
     };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
@@ -5054,7 +5220,7 @@ mod durable_tests {
         RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome, WriterLease,
     };
     use orna_stream_v1::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
-    use orna_syntax_v1::{Expr, parse_expression};
+    use orna_syntax_v1::{Expr, parse_expression, parse_module};
     use std::{path::Path, process::Command};
     use tempfile::TempDir;
 
@@ -6113,7 +6279,13 @@ mod durable_tests {
             vec![String::from("location"), String::from("sku")],
         )]);
 
-        super::lower_relation_expression(&mut expression, &keys);
+        super::lower_relation_expression_with_resolution(
+            &mut expression,
+            &keys,
+            &Functions::new(),
+            None,
+            &std::collections::BTreeSet::new(),
+        );
 
         let Expr::Range {
             lower: Some(lower),
@@ -6137,6 +6309,34 @@ mod durable_tests {
             upper.as_ref(),
             Expr::Literal { text, .. } if text == "2"
         ));
+    }
+
+    #[test]
+    fn relation_integer_aggregate_lowering_requires_unshadowed_root_bindings() {
+        for operation in ["map", "min", "max", "sum"] {
+            let terminal = match operation {
+                "min" | "max" => format!("{operation}()"),
+                _ => operation.into(),
+            };
+            let source = format!(
+                r#"
+                    pub table Reading(id: Int) {{ value: Int, }}
+                    fn {operation}(values: Int) = 99;
+                    fn total() = Reading | map(reading => reading.value) | {terminal};
+                "#
+            );
+            let parsed = parse_module(&source);
+            assert!(parsed.is_ok(), "{operation}: {:?}", parsed.diagnostics);
+            let (functions, keys, _, _) =
+                admitted_transaction_module(&parsed.value.items, None).expect("valid source");
+            let lowered = lower_relation_bindings(&functions, &keys);
+
+            assert!(
+                matches!(&lowered["total"].body, Expr::Binary { op, .. } if op == "|"),
+                "{operation} shadow was lowered: {:?}",
+                lowered["total"].body
+            );
+        }
     }
 }
 
