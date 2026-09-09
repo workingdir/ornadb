@@ -834,6 +834,18 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
+            "std.collection.drop([1, 2, 3], 1)",
+            Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())])).unwrap(),
+        ),
+        (
+            "[1, 2, 3] | std.collection.drop(count: 2)",
+            Value::new(Raw::Array(vec![Raw::Int(3.into())])).unwrap(),
+        ),
+        (
+            "std.collection.drop(count: 9, values: [1, 2, 3])",
+            Value::new(Raw::Array(vec![])).unwrap(),
+        ),
+        (
             "std.collection.partition([1, 2, 3, 4], value => value % 2 == 0)",
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
@@ -992,6 +1004,13 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
             "std.collection.take([1], 1, extra: 2)",
             "ORNA-EVAL-UNSUPPORTED",
         ),
+        ("std.collection.drop(1, 1)", "ORNA-EVAL-TYPE"),
+        ("std.collection.drop([1], 1.0)", "ORNA-EVAL-TYPE"),
+        ("std.collection.drop([1], -1)", "ORNA-EVAL-VALUE"),
+        (
+            "std.collection.drop([1], 1, extra: 2)",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
         (
             "std.collection.partition(1, value => true)",
             "ORNA-EVAL-TYPE",
@@ -1105,6 +1124,29 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
     assert_eq!(
         code(evaluate_expression(
             "std.collection.take(rows, 2)",
+            &rows,
+            Limits {
+                max_collection_items: 1,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert_eq!(
+        evaluate_expression(
+            "std.collection.drop(rows, 1)",
+            &rows,
+            Limits {
+                max_collection_items: 3,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+        Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())])).unwrap()
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.drop(rows, 1)",
             &rows,
             Limits {
                 max_collection_items: 1,
