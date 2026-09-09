@@ -2298,6 +2298,17 @@ fn authoritative_ranges_fixture_accepts_only_numeric_membership_and_list_take() 
 }
 
 #[test]
+fn optional_numeric_ranges_infer_from_endpoints_or_expected_range_context() {
+    let result = analyze(&[ModuleInput::new(
+        "optional-ranges.orna",
+        "fn lower() = ..5; fn upper() = 1..; fn bounded() = 1..5;",
+    )]);
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let invalid = analyze(&[ModuleInput::new("untyped-range.orna", "fn invalid() = ..;")]);
+    assert!(has(&invalid, DIAG_TYPE));
+}
+
+#[test]
 fn affine_collection_aggregates_preserve_absolute_values_and_reject_sum() {
     let valid = analyze(&[
         ModuleInput::new(
