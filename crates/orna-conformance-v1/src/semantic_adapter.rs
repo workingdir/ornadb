@@ -2615,6 +2615,75 @@ impl TableEffectHandler<'_, '_> {
         callee: &Expr,
         arguments: &[Value],
     ) -> Result<Option<Value>, EvaluationError> {
+        if matches!(
+            callee,
+            Expr::Field {
+                base,
+                name,
+                ..
+            } if matches!(base.as_ref(), Expr::ReplBinding { text, .. } if text == "$__orna_relation")
+                && name == "integer_aggregate"
+        ) {
+            let [table, field, operation] = arguments else {
+                return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+            };
+            let (OvbRaw::Text(table), OvbRaw::Text(field), OvbRaw::Text(operation)) =
+                (table.raw(), field.raw(), operation.raw())
+            else {
+                return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+            };
+            let operation = operation.as_str();
+            if !self.key_fields.contains_key(table) || !matches!(operation, "min" | "max" | "sum") {
+                return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+            }
+            let mut extreme = None;
+            let mut total = BigInt::ZERO;
+            for (_, row) in self
+                .activation
+                .candidate_relation(table)
+                .map_err(|error| transaction_error(table_error_code(error)))?
+            {
+                let value = record_field(&row, field)
+                    .ok_or_else(|| transaction_error("ORNA-EVAL-UNSUPPORTED"))?;
+                let OvbRaw::Int(value) = value.raw() else {
+                    return Err(transaction_error("ORNA-EVAL-UNSUPPORTED"));
+                };
+                match operation {
+                    "sum" => total += value,
+                    "min" => {
+                        if extreme
+                            .as_ref()
+                            .is_none_or(|current: &BigInt| value < current)
+                        {
+                            extreme = Some(value.clone());
+                        }
+                    }
+                    "max" => {
+                        if extreme
+                            .as_ref()
+                            .is_none_or(|current: &BigInt| value > current)
+                        {
+                            extreme = Some(value.clone());
+                        }
+                    }
+                    _ => unreachable!("integer aggregate operation was checked above"),
+                }
+            }
+            return match operation {
+                "sum" => Ok(Some(Value::int(total))),
+                "min" | "max" => match extreme {
+                    Some(value) => Value::option(Some(Value::int(value)))
+                        .map(Some)
+                        .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ARGUMENT")),
+                    None => {
+                        Ok(Some(Value::new(OvbRaw::Null).map_err(|_| {
+                            transaction_error("ORNA-EVAL-TABLE-ARGUMENT")
+                        })?))
+                    }
+                },
+                _ => unreachable!("integer aggregate operation was checked above"),
+            };
+        }
         if let Expr::Field { base, name, .. } = callee
             && matches!(base.as_ref(), Expr::ReplBinding { text, .. } if text == "$__orna_relation")
             && matches!(name.as_str(), "window" | "window_count")
@@ -3223,14 +3292,17 @@ fn admitted_transaction_module(
 }
 
 /// Materializes the narrow relation forms admitted by the durable transaction
-/// seam. `Table | filter(predicate) | one()` becomes a keyed lookup,
-/// `Table | filter(row => row.field == value) | count` becomes an internal
-/// lazy candidate-relation count, and the terminal `Table | count` /
-/// `Table | count()` form becomes `Table.count()`. All read the active
-/// candidate relation; other relation operators stay unsupported rather than
-/// being materialized by this seam. The filtered form uses a ReplBinding AST
-/// marker which ordinary source cannot spell, rather than an undocumented
-/// table member.
+/// seam. `Table | map(row => row.integer_field) | min/max/sum` becomes an
+/// internal candidate-relation fold, `Table | filter(predicate) | one()`
+/// becomes a keyed lookup, `Table | filter(row => row.field == value) | count`
+/// becomes an internal lazy candidate-relation count, and the terminal
+/// `Table | count` / `Table | count()` form becomes `Table.count()`. All read
+/// the active candidate relation; other relation operators stay unsupported
+/// rather than being materialized by this seam. Integer aggregate lowering is
+/// deliberately shape-limited; the effect handler rejects non-Int projections
+/// so Decimal, Float, Money, affine, and other unsupported values fail closed.
+/// Internal forms use a ReplBinding AST marker which ordinary source cannot
+/// spell, rather than an undocumented table member.
 fn lower_relation_bindings(functions: &Functions, table_keys: &TableKeys) -> Functions {
     let mut materialized = functions.clone();
     for function in materialized.values_mut() {
@@ -3240,7 +3312,8 @@ fn lower_relation_bindings(functions: &Functions, table_keys: &TableKeys) -> Fun
 }
 
 fn lower_relation_expression(expression: &mut Expr, table_keys: &TableKeys) {
-    if let Some(lowered) = relation_window_count(expression, table_keys)
+    if let Some(lowered) = relation_integer_aggregate(expression, table_keys)
+        .or_else(|| relation_window_count(expression, table_keys))
         .or_else(|| relation_lookup(expression, table_keys))
         .or_else(|| relation_filtered_one(expression, table_keys))
         .or_else(|| relation_filter_count(expression, table_keys))
@@ -3311,6 +3384,128 @@ fn lower_relation_expression(expression: &mut Expr, table_keys: &TableKeys) {
         | Expr::Literal { .. }
         | Expr::InterpolatedString { .. }
         | Expr::ReplBinding { .. } => {}
+    }
+}
+
+fn relation_integer_aggregate(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
+    let Expr::Binary { lhs, op, rhs, .. } = expression else {
+        return None;
+    };
+    if op != "|" {
+        return None;
+    }
+    let operation = relation_integer_aggregate_operation(rhs)?;
+    let Expr::Binary {
+        lhs: relation,
+        op: map_op,
+        rhs: map,
+        ..
+    } = lhs.as_ref()
+    else {
+        return None;
+    };
+    let Expr::Name {
+        text: table,
+        span: table_span,
+    } = relation.as_ref()
+    else {
+        return None;
+    };
+    if map_op != "|" || !table_keys.contains_key(table) {
+        return None;
+    }
+    let Expr::Call {
+        callee, arguments, ..
+    } = map.as_ref()
+    else {
+        return None;
+    };
+    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "map") {
+        return None;
+    }
+    let [argument] = arguments.as_slice() else {
+        return None;
+    };
+    if argument.name.is_some() {
+        return None;
+    }
+    let Expr::Lambda {
+        parameters, body, ..
+    } = &argument.value
+    else {
+        return None;
+    };
+    let [parameter] = parameters.as_slice() else {
+        return None;
+    };
+    let Pattern::Name(binding, _) = &parameter.pattern else {
+        return None;
+    };
+    let Expr::Field {
+        base, name: field, ..
+    } = body.as_ref()
+    else {
+        return None;
+    };
+    if !matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) {
+        return None;
+    }
+
+    let table = Expr::Literal {
+        text: format!("{table:?}"),
+        kind: orna_syntax_v1::LiteralKind::String,
+        span: table_span.clone(),
+    };
+    let field = Expr::Literal {
+        text: format!("{field:?}"),
+        kind: orna_syntax_v1::LiteralKind::String,
+        span: body.span(),
+    };
+    let operation = Expr::Literal {
+        text: format!("{operation:?}"),
+        kind: orna_syntax_v1::LiteralKind::String,
+        span: rhs.span(),
+    };
+    Some(Expr::Call {
+        callee: Box::new(Expr::Field {
+            base: Box::new(Expr::ReplBinding {
+                text: "$__orna_relation".into(),
+                span: expression.span(),
+            }),
+            name: "integer_aggregate".into(),
+            span: expression.span(),
+        }),
+        arguments: vec![
+            orna_syntax_v1::Argument {
+                name: None,
+                span: table.span(),
+                value: table,
+            },
+            orna_syntax_v1::Argument {
+                name: None,
+                span: field.span(),
+                value: field,
+            },
+            orna_syntax_v1::Argument {
+                name: None,
+                span: operation.span(),
+                value: operation,
+            },
+        ],
+        span: expression.span(),
+    })
+}
+
+fn relation_integer_aggregate_operation(expression: &Expr) -> Option<&str> {
+    match expression {
+        Expr::Name { text, .. } if matches!(text.as_str(), "min" | "max" | "sum") => Some(text),
+        Expr::Call {
+            callee, arguments, ..
+        } if arguments.is_empty() => match callee.as_ref() {
+            Expr::Name { text, .. } if matches!(text.as_str(), "min" | "max" | "sum") => Some(text),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
