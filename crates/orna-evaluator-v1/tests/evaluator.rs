@@ -1331,6 +1331,142 @@ fn std_collection_one_rejects_invalid_inputs_propagates_callback_failures_and_ke
 }
 
 #[test]
+fn std_collection_every_and_exists_accept_all_call_forms_and_function_callbacks() {
+    let true_value = Value::new(Raw::Bool(true)).unwrap();
+    let false_value = Value::new(Raw::Bool(false)).unwrap();
+    for expression in [
+        "every([1, 2, 3], value => value > 0)",
+        "std.collection.every([1, 2, 3], value => value > 0)",
+        "[1, 2, 3] | every(predicate: value => value > 0)",
+        "[1, 2, 3] | std.collection.every(predicate: value => value > 0)",
+        "every(rows: [1, 2, 3], predicate: value => value > 0)",
+        "std.collection.every(predicate: value => value > 0, rows: [1, 2, 3])",
+        "every([], value => value > 0)",
+    ] {
+        assert_eq!(
+            evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
+            true_value,
+            "{expression}"
+        );
+    }
+    for expression in [
+        "exists([1, 2, 3], value => value == 2)",
+        "std.collection.exists([1, 2, 3], value => value == 2)",
+        "[1, 2, 3] | exists(predicate: value => value == 2)",
+        "[1, 2, 3] | std.collection.exists(predicate: value => value == 2)",
+        "exists(rows: [1, 2, 3], predicate: value => value == 2)",
+        "std.collection.exists(predicate: value => value == 2, rows: [1, 2, 3])",
+        "exists([], value => value == 2)",
+    ] {
+        assert_eq!(
+            evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
+            if expression.starts_with("exists([]") {
+                false_value.clone()
+            } else {
+                true_value.clone()
+            },
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        evaluate_expression(
+            "exists([1, 2, 3], value => value > 3)",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap(),
+        false_value
+    );
+
+    let source = "fn positive(value: Int) = value > 0; fn all(rows: [Int]) = every(rows, positive); fn any(rows: [Int]) = std.collection.exists(predicate: positive, rows: rows);";
+    assert_eq!(
+        call_module(source, "all([1, 2, 3])", Limits::default()).unwrap(),
+        true_value
+    );
+    assert_eq!(
+        call_module(source, "any([1, 2, 3])", Limits::default()).unwrap(),
+        true_value
+    );
+}
+
+#[test]
+fn std_collection_every_and_exists_short_circuit_in_order_and_require_bool_callbacks() {
+    assert_eq!(
+        evaluate("every([1, 2, 3], value => if value <= 2 { value == 1 } else { 1 / 0 == 0 })"),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate("exists([1, 2, 3], value => if value <= 2 { value == 2 } else { 1 / 0 == 0 })"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "every([0, 1], value => if value == 0 { 1 / 0 == 0 } else { true })",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "exists([1], value => 1)",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-TYPE"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "every([1], () => true)",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-ARGUMENT"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.exists(1, value => true)",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-TYPE"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "every([1, 2, 3], value => true)",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn root_every_and_exists_remain_shadowable_by_admitted_functions_and_locals() {
+    assert_eq!(
+        call_module(
+            "fn every(value: Int) = value + 100; fn run() = every(1);",
+            "run()",
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(101.into())
+    );
+    assert_eq!(
+        evaluate_expression(
+            "if true { let exists = value => value + 100; exists(1) } else { 0 }",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(101.into())
+    );
+}
+
+#[test]
 fn root_one_remains_shadowable_and_does_not_change_relation_member_behavior() {
     assert_eq!(
         call_module(
