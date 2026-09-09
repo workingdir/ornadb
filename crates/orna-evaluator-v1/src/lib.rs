@@ -1638,6 +1638,8 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
+        let root_collection =
+            root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
         // A verified standard-source function takes precedence over the
         // legacy bounded math fallback. This keeps admitted REPL calls on
         // ordinary import/resolution and executes their pinned source body,
@@ -1648,6 +1650,7 @@ impl Context<'_, '_> {
             && bits_name(callee).is_none()
             && text_name(callee).is_none()
             && collection_name(callee).is_none()
+            && root_collection.is_none()
             || self.resolve_function_name(callee, scope).is_some()
         {
             if matches!(callee, Expr::Field { .. }) && self.effects.is_some() {
@@ -1769,7 +1772,7 @@ impl Context<'_, '_> {
         let math = math_name(callee);
         let bits = bits_name(callee);
         let text = text_name(callee);
-        let collection = collection_name(callee);
+        let collection = collection_name(callee).or(root_collection);
         let name = math
             .or(bits)
             .or(text)
@@ -2035,6 +2038,10 @@ impl Context<'_, '_> {
             ("count", [Value::List(values)]) => self.count(values),
             ("take", [Value::List(values), Value::Int(count)]) => self.take(values, count),
             ("drop", [Value::List(values), Value::Int(count)]) => self.drop(values, count),
+            ("map", [Value::List(values), transform]) => self.map(values, transform, depth),
+            ("flat_map", [Value::List(values), transform]) => {
+                self.flat_map(values, transform, depth)
+            }
             ("filter", [Value::List(values), predicate]) => self.filter(values, predicate, depth),
             ("partition", [Value::List(values), predicate]) => {
                 self.partition(values, predicate, depth)
@@ -2069,6 +2076,8 @@ impl Context<'_, '_> {
             | ("union", [_, _])
             | ("take", [_, _])
             | ("drop", [_, _])
+            | ("map", [_, _])
+            | ("flat_map", [_, _])
             | ("filter", [_, _])
             | ("partition", [_, _])
             | ("split_when", [_, _])
@@ -2077,6 +2086,41 @@ impl Context<'_, '_> {
             | ("window", [_, _] | [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
+    }
+    fn map(
+        &mut self,
+        values: &[Value],
+        transform: &Value,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let mut mapped = Vec::with_capacity(values.len());
+        for value in values {
+            mapped.push(self.invoke_predicate(transform, value.clone(), depth + 1)?);
+            self.items(mapped.len())?;
+        }
+        Ok(Value::List(mapped))
+    }
+    fn flat_map(
+        &mut self,
+        values: &[Value],
+        transform: &Value,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let mut flattened = Vec::new();
+        for value in values {
+            let Value::List(inner) = self.invoke_predicate(transform, value.clone(), depth + 1)?
+            else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            self.items(inner.len())?;
+            for value in inner {
+                flattened.push(value);
+                self.items(flattened.len())?;
+            }
+        }
+        Ok(Value::List(flattened))
     }
     fn distinct(&self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
@@ -2635,6 +2679,7 @@ fn named_arguments(
         "union" => &["left", "right"],
         "take" => &["values", "count"],
         "drop" => &["values", "count"],
+        "map" | "flat_map" => &["values", "transform"],
         "filter" | "partition" | "split_when" => &["values", "predicate"],
         "group_by" => &["values", "key"],
         "zip" | "zip_exact" => &["left", "right"],
@@ -2690,6 +2735,13 @@ fn text_name(expression: &Expr) -> Option<&str> {
 
 fn collection_name(expression: &Expr) -> Option<&str> {
     standard_name(expression, "collection")
+}
+
+fn root_collection_name(expression: &Expr) -> Option<&str> {
+    let Expr::Name { text, .. } = expression else {
+        return None;
+    };
+    matches!(text.as_str(), "map" | "flat_map").then_some(text.as_str())
 }
 
 fn standard_name<'a>(expression: &'a Expr, module: &str) -> Option<&'a str> {
