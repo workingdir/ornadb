@@ -1059,6 +1059,17 @@ pub enum GitObjectState {
     Malformed,
 }
 
+/// Read-only completeness classification for a caller-declared set of native
+/// Git object IDs. A complete result means every supplied ID is either locally
+/// materialized or proven reachable as a promised object. It does not infer
+/// whether the caller supplied every object required by a logical snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitDeclaredObjectSetState {
+    Complete,
+    Incomplete,
+    Malformed,
+}
+
 /// A validated Orna-managed remote reference.  Only refs in `refs/orna/*`
 /// participate in continuity checks; ordinary Git refs remain outside this
 /// observer's authority.
@@ -2925,6 +2936,28 @@ impl Repository {
             return Ok(GitObjectState::Malformed);
         };
         Ok(GitObjectState::Materialized { kind, size })
+    }
+
+    /// Classifies a caller-declared object set without fetching, hydrating, or
+    /// changing local Git state. A promised object preserves logical
+    /// completeness; an unavailable or malformed object never does.
+    pub fn observe_declared_git_object_set(
+        &self,
+        object_ids: &[&str],
+    ) -> Result<GitDeclaredObjectSetState, RepositoryError> {
+        let mut incomplete = false;
+        for object_id in object_ids {
+            match self.observe_git_object(object_id)? {
+                GitObjectState::Materialized { .. } | GitObjectState::Promised => {}
+                GitObjectState::Unavailable => incomplete = true,
+                GitObjectState::Malformed => return Ok(GitDeclaredObjectSetState::Malformed),
+            }
+        }
+        Ok(if incomplete {
+            GitDeclaredObjectSetState::Incomplete
+        } else {
+            GitDeclaredObjectSetState::Complete
+        })
     }
 
     fn local_config_value(&self, key: &str) -> Result<ConfigValue, RepositoryError> {
