@@ -14138,6 +14138,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_replay_returns_the_same_failure_to_skipped_without_progress() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("replay-cancel", "replay-cancel-next");
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let (grant, checkpoint, skipped) = {
+            let mut stream = state.stream_backend(writer);
+            let delivery_lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected delivery lease: {other:?}"),
+            };
+            let failed = match stream
+                .fail_async(
+                    delivery_lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(vec![4, 5]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected failed delivery result: {other:?}"),
+            };
+            let skip_lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Skip,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected skip lease: {other:?}"),
+            };
+            let checkpoint = match stream
+                .apply_async(CommitIntent::Skip {
+                    lease: skip_lease,
+                    expected,
+                    expected_failure_version: failed.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+                other => panic!("unexpected skip result: {other:?}"),
+            };
+            let skipped = stream
+                .failure_async(&failed.identity)
+                .await
+                .unwrap()
+                .expect("skipped failure");
+            let grant = match stream
+                .apply_async(CommitIntent::Replay {
+                    failure: failed.identity,
+                    expected_version: skipped.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::ReplayGranted { grant } => grant,
+                other => panic!("unexpected replay grant: {other:?}"),
+            };
+            (grant, checkpoint, skipped)
+        };
+
+        let mut handler = ReplayHandler {
+            payload: Vec::new(),
+            result: Some(StreamHandlerResult::Cancelled),
+        };
+        let cancelled = state
+            .replay_stream_failure(writer, grant.clone(), &mut handler)
+            .await
+            .unwrap();
+        let recovered = match cancelled {
+            CommitResult::ReplayFailed { failure } => failure,
+            other => panic!("unexpected cancelled replay result: {other:?}"),
+        };
+
+        assert_eq!(handler.payload, vec![4, 5]);
+        assert_eq!(recovered.identity, grant.failure);
+        assert_eq!(recovered.status, FailureStatus::Skipped);
+        assert_eq!(recovered.attempts, skipped.attempts + 1);
+        assert_eq!(recovered.version, grant.version + 1);
+        assert_eq!(
+            recovered.diagnostic,
+            SafeDiagnostic {
+                code: DiagnosticCode::Cancelled,
+                class: DiagnosticClass::Cancellation,
+            }
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
+        );
+    }
+
+    #[tokio::test]
     async fn protected_reference_replay_fails_closed_without_invoking_handler() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
