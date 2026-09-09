@@ -180,7 +180,7 @@ mod admission_context_tests {
 /// and then complete the call (`CALL_COMPLETED`). The other variants are
 /// closed and disclose no target, signature, selector, value, binding, or
 /// security evidence.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum SealedInvocationResult {
     /// The invocation completed with its complete Event sequence.
     Completed {
@@ -212,6 +212,25 @@ pub enum SealedInvocationResult {
         /// The invocation identity.
         invocation: InvocationId,
     },
+}
+
+impl std::fmt::Debug for SealedInvocationResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // INVOKE-1 publishes redacted outcomes. In particular, do not let
+        // diagnostic/logging paths recursively render the completed Event
+        // batch: its values are delivery data, not safe diagnostic metadata.
+        let (outcome, invocation) = match self {
+            Self::Completed { invocation, .. } => ("Completed", invocation),
+            Self::Failed { invocation, .. } => ("Failed", invocation),
+            Self::Denied { invocation } => ("Denied", invocation),
+            Self::PresentationFailed { invocation } => ("PresentationFailed", invocation),
+        };
+        formatter
+            .debug_struct("SealedInvocationResult")
+            .field("outcome", &outcome)
+            .field("invocation", invocation)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1593,6 +1612,26 @@ mod lifecycle_tests {
             .fields(),
             ("failed", Some(3), Some(2))
         );
+    }
+
+    #[test]
+    fn sealed_result_debug_redacts_completed_event_values() {
+        const SENTINEL: &str = "sealed-result-debug-sentinel";
+        let invocation = InvocationId::from_bytes([0x32; 16]);
+        let events = super::super::sealed_events::sealed_completed_events(
+            PrincipalId::from_bytes([0x33; 16]),
+            invocation,
+            RuntimeValue::Text(SENTINEL.into()),
+        )
+        .expect("test value produces a sealed event batch");
+        let rendered = format!(
+            "{:?}",
+            SealedInvocationResult::Completed { invocation, events }
+        );
+
+        assert!(rendered.contains("Completed"));
+        assert!(!rendered.contains(SENTINEL));
+        assert!(!rendered.contains("ValueBatch"));
     }
 
     #[test]
