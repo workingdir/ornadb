@@ -447,6 +447,19 @@ impl RuntimePublicationCoordinator {
             .publication_freeze(intent_id)
             .await
             .map_err(map_compact_runtime_error)?;
+        // The journal's compact witness and the runtime freeze name the same
+        // frozen prefix.  An intent match alone is insufficient: a malformed
+        // journal could pair that intent with another watermark, causing this
+        // reader to choose a snapshot/tail boundary which no durable receipt
+        // can prove.  Refuse the observation before exposing either side.
+        if journal
+            .compact_manifest()
+            .ok_or(Error::InvalidTransition)?
+            .cleanup_watermark()
+            != freeze.checkpoint.digest
+        {
+            return Err(Error::InvalidTransition);
+        }
         let frozen_prefix = runtime
             .pending_through(&freeze)
             .await
@@ -1506,6 +1519,30 @@ mod tests {
             .advance(orna_repository_v1::PublicationJournalStage::RuntimeCompleted)
             .unwrap();
         repository.write_publication_journal(&journal).unwrap();
+
+        assert_eq!(runtime.pending().await.unwrap().len(), 2);
+        assert_eq!(
+            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime).await,
+            Err(Error::InvalidTransition)
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_reader_visibility_rejects_a_journal_with_a_mismatched_runtime_watermark() {
+        let (_temp, repository, runtime, freeze, _plan) =
+            compact_runtime_unpublished_fixture().await;
+        let mismatched_freeze = PublicationFreeze {
+            intent_id: freeze.intent_id,
+            checkpoint: orna_runtime_v1::Checkpoint {
+                generation: freeze.checkpoint.generation,
+                digest: [98; 32],
+                mutation_sequence: freeze.checkpoint.mutation_sequence,
+            },
+        };
+        let plan = compact_runtime_plan(&repository, &mismatched_freeze);
+        repository
+            .publish_compact_repository_boundary(plan)
+            .unwrap();
 
         assert_eq!(runtime.pending().await.unwrap().len(), 2);
         assert_eq!(
