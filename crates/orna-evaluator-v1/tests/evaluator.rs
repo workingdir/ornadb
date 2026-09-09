@@ -816,6 +816,58 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             ]))
             .unwrap(),
         ),
+        (
+            "std.collection.distinct([2, 1, 2, [3], [3], 1, []])",
+            Value::new(Raw::Array(vec![
+                Raw::Int(2.into()),
+                Raw::Int(1.into()),
+                Raw::Array(vec![Raw::Int(3.into())]),
+                Raw::Array(vec![]),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "[2, 1, 2, 1] | std.collection.distinct()",
+            Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(1.into())])).unwrap(),
+        ),
+        (
+            "std.collection.distinct(values: [1.0, 1.00, 2.0])",
+            Value::new(Raw::Array(vec![
+                Value::decimal(1.into(), 0.into()).unwrap().raw().clone(),
+                Value::decimal(2.into(), 0.into()).unwrap().raw().clone(),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.union([1, 2], [2, 3])",
+            Value::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Int(2.into()),
+                Raw::Int(2.into()),
+                Raw::Int(3.into()),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "[1, 2] | std.collection.union(right: [2, 3])",
+            Value::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Int(2.into()),
+                Raw::Int(2.into()),
+                Raw::Int(3.into()),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.union(right: [2, 3], left: [1, 2])",
+            Value::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Int(2.into()),
+                Raw::Int(2.into()),
+                Raw::Int(3.into()),
+            ]))
+            .unwrap(),
+        ),
         ("std.collection.count([1, 2, 3])", Value::int(3.into())),
         ("[1, 2, 3] | std.collection.count()", Value::int(3.into())),
         (
@@ -1003,6 +1055,18 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
         ("std.collection.flatten([1])", "ORNA-EVAL-TYPE"),
         ("std.collection.unique(1)", "ORNA-EVAL-TYPE"),
         ("std.collection.unique([1], 2)", "ORNA-EVAL-UNSUPPORTED"),
+        ("std.collection.distinct(1)", "ORNA-EVAL-TYPE"),
+        ("std.collection.distinct([1], 2)", "ORNA-EVAL-UNSUPPORTED"),
+        (
+            "std.collection.distinct([1.0f, 1.0f])",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        ("std.collection.union(1, [2])", "ORNA-EVAL-TYPE"),
+        ("std.collection.union([1])", "ORNA-EVAL-UNSUPPORTED"),
+        (
+            "std.collection.union(left: [1], right: [2], extra: [3])",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
         ("std.collection.count(1)", "ORNA-EVAL-TYPE"),
         ("std.collection.count([1], 2)", "ORNA-EVAL-TYPE"),
         (
@@ -1093,6 +1157,28 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
     assert_eq!(
         code(evaluate_expression(
             "std.collection.unique([1, 2, 3])",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.distinct([1, 2, 3])",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.union([1, 2], [3])",
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
