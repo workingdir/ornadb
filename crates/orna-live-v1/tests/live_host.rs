@@ -17,8 +17,8 @@ use orna_protocol_v1::{
 };
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    FaultInjector, FaultPoint, RequestIdentity, RequestOwner, RunObservationStatus, RuntimeError,
-    RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
+    FaultInjector, FaultPoint, RequestIdentity, RequestOwner, RequestState, RunObservationStatus,
+    RuntimeError, RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
 };
 use orna_security_v1::{
     AttachmentId, BoundaryError, CredentialIssuer, Origin, OriginPolicy, SessionBoundary,
@@ -4017,8 +4017,18 @@ fn durable_runtime_recovers_an_owned_running_request_after_takeover() {
     }))
     .unwrap();
     let mut application = UnitApplication::default();
+    let fresh = eval([1; 16], [80; 16], "2");
+    let fresh_outcome =
+        block_on(host.dispatch_frame([9; 16], 2, Frame::Binary(fresh), &mut application)).unwrap();
+    assert_eq!(fresh_outcome.outcome, FrameOutcome::Accepted);
+    assert_eq!(application.calls, 1);
+    let old_status =
+        block_on(open_durable_state(&repository).request_status(identity, fingerprint))
+            .unwrap()
+            .unwrap();
+    assert_eq!(old_status.state, RequestState::Orphaned);
     let recovered =
-        block_on(host.dispatch_frame([9; 16], 2, Frame::Binary(request.clone()), &mut application))
+        block_on(host.dispatch_frame([9; 16], 3, Frame::Binary(request.clone()), &mut application))
             .unwrap();
     assert!(matches!(
         recovered.response.as_ref().unwrap().message,
@@ -4027,12 +4037,12 @@ fn durable_runtime_recovers_an_owned_running_request_after_takeover() {
             ..
         }
     ));
-    assert_eq!(application.calls, 0);
+    assert_eq!(application.calls, 1);
     assert_eq!(
-        block_on(host.dispatch_frame([9; 16], 3, Frame::Binary(request), &mut application)),
+        block_on(host.dispatch_frame([9; 16], 4, Frame::Binary(request), &mut application)),
         Ok(recovered)
     );
-    assert_eq!(application.calls, 0);
+    assert_eq!(application.calls, 1);
     drop(host);
     remove_test_repository(&root);
 }
