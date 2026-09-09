@@ -2481,6 +2481,153 @@ fn std_collection_flat_map_preserves_outer_and_inner_order_for_all_call_forms() 
 }
 
 #[test]
+fn std_collection_sort_by_accepts_all_call_forms_and_preserves_stable_ties() {
+    let expected = Value::new(Raw::Array(vec![
+        Raw::Int(1.into()),
+        Raw::Int(2.into()),
+        Raw::Int(3.into()),
+    ]))
+    .unwrap();
+    for expression in [
+        "sort_by([3, 1, 2], value => value)",
+        "std.collection.sort_by([3, 1, 2], value => value)",
+        "sort_by(rows: [3, 1, 2], key: value => value)",
+        "std.collection.sort_by(rows: [3, 1, 2], key: value => value)",
+        "std.collection.sort_by(key: value => value, rows: [3, 1, 2])",
+        "[3, 1, 2] | sort_by(key: value => value)",
+        "[3, 1, 2] | std.collection.sort_by(key: value => value)",
+    ] {
+        assert_eq!(
+            evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
+            expected,
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        call_module(
+            "fn key(value: Int) = value % 10; fn run() = std.collection.sort_by(rows: [12, 3, 1], key: key);",
+            "run()",
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::new(Raw::Array(vec![
+            Raw::Int(1.into()),
+            Raw::Int(12.into()),
+            Raw::Int(3.into()),
+        ]))
+        .unwrap()
+    );
+    assert_eq!(
+        evaluate("sort_by([3, 2, 1, 4], value => value % 2)"),
+        Value::new(Raw::Array(vec![
+            Raw::Int(2.into()),
+            Raw::Int(4.into()),
+            Raw::Int(3.into()),
+            Raw::Int(1.into()),
+        ]))
+        .unwrap()
+    );
+}
+
+#[test]
+fn std_collection_sort_by_uses_float_total_order() {
+    let rows = float_rows(&[
+        0x7ff8_0000_0000_0000,
+        0x3ff0_0000_0000_0000,
+        0x0000_0000_0000_0000,
+        0x8000_0000_0000_0000,
+    ]);
+    let environment = Environment::from([("rows".into(), rows)]);
+    assert_eq!(
+        evaluate_expression(
+            "std.collection.sort_by(rows: rows, key: value => value)",
+            &environment,
+            Limits::default(),
+        )
+        .unwrap(),
+        float_rows(&[
+            0x8000_0000_0000_0000,
+            0x0000_0000_0000_0000,
+            0x3ff0_0000_0000_0000,
+            0x7ff8_0000_0000_0000,
+        ])
+    );
+}
+
+#[test]
+fn std_collection_sort_by_evaluates_callbacks_before_sorting_and_fails_closed() {
+    assert_eq!(
+        code(evaluate_expression(
+            "sort_by([1, 0, 2], value => 10 / value)",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
+    );
+    for (expression, expected) in [
+        ("sort_by([1], 1)", "ORNA-EVAL-TYPE"),
+        ("sort_by([1], value => [value])", "ORNA-EVAL-TYPE"),
+        ("sort_by([1])", "ORNA-EVAL-UNSUPPORTED"),
+        (
+            "sort_by([1, 2], value => if value == 1 { value } else { \"x\" })",
+            "ORNA-EVAL-TYPE",
+        ),
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            expected,
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        code(evaluate_expression(
+            "sort_by([1, 2, 3], value => value)",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "sort_by([1], value => value)",
+            &Environment::new(),
+            Limits {
+                max_steps: 1,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+
+    let functions = functions_from_source(
+        "fn key(value: Int) = Note.insert(value); fn run() = sort_by([3, 1], key);",
+    );
+    let mut effects = NoteEffects::default();
+    assert_eq!(
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut effects,
+        )
+        .unwrap(),
+        Value::new(Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())])).unwrap()
+    );
+    assert_eq!(
+        effects.calls,
+        vec![vec![Value::int(3.into())], vec![Value::int(1.into())]]
+    );
+}
+
+#[test]
 fn root_map_names_remain_shadowable_by_admitted_functions_and_locals() {
     assert_eq!(
         call_module(
