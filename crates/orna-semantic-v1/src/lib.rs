@@ -4518,8 +4518,10 @@ fn infer_stream_from_list(
 fn finite_list_collection_operation(callee: &Expr) -> Option<&str> {
     let path = qualified_path(callee)?;
     match path.as_slice() {
-        ["map"]
+        ["first"]
+        | ["map"]
         | ["flat_map"]
+        | ["std", "collection", "first"]
         | ["std", "collection", "map"]
         | ["std", "collection", "flat_map"] => path.last().copied(),
         _ => None,
@@ -4534,14 +4536,15 @@ fn infer_finite_list_collection_call(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
     let path = qualified_path(callee)?;
-    if !matches!(
-        path.as_slice(),
-        ["std", "collection", "map"] | ["std", "collection", "flat_map"]
-    ) {
-        return None;
-    }
+    let operation = match path.as_slice() {
+        ["first"] => "first",
+        ["std", "collection", "first"] => "first",
+        ["std", "collection", "map"] => "map",
+        ["std", "collection", "flat_map"] => "flat_map",
+        _ => return None,
+    };
     Some(infer_finite_list_collection(
-        path.last().copied().expect("collection operation path"),
+        operation,
         None,
         arguments,
         scope,
@@ -4561,6 +4564,9 @@ fn infer_finite_list_collection(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    if operation == "first" {
+        return infer_finite_list_first(arguments, input, scope, local, diagnostics);
+    }
     let pipeline = input.is_some();
     let mut slots = [None, None];
     let mut malformed = false;
@@ -4681,6 +4687,96 @@ fn infer_finite_list_collection(
         _ => unreachable!("finite list collection operation was checked"),
     };
     Inferred { ty, effects }
+}
+
+/// Checks the finite-list `first(rows)` signature. The result is optional
+/// independently of whether the input list is known to be empty; runtime
+/// evaluation supplies `Some(first)` or `null`.
+fn infer_finite_list_first(
+    arguments: &[orna_syntax_v1::Argument],
+    input: Option<Inferred>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let pipeline = input.is_some();
+    let mut row_slot = None;
+    let mut malformed = false;
+    let mut positional = usize::from(pipeline);
+    let mut named_started = false;
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = match argument.name.as_deref() {
+            Some("rows") => {
+                named_started = true;
+                Some(0)
+            }
+            Some(_) => {
+                named_started = true;
+                malformed = true;
+                None
+            }
+            None if named_started || positional >= 1 => {
+                malformed = true;
+                None
+            }
+            None => {
+                let slot = positional;
+                positional += 1;
+                Some(slot)
+            }
+        };
+        if let Some(slot) = slot {
+            if pipeline && slot == 0 {
+                malformed = true;
+            } else if row_slot.replace(index).is_some() {
+                malformed = true;
+            }
+        }
+    }
+    if !pipeline && row_slot.is_none() {
+        malformed = true;
+    }
+
+    let mut effects = input
+        .as_ref()
+        .map(|input| input.effects.clone())
+        .unwrap_or_default();
+    let values = arguments
+        .iter()
+        .map(|argument| {
+            let value = infer(&argument.value, scope, local, diagnostics);
+            effects.join(&value.effects);
+            value.ty
+        })
+        .collect::<Vec<_>>();
+    let rows = input
+        .map(|input| input.ty)
+        .or_else(|| row_slot.and_then(|index| values.get(index).cloned()))
+        .unwrap_or(Type::Error);
+
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "finite-list first arguments do not match its static signature",
+        ));
+    }
+    let Type::List(element) = rows else {
+        diagnostics.push(diag(DIAG_TYPE, "finite-list first requires a finite list"));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    if malformed {
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+    Inferred {
+        ty: Type::Optional(element),
+        effects,
+    }
 }
 
 fn infer_relation_call(
@@ -4937,6 +5033,19 @@ fn infer_success_pipeline(
         return Inferred {
             ty: window.ty,
             effects,
+        };
+    }
+    if let Type::Relation(element) = &input.ty
+        && let Expr::Call {
+            callee, arguments, ..
+        } = rhs
+        && let Expr::Name { text, .. } = callee.as_ref()
+        && text == "first"
+        && arguments.is_empty()
+    {
+        return Inferred {
+            ty: Type::Optional(element.clone()),
+            effects: input.effects,
         };
     }
     if matches!(&input.ty, Type::List(_))
