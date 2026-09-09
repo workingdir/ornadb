@@ -941,6 +941,14 @@ impl SysStreamProjection {
         {
             return Err(RuntimeError::RecoveryInvalid);
         }
+        // A terminal delivery failure is written atomically with both the
+        // causal failure identity and a redacted diagnostic. Do not expose a
+        // retained row that claims the terminal state without that evidence.
+        if observation.status == StreamObservationStatus::Failed
+            && (observation.last_failure.is_none() || observation.diagnostic.is_none())
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
         let run_reference = run.reference()?;
         let reference = observation.reference(run)?;
         validate_checkpoint_reference(
@@ -7403,6 +7411,17 @@ async fn sync_stream_observation_tx(
             Some(stream_identity_id(&failure.identity)),
             false,
         ),
+        CommitResult::ReplayCancelled { failure } => (
+            failure.identity.0.checkpoint_key(),
+            Some(StreamObservationStatus::Failed),
+            0,
+            0,
+            0,
+            Some(failure.diagnostic),
+            None,
+            Some(stream_identity_id(&failure.identity)),
+            false,
+        ),
         CommitResult::Cancelled { checkpoint, .. } => (
             checkpoint.key.clone(),
             Some(StreamObservationStatus::Cancelled),
@@ -8810,6 +8829,40 @@ async fn apply_stream_intent_tx(
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
             Ok(CommitResult::ReplayFailed {
+                failure: load_stream_failure(connection, &failure)
+                    .await?
+                    .ok_or(RuntimeError::RecoveryInvalid)?,
+            })
+        }
+        CommitIntent::ReplayCancel {
+            failure,
+            expected_version,
+        } => {
+            let key = failure.0.checkpoint_key();
+            ensure_stream_checkpoint(connection, &key).await?;
+            let Some(record) = load_stream_failure(connection, &failure).await? else {
+                return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
+            };
+            if record.version != expected_version {
+                return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
+            }
+            if record.status != FailureStatus::Replaying {
+                return Ok(CommitResult::Rejected(RejectReason::RetryNotAllowed));
+            }
+            connection
+                .execute(
+                    "UPDATE stream_failure
+                     SET version = version + 1, attempts = attempts + 1,
+                         status = ?2
+                     WHERE identity_id = ?1",
+                    params![
+                        stream_identity_id(&failure),
+                        encode_status(FailureStatus::Skipped)
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Ok(CommitResult::ReplayCancelled {
                 failure: load_stream_failure(connection, &failure)
                     .await?
                     .ok_or(RuntimeError::RecoveryInvalid)?,
@@ -18604,6 +18657,18 @@ mod tests {
             .clone()
             .expect("retained failure reference");
         assert_eq!(projection.last_failure, Some(failure_reference.clone()));
+        let mut missing_failure = failed.clone();
+        missing_failure.last_failure = None;
+        assert_eq!(
+            SysStreamProjection::try_from_observation(&missing_failure, &retained_run),
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        let mut missing_diagnostic = failed.clone();
+        missing_diagnostic.diagnostic = None;
+        assert_eq!(
+            SysStreamProjection::try_from_observation(&missing_diagnostic, &retained_run),
+            Err(RuntimeError::RecoveryInvalid)
+        );
         assert_eq!(
             failed.checkpoint_reference.as_row_ref().table_id,
             SYS_CHECKPOINT_TABLE_ID
