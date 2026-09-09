@@ -841,6 +841,38 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
+            "std.collection.group_by([31, 12, 22, 13, 33], value => value % 10)",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![
+                    Raw::Int(1.into()),
+                    Raw::Array(vec![Raw::Int(31.into())]),
+                ]),
+                Raw::Array(vec![
+                    Raw::Int(2.into()),
+                    Raw::Array(vec![Raw::Int(12.into()), Raw::Int(22.into())]),
+                ]),
+                Raw::Array(vec![
+                    Raw::Int(3.into()),
+                    Raw::Array(vec![Raw::Int(13.into()), Raw::Int(33.into())]),
+                ]),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "[3, 1, 2, 4] | std.collection.group_by(key: value => value % 2)",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![
+                    Raw::Int(0.into()),
+                    Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
+                ]),
+                Raw::Array(vec![
+                    Raw::Int(1.into()),
+                    Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())]),
+                ]),
+            ]))
+            .unwrap(),
+        ),
+        (
             "std.collection.zip([1, 2, 3], [\"a\", \"b\"])",
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())]),
@@ -927,6 +959,19 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
             "std.collection.partition([1], value => true, extra: value => true)",
             "ORNA-EVAL-UNSUPPORTED",
         ),
+        (
+            "std.collection.group_by(1, value => value)",
+            "ORNA-EVAL-TYPE",
+        ),
+        ("std.collection.group_by([1], 1)", "ORNA-EVAL-TYPE"),
+        (
+            "std.collection.group_by([1], value => [value])",
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            "std.collection.group_by([1], value => value, extra: value => value)",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
         ("std.collection.zip_exact([1], [2, 3])", "ORNA-EVAL-VALUE"),
         ("std.collection.pairs(1)", "ORNA-EVAL-TYPE"),
         ("std.collection.window([1, 2], 0)", "ORNA-EVAL-VALUE"),
@@ -993,6 +1038,36 @@ fn std_collection_partition_accepts_lawful_predicates_and_enforces_limits() {
     assert_eq!(
         code(evaluate_expression(
             "std.collection.partition([1, 2, 3], value => true)",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn std_collection_group_by_accepts_functions_and_enforces_limits() {
+    let source = "fn parity(value: Int) = value % 2; fn run() = std.collection.group_by([3, 2, 1, 4], parity);";
+    assert_eq!(
+        call_module(source, "run()", Limits::default()).unwrap(),
+        Value::new(Raw::Array(vec![
+            Raw::Array(vec![
+                Raw::Int(0.into()),
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
+            ]),
+            Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())]),
+            ]),
+        ]))
+        .unwrap()
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.group_by([1, 2, 3], value => value)",
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
