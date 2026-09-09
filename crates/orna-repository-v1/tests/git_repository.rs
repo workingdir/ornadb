@@ -1180,6 +1180,46 @@ fn divergent_checkout_logical_validation_rejection_fences_git_mutation() {
 }
 
 #[test]
+fn divergent_checkout_rechecks_git_state_after_candidate_validation() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("target.orna"), "target source\n").unwrap();
+    git(root.path(), &["add", "target.orna"]);
+    git(root.path(), &["commit", "-m", "target source"]);
+    git(root.path(), &["switch", "main"]);
+
+    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(42))
+        .unwrap();
+    let before = git_state(&repo, root.path());
+
+    assert!(matches!(
+        repo.execute_nonconflicting_git_checkout_with_validation(&plan, |_, _| {
+            fs::write(root.path().join("main.orna"), "changed during validation\n").unwrap();
+            Ok::<(), ()>(())
+        }),
+        Err(CheckoutExecutionError::Repository(
+            orna_repository_v1::RepositoryError::CheckoutPlanStale
+        ))
+    ));
+    assert_eq!(git_state(&repo, root.path()).0, before.0);
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged ordinary"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("main.orna")).unwrap(),
+        "changed during validation\n"
+    );
+    assert!(!root.path().join("target.orna").exists());
+}
+
+#[test]
 fn divergent_checkout_refuses_conflicting_git_state_without_mutating_cwd() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
