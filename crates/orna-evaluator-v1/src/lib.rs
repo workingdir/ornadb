@@ -19,7 +19,9 @@ use orna_syntax_v1::{
     AssignmentOperator, AssignmentTarget, ControlKind, Expr, LiteralKind, Parameter, Pattern,
     PatternField, ReplInput, Statement, StringSegment, parse_expression, parse_repl,
 };
-use orna_value_v1::{CANONICAL_NAN_BITS, Raw, float_max, float_min, float_ordinary_eq};
+use orna_value_v1::{
+    CANONICAL_NAN_BITS, Raw, float_max, float_min, float_ordinary_eq, float_total_cmp,
+};
 use unicode_normalization::UnicodeNormalization;
 
 mod admitted_repl;
@@ -2128,6 +2130,7 @@ impl Context<'_, '_> {
             ("flat_map", [Value::List(values), transform]) => {
                 self.flat_map(values, transform, depth)
             }
+            ("sort_by", [Value::List(values), key]) => self.sort_by(values, key, depth),
             ("filter", [Value::List(values), predicate]) => self.filter(values, predicate, depth),
             ("partition", [Value::List(values), predicate]) => {
                 self.partition(values, predicate, depth)
@@ -2170,6 +2173,7 @@ impl Context<'_, '_> {
             | ("drop", [_, _])
             | ("map", [_, _])
             | ("flat_map", [_, _])
+            | ("sort_by", [_, _])
             | ("filter", [_, _])
             | ("partition", [_, _])
             | ("split_when", [_, _])
@@ -2213,6 +2217,41 @@ impl Context<'_, '_> {
             }
         }
         Ok(Value::List(flattened))
+    }
+    fn sort_by(
+        &mut self,
+        values: &[Value],
+        key: &Value,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let mut keyed = Vec::with_capacity(values.len());
+        for value in values {
+            // Evaluate every callback in source order before considering any
+            // reordering. This preserves effect/error observability even when
+            // the eventual sort can be optimized by its caller.
+            let sort_key = self.invoke_predicate(key, value.clone(), depth + 1)?;
+            lawful_sort_key(&sort_key)?;
+            keyed.push((sort_key, value.clone()));
+            self.items(keyed.len())?;
+        }
+
+        // A fallible insertion sort keeps comparison errors explicit while
+        // retaining source order for equal keys. It is bounded by the already
+        // admitted finite-list item limit.
+        for index in 1..keyed.len() {
+            let mut current = index;
+            while current > 0
+                && compare_sort_keys(&keyed[current - 1].0, &keyed[current].0)?
+                    == std::cmp::Ordering::Greater
+            {
+                keyed.swap(current - 1, current);
+                current -= 1;
+            }
+        }
+        Ok(Value::List(
+            keyed.into_iter().map(|(_, value)| value).collect(),
+        ))
     }
     fn distinct(&self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
@@ -2924,6 +2963,7 @@ fn named_arguments(
         "take" => &["values", "count"],
         "drop" => &["values", "count"],
         "map" | "flat_map" => &["values", "transform"],
+        "sort_by" => &["rows", "key"],
         "filter" | "partition" | "split_when" => &["values", "predicate"],
         "group_by" => &["values", "key"],
         "zip" | "zip_exact" => &["left", "right"],
@@ -2987,7 +3027,16 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
     };
     matches!(
         text.as_str(),
-        "first" | "one" | "min" | "max" | "sum" | "every" | "exists" | "map" | "flat_map"
+        "first"
+            | "one"
+            | "min"
+            | "max"
+            | "sum"
+            | "every"
+            | "exists"
+            | "map"
+            | "flat_map"
+            | "sort_by"
     )
     .then_some(text.as_str())
 }
@@ -3120,6 +3169,36 @@ fn compare_values(left: &Value, right: &Value) -> Result<std::cmp::Ordering, Eva
                 (Some(left), Some(right)) => left.cmp(right),
             })
             .then_with(|| left_inclusive.cmp(right_inclusive))),
+        _ => Err(error("ORNA-EVAL-TYPE")),
+    }
+}
+fn lawful_sort_key(value: &Value) -> Result<(), EvaluationError> {
+    match value {
+        Value::Bool(_) | Value::Int(_) | Value::Decimal(_) | Value::Float(_) | Value::String(_) => {
+            Ok(())
+        }
+        Value::Range { .. } => Ok(()),
+        Value::Tuple(values) => values.iter().try_for_each(lawful_sort_key),
+        _ => Err(error("ORNA-EVAL-TYPE")),
+    }
+}
+fn compare_sort_keys(left: &Value, right: &Value) -> Result<std::cmp::Ordering, EvaluationError> {
+    match (left, right) {
+        (Value::Bool(left), Value::Bool(right)) => Ok(left.cmp(right)),
+        (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
+        (Value::Float(left), Value::Float(right)) => Ok(float_total_cmp(*left, *right)),
+        (Value::Tuple(left), Value::Tuple(right)) => {
+            for (left, right) in left.iter().zip(right) {
+                let ordering = compare_sort_keys(left, right)?;
+                if ordering != std::cmp::Ordering::Equal {
+                    return Ok(ordering);
+                }
+            }
+            Ok(left.len().cmp(&right.len()))
+        }
+        (Value::Range { .. }, Value::Range { .. })
+        | (Value::Int(_), Value::Int(_))
+        | (Value::Decimal(_), Value::Decimal(_)) => compare_values(left, right),
         _ => Err(error("ORNA-EVAL-TYPE")),
     }
 }
