@@ -192,3 +192,88 @@ fn relation_integer_sum_rejects_an_intermediate_integer_that_exceeds_the_limit()
         );
     }
 }
+
+#[test]
+fn relation_scan_shares_evaluator_budget_and_rolls_back_on_exhaustion() {
+    let mut limits = Limits::default();
+    limits.max_steps = 14;
+    let mut evaluator = TransactionalEvaluator::new("parent", limits);
+    let outcome = evaluator.execute_source(&source(
+        r#"
+            Reading.insert({ id: 1, value: 2 });
+            Reading.insert({ id: 2, value: 3 });
+            Reading | map(reading => reading.value) | sum;
+        "#,
+    ));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+    ));
+    for id in [1, 2] {
+        assert_eq!(
+            evaluator.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "row {id} escaped the exhausted activation"
+        );
+    }
+}
+
+#[test]
+fn zero_step_budget_fails_before_any_publication() {
+    let mut limits = Limits::default();
+    limits.max_steps = 0;
+    let mut evaluator = TransactionalEvaluator::new("parent", limits);
+    let outcome = evaluator.execute_source(&source(
+        r#"
+            Reading.insert({ id: 1, value: 2 });
+            Reading | map(reading => reading.value) | sum;
+        "#,
+    ));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+    ));
+    assert_eq!(
+        evaluator.committed_row("Reading", &Value::int(1.into())),
+        None
+    );
+}
+
+#[test]
+fn assertion_scan_consumes_shared_budget_and_preserves_rollback() {
+    let unit = SourceUnit {
+        fixture_id: "relation-assertion-step-limit".into(),
+        source_id: "relation-assertion-step-limit.orna".into(),
+        parse_as: "module_unit".into(),
+        source: r#"
+            pub table Reading(id: Int) {
+                value: Int,
+                assert every(reading => reading.value > 0);
+            }
+            fn parent() {
+                Reading.insert({ id: 1, value: 2 });
+                Reading.insert({ id: 2, value: 3 });
+            }
+        "#
+        .into(),
+    };
+    let mut limits = Limits::default();
+    limits.max_steps = 10;
+    let mut evaluator = TransactionalEvaluator::new("parent", limits);
+
+    let outcome = evaluator.execute_source(&unit);
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+    ));
+    for id in [1, 2] {
+        assert_eq!(
+            evaluator.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "row {id} escaped assertion-limit rollback"
+        );
+    }
+}
