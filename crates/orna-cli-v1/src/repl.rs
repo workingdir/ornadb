@@ -262,6 +262,18 @@ mod tests {
     }
 
     #[test]
+    fn status_binding_reports_a_redacted_failure_then_a_success() {
+        let mut input = b"let secret_name: Int = \"private\";\n$?\n40 + 2\n$?\n:quit\n".as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        run(&mut input, &mut output, &mut session).expect("REPL runs");
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "> error[ORNA-S021-TYPE]\n> {\"code\": \"ORNA-S021-TYPE\", \"message\": \"<redacted>\", \"redacted\": true, \"severity\": \"error\"} : Map\n> 42 : Int\n> null : Null\n> "
+        );
+    }
+
+    #[test]
     fn submitted_effect_is_rejected_without_changing_the_last_result() {
         let mut input =
             b"let seed: Int = 2;\nseed\nstd.net.http.get(\"https://example.com\")\n$_\n:quit\n"

@@ -1095,6 +1095,29 @@ mod tests {
     }
 
     #[test]
+    fn project_source_rejects_repl_only_bindings() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        std::fs::write(directory.path().join("main.orna"), "pub fn status() = $?;")
+            .expect("main source");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+
+        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
+        assert_eq!(
+            repl_session(&endpoint)
+                .expect_err("module source rejects status binding")
+                .code,
+            "E2101"
+        );
+    }
+
+    #[test]
     fn single_expression_repl_reports_visible_success_failure_and_quit() {
         let mut session = AdmittedReplSession::new(Limits::default());
         let mut output = Vec::new();
