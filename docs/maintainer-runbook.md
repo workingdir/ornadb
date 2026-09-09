@@ -527,6 +527,44 @@ deliberately does not retain arguments or returned values. This is redacted
 history/audit, not durable `Resources` streaming; do not document it as durable
 payload/result storage.
 
+## Compact-publication recovery boundary
+
+The repository boundary has a deliberately narrow, fail-closed compact
+publication recovery path. It verifies a candidate compact manifest before
+reconciliation and retains the local publication journal when completion is
+not proven. In particular, an unsupported required compact profile is rejected
+without moving an externally advanced `HEAD` or clearing the receipt. A
+post-publication cleanup also requires the matching runtime-completion receipt;
+an ordinary commit that advances `HEAD` first leaves reconciliation pending
+rather than forcing cleanup.
+
+This is repository-boundary evidence for ORNA-PUB-007, ORNA-PUB-008,
+ORNA-PUB-009, ORNA-PUB-016, ORNA-PUB-017, ORNA-COMPACT-010, and
+ORNA-COMPACT-011. It is not a claim that compact storage is generally usable
+for logical table reads. Do not delete the journal, reset the ordinary index,
+or force the reference to resolve a recovery conflict; preserve the observed
+state and investigate the retained journal and manifest instead.
+
+Run the focused repository recovery evidence with:
+
+```sh
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=6 RUSTFLAGS='-C debuginfo=0' \
+  cargo test --locked -p orna-repository-v1 --test git_repository \
+  compact_recovery_rejects_an_unknown_profile_without_clearing_the_receipt
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=6 RUSTFLAGS='-C debuginfo=0' \
+  cargo test --locked -p orna-repository-v1 --test git_repository \
+  compact_runtime_fence_rejects_ref_drift_before_cleanup
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=6 RUSTFLAGS='-C debuginfo=0' \
+  cargo test --locked -p orna-repository-v1 --test git_repository \
+  ordinary_commit_preserves_verified_compact_manifest_and_segment_identities
+```
+
+These regressions establish only the stated recovery fences. The required
+logical compact reader/provider, supported encoder-version interoperability,
+cross-reader profile evidence, full publication fault profile, and production
+throughput claim remain unimplemented or unproven. Treat a failure or missing
+prerequisite as unavailable or failed evidence, never as successful recovery.
+
 ## Linux distribution artifact
 
 The checked-in `packaging/linux/` command builds the smallest accepted Linux
