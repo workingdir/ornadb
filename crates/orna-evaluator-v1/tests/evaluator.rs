@@ -1525,6 +1525,8 @@ fn integer_ranges_are_canonical_membership_values_and_finite_iterables() {
     assert_eq!(evaluate("1 in 1..5"), Value::new(Raw::Bool(true)).unwrap());
     assert_eq!(evaluate("5 in 1..5"), Value::new(Raw::Bool(false)).unwrap());
     assert_eq!(evaluate("5 in 1..=5"), Value::new(Raw::Bool(true)).unwrap());
+    assert_eq!(evaluate("-1 in ..5"), Value::new(Raw::Bool(true)).unwrap());
+    assert_eq!(evaluate("5 in 5.."), Value::new(Raw::Bool(true)).unwrap());
     assert_eq!(
         evaluate("5..1"),
         Value::new(Raw::Tag(
@@ -1607,12 +1609,19 @@ fn integer_ranges_reject_unsupported_forms_and_obey_finite_limits() {
         "ORNA-EVAL-TYPE"
     );
     assert_eq!(
-        code(evaluate_expression(
-            "..5",
-            &Environment::new(),
-            Limits::default()
-        )),
-        "ORNA-EVAL-PARSE"
+        evaluate("..5"),
+        Value::new(Raw::Tag(
+            60019,
+            Box::new(Raw::Array(vec![
+                Raw::Tag(60013, Box::new(Raw::Array(vec![Raw::Int(0.into())]))),
+                Raw::Tag(
+                    60013,
+                    Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(5.into())])),
+                ),
+                Raw::Bool(false),
+            ])),
+        ))
+        .unwrap()
     );
 }
 
