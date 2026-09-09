@@ -4679,7 +4679,16 @@ fn root_collection_intrinsic_is_unshadowed(
 ) -> bool {
     matches!(
         operation,
-        "every" | "exists" | "first" | "one" | "map" | "flat_map" | "sum" | "min" | "max"
+        "every"
+            | "exists"
+            | "first"
+            | "one"
+            | "map"
+            | "flat_map"
+            | "sort_by"
+            | "sum"
+            | "min"
+            | "max"
     ) && !local.contains_key(operation)
         && !scope.names.contains_key(operation)
 }
@@ -4693,7 +4702,16 @@ fn finite_list_collection_operation<'a>(
     if path.len() == 1
         && matches!(
             path[0],
-            "every" | "exists" | "first" | "one" | "map" | "flat_map" | "sum" | "min" | "max"
+            "every"
+                | "exists"
+                | "first"
+                | "one"
+                | "map"
+                | "flat_map"
+                | "sort_by"
+                | "sum"
+                | "min"
+                | "max"
         )
         && root_collection_intrinsic_is_unshadowed(path[0], scope, local)
     {
@@ -4733,7 +4751,7 @@ fn infer_finite_list_collection_call(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
     let path = qualified_path(callee)?;
-    if matches!(path.as_slice(), ["every"] | ["exists"])
+    if matches!(path.as_slice(), ["every"] | ["exists"] | ["sort_by"])
         && let Some(argument) = arguments.first()
     {
         let mut probe_diagnostics = Vec::new();
@@ -4750,6 +4768,15 @@ fn infer_finite_list_collection_call(
         ["sum"] => "sum",
         ["min"] => "min",
         ["max"] => "max",
+        ["sort_by"] if root_collection_intrinsic_is_unshadowed("sort_by", scope, local) => {
+            "sort_by"
+        }
+        ["std", "collection", "sort_by"]
+            if !local.contains_key("std")
+                && standard_finite_list_operation_is_admitted("sort_by", scope) =>
+        {
+            "sort_by"
+        }
         ["std", "collection", operation]
             if standard_finite_list_operation_is_admitted(operation, scope) =>
         {
@@ -4796,6 +4823,9 @@ fn infer_finite_list_collection(
             local,
             diagnostics,
         );
+    }
+    if operation == "sort_by" {
+        return infer_finite_list_sort_by(arguments, input, scope, local, diagnostics);
     }
     if matches!(operation, "every" | "exists") {
         return infer_finite_list_every_exists(
@@ -4927,6 +4957,177 @@ fn infer_finite_list_collection(
         _ => unreachable!("finite list collection operation was checked"),
     };
     Inferred { ty, effects }
+}
+
+/// Checks the finite-list `sort_by(rows, key)` signature.  The key callback is
+/// evaluated once per source value by the runtime and must produce a value with
+/// an available total order; callback effects and failures remain visible to
+/// the surrounding expression before any ordering optimisation.
+fn infer_finite_list_sort_by(
+    arguments: &[orna_syntax_v1::Argument],
+    input: Option<Inferred>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let pipeline = input.is_some();
+    let mut slots = [None, None];
+    let mut malformed = false;
+    let mut positional = usize::from(pipeline);
+    let mut named_started = false;
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = match argument.name.as_deref() {
+            Some("rows") => {
+                named_started = true;
+                Some(0)
+            }
+            Some("key") => {
+                named_started = true;
+                Some(1)
+            }
+            Some(_) => {
+                malformed = true;
+                None
+            }
+            None if named_started || positional >= slots.len() => {
+                malformed = true;
+                None
+            }
+            None => {
+                let slot = positional;
+                positional += 1;
+                Some(slot)
+            }
+        };
+        if let Some(slot) = slot {
+            if pipeline && slot == 0 {
+                malformed = true;
+            } else if slots[slot].replace(index).is_some() {
+                malformed = true;
+            }
+        }
+    }
+    if pipeline {
+        if slots[0].is_some() {
+            malformed = true;
+        }
+    } else if slots[0].is_none() {
+        malformed = true;
+    }
+    if slots[1].is_none() {
+        malformed = true;
+    }
+
+    let mut effects = input
+        .as_ref()
+        .map(|input| input.effects.clone())
+        .unwrap_or_default();
+    let row = if let Some(input) = input {
+        input.ty
+    } else if let Some(index) = slots[0] {
+        let row = infer(&arguments[index].value, scope, local, diagnostics);
+        effects.join(&row.effects);
+        row.ty
+    } else {
+        for argument in arguments {
+            let value = infer(&argument.value, scope, local, diagnostics);
+            effects.join(&value.effects);
+        }
+        Type::Error
+    };
+
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "finite-list sort_by arguments do not match its static signature",
+        ));
+    }
+    let Type::List(element) = row else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "finite-list sort_by requires a finite list",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    let Some(index) = slots[1] else {
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    let callback = infer_finite_list_sort_key(
+        &arguments[index].value,
+        element.as_ref().clone(),
+        scope,
+        local,
+        diagnostics,
+    );
+    effects.join(&callback.effects);
+    if !is_sort_key_type(&callback.ty) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "finite-list sort_by key must have a total order",
+        ));
+    }
+    Inferred {
+        ty: if !malformed && is_sort_key_type(&callback.ty) {
+            Type::List(element)
+        } else {
+            Type::Error
+        },
+        effects,
+    }
+}
+
+fn infer_finite_list_sort_key(
+    expression: &Expr,
+    parameter: Type,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if let Expr::Lambda { parameters, .. } = expression
+        && let [lambda_parameter] = parameters.as_slice()
+        && let Some(annotation) = &lambda_parameter.annotation
+    {
+        require_same(&parameter, &type_of(annotation), diagnostics);
+    }
+    infer_finite_list_callback(
+        expression,
+        parameter,
+        Type::Error,
+        scope,
+        local,
+        diagnostics,
+    )
+}
+
+fn is_sort_key_type(ty: &Type) -> bool {
+    match ty {
+        Type::Error
+        | Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Named(_)
+        | Type::Applied { .. } => true,
+        Type::Range(element) => is_sort_key_type(element),
+        Type::Tuple(elements) => elements.iter().all(is_sort_key_type),
+        Type::List(_)
+        | Type::Relation(_)
+        | Type::Stream(_)
+        | Type::Record(_)
+        | Type::Optional(_)
+        | Type::Null
+        | Type::MoneyPerUnit { .. }
+        | Type::Function { .. } => false,
+    }
 }
 
 /// Checks the bounded finite-list numeric aggregate signatures. Unqualified
