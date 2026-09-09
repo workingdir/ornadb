@@ -603,6 +603,20 @@ impl Value {
             _ => false,
         }
     }
+    fn contains_float(&self) -> bool {
+        match self {
+            Self::Float(_) => true,
+            Self::List(values) | Self::Tuple(values) => values.iter().any(Self::contains_float),
+            Self::Record(values) => values.values().any(Self::contains_float),
+            Self::NominalRecord { fields, .. } => {
+                fields.iter().any(|(_, value)| value.contains_float())
+            }
+            Self::Enum { payload, .. } | Self::Option(payload) => {
+                payload.as_ref().is_some_and(|value| value.contains_float())
+            }
+            _ => false,
+        }
+    }
     fn canonical(self) -> Result<CanonicalValue, EvaluationError> {
         CanonicalValue::new(self.raw()?).map_err(|_| error("ORNA-EVAL-VALUE"))
     }
@@ -2014,7 +2028,10 @@ impl Context<'_, '_> {
                 }
                 Ok(Value::List(flattened))
             }
-            ("unique", [Value::List(values)]) => self.unique(values),
+            ("distinct", [Value::List(values)]) | ("unique", [Value::List(values)]) => {
+                self.distinct(values)
+            }
+            ("union", [Value::List(left), Value::List(right)]) => self.union(left, right),
             ("count", [Value::List(values)]) => self.count(values),
             ("take", [Value::List(values), Value::Int(count)]) => self.take(values, count),
             ("drop", [Value::List(values), Value::Int(count)]) => self.drop(values, count),
@@ -2046,8 +2063,9 @@ impl Context<'_, '_> {
                 self.windows(values, size, step)
             }
             ("chunk", [_, _])
-            | ("flatten" | "unique" | "pairs" | "count", [_])
+            | ("flatten" | "distinct" | "unique" | "pairs" | "count", [_])
             | ("count", [_, _])
+            | ("union", [_, _])
             | ("take", [_, _])
             | ("drop", [_, _])
             | ("partition", [_, _])
@@ -2058,7 +2076,7 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
-    fn unique(&self, values: &[Value]) -> Result<Value, EvaluationError> {
+    fn distinct(&self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
         let mut keys = Vec::new();
         let mut unique = Vec::new();
@@ -2066,6 +2084,11 @@ impl Context<'_, '_> {
             // Equality for this fallback is equality of the canonical value,
             // not incidental host representation. Values that cannot cross the
             // canonical boundary (including callables) have no lawful key.
+            // Float has no default lawful hash/equality implementation here,
+            // so distinctness fails closed rather than inventing semantics.
+            if value.contains_float() {
+                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+            }
             let key = value.clone().canonical()?;
             if keys.iter().any(|existing| existing == &key) {
                 continue;
@@ -2075,6 +2098,19 @@ impl Context<'_, '_> {
             self.items(unique.len())?;
         }
         Ok(Value::List(unique))
+    }
+    fn union(&self, left: &[Value], right: &[Value]) -> Result<Value, EvaluationError> {
+        self.items(left.len())?;
+        self.items(right.len())?;
+        let length = left
+            .len()
+            .checked_add(right.len())
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        self.items(length)?;
+        let mut values = Vec::with_capacity(length);
+        values.extend(left.iter().cloned());
+        values.extend(right.iter().cloned());
+        Ok(Value::List(values))
     }
     fn count(&self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
@@ -2572,7 +2608,8 @@ fn named_arguments(
         "replace" => &["value", "from", "to"],
         "normalise" => &["value", "form"],
         "chunk" => &["values", "size"],
-        "flatten" | "unique" | "pairs" | "count" => &["values"],
+        "flatten" | "distinct" | "unique" | "pairs" | "count" => &["values"],
+        "union" => &["left", "right"],
         "take" => &["values", "count"],
         "drop" => &["values", "count"],
         "partition" | "split_when" => &["values", "predicate"],
