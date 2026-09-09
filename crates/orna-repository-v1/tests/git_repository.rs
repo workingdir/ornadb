@@ -2286,6 +2286,56 @@ fn declared_object_set_requires_every_object_to_be_materialized_or_proven_promis
 }
 
 #[test]
+fn declared_segment_blob_set_rejects_non_blobs_without_hydrating_promises() {
+    let Some((fixture, clone, promised)) = filtered_clone() else {
+        // The fixture requires file-protocol filtering support. A
+        // configuration-only repository cannot prove a missing blob is
+        // promised, so it is not evidence for segment completeness.
+        return;
+    };
+    let repo = Repository::discover(&clone).unwrap();
+    let before = git_state(&repo, &clone);
+    let origin = fixture.path().join("origin.git");
+    let origin_refs_before = git(
+        &origin,
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
+    let origin_objects_before = git(&origin, &["count-objects", "-v"]);
+    let blob = git(&clone, &["rev-parse", "HEAD:visible.txt"]);
+    let tree = git(&clone, &["rev-parse", "HEAD^{tree}"]);
+    let unavailable = "0".repeat(blob.len());
+
+    assert_eq!(
+        repo.observe_declared_segment_blob_set(&[&blob, &promised])
+            .unwrap(),
+        GitDeclaredObjectSetState::Complete
+    );
+    assert_eq!(
+        repo.observe_declared_segment_blob_set(&[&tree]).unwrap(),
+        GitDeclaredObjectSetState::Malformed
+    );
+    assert_eq!(
+        repo.observe_declared_segment_blob_set(&[&unavailable])
+            .unwrap(),
+        GitDeclaredObjectSetState::Incomplete
+    );
+
+    assert_eq!(git_state(&repo, &clone), before);
+    assert_eq!(
+        git(
+            &origin,
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+        ),
+        origin_refs_before
+    );
+    assert_eq!(
+        git(&origin, &["count-objects", "-v"]),
+        origin_objects_before
+    );
+    drop(fixture);
+}
+
+#[test]
 fn observes_combined_sparse_and_partial_capabilities() {
     let root = repository();
     with_partial_clone(root.path());
