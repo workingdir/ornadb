@@ -1773,6 +1773,7 @@ dependencies = [
  "orna-syntax-v1",
  "orna-value-v1",
  "tempfile",
+ "unicode-normalization",
 ]
 
 [[package]]
