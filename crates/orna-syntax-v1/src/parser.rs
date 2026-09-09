@@ -402,6 +402,12 @@ pub enum Expr {
         rhs: Box<Expr>,
         span: SourceSpan,
     },
+    Range {
+        lower: Option<Box<Expr>>,
+        operator: String,
+        upper: Option<Box<Expr>>,
+        span: SourceSpan,
+    },
     Call {
         callee: Box<Expr>,
         arguments: Vec<Argument>,
@@ -729,6 +735,10 @@ fn expr_depth(expr: &Expr) -> usize {
         }
         Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => expr_depth(rhs),
         Expr::Binary { lhs, rhs, .. } => expr_depth(lhs).max(expr_depth(rhs)),
+        Expr::Range { lower, upper, .. } => lower
+            .as_deref()
+            .map_or(0, expr_depth)
+            .max(upper.as_deref().map_or(0, expr_depth)),
         Expr::Call {
             callee, arguments, ..
         } => max_depth(
@@ -854,6 +864,7 @@ impl Expr {
             | Self::ReplBinding { span, .. }
             | Self::Unary { span, .. }
             | Self::Binary { span, .. }
+            | Self::Range { span, .. }
             | Self::Call { span, .. }
             | Self::Field { span, .. }
             | Self::Group { span, .. }
@@ -1303,6 +1314,17 @@ fn annotate_expr(expr: &mut Expr, source: &str, file: &str) {
         Expr::Binary { lhs, rhs, span, .. } => {
             annotate_expr(lhs, source, file);
             annotate_expr(rhs, source, file);
+            annotate_span(span, source, file)
+        }
+        Expr::Range {
+            lower, upper, span, ..
+        } => {
+            if let Some(lower) = lower {
+                annotate_expr(lower, source, file)
+            }
+            if let Some(upper) = upper {
+                annotate_expr(upper, source, file)
+            }
             annotate_span(span, source, file)
         }
         Expr::Call { callee, span, .. } => {
@@ -3476,6 +3498,28 @@ impl Parser {
             }
             let op = self.current().text.clone();
             self.bump();
+            if matches!(op.as_str(), ".." | "..=") {
+                let rhs = if self.can_start_expression() {
+                    self.recurse(|parser| parser.pratt(prec + 1))
+                } else {
+                    None
+                };
+                if !self.within_depth(expr_depth(&lhs).max(rhs.as_ref().map_or(0, expr_depth)) + 1)
+                {
+                    return Some(lhs);
+                }
+                let start = lhs.span().start;
+                let end = rhs
+                    .as_ref()
+                    .map_or_else(|| self.previous().span.clone(), Expr::span);
+                lhs = Expr::Range {
+                    lower: Some(Box::new(lhs)),
+                    operator: op,
+                    upper: rhs.map(Box::new),
+                    span: SourceSpan::new(start, end.end),
+                };
+                continue;
+            }
             if matches!(op.as_str(), "|" | "|?")
                 && !matches!(
                     self.current().kind,
@@ -3507,6 +3551,26 @@ impl Parser {
     }
     fn prefix(&mut self) -> Option<Expr> {
         let t = self.current().clone();
+        if matches!(t.kind, TokenKind::Punct(".." | "..=")) {
+            self.bump();
+            if !self.can_start_expression() {
+                self.error_here("ORNA-PARSE-001", "expected range upper endpoint");
+                return Some(Expr::Range {
+                    lower: None,
+                    operator: t.text,
+                    upper: None,
+                    span: t.span,
+                });
+            }
+            let upper = self.recurse(|parser| parser.pratt(7))?;
+            let span = t.span.join(upper.span());
+            return Some(Expr::Range {
+                lower: None,
+                operator: t.text,
+                upper: Some(Box::new(upper)),
+                span,
+            });
+        }
         if matches!(
             t.kind,
             TokenKind::Punct("!") | TokenKind::Punct("-") | TokenKind::Punct("+")
@@ -4096,6 +4160,24 @@ impl Parser {
             "^" => (9, true),
             _ => return None,
         })
+    }
+    fn can_start_expression(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Identifier { .. }
+                | TokenKind::Integer
+                | TokenKind::Decimal
+                | TokenKind::Float
+                | TokenKind::Date
+                | TokenKind::Instant
+                | TokenKind::String
+                | TokenKind::StringStart
+                | TokenKind::ReplBinding
+                | TokenKind::Keyword(
+                    Keyword::SelfValue | Keyword::True | Keyword::False | Keyword::Null
+                )
+                | TokenKind::Punct("(" | "[" | "{" | "!" | "-" | "+")
+        )
     }
     fn finish(&mut self) {
         if !self.eof() {
