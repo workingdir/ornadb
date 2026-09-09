@@ -16,6 +16,8 @@ fn collection_catalogue() -> Catalogue {
     let source = r#"
         pub fn first(rows: [Int]): Int? = null;
         pub fn one(rows: [Int]): Int = 0;
+        pub fn every(rows: [Int], predicate: fn(Int): Bool): Bool = true;
+        pub fn exists(rows: [Int], predicate: fn(Int): Bool): Bool = false;
         pub fn map(rows: [Int], transform: fn(Int): Int): [Int] = rows;
         pub fn flat_map(rows: [Int], transform: fn(Int): [Int]): [Int] = rows;
     "#;
@@ -2809,6 +2811,134 @@ fn finite_list_one_rejects_invalid_signatures_and_keeps_relation_one_behavior() 
             module.symbols[name].ty
         );
     }
+}
+
+#[test]
+fn finite_list_every_and_exists_return_bool_for_all_supported_call_forms_and_preserve_effects() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "every-exists.orna",
+            r#"
+            table Reading(id: Int) { value: Int, }
+            fn positive(value: Int) = value > 0;
+            fn reads_predicate(value: Int) = Reading.count() > 0 && value > 0;
+            pub fn direct(rows: [Int]) = every(rows, positive);
+            pub fn direct_lambda(rows: [Int]) = exists(rows, value => value > 0);
+            pub fn named(rows: [Int]) = every(predicate: positive, rows: rows);
+            pub fn pipeline(rows: [Int]) = rows | every(positive);
+            pub fn pipeline_named(rows: [Int]) = rows | exists(predicate: value => value > 0);
+            pub fn qualified(rows: [Int]) = std.collection.every(rows: rows, predicate: positive);
+            pub fn qualified_pipeline(rows: [Int]) = rows | std.collection.exists(predicate: positive);
+            pub fn reads(rows: [Int]) = every(rows, reads_predicate);
+            pub fn relation_exists() = exists(Reading, reading => reading.value > 0);
+        "#,
+        )],
+        &collection_catalogue(),
+    );
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result.modules.values().next().expect("every/exists module");
+    for name in [
+        "direct",
+        "direct_lambda",
+        "named",
+        "pipeline",
+        "pipeline_named",
+        "qualified",
+        "qualified_pipeline",
+        "reads",
+    ] {
+        assert!(
+            matches!(
+                &module.symbols[name].ty,
+                Type::Function { result, .. } if result.as_ref() == &Type::Bool
+            ),
+            "{name}: {:?}",
+            module.symbols[name].ty
+        );
+    }
+    assert!(
+        module.symbols["reads"]
+            .effects
+            .effects
+            .contains("database read")
+    );
+    assert!(module.symbols["reads"].effects.may_fail);
+    assert!(matches!(
+        &module.symbols["relation_exists"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Bool
+    ));
+}
+
+#[test]
+fn finite_list_every_and_exists_reject_invalid_signatures_without_changing_assertions() {
+    let invalid = analyze(&[
+        ModuleInput::new(
+            "missing-predicate.orna",
+            "fn bad(rows: [Int]) = every(rows);",
+        ),
+        ModuleInput::new(
+            "extra.orna",
+            "fn bad(rows: [Int]) = exists(rows, value => true, value => false);",
+        ),
+        ModuleInput::new(
+            "wrong-row-name.orna",
+            "fn bad(rows: [Int]) = every(values: rows, predicate: value => true);",
+        ),
+        ModuleInput::new(
+            "wrong-predicate-name.orna",
+            "fn bad(rows: [Int]) = exists(rows: rows, test: value => true);",
+        ),
+        ModuleInput::new(
+            "wrong-collection.orna",
+            "fn bad() = every(1, value => true);",
+        ),
+        ModuleInput::new(
+            "wrong-result.orna",
+            "fn bad(rows: [Int]) = exists(rows, value => value + 1);",
+        ),
+        ModuleInput::new(
+            "wrong-parameter-count.orna",
+            "fn bad(rows: [Int]) = every(rows, (left, right) => left > right);",
+        ),
+        ModuleInput::new(
+            "wrong-parameter-type.orna",
+            "fn bad(rows: [Int]) = exists(rows, (value: Str) => value == \"x\");",
+        ),
+        ModuleInput::new(
+            "pipeline-row-name.orna",
+            "fn bad(rows: [Int]) = rows | exists(rows: rows, predicate: value => true);",
+        ),
+        ModuleInput::new(
+            "pipeline-extra.orna",
+            "fn bad(rows: [Int]) = rows | every(value => true, value => false);",
+        ),
+    ]);
+    assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
+    assert!(!invalid.diagnostics.is_empty(), "{:?}", invalid.diagnostics);
+
+    let qualified = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "unprofiled.orna",
+            "fn bad(rows: [Int]) = std.collection.every(rows, value => true);",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(
+        has(&qualified, DIAG_UNRESOLVED),
+        "{:?}",
+        qualified.diagnostics
+    );
+
+    let assertions = analyze(&[ModuleInput::new(
+        "assertions.orna",
+        r#"
+            pub table Book(id: Str) { title: Str, }
+            pub table Loan(book_id: Str) { }
+            assert every(Loan, loan => exists(Book, book => book.id == loan.book_id));
+        "#,
+    )]);
+    assert!(assertions.is_ok(), "{:?}", assertions.diagnostics);
 }
 
 #[test]
