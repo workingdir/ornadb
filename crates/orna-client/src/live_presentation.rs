@@ -513,6 +513,22 @@ mod tests {
     }
 
     #[test]
+    fn delta_before_initial_snapshot_is_discarded_and_requests_resync() {
+        let watch = [7; 16];
+        let mut state = default_presentation(watch);
+
+        assert_eq!(
+            state
+                .receive(&frame(17, watch, delta(0, 1, vec![replace_text("one")])))
+                .unwrap(),
+            LivePresentationUpdate::ResyncRequired
+        );
+        assert!(state.published().is_none());
+        assert!(state.awaiting_snapshot());
+        assert!(state.take_resync_request().is_some());
+    }
+
+    #[test]
     fn missing_base_preserves_visible_tree_and_requests_resync() {
         let watch = [7; 16];
         let mut state = default_presentation(watch);
