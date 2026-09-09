@@ -89,6 +89,10 @@ pub(crate) struct PureEvalApplication {
     admissions: Box<dyn OperationAdmissionSource>,
     expiries: SessionExpiries,
     sessions: BTreeMap<SessionId, SessionState>,
+    /// Terminal Eval rejections that occurred before an evaluator overlay
+    /// could be admitted. They are still bound to a live session lease, so an
+    /// exact retry cannot re-admit against later repository state.
+    rejected_terminals: BTreeMap<SessionId, BTreeMap<[u8; 16], ([u8; 32], Envelope)>>,
 }
 
 impl PureEvalApplication {
@@ -113,6 +117,7 @@ impl PureEvalApplication {
             }),
             expiries,
             sessions: BTreeMap::new(),
+            rejected_terminals: BTreeMap::new(),
         })
     }
 
@@ -131,6 +136,7 @@ impl PureEvalApplication {
         for session in expired {
             expiries.remove(&session);
             self.sessions.remove(&session);
+            self.rejected_terminals.remove(&session);
         }
     }
 
@@ -140,6 +146,7 @@ impl PureEvalApplication {
     pub(crate) fn remove(&mut self, session: SessionId) {
         self.expiries.borrow_mut().remove(&session);
         self.sessions.remove(&session);
+        self.rejected_terminals.remove(&session);
     }
 
     fn admit(
@@ -224,6 +231,11 @@ impl PureEvalApplication {
             .sessions
             .get(&session)
             .and_then(|state| state.terminal.get(&request))
+            .or_else(|| {
+                self.rejected_terminals
+                    .get(&session)
+                    .and_then(|terminals| terminals.get(&request))
+            })
         else {
             return Ok(None);
         };
@@ -247,6 +259,11 @@ impl PureEvalApplication {
         if let Some(state) = self.sessions.get_mut(&session) {
             state
                 .terminal
+                .insert(request, (fingerprint, response.clone()));
+        } else if self.expiries.borrow().contains_key(&session) {
+            self.rejected_terminals
+                .entry(session)
+                .or_default()
                 .insert(request, (fingerprint, response.clone()));
         }
     }
@@ -479,6 +496,7 @@ mod tests {
             }),
             expiries: Rc::clone(&expiries),
             sessions: BTreeMap::new(),
+            rejected_terminals: BTreeMap::new(),
         };
         (
             application,
