@@ -3136,6 +3136,24 @@ fn infer(
             local,
             diagnostics,
         ),
+        Expr::Control {
+            kind: ControlKind::While,
+            binding,
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => infer_while(
+            binding.as_ref(),
+            condition.as_deref(),
+            body.as_deref(),
+            arms,
+            alternate.as_deref(),
+            scope,
+            local,
+            diagnostics,
+        ),
         _ => {
             diagnostics.push(diag(
                 DIAG_UNSUPPORTED,
@@ -3446,6 +3464,49 @@ fn unwrap_group(expression: &Expr) -> &Expr {
     match expression {
         Expr::Group { inner, .. } => unwrap_group(inner),
         expression => expression,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn infer_while(
+    binding: Option<&Pattern>,
+    condition: Option<&Expr>,
+    body: Option<&Expr>,
+    arms: &[orna_syntax_v1::CaseArm],
+    alternate: Option<&Expr>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if binding.is_some() || !arms.is_empty() || alternate.is_some() {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "malformed while control shape is outside this semantic slice",
+        ));
+    }
+    let Some(condition) = condition else {
+        diagnostics.push(diag(DIAG_UNSUPPORTED, "while control requires a condition"));
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    };
+    let condition = infer(condition, scope, local, diagnostics);
+    require_same(&Type::Bool, &condition.ty, diagnostics);
+
+    let Some(body) = body else {
+        diagnostics.push(diag(DIAG_UNSUPPORTED, "while control requires a body"));
+        return Inferred {
+            ty: Type::Error,
+            effects: condition.effects,
+        };
+    };
+    let body = infer(body, scope, local, diagnostics);
+    let mut effects = condition.effects;
+    effects.join(&body.effects);
+    Inferred {
+        ty: Type::Null,
+        effects,
     }
 }
 
