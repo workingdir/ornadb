@@ -23,6 +23,7 @@ fn collection_catalogue() -> Catalogue {
         pub fn max(rows: [Int]): Int? = null;
         pub fn map(rows: [Int], transform: fn(Int): Int): [Int] = rows;
         pub fn flat_map(rows: [Int], transform: fn(Int): [Int]): [Int] = rows;
+        pub fn sort_by(rows: [Int], key: fn(Int): Int): [Int] = rows;
     "#;
     let profile = StandardDependencyProfile::from_sources(
         "orna.std/v1-collection",
@@ -2577,6 +2578,91 @@ fn finite_list_map_and_flat_map_reject_invalid_callbacks_and_collections() {
         Type::Function { result, .. }
             if result.as_ref() == &Type::Relation(Box::new(Type::Int))
     ));
+}
+
+#[test]
+fn finite_list_sort_by_admits_direct_pipeline_and_named_keys() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "sort-by.orna",
+            r#"
+            table Reading(id: Int) { value: Int, }
+            fn float_key(value: Int): Float = 0.0f;
+            pub fn direct(values: [Int]) = sort_by(values, value => value);
+            pub fn pipeline(values: [Int]) = values | sort_by(value => value);
+            pub fn named(values: [Int]) = sort_by(key: float_key, rows: values);
+            pub fn qualified(values: [Int]) = std.collection.sort_by(rows: values, key: float_key);
+            pub fn reads(values: [Int]) = values | sort_by(key: value => Reading.count() + value);
+        "#,
+        )],
+        &collection_catalogue(),
+    );
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result.modules.values().next().expect("sort_by module");
+    for name in ["direct", "pipeline", "named", "qualified", "reads"] {
+        assert!(matches!(
+            &module.symbols[name].ty,
+            Type::Function { result, .. }
+                if result.as_ref() == &Type::List(Box::new(Type::Int))
+        ));
+    }
+    assert!(
+        module.symbols["reads"]
+            .effects
+            .effects
+            .contains("database read")
+    );
+    assert!(module.symbols["reads"].effects.may_fail);
+}
+
+#[test]
+fn finite_list_sort_by_rejects_bad_callbacks_keys_and_boundaries() {
+    let invalid = analyze_with_catalogue(
+        &[
+            ModuleInput::new("missing.orna", "fn bad(values: [Int]) = values | sort_by;"),
+            ModuleInput::new(
+                "wrong-arity.orna",
+                "fn bad(values: [Int]) = values | sort_by(value => value, value => value);",
+            ),
+            ModuleInput::new(
+                "wrong-name.orna",
+                "fn bad(values: [Int]) = values | sort_by(transform: value => value);",
+            ),
+            ModuleInput::new(
+                "wrong-parameter.orna",
+                "fn bad(values: [Int]) = values | sort_by((left, right) => left);",
+            ),
+            ModuleInput::new(
+                "wrong-key.orna",
+                "fn bad(values: [Int]) = values | sort_by(value => [value]);",
+            ),
+            ModuleInput::new(
+                "wrong-annotation.orna",
+                "fn bad(values: [Int]) = values | sort_by((value: Str) => value);",
+            ),
+            ModuleInput::new(
+                "relation.orna",
+                "table Reading(id: Int) { value: Int, } fn bad() = sort_by(Reading, reading => reading.value);",
+            ),
+        ],
+        &collection_catalogue(),
+    );
+    assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
+    assert!(!invalid.is_ok(), "{:?}", invalid.diagnostics);
+
+    let unprofiled = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "unprofiled.orna",
+            "fn bad(values: [Int]) = std.collection.sort_by(values, value => value);",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(
+        has(&unprofiled, DIAG_UNRESOLVED),
+        "{:?}",
+        unprofiled.diagnostics
+    );
 }
 
 #[test]
