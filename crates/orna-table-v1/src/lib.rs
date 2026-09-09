@@ -123,6 +123,21 @@ where
         self.committed.iter()
     }
 
+    /// Observes at most `limit` captured rows without materialising the
+    /// complete snapshot relation.
+    pub fn scan_window(&self, limit: usize) -> impl Iterator<Item = (&Key, &Row)> {
+        self.scan().take(limit)
+    }
+
+    /// Scans a canonical key range from the captured relation in ascending
+    /// order without observing rows outside the requested bounds.
+    pub fn scan_range<R>(&self, range: R) -> impl Iterator<Item = (&Key, &Row)>
+    where
+        R: RangeBounds<Key>,
+    {
+        self.committed.range(range)
+    }
+
     /// Returns a lazy ordered relation over the captured rows.
     pub fn relation(&self) -> Relation<'_, (Key, Row)>
     where
@@ -894,6 +909,29 @@ where
             .flat_map(BTreeMap::iter)
     }
 
+    /// Observes at most `limit` captured rows from one relation without
+    /// materialising the complete snapshot relation.
+    pub fn scan_window(&self, table: &Table, limit: usize) -> impl Iterator<Item = (&Key, &Row)> {
+        self.scan(table).take(limit)
+    }
+
+    /// Scans a canonical key range from one captured relation in ascending
+    /// order without observing rows outside the requested bounds.
+    pub fn scan_range<'a, R>(
+        &'a self,
+        table: &'a Table,
+        range: R,
+    ) -> impl Iterator<Item = (&'a Key, &'a Row)> + 'a
+    where
+        Key: Ord,
+        R: Clone + RangeBounds<Key> + 'a,
+    {
+        self.committed
+            .get(table)
+            .into_iter()
+            .flat_map(move |relation| relation.range(range.clone()))
+    }
+
     /// Returns a lazy ordered relation over one captured relation.
     pub fn relation<'a>(&'a self, table: &'a Table) -> Relation<'a, (Key, Row)>
     where
@@ -1581,6 +1619,77 @@ mod tests {
         assert_eq!(snapshot.committed(&1), Some(&"old"));
         assert_eq!(snapshot.committed(&2), None);
         assert_eq!(snapshot.relation().collect::<Vec<_>>(), vec![(1, "old")]);
+    }
+
+    #[test]
+    fn snapshot_bounded_reads_stay_pinned_and_canonically_ordered() {
+        let mut table = TableRuntime::<u64, &'static str>::default();
+        table
+            .activate(|activation| {
+                for (key, row) in [(3, "three"), (1, "one"), (2, "two")] {
+                    activation.insert(key, row)?;
+                }
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+        let snapshot = table.snapshot();
+
+        table
+            .activate(|activation| {
+                activation.update(2, "later")?;
+                activation.insert(4, "four")?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            snapshot
+                .scan_window(2)
+                .map(|(key, row)| (*key, *row))
+                .collect::<Vec<_>>(),
+            vec![(1, "one"), (2, "two")]
+        );
+        assert_eq!(
+            snapshot
+                .scan_range(2..=4)
+                .map(|(key, row)| (*key, *row))
+                .collect::<Vec<_>>(),
+            vec![(2, "two"), (3, "three")]
+        );
+
+        let mut database = DatabaseRuntime::<&'static str, u64, &'static str>::default();
+        database
+            .activate(|activation| {
+                for (key, row) in [(3, "three"), (1, "one"), (2, "two")] {
+                    activation.insert("notes", key, row)?;
+                }
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+        let snapshot = database.snapshot();
+
+        database
+            .activate(|activation| {
+                activation.update("notes", 2, "later")?;
+                activation.insert("notes", 4, "four")?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            snapshot
+                .scan_window(&"notes", 2)
+                .map(|(key, row)| (*key, *row))
+                .collect::<Vec<_>>(),
+            vec![(1, "one"), (2, "two")]
+        );
+        assert_eq!(
+            snapshot
+                .scan_range(&"notes", 2..=4)
+                .map(|(key, row)| (*key, *row))
+                .collect::<Vec<_>>(),
+            vec![(2, "two"), (3, "three")]
+        );
     }
 
     #[test]
