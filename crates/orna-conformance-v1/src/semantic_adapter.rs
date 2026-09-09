@@ -3254,6 +3254,11 @@ fn lower_relation_expression(expression: &mut Expr, table_keys: &TableKeys) {
         Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
             lower_relation_expression(rhs, table_keys);
         }
+        Expr::Range { lower, upper, .. } => {
+            for endpoint in [lower, upper].into_iter().flatten() {
+                lower_relation_expression(endpoint, table_keys);
+            }
+        }
         Expr::Binary { lhs, rhs, .. } => {
             lower_relation_expression(lhs, table_keys);
             lower_relation_expression(rhs, table_keys);
@@ -4854,6 +4859,7 @@ mod durable_tests {
         RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome, WriterLease,
     };
     use orna_stream_v1::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
+    use orna_syntax_v1::{Expr, parse_expression};
     use std::{path::Path, process::Command};
     use tempfile::TempDir;
 
@@ -5898,6 +5904,44 @@ mod durable_tests {
         );
         assert!(duplicate_key.is_ok());
         assert!(super::relation_lookup(&duplicate_key.value, &keys).is_none());
+    }
+
+    #[test]
+    fn relation_lowering_descends_into_range_endpoints() {
+        let parsed = parse_expression(
+            r#"(Stock | filter(stock => stock.location == "north" && stock.sku == "pencil") | one()) .. 2"#,
+        );
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+        let mut expression = parsed.value;
+        let keys = std::collections::BTreeMap::from([(
+            String::from("Stock"),
+            vec![String::from("location"), String::from("sku")],
+        )]);
+
+        super::lower_relation_expression(&mut expression, &keys);
+
+        let Expr::Range {
+            lower: Some(lower),
+            operator,
+            upper: Some(upper),
+            ..
+        } = expression
+        else {
+            panic!("expected range expression");
+        };
+        assert_eq!(operator, "..");
+        assert!(matches!(
+            lower.as_ref(),
+            Expr::Group { inner, .. }
+                if matches!(inner.as_ref(), Expr::Call { callee, .. }
+                    if matches!(callee.as_ref(), Expr::Field { base, name, .. }
+                        if name == "lookup"
+                            && matches!(base.as_ref(), Expr::Name { text, .. } if text == "Stock")))
+        ));
+        assert!(matches!(
+            upper.as_ref(),
+            Expr::Literal { text, .. } if text == "2"
+        ));
     }
 }
 
