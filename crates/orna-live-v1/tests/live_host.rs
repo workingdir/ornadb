@@ -5397,7 +5397,7 @@ fn websocket_upgrade_fragmentation_and_controls_are_checked_and_forwarded() {
         close,
         vec![
             WebSocketOutput::Accepted(FrameOutcome::Closed),
-            WebSocketOutput::Close
+            WebSocketOutput::Close { code: None }
         ]
     );
     assert_eq!(
@@ -5447,8 +5447,20 @@ fn websocket_output_encoder_emits_minimal_unmasked_frames() {
         Some(vec![0x8a, 2, 1, 2])
     );
     assert_eq!(
-        encode_websocket_output(&WebSocketOutput::Close, TransportLimits::default()).unwrap(),
+        encode_websocket_output(
+            &WebSocketOutput::Close { code: None },
+            TransportLimits::default()
+        )
+        .unwrap(),
         Some(vec![0x88, 0])
+    );
+    assert_eq!(
+        encode_websocket_output(
+            &WebSocketOutput::Close { code: Some(1002) },
+            TransportLimits::default()
+        )
+        .unwrap(),
+        Some(vec![0x88, 2, 0x03, 0xea])
     );
     assert_eq!(
         encode_websocket_output(

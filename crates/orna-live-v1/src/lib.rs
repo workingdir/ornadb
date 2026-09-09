@@ -3097,7 +3097,13 @@ pub enum WebSocketOutput {
         payload: Vec<u8>,
     },
     Pong(Vec<u8>),
-    Close,
+    /// A WebSocket close, optionally carrying one RFC 6455 close code.
+    ///
+    /// Protocol-invalid canonical envelopes use 1002. A peer Close without a
+    /// code is acknowledged without inventing one.
+    Close {
+        code: Option<u16>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3116,11 +3122,20 @@ pub fn encode_websocket_output(
     output: &WebSocketOutput,
     limits: TransportLimits,
 ) -> std::result::Result<Option<Vec<u8>>, WebSocketEncodeError> {
+    let close_code;
     let (opcode, payload) = match output {
         WebSocketOutput::Accepted(_) => return Ok(None),
         WebSocketOutput::Binary { payload, .. } => (2, payload.as_slice()),
         WebSocketOutput::Pong(payload) => (10, payload.as_slice()),
-        WebSocketOutput::Close => (8, &[] as &[u8]),
+        WebSocketOutput::Close { code } => {
+            close_code = code.map(u16::to_be_bytes);
+            (
+                8,
+                close_code
+                    .as_ref()
+                    .map_or(&[] as &[u8], |code| code.as_slice()),
+            )
+        }
     };
     let control = matches!(opcode, 8..=10);
     if payload.len() > limits.max_frame_bytes || control && payload.len() > 125 {
@@ -4483,7 +4498,7 @@ impl LiveTransport {
             {
                 output.push(next);
                 if socket.closed {
-                    output.push(WebSocketOutput::Close);
+                    output.push(WebSocketOutput::Close { code: None });
                 }
             }
             input = &[];
@@ -4558,7 +4573,7 @@ impl LiveTransport {
                         self.limits,
                         writer,
                         cancellation,
-                        vec![WebSocketOutput::Close],
+                        vec![WebSocketOutput::Close { code: None }],
                     )
                     .await?;
                     return Ok(true);
@@ -4598,7 +4613,7 @@ where
     X: Future<Output = ()> + Unpin,
 {
     for output in outputs {
-        let closing = matches!(output, WebSocketOutput::Close);
+        let closing = matches!(output, WebSocketOutput::Close { .. });
         let Some(frame) = encode_websocket_output(&output, limits)
             .map_err(HttpConnectionError::WebSocket)
             .map_err(HttpIoError::Transport)?
