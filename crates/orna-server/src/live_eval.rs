@@ -279,6 +279,26 @@ impl PureEvalApplication {
             ),
         ]))
     }
+
+    /// Watch remains outside this pure Eval adapter, but its rejection is a
+    /// terminal, request-correlated host response rather than an uncorrelated
+    /// transport error. This lets the durable transport retain and replay the
+    /// exact rejection without allocating a watch or evaluator session.
+    fn watch_failure(&self, request: [u8; 16]) -> Result<Envelope> {
+        let diagnostic = diagnostic_raw(
+            diagnostic_for_code("live.unsupported_operation")?.with_reference(request),
+        )?;
+        decode_envelope(OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (OvbRaw::Int(1.into()), OvbRaw::Int(19.into())),
+            (OvbRaw::Int(2.into()), OvbRaw::Bytes(request.to_vec())),
+            (OvbRaw::Int(3.into()), OvbRaw::Null),
+            (
+                OvbRaw::Int(4.into()),
+                OvbRaw::Map(vec![(OvbRaw::Int(0.into()), diagnostic)]),
+            ),
+        ]))
+    }
 }
 
 impl LiveApplication for PureEvalApplication {
@@ -351,8 +371,11 @@ impl LiveApplication for PureEvalApplication {
         Ok(response)
     }
 
-    fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
-        Err(Error::UnsupportedOperation)
+    fn watch(&mut self, _: [u8; 16], request: [u8; 16], message: &Message) -> Result<Envelope> {
+        if !matches!(message, Message::Watch { .. }) {
+            return Err(Error::InvalidMessage);
+        }
+        self.watch_failure(request)
     }
 }
 
