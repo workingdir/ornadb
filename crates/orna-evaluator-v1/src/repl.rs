@@ -572,6 +572,14 @@ fn ambiguous_expr(
         Expr::Binary { lhs, rhs, .. } => {
             ambiguous_expr(lhs, ambiguities, shadowed) || ambiguous_expr(rhs, ambiguities, shadowed)
         }
+        Expr::Range { lower, upper, .. } => {
+            lower
+                .as_deref()
+                .is_some_and(|value| ambiguous_expr(value, ambiguities, shadowed))
+                || upper
+                    .as_deref()
+                    .is_some_and(|value| ambiguous_expr(value, ambiguities, shadowed))
+        }
         Expr::Call {
             callee, arguments, ..
         } => {
