@@ -4675,6 +4675,20 @@ fn is_non_positive_integer_constant(expression: &Expr) -> bool {
     }
 }
 
+fn is_negative_integer_constant(expression: &Expr) -> bool {
+    match expression {
+        Expr::Unary { op, rhs, .. } if op == "-" => matches!(
+            rhs.as_ref(),
+            Expr::Literal {
+                kind: LiteralKind::Integer,
+                ..
+            }
+        ),
+        Expr::Group { inner, .. } => is_negative_integer_constant(inner),
+        _ => false,
+    }
+}
+
 /// The frozen parser represents `!exists(rows, predicate)` as a call whose
 /// callee is unary `!exists`; it is still the root `exists` relation form.
 fn core_relation_call_name(callee: &Expr) -> Option<&str> {
@@ -4793,17 +4807,20 @@ fn infer_success_pipeline(
         let mut effects = input.effects;
         let ty = match arguments.as_slice() {
             [argument] if argument.name.is_none() => {
-                let range = infer(&argument.value, scope, local, diagnostics);
-                effects.join(&range.effects);
-                if range.ty == Type::Range(Box::new(Type::Int)) {
+                let count = infer(&argument.value, scope, local, diagnostics);
+                effects.join(&count.effects);
+                if count.ty == Type::Int && !is_negative_integer_constant(&argument.value) {
                     Type::List(element.clone())
+                } else if count.ty == Type::Int {
+                    diagnostics.push(diag(DIAG_TYPE, "take count must be nonnegative"));
+                    Type::Error
                 } else {
-                    diagnostics.push(diag(DIAG_TYPE, "take requires an integer range"));
+                    diagnostics.push(diag(DIAG_TYPE, "take requires an integer count"));
                     Type::Error
                 }
             }
             _ => {
-                diagnostics.push(diag(DIAG_TYPE, "take requires one integer range"));
+                diagnostics.push(diag(DIAG_TYPE, "take requires one integer count"));
                 Type::Error
             }
         };
