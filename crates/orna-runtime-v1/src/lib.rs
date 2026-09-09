@@ -8313,6 +8313,10 @@ async fn apply_stream_intent_tx(
                 let allowed = matches!(
                     (purpose, status),
                     (LeasePurpose::Deliver, FailureStatus::Retrying)
+                        | (
+                            LeasePurpose::Deliver,
+                            FailureStatus::Succeeded | FailureStatus::Resolved
+                        )
                         | (LeasePurpose::Skip, FailureStatus::Failed)
                 );
                 if !allowed {
@@ -13350,6 +13354,358 @@ mod tests {
                 .status,
             FailureStatus::Resolved
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_failure_reopens_with_its_stable_identity_after_reset_and_restart() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("terminal-reset", "terminal-reset-next");
+        let initial = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let terminal = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: initial.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected delivery lease: {other:?}"),
+            };
+            let failed = match stream
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(Vec::new()),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected failure: {other:?}"),
+            };
+            let skip_lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: initial.clone(),
+                    purpose: LeasePurpose::Skip,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected skip lease: {other:?}"),
+            };
+            let checkpoint = match stream
+                .apply_async(CommitIntent::Skip {
+                    lease: skip_lease,
+                    expected: initial,
+                    expected_failure_version: failed.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+                other => panic!("unexpected skip result: {other:?}"),
+            };
+            let skipped = stream
+                .failure_async(&failed.identity)
+                .await
+                .unwrap()
+                .expect("skipped failure");
+            let replay = match stream
+                .apply_async(CommitIntent::Replay {
+                    failure: skipped.identity.clone(),
+                    expected_version: skipped.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::ReplayGranted { grant } => grant,
+                other => panic!("unexpected replay grant: {other:?}"),
+            };
+            let replayed = match stream
+                .apply_async(CommitIntent::ReplayComplete {
+                    failure: replay.failure,
+                    expected_version: replay.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::ReplayCompleted { failure } => failure,
+                other => panic!("unexpected replay completion: {other:?}"),
+            };
+            let terminal = match stream
+                .apply_async(CommitIntent::Resolve {
+                    failure: replayed.identity.clone(),
+                    expected_version: replayed.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Resolved { failure } => failure,
+                other => panic!("unexpected resolve result: {other:?}"),
+            };
+            assert_eq!(terminal.status, FailureStatus::Resolved);
+            assert_eq!(
+                stream
+                    .checkpoint_async(&delivery.checkpoint_key())
+                    .await
+                    .unwrap(),
+                checkpoint
+            );
+            terminal
+        };
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let writer = reopened.acquire_lease(id(4)).await.unwrap();
+        let reopened_failure = {
+            let mut stream = reopened.stream_backend(writer);
+            let terminal_checkpoint = stream
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap();
+            assert!(matches!(
+                stream
+                    .apply_async(CommitIntent::Pause {
+                        key: delivery.checkpoint_key(),
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::StreamStatusChanged { .. }
+            ));
+            let reset = match stream
+                .apply_async(CommitIntent::Reset {
+                    key: delivery.checkpoint_key(),
+                    expected: (&terminal_checkpoint).into(),
+                    to: delivery.position.clone(),
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::CheckpointReset { checkpoint } => checkpoint,
+                other => panic!("unexpected reset result: {other:?}"),
+            };
+            assert!(matches!(
+                stream
+                    .apply_async(CommitIntent::Resume {
+                        key: delivery.checkpoint_key(),
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::StreamStatusChanged { .. }
+            ));
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: (&reset).into(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected reset delivery lease: {other:?}"),
+            };
+            let failure = match stream
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ProviderUnavailable,
+                        class: DiagnosticClass::Transient,
+                    },
+                    StreamFailurePayload::Plaintext(Vec::new()),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected reopened failure: {other:?}"),
+            };
+            assert_eq!(failure.identity, terminal.identity);
+            assert_eq!(failure.version, terminal.version + 1);
+            assert_eq!(failure.attempts, terminal.attempts + 1);
+            assert_eq!(failure.status, FailureStatus::Failed);
+            failure
+        };
+        drop(reopened);
+
+        let reopened = open_state(&repo).await;
+        let writer = reopened.acquire_lease(id(4)).await.unwrap();
+        let stream = reopened.stream_backend(writer);
+        assert_eq!(
+            stream
+                .failure_async(&reopened_failure.identity)
+                .await
+                .unwrap()
+                .expect("reopened failure"),
+            reopened_failure
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_failure_reopens_with_its_stable_identity_after_reset() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("recovered-reset", "recovered-reset-next");
+        let initial = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let recovered = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: initial.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected delivery lease: {other:?}"),
+            };
+            let failed = match stream
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(Vec::new()),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected failure: {other:?}"),
+            };
+            let retry = match stream
+                .apply_async(CommitIntent::Retry {
+                    failure: failed.identity.clone(),
+                    expected_version: failed.version,
+                    expected: initial.clone(),
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::RetryScheduled { failure } => failure,
+                other => panic!("unexpected retry result: {other:?}"),
+            };
+            let retry_lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: initial.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected retry lease: {other:?}"),
+            };
+            assert!(matches!(
+                stream
+                    .apply_async(CommitIntent::Complete {
+                        lease: retry_lease,
+                        expected: initial,
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::CheckpointAdvanced { .. }
+            ));
+            let recovered = stream
+                .failure_async(&retry.identity)
+                .await
+                .unwrap()
+                .expect("recovered failure");
+            assert_eq!(recovered.status, FailureStatus::Succeeded);
+            recovered
+        };
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let writer = reopened.acquire_lease(id(4)).await.unwrap();
+        let mut stream = reopened.stream_backend(writer);
+        let terminal_checkpoint = stream
+            .checkpoint_async(&delivery.checkpoint_key())
+            .await
+            .unwrap();
+        assert!(matches!(
+            stream
+                .apply_async(CommitIntent::Pause {
+                    key: delivery.checkpoint_key(),
+                })
+                .await
+                .unwrap(),
+            CommitResult::StreamStatusChanged { .. }
+        ));
+        let reset = match stream
+            .apply_async(CommitIntent::Reset {
+                key: delivery.checkpoint_key(),
+                expected: (&terminal_checkpoint).into(),
+                to: delivery.position.clone(),
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::CheckpointReset { checkpoint } => checkpoint,
+            other => panic!("unexpected reset result: {other:?}"),
+        };
+        assert!(matches!(
+            stream
+                .apply_async(CommitIntent::Resume {
+                    key: delivery.checkpoint_key(),
+                })
+                .await
+                .unwrap(),
+            CommitResult::StreamStatusChanged { .. }
+        ));
+        let lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: delivery.clone(),
+                expected: (&reset).into(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected reset delivery lease: {other:?}"),
+        };
+        let failure = match stream
+            .fail_async(
+                lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ProviderUnavailable,
+                    class: DiagnosticClass::Transient,
+                },
+                StreamFailurePayload::Plaintext(Vec::new()),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected reopened failure: {other:?}"),
+        };
+        assert_eq!(failure.identity, recovered.identity);
+        assert_eq!(failure.version, recovered.version + 1);
+        assert_eq!(failure.attempts, recovered.attempts + 1);
+        assert_eq!(failure.status, FailureStatus::Failed);
     }
 
     #[tokio::test]
