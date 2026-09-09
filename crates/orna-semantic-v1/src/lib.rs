@@ -4773,6 +4773,28 @@ fn infer_success_pipeline(
         && let Expr::Name { text, .. } = callee.as_ref()
     {
         match (text.as_str(), arguments.as_slice()) {
+            ("filter", [argument])
+                if argument.name.is_none() || argument.name.as_deref() == Some("predicate") =>
+            {
+                let callback = infer_callback(
+                    &argument.value,
+                    element.as_ref().clone(),
+                    Type::Bool,
+                    scope,
+                    local,
+                    diagnostics,
+                );
+                let mut effects = input.effects;
+                effects.join(&callback.effects);
+                return Inferred {
+                    ty: if callback.ty == Type::Bool {
+                        input.ty
+                    } else {
+                        Type::Error
+                    },
+                    effects,
+                };
+            }
             ("distinct", []) => {
                 if is_default_float_equality_type(element) {
                     diagnostics.push(diag(
