@@ -1095,6 +1095,34 @@ mod tests {
     }
 
     #[test]
+    fn project_repl_executes_an_ordinary_pinned_standard_import() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            "use std.math; pub fn run(): Int = std.math.increment(41);",
+        )
+        .expect("main source");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+
+        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
+        let mut session = repl_session(&endpoint).expect("project session");
+        let mut input = b"use std.math;\nstd.math.clamp(99, 20, 22)\n:quit\n".as_slice();
+        let mut output = Vec::new();
+        repl::run(&mut input, &mut output, &mut session).expect("scripted session");
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "> > 22 : Int\n> "
+        );
+    }
+
+    #[test]
     fn project_source_rejects_repl_only_bindings() {
         let directory = tempfile::tempdir().expect("temporary project");
         std::fs::write(directory.path().join("main.orna"), "pub fn status() = $?;")
