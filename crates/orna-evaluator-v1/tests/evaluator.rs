@@ -816,6 +816,12 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             ]))
             .unwrap(),
         ),
+        ("std.collection.count([1, 2, 3])", Value::int(3.into())),
+        ("[1, 2, 3] | std.collection.count()", Value::int(3.into())),
+        (
+            "std.collection.count(values: [1, 2, 3, 4])",
+            Value::int(4.into()),
+        ),
         (
             "std.collection.take([1, 2, 3], 2)",
             Value::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())])).unwrap(),
@@ -997,6 +1003,12 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
         ("std.collection.flatten([1])", "ORNA-EVAL-TYPE"),
         ("std.collection.unique(1)", "ORNA-EVAL-TYPE"),
         ("std.collection.unique([1], 2)", "ORNA-EVAL-UNSUPPORTED"),
+        ("std.collection.count(1)", "ORNA-EVAL-TYPE"),
+        ("std.collection.count([1], 2)", "ORNA-EVAL-TYPE"),
+        (
+            "std.collection.count(values: [1], extra: 2)",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
         ("std.collection.take(1, 1)", "ORNA-EVAL-TYPE"),
         ("std.collection.take([1], 1.0)", "ORNA-EVAL-TYPE"),
         ("std.collection.take([1], -1)", "ORNA-EVAL-VALUE"),
@@ -1081,6 +1093,17 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
     assert_eq!(
         code(evaluate_expression(
             "std.collection.unique([1, 2, 3])",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.count([1, 2, 3])",
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
