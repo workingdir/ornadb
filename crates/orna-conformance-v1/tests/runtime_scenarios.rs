@@ -429,3 +429,37 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
     );
     assert_eq!(runtime_root["status"], "passed");
 }
+
+#[test]
+fn remote_eval_contract_remains_skipped_without_an_authoritative_host_witness() {
+    let output = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
+        .output()
+        .expect("conformance binary runs");
+    assert!(output.status.success(), "conformance binary failed");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("conformance report is JSON");
+    let eval = report["scenarios"]
+        .as_array()
+        .expect("scenario results are an array")
+        .iter()
+        .find(|result| result["scenario"] == "EVAL-001")
+        .expect("EVAL-001 result is present");
+
+    assert_eq!(
+        eval["requirements"],
+        serde_json::json!(["ORNA-EVAL-001", "ORNA-EVAL-002", "ORNA-EVAL-003"])
+    );
+    assert_eq!(eval["status"], "skipped");
+    assert_eq!(
+        eval["detail"],
+        "scenario execution skipped: scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution"
+    );
+    assert!(
+        !report["implementation_claim"]["executed_scenario_contracts"]
+            .as_array()
+            .expect("scenario execution claim is an array")
+            .iter()
+            .any(|scenario| scenario == "EVAL-001"),
+        "remote Eval must not be claimed without a host execution witness"
+    );
+}
