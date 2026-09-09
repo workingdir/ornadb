@@ -4519,9 +4519,11 @@ fn finite_list_collection_operation(callee: &Expr) -> Option<&str> {
     let path = qualified_path(callee)?;
     match path.as_slice() {
         ["first"]
+        | ["one"]
         | ["map"]
         | ["flat_map"]
         | ["std", "collection", "first"]
+        | ["std", "collection", "one"]
         | ["std", "collection", "map"]
         | ["std", "collection", "flat_map"] => path.last().copied(),
         _ => None,
@@ -4538,7 +4540,9 @@ fn infer_finite_list_collection_call(
     let path = qualified_path(callee)?;
     let operation = match path.as_slice() {
         ["first"] => "first",
+        ["one"] => "one",
         ["std", "collection", "first"] => "first",
+        ["std", "collection", "one"] => "one",
         ["std", "collection", "map"] => "map",
         ["std", "collection", "flat_map"] => "flat_map",
         _ => return None,
@@ -4566,6 +4570,9 @@ fn infer_finite_list_collection(
 ) -> Inferred {
     if operation == "first" {
         return infer_finite_list_first(arguments, input, scope, local, diagnostics);
+    }
+    if operation == "one" {
+        return infer_finite_list_one(arguments, input, scope, local, diagnostics);
     }
     let pipeline = input.is_some();
     let mut slots = [None, None];
@@ -4776,6 +4783,186 @@ fn infer_finite_list_first(
     Inferred {
         ty: Type::Optional(element),
         effects,
+    }
+}
+
+/// Checks the finite-list `one(rows)` and `one(rows, predicate)` overloads.
+/// The operation returns the element type directly; exact cardinality and
+/// its distinct zero/multiple failure cases belong to runtime evaluation.
+fn infer_finite_list_one(
+    arguments: &[orna_syntax_v1::Argument],
+    input: Option<Inferred>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let pipeline = input.is_some();
+    let mut slots = [None, None];
+    let mut malformed = false;
+    let mut positional = usize::from(pipeline);
+    let mut named_started = false;
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = match argument.name.as_deref() {
+            Some("rows") => {
+                named_started = true;
+                Some(0)
+            }
+            Some("predicate") => {
+                named_started = true;
+                Some(1)
+            }
+            Some(_) => {
+                malformed = true;
+                None
+            }
+            None if named_started || positional >= slots.len() => {
+                malformed = true;
+                None
+            }
+            None => {
+                let slot = positional;
+                positional += 1;
+                Some(slot)
+            }
+        };
+        if let Some(slot) = slot {
+            if pipeline && slot == 0 {
+                malformed = true;
+            } else if slots[slot].replace(index).is_some() {
+                malformed = true;
+            }
+        }
+    }
+    if pipeline {
+        if slots[0].is_some() {
+            malformed = true;
+        }
+    } else if slots[0].is_none() {
+        malformed = true;
+    }
+
+    let mut effects = input
+        .as_ref()
+        .map(|input| input.effects.clone())
+        .unwrap_or_default();
+    let values = arguments
+        .iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            if slots[1] == Some(index) && matches!(argument.value, Expr::Lambda { .. }) {
+                return Type::Error;
+            }
+            let value = infer(&argument.value, scope, local, diagnostics);
+            effects.join(&value.effects);
+            value.ty
+        })
+        .collect::<Vec<_>>();
+    let rows = input
+        .map(|input| input.ty)
+        .or_else(|| slots[0].and_then(|index| values.get(index).cloned()))
+        .unwrap_or(Type::Error);
+
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "finite-list one arguments do not match its static signature",
+        ));
+    }
+    let Type::List(element) = rows else {
+        diagnostics.push(diag(DIAG_TYPE, "finite-list one requires a finite list"));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+
+    if let Some(index) = slots[1] {
+        let callback = infer_finite_list_one_predicate(
+            &arguments[index].value,
+            element.as_ref().clone(),
+            scope,
+            local,
+            diagnostics,
+        );
+        effects.join(&callback.effects);
+    }
+    effects.may_fail = true;
+    Inferred {
+        ty: if malformed { Type::Error } else { *element },
+        effects,
+    }
+}
+
+fn infer_finite_list_one_predicate(
+    expression: &Expr,
+    parameter: Type,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if let Expr::Lambda {
+        parameters, body, ..
+    } = expression
+    {
+        let [lambda_parameter] = parameters.as_slice() else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "finite-list one predicate must take one parameter",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects: EffectSummary::default(),
+            };
+        };
+        if let Some(annotation) = &lambda_parameter.annotation {
+            require_same(&parameter, &type_of(annotation), diagnostics);
+        }
+        let Pattern::Name(name, _) = &lambda_parameter.pattern else {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "finite-list one predicate pattern is outside this semantic slice",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects: EffectSummary::default(),
+            };
+        };
+        let mut callback_locals = local.clone();
+        insert_local_binding(name, parameter, &mut callback_locals, diagnostics);
+        let inferred = infer(body, scope, &callback_locals, diagnostics);
+        require_same(&Type::Bool, &inferred.ty, diagnostics);
+        return Inferred {
+            ty: inferred.ty,
+            effects: inferred.effects,
+        };
+    }
+
+    let callback = infer(expression, scope, local, diagnostics);
+    let Type::Function {
+        parameters, result, ..
+    } = callback.ty
+    else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "finite-list one predicate must be a one-parameter function",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: callback.effects,
+        };
+    };
+    if parameters.len() != 1 {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "finite-list one predicate must take one parameter",
+        ));
+    } else {
+        require_same(&parameter, &parameters[0], diagnostics);
+    }
+    require_same(&Type::Bool, &result, diagnostics);
+    Inferred {
+        ty: *result,
+        effects: callback.effects,
     }
 }
 
