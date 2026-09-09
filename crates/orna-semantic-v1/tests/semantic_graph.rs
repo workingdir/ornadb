@@ -2657,6 +2657,44 @@ fn control_flow_infers_list_for_and_local_assignment_while_other_shapes_fail_clo
 }
 
 #[test]
+fn while_requires_a_boolean_condition_and_preserves_body_effects() {
+    let valid = analyze(&[ModuleInput::new(
+        "while.orna",
+        r#"
+            pub table Reading(id: Int) { value: Int, }
+            pub fn poll(ready: Bool) {
+                while ready { Reading.insert({ id: 1, value: 2 }); }
+            }
+        "#,
+    )]);
+    let module = valid
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "while")
+        .unwrap();
+    let poll = &module.symbols["poll"];
+    assert!(matches!(
+        &poll.ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Null
+    ));
+    assert!(poll.effects.effects.contains("database write"));
+    assert!(poll.effects.may_fail);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
+
+    let non_boolean = analyze(&[ModuleInput::new(
+        "while-non-boolean.orna",
+        "pub table Reading(id: Int) { value: Int, } fn poll() { while 1 { Reading.insert({ id: 1, value: 2 }); } }",
+    )]);
+    assert!(has(&non_boolean, DIAG_TYPE));
+
+    let break_transfer = analyze(&[ModuleInput::new(
+        "while-break.orna",
+        "fn poll(ready: Bool) { while ready { break; } }",
+    )]);
+    assert!(has(&break_transfer, DIAG_UNSUPPORTED));
+}
+
+#[test]
 fn coalesce_types_optional_values_with_precedence_and_grouping() {
     let valid = analyze(&[
         ModuleInput::new(
