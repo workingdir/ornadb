@@ -770,6 +770,132 @@ fn std_text_fallback_rejects_invalid_arguments_and_enforces_existing_limits() {
 }
 
 #[test]
+fn std_collection_fallback_preserves_finite_list_ordering() {
+    for (expression, expected) in [
+        (
+            "std.collection.chunk([1, 2, 3, 4, 5], 2)",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
+                Raw::Array(vec![Raw::Int(3.into()), Raw::Int(4.into())]),
+                Raw::Array(vec![Raw::Int(5.into())]),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.chunk([], 2)",
+            Value::new(Raw::Array(vec![])).unwrap(),
+        ),
+        (
+            "std.collection.flatten([[1, 2], [], [3]])",
+            Value::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Int(2.into()),
+                Raw::Int(3.into()),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.zip([1, 2, 3], [\"a\", \"b\"])",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())]),
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Text("b".into())]),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.zip_exact([1, 2], [\"a\", \"b\"])",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())]),
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Text("b".into())]),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.pairs([1, 2, 3])",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.window([1, 2, 3, 4, 5], 3, 2)",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![
+                    Raw::Int(1.into()),
+                    Raw::Int(2.into()),
+                    Raw::Int(3.into()),
+                ]),
+                Raw::Array(vec![
+                    Raw::Int(3.into()),
+                    Raw::Int(4.into()),
+                    Raw::Int(5.into()),
+                ]),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.window([1, 2, 3, 4], 3, 2)",
+            Value::new(Raw::Array(vec![Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Int(2.into()),
+                Raw::Int(3.into()),
+            ])]))
+            .unwrap(),
+        ),
+        (
+            "[1, 2, 3] | std.collection.window(size: 2)",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
+            ]))
+            .unwrap(),
+        ),
+    ] {
+        assert_eq!(evaluate(expression), expected, "{expression}");
+    }
+}
+
+#[test]
+fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
+    for (expression, expected) in [
+        ("std.collection.chunk([1], 0)", "ORNA-EVAL-VALUE"),
+        ("std.collection.chunk([1], -1)", "ORNA-EVAL-VALUE"),
+        ("std.collection.flatten([1])", "ORNA-EVAL-TYPE"),
+        ("std.collection.zip_exact([1], [2, 3])", "ORNA-EVAL-VALUE"),
+        ("std.collection.pairs(1)", "ORNA-EVAL-TYPE"),
+        ("std.collection.window([1, 2], 0)", "ORNA-EVAL-VALUE"),
+        ("std.collection.window([1, 2], 1, 0)", "ORNA-EVAL-VALUE"),
+        ("std.collection.window([1, 2], 1, -1)", "ORNA-EVAL-VALUE"),
+        (
+            "std.collection.window([1, 2], 1, 1, 1)",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default()
+            )),
+            expected,
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.window([1, 2, 3], 2)",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 1,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
 fn recursive_calls_terminate_or_hit_shared_limits() {
     let source = "fn factorial(n: Int) = if n == 0 { 1 } else { n * factorial(n - 1) };";
     assert_eq!(
