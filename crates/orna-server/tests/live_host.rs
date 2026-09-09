@@ -418,6 +418,7 @@ fn loopback_host_cancellation_closes_a_stalled_connection() {
     let initialized = initialize_repository(temporary.path()).unwrap();
     let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
     let address = host.address();
+    let request_id = [0x51; 16];
     let (sender, receiver) = futures::channel::oneshot::channel();
     let client = std::thread::spawn(move || {
         let _client = TcpStream::connect(address).unwrap();
@@ -577,6 +578,72 @@ fn loopback_host_serves_websocket_and_resumes_the_session_after_close() {
         Err(LiveHostError::Cancelled)
     );
     client.join().unwrap();
+    let _released = TcpListener::bind(address).unwrap();
+}
+
+#[test]
+fn loopback_host_closes_an_invalid_client_direction_envelope_with_1002() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let database = initialized.metadata().database_id().to_string();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let client = std::thread::spawn(move || {
+        let mut create = TcpStream::connect(address).unwrap();
+        create
+            .write_all(request(address, &database).as_bytes())
+            .unwrap();
+        let created = read_response(&mut create);
+        let session = json_field(&created, "session");
+        let token = json_field(&created, "resume_token");
+        create.shutdown(Shutdown::Write).unwrap();
+        let mut ignored = Vec::new();
+        create.read_to_end(&mut ignored).unwrap();
+
+        let invalid = Envelope {
+            request: Some(request_id),
+            watch: None,
+            message: Message::Result {
+                status: ResultStatus::Success,
+                value: Some(orna_foundation_v1::CanonicalValue::unit()),
+                fingerprint: [0; 32],
+                diagnostic: None,
+            },
+            extensions: std::collections::BTreeMap::new(),
+        }
+        .encode(ProtocolLimits::default())
+        .unwrap();
+        let mut websocket = websocket_upgrade(address, &session, &token);
+        websocket.write_all(&masked(true, 2, &invalid)).unwrap();
+        websocket.shutdown(Shutdown::Write).unwrap();
+        let mut close = Vec::new();
+        websocket.read_to_end(&mut close).unwrap();
+        assert_eq!(close, b"\x88\x02\x03\xea");
+        sender.send(()).unwrap();
+        session
+    });
+
+    assert_eq!(
+        host.serve_until_cancellation(receiver.map(|_| ())),
+        Err(LiveHostError::Cancelled)
+    );
+    let session = client.join().unwrap();
+    let (identity, digest) = stored_runtime_identity(uuid_bytes(&database));
+    let state = block_on(RuntimeState::open(
+        initialized.repository(),
+        identity,
+        digest,
+    ))
+    .unwrap();
+    assert!(
+        block_on(state.request_status_for_identity(RequestIdentity {
+            session_id: uuid_bytes(&session),
+            request_id,
+        }))
+        .unwrap()
+        .is_none()
+    );
     let _released = TcpListener::bind(address).unwrap();
 }
 
