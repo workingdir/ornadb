@@ -1330,7 +1330,10 @@ impl Context<'_, '_> {
         // including its declared argument names. The fallback remains only
         // for the standalone evaluator surface, which has no admitted module
         // environment.
-        if math_name(callee).is_none() && bits_name(callee).is_none() && text_name(callee).is_none()
+        if math_name(callee).is_none()
+            && bits_name(callee).is_none()
+            && text_name(callee).is_none()
+            && collection_name(callee).is_none()
             || self.resolve_function_name(callee, scope).is_some()
         {
             if matches!(callee, Expr::Field { .. }) && self.effects.is_some() {
@@ -1443,9 +1446,11 @@ impl Context<'_, '_> {
         let math = math_name(callee);
         let bits = bits_name(callee);
         let text = text_name(callee);
+        let collection = collection_name(callee);
         let name = math
             .or(bits)
             .or(text)
+            .or(collection)
             .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
         let implicit = usize::from(input.is_some());
         self.items(arguments.len() + implicit)?;
@@ -1460,8 +1465,10 @@ impl Context<'_, '_> {
             self.math(name, values)
         } else if bits.is_some() {
             self.bits(name, values)
-        } else {
+        } else if text.is_some() {
             self.text(name, values)
+        } else {
+            self.collection(name, values)
         }
     }
     fn resolve_function_name(&self, expression: &Expr, scope: &Scope) -> Option<String> {
@@ -1657,6 +1664,113 @@ impl Context<'_, '_> {
             | ("normalise", [_, _]) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
+    }
+    fn collection(&self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        match (name, values.as_slice()) {
+            ("chunk", [Value::List(values), Value::Int(size)]) => {
+                self.items(values.len())?;
+                let size = self.positive_collection_size(size)?;
+                let mut chunks = Vec::new();
+                for chunk in values.chunks(size) {
+                    self.items(chunk.len())?;
+                    chunks.push(Value::List(chunk.to_vec()));
+                    self.items(chunks.len())?;
+                }
+                Ok(Value::List(chunks))
+            }
+            ("flatten", [Value::List(values)]) => {
+                self.items(values.len())?;
+                let mut flattened = Vec::new();
+                for value in values {
+                    let Value::List(inner) = value else {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    };
+                    self.items(inner.len())?;
+                    for value in inner {
+                        flattened.push(value.clone());
+                        self.items(flattened.len())?;
+                    }
+                }
+                Ok(Value::List(flattened))
+            }
+            ("zip", [Value::List(left), Value::List(right)]) => self.zipped(left, right, false),
+            ("zip_exact", [Value::List(left), Value::List(right)]) => {
+                self.zipped(left, right, true)
+            }
+            ("pairs", [Value::List(values)]) => {
+                self.items(values.len())?;
+                let mut pairs = Vec::new();
+                for pair in values.windows(2) {
+                    self.items(pair.len())?;
+                    pairs.push(Value::Tuple(pair.to_vec()));
+                    self.items(pairs.len())?;
+                }
+                Ok(Value::List(pairs))
+            }
+            ("window", [Value::List(values), Value::Int(size)]) => {
+                self.windows(values, size, &BigInt::from(1))
+            }
+            ("window", [Value::List(values), Value::Int(size), Value::Int(step)]) => {
+                self.windows(values, size, step)
+            }
+            ("chunk", [_, _])
+            | ("flatten" | "pairs", [_])
+            | ("zip" | "zip_exact", [_, _])
+            | ("window", [_, _] | [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+    fn positive_collection_size(&self, value: &BigInt) -> Result<usize, EvaluationError> {
+        if !value.is_positive() {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        Ok(value.to_usize().unwrap_or(usize::MAX))
+    }
+    fn zipped(
+        &self,
+        left: &[Value],
+        right: &[Value],
+        exact: bool,
+    ) -> Result<Value, EvaluationError> {
+        self.items(left.len())?;
+        self.items(right.len())?;
+        if exact && left.len() != right.len() {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        let mut pairs = Vec::new();
+        for (left, right) in left.iter().zip(right) {
+            self.items(2)?;
+            pairs.push(Value::Tuple(vec![left.clone(), right.clone()]));
+            self.items(pairs.len())?;
+        }
+        Ok(Value::List(pairs))
+    }
+    fn windows(
+        &self,
+        values: &[Value],
+        size: &BigInt,
+        step: &BigInt,
+    ) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let size = self.positive_collection_size(size)?;
+        let step = self.positive_collection_size(step)?;
+        if size > values.len() {
+            return Ok(Value::List(Vec::new()));
+        }
+        let last_start = values.len() - size;
+        let mut start = 0;
+        let mut windows = Vec::new();
+        while start <= last_start {
+            let window = &values[start..start + size];
+            self.items(window.len())?;
+            windows.push(Value::List(window.to_vec()));
+            self.items(windows.len())?;
+            let Some(next) = start.checked_add(step) else {
+                break;
+            };
+            start = next;
+        }
+        Ok(Value::List(windows))
     }
     fn shift_left(&self, value: &BigInt, count: &BigInt) -> Result<Value, EvaluationError> {
         if count.is_negative() {
@@ -1916,6 +2030,14 @@ fn named_arguments(
         "contains" => &["value", "needle"],
         "replace" => &["value", "from", "to"],
         "normalise" => &["value", "form"],
+        "chunk" => &["values", "size"],
+        "flatten" | "pairs" => &["values"],
+        "zip" | "zip_exact" => &["left", "right"],
+        "window" => match values.len() {
+            2 => &["values", "size"],
+            3 => &["values", "size", "step"],
+            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+        },
         _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
     };
     if values.len() != expected.len() {
@@ -1959,6 +2081,10 @@ fn bits_name(expression: &Expr) -> Option<&str> {
 
 fn text_name(expression: &Expr) -> Option<&str> {
     standard_name(expression, "text")
+}
+
+fn collection_name(expression: &Expr) -> Option<&str> {
+    standard_name(expression, "collection")
 }
 
 fn standard_name<'a>(expression: &'a Expr, module: &str) -> Option<&'a str> {
