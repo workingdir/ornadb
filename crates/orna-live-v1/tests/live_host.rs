@@ -2870,6 +2870,46 @@ fn frames_are_bounded_binary_canonical_and_cancellable() {
 }
 
 #[test]
+fn decoded_server_result_is_rejected_before_durable_admission_or_application() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [87; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [88; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    let request = [89; 16];
+    let result = unit_result(request, [0; 32])
+        .encode(Limits::default().protocol)
+        .unwrap();
+    let mut application = UnitApplication::default();
+    assert_eq!(
+        block_on(host.dispatch_frame([88; 16], 2, Frame::Binary(result), &mut application,)),
+        Err(Error::InvalidMessage)
+    );
+    assert_eq!(application.calls, 0);
+    assert!(
+        block_on(
+            open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+                session_id: [1; 16],
+                request_id: request,
+            })
+        )
+        .unwrap()
+        .is_none()
+    );
+
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn expired_attachment_rejects_a_valid_binary_request_before_admission() {
     let (root, repository) = durable_repository();
     let mut host = durable_host_with_owner(open_durable_state(&repository), [86; 16]);
