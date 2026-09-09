@@ -2502,6 +2502,118 @@ fn finite_list_map_and_flat_map_reject_invalid_callbacks_and_collections() {
 }
 
 #[test]
+fn finite_list_first_returns_an_optional_element_for_all_supported_call_forms() {
+    let result = analyze(&[ModuleInput::new(
+        "first.orna",
+        r#"
+            pub fn direct(rows: [Int]) = first(rows);
+            pub fn pipeline(rows: [Int]) = rows | first();
+            pub fn named(rows: [Int]) = first(rows: rows);
+            pub fn qualified(rows: [Int]) = std.collection.first(rows);
+            pub fn qualified_pipeline(rows: [Int]) = rows | std.collection.first();
+            pub fn qualified_named(rows: [Int]) = std.collection.first(rows: rows);
+        "#,
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result.modules.values().next().expect("first module");
+    for name in [
+        "direct",
+        "pipeline",
+        "named",
+        "qualified",
+        "qualified_pipeline",
+        "qualified_named",
+    ] {
+        assert_eq!(
+            module.symbols[name].ty,
+            Type::Function {
+                parameters: vec![Type::List(Box::new(Type::Int))],
+                parameter_names: Some(vec!["rows".into()]),
+                result: Box::new(Type::Optional(Box::new(Type::Int))),
+                default_parameters: Default::default(),
+            },
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn finite_list_first_rejects_invalid_arity_names_and_types_without_changing_relation_members() {
+    let invalid = analyze(&[
+        ModuleInput::new("arity.orna", "fn bad(rows: [Int]) = first();"),
+        ModuleInput::new("extra.orna", "fn bad(rows: [Int]) = first(rows, rows);"),
+        ModuleInput::new(
+            "unknown-name.orna",
+            "fn bad(rows: [Int]) = first(values: rows);",
+        ),
+        ModuleInput::new("wrong-type.orna", "fn bad() = first(1);"),
+        ModuleInput::new(
+            "pipeline-argument.orna",
+            "fn bad(rows: [Int]) = rows | first(1);",
+        ),
+        ModuleInput::new(
+            "pipeline-row-name.orna",
+            "fn bad(rows: [Int]) = rows | first(rows: rows);",
+        ),
+        ModuleInput::new(
+            "qualified-name.orna",
+            "fn bad(rows: [Int]) = std.collection.first(values: rows);",
+        ),
+    ]);
+    assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
+
+    let relation = analyze(&[ModuleInput::new(
+        "relation-first.orna",
+        r#"
+            table Reading(id: Int) { value: Int, }
+            pub fn first_reading() = Reading.first();
+            pub fn first_pipeline() = Reading | first();
+        "#,
+    )]);
+    assert!(relation.is_ok(), "{:?}", relation.diagnostics);
+    let module = relation.modules.values().next().expect("relation module");
+    assert_eq!(
+        module.symbols["first_reading"].ty,
+        Type::Function {
+            parameters: Vec::new(),
+            parameter_names: Some(Vec::new()),
+            result: Box::new(Type::Optional(Box::new(Type::Named("Reading".into())))),
+            default_parameters: Default::default(),
+        }
+    );
+    assert_eq!(
+        module.symbols["first_pipeline"].ty,
+        Type::Function {
+            parameters: Vec::new(),
+            parameter_names: Some(Vec::new()),
+            result: Box::new(Type::Optional(Box::new(Type::Named("Reading".into())))),
+            default_parameters: Default::default(),
+        }
+    );
+
+    let invalid_relation = analyze(&[
+        ModuleInput::new(
+            "relation-first-arity.orna",
+            "table Reading(id: Int) { value: Int, } fn bad() = Reading | first(1);",
+        ),
+        ModuleInput::new(
+            "relation-first-name.orna",
+            "table Reading(id: Int) { value: Int, } fn bad() = Reading | first(rows: Reading);",
+        ),
+        ModuleInput::new(
+            "relation-first-unknown.orna",
+            "table Reading(id: Int) { value: Int, } fn bad() = Reading | first(extra: 1);",
+        ),
+    ]);
+    assert!(
+        has(&invalid_relation, DIAG_TYPE),
+        "{:?}",
+        invalid_relation.diagnostics
+    );
+}
+
+#[test]
 fn relation_flat_map_preserves_relation_output_and_accepts_finite_inner_collections() {
     let valid = analyze(&[ModuleInput::new(
         "relation-flat-map.orna",
