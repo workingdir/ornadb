@@ -1366,6 +1366,179 @@ fn std_collection_filter_enforces_limits() {
 }
 
 #[test]
+fn std_collection_map_preserves_order_for_direct_pipeline_named_and_function_calls() {
+    let expected = Value::new(Raw::Array(vec![
+        Raw::Int(30.into()),
+        Raw::Int(10.into()),
+        Raw::Int(20.into()),
+    ]))
+    .unwrap();
+    for expression in [
+        "std.collection.map([3, 1, 2], value => value * 10)",
+        "[3, 1, 2] | std.collection.map(transform: value => value * 10)",
+        "std.collection.map(transform: value => value * 10, values: [3, 1, 2])",
+        "map([3, 1, 2], value => value * 10)",
+        "[3, 1, 2] | map(transform: value => value * 10)",
+        "map(transform: value => value * 10, values: [3, 1, 2])",
+    ] {
+        assert_eq!(
+            evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
+            expected,
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        call_module(
+            "fn scale(value: Int) = value * 10; fn run() = std.collection.map([3, 1, 2], scale);",
+            "run()",
+            Limits::default(),
+        )
+        .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn std_collection_flat_map_preserves_outer_and_inner_order_for_all_call_forms() {
+    let expected = Value::new(Raw::Array(vec![
+        Raw::Int(3.into()),
+        Raw::Int(13.into()),
+        Raw::Int(1.into()),
+        Raw::Int(11.into()),
+        Raw::Int(2.into()),
+        Raw::Int(12.into()),
+    ]))
+    .unwrap();
+    for expression in [
+        "std.collection.flat_map([3, 1, 2], value => [value, value + 10])",
+        "[3, 1, 2] | std.collection.flat_map(transform: value => [value, value + 10])",
+        "std.collection.flat_map(transform: value => [value, value + 10], values: [3, 1, 2])",
+        "flat_map([3, 1, 2], value => [value, value + 10])",
+        "[3, 1, 2] | flat_map(transform: value => [value, value + 10])",
+        "flat_map(transform: value => [value, value + 10], values: [3, 1, 2])",
+    ] {
+        assert_eq!(
+            evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
+            expected,
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        call_module(
+            "fn expand(value: Int) = [value, value + 10]; fn run() = std.collection.flat_map([3, 1, 2], expand);",
+            "run()",
+            Limits::default(),
+        )
+        .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn root_map_names_remain_shadowable_by_admitted_functions_and_locals() {
+    assert_eq!(
+        call_module(
+            "fn map(value: Int) = value + 100; fn run() = map(1);",
+            "run()",
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(101.into())
+    );
+    assert_eq!(
+        evaluate_expression(
+            "if true { let map = value => value + 100; map(1) } else { 0 }",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(101.into())
+    );
+}
+
+#[test]
+fn std_collection_map_and_flat_map_propagate_callback_errors() {
+    for expression in [
+        "std.collection.map([1, 0, 2], value => 10 / value)",
+        "std.collection.flat_map([1, 0, 2], value => [10 / value])",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            "ORNA-EVAL-DIVIDE-BY-ZERO",
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        code(call_module(
+            "fn bad(value: Int, other: Int) = value; fn run() = std.collection.map([1], bad);",
+            "run()",
+            Limits::default(),
+        )),
+        "ORNA-EVAL-ARGUMENT"
+    );
+}
+
+#[test]
+fn std_collection_map_and_flat_map_reject_invalid_inputs_and_outputs() {
+    for (expression, expected) in [
+        ("std.collection.map(1, value => value)", "ORNA-EVAL-TYPE"),
+        ("std.collection.map([1], 1)", "ORNA-EVAL-TYPE"),
+        ("std.collection.map([1])", "ORNA-EVAL-UNSUPPORTED"),
+        ("std.collection.map([1], () => 1)", "ORNA-EVAL-ARGUMENT"),
+        (
+            "std.collection.flat_map(1, value => [value])",
+            "ORNA-EVAL-TYPE",
+        ),
+        ("std.collection.flat_map([1], 1)", "ORNA-EVAL-TYPE"),
+        (
+            "std.collection.flat_map([1], value => value)",
+            "ORNA-EVAL-TYPE",
+        ),
+        ("std.collection.flat_map([1])", "ORNA-EVAL-UNSUPPORTED"),
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            expected,
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn std_collection_map_and_flat_map_enforce_collection_limits() {
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.map([1, 2, 3], value => value)",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.flat_map([1, 2], value => [value, value])",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 3,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
 fn std_collection_split_when_accepts_functions_and_enforces_limits() {
     let source = "fn boundary(value: Int) = value % 2 == 0; fn run() = std.collection.split_when([1, 2, 3, 4], boundary);";
     assert_eq!(
