@@ -2551,7 +2551,7 @@ fn infer_contextual_finite_list_aggregate(
         Expr::Call {
             callee, arguments, ..
         } => {
-            let operation = finite_list_collection_operation(callee, scope)?;
+            let operation = finite_list_collection_operation(callee, scope, local)?;
             if !matches!(operation, "sum" | "min" | "max")
                 || arguments.len() != 1
                 || !arguments[0]
@@ -2579,7 +2579,7 @@ fn infer_contextual_finite_list_aggregate(
                 }
                 _ => return None,
             };
-            let operation = finite_list_collection_operation(callee, scope)?;
+            let operation = finite_list_collection_operation(callee, scope, local)?;
             if !matches!(operation, "sum" | "min" | "max") || !is_empty_list_literal(lhs) {
                 return None;
             }
@@ -4669,20 +4669,40 @@ fn finite_list_aggregate_element(callee: &Expr, operation: &str, scope: &Scope) 
     }
 }
 
-fn finite_list_collection_operation<'a>(callee: &'a Expr, scope: &Scope) -> Option<&'a str> {
+/// Root collection names are ordinary, shadowable bindings in 1.0.0. Keep
+/// the closed intrinsic overloads behind the same lexical lookup rule used by
+/// `infer(Name)`: a local binding or source/imported symbol wins first.
+fn root_collection_intrinsic_is_unshadowed(
+    operation: &str,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> bool {
+    matches!(
+        operation,
+        "every" | "exists" | "first" | "one" | "map" | "flat_map" | "sum" | "min" | "max"
+    ) && !local.contains_key(operation)
+        && !scope.names.contains_key(operation)
+}
+
+fn finite_list_collection_operation<'a>(
+    callee: &'a Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> Option<&'a str> {
     let path = qualified_path(callee)?;
+    if path.len() == 1
+        && matches!(
+            path[0],
+            "every" | "exists" | "first" | "one" | "map" | "flat_map" | "sum" | "min" | "max"
+        )
+        && root_collection_intrinsic_is_unshadowed(path[0], scope, local)
+    {
+        return path.last().copied();
+    }
     match path.as_slice() {
-        ["every"]
-        | ["exists"]
-        | ["first"]
-        | ["one"]
-        | ["map"]
-        | ["flat_map"]
-        | ["sum"]
-        | ["min"]
-        | ["max"] => path.last().copied(),
         ["std", "collection", operation]
-            if standard_finite_list_operation_is_admitted(operation, scope) =>
+            if !local.contains_key("std")
+                && standard_finite_list_operation_is_admitted(operation, scope) =>
         {
             Some(*operation)
         }
@@ -4690,11 +4710,15 @@ fn finite_list_collection_operation<'a>(callee: &'a Expr, scope: &Scope) -> Opti
     }
 }
 
-fn is_finite_list_numeric_aggregate_pipeline_stage(expression: &Expr, scope: &Scope) -> bool {
+fn is_finite_list_numeric_aggregate_pipeline_stage(
+    expression: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> bool {
     let operation = match expression {
-        Expr::Call { callee, .. } => finite_list_collection_operation(callee, scope),
+        Expr::Call { callee, .. } => finite_list_collection_operation(callee, scope, local),
         Expr::Name { .. } | Expr::Field { .. } => {
-            finite_list_collection_operation(expression, scope)
+            finite_list_collection_operation(expression, scope, local)
         }
         _ => None,
     };
@@ -5661,7 +5685,7 @@ fn infer_success_pipeline(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
-    let input = if is_finite_list_numeric_aggregate_pipeline_stage(rhs, scope) {
+    let input = if is_finite_list_numeric_aggregate_pipeline_stage(rhs, scope, local) {
         infer_finite_list_aggregate_rows(lhs, None, scope, local, diagnostics)
     } else {
         infer(lhs, scope, local, diagnostics)
@@ -5737,7 +5761,7 @@ fn infer_success_pipeline(
         && let Expr::Call {
             callee, arguments, ..
         } = rhs
-        && let Some(operation) = finite_list_collection_operation(callee, scope)
+        && let Some(operation) = finite_list_collection_operation(callee, scope, local)
     {
         return infer_finite_list_collection(
             operation,
@@ -5912,7 +5936,7 @@ fn infer_success_pipeline(
     }
     if let Type::List(_) = &input.ty
         && let Some(operation @ ("sum" | "min" | "max")) =
-            finite_list_collection_operation(rhs, scope)
+            finite_list_collection_operation(rhs, scope, local)
     {
         return infer_finite_list_collection(
             operation,
@@ -5935,12 +5959,30 @@ fn infer_success_pipeline(
     }
     if let Expr::Name { text, .. } = rhs
         && let Type::Relation(element) = &input.ty
+        && root_collection_intrinsic_is_unshadowed(text, scope, local)
         && let Some(ty) = infer_relation_sum(text, element, diagnostics)
     {
         return Inferred {
             ty,
             effects: input.effects,
         };
+    }
+    if matches!(&input.ty, Type::Relation(_) | Type::Stream(_))
+        && let Some((callee, arguments)) = match rhs {
+            Expr::Call {
+                callee, arguments, ..
+            } => Some((callee.as_ref(), arguments.as_slice())),
+            Expr::Name { .. } | Expr::Field { .. } => Some((rhs, &[][..])),
+            _ => None,
+        }
+        && let Expr::Name { text, .. } = callee
+        && matches!(
+            text.as_str(),
+            "every" | "exists" | "first" | "one" | "map" | "flat_map" | "sum" | "min" | "max"
+        )
+        && !root_collection_intrinsic_is_unshadowed(text, scope, local)
+    {
+        return infer_named_pipeline_stage(input, callee, arguments, scope, local, diagnostics);
     }
     if let Expr::Name { text, .. } = rhs
         && text == "count"
@@ -6016,6 +6058,7 @@ fn infer_success_pipeline(
     };
     if !is_stream
         && text == "map"
+        && root_collection_intrinsic_is_unshadowed(text, scope, local)
         && let [argument] = arguments.as_slice()
         && argument.name.is_none()
     {
@@ -6117,7 +6160,9 @@ fn infer_success_pipeline(
             ]))),
             None,
         ),
-        ("min", false, []) | ("max", false, []) => {
+        ("min", false, []) | ("max", false, [])
+            if root_collection_intrinsic_is_unshadowed(text, scope, local) =>
+        {
             (Type::Optional(Box::new(element.clone())), None)
         }
         ("for_each", true, [_]) => (Type::Null, Some(Type::Error)),
