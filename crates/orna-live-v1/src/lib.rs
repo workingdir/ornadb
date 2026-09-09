@@ -4283,6 +4283,17 @@ impl LiveTransport {
         if upgrade.owner != self.owner {
             return Err(Error::Closed);
         }
+        // A consumed reservation is inert.  In particular, do not let an old
+        // local token trigger the periodic expiry sweep: that would permit a
+        // stale cancellation/replay path to retire another session's pending
+        // candidate before the executable owner has observed its deadline.
+        if !self
+            .pending_upgrades
+            .values()
+            .any(|pending| pending.reservation == upgrade.reservation)
+        {
+            return Err(Error::Closed);
+        }
         self.expire_pending_websocket_upgrades(now);
         let session = self
             .pending_upgrades
