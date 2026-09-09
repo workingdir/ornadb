@@ -1724,7 +1724,7 @@ fn force_checkout_discards_only_the_consented_paths_and_carries_unrelated_state(
 }
 
 #[test]
-fn interrupted_force_checkout_recovers_only_the_recorded_applied_generation() {
+fn interrupted_force_checkout_after_git_switch_recovers_selected_target() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
     git(root.path(), &["branch", "experiment"]);
@@ -1755,6 +1755,10 @@ fn interrupted_force_checkout_recovers_only_the_recorded_applied_generation() {
         Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
     ));
     assert!(repo.has_pending_pre_execution_checkout().unwrap());
+    assert_eq!(
+        git(root.path(), &["branch", "--show-current"]),
+        "experiment"
+    );
 
     let restarted = Repository::discover(root.path()).unwrap();
     restarted.recover_pre_execution_checkout().unwrap();
@@ -1776,7 +1780,7 @@ fn interrupted_force_checkout_recovers_only_the_recorded_applied_generation() {
 }
 
 #[test]
-fn malformed_applied_checkout_journal_attachment_fails_before_recovery_mutation() {
+fn malformed_discarded_checkout_journal_attachment_fails_before_recovery_mutation() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
     git(root.path(), &["branch", "beta"]);
@@ -1805,11 +1809,11 @@ fn malformed_applied_checkout_journal_attachment_fails_before_recovery_mutation(
 
     let journal_path = repo.runtime_paths().root().join("checkout-journal.bin");
     let mut journal = fs::read(&journal_path).unwrap();
-    let applied_branch = journal
-        .windows(b"beta".len())
-        .rposition(|window| window == b"beta")
-        .expect("applied branch is journalled");
-    journal[applied_branch..applied_branch + b"beta".len()].copy_from_slice(b"main");
+    let discarded_branch = journal
+        .windows(b"main".len())
+        .rposition(|window| window == b"main")
+        .expect("discarded branch is journalled");
+    journal[discarded_branch..discarded_branch + b"main".len()].copy_from_slice(b"beta");
     fs::write(&journal_path, &journal).unwrap();
 
     let restarted = Repository::discover(root.path()).unwrap();

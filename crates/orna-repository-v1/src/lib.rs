@@ -2471,12 +2471,13 @@ impl Repository {
         self.execute_validated_force_checkout_impl(discard, None)
     }
 
-    /// Test-only interruption seam for the post-selection durable boundary.
+    /// Test-only interruption seam for the post-selection journal boundary.
     ///
     /// Production callers must use [`Self::execute_validated_force_checkout`].
-    /// The hook runs after the selected CWD generation has been durably
-    /// journalled and before journal completion, which lets real-Git tests
-    /// exercise restart recovery without weakening the production boundary.
+    /// The hook runs after Git has selected the target and its CWD has been
+    /// observed, but before that selected generation is durably journalled.
+    /// This is the only crash window in which recovery must recognize the
+    /// selected attachment without an already-recorded applied generation.
     pub fn execute_validated_force_checkout_with_test_hook(
         &self,
         discard: &ValidatedCheckoutDiscard,
@@ -2516,11 +2517,11 @@ impl Repository {
         {
             return Err(RepositoryError::GitOperationFailed);
         }
-        journal.record_applied(after)?;
-        self.write_checkout_recovery_journal_locked(&journal)?;
         if let Some(hook) = after_applied.as_mut() {
             hook()?;
         }
+        journal.record_applied(after)?;
+        self.write_checkout_recovery_journal_locked(&journal)?;
         self.clear_checkout_recovery_journal_locked()
     }
 
@@ -2585,6 +2586,19 @@ impl Repository {
                         return Err(RepositoryError::GitOperationFailed);
                     }
                     journal.record_applied(after)?;
+                    self.write_checkout_recovery_journal_locked(&journal)?;
+                    self.clear_checkout_recovery_journal_locked()
+                }
+                // A process may stop after Git has selected the target but
+                // before that observable CWD generation is journalled. The
+                // target attachment proves this is the recorded transition,
+                // while retaining the observed index and worktree state
+                // avoids any broad reset over later local changes.
+                CheckoutRecoveryPhase::Discarded
+                    if current.head.as_ref() == Some(journal.target.commit())
+                        && current.branch.as_deref() == journal.target.branch_name() =>
+                {
+                    journal.record_applied(current)?;
                     self.write_checkout_recovery_journal_locked(&journal)?;
                     self.clear_checkout_recovery_journal_locked()
                 }
