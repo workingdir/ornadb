@@ -2960,6 +2960,41 @@ impl Repository {
         })
     }
 
+    /// Classifies a manifest-declared set of immutable storage segment blob
+    /// IDs without fetching, hydrating, or changing local Git state.
+    ///
+    /// Unlike [`Self::observe_declared_git_object_set`], this boundary is for
+    /// objects that a verified storage manifest has already declared to be
+    /// segment blobs. A locally materialized commit, tree, or tag is therefore
+    /// invalid evidence for such a declaration. A missing object remains
+    /// logically available only when the local promisor walk proves its
+    /// declared ID reachable; the manifest retains the segment's blob role
+    /// while its bytes are absent.
+    pub fn observe_declared_segment_blob_set(
+        &self,
+        object_ids: &[&str],
+    ) -> Result<GitDeclaredObjectSetState, RepositoryError> {
+        let mut incomplete = false;
+        for object_id in object_ids {
+            match self.observe_git_object(object_id)? {
+                GitObjectState::Materialized {
+                    kind: GitObjectKind::Blob,
+                    ..
+                }
+                | GitObjectState::Promised => {}
+                GitObjectState::Materialized { .. } | GitObjectState::Malformed => {
+                    return Ok(GitDeclaredObjectSetState::Malformed);
+                }
+                GitObjectState::Unavailable => incomplete = true,
+            }
+        }
+        Ok(if incomplete {
+            GitDeclaredObjectSetState::Incomplete
+        } else {
+            GitDeclaredObjectSetState::Complete
+        })
+    }
+
     fn local_config_value(&self, key: &str) -> Result<ConfigValue, RepositoryError> {
         self.config_value("--local", key)
     }
