@@ -1129,6 +1129,133 @@ fn std_collection_first_is_callback_free_and_bounded() {
 }
 
 #[test]
+fn std_collection_sum_accepts_direct_named_pipeline_and_function_calls() {
+    let expected = Value::int(6.into());
+    for expression in [
+        "sum([3, 1, 2])",
+        "std.collection.sum([3, 1, 2])",
+        "sum(rows: [3, 1, 2])",
+        "std.collection.sum(rows: [3, 1, 2])",
+        "[3, 1, 2] | sum",
+        "[3, 1, 2] | sum()",
+        "[3, 1, 2] | std.collection.sum",
+        "[3, 1, 2] | std.collection.sum()",
+    ] {
+        assert_eq!(
+            evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
+            expected,
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        call_module(
+            "fn total(rows: [Int]) = sum(rows);",
+            "total([3, 1, 2])",
+            Limits::default(),
+        )
+        .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn std_collection_sum_accumulates_exactly_in_order_and_returns_integer_zero() {
+    assert_eq!(evaluate("sum([])"), Value::int(0.into()),);
+    assert_eq!(
+        evaluate("sum([9007199254740993, 1])"),
+        Value::int(9007199254740994_u64.into()),
+    );
+
+    let limited = Limits {
+        max_integer_digits: 3,
+        ..Limits::default()
+    };
+    assert_eq!(
+        code(evaluate_expression(
+            "sum([999, 1, -99, -99, -99, -99, -99, -99, -99, -99, -99, -10])",
+            &Environment::new(),
+            limited,
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert_eq!(
+        evaluate_expression(
+            "sum([999, -99, 1, -99, -99, -99, -99, -99, -99, -99, -99, -99, -10])",
+            &Environment::new(),
+            limited,
+        )
+        .unwrap(),
+        Value::int(0.into())
+    );
+}
+
+#[test]
+fn std_collection_sum_rejects_unsupported_numeric_kinds_and_shapes() {
+    for expression in [
+        "sum([1.0])",
+        "std.collection.sum([1.0])",
+        "sum([1.0f])",
+        "std.collection.sum([1.0f])",
+        "sum([1, true])",
+        "sum(values: [1])",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            "ORNA-EVAL-UNSUPPORTED",
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        code(evaluate_expression(
+            "sum(1)",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-TYPE"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "sum()",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
+
+    let currency = Raw::Tag(37, Box::new(Raw::Bytes(vec![0; 16])));
+    let affine = Raw::Tag(
+        60006,
+        Box::new(Raw::Array(vec![Raw::Int(1.into()), currency.clone()])),
+    );
+    let money = Raw::Tag(
+        60007,
+        Box::new(Raw::Array(vec![
+            Raw::Tag(
+                60000,
+                Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(0.into())])),
+            ),
+            currency,
+        ])),
+    );
+    for raw in [affine, money] {
+        let environment =
+            Environment::from([("values".into(), Value::new(Raw::Array(vec![raw])).unwrap())]);
+        assert_eq!(
+            code(evaluate_expression(
+                "sum(values)",
+                &environment,
+                Limits::default(),
+            )),
+            "ORNA-EVAL-UNSUPPORTED"
+        );
+    }
+}
+
+#[test]
 fn std_collection_one_accepts_predicate_free_direct_pipeline_named_and_function_calls() {
     let expected = Value::int(7.into());
     for expression in [
