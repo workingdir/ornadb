@@ -1994,13 +1994,54 @@ impl RuntimeState {
             return Err(RuntimeError::RequestStateConflict);
         }
         ensure_stream_checkpoint(&tx, &registration.checkpoint).await?;
-        let id = StreamObservationId(*Uuid::new_v4().as_bytes());
         let key_id = stream_key_id(&registration.checkpoint);
+        let mut existing = tx
+            .query(
+                "SELECT run_id FROM sys_stream_observation WHERE checkpoint_key_id = ?1",
+                params![key_id.clone()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if let Some(row) = existing
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let existing_run = RunObservationId(fixed(
+                row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?);
+            return if existing_run == registration.run {
+                Err(RuntimeError::RequestStateConflict)
+            } else {
+                Err(RuntimeError::StreamIdentityMismatch)
+            };
+        }
         let partition = registration
             .checkpoint
             .partition
             .as_ref()
             .map(|value| value.as_str().to_owned());
+        let mut natural_key = tx
+            .query(
+                "SELECT checkpoint_key_id FROM sys_stream_observation
+                 WHERE run_id = ?1 AND source_identity = ?2 AND partition IS ?3",
+                params![
+                    registration.run.0.to_vec(),
+                    registration.checkpoint.source.as_str(),
+                    partition.clone(),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if natural_key
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::StreamIdentityMismatch);
+        }
+        let id = StreamObservationId(*Uuid::new_v4().as_bytes());
         tx.execute(
             "INSERT INTO sys_stream_observation (stream_id, run_id, checkpoint_key_id, producer, consumer_name, consumer_identity, source_identity, partition, status, items_seen, items_committed, items_failed, checkpoint_version, last_failure_identity, last_item_ms, diagnostic_code, diagnostic_class, observed_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, 0, NULL, NULL, NULL, NULL, NULL, ?10)",
             params![id.0.to_vec(), registration.run.0.to_vec(), key_id, registration.producer, registration.consumer,
@@ -17585,7 +17626,7 @@ mod tests {
                     checkpoint: key.clone(),
                 })
                 .await,
-            Err(RuntimeError::StorageUnavailable)
+            Err(RuntimeError::StreamIdentityMismatch)
         ));
         let before = state.stream_checkpoint(&key).await.unwrap();
         assert_eq!(
@@ -17671,7 +17712,7 @@ mod tests {
                     checkpoint: duplicate_key,
                 })
                 .await,
-            Err(RuntimeError::StorageUnavailable)
+            Err(RuntimeError::StreamIdentityMismatch)
         ));
 
         drop(state);
