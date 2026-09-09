@@ -2522,6 +2522,76 @@ fn foreign_expired_reservation_commit_cannot_expire_local_pending_handshake() {
 }
 
 #[test]
+fn consumed_reservation_replay_cannot_expire_another_pending_handshake() {
+    let limits = TransportLimits {
+        lease_ms: 10,
+        request_retention_ms: 10,
+        ..TransportLimits::default()
+    };
+    let mut transport = LiveTransport::new(host(), limits).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = CountingAuthority {
+        calls: 0,
+        times: Vec::new(),
+    };
+    let mut deletion = Delete(true);
+    let first = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let second = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(3)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let stale = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &token(&first)), [5; 16], 1)
+        .unwrap();
+    assert!(transport.abort_websocket_upgrade(&stale));
+    assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
+    assert!(transport.acknowledge_retired_attachment([5; 16]));
+
+    let pending = transport
+        .begin_websocket_upgrade(&websocket_upgrade(2, &token(&second)), [6; 16], 1)
+        .unwrap();
+
+    // The token is stale before the second candidate's delivery window has
+    // been considered.  Its replay cannot run the expiry sweep or publish a
+    // retirement for that unrelated candidate.
+    assert_eq!(
+        block_on(transport.commit_websocket_upgrade(stale, 11)),
+        Err(Error::Closed)
+    );
+    assert!(transport.take_retired_attachments().is_empty());
+
+    transport.expire_pending_websocket_upgrades(11);
+    assert_eq!(transport.take_retired_attachments(), vec![[6; 16]]);
+    assert_eq!(
+        block_on(transport.commit_websocket_upgrade(pending, 11)),
+        Err(Error::Closed)
+    );
+}
+
+#[test]
 fn child_aware_delete_retires_active_and_pending_websocket_candidates() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
