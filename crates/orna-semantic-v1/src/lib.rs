@@ -2457,6 +2457,11 @@ fn infer_contextual(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    if let Some(inferred) =
+        infer_contextual_finite_list_aggregate(expr, expected, scope, local, diagnostics)
+    {
+        return inferred;
+    }
     if let (Expr::List { elements, .. }, Type::List(element_type)) = (expr, expected) {
         let mut effects = EffectSummary::default();
         for element in elements {
@@ -2517,6 +2522,94 @@ fn infer_contextual(
         };
     }
     infer(expr, scope, local, diagnostics)
+}
+
+fn contextual_finite_list_aggregate_element(operation: &str, expected: &Type) -> Option<Type> {
+    match operation {
+        "sum" => match expected {
+            Type::Int | Type::Float => Some(expected.clone()),
+            _ => None,
+        },
+        "min" | "max" => match expected {
+            Type::Optional(element) if matches!(element.as_ref(), Type::Int | Type::Float) => {
+                Some(element.as_ref().clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn infer_contextual_finite_list_aggregate(
+    expr: &Expr,
+    expected: &Type,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let (operation, rows, arguments, qualified_element) = match expr {
+        Expr::Call {
+            callee, arguments, ..
+        } => {
+            let operation = finite_list_collection_operation(callee, scope)?;
+            if !matches!(operation, "sum" | "min" | "max")
+                || arguments.len() != 1
+                || !arguments[0]
+                    .name
+                    .as_deref()
+                    .is_none_or(|name| name == "rows")
+                || !is_empty_list_literal(&arguments[0].value)
+            {
+                return None;
+            }
+            (
+                operation,
+                &arguments[0].value,
+                arguments.as_slice(),
+                finite_list_aggregate_element(callee, operation, scope),
+            )
+        }
+        Expr::Binary { lhs, op, rhs, .. } if op == "|" => {
+            let (callee, arguments) = match rhs.as_ref() {
+                Expr::Call {
+                    callee, arguments, ..
+                } if arguments.is_empty() => (callee.as_ref(), arguments.as_slice()),
+                Expr::Name { .. } | Expr::Field { .. } => {
+                    (rhs.as_ref(), &[] as &[orna_syntax_v1::Argument])
+                }
+                _ => return None,
+            };
+            let operation = finite_list_collection_operation(callee, scope)?;
+            if !matches!(operation, "sum" | "min" | "max") || !is_empty_list_literal(lhs) {
+                return None;
+            }
+            (
+                operation,
+                lhs.as_ref(),
+                arguments,
+                finite_list_aggregate_element(callee, operation, scope),
+            )
+        }
+        _ => return None,
+    };
+    let element = qualified_element
+        .or_else(|| contextual_finite_list_aggregate_element(operation, expected))?;
+    let row = infer_contextual(
+        rows,
+        &Type::List(Box::new(element.clone())),
+        scope,
+        local,
+        diagnostics,
+    );
+    Some(infer_finite_list_collection(
+        operation,
+        (matches!(expr, Expr::Binary { .. })).then_some(row),
+        arguments,
+        Some(element),
+        scope,
+        local,
+        diagnostics,
+    ))
 }
 
 fn infer_contextual_lambda(
@@ -4528,26 +4621,52 @@ fn standard_collection_operation_is_admitted(operation: &str, scope: &Scope) -> 
 }
 
 fn standard_integer_aggregate_operation_is_admitted(operation: &str, scope: &Scope) -> bool {
-    if !matches!(operation, "min" | "max") {
-        return false;
+    standard_aggregate_element(operation, Type::Int, scope).is_some()
+}
+
+fn standard_float_aggregate_operation_is_admitted(operation: &str, scope: &Scope) -> bool {
+    standard_aggregate_element(operation, Type::Float, scope).is_some()
+}
+
+fn standard_aggregate_element(operation: &str, element: Type, scope: &Scope) -> Option<Type> {
+    if !matches!(operation, "sum" | "min" | "max") {
+        return None;
     }
+    let result = if operation == "sum" {
+        element.clone()
+    } else {
+        Type::Optional(Box::new(element.clone()))
+    };
     let expected = Type::Function {
-        parameters: vec![Type::List(Box::new(Type::Int))],
+        parameters: vec![Type::List(Box::new(element.clone()))],
         parameter_names: Some(vec!["rows".into()]),
         default_parameters: BTreeSet::new(),
-        result: Box::new(Type::Optional(Box::new(Type::Int))),
+        result: Box::new(result),
     };
     scope
         .available_modules
         .get(&Namespace(vec!["std".into(), "collection".into()]))
         .and_then(|module| module.exports.get(operation))
         .is_some_and(|symbol| symbol.kind == SymbolKind::Function && symbol.ty == expected)
+        .then_some(element)
 }
 
 fn standard_finite_list_operation_is_admitted(operation: &str, scope: &Scope) -> bool {
-    standard_collection_operation_is_admitted(operation, scope)
-        && (!matches!(operation, "min" | "max")
-            || standard_integer_aggregate_operation_is_admitted(operation, scope))
+    if matches!(operation, "sum" | "min" | "max") {
+        standard_integer_aggregate_operation_is_admitted(operation, scope)
+            || standard_float_aggregate_operation_is_admitted(operation, scope)
+    } else {
+        standard_collection_operation_is_admitted(operation, scope)
+    }
+}
+
+fn finite_list_aggregate_element(callee: &Expr, operation: &str, scope: &Scope) -> Option<Type> {
+    if qualified_path(callee)?.as_slice() == ["std", "collection", operation] {
+        standard_aggregate_element(operation, Type::Int, scope)
+            .or_else(|| standard_aggregate_element(operation, Type::Float, scope))
+    } else {
+        None
+    }
 }
 
 fn finite_list_collection_operation<'a>(callee: &'a Expr, scope: &Scope) -> Option<&'a str> {
@@ -4571,7 +4690,7 @@ fn finite_list_collection_operation<'a>(callee: &'a Expr, scope: &Scope) -> Opti
     }
 }
 
-fn is_finite_list_integer_aggregate_pipeline_stage(expression: &Expr, scope: &Scope) -> bool {
+fn is_finite_list_numeric_aggregate_pipeline_stage(expression: &Expr, scope: &Scope) -> bool {
     let operation = match expression {
         Expr::Call { callee, .. } => finite_list_collection_operation(callee, scope),
         Expr::Name { .. } | Expr::Field { .. } => {
@@ -4618,6 +4737,7 @@ fn infer_finite_list_collection_call(
         operation,
         None,
         arguments,
+        finite_list_aggregate_element(callee, operation, scope),
         scope,
         local,
         diagnostics,
@@ -4631,6 +4751,7 @@ fn infer_finite_list_collection(
     operation: &str,
     input: Option<Inferred>,
     arguments: &[orna_syntax_v1::Argument],
+    aggregate_element: Option<Type>,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -4642,10 +4763,11 @@ fn infer_finite_list_collection(
         return infer_finite_list_one(arguments, input, scope, local, diagnostics);
     }
     if matches!(operation, "sum" | "min" | "max") {
-        return infer_finite_list_integer_aggregate(
+        return infer_finite_list_numeric_aggregate(
             operation,
             arguments,
             input,
+            aggregate_element,
             scope,
             local,
             diagnostics,
@@ -4783,14 +4905,16 @@ fn infer_finite_list_collection(
     Inferred { ty, effects }
 }
 
-/// Checks the finite-list integer aggregate signatures. This semantic slice
-/// admits only `List<Int>` for `sum`, `min`, and `max`; empty lists are
-/// contextually represented as `List<Int>` so no dynamic element type is
-/// invented. Effects from the input expression are retained.
-fn infer_finite_list_integer_aggregate(
+/// Checks the bounded finite-list numeric aggregate signatures. Unqualified
+/// calls admit only `List<Int>` and `List<Float>`; qualified calls pass the
+/// exact element type from their pinned standard declaration. Empty lists use
+/// that declaration or the contextual result type, falling back to Int for
+/// the unannotated legacy form. Effects from the input expression are retained.
+fn infer_finite_list_numeric_aggregate(
     operation: &str,
     arguments: &[orna_syntax_v1::Argument],
     input: Option<Inferred>,
+    aggregate_element: Option<Type>,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -4846,7 +4970,13 @@ fn infer_finite_list_integer_aggregate(
         .enumerate()
         .map(|(index, argument)| {
             let value = if row_slot == Some(index) {
-                infer_finite_list_integer_rows(&argument.value, scope, local, diagnostics)
+                infer_finite_list_aggregate_rows(
+                    &argument.value,
+                    aggregate_element.as_ref(),
+                    scope,
+                    local,
+                    diagnostics,
+                )
             } else {
                 infer(&argument.value, scope, local, diagnostics)
             };
@@ -4865,7 +4995,12 @@ fn infer_finite_list_integer_aggregate(
             format!("finite-list {operation} arguments do not match its static signature"),
         ));
     }
-    if rows != Type::List(Box::new(Type::Int)) {
+    let valid = match (&rows, aggregate_element.as_ref()) {
+        (Type::List(element), Some(expected)) => element.as_ref() == expected,
+        (Type::List(element), None) => matches!(element.as_ref(), Type::Int | Type::Float),
+        _ => false,
+    };
+    if !valid {
         if matches!(&rows, Type::List(element) if is_absolute_affine_temperature(element)) {
             diagnostics.push(diag(
                 DIAG_TYPE,
@@ -4874,16 +5009,22 @@ fn infer_finite_list_integer_aggregate(
         } else {
             diagnostics.push(diag(
                 DIAG_TYPE,
-                format!("finite-list {operation} requires a finite list of Int values"),
+                format!("finite-list {operation} requires a finite list of Int or Float values"),
             ));
         }
     }
     Inferred {
-        ty: if !malformed && rows == Type::List(Box::new(Type::Int)) {
+        ty: if !malformed && (valid || aggregate_element.is_some()) {
+            let element = aggregate_element
+                .or_else(|| match &rows {
+                    Type::List(element) => Some(element.as_ref().clone()),
+                    _ => None,
+                })
+                .unwrap_or(Type::Error);
             if operation == "sum" {
-                Type::Int
+                element
             } else {
-                Type::Optional(Box::new(Type::Int))
+                Type::Optional(Box::new(element))
             }
         } else {
             Type::Error
@@ -4892,8 +5033,9 @@ fn infer_finite_list_integer_aggregate(
     }
 }
 
-fn infer_finite_list_integer_rows(
+fn infer_finite_list_aggregate_rows(
     expression: &Expr,
+    empty_element: Option<&Type>,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -4901,12 +5043,12 @@ fn infer_finite_list_integer_rows(
     if let Expr::Group { inner, .. } = expression
         && is_empty_list_literal(expression)
     {
-        return infer_finite_list_integer_rows(inner, scope, local, diagnostics);
+        return infer_finite_list_aggregate_rows(inner, empty_element, scope, local, diagnostics);
     }
     if is_empty_list_literal(expression) {
         return infer_contextual(
             expression,
-            &Type::List(Box::new(Type::Int)),
+            &Type::List(Box::new(empty_element.cloned().unwrap_or(Type::Int))),
             scope,
             local,
             diagnostics,
@@ -5519,8 +5661,8 @@ fn infer_success_pipeline(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
-    let input = if is_finite_list_integer_aggregate_pipeline_stage(rhs, scope) {
-        infer_finite_list_integer_rows(lhs, scope, local, diagnostics)
+    let input = if is_finite_list_numeric_aggregate_pipeline_stage(rhs, scope) {
+        infer_finite_list_aggregate_rows(lhs, None, scope, local, diagnostics)
     } else {
         infer(lhs, scope, local, diagnostics)
     };
@@ -5601,6 +5743,7 @@ fn infer_success_pipeline(
             operation,
             Some(input),
             arguments,
+            finite_list_aggregate_element(callee, operation, scope),
             scope,
             local,
             diagnostics,
@@ -5775,6 +5918,7 @@ fn infer_success_pipeline(
             operation,
             Some(input),
             &[],
+            finite_list_aggregate_element(rhs, operation, scope),
             scope,
             local,
             diagnostics,
