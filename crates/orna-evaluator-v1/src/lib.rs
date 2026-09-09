@@ -1468,7 +1468,7 @@ impl Context<'_, '_> {
         } else if text.is_some() {
             self.text(name, values)
         } else {
-            self.collection(name, values)
+            self.collection(name, values, depth)
         }
     }
     fn resolve_function_name(&self, expression: &Expr, scope: &Scope) -> Option<String> {
@@ -1665,7 +1665,12 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
-    fn collection(&self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+    fn collection(
+        &mut self,
+        name: &str,
+        values: Vec<Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
             ("chunk", [Value::List(values), Value::Int(size)]) => {
                 self.items(values.len())?;
@@ -1694,6 +1699,9 @@ impl Context<'_, '_> {
                 Ok(Value::List(flattened))
             }
             ("unique", [Value::List(values)]) => self.unique(values),
+            ("partition", [Value::List(values), predicate]) => {
+                self.partition(values, predicate, depth)
+            }
             ("zip", [Value::List(left), Value::List(right)]) => self.zipped(left, right, false),
             ("zip_exact", [Value::List(left), Value::List(right)]) => {
                 self.zipped(left, right, true)
@@ -1716,6 +1724,7 @@ impl Context<'_, '_> {
             }
             ("chunk", [_, _])
             | ("flatten" | "unique" | "pairs", [_])
+            | ("partition", [_, _])
             | ("zip" | "zip_exact", [_, _])
             | ("window", [_, _] | [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
@@ -1738,6 +1747,82 @@ impl Context<'_, '_> {
             self.items(unique.len())?;
         }
         Ok(Value::List(unique))
+    }
+    fn partition(
+        &mut self,
+        values: &[Value],
+        predicate: &Value,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        self.items(2)?;
+        let mut matching = Vec::new();
+        let mut remaining = Vec::new();
+        for value in values {
+            // Invoke once, in input order, so a lawful callback's observable
+            // behavior is never duplicated by classification.
+            match self.invoke_predicate(predicate, value.clone(), depth + 1)? {
+                Value::Bool(true) => {
+                    matching.push(value.clone());
+                    self.items(matching.len())?;
+                }
+                Value::Bool(false) => {
+                    remaining.push(value.clone());
+                    self.items(remaining.len())?;
+                }
+                _ => return Err(error("ORNA-EVAL-TYPE")),
+            }
+        }
+        Ok(Value::Tuple(vec![
+            Value::List(matching),
+            Value::List(remaining),
+        ]))
+    }
+    fn invoke_predicate(
+        &mut self,
+        callable: &Value,
+        input: Value,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let (parameters, body, captured, session_owned, namespace) = match callable {
+            Value::Function(name) => {
+                let function = self
+                    .functions
+                    .get(name)
+                    .ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+                (
+                    function.parameters.clone(),
+                    function.body.clone(),
+                    Scope::from_environment(&function.environment, self)?,
+                    self.session_functions
+                        .is_some_and(|functions| functions.contains(name)),
+                    function_namespace(name),
+                )
+            }
+            Value::Closure(closure) => (
+                closure.parameters.clone(),
+                closure.body.clone(),
+                closure.captured.clone(),
+                self.repl_bindings,
+                None,
+            ),
+            _ => return Err(error("ORNA-EVAL-TYPE")),
+        };
+        self.depth(depth + 1)?;
+        self.items(1)?;
+        let Some(parameter) = parameters.first() else {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        };
+        let mut supplied = BTreeMap::new();
+        supplied.insert(parameter_key(parameter, 0), input);
+        let previous_repl_bindings = self.repl_bindings;
+        self.repl_bindings = session_owned;
+        let previous_namespace = self.namespace.clone();
+        self.namespace = namespace;
+        let result = invoke_pure(self, &parameters, &body, captured, supplied, depth + 1);
+        self.namespace = previous_namespace;
+        self.repl_bindings = previous_repl_bindings;
+        result
     }
     fn positive_collection_size(&self, value: &BigInt) -> Result<usize, EvaluationError> {
         if !value.is_positive() {
@@ -2051,6 +2136,7 @@ fn named_arguments(
         "normalise" => &["value", "form"],
         "chunk" => &["values", "size"],
         "flatten" | "unique" | "pairs" => &["values"],
+        "partition" => &["values", "predicate"],
         "zip" | "zip_exact" => &["left", "right"],
         "window" => match values.len() {
             2 => &["values", "size"],
