@@ -2359,6 +2359,72 @@ fn finite_list_distinct_and_union_preserve_types_and_reject_invalid_inputs() {
 }
 
 #[test]
+fn finite_list_filter_types_predicate_and_preserves_effects() {
+    let valid = analyze(&[ModuleInput::new(
+        "filter.orna",
+        r#"
+            table Reading(id: Int) { value: Int, }
+            pub fn positive(values: [Int]) = values | filter(value => value > 0);
+            pub fn positive_named(values: [Int]) = values | filter(predicate: value => value > 0);
+            pub fn reads(values: [Int]) = values | filter(value => Reading.count() > 0 && value > 0);
+        "#,
+    )]);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
+    let module = valid.modules.values().next().expect("filter module");
+    for name in ["positive", "positive_named"] {
+        assert!(matches!(
+            &module.symbols[name].ty,
+            Type::Function { result, .. }
+                if result.as_ref() == &Type::List(Box::new(Type::Int))
+        ));
+    }
+    assert!(
+        module.symbols["reads"]
+            .effects
+            .effects
+            .contains("database read")
+    );
+    assert!(module.symbols["reads"].effects.may_fail);
+}
+
+#[test]
+fn finite_list_filter_rejects_wrong_callback_shape_without_affecting_relations() {
+    let invalid = analyze(&[
+        ModuleInput::new("arity.orna", "fn bad(values: [Int]) = values | filter;"),
+        ModuleInput::new(
+            "too-many.orna",
+            "fn bad(values: [Int]) = values | filter(value => value > 0, value => true);",
+        ),
+        ModuleInput::new(
+            "wrong-result.orna",
+            "fn bad(values: [Int]) = values | filter(value => value + 1);",
+        ),
+        ModuleInput::new(
+            "wrong-name.orna",
+            "fn bad(values: [Int]) = values | filter(test: value => value > 0);",
+        ),
+        ModuleInput::new(
+            "wrong-parameter.orna",
+            "fn bad(values: [Int]) = values | filter((left, right) => left > right);",
+        ),
+    ]);
+    assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
+    assert!(!invalid.diagnostics.is_empty(), "{:?}", invalid.diagnostics);
+
+    let relation = analyze(&[ModuleInput::new(
+        "relation.orna",
+        "table Reading(id: Int) { value: Int, } fn recent() = Reading | filter(reading => reading.value > 0);",
+    )]);
+    assert!(relation.is_ok(), "{:?}", relation.diagnostics);
+    let module = relation.modules.values().next().expect("relation module");
+    assert!(matches!(
+        &module.symbols["recent"].ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Relation(Box::new(Type::Named("Reading".into())))
+    ));
+}
+
+#[test]
 fn optional_numeric_ranges_infer_from_endpoints_or_expected_range_context() {
     let result = analyze(&[ModuleInput::new(
         "optional-ranges.orna",
