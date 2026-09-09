@@ -2051,6 +2051,56 @@ fn observes_a_partial_clone_and_a_promised_object_without_hydrating() {
 }
 
 #[test]
+fn filtered_clone_keeps_promised_unavailable_and_materialized_objects_distinct_without_mutation() {
+    let Some((fixture, clone, promised)) = filtered_clone() else {
+        // The fixture requires file-protocol filtering support.  A
+        // configuration-only repository is covered separately and must never
+        // manufacture a promised result.
+        return;
+    };
+    let repo = Repository::discover(&clone).unwrap();
+    let before = git_state(&repo, &clone);
+    let origin = fixture.path().join("origin.git");
+    let origin_refs_before = git(
+        &origin,
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
+    let origin_objects_before = git(&origin, &["count-objects", "-v"]);
+    let materialized = git(&clone, &["rev-parse", "HEAD"]);
+    let unavailable = "0".repeat(materialized.len());
+
+    assert!(matches!(
+        repo.observe_git_object(&materialized).unwrap(),
+        GitObjectState::Materialized {
+            kind: GitObjectKind::Commit,
+            size: 1..
+        }
+    ));
+    assert_eq!(
+        repo.observe_git_object(&promised).unwrap(),
+        GitObjectState::Promised
+    );
+    assert_eq!(
+        repo.observe_git_object(&unavailable).unwrap(),
+        GitObjectState::Unavailable
+    );
+
+    assert_eq!(git_state(&repo, &clone), before);
+    assert_eq!(
+        git(
+            &origin,
+            &["for-each-ref", "--format=%(refname) %(objectname)"]
+        ),
+        origin_refs_before
+    );
+    assert_eq!(
+        git(&origin, &["count-objects", "-v"]),
+        origin_objects_before
+    );
+    drop(fixture);
+}
+
+#[test]
 fn observes_combined_sparse_and_partial_capabilities() {
     let root = repository();
     with_partial_clone(root.path());
