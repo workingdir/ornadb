@@ -5,7 +5,7 @@ use orna_evaluator_v1::{
     evaluate_parsed, evaluate_repl, invoke_named, invoke_named_with_effects,
 };
 use orna_syntax_v1::{Expr, Pattern, RecordField, Statement, SyntaxSpan};
-use orna_value_v1::{Raw, Value};
+use orna_value_v1::{CANONICAL_NAN_BITS, Raw, Value};
 
 fn evaluate(source: &str) -> Value {
     evaluate_expression(source, &Environment::new(), Limits::default())
@@ -13,6 +13,10 @@ fn evaluate(source: &str) -> Value {
 }
 fn code(result: Result<Value, EvaluationError>) -> String {
     result.unwrap_err().code().to_owned()
+}
+
+fn float_rows(bits: &[u64]) -> Value {
+    Value::new(Raw::Array(bits.iter().copied().map(Raw::Float).collect())).unwrap()
 }
 
 fn invoke(source: &str, arguments: &Environment, limits: Limits) -> Result<Value, EvaluationError> {
@@ -1191,14 +1195,7 @@ fn std_collection_sum_accumulates_exactly_in_order_and_returns_integer_zero() {
 
 #[test]
 fn std_collection_sum_rejects_unsupported_numeric_kinds_and_shapes() {
-    for expression in [
-        "sum([1.0])",
-        "std.collection.sum([1.0])",
-        "sum([1.0f])",
-        "std.collection.sum([1.0f])",
-        "sum([1, true])",
-        "sum(values: [1])",
-    ] {
+    for expression in ["sum([1, true])", "sum(values: [1])"] {
         assert_eq!(
             code(evaluate_expression(
                 expression,
@@ -1251,6 +1248,214 @@ fn std_collection_sum_rejects_unsupported_numeric_kinds_and_shapes() {
                 Limits::default(),
             )),
             "ORNA-EVAL-UNSUPPORTED"
+        );
+    }
+}
+
+#[test]
+fn std_collection_float_sum_accepts_direct_named_pipeline_and_function_calls() {
+    let expected = Value::float_bits(3.75f64.to_bits());
+    for expression in [
+        "sum([1.5f, 2.25f])",
+        "std.collection.sum([1.5f, 2.25f])",
+        "sum(rows: [1.5f, 2.25f])",
+        "std.collection.sum(rows: [1.5f, 2.25f])",
+        "[1.5f, 2.25f] | sum",
+        "[1.5f, 2.25f] | sum()",
+        "[1.5f, 2.25f] | std.collection.sum",
+        "[1.5f, 2.25f] | std.collection.sum()",
+    ] {
+        assert_eq!(evaluate(expression), expected, "{expression}");
+    }
+
+    assert_eq!(
+        call_module(
+            "fn total(rows: [Float]) = sum(rows);",
+            "total([1.5f, 2.25f])",
+            Limits::default(),
+        )
+        .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn std_collection_float_sum_folds_left_to_right_and_propagates_canonical_nan() {
+    let rows = float_rows(&[
+        10_000_000_000_000_000.0f64.to_bits(),
+        (-10_000_000_000_000_000.0f64).to_bits(),
+        1.0f64.to_bits(),
+    ]);
+    let environment = Environment::from([("rows".into(), rows)]);
+    assert_eq!(
+        evaluate_expression("sum(rows)", &environment, Limits::default()).unwrap(),
+        Value::float_bits(1.0f64.to_bits())
+    );
+
+    let nan_environment = Environment::from([(
+        "rows".into(),
+        float_rows(&[1.0f64.to_bits(), CANONICAL_NAN_BITS, 2.0f64.to_bits()]),
+    )]);
+    for expression in [
+        "sum(rows)",
+        "std.collection.sum(rows)",
+        "sum(rows: rows)",
+        "std.collection.sum(rows: rows)",
+        "rows | sum",
+        "rows | sum()",
+        "rows | std.collection.sum",
+        "rows | std.collection.sum()",
+    ] {
+        assert_eq!(
+            evaluate_expression(expression, &nan_environment, Limits::default()).unwrap(),
+            Value::float_bits(CANONICAL_NAN_BITS),
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn std_collection_float_min_and_max_use_total_order_and_ordinary_equality_separately() {
+    let negative_zero = Value::float_bits((-0.0f64).to_bits());
+    let positive_zero = Value::float_bits(0.0f64.to_bits());
+    let expected_min = Value::option(Some(negative_zero.clone())).unwrap();
+    let expected_max = Value::option(Some(positive_zero.clone())).unwrap();
+    for (name, expected) in [("min", expected_min), ("max", expected_max)] {
+        for expression in [
+            format!("{name}([-0.0f, 0.0f])"),
+            format!("std.collection.{name}([-0.0f, 0.0f])"),
+            format!("{name}(rows: [-0.0f, 0.0f])"),
+            format!("std.collection.{name}(rows: [-0.0f, 0.0f])"),
+            format!("[-0.0f, 0.0f] | {name}"),
+            format!("[-0.0f, 0.0f] | {name}()"),
+            format!("[-0.0f, 0.0f] | std.collection.{name}"),
+            format!("[-0.0f, 0.0f] | std.collection.{name}()"),
+        ] {
+            assert_eq!(evaluate(&expression), expected, "{expression}");
+        }
+    }
+
+    let source = "fn lowest(rows: [Float]) = min(rows); fn highest(rows: [Float]) = std.collection.max(rows);";
+    assert_eq!(
+        call_module(source, "lowest([-3.0f, 2.0f])", Limits::default()).unwrap(),
+        Value::option(Some(Value::float_bits((-3.0f64).to_bits()))).unwrap()
+    );
+    assert_eq!(
+        call_module(source, "highest([-3.0f, 2.0f])", Limits::default()).unwrap(),
+        Value::option(Some(Value::float_bits(2.0f64.to_bits()))).unwrap()
+    );
+
+    let environment = Environment::from([
+        ("negative_zero".into(), negative_zero),
+        ("positive_zero".into(), positive_zero),
+        ("nan".into(), Value::float_bits(CANONICAL_NAN_BITS)),
+    ]);
+    assert_eq!(
+        evaluate_expression(
+            "negative_zero == positive_zero",
+            &environment,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate_expression("nan == nan", &environment, Limits::default()).unwrap(),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+}
+
+#[test]
+fn std_collection_float_min_and_max_propagate_nan_and_return_empty_identity() {
+    let environment = Environment::from([(
+        "rows".into(),
+        float_rows(&[(-1.0f64).to_bits(), CANONICAL_NAN_BITS, 2.0f64.to_bits()]),
+    )]);
+    let expected = Value::option(Some(Value::float_bits(CANONICAL_NAN_BITS))).unwrap();
+    for (name, expected) in [("min", expected.clone()), ("max", expected)] {
+        for expression in [
+            format!("{name}(rows)"),
+            format!("std.collection.{name}(rows)"),
+            format!("{name}(rows: rows)"),
+            format!("std.collection.{name}(rows: rows)"),
+            format!("rows | {name}"),
+            format!("rows | {name}()"),
+            format!("rows | std.collection.{name}"),
+            format!("rows | std.collection.{name}()"),
+        ] {
+            assert_eq!(
+                evaluate_expression(&expression, &environment, Limits::default()).unwrap(),
+                expected,
+                "{expression}"
+            );
+        }
+    }
+
+    for expression in [
+        "min([])",
+        "max([])",
+        "std.collection.min(rows: [])",
+        "std.collection.max(rows: [])",
+        "[] | min()",
+        "[] | max()",
+    ] {
+        assert_eq!(
+            evaluate(expression),
+            Value::new(Raw::Null).unwrap(),
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
+    for expression in [
+        "sum([1.0f, 2])",
+        "sum([1, 2.0f])",
+        "min([1.0f, 2])",
+        "std.collection.max([1, 2.0f])",
+        "sum([1.0f], value => value)",
+        "std.collection.min(rows: [1.0f], callback: value => value)",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            "ORNA-EVAL-UNSUPPORTED",
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        code(evaluate_expression(
+            "sum([1.0f, 1.0f / 0.0f])",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
+    );
+
+    for (expression, limits) in [
+        (
+            "sum([1.0f, 2.0f])",
+            Limits {
+                max_collection_items: 1,
+                ..Limits::default()
+            },
+        ),
+        (
+            "std.collection.max([1.0f])",
+            Limits {
+                max_steps: 1,
+                ..Limits::default()
+            },
+        ),
+    ] {
+        assert_eq!(
+            code(evaluate_expression(expression, &Environment::new(), limits)),
+            "ORNA-EVAL-LIMIT",
+            "{expression}"
         );
     }
 }
@@ -1340,8 +1545,6 @@ fn std_collection_min_and_max_optional_results_match_some_null_and_coalesce() {
 #[test]
 fn std_collection_min_and_max_fail_closed_for_unsupported_kinds_shapes_and_limits() {
     for expression in [
-        "min([1.0f, 0.0f])",
-        "std.collection.max([1.0f, 0.0f])",
         "min([1.0])",
         "std.collection.max([1.0])",
         "std.collection.max([1, true])",
