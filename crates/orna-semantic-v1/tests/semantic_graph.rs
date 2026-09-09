@@ -2614,6 +2614,141 @@ fn finite_list_first_rejects_invalid_arity_names_and_types_without_changing_rela
 }
 
 #[test]
+fn finite_list_one_returns_exactly_the_element_type_and_preserves_callback_effects() {
+    let result = analyze(&[ModuleInput::new(
+        "one.orna",
+        r#"
+            table Reading(id: Int) { value: Int, }
+            fn positive(value: Int) = value > 0;
+            fn reads_predicate(value: Int) = Reading.count() > 0 && value > 0;
+            pub fn direct(rows: [Int]) = one(rows);
+            pub fn direct_named(rows: [Int]) = one(rows: rows);
+            pub fn direct_predicate(rows: [Int]) = one(rows, positive);
+            pub fn unused_predicate(rows: [Int]) = one(rows, value => true);
+            pub fn qualified(rows: [Int]) = std.collection.one(rows: rows, predicate: positive);
+            pub fn pipeline(rows: [Int]) = rows | one();
+            pub fn pipeline_predicate(rows: [Int]) = rows | one(positive);
+            pub fn qualified_pipeline(rows: [Int]) = rows | std.collection.one(predicate: positive);
+            pub fn reads(rows: [Int]) = rows | one(predicate: value => Reading.count() > 0 && value > 0);
+            pub fn named_reads(rows: [Int]) = one(predicate: reads_predicate, rows: rows);
+        "#,
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result.modules.values().next().expect("one module");
+    for name in [
+        "direct",
+        "direct_named",
+        "direct_predicate",
+        "unused_predicate",
+        "qualified",
+        "pipeline",
+        "pipeline_predicate",
+        "qualified_pipeline",
+    ] {
+        assert!(
+            matches!(
+                &module.symbols[name].ty,
+                Type::Function { result, .. } if result.as_ref() == &Type::Int
+            ),
+            "{name}: {:?}",
+            module.symbols[name].ty
+        );
+    }
+    for name in ["reads", "named_reads"] {
+        assert!(
+            matches!(
+                &module.symbols[name].ty,
+                Type::Function { result, .. } if result.as_ref() == &Type::Int
+            ),
+            "{name}: {:?}",
+            module.symbols[name].ty
+        );
+        assert!(
+            module.symbols[name]
+                .effects
+                .effects
+                .contains("database read"),
+            "{name}: {:?}",
+            module.symbols[name].effects
+        );
+        assert!(module.symbols[name].effects.may_fail);
+    }
+}
+
+#[test]
+fn finite_list_one_rejects_invalid_signatures_and_keeps_relation_one_behavior() {
+    let invalid = analyze(&[
+        ModuleInput::new("arity.orna", "fn bad(rows: [Int]) = one();"),
+        ModuleInput::new(
+            "extra.orna",
+            "fn bad(rows: [Int]) = one(rows, value => value > 0, value => true);",
+        ),
+        ModuleInput::new(
+            "unknown-row-name.orna",
+            "fn bad(rows: [Int]) = one(values: rows);",
+        ),
+        ModuleInput::new(
+            "unknown-predicate-name.orna",
+            "fn bad(rows: [Int]) = one(rows, test: value => value > 0);",
+        ),
+        ModuleInput::new("wrong-collection.orna", "fn bad() = one(1);"),
+        ModuleInput::new(
+            "wrong-result.orna",
+            "fn bad(rows: [Int]) = one(rows, value => value + 1);",
+        ),
+        ModuleInput::new(
+            "wrong-parameter-count.orna",
+            "fn bad(rows: [Int]) = one(rows, (left, right) => left > right);",
+        ),
+        ModuleInput::new(
+            "wrong-parameter-type.orna",
+            "fn bad(rows: [Int]) = one(rows, (value: Str) => value == \"x\");",
+        ),
+        ModuleInput::new("non-callback.orna", "fn bad(rows: [Int]) = one(rows, 1);"),
+        ModuleInput::new(
+            "pipeline-row-name.orna",
+            "fn bad(rows: [Int]) = rows | one(rows: rows);",
+        ),
+        ModuleInput::new(
+            "pipeline-extra.orna",
+            "fn bad(rows: [Int]) = rows | one(positive: value => value > 0);",
+        ),
+        ModuleInput::new(
+            "qualified-name.orna",
+            "fn bad(rows: [Int]) = std.collection.one(values: rows);",
+        ),
+    ]);
+    assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
+
+    let relation = analyze(&[ModuleInput::new(
+        "relation-one.orna",
+        r#"
+            table Reading(id: Int) { value: Int, }
+            pub fn member() = Reading.one();
+            pub fn pipeline() = Reading | one();
+            pub fn predicate() = Reading | one(reading => reading.value > 0);
+        "#,
+    )]);
+    assert!(relation.is_ok(), "{:?}", relation.diagnostics);
+    let module = relation
+        .modules
+        .values()
+        .next()
+        .expect("relation one module");
+    for name in ["member", "pipeline", "predicate"] {
+        assert!(
+            matches!(
+                &module.symbols[name].ty,
+                Type::Function { result, .. } if result.as_ref() == &Type::Named("Reading".into())
+            ),
+            "{name}: {:?}",
+            module.symbols[name].ty
+        );
+    }
+}
+
+#[test]
 fn relation_flat_map_preserves_relation_output_and_accepts_finite_inner_collections() {
     let valid = analyze(&[ModuleInput::new(
         "relation-flat-map.orna",
