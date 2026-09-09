@@ -4643,6 +4643,24 @@ fn failed_child_join_after_durable_cancellation_never_reports_delete_success() {
     assert_eq!(deletion.calls, 0);
     assert_eq!(children.calls, 1);
     assert_eq!(children.requests, vec![reserved, running]);
+    // A failed join leaves the session fenced. Retrying the same authenticated
+    // DELETE must never turn the prior failed cleanup into an idempotent 204.
+    assert_ne!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [1; 16],
+                origin: &origin,
+                credential: &credential,
+                now: 1,
+            },
+            &mut deletion,
+            &mut children,
+        ))
+        .status,
+        204
+    );
+    assert_eq!(deletion.calls, 0);
+    assert_eq!(children.calls, 1);
     for (identity, fingerprint) in [
         (reserved, reserved_fingerprint),
         (running, running_fingerprint),
