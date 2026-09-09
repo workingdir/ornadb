@@ -1693,6 +1693,7 @@ impl Context<'_, '_> {
                 }
                 Ok(Value::List(flattened))
             }
+            ("unique", [Value::List(values)]) => self.unique(values),
             ("zip", [Value::List(left), Value::List(right)]) => self.zipped(left, right, false),
             ("zip_exact", [Value::List(left), Value::List(right)]) => {
                 self.zipped(left, right, true)
@@ -1714,11 +1715,29 @@ impl Context<'_, '_> {
                 self.windows(values, size, step)
             }
             ("chunk", [_, _])
-            | ("flatten" | "pairs", [_])
+            | ("flatten" | "unique" | "pairs", [_])
             | ("zip" | "zip_exact", [_, _])
             | ("window", [_, _] | [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
+    }
+    fn unique(&self, values: &[Value]) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let mut keys = Vec::new();
+        let mut unique = Vec::new();
+        for value in values {
+            // Equality for this fallback is equality of the canonical value,
+            // not incidental host representation. Values that cannot cross the
+            // canonical boundary (including callables) have no lawful key.
+            let key = value.clone().canonical()?;
+            if keys.iter().any(|existing| existing == &key) {
+                continue;
+            }
+            keys.push(key);
+            unique.push(value.clone());
+            self.items(unique.len())?;
+        }
+        Ok(Value::List(unique))
     }
     fn positive_collection_size(&self, value: &BigInt) -> Result<usize, EvaluationError> {
         if !value.is_positive() {
@@ -2031,7 +2050,7 @@ fn named_arguments(
         "replace" => &["value", "from", "to"],
         "normalise" => &["value", "form"],
         "chunk" => &["values", "size"],
-        "flatten" | "pairs" => &["values"],
+        "flatten" | "unique" | "pairs" => &["values"],
         "zip" | "zip_exact" => &["left", "right"],
         "window" => match values.len() {
             2 => &["values", "size"],

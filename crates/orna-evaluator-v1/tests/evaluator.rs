@@ -795,6 +795,28 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
+            "std.collection.unique([2, 1, 2, [3], [3], 1, []])",
+            Value::new(Raw::Array(vec![
+                Raw::Int(2.into()),
+                Raw::Int(1.into()),
+                Raw::Array(vec![Raw::Int(3.into())]),
+                Raw::Array(vec![]),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "[2, 1, 2, 1] | std.collection.unique()",
+            Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(1.into())])).unwrap(),
+        ),
+        (
+            "std.collection.unique([1.0, 1.00, 2.0])",
+            Value::new(Raw::Array(vec![
+                Value::decimal(1.into(), 0.into()).unwrap().raw().clone(),
+                Value::decimal(2.into(), 0.into()).unwrap().raw().clone(),
+            ]))
+            .unwrap(),
+        ),
+        (
             "std.collection.zip([1, 2, 3], [\"a\", \"b\"])",
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())]),
@@ -862,6 +884,8 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
         ("std.collection.chunk([1], 0)", "ORNA-EVAL-VALUE"),
         ("std.collection.chunk([1], -1)", "ORNA-EVAL-VALUE"),
         ("std.collection.flatten([1])", "ORNA-EVAL-TYPE"),
+        ("std.collection.unique(1)", "ORNA-EVAL-TYPE"),
+        ("std.collection.unique([1], 2)", "ORNA-EVAL-UNSUPPORTED"),
         ("std.collection.zip_exact([1], [2, 3])", "ORNA-EVAL-VALUE"),
         ("std.collection.pairs(1)", "ORNA-EVAL-TYPE"),
         ("std.collection.window([1, 2], 0)", "ORNA-EVAL-VALUE"),
@@ -882,6 +906,17 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
             "{expression}"
         );
     }
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.unique([1, 2, 3])",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
     assert_eq!(
         code(evaluate_expression(
             "std.collection.window([1, 2, 3], 2)",
