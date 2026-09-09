@@ -349,6 +349,7 @@ pub struct LiveHost {
     runtime_owner: Option<[u8; 16]>,
     writer_lease: Option<WriterLease>,
     recovered_owner: Option<RequestOwner>,
+    takeover_recovery_complete: bool,
 }
 
 enum DurableAdmission {
@@ -478,6 +479,7 @@ impl LiveHost {
             runtime_owner,
             writer_lease: None,
             recovered_owner,
+            takeover_recovery_complete: false,
         })
     }
 
@@ -1527,6 +1529,7 @@ impl LiveHost {
         fingerprint: [u8; 32],
         envelope: &Envelope,
     ) -> Result<DurableAdmission> {
+        self.ensure_takeover_recovery().await?;
         let identity = RequestIdentity {
             session_id: session,
             request_id: request,
@@ -1599,6 +1602,64 @@ impl LiveHost {
             }
             Err(error) => Err(map_runtime(&error)),
         }
+    }
+
+    /// Complete the recovery barrier established by a proven lease takeover
+    /// before admitting any fresh durable request. A request-specific retry
+    /// must not be the first event that discovers another abandoned callback:
+    /// otherwise a new write could commit while an old owner remains
+    /// unresolved. Reservations have no owner and remain non-executable; only
+    /// running rows are fenced into their conservative terminal outcomes.
+    async fn ensure_takeover_recovery(&mut self) -> Result<()> {
+        if self.takeover_recovery_complete || self.recovered_owner.is_none() {
+            return Ok(());
+        }
+        let lost_owner = self.recovered_owner.ok_or(Error::RuntimeUnavailable)?;
+        let lease = self.writer_lease().await?;
+        let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
+        let running = runtime
+            .running_requests()
+            .await
+            .map_err(|error| map_runtime(&error))?;
+        for status in running {
+            let owner = runtime
+                .request_owner(status.identity, status.fingerprint)
+                .await
+                .map_err(|error| map_runtime(&error))?;
+            let uncertain = self.terminal_outcome(&retained_without_value_outcome(
+                status.identity.request_id,
+                status.fingerprint,
+            ))?;
+            if owner == Some(lost_owner) {
+                let rollback_proven = self.terminal_outcome(&redacted_failure_outcome(
+                    status.identity.request_id,
+                    status.fingerprint,
+                ))?;
+                runtime
+                    .recover_running_request_with_outcomes(
+                        status.identity,
+                        status.fingerprint,
+                        lost_owner,
+                        lease,
+                        rollback_proven,
+                        uncertain,
+                    )
+                    .await
+                    .map_err(|error| map_runtime(&error))?;
+            } else if owner.is_none() {
+                runtime
+                    .recover_legacy_running_request(
+                        status.identity,
+                        status.fingerprint,
+                        lease,
+                        uncertain,
+                    )
+                    .await
+                    .map_err(|error| map_runtime(&error))?;
+            }
+        }
+        self.takeover_recovery_complete = true;
+        Ok(())
     }
 
     async fn admit_running_request(
