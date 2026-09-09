@@ -121,3 +121,74 @@ fn relation_integer_aggregate_requires_a_projection_shape() {
         None
     );
 }
+
+#[test]
+fn relation_integer_aggregate_rejects_too_many_candidate_rows_without_publication() {
+    let unit = SourceUnit {
+        fixture_id: "relation-aggregate-row-limit".into(),
+        source_id: "relation-aggregate-row-limit.orna".into(),
+        parse_as: "module_unit".into(),
+        source: r#"
+            pub table Reading(id: Int) { value: Int, }
+            fn parent() {
+                Reading.insert({ id: 1, value: 1 });
+                Reading.insert({ id: 2, value: 2 });
+                Reading.insert({ id: 3, value: 3 });
+                Reading | map(reading => reading.value) | sum;
+            }
+        "#
+        .into(),
+    };
+    let mut limits = Limits::default();
+    limits.max_collection_items = 2;
+    let mut evaluator = TransactionalEvaluator::new("parent", limits);
+
+    let outcome = evaluator.execute_source(&unit);
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+    ));
+    for id in [1, 2, 3] {
+        assert_eq!(
+            evaluator.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "row {id} escaped the failed activation"
+        );
+    }
+}
+
+#[test]
+fn relation_integer_sum_rejects_an_intermediate_integer_that_exceeds_the_limit() {
+    let unit = SourceUnit {
+        fixture_id: "relation-aggregate-integer-limit".into(),
+        source_id: "relation-aggregate-integer-limit.orna".into(),
+        parse_as: "module_unit".into(),
+        source: r#"
+            pub table Reading(id: Int) { value: Int, }
+            fn parent() {
+                Reading.insert({ id: 1, value: 99 });
+                Reading.insert({ id: 2, value: 1 });
+                Reading | map(reading => reading.value) | sum;
+            }
+        "#
+        .into(),
+    };
+    let mut limits = Limits::default();
+    limits.max_integer_digits = 2;
+    let mut evaluator = TransactionalEvaluator::new("parent", limits);
+
+    let outcome = evaluator.execute_source(&unit);
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+    ));
+    for id in [1, 2] {
+        assert_eq!(
+            evaluator.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "row {id} escaped the failed activation"
+        );
+    }
+}
