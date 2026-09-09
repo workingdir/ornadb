@@ -2198,6 +2198,197 @@ fn check_function(
             }
         }
     }
+    validate_loop_transfers(body, scope, &local, &mut Vec::new(), diagnostics);
+}
+
+/// Validate transfer statements after ordinary expression inference. `for` and
+/// `while` are the only loop forms this semantic slice gives a result type, so
+/// their nearest-loop break value is statically constrained to that result.
+/// A lambda begins a new function boundary and therefore cannot transfer to a
+/// loop surrounding its creation site.
+fn validate_loop_transfers(
+    expression: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    loops: &mut Vec<LoopTransferContext>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match expression {
+        Expr::InterpolatedString { segments, .. } => {
+            for segment in segments {
+                if let StringSegment::Expression { value, .. } = segment {
+                    validate_loop_transfers(value, scope, local, loops, diagnostics);
+                }
+            }
+        }
+        Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
+            validate_loop_transfers(rhs, scope, local, loops, diagnostics);
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            validate_loop_transfers(lhs, scope, local, loops, diagnostics);
+            validate_loop_transfers(rhs, scope, local, loops, diagnostics);
+        }
+        Expr::Call {
+            callee, arguments, ..
+        } => {
+            validate_loop_transfers(callee, scope, local, loops, diagnostics);
+            for argument in arguments {
+                validate_loop_transfers(&argument.value, scope, local, loops, diagnostics);
+            }
+        }
+        Expr::Index { base, index, .. } => {
+            validate_loop_transfers(base, scope, local, loops, diagnostics);
+            validate_loop_transfers(index, scope, local, loops, diagnostics);
+        }
+        Expr::Field { base, .. } => {
+            validate_loop_transfers(base, scope, local, loops, diagnostics);
+        }
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+            for element in elements {
+                validate_loop_transfers(element, scope, local, loops, diagnostics);
+            }
+        }
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+            for field in fields {
+                validate_loop_transfers(&field.value, scope, local, loops, diagnostics);
+            }
+        }
+        Expr::Lambda {
+            parameters, body, ..
+        } => {
+            let mut lambda_locals = local.clone();
+            for parameter in parameters {
+                bind_pattern(
+                    &parameter.pattern,
+                    parameter
+                        .annotation
+                        .as_ref()
+                        .map(type_of)
+                        .unwrap_or(Type::Error),
+                    &mut lambda_locals,
+                    diagnostics,
+                );
+            }
+            validate_loop_transfers(body, scope, &lambda_locals, &mut Vec::new(), diagnostics);
+        }
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            let mut block_locals = local.clone();
+            for statement in statements {
+                match statement {
+                    Statement::Let {
+                        pattern,
+                        annotation,
+                        value,
+                        ..
+                    } => {
+                        validate_loop_transfers(value, scope, &block_locals, loops, diagnostics);
+                        let ty = annotation.as_ref().map(type_of).unwrap_or_else(|| {
+                            infer(value, scope, &block_locals, &mut Vec::new()).ty
+                        });
+                        bind_pattern(pattern, ty, &mut block_locals, diagnostics);
+                    }
+                    Statement::Assert { value, .. }
+                    | Statement::Expression { value, .. }
+                    | Statement::Control { value, .. }
+                    | Statement::Assignment { value, .. } => {
+                        validate_loop_transfers(value, scope, &block_locals, loops, diagnostics)
+                    }
+                    Statement::Break { value, .. } => match loops.last() {
+                        Some(LoopTransferContext::Typed(expected)) => {
+                            let actual = value.as_ref().map_or(Type::Null, |value| {
+                                infer(value, scope, &block_locals, &mut Vec::new()).ty
+                            });
+                            require_same(expected, &actual, diagnostics);
+                        }
+                        // `loop` does have an enclosing transfer target, but its
+                        // result contract is not implemented by this slice.
+                        Some(LoopTransferContext::Unsupported) => {}
+                        None => diagnostics.push(diag(
+                            DIAG_UNSUPPORTED,
+                            "break transfer requires an enclosing supported loop",
+                        )),
+                    },
+                    Statement::Continue { .. } => {
+                        if loops.is_empty() {
+                            diagnostics.push(diag(
+                                DIAG_UNSUPPORTED,
+                                "continue transfer requires an enclosing supported loop",
+                            ));
+                        }
+                    }
+                    Statement::Return { value, .. } => {
+                        if let Some(value) = value {
+                            validate_loop_transfers(
+                                value,
+                                scope,
+                                &block_locals,
+                                loops,
+                                diagnostics,
+                            );
+                        }
+                    }
+                }
+            }
+            if let Some(tail) = tail {
+                validate_loop_transfers(tail, scope, &block_locals, loops, diagnostics);
+            }
+        }
+        Expr::Control {
+            kind,
+            binding,
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => {
+            if let Some(condition) = condition {
+                validate_loop_transfers(condition, scope, local, loops, diagnostics);
+            }
+            let loop_context = match kind {
+                ControlKind::For | ControlKind::While => {
+                    Some(LoopTransferContext::Typed(Type::Null))
+                }
+                ControlKind::Loop => Some(LoopTransferContext::Unsupported),
+                ControlKind::If | ControlKind::Case => None,
+            };
+            let enters_loop = loop_context.is_some();
+            let mut body_locals = local.clone();
+            if let (ControlKind::For, Some(binding), Some(iterable)) = (kind, binding, condition)
+                && let Type::List(element) = infer(iterable, scope, local, &mut Vec::new()).ty
+            {
+                bind_pattern(binding, *element, &mut body_locals, &mut Vec::new());
+            }
+            if let Some(loop_context) = loop_context {
+                loops.push(loop_context);
+            }
+            if let Some(body) = body {
+                validate_loop_transfers(body, scope, &body_locals, loops, diagnostics);
+            }
+            if !matches!(kind, ControlKind::For) {
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        validate_loop_transfers(guard, scope, local, loops, diagnostics);
+                    }
+                    validate_loop_transfers(&arm.body, scope, local, loops, diagnostics);
+                }
+            }
+            if let Some(alternate) = alternate {
+                validate_loop_transfers(alternate, scope, local, loops, diagnostics);
+            }
+            if enters_loop {
+                loops.pop();
+            }
+        }
+        Expr::Name { .. } | Expr::Literal { .. } | Expr::ReplBinding { .. } => {}
+    }
+}
+
+enum LoopTransferContext {
+    Typed(Type),
+    Unsupported,
 }
 fn bind_pattern(
     pattern: &Pattern,
@@ -3062,7 +3253,14 @@ fn infer(
                         &mut locals,
                         diagnostics,
                     )),
-                    _ => diagnostics.push(diag(
+                    Statement::Break { value, .. } => {
+                        if let Some(value) = value {
+                            let x = infer(value, scope, &locals, diagnostics);
+                            effects.join(&x.effects);
+                        }
+                    }
+                    Statement::Continue { .. } => {}
+                    Statement::Return { .. } => diagnostics.push(diag(
                         DIAG_UNSUPPORTED,
                         "control statement is outside this semantic slice",
                     )),

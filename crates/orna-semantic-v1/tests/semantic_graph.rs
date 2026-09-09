@@ -2657,7 +2657,7 @@ fn control_flow_infers_list_for_and_local_assignment_while_other_shapes_fail_clo
 }
 
 #[test]
-fn while_requires_a_boolean_condition_and_preserves_body_effects() {
+fn while_requires_a_boolean_condition_preserves_body_effects_and_validates_transfers() {
     let valid = analyze(&[ModuleInput::new(
         "while.orna",
         r#"
@@ -2687,11 +2687,30 @@ fn while_requires_a_boolean_condition_and_preserves_body_effects() {
     )]);
     assert!(has(&non_boolean, DIAG_TYPE));
 
-    let break_transfer = analyze(&[ModuleInput::new(
-        "while-break.orna",
-        "fn poll(ready: Bool) { while ready { break; } }",
+    let nearest_loop = analyze(&[ModuleInput::new(
+        "nearest-loop.orna",
+        "fn poll(outer: Bool, inner: Bool) { while outer { while inner { continue; break; } break; } }",
     )]);
-    assert!(has(&break_transfer, DIAG_UNSUPPORTED));
+    assert!(nearest_loop.is_ok(), "{:?}", nearest_loop.diagnostics);
+
+    let outside_loop = analyze(&[ModuleInput::new(
+        "outside-loop.orna",
+        "fn poll() { break; continue; }",
+    )]);
+    assert!(has(&outside_loop, DIAG_UNSUPPORTED));
+
+    let mismatched_break_value = analyze(&[ModuleInput::new(
+        "mismatched-break-value.orna",
+        "fn poll(ready: Bool) { while ready { break 1; } }",
+    )]);
+    assert!(has(&mismatched_break_value, DIAG_TYPE));
+    assert!(!has(&mismatched_break_value, DIAG_UNSUPPORTED));
+
+    let lambda_boundary = analyze(&[ModuleInput::new(
+        "lambda-boundary.orna",
+        "fn poll(ready: Bool) { while ready { let stop = () => { break; }; } }",
+    )]);
+    assert!(has(&lambda_boundary, DIAG_UNSUPPORTED));
 }
 
 #[test]
