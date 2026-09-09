@@ -699,6 +699,14 @@ fn std_text_fallback_preserves_unicode_scalar_and_field_semantics() {
             Value::new(Raw::Text("bb".into())).unwrap(),
         ),
         (
+            "std.text.normalise(\"Cafe\u{301}\", \"NFC\")",
+            Value::new(Raw::Text("Café".into())).unwrap(),
+        ),
+        (
+            "std.text.normalise(\"Café\", \"NFD\")",
+            Value::new(Raw::Text("Cafe\u{301}".into())).unwrap(),
+        ),
+        (
             "std.text.lower(\"İΣ\")",
             Value::new(Raw::Text("i̇ς".into())).unwrap(),
         ),
@@ -724,6 +732,8 @@ fn std_text_fallback_rejects_invalid_arguments_and_enforces_existing_limits() {
             "ORNA-EVAL-UNSUPPORTED",
         ),
         ("std.text.normalise(\"a\")", "ORNA-EVAL-UNSUPPORTED"),
+        ("std.text.normalise(1, \"NFC\")", "ORNA-EVAL-TYPE"),
+        ("std.text.normalise(\"a\", \"NFKC\")", "ORNA-EVAL-VALUE"),
     ] {
         assert_eq!(
             code(evaluate_expression(

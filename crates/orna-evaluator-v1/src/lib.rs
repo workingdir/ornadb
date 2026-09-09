@@ -20,6 +20,7 @@ use orna_syntax_v1::{
     PatternField, ReplInput, Statement, StringSegment, parse_expression, parse_repl,
 };
 use orna_value_v1::Raw;
+use unicode_normalization::UnicodeNormalization;
 
 mod admitted_repl;
 mod repl;
@@ -1638,6 +1639,11 @@ impl Context<'_, '_> {
             ("replace", [Value::String(value), Value::String(from), Value::String(to)]) => {
                 self.string(value.replace(from, to)).map(Value::String)
             }
+            ("normalise", [Value::String(value), Value::String(form)]) => match form.as_str() {
+                "NFC" => self.string(value.nfc().collect()).map(Value::String),
+                "NFD" => self.string(value.nfd().collect()).map(Value::String),
+                _ => Err(error("ORNA-EVAL-VALUE")),
+            },
             ("lower", [Value::String(value)]) => {
                 self.string(value.to_lowercase()).map(Value::String)
             }
@@ -1647,7 +1653,8 @@ impl Context<'_, '_> {
             ("trim" | "lower" | "upper", [_])
             | ("split" | "starts_with" | "ends_with" | "contains", [_, _])
             | ("join", [_, _])
-            | ("replace", [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
+            | ("replace", [_, _, _])
+            | ("normalise", [_, _]) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -1908,6 +1915,7 @@ fn named_arguments(
         "ends_with" => &["value", "suffix"],
         "contains" => &["value", "needle"],
         "replace" => &["value", "from", "to"],
+        "normalise" => &["value", "form"],
         _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
     };
     if values.len() != expected.len() {
