@@ -19,7 +19,7 @@ use orna_syntax_v1::{
     AssignmentOperator, AssignmentTarget, ControlKind, Expr, LiteralKind, Parameter, Pattern,
     PatternField, ReplInput, Statement, StringSegment, parse_expression, parse_repl,
 };
-use orna_value_v1::Raw;
+use orna_value_v1::{CANONICAL_NAN_BITS, Raw, float_max, float_min, float_ordinary_eq};
 use unicode_normalization::UnicodeNormalization;
 
 mod admitted_repl;
@@ -719,7 +719,11 @@ impl Value {
             }
             Raw::Bool(value) => Ok(Self::Bool(*value)),
             Raw::Int(value) => context.integer(value.clone()).map(Self::Int),
-            Raw::Float(bits) if f64::from_bits(*bits).is_finite() => Ok(Self::Float(*bits)),
+            Raw::Float(bits)
+                if f64::from_bits(*bits).is_finite() || *bits == CANONICAL_NAN_BITS =>
+            {
+                Ok(Self::Float(*bits))
+            }
             Raw::Text(value) => context.string(value.clone()).map(Self::String),
             Raw::Array(values) => {
                 context.items(values.len())?;
@@ -1455,7 +1459,10 @@ impl Context<'_, '_> {
             if left.contains_callable() || right.contains_callable() {
                 return Err(error("ORNA-EVAL-UNSUPPORTED"));
             }
-            let equal = left == right;
+            let equal = match (&left, &right) {
+                (Value::Float(left), Value::Float(right)) => float_ordinary_eq(*left, *right),
+                _ => left == right,
+            };
             return Ok(Value::Bool(if op == "==" { equal } else { !equal }));
         }
         if matches!((&left, &right), (Value::Range { .. }, Value::Range { .. })) {
@@ -2183,11 +2190,29 @@ impl Context<'_, '_> {
     }
     fn sum(&self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
+        if values.iter().all(|value| matches!(value, Value::Float(_))) && !values.is_empty() {
+            let mut total = match values.first() {
+                Some(Value::Float(value)) => f64::from_bits(*value),
+                _ => unreachable!("non-empty all-float list has a first Float"),
+            };
+            for value in &values[1..] {
+                let Value::Float(value) = value else {
+                    unreachable!("all-float list was checked above")
+                };
+                total += f64::from_bits(*value);
+            }
+            return Ok(Value::Float(if total.is_nan() {
+                CANONICAL_NAN_BITS
+            } else {
+                total.to_bits()
+            }));
+        }
         let mut total = BigInt::ZERO;
         for value in values {
             let Value::Int(value) = value else {
-                // Decimal, Float, Money and affine quantities remain outside
-                // this evaluator slice until their runtime contracts exist.
+                // Decimal, mixed numeric kinds, Money and affine quantities
+                // remain outside this evaluator slice until their runtime
+                // contracts exist.
                 return Err(error("ORNA-EVAL-UNSUPPORTED"));
             };
             total = self.integer(&total + value)?;
@@ -2196,12 +2221,27 @@ impl Context<'_, '_> {
     }
     fn extreme(&self, name: &str, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
+        if values.iter().all(|value| matches!(value, Value::Float(_))) {
+            let bits = values
+                .iter()
+                .map(|value| match value {
+                    Value::Float(bits) => *bits,
+                    _ => unreachable!("all-float list was checked above"),
+                })
+                .collect::<Vec<_>>();
+            let result = if name == "min" {
+                float_min(&bits)
+            } else {
+                float_max(&bits)
+            };
+            return Ok(result.map_or(Value::Null, |value| {
+                Value::Option(Some(Box::new(Value::Float(value))))
+            }));
+        }
         let mut candidate = None;
         for value in values {
             let Value::Int(value) = value else {
-                // Float total-order, Decimal, Money and affine aggregation
-                // remain outside this evaluator slice until their runtime
-                // contracts exist. Mixed or otherwise invalid element shapes
+                // Mixed numeric kinds, Decimal, Money and affine aggregation
                 // fail closed rather than receiving incidental host ordering.
                 return Err(error("ORNA-EVAL-UNSUPPORTED"));
             };
