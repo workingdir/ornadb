@@ -2183,13 +2183,14 @@ impl SessionDeletionAdapter for HostDeletion {
     type Error = ();
 
     fn delete(&mut self, session: SessionId) -> Result<(), Self::Error> {
+        // Obtain the application owner before mutating the retained lease
+        // records. A failed ownership proof must leave the adapter retryable
+        // and cannot create an idempotency record for incomplete cleanup.
+        let mut application = self.application.try_borrow_mut().map_err(|_| ())?;
+        let application = application.as_mut().ok_or(())?;
         let expires_at = self.expiries.borrow_mut().remove(&session).ok_or(())?;
         self.deleted_leases.borrow_mut().insert(session, expires_at);
-        self.application
-            .borrow_mut()
-            .as_mut()
-            .ok_or(())?
-            .remove(session);
+        application.remove(session);
         Ok(())
     }
 }
@@ -2286,7 +2287,7 @@ mod tests {
         DeletedLeaseIndex, HostDeletion, SharedApplication, duration_milliseconds,
         expired_delete_response,
     };
-    use orna_security_v1::SessionId;
+    use orna_security_v1::{SessionDeletionAdapter, SessionId};
     use std::time::Duration;
     use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
@@ -2318,5 +2319,21 @@ mod tests {
         assert!(!deletion.expired_deleted_lease(&request, 99));
         assert!(deletion.expired_deleted_lease(&request, 100));
         assert_eq!(expired_delete_response().status, 410);
+    }
+
+    #[test]
+    fn unavailable_application_does_not_partially_delete_session_lease() {
+        let session = SessionId::new([8; 16]);
+        let expiries = Rc::new(RefCell::new(BTreeMap::from([(session, 100)])));
+        let deleted_leases: DeletedLeaseIndex = Rc::new(RefCell::new(BTreeMap::new()));
+        let mut deletion = HostDeletion {
+            expiries: Rc::clone(&expiries),
+            deleted_leases: Rc::clone(&deleted_leases),
+            application: Rc::new(RefCell::new(None)) as SharedApplication,
+        };
+
+        assert_eq!(deletion.delete(session), Err(()));
+        assert_eq!(expiries.borrow().get(&session), Some(&100));
+        assert!(deleted_leases.borrow().is_empty());
     }
 }
