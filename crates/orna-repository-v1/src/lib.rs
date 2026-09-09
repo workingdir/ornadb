@@ -2066,6 +2066,8 @@ impl Repository {
         }
 
         validate(self, plan).map_err(CheckoutExecutionError::Validation)?;
+        self.verify_checkout_preflight_locked(plan)
+            .map_err(CheckoutExecutionError::Repository)?;
 
         let mut command = self.command();
         match plan.target() {
