@@ -1048,6 +1048,117 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
 }
 
 #[test]
+fn std_collection_first_returns_only_the_head_of_a_finite_list() {
+    for (expression, expected) in [
+        ("first([0, 1, 2])", Value::int(0.into())),
+        ("std.collection.first([1, 2, 3])", Value::int(1.into())),
+        ("std.collection.first([])", Value::new(Raw::Null).unwrap()),
+        ("[3, 4, 5] | first()", Value::int(3.into())),
+        ("[4, 5, 6] | std.collection.first()", Value::int(4.into())),
+        ("first(rows: [7, 8, 9])", Value::int(7.into())),
+        (
+            "std.collection.first(rows: [8, 9, 10])",
+            Value::int(8.into()),
+        ),
+    ] {
+        assert_eq!(
+            evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
+            expected,
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        call_module(
+            "fn pick(rows: [Int]) = first(rows);",
+            "pick([10, 11, 12])",
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(10.into())
+    );
+}
+
+#[test]
+fn std_collection_first_is_callback_free_and_bounded() {
+    for (expression, expected) in [
+        ("std.collection.first(1)", "ORNA-EVAL-TYPE"),
+        (
+            "std.collection.first([1], value => value / 0)",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            "std.collection.first(rows: [1], callback: value => value)",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        ("std.collection.first(values: [1])", "ORNA-EVAL-UNSUPPORTED"),
+        ("std.collection.first()", "ORNA-EVAL-UNSUPPORTED"),
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            expected,
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        evaluate_expression(
+            "std.collection.first([13])",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 1,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+        Value::int(13.into())
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.first([13])",
+            &Environment::new(),
+            Limits {
+                max_steps: 1,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn root_first_dispatch_respects_local_function_and_relation_shadowing() {
+    assert_eq!(
+        call_module(
+            "fn first(value: Int) = value + 100; fn run() = first(1);",
+            "run()",
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(101.into())
+    );
+    assert_eq!(
+        evaluate_expression(
+            "if true { let first = value => value + 100; first(1) } else { 0 }",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(101.into())
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "Note.first()",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-NAME"
+    );
+}
+
+#[test]
 fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
     for (expression, expected) in [
         ("std.collection.chunk([1], 0)", "ORNA-EVAL-VALUE"),

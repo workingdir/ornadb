@@ -2036,6 +2036,7 @@ impl Context<'_, '_> {
             }
             ("union", [Value::List(left), Value::List(right)]) => self.union(left, right),
             ("count", [Value::List(values)]) => self.count(values),
+            ("first", [Value::List(values)]) => self.first(values),
             ("take", [Value::List(values), Value::Int(count)]) => self.take(values, count),
             ("drop", [Value::List(values), Value::Int(count)]) => self.drop(values, count),
             ("map", [Value::List(values), transform]) => self.map(values, transform, depth),
@@ -2071,7 +2072,7 @@ impl Context<'_, '_> {
                 self.windows(values, size, step)
             }
             ("chunk", [_, _])
-            | ("flatten" | "distinct" | "unique" | "pairs" | "count", [_])
+            | ("flatten" | "distinct" | "unique" | "pairs" | "count" | "first", [_])
             | ("count", [_, _])
             | ("union", [_, _])
             | ("take", [_, _])
@@ -2161,6 +2162,9 @@ impl Context<'_, '_> {
     fn count(&self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
         Ok(Value::Int(BigInt::from(values.len())))
+    }
+    fn first(&self, values: &[Value]) -> Result<Value, EvaluationError> {
+        Ok(values.first().cloned().unwrap_or(Value::Null))
     }
     fn take(&self, values: &[Value], count: &BigInt) -> Result<Value, EvaluationError> {
         if count.is_negative() {
@@ -2676,6 +2680,7 @@ fn named_arguments(
         "normalise" => &["value", "form"],
         "chunk" => &["values", "size"],
         "flatten" | "distinct" | "unique" | "pairs" | "count" => &["values"],
+        "first" => &["rows"],
         "union" => &["left", "right"],
         "take" => &["values", "count"],
         "drop" => &["values", "count"],
@@ -2741,7 +2746,7 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
     let Expr::Name { text, .. } = expression else {
         return None;
     };
-    matches!(text.as_str(), "map" | "flat_map").then_some(text.as_str())
+    matches!(text.as_str(), "first" | "map" | "flat_map").then_some(text.as_str())
 }
 
 fn standard_name<'a>(expression: &'a Expr, module: &str) -> Option<&'a str> {
