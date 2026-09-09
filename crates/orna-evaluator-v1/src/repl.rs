@@ -195,11 +195,16 @@ impl ReplSession {
             reject_unhandled_field_calls: true,
             effects: None,
             namespace: None,
+            transfer: None,
         };
         context.items(self.functions.len())?;
         let mut scope = Scope::from_environment(&environment, &mut context)?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
-        context.evaluate(expression, &mut scope, 0)?.canonical()
+        let value = context.evaluate(expression, &mut scope, 0)?;
+        if context.transfer.is_some() {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        value.canonical()
     }
 
     fn declare(&mut self, declaration: Declaration) -> Result<(), EvaluationError> {
@@ -294,10 +299,14 @@ impl ReplSession {
             reject_unhandled_field_calls: true,
             effects: None,
             namespace: None,
+            transfer: None,
         };
         let mut scope = Scope::from_environment(&environment, &mut context)?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
         let value = context.evaluate(expression, &mut scope, 0)?;
+        if context.transfer.is_some() {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
         let names = pattern_names(pattern);
         let matched = bind(pattern, value, &mut scope, &context, 1)?;
         drop(context);
