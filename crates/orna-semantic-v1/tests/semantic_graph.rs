@@ -1,8 +1,8 @@
 use orna_semantic_v1::{
-    Catalogue, DIAG_AMBIGUOUS, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_ONE_TABLE,
-    DIAG_ASSERTION_SCOPE, DIAG_IMPORT, DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_RESERVED,
-    DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED, ModuleInput, StandardDependencyProfile, Type,
-    analyze, analyze_with_catalogue,
+    Catalogue, DIAG_AMBIGUOUS, DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT,
+    DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, DIAG_IMPORT, DIAG_LEGACY_SYS_RUNTIME,
+    DIAG_LEGACY_TRYFROM, DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED, ModuleInput,
+    StandardDependencyProfile, Type, analyze, analyze_with_catalogue,
 };
 
 fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
@@ -3180,6 +3180,38 @@ fn finite_list_integer_min_max_reject_unsupported_shapes_and_preserve_relation_b
             ),
             "{name}: {:?}",
             module.symbols[name].ty
+        );
+    }
+}
+
+#[test]
+fn root_relation_aggregates_respect_shadowed_bindings() {
+    for (operation, terminal) in [
+        ("map", "sum"),
+        ("min", "min()"),
+        ("max", "max()"),
+        ("sum", "sum"),
+    ] {
+        let result = analyze(&[ModuleInput::new(
+            format!("shadowed-{operation}.orna"),
+            format!(
+                r#"
+                    table Reading(id: Int) {{ value: Int, }}
+                    fn {operation}(values: Int): Int = 99;
+                    pub fn aggregate() =
+                        Reading | map(reading => reading.value) | {terminal};
+                "#
+            ),
+        )]);
+        assert!(
+            has(&result, DIAG_TYPE),
+            "{operation}: {:?}",
+            result.diagnostics
+        );
+        assert!(
+            !has(&result, DIAG_ANNOTATION),
+            "{operation}: {:?}",
+            result.diagnostics
         );
     }
 }
