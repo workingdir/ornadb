@@ -4801,10 +4801,14 @@ fn infer_success_pipeline(
     if let Expr::Call {
         callee, arguments, ..
     } = rhs
-        && matches!(callee.as_ref(), Expr::Name { text, .. } if text == "take")
+        && matches!(callee.as_ref(), Expr::Name { text, .. } if text == "take" || text == "drop")
         && let Type::List(element) = &input.ty
     {
         let mut effects = input.effects;
+        let operation = match callee.as_ref() {
+            Expr::Name { text, .. } => text.as_str(),
+            _ => unreachable!("pipeline collection operation must be named"),
+        };
         let ty = match arguments.as_slice() {
             [argument] if argument.name.is_none() => {
                 let count = infer(&argument.value, scope, local, diagnostics);
@@ -4812,15 +4816,24 @@ fn infer_success_pipeline(
                 if count.ty == Type::Int && !is_negative_integer_constant(&argument.value) {
                     Type::List(element.clone())
                 } else if count.ty == Type::Int {
-                    diagnostics.push(diag(DIAG_TYPE, "take count must be nonnegative"));
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        format!("{operation} count must be nonnegative"),
+                    ));
                     Type::Error
                 } else {
-                    diagnostics.push(diag(DIAG_TYPE, "take requires an integer count"));
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        format!("{operation} requires an integer count"),
+                    ));
                     Type::Error
                 }
             }
             _ => {
-                diagnostics.push(diag(DIAG_TYPE, "take requires one integer count"));
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("{operation} requires one integer count"),
+                ));
                 Type::Error
             }
         };
