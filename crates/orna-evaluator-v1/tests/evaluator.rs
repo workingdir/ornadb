@@ -1256,6 +1256,179 @@ fn std_collection_sum_rejects_unsupported_numeric_kinds_and_shapes() {
 }
 
 #[test]
+fn std_collection_min_and_max_accept_integer_lists_in_all_call_forms() {
+    let values = "[9007199254740993, -9007199254740993, 7, -9007199254740993]";
+    let expected_min = Value::option(Some(Value::int((-9007199254740993_i64).into()))).unwrap();
+    let expected_max = Value::option(Some(Value::int(9007199254740993_i64.into()))).unwrap();
+
+    for (name, expected) in [("min", expected_min), ("max", expected_max)] {
+        for expression in [
+            format!("{name}({values})"),
+            format!("std.collection.{name}({values})"),
+            format!("{name}(rows: {values})"),
+            format!("std.collection.{name}(rows: {values})"),
+            format!("{values} | {name}"),
+            format!("{values} | {name}()"),
+            format!("{values} | std.collection.{name}"),
+            format!("{values} | std.collection.{name}()"),
+        ] {
+            assert_eq!(evaluate(&expression), expected, "{expression}");
+        }
+    }
+
+    let source =
+        "fn lowest(rows: [Int]) = min(rows); fn highest(rows: [Int]) = std.collection.max(rows);";
+    assert_eq!(
+        call_module(source, "lowest([3, 1, 2])", Limits::default()).unwrap(),
+        Value::option(Some(Value::int(1.into()))).unwrap()
+    );
+    assert_eq!(
+        call_module(source, "highest([3, 1, 2])", Limits::default()).unwrap(),
+        Value::option(Some(Value::int(3.into()))).unwrap()
+    );
+}
+
+#[test]
+fn std_collection_min_and_max_use_exact_integer_order_and_first_ties() {
+    assert_eq!(
+        evaluate("min([5, 1, 1, 9])"),
+        Value::option(Some(Value::int(1.into()))).unwrap()
+    );
+    assert_eq!(
+        evaluate("max([5, 9, 9, 1])"),
+        Value::option(Some(Value::int(9.into()))).unwrap()
+    );
+    assert_eq!(evaluate("min([])"), Value::new(Raw::Null).unwrap());
+    assert_eq!(evaluate("max([])"), Value::new(Raw::Null).unwrap());
+    assert_eq!(evaluate("[] | min()"), Value::new(Raw::Null).unwrap());
+    assert_eq!(
+        evaluate("std.collection.max(rows: [])"),
+        Value::new(Raw::Null).unwrap()
+    );
+}
+
+#[test]
+fn std_collection_min_and_max_optional_results_match_some_null_and_coalesce() {
+    for (expression, expected) in [
+        (
+            "case min([3, 1, 2]) { Some(value): value, null: 0 }",
+            Value::int(1.into()),
+        ),
+        (
+            "case max([3, 1, 2]) { Some(value): value, null: 0 }",
+            Value::int(3.into()),
+        ),
+        (
+            "case min([]) { Some(value): value, null: 10 }",
+            Value::int(10.into()),
+        ),
+        (
+            "case max([]) { Some(value): value, null: 10 }",
+            Value::int(10.into()),
+        ),
+        ("min([3, 1, 2]) ?? 10", Value::int(1.into())),
+        ("max([3, 1, 2]) ?? 10", Value::int(3.into())),
+        ("min([]) ?? 10", Value::int(10.into())),
+        ("max([]) ?? 10", Value::int(10.into())),
+        ("min([3, 1, 2]) ?? (1 / 0)", Value::int(1.into())),
+        ("max([3]) ?? (1 / 0)", Value::int(3.into())),
+    ] {
+        assert_eq!(evaluate(expression), expected, "{expression}");
+    }
+}
+
+#[test]
+fn std_collection_min_and_max_fail_closed_for_unsupported_kinds_shapes_and_limits() {
+    for expression in [
+        "min([1.0f, 0.0f])",
+        "std.collection.max([1.0f, 0.0f])",
+        "min([1.0])",
+        "std.collection.max([1.0])",
+        "std.collection.max([1, true])",
+        "min(1)",
+        "std.collection.max(1)",
+        "std.collection.max()",
+        "std.collection.min(values: [1])",
+        "min([1], value => value / 0)",
+    ] {
+        let expected = if matches!(expression, "min(1)" | "std.collection.max(1)") {
+            "ORNA-EVAL-TYPE"
+        } else {
+            "ORNA-EVAL-UNSUPPORTED"
+        };
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            expected,
+            "{expression}"
+        );
+    }
+
+    let currency = Raw::Tag(37, Box::new(Raw::Bytes(vec![0; 16])));
+    let affine = Raw::Tag(
+        60006,
+        Box::new(Raw::Array(vec![Raw::Int(1.into()), currency.clone()])),
+    );
+    let money = Raw::Tag(
+        60007,
+        Box::new(Raw::Array(vec![
+            Raw::Tag(
+                60000,
+                Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(0.into())])),
+            ),
+            currency,
+        ])),
+    );
+    for raw in [affine, money] {
+        let environment =
+            Environment::from([("rows".into(), Value::new(Raw::Array(vec![raw])).unwrap())]);
+        for operation in ["min", "max"] {
+            assert_eq!(
+                code(evaluate_expression(
+                    &format!("{operation}(rows)"),
+                    &environment,
+                    Limits::default(),
+                )),
+                "ORNA-EVAL-UNSUPPORTED"
+            );
+        }
+    }
+
+    for (expression, limits) in [
+        (
+            "min([3, 2, 1])",
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        ),
+        (
+            "std.collection.max([1])",
+            Limits {
+                max_steps: 1,
+                ..Limits::default()
+            },
+        ),
+        (
+            "min([1000])",
+            Limits {
+                max_integer_digits: 3,
+                ..Limits::default()
+            },
+        ),
+    ] {
+        assert_eq!(
+            code(evaluate_expression(expression, &Environment::new(), limits)),
+            "ORNA-EVAL-LIMIT",
+            "{expression}"
+        );
+    }
+}
+
+#[test]
 fn std_collection_one_accepts_predicate_free_direct_pipeline_named_and_function_calls() {
     let expected = Value::int(7.into());
     for expression in [
