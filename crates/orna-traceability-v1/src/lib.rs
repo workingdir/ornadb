@@ -1110,6 +1110,46 @@ mod tests {
         assert_eq!(scenario.status, Status::JustifiedGap);
     }
     #[test]
+    fn scenario_witnesses_reject_requirements_not_declared_by_the_scenario() {
+        let root = corpus();
+        let harness = orna_conformance_v1::Harness::new(
+            orna_conformance_v1::Corpus::load(&root).expect("conformance corpus loads"),
+        );
+        let mut adapter = orna_conformance_v1::RuntimeAdapter::new(
+            orna_conformance_v1::BoundedEvaluator::default(),
+        );
+        let mut conformance_report = harness.run(&mut adapter);
+        conformance_report
+            .implementation_claim
+            .executed_scenario_contracts
+            .push("LET-REBIND-091".into());
+        let binding = orna_conformance_v1::ScenarioExecutionBinding {
+            requirement_id: "ORNA-EVIDENCE-001".into(),
+            scenario_id: "LET-REBIND-091".into(),
+            implementation_ref: "orna.bounded-expression-runtime.let-rebinding".into(),
+            test_ref: "conformance.runtime_scenarios.let_rebinding".into(),
+        };
+
+        let error = harness
+            .scenario_execution_witnesses(&conformance_report, &[binding])
+            .expect_err("unrelated requirement cannot acquire scenario evidence");
+        assert_eq!(error, "scenario requirement mismatch: LET-REBIND-091");
+
+        let report = generate(&root).expect("unbound report remains valid");
+        let requirement = report
+            .requirements
+            .iter()
+            .find(|requirement| requirement.requirement_id == "ORNA-EVIDENCE-001")
+            .expect("published requirement");
+        assert_eq!(requirement.status, Status::JustifiedGap);
+        let scenario = report
+            .behavioral_scenarios
+            .iter()
+            .find(|scenario| scenario.scenario_id == "LET-REBIND-091")
+            .expect("published scenario");
+        assert_eq!(scenario.status, Status::JustifiedGap);
+    }
+    #[test]
     fn reproducible() {
         assert_eq!(
             generate(corpus()).expect("one"),
