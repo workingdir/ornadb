@@ -1446,6 +1446,65 @@ fn evaluates_local_assignments_and_finite_list_for_mutations() {
 }
 
 #[test]
+fn executes_function_and_finite_for_control_transfers() {
+    assert_eq!(
+        invoke(
+            "fn early() { return 7; 9 }",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(7.into())
+    );
+    assert_eq!(
+        evaluate(
+            "if true { let total = 0; for value in [1, 2, 3, 4] { total += value; if value == 2 { break; }; }; total }"
+        ),
+        Value::int(3.into())
+    );
+    assert_eq!(
+        evaluate(
+            "if true { let total = 0; for value in 1..=4 { if value == 2 { continue; }; total += value; }; total }"
+        ),
+        Value::int(8.into())
+    );
+    assert_eq!(
+        evaluate(
+            "if true { let total = 0; for outer in [1, 2] { for inner in [1, 2] { if inner == 1 { continue; }; total += outer; break; }; }; total }"
+        ),
+        Value::int(3.into())
+    );
+}
+
+#[test]
+fn transfer_boundaries_reject_loop_transfers_from_a_called_lambda() {
+    assert_eq!(
+        code(call_module(
+            "fn outer() { for value in [1] { let stop = () => { break; }; stop(); }; 0 }",
+            "outer()",
+            Limits::default(),
+        )),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "if true { return 1; 0 }",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "if true { for value in [1] { break 1; }; 0 }",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
+}
+
+#[test]
 fn integer_ranges_are_canonical_membership_values_and_finite_iterables() {
     let half_open = Value::new(Raw::Tag(
         60019,
