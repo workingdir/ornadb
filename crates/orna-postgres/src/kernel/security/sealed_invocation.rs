@@ -1613,6 +1613,32 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn terminal_retries_preserve_every_closed_lifecycle_disposition() {
+        // INVOKE-1 step 7 allows one terminal outcome only.  In particular, a
+        // retry after reopen may acknowledge the same retained disposition,
+        // but must never turn success, an ordinary failure, cancellation, or
+        // owner loss into another terminal outcome.
+        let terminals = [
+            SealedInvocationLifecycleTerminal::Succeeded,
+            SealedInvocationLifecycleTerminal::Failed(SealedInvocationFailureClass::Bind),
+            SealedInvocationLifecycleTerminal::Failed(SealedInvocationFailureClass::Target),
+            SealedInvocationLifecycleTerminal::Failed(SealedInvocationFailureClass::Internal),
+            SealedInvocationLifecycleTerminal::Cancelled,
+            SealedInvocationLifecycleTerminal::Orphaned,
+        ];
+
+        for retained in terminals {
+            for requested in terminals {
+                assert_eq!(
+                    sealed_invocation_terminal_matches(retained.fields(), requested.fields()),
+                    retained == requested,
+                    "a retained terminal disposition must be absorbing"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn orphaned_terminal_is_closed_and_distinct_from_cancellation() {
         let orphaned = SealedInvocationLifecycleTerminal::Orphaned.fields();
         let cancelled = SealedInvocationLifecycleTerminal::Cancelled.fields();
