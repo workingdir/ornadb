@@ -1184,6 +1184,23 @@ mod tests {
     }
 
     #[test]
+    fn durable_sys_projection_does_not_substitute_implementation_ids_for_catalogue_references() {
+        let admitted = capture(1);
+        let retained = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
+        let expected = retained.durable_sys_projection().unwrap();
+
+        let mut different_private_ids = retained;
+        different_private_ids.function = FunctionId::from_bytes([9; 16]);
+        different_private_ids.arguments[0].type_kind =
+            SealedInvocationArgumentTypeKind::Named(orna_core::TypeId::from_bytes([8; 16]));
+
+        assert_eq!(
+            different_private_ids.durable_sys_projection().unwrap(),
+            expected
+        );
+    }
+
+    #[test]
     fn durable_sys_projection_collection_preserves_retained_order_without_mutation() {
         let retained = vec![
             observation(&capture(1), 3, SealedInvocationObservationStatus::Running),
