@@ -615,3 +615,35 @@ fn module_every_exists_assertion_permits_atomic_cross_table_publication() {
         .committed_row("Loan", &Value::int(1.into()))
         .is_some());
 }
+
+#[test]
+fn table_assertions_precede_module_assertions_and_abort_the_candidate_database() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let unit = SourceUnit {
+        fixture_id: "assertion-order".into(),
+        source_id: "assertion-order.orna".into(),
+        parse_as: "module_unit".into(),
+        source: r#"
+            pub table Book(id: Int) {
+                title: Str,
+                assert every(book => book.title != "");
+            }
+            pub table Loan(id: Int) { book_id: Int, }
+            assert every(Loan, loan => exists(Book, book => book.id == loan.book_id));
+            fn parent() {
+                Book.insert({ id: 7, title: "" });
+                Loan.insert({ id: 1, book_id: 8 });
+            }
+        "#
+        .into(),
+    };
+
+    let outcome = runtime.execute_source(&unit);
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+    ));
+    assert_eq!(runtime.committed_row("Book", &Value::int(7.into())), None);
+    assert_eq!(runtime.committed_row("Loan", &Value::int(1.into())), None);
+}
