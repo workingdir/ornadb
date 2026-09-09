@@ -841,6 +841,32 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
+            "std.collection.split_when([1, 2, 3, 4, 5], value => value % 2 == 0)",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(1.into())]),
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
+                Raw::Array(vec![Raw::Int(4.into()), Raw::Int(5.into())]),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "[1, 2, 3] | std.collection.split_when(predicate: value => value == 1)",
+            Value::new(Raw::Array(vec![Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Int(2.into()),
+                Raw::Int(3.into()),
+            ])]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.split_when(predicate: value => value == 2, values: [1, 2, 3])",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(1.into())]),
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
+            ]))
+            .unwrap(),
+        ),
+        (
             "std.collection.group_by([31, 12, 22, 13, 33], value => value % 10)",
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![
@@ -960,6 +986,23 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
             "ORNA-EVAL-UNSUPPORTED",
         ),
         (
+            "std.collection.split_when(1, value => true)",
+            "ORNA-EVAL-TYPE",
+        ),
+        ("std.collection.split_when([1], 1)", "ORNA-EVAL-TYPE"),
+        (
+            "std.collection.split_when([1], value => 1)",
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            "std.collection.split_when([1], () => true)",
+            "ORNA-EVAL-ARGUMENT",
+        ),
+        (
+            "std.collection.split_when([1], value => true, extra: value => true)",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
             "std.collection.group_by(1, value => value)",
             "ORNA-EVAL-TYPE",
         ),
@@ -1038,6 +1081,39 @@ fn std_collection_partition_accepts_lawful_predicates_and_enforces_limits() {
     assert_eq!(
         code(evaluate_expression(
             "std.collection.partition([1, 2, 3], value => true)",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn std_collection_split_when_accepts_functions_and_enforces_limits() {
+    let source = "fn boundary(value: Int) = value % 2 == 0; fn run() = std.collection.split_when([1, 2, 3, 4], boundary);";
+    assert_eq!(
+        call_module(source, "run()", Limits::default()).unwrap(),
+        Value::new(Raw::Array(vec![
+            Raw::Array(vec![Raw::Int(1.into())]),
+            Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
+            Raw::Array(vec![Raw::Int(4.into())]),
+        ]))
+        .unwrap()
+    );
+    assert_eq!(
+        code(call_module(
+            "fn bad(value: Int, other: Int) = true; fn run() = std.collection.split_when([1], bad);",
+            "run()",
+            Limits::default(),
+        )),
+        "ORNA-EVAL-ARGUMENT"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.split_when([1, 2, 3], value => true)",
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
