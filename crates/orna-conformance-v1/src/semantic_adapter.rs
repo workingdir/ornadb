@@ -1021,6 +1021,23 @@ impl TransactionalEvaluator {
         table_assertions: &TableAssertions,
         module_assertions: &[Expr],
     ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
+        self.execute_admitted_with_arguments(
+            functions,
+            key_fields,
+            table_assertions,
+            module_assertions,
+            &Environment::new(),
+        )
+    }
+
+    fn execute_admitted_with_arguments(
+        &mut self,
+        functions: &Functions,
+        key_fields: &TableKeys,
+        table_assertions: &TableAssertions,
+        module_assertions: &[Expr],
+        arguments: &Environment,
+    ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
         let entry = self.entry.clone();
         let limits = self.limits;
         let mut mutations = Vec::new();
@@ -1032,17 +1049,12 @@ impl TransactionalEvaluator {
                 mutations: &mut mutations,
                 next_mutation: 0,
             };
-            invoke_named_with_effects(
-                &entry,
-                &functions,
-                &Environment::new(),
-                limits,
-                &mut effects,
+            invoke_named_with_effects(&entry, &functions, arguments, limits, &mut effects).and_then(
+                |_| {
+                    validate_table_assertions(activation, table_assertions, &functions, limits)?;
+                    validate_module_assertions(activation, module_assertions, &functions, limits)
+                },
             )
-            .and_then(|_| {
-                validate_table_assertions(activation, table_assertions, &functions, limits)?;
-                validate_module_assertions(activation, module_assertions, &functions, limits)
-            })
         });
         match result {
             Ok(()) => Ok(mutations),
@@ -1482,6 +1494,33 @@ impl DurableTransactionalEvaluator {
         project: &ProjectUnit,
         root_entry: &str,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+        self.execute_project_with_arguments(
+            repository,
+            identity,
+            owner_id,
+            initial_digest,
+            project,
+            root_entry,
+            &Environment::new(),
+        )
+        .await
+    }
+
+    /// Executes one admitted project activation with canonical named arguments.
+    ///
+    /// The argument map crosses this bounded adapter only after project
+    /// admission. It is retained solely for the root invocation and does not
+    /// grant a caller access to a different module, function, or transaction.
+    pub async fn execute_project_with_arguments(
+        &self,
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        owner_id: [u8; 16],
+        initial_digest: [u8; 32],
+        project: &ProjectUnit,
+        root_entry: &str,
+        arguments: &Environment,
+    ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
         if !root_entry.contains('.') {
             return Ok(StageOutcome::Skipped {
                 reason: "project transaction roots must be namespace-qualified".into(),
@@ -1500,13 +1539,14 @@ impl DurableTransactionalEvaluator {
                 reason: "project transaction admission does not run stream roots; use the explicit finite-list stream seam".into(),
             });
         }
-        self.execute_admitted_project(
+        self.execute_admitted_project_with_arguments(
             repository,
             identity,
             owner_id,
             initial_digest,
             root_entry,
             admitted,
+            arguments,
         )
         .await
     }
@@ -1560,7 +1600,7 @@ impl DurableTransactionalEvaluator {
         }
     }
 
-    async fn execute_admitted_project(
+    async fn execute_admitted_project_with_arguments(
         &self,
         repository: &Repository,
         identity: RuntimeIdentity,
@@ -1568,6 +1608,7 @@ impl DurableTransactionalEvaluator {
         initial_digest: [u8; 32],
         entry: &str,
         admitted: AdmittedTransaction,
+        arguments: &Environment,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
         let (functions, key_fields, table_assertions, module_assertions) = admitted;
         let state = RuntimeState::open(repository, identity, initial_digest).await?;
@@ -1582,11 +1623,12 @@ impl DurableTransactionalEvaluator {
                 evaluator.seed_committed(table.clone(), key.clone(), row)?;
             }
         }
-        let mutations = match evaluator.execute_admitted(
+        let mutations = match evaluator.execute_admitted_with_arguments(
             &functions,
             &key_fields,
             &table_assertions,
             &module_assertions,
+            arguments,
         ) {
             Ok(mutations) => mutations,
             Err(diagnostic) => return Ok(StageOutcome::Failed(*diagnostic)),
