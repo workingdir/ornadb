@@ -7519,8 +7519,32 @@ async fn sync_stream_observation_update_tx(
 ) -> Result<u64, RuntimeError> {
     let code = update.diagnostic.map(|value| encode_code(value.code));
     let class = update.diagnostic.map(|value| encode_class(value.class));
-    let changed = connection.execute("UPDATE sys_stream_observation SET status = COALESCE(?2, status), items_seen = items_seen + ?3, items_committed = items_committed + ?4, items_failed = items_failed + ?5, checkpoint_version = COALESCE(?6, checkpoint_version), last_failure_identity = COALESCE(?7, last_failure_identity), last_item_ms = CASE WHEN ?3 + ?4 + ?5 > 0 THEN ?8 ELSE last_item_ms END, diagnostic_code = COALESCE(?9, diagnostic_code), diagnostic_class = COALESCE(?10, diagnostic_class), observed_ms = ?8 WHERE checkpoint_key_id = ?1", params![stream_key_id(key), update.status.map(stream_observation_status_code), update.seen, update.committed, update.failed, update.checkpoint.map(|value| i64::try_from(value).map_err(|_| RuntimeError::RecoveryInvalid)).transpose()?, update.last_failure, now_ms()?, code, class]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
-    Ok(changed)
+    let key_id = stream_key_id(key);
+    let changed = connection.execute("UPDATE sys_stream_observation SET status = COALESCE(?2, status), items_seen = items_seen + ?3, items_committed = items_committed + ?4, items_failed = items_failed + ?5, checkpoint_version = COALESCE(?6, checkpoint_version), last_failure_identity = COALESCE(?7, last_failure_identity), last_item_ms = CASE WHEN ?3 + ?4 + ?5 > 0 THEN ?8 ELSE last_item_ms END, diagnostic_code = COALESCE(?9, diagnostic_code), diagnostic_class = COALESCE(?10, diagnostic_class), observed_ms = ?8 WHERE checkpoint_key_id = ?1 AND status NOT IN (?11, ?12, ?13) AND run_id IN (SELECT run_id FROM sys_run_observation WHERE status IN (?14, ?15) AND ended_ms IS NULL)", params![key_id.clone(), update.status.map(stream_observation_status_code), update.seen, update.committed, update.failed, update.checkpoint.map(|value| i64::try_from(value).map_err(|_| RuntimeError::RecoveryInvalid)).transpose()?, update.last_failure, now_ms()?, code, class, stream_observation_status_code(StreamObservationStatus::Completed), stream_observation_status_code(StreamObservationStatus::Cancelled), stream_observation_status_code(StreamObservationStatus::Orphaned), run_status_code(RunObservationStatus::Starting), run_status_code(RunObservationStatus::Running)]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    if changed != 0 {
+        return Ok(changed);
+    }
+
+    let mut retained = connection
+        .query(
+            "SELECT 1 FROM sys_stream_observation WHERE checkpoint_key_id = ?1",
+            params![key_id],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if retained
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some()
+    {
+        // A retained observation must never turn an orphaned/completed
+        // stream back into a live state, and no delivery may advance after
+        // its parent run has reached a terminal boundary. The enclosing
+        // transaction rolls back the checkpoint and control mutation too.
+        return Err(RuntimeError::RequestStateConflict);
+    }
+    Ok(0)
 }
 
 async fn sync_run_request_state_tx(
@@ -18267,6 +18291,95 @@ mod tests {
         );
         assert!(restored.last_item_ms.is_some());
         assert!(!restored.live);
+    }
+
+    #[tokio::test]
+    async fn terminal_run_rejects_stale_delivery_before_checkpoint_or_counter_mutation() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(48)).await.unwrap();
+        let request = request(49, 50);
+        let fingerprint = digest(51);
+        let key = stream_delivery("terminal-run:one", "terminal-run:two").checkpoint_key();
+        let run = state
+            .begin_observed_request(
+                RunObservationRegistration {
+                    request,
+                    consumer_identity: key.consumer.clone(),
+                    function: "pkg.terminal-run".into(),
+                    source_identity: Some(key.source.as_str().to_owned()),
+                    invocation_id: id(52),
+                },
+                fingerprint,
+                writer,
+            )
+            .await
+            .unwrap()
+            .run
+            .unwrap();
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: None,
+                checkpoint: key.clone(),
+            })
+            .await
+            .unwrap();
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let lease = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Acquire {
+                delivery: stream_delivery("terminal-run:one", "terminal-run:two"),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected acquisition: {other:?}"),
+        };
+
+        state
+            .complete_observed_request_with_owner(request, fingerprint, writer, outcome(53))
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .stream_observation(stream.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            StreamObservationStatus::Orphaned
+        );
+
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Complete { lease, expected })
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+        let checkpoint = state.stream_checkpoint(&key).await.unwrap();
+        assert_eq!(checkpoint.version, 0);
+        assert_eq!(checkpoint.committed, None);
+        let retained = state.stream_observation(stream.id).await.unwrap().unwrap();
+        assert_eq!(retained.status, StreamObservationStatus::Orphaned);
+        assert_eq!((retained.items_seen, retained.items_committed), (1, 0));
+        assert_eq!(
+            state
+                .run_observation(run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .checkpoint_count,
+            0
+        );
     }
 
     #[tokio::test]
