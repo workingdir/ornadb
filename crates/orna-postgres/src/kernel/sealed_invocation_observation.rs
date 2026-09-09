@@ -590,19 +590,43 @@ async fn load_observation_by_id(
         &record,
     )?;
     let (started, ended) = decode_observation_timestamps(&row, &status, &record)?;
+    let catalogue_revision_bytes = catalogue_revision.to_bytes().to_vec();
+    let function_bytes = function.to_bytes().to_vec();
     let argument_rows = transaction
         .query(
-            "SELECT position, parameter_id, name, type_kind, scalar_type, \
-                    target_type_id, value_digest, redacted \
-             FROM _orna_kernel.sealed_invocation_argument_metadata \
-             WHERE invocation_id = $1 ORDER BY position ASC",
-            &[&invocation_bytes],
+            "SELECT metadata.position, metadata.parameter_id, metadata.name, \
+                    metadata.type_kind, metadata.scalar_type, metadata.target_type_id, \
+                    metadata.value_digest, metadata.redacted, \
+                    declared.parameter_id AS declared_parameter_id \
+             FROM _orna_kernel.sealed_invocation_argument_metadata AS metadata \
+             LEFT JOIN _orna_kernel.catalogue_function_parameters AS declared \
+               ON declared.catalogue_revision_id = $2 \
+              AND declared.function_id = $3 \
+              AND declared.parameter_id = metadata.parameter_id \
+              AND declared.ordinal = metadata.position \
+              AND declared.name = metadata.name \
+             WHERE metadata.invocation_id = $1 \
+             ORDER BY metadata.position ASC",
+            &[
+                &invocation_bytes,
+                &catalogue_revision_bytes,
+                &function_bytes,
+            ],
         )
         .await
         .map_err(PostgresKernelError::Database)?;
     let arguments = argument_rows
         .iter()
-        .map(|argument| decode_argument_observation(argument, &capture, invocation, &record))
+        .map(|argument| {
+            let observation = decode_argument_observation(argument, &capture, invocation, &record)?;
+            validate_argument_declaration_witness(
+                &observation,
+                observation_optional_id(argument, &record, "declared_parameter_id")?
+                    .map(orna_core::ParameterId::from_bytes),
+                &record,
+            )?;
+            Ok(observation)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     validate_argument_order(&arguments, &record)?;
     Ok(Some(SealedInvocationObservation {
@@ -881,6 +905,26 @@ fn validate_argument_parameter_identity(
         ));
     }
     Ok(())
+}
+
+/// Confirms that every retained child still denotes the exact declared
+/// parameter at the lifecycle row's pinned catalogue revision and function.
+/// The SQL join supplies this witness only when its identity, name, and
+/// declaration ordinal all agree; a missing witness is therefore not an
+/// absent optional field and must not become a public argument projection.
+fn validate_argument_declaration_witness(
+    argument: &SealedInvocationArgumentObservation,
+    declared_parameter: Option<orna_core::ParameterId>,
+    record: &str,
+) -> Result<(), PostgresKernelError> {
+    if declared_parameter == Some(argument.parameter) {
+        Ok(())
+    } else {
+        Err(observation_invariant(
+            record,
+            "argument observation must match its pinned declared parameter",
+        ))
+    }
 }
 
 /// Revalidates metadata that becomes visible in the redacted public argument
@@ -1459,6 +1503,26 @@ mod tests {
             });
 
         assert!(internal.durable_sys_projection().is_err());
+    }
+
+    #[test]
+    fn retained_argument_requires_a_matching_pinned_declaration_witness() {
+        let internal = observation(&capture(1), 2, SealedInvocationObservationStatus::Succeeded);
+        let argument = &internal.arguments[0];
+
+        assert!(
+            validate_argument_declaration_witness(argument, Some(argument.parameter), "test",)
+                .is_ok()
+        );
+        assert!(validate_argument_declaration_witness(argument, None, "test").is_err());
+        assert!(
+            validate_argument_declaration_witness(
+                argument,
+                Some(orna_core::ParameterId::from_bytes([9; 16])),
+                "test",
+            )
+            .is_err()
+        );
     }
 
     #[test]
