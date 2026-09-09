@@ -109,6 +109,41 @@ impl Limits {
     }
 }
 
+/// The activation-scoped evaluator step budget shared with handled effects.
+///
+/// Effect handlers may debit host-side work through the budget-aware hook on
+/// [`EffectHandler`]. Existing handlers that implement only [`EffectHandler::handle`]
+/// retain their previous behavior.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StepBudget {
+    remaining: u64,
+}
+
+impl StepBudget {
+    fn new(max_steps: u64) -> Self {
+        Self {
+            remaining: max_steps,
+        }
+    }
+
+    /// Debit work from this activation's remaining step budget.
+    pub fn debit(&mut self, steps: u64) -> Result<(), EvaluationError> {
+        if steps > self.remaining {
+            self.remaining = 0;
+            Err(error("ORNA-EVAL-LIMIT"))
+        } else {
+            self.remaining -= steps;
+            Ok(())
+        }
+    }
+
+    /// Return the remaining steps available to this activation.
+    #[must_use]
+    pub fn remaining(&self) -> u64 {
+        self.remaining
+    }
+}
+
 /// A deterministic name environment. Values must be canonical OVB-1 values.
 /// Qualified enum-label patterns resolve an exact `Type.variant` binding here;
 /// its enum type and variant identities are matched before payload fields bind.
@@ -166,6 +201,19 @@ pub trait EffectHandler {
         callee: &Expr,
         arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError>;
+
+    /// Handle an effect while sharing the activation's step budget.
+    ///
+    /// The default delegates to [`EffectHandler::handle`] so existing effect
+    /// handlers remain source-compatible and retain their prior behavior.
+    fn handle_with_budget(
+        &mut self,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+        _budget: &mut StepBudget,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.handle(callee, arguments)
+    }
 }
 
 /// Evaluate one expression using [`parse_expression`].
@@ -1689,11 +1737,19 @@ impl Context<'_, '_> {
                     .into_iter()
                     .map(Value::canonical)
                     .collect::<Result<Vec<_>, _>>()?;
-                let handled = self
+                let remaining = self.limits.max_steps.saturating_sub(self.steps);
+                let mut budget = StepBudget::new(remaining);
+                let result = self
                     .effects
                     .as_deref_mut()
                     .expect("checked effect handler")
-                    .handle(callee, &values)?;
+                    .handle_with_budget(callee, &values, &mut budget);
+                let debited = remaining - budget.remaining();
+                self.steps = self
+                    .steps
+                    .checked_add(debited)
+                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                let handled = result?;
                 if let Some(value) = handled {
                     return Value::from_canonical(&value, self, depth + 1);
                 }

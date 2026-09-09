@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use orna_evaluator_v1::{
-    EffectHandler, Environment, EvaluationError, Limits, evaluate_expression, evaluate_function,
-    evaluate_parsed, evaluate_repl, invoke_named, invoke_named_with_effects,
+    EffectHandler, Environment, EvaluationError, Limits, StepBudget, evaluate_expression,
+    evaluate_function, evaluate_parsed, evaluate_repl, invoke_named, invoke_named_with_effects,
 };
 use orna_syntax_v1::{Expr, Pattern, RecordField, Statement, SyntaxSpan};
 use orna_value_v1::{CANONICAL_NAN_BITS, Raw, Value};
@@ -112,6 +112,70 @@ impl EffectHandler for UnitEffects {
             Ok(None)
         }
     }
+}
+
+struct BudgetedEffects;
+
+impl EffectHandler for BudgetedEffects {
+    fn handle(
+        &mut self,
+        callee: &Expr,
+        arguments: &[Value],
+    ) -> Result<Option<Value>, EvaluationError> {
+        NoteEffects::default().handle(callee, arguments)
+    }
+
+    fn handle_with_budget(
+        &mut self,
+        callee: &Expr,
+        arguments: &[Value],
+        budget: &mut StepBudget,
+    ) -> Result<Option<Value>, EvaluationError> {
+        budget.debit(1)?;
+        self.handle(callee, arguments)
+    }
+}
+
+#[test]
+fn effect_budget_hook_shares_activation_steps_and_exhausts() {
+    let functions = functions_from_source("fn entry() = Note.insert(1);");
+    let mut effects = BudgetedEffects;
+
+    assert_eq!(
+        code(invoke_named_with_effects(
+            "entry",
+            &functions,
+            &Environment::new(),
+            Limits {
+                max_steps: 2,
+                ..Limits::default()
+            },
+            &mut effects,
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn legacy_effect_handler_keeps_existing_budget_behavior() {
+    let functions = functions_from_source("fn entry() = Note.insert(1);");
+    let mut effects = NoteEffects::default();
+
+    assert_eq!(
+        invoke_named_with_effects(
+            "entry",
+            &functions,
+            &Environment::new(),
+            Limits {
+                max_steps: 2,
+                ..Limits::default()
+            },
+            &mut effects,
+        )
+        .unwrap(),
+        Value::int(1.into())
+    );
+    assert_eq!(effects.calls, vec![vec![Value::int(1.into())]]);
 }
 
 #[test]
