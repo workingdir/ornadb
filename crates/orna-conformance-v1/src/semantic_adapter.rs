@@ -1048,6 +1048,7 @@ impl TransactionalEvaluator {
                 key_fields,
                 mutations: &mut mutations,
                 next_mutation: 0,
+                limits,
             };
             invoke_named_with_effects(&entry, &functions, arguments, limits, &mut effects).and_then(
                 |_| {
@@ -2585,6 +2586,7 @@ struct TableEffectHandler<'activation, 'runtime> {
     key_fields: &'activation TableKeys,
     mutations: &'activation mut Vec<TableMutation>,
     next_mutation: u64,
+    limits: EvaluatorLimits,
 }
 
 impl EffectHandler for TableEffectHandler<'_, '_> {
@@ -2638,18 +2640,33 @@ impl TableEffectHandler<'_, '_> {
             }
             let mut extreme = None;
             let mut total = BigInt::ZERO;
+            let mut candidate_rows: usize = 0;
             for (_, row) in self
                 .activation
                 .candidate_relation(table)
                 .map_err(|error| transaction_error(table_error_code(error)))?
             {
+                candidate_rows = candidate_rows
+                    .checked_add(1)
+                    .ok_or_else(|| transaction_error("ORNA-EVAL-LIMIT"))?;
+                self.limits
+                    .check_items(candidate_rows)
+                    .map_err(|_| transaction_error("ORNA-EVAL-LIMIT"))?;
                 let value = record_field(&row, field)
                     .ok_or_else(|| transaction_error("ORNA-EVAL-UNSUPPORTED"))?;
                 let OvbRaw::Int(value) = value.raw() else {
                     return Err(transaction_error("ORNA-EVAL-UNSUPPORTED"));
                 };
+                self.limits
+                    .check_integer(value)
+                    .map_err(|_| transaction_error("ORNA-EVAL-LIMIT"))?;
                 match operation {
-                    "sum" => total += value,
+                    "sum" => {
+                        total += value;
+                        self.limits
+                            .check_integer(&total)
+                            .map_err(|_| transaction_error("ORNA-EVAL-LIMIT"))?;
+                    }
                     "min" => {
                         if extreme
                             .as_ref()
