@@ -1702,6 +1702,9 @@ impl Context<'_, '_> {
             ("partition", [Value::List(values), predicate]) => {
                 self.partition(values, predicate, depth)
             }
+            ("split_when", [Value::List(values), predicate]) => {
+                self.split_when(values, predicate, depth)
+            }
             ("group_by", [Value::List(values), key]) => self.group_by(values, key, depth),
             ("zip", [Value::List(left), Value::List(right)]) => self.zipped(left, right, false),
             ("zip_exact", [Value::List(left), Value::List(right)]) => {
@@ -1726,6 +1729,7 @@ impl Context<'_, '_> {
             ("chunk", [_, _])
             | ("flatten" | "unique" | "pairs", [_])
             | ("partition", [_, _])
+            | ("split_when", [_, _])
             | ("group_by", [_, _])
             | ("zip" | "zip_exact", [_, _])
             | ("window", [_, _] | [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
@@ -1779,6 +1783,35 @@ impl Context<'_, '_> {
             Value::List(matching),
             Value::List(remaining),
         ]))
+    }
+    fn split_when(
+        &mut self,
+        values: &[Value],
+        predicate: &Value,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let mut groups = Vec::new();
+        let mut current = Vec::new();
+        for value in values {
+            // Invoke once, in input order. A true boundary starts the next
+            // group, except at the beginning where no empty group is lawful.
+            match self.invoke_predicate(predicate, value.clone(), depth + 1)? {
+                Value::Bool(true) if !current.is_empty() => {
+                    groups.push(Value::List(std::mem::take(&mut current)));
+                    self.items(groups.len())?;
+                }
+                Value::Bool(_) => {}
+                _ => return Err(error("ORNA-EVAL-TYPE")),
+            }
+            current.push(value.clone());
+            self.items(current.len())?;
+        }
+        if !current.is_empty() {
+            groups.push(Value::List(current));
+            self.items(groups.len())?;
+        }
+        Ok(Value::List(groups))
     }
     fn group_by(
         &mut self,
@@ -2190,7 +2223,7 @@ fn named_arguments(
         "normalise" => &["value", "form"],
         "chunk" => &["values", "size"],
         "flatten" | "unique" | "pairs" => &["values"],
-        "partition" => &["values", "predicate"],
+        "partition" | "split_when" => &["values", "predicate"],
         "group_by" => &["values", "key"],
         "zip" | "zip_exact" => &["left", "right"],
         "window" => match values.len() {
