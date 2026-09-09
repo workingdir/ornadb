@@ -97,6 +97,16 @@ impl Limits {
             Ok(())
         }
     }
+
+    /// Validate an integer produced at an evaluation boundary.
+    pub fn check_integer(self, value: &BigInt) -> Result<(), EvaluationError> {
+        validate_limits(self)?;
+        if value.to_str_radix(10).len() > self.max_integer_digits {
+            Err(error("ORNA-EVAL-LIMIT"))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// A deterministic name environment. Values must be canonical OVB-1 values.
