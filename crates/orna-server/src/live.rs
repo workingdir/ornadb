@@ -829,6 +829,30 @@ async fn shutdown_concurrent_host(
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;
+    use futures::io::AsyncWrite;
+
+    struct FlushStall {
+        written: Vec<u8>,
+    }
+
+    impl AsyncWrite for FlushStall {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.written.extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     fn run_local(future: impl Future<Output = ()> + 'static) {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1113,6 +1137,23 @@ mod shutdown_tests {
         registry.unregister_candidate(attachment, candidate);
 
         assert_eq!(registry.attachments.get(&attachment), Some(&incumbent));
+    }
+
+    #[test]
+    fn cancellation_during_upgrade_flush_keeps_the_handshake_undelivered() {
+        run_local(async {
+            let response = b"HTTP/1.1 101 Switching Protocols\r\n\r\n";
+            let mut writer = FlushStall {
+                written: Vec::new(),
+            };
+            let mut cancellation = futures::future::ready(());
+
+            assert_eq!(
+                deliver_websocket_upgrade_response(&mut writer, response, &mut cancellation).await,
+                Err(())
+            );
+            assert_eq!(writer.written, response);
+        });
     }
 
     #[test]
@@ -1771,10 +1812,9 @@ async fn serve_websocket_worker<C>(
             return;
         }
     };
-    if await_socket_io(writer.write_all(&encoded), cancellation)
+    if deliver_websocket_upgrade_response(&mut writer, &encoded, cancellation)
         .await
         .is_err()
-        || await_socket_io(writer.flush(), cancellation).await.is_err()
     {
         actor_abort(&actor, prepared).await;
         return;
@@ -1888,6 +1928,24 @@ async fn actor_abort(
     {
         let _ = receiver.await;
     }
+}
+
+/// Delivers the provisional HTTP response for a WebSocket handoff.
+///
+/// The caller owns the reservation and must abort it when this returns an
+/// error. In particular, a successful write without a successful flush has
+/// not crossed the transport delivery boundary and must not be committed.
+async fn deliver_websocket_upgrade_response<W, C>(
+    writer: &mut W,
+    response: &[u8],
+    cancellation: &mut C,
+) -> Result<(), ()>
+where
+    W: futures::io::AsyncWrite + Unpin,
+    C: Future<Output = ()> + Unpin,
+{
+    await_socket_io(writer.write_all(response), cancellation).await?;
+    await_socket_io(writer.flush(), cancellation).await
 }
 
 async fn serve_websocket_bytes<C>(
