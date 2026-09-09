@@ -2035,6 +2035,7 @@ impl Context<'_, '_> {
             ("count", [Value::List(values)]) => self.count(values),
             ("take", [Value::List(values), Value::Int(count)]) => self.take(values, count),
             ("drop", [Value::List(values), Value::Int(count)]) => self.drop(values, count),
+            ("filter", [Value::List(values), predicate]) => self.filter(values, predicate, depth),
             ("partition", [Value::List(values), predicate]) => {
                 self.partition(values, predicate, depth)
             }
@@ -2068,6 +2069,7 @@ impl Context<'_, '_> {
             | ("union", [_, _])
             | ("take", [_, _])
             | ("drop", [_, _])
+            | ("filter", [_, _])
             | ("partition", [_, _])
             | ("split_when", [_, _])
             | ("group_by", [_, _])
@@ -2139,6 +2141,27 @@ impl Context<'_, '_> {
         };
         self.items(values.len() - start)?;
         Ok(Value::List(values[start..].to_vec()))
+    }
+    fn filter(
+        &mut self,
+        values: &[Value],
+        predicate: &Value,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let mut filtered = Vec::new();
+        for value in values {
+            // Invoke once, in input order, and retain only an explicit true.
+            match self.invoke_predicate(predicate, value.clone(), depth + 1)? {
+                Value::Bool(true) => {
+                    filtered.push(value.clone());
+                    self.items(filtered.len())?;
+                }
+                Value::Bool(false) => {}
+                _ => return Err(error("ORNA-EVAL-TYPE")),
+            }
+        }
+        Ok(Value::List(filtered))
     }
     fn partition(
         &mut self,
@@ -2612,7 +2635,7 @@ fn named_arguments(
         "union" => &["left", "right"],
         "take" => &["values", "count"],
         "drop" => &["values", "count"],
-        "partition" | "split_when" => &["values", "predicate"],
+        "filter" | "partition" | "split_when" => &["values", "predicate"],
         "group_by" => &["values", "key"],
         "zip" | "zip_exact" => &["left", "right"],
         "window" => match values.len() {
