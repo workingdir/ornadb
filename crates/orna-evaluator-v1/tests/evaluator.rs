@@ -656,6 +656,110 @@ fn std_bits_preserves_unbounded_signed_twos_complement_semantics() {
 }
 
 #[test]
+fn std_text_fallback_preserves_unicode_scalar_and_field_semantics() {
+    let fields = Value::new(Raw::Array(vec![
+        Raw::Text("alpha".into()),
+        Raw::Text("".into()),
+        Raw::Text("β".into()),
+        Raw::Text("".into()),
+    ]))
+    .unwrap();
+    for (expression, expected) in [
+        (
+            "std.text.trim(\"  café  \")",
+            Value::new(Raw::Text("café".into())).unwrap(),
+        ),
+        ("std.text.split(\"alpha,,β,\", \",\")", fields),
+        (
+            "std.text.split(\"aβ\", \"\")",
+            Value::new(Raw::Array(vec![
+                Raw::Text("a".into()),
+                Raw::Text("β".into()),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.text.join([\"a\", \"β\", \"\"], \":\")",
+            Value::new(Raw::Text("a:β:".into())).unwrap(),
+        ),
+        (
+            "std.text.starts_with(\"βeta\", \"βe\")",
+            Value::new(Raw::Bool(true)).unwrap(),
+        ),
+        (
+            "std.text.ends_with(\"βeta\", \"ta\")",
+            Value::new(Raw::Bool(true)).unwrap(),
+        ),
+        (
+            "std.text.contains(\"aβa\", \"β\")",
+            Value::new(Raw::Bool(true)).unwrap(),
+        ),
+        (
+            "std.text.replace(\"aaaa\", \"aa\", \"b\")",
+            Value::new(Raw::Text("bb".into())).unwrap(),
+        ),
+        (
+            "std.text.lower(\"İΣ\")",
+            Value::new(Raw::Text("i̇ς".into())).unwrap(),
+        ),
+        (
+            "std.text.upper(\"ß\")",
+            Value::new(Raw::Text("SS".into())).unwrap(),
+        ),
+    ] {
+        assert_eq!(evaluate(expression), expected, "{expression}");
+    }
+}
+
+#[test]
+fn std_text_fallback_rejects_invalid_arguments_and_enforces_existing_limits() {
+    for (expression, expected) in [
+        ("std.text.trim(1)", "ORNA-EVAL-TYPE"),
+        ("std.text.trim([\"a\"])", "ORNA-EVAL-TYPE"),
+        ("std.text.join([\"a\", 1], \",\")", "ORNA-EVAL-TYPE"),
+        ("std.text.join([\"a\"], [\",\"])", "ORNA-EVAL-TYPE"),
+        ("std.text.replace(\"a\", \"a\")", "ORNA-EVAL-UNSUPPORTED"),
+        (
+            "std.text.split(value: \"a\", separator: \",\", extra: \"x\")",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        ("std.text.normalise(\"a\")", "ORNA-EVAL-UNSUPPORTED"),
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default()
+            )),
+            expected,
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        code(evaluate_expression(
+            "std.text.replace(\"aaaa\", \"a\", \"bb\")",
+            &Environment::new(),
+            Limits {
+                max_string_bytes: 7,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.text.split(\"abc\", \"\")",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
 fn recursive_calls_terminate_or_hit_shared_limits() {
     let source = "fn factorial(n: Int) = if n == 0 { 1 } else { n * factorial(n - 1) };";
     assert_eq!(
