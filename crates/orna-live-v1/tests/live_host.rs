@@ -355,6 +355,12 @@ struct UnitApplication {
     eval_outcome: UnitEvalOutcome,
 }
 
+struct CompetingTerminalApplication {
+    repository: Repository,
+    owner: [u8; 16],
+    calls: usize,
+}
+
 struct FailAt(FaultPoint);
 
 impl FaultInjector for FailAt {
@@ -444,6 +450,60 @@ impl LiveApplication for UnitApplication {
             return Err(Error::ApplicationRejected);
         }
         Ok(unit_result(request, fingerprint))
+    }
+}
+
+impl LiveApplication for CompetingTerminalApplication {
+    fn eval(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &Message,
+    ) -> Result<Envelope, Error> {
+        let Message::Eval { fingerprint, .. } = message else {
+            return Err(Error::ApplicationRejected);
+        };
+        self.calls += 1;
+        let malformed_winner = Envelope {
+            request: Some([99; 16]),
+            watch: None,
+            message: Message::Result {
+                status: ResultStatus::Success,
+                value: Some(CanonicalValue::unit()),
+                fingerprint: *fingerprint,
+                diagnostic: None,
+            },
+            extensions: BTreeMap::new(),
+        };
+        let repository = self.repository.clone();
+        let owner = self.owner;
+        let fingerprint = *fingerprint;
+        std::thread::spawn(move || {
+            let runtime = open_durable_state(&repository);
+            let writer = block_on(runtime.acquire_lease(owner)).unwrap();
+            block_on(
+                runtime.complete_observed_request_with_owner(
+                    RequestIdentity {
+                        session_id: session,
+                        request_id: request,
+                    },
+                    fingerprint,
+                    writer,
+                    TerminalOutcome::new(
+                        malformed_winner.encode(Limits::default().protocol).unwrap(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        })
+        .join()
+        .unwrap();
+        Ok(unit_result(request, fingerprint))
+    }
+
+    fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
     }
 }
 
@@ -4342,6 +4402,63 @@ fn durable_runtime_rejects_a_retained_response_with_the_wrong_message_shape() {
     );
     assert_eq!(application.calls, 0);
     drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn completion_race_rejects_a_terminal_winner_with_mismatched_request_bytes() {
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let owner = [91; 16];
+    let mut host = durable_host_with_owner(open_durable_state(&repository), owner);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [9; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    let request = eval([1; 16], [92; 16], "1");
+    let fingerprint = request_fingerprint(&request, [1; 16]);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [92; 16],
+    };
+    let mut application = CompetingTerminalApplication {
+        repository: repository.clone(),
+        owner,
+        calls: 0,
+    };
+    assert_eq!(
+        block_on(host.dispatch_frame([9; 16], 2, Frame::Binary(request.clone()), &mut application)),
+        Err(Error::RuntimeUnavailable)
+    );
+    assert_eq!(application.calls, 1);
+
+    let status = block_on(runtime.request_status(identity, fingerprint))
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.state, orna_runtime_v1::RequestState::Completed);
+    assert_eq!(
+        Envelope::decode(
+            status.terminal_outcome.unwrap().as_bytes(),
+            Limits::default().protocol,
+        )
+        .unwrap()
+        .request,
+        Some([99; 16])
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame([9; 16], 3, Frame::Binary(request), &mut application)),
+        Err(Error::RuntimeUnavailable)
+    );
+    assert_eq!(application.calls, 1);
+    drop(host);
+    drop(runtime);
     remove_test_repository(&root);
 }
 
