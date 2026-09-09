@@ -213,6 +213,56 @@ fn parsed_relation_first_reads_canonical_candidate_rows_and_never_publishes_on_f
 }
 
 #[test]
+fn parsed_keyed_relation_one_observes_candidate_rows_and_absence_rolls_back() {
+    let unit = SourceUnit {
+        fixture_id: "relation-one".into(),
+        source_id: "relation-one.orna".into(),
+        parse_as: "module_unit".into(),
+        source: r#"
+            pub table Note(id: Int) { text: Str, }
+            fn find_note(id: Int) = Note | filter(note => note.id == id) | one();
+            fn parent() {
+                Note.insert({ id: 7, text: "candidate" });
+                assert find_note(7).text == "candidate";
+            }
+        "#
+        .into(),
+    };
+    let mut committed = TransactionalEvaluator::new("parent", Limits::default());
+    assert!(matches!(
+        committed.execute_source(&unit),
+        StageOutcome::Passed
+    ));
+    assert!(committed
+        .committed_row("Note", &Value::int(7.into()))
+        .is_some());
+
+    let missing = SourceUnit {
+        fixture_id: "relation-one-missing".into(),
+        source_id: "relation-one-missing.orna".into(),
+        parse_as: "module_unit".into(),
+        source: r#"
+            pub table Note(id: Int) { text: Str, }
+            fn find_note(id: Int) = Note | filter(note => note.id == id) | one();
+            fn parent() {
+                Note.insert({ id: 7, text: "candidate" });
+                find_note(99);
+            }
+        "#
+        .into(),
+    };
+    let mut rolled_back = TransactionalEvaluator::new("parent", Limits::default());
+    assert!(matches!(
+        rolled_back.execute_source(&missing),
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-MISSING"
+    ));
+    assert_eq!(
+        rolled_back.committed_row("Note", &Value::int(7.into())),
+        None
+    );
+}
+
+#[test]
 fn parsed_pipeline_count_in_a_direct_function_body_observes_activation_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = runtime.execute_source(&source_with_count_function(
