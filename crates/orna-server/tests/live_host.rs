@@ -1026,6 +1026,79 @@ fn loopback_host_evaluates_pure_source_retains_state_and_replays_terminal_eval()
 }
 
 #[test]
+fn loopback_host_replays_pre_overlay_eval_rejection_without_binding_source() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let database = initialized.metadata().database_id().to_string();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let client = std::thread::spawn(move || {
+        let mut create = TcpStream::connect(address).unwrap();
+        create
+            .write_all(request(address, &database).as_bytes())
+            .unwrap();
+        let created = read_response(&mut create);
+        let session = json_field(&created, "session");
+        let token = json_field(&created, "resume_token");
+        create.shutdown(Shutdown::Write).unwrap();
+        let mut ignored = Vec::new();
+        create.read_to_end(&mut ignored).unwrap();
+
+        let stale =
+            orna_foundation_v1::CanonicalSnapshot::cwd(uuid_bytes(&database), [0x77; 16], 1.into())
+                .unwrap();
+        let request_id = [61; 16];
+        let first = websocket_eval_at(
+            address,
+            &session,
+            &token,
+            &database,
+            request_id,
+            Some(stale.clone()),
+            "let hidden: Int = 1;",
+        );
+        assert!(matches!(
+            &first.message,
+            Message::Result {
+                status: ResultStatus::Failure,
+                diagnostic: Some(_),
+                ..
+            }
+        ));
+
+        let replay = websocket_eval_at(
+            address,
+            &session,
+            &token,
+            &database,
+            request_id,
+            Some(stale),
+            "let hidden: Int = 1;",
+        );
+        assert_eq!(replay, first);
+
+        let hidden = websocket_eval(address, &session, &token, &database, [62; 16], "hidden");
+        assert!(matches!(
+            &hidden.message,
+            Message::Result {
+                status: ResultStatus::Failure,
+                diagnostic: Some(_),
+                ..
+            }
+        ));
+        sender.send(()).unwrap();
+    });
+
+    assert_eq!(
+        host.serve_until_cancellation(receiver.map(|_| ())),
+        Err(LiveHostError::Cancelled)
+    );
+    client.join().unwrap();
+    let _released = TcpListener::bind(address).unwrap();
+}
+
+#[test]
 fn loopback_host_rejects_unsupported_watch() {
     let temporary = TemporaryRepository::new();
     let initialized = initialize_repository(temporary.path()).unwrap();
