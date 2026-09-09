@@ -634,6 +634,18 @@ pub(super) async fn transition_sealed_invocation_lifecycle(
     invocation: InvocationId,
     terminal: SealedInvocationLifecycleTerminal,
 ) -> Result<(), PostgresKernelError> {
+    // ORNA-TASK-003 requires owner-loss recovery to fence the lost owner
+    // lease. This boundary currently retains the authenticated principal and
+    // runtime capture, but neither proves that a writer lease was replaced.
+    // Keep orphan recovery unavailable until it can atomically compare the
+    // retained lease owner and epoch against an authoritative replacement.
+    if sealed_invocation_orphan_recovery_requires_owner_lease(terminal) {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: "_orna_kernel.sealed_invocation_lifecycle",
+            record: invocation.canonical(),
+            rule: "sealed invocation orphan recovery requires an authoritative owner lease compare-and-set",
+        });
+    }
     let (status, diagnostic_code, diagnostic_class) = terminal.fields();
     let record = invocation.canonical();
     let invocation = invocation.to_bytes().to_vec();
@@ -686,6 +698,12 @@ pub(super) async fn transition_sealed_invocation_lifecycle(
         record,
         rule: "sealed invocation terminal transition requires one active lifecycle row",
     })
+}
+
+fn sealed_invocation_orphan_recovery_requires_owner_lease(
+    terminal: SealedInvocationLifecycleTerminal,
+) -> bool {
+    terminal == SealedInvocationLifecycleTerminal::Orphaned
 }
 
 fn sealed_invocation_terminal_matches(
@@ -1688,5 +1706,19 @@ mod lifecycle_tests {
             !sealed_invocation_terminal_matches(orphaned, cancelled),
             "owner loss must not be replayed as a cancellation"
         );
+    }
+
+    #[test]
+    fn orphan_recovery_fails_closed_without_an_owner_lease_compare_and_set() {
+        // A principal and captured runtime generation identify admission but
+        // do not prove owner loss. The PostgreSQL lifecycle boundary must not
+        // convert an active row to orphaned until it receives and checks the
+        // exact lost lease owner and epoch in one recovery transaction.
+        assert!(sealed_invocation_orphan_recovery_requires_owner_lease(
+            SealedInvocationLifecycleTerminal::Orphaned
+        ));
+        assert!(!sealed_invocation_orphan_recovery_requires_owner_lease(
+            SealedInvocationLifecycleTerminal::Cancelled
+        ));
     }
 }
