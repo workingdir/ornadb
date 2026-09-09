@@ -458,6 +458,11 @@ enum Value {
     Decimal(DecimalValue),
     Float(u64),
     String(String),
+    Range {
+        lower: Option<BigInt>,
+        upper: Option<BigInt>,
+        upper_inclusive: bool,
+    },
     List(Vec<Value>),
     Tuple(Vec<Value>),
     Record(BTreeMap<String, Value>),
@@ -604,6 +609,18 @@ impl Value {
             ),
             Self::Float(bits) => Raw::Float(bits),
             Self::String(value) => Raw::Text(value),
+            Self::Range {
+                lower,
+                upper,
+                upper_inclusive,
+            } => Raw::Tag(
+                60019,
+                Box::new(Raw::Array(vec![
+                    raw_option_int(lower),
+                    raw_option_int(upper),
+                    Raw::Bool(upper_inclusive),
+                ])),
+            ),
             Self::List(values) | Self::Tuple(values) => Raw::Array(
                 values
                     .into_iter()
@@ -706,6 +723,7 @@ impl Value {
             Raw::Tag(60008, boxed) => Self::enum_from_raw(boxed, context, depth),
             Raw::Tag(60009, boxed) => Self::nominal_record_from_raw(boxed, context, depth),
             Raw::Tag(60013, boxed) => Self::option_from_raw(boxed, context, depth),
+            Raw::Tag(60019, boxed) => Self::range_from_raw(boxed, context, depth),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -790,6 +808,25 @@ impl Value {
             )))),
             _ => Err(error("ORNA-EVAL-VALUE")),
         }
+    }
+    fn range_from_raw(
+        raw: &Raw,
+        context: &mut Context,
+        depth: usize,
+    ) -> Result<Self, EvaluationError> {
+        let Raw::Array(parts) = raw else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        let [lower, upper, Raw::Bool(upper_inclusive)] = parts.as_slice() else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        let lower = option_int(lower, context, depth + 1)?;
+        let upper = option_int(upper, context, depth + 1)?;
+        Ok(Self::Range {
+            lower,
+            upper,
+            upper_inclusive: *upper_inclusive,
+        })
     }
 }
 
@@ -1000,10 +1037,8 @@ impl Context<'_, '_> {
                 {
                     return Err(error("ORNA-EVAL-UNSUPPORTED"));
                 }
-                let Value::List(values) = self.evaluate(iterable, scope, depth + 1)? else {
-                    return Err(error("ORNA-EVAL-TYPE"));
-                };
-                self.items(values.len())?;
+                let iterable = self.evaluate(iterable, scope, depth + 1)?;
+                let values = self.finite_iterable(iterable)?;
                 let outer_names = scope.0.keys().cloned().collect::<Vec<_>>();
                 let bound_names = pattern_names(binding);
                 for value in values {
@@ -1206,6 +1241,16 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         match op {
+            ".." | "..=" => {
+                let lower = self.evaluate(lhs, scope, depth + 1)?;
+                let upper = self.evaluate(rhs, scope, depth + 1)?;
+                self.integer_range(lower, upper, op == "..=")
+            }
+            "in" => {
+                let value = self.evaluate(lhs, scope, depth + 1)?;
+                let range = self.evaluate(rhs, scope, depth + 1)?;
+                self.range_contains(value, range)
+            }
             "|" => {
                 let input = self.evaluate(lhs, scope, depth + 1)?;
                 let (callee, arguments) = match rhs {
@@ -1252,6 +1297,9 @@ impl Context<'_, '_> {
             let equal = left == right;
             return Ok(Value::Bool(if op == "==" { equal } else { !equal }));
         }
+        if matches!((&left, &right), (Value::Range { .. }, Value::Range { .. })) {
+            return compare(op, compare_values(&left, &right)?);
+        }
         match (left, right) {
             (Value::Int(a), Value::Int(b)) => self.int_binary(op, a, b),
             (Value::Decimal(a), Value::Decimal(b)) => self.decimal_binary(op, a, b),
@@ -1260,6 +1308,84 @@ impl Context<'_, '_> {
             (Value::Bool(a), Value::Bool(b)) => compare(op, a.cmp(&b)),
             _ => Err(error("ORNA-EVAL-TYPE")),
         }
+    }
+    fn integer_range(
+        &self,
+        lower: Value,
+        upper: Value,
+        upper_inclusive: bool,
+    ) -> Result<Value, EvaluationError> {
+        let (Value::Int(lower), Value::Int(upper)) = (lower, upper) else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        Ok(Value::Range {
+            lower: Some(lower),
+            upper: Some(upper),
+            upper_inclusive,
+        })
+    }
+    fn range_contains(&self, value: Value, range: Value) -> Result<Value, EvaluationError> {
+        let (
+            Value::Int(value),
+            Value::Range {
+                lower,
+                upper,
+                upper_inclusive,
+            },
+        ) = (value, range)
+        else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        let lower_matches = lower.is_none_or(|lower| value >= lower);
+        let upper_matches = upper.is_none_or(|upper| {
+            if upper_inclusive {
+                value <= upper
+            } else {
+                value < upper
+            }
+        });
+        Ok(Value::Bool(lower_matches && upper_matches))
+    }
+    fn finite_iterable(&self, value: Value) -> Result<Vec<Value>, EvaluationError> {
+        match value {
+            Value::List(values) => {
+                self.items(values.len())?;
+                Ok(values)
+            }
+            Value::Range {
+                lower: Some(lower),
+                upper: Some(upper),
+                upper_inclusive,
+            } => self.integer_range_values(lower, upper, upper_inclusive),
+            // A Range with an unbounded side is a valid Range value but not a
+            // finite Iterable, so this bounded evaluator cannot consume it.
+            Value::Range { .. } => Err(error("ORNA-EVAL-TYPE")),
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
+    }
+    fn integer_range_values(
+        &self,
+        lower: BigInt,
+        upper: BigInt,
+        upper_inclusive: bool,
+    ) -> Result<Vec<Value>, EvaluationError> {
+        let count = if upper_inclusive {
+            &upper - &lower + 1
+        } else {
+            &upper - &lower
+        };
+        if count <= BigInt::zero() {
+            return Ok(Vec::new());
+        }
+        let count = count.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        self.items(count)?;
+        let mut values = Vec::with_capacity(count);
+        let mut value = lower;
+        for _ in 0..count {
+            values.push(Value::Int(value.clone()));
+            value += 1;
+        }
+        Ok(values)
     }
     fn int_binary(&self, op: &str, a: BigInt, b: BigInt) -> Result<Value, EvaluationError> {
         match op {
@@ -2327,6 +2453,36 @@ fn one_like(value: &Value) -> Result<Value, EvaluationError> {
         _ => Err(error("ORNA-EVAL-TYPE")),
     }
 }
+fn raw_option_int(value: Option<BigInt>) -> Raw {
+    Raw::Tag(
+        60013,
+        Box::new(Raw::Array(match value {
+            Some(value) => vec![Raw::Int(1.into()), Raw::Int(value)],
+            None => vec![Raw::Int(0.into())],
+        })),
+    )
+}
+fn option_int(
+    raw: &Raw,
+    context: &mut Context,
+    depth: usize,
+) -> Result<Option<BigInt>, EvaluationError> {
+    context.depth(depth)?;
+    let Raw::Tag(60013, boxed) = raw else {
+        return Err(error("ORNA-EVAL-VALUE"));
+    };
+    let Raw::Array(parts) = boxed.as_ref() else {
+        return Err(error("ORNA-EVAL-VALUE"));
+    };
+    match parts.as_slice() {
+        [Raw::Int(tag)] if tag.is_zero() => Ok(None),
+        [Raw::Int(tag), Raw::Int(value)] if *tag == BigInt::from(1) => {
+            context.integer(value.clone()).map(Some)
+        }
+        [Raw::Int(tag), _] if *tag == BigInt::from(1) => Err(error("ORNA-EVAL-TYPE")),
+        _ => Err(error("ORNA-EVAL-VALUE")),
+    }
+}
 fn compare(op: &str, ordering: std::cmp::Ordering) -> Result<Value, EvaluationError> {
     Ok(Value::Bool(match op {
         "<" => ordering.is_lt(),
@@ -2358,6 +2514,26 @@ fn compare_values(left: &Value, right: &Value) -> Result<std::cmp::Ordering, Eva
         (Value::Float(a), Value::Float(b)) => f64::from_bits(*a)
             .partial_cmp(&f64::from_bits(*b))
             .ok_or_else(|| error("ORNA-EVAL-VALUE")),
+        (
+            Value::Range {
+                lower: left_lower,
+                upper: left_upper,
+                upper_inclusive: left_inclusive,
+            },
+            Value::Range {
+                lower: right_lower,
+                upper: right_upper,
+                upper_inclusive: right_inclusive,
+            },
+        ) => Ok(left_lower
+            .cmp(right_lower)
+            .then_with(|| match (left_upper, right_upper) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (Some(left), Some(right)) => left.cmp(right),
+            })
+            .then_with(|| left_inclusive.cmp(right_inclusive))),
         _ => Err(error("ORNA-EVAL-TYPE")),
     }
 }
