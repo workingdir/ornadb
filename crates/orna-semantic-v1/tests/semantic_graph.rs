@@ -34,6 +34,22 @@ fn collection_catalogue() -> Catalogue {
         .expect("verified collection catalogue")
 }
 
+fn float_collection_catalogue() -> Catalogue {
+    let source = r#"
+        pub fn sum(rows: [Float]): Float = 0.0f;
+        pub fn min(rows: [Float]): Float? = null;
+        pub fn max(rows: [Float]): Float? = null;
+    "#;
+    let profile = StandardDependencyProfile::from_sources(
+        "orna.std/v1-float-collection",
+        [("std/collection.orna".into(), source.into())],
+    )
+    .expect("float collection profile");
+    Catalogue::authoritative_core()
+        .with_standard_sources(&profile, [("std/collection.orna".into(), source.into())])
+        .expect("verified float collection catalogue")
+}
+
 #[test]
 fn calendar_buckets_require_typed_zones_and_do_not_conflate_elapsed_durations() {
     for (body, expected) in [
@@ -3166,6 +3182,148 @@ fn finite_list_integer_min_max_reject_unsupported_shapes_and_preserve_relation_b
             module.symbols[name].ty
         );
     }
+}
+
+#[test]
+fn finite_list_float_aggregates_return_exact_types_for_all_call_forms_and_effects() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "float-aggregates.orna",
+            r#"
+            table Reading(id: Int) { value: Float, }
+            pub fn direct_sum(rows: [Float]): Float = sum(rows);
+            pub fn direct_min(rows: [Float]): Float? = min([3.0f, 1.0f, 2.0f]);
+            pub fn direct_max(rows: [Float]): Float? = max([3.0f, 1.0f, 2.0f]);
+            pub fn named_sum(rows: [Float]): Float = sum(rows: rows);
+            pub fn named_min(rows: [Float]): Float? = min(rows: rows);
+            pub fn named_max(rows: [Float]): Float? = max(rows: rows);
+            pub fn pipeline_sum(rows: [Float]): Float = rows | sum();
+            pub fn pipeline_min(rows: [Float]): Float? = rows | min;
+            pub fn pipeline_max(rows: [Float]): Float? = rows | std.collection.max();
+            pub fn call_pipeline_min(rows: [Float]): Float? = rows | min();
+            pub fn empty_sum(): Float = sum([]);
+            pub fn empty_min(): Float? = min([]);
+            pub fn empty_max(): Float? = [] | max;
+            pub fn reads(rows: [Float]): Float =
+                rows | map(transform: value => if Reading.count() > 0 { value } else { value }) | sum;
+            pub fn qualified_sum(rows: [Float]): Float = std.collection.sum(rows);
+            pub fn qualified_min(rows: [Float]): Float? = std.collection.min(rows: rows);
+            pub fn qualified_max(rows: [Float]): Float? = rows | std.collection.max;
+        "#,
+        )],
+        &float_collection_catalogue(),
+    );
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("direct_sum"))
+        .expect("float aggregate module");
+    for name in [
+        "direct_sum",
+        "named_sum",
+        "pipeline_sum",
+        "empty_sum",
+        "qualified_sum",
+    ] {
+        assert!(
+            matches!(
+                &module.symbols[name].ty,
+                Type::Function { result, .. } if result.as_ref() == &Type::Float
+            ),
+            "{name}: {:?}",
+            module.symbols[name].ty
+        );
+    }
+    for name in [
+        "direct_min",
+        "direct_max",
+        "named_min",
+        "named_max",
+        "pipeline_min",
+        "pipeline_max",
+        "call_pipeline_min",
+        "empty_min",
+        "empty_max",
+        "qualified_min",
+        "qualified_max",
+    ] {
+        assert!(
+            matches!(
+                &module.symbols[name].ty,
+                Type::Function { result, .. }
+                    if result.as_ref() == &Type::Optional(Box::new(Type::Float))
+            ),
+            "{name}: {:?}",
+            module.symbols[name].ty
+        );
+    }
+    assert!(
+        module.symbols["reads"]
+            .effects
+            .effects
+            .contains("database read")
+    );
+    assert!(module.symbols["reads"].effects.may_fail);
+}
+
+#[test]
+fn finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_names() {
+    let invalid = analyze(&[
+        ModuleInput::new("mixed-sum.orna", "fn bad() = sum([1, 2.0f]);"),
+        ModuleInput::new("mixed-min.orna", "fn bad() = min([1.0f, 2]);"),
+        ModuleInput::new("mixed-max.orna", "fn bad() = [1, 2.0f] | max;"),
+        ModuleInput::new("decimal.orna", "fn bad(values: [Decimal]) = sum(values);"),
+        ModuleInput::new("int-min.orna", "fn bad(values: [Int]) = min(values);"),
+        ModuleInput::new(
+            "wrong-name.orna",
+            "fn bad(values: [Float]) = max(rows: values, extra: 1);",
+        ),
+    ]);
+    assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
+
+    let qualified = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "unprofiled.orna",
+            "fn bad(values: [Float]) = std.collection.sum(values);",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(
+        has(&qualified, DIAG_UNRESOLVED),
+        "{:?}",
+        qualified.diagnostics
+    );
+
+    let incompatible_source = r#"
+        pub fn sum(rows: [Decimal]): Decimal = 0;
+        pub fn min(rows: [Decimal]): Decimal? = null;
+        pub fn max(rows: [Decimal]): Decimal? = null;
+    "#;
+    let incompatible_profile = StandardDependencyProfile::from_sources(
+        "orna.std/v1-incompatible-float-collection",
+        [("std/collection.orna".into(), incompatible_source.into())],
+    )
+    .expect("incompatible float collection profile");
+    let incompatible_catalogue = Catalogue::authoritative_core()
+        .with_standard_sources(
+            &incompatible_profile,
+            [("std/collection.orna".into(), incompatible_source.into())],
+        )
+        .expect("verified incompatible float collection catalogue");
+    let incompatible = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "incompatible.orna",
+            "fn bad(values: [Float]) = std.collection.sum(values);",
+        )],
+        &incompatible_catalogue,
+    );
+    assert!(
+        has(&incompatible, DIAG_TYPE),
+        "{:?}",
+        incompatible.diagnostics
+    );
 }
 
 #[test]
