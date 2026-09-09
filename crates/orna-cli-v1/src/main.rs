@@ -15,7 +15,8 @@ use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
     ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
 };
-use orna_evaluator_v1::Limits;
+use orna_evaluator_v1::{Environment, Limits};
+use orna_foundation_v1::{OvbRaw, Value};
 use orna_runtime_v1::RuntimeIdentity;
 
 const SENSOR_SOURCE_IDENTITY: &str = "example:sensors:v1";
@@ -38,7 +39,7 @@ fn standard_profile() -> orna_semantic_v1::StandardDependencyProfile {
     dead_code,
     reason = "The bounded CLI records the complete specified exit-status space."
 )]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Exit {
     Success = 0,
     Target = 1,
@@ -141,11 +142,12 @@ impl Endpoint {
         Ok(Self::Path(value.to_owned()))
     }
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Invocation {
     Seed,
     Exercise,
     SensorsIngest,
+    LibraryLend { book_id: String, borrower: String },
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Command {
@@ -229,18 +231,38 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             Some("seed") => Command::Run(Invocation::Seed),
             Some("exercise") => Command::Run(Invocation::Exercise),
             Some("sensors.ingest") => Command::Run(Invocation::SensorsIngest),
+            Some("library.lend") => {
+                let book_id = words.next().ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1001",
+                        "`run library.lend` needs a book ID",
+                        "supply the book ID and borrower after `run library.lend`",
+                    )
+                })?;
+                let borrower = words.next().ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1001",
+                        "`run library.lend` needs a borrower",
+                        "supply the book ID and borrower after `run library.lend`",
+                    )
+                })?;
+                Command::Run(Invocation::LibraryLend {
+                    book_id: book_id.to_owned(),
+                    borrower: borrower.to_owned(),
+                })
+            }
             Some(_) => {
                 return Err(Diagnostic::usage(
                     "E1002",
                     "reference invocation is not supported by this bounded slice",
-                    "use `run seed`, `run exercise`, or `run sensors.ingest`",
+                    "use `run seed`, `run exercise`, `run sensors.ingest`, or `run library.lend BOOK_ID BORROWER`",
                 ));
             }
             None => {
                 return Err(Diagnostic::usage(
                     "E1001",
                     "`run` needs a reference invocation",
-                    "use `run seed`, `run exercise`, or `run sensors.ingest`",
+                    "use `run seed`, `run exercise`, `run sensors.ingest`, or `run library.lend BOOK_ID BORROWER`",
                 ));
             }
         },
@@ -629,6 +651,14 @@ fn invocation_owner_id(identity: RuntimeIdentity) -> [u8; 16] {
 }
 
 fn run_project_invocation(endpoint: &Endpoint, root_entry: &str) -> Result<(), Diagnostic> {
+    run_project_invocation_with_arguments(endpoint, root_entry, &Environment::new())
+}
+
+fn run_project_invocation_with_arguments(
+    endpoint: &Endpoint,
+    root_entry: &str,
+    arguments: &Environment,
+) -> Result<(), Diagnostic> {
     let repository = orna_repository_v1::Repository::discover(local_project_path(endpoint)?)
         .map_err(|_| {
             Diagnostic::target(
@@ -660,14 +690,17 @@ fn run_project_invocation(endpoint: &Endpoint, root_entry: &str) -> Result<(), D
                 "retry the durable project invocation",
             )
         })?
-        .block_on(DurableTransactionalEvaluator::default().execute_project(
-            &repository,
-            identity,
-            owner_id,
-            initial_digest,
-            &project,
-            root_entry,
-        ))
+        .block_on(
+            DurableTransactionalEvaluator::default().execute_project_with_arguments(
+                &repository,
+                identity,
+                owner_id,
+                initial_digest,
+                &project,
+                root_entry,
+                arguments,
+            ),
+        )
         .map_err(|_| {
             Diagnostic::target(
                 "E2200",
@@ -938,10 +971,10 @@ fn initialize_repository(target: Option<&std::path::Path>) -> Result<(), Diagnos
 }
 
 fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
-    match parsed.command {
+    match parsed.command.clone() {
         Command::Help => {
             println!(
-                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|check|invoke TARGET|run seed|run exercise|run sensors.ingest]"
+                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|check|invoke TARGET|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
             );
             println!("orna-cli-v1 init [DIRECTORY]");
             Ok(())
@@ -960,6 +993,34 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         }
         Command::Run(Invocation::SensorsIngest) => {
             run_project_stream_invocation(&parsed.endpoint, "sensors.ingest")
+        }
+        Command::Run(Invocation::LibraryLend {
+            ref book_id,
+            ref borrower,
+        }) => {
+            let arguments = Environment::from([
+                (
+                    "book_id".into(),
+                    Value::new(OvbRaw::Text(book_id.clone())).map_err(|_| {
+                        Diagnostic::usage(
+                            "E1002",
+                            "`run library.lend` received an invalid book ID",
+                            "supply a valid Orna string value for the book ID",
+                        )
+                    })?,
+                ),
+                (
+                    "borrower".into(),
+                    Value::new(OvbRaw::Text(borrower.clone())).map_err(|_| {
+                        Diagnostic::usage(
+                            "E1002",
+                            "`run library.lend` received an invalid borrower",
+                            "supply a valid Orna string value for the borrower",
+                        )
+                    })?,
+                ),
+            ]);
+            run_project_invocation_with_arguments(&parsed.endpoint, "library.lend", &arguments)
         }
     }
 }
