@@ -231,12 +231,15 @@ pub fn evaluate_with_functions(
         reject_unhandled_field_calls: false,
         effects: None,
         namespace: None,
+        transfer: None,
     };
     context.items(functions.len())?;
     let mut scope = Scope::from_environment(environment, &mut context)?;
-    context
-        .evaluate(expression, &mut scope, 0)
-        .and_then(Value::canonical)
+    let value = context.evaluate(expression, &mut scope, 0)?;
+    if context.transfer.is_some() {
+        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    value.canonical()
 }
 
 /// Invoke a parsed, statically checked pure function with canonical named
@@ -263,6 +266,7 @@ pub fn evaluate_function(
         reject_unhandled_field_calls: false,
         effects: None,
         namespace: None,
+        transfer: None,
     };
     let supplied = supplied_arguments(arguments, &mut context)?;
     let captured = Scope::from_environment(environment, &mut context)?;
@@ -289,6 +293,7 @@ pub fn invoke_named(
         reject_unhandled_field_calls: false,
         effects: None,
         namespace: function_namespace(name),
+        transfer: None,
     };
     context.items(functions.len())?;
     let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
@@ -326,6 +331,7 @@ pub fn invoke_named_with_effects(
         reject_unhandled_field_calls: false,
         effects: Some(effects),
         namespace: function_namespace(name),
+        transfer: None,
     };
     context.items(functions.len())?;
     let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
@@ -419,7 +425,14 @@ fn invoke_pure(
         }
         context.items(scope.0.len())?;
     }
-    context.evaluate(body, &mut scope, depth)
+    let value = context.evaluate(body, &mut scope, depth)?;
+    match context.transfer.take() {
+        Some(Transfer::Return(value)) => Ok(value),
+        // A called function/lambda is a transfer boundary. A loop transfer
+        // cannot target a loop outside that boundary.
+        Some(Transfer::Break(_) | Transfer::Continue) => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        None => Ok(value),
+    }
 }
 
 fn check_limits(source: &str, limits: Limits) -> Result<(), EvaluationError> {
@@ -860,6 +873,16 @@ struct Context<'functions, 'effects> {
     reject_unhandled_field_calls: bool,
     effects: Option<&'effects mut dyn EffectHandler>,
     namespace: Option<String>,
+    transfer: Option<Transfer>,
+}
+
+/// An evaluator-only non-local control transfer. It never crosses the public
+/// canonical-value boundary: a function consumes `Return`, and a finite `for`
+/// consumes `Break` or `Continue`.
+enum Transfer {
+    Return(Value),
+    Break(Value),
+    Continue,
 }
 impl Context<'_, '_> {
     fn step(&mut self) -> Result<(), EvaluationError> {
@@ -907,9 +930,14 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
+        // Once a block emits a transfer, every enclosing expression is only a
+        // transport frame. Do not run siblings, effects, or later statements.
+        if self.transfer.is_some() {
+            return Ok(Value::Null);
+        }
         self.step()?;
         self.depth(depth)?;
-        match expression {
+        let result = match expression {
             Expr::Name { text, .. } => scope
                 .0
                 .get(text)
@@ -961,6 +989,9 @@ impl Context<'_, '_> {
             Expr::Group { inner, .. } => self.evaluate(inner, scope, depth + 1),
             Expr::Unary { op, rhs, .. } => {
                 let value = self.evaluate(rhs, scope, depth + 1)?;
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
                 self.unary(op, value)
             }
             Expr::Binary { lhs, op, rhs, .. } => self.binary(op, lhs, rhs, scope, depth),
@@ -970,13 +1001,11 @@ impl Context<'_, '_> {
                 self.items(fields.len())?;
                 let mut result = BTreeMap::new();
                 for field in fields {
-                    if result
-                        .insert(
-                            field.name.clone(),
-                            self.evaluate(&field.value, scope, depth + 1)?,
-                        )
-                        .is_some()
-                    {
+                    let value = self.evaluate(&field.value, scope, depth + 1)?;
+                    if self.transfer.is_some() {
+                        return Ok(Value::Null);
+                    }
+                    if result.insert(field.name.clone(), value).is_some() {
                         return Err(error("ORNA-EVAL-VALUE"));
                     }
                 }
@@ -990,11 +1019,20 @@ impl Context<'_, '_> {
             } => self.call(callee, arguments, None, scope, depth),
             Expr::Index { base, index, .. } => {
                 let base = self.evaluate(base, scope, depth + 1)?;
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
                 let index = self.evaluate(index, scope, depth + 1)?;
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
                 self.index(base, index)
             }
             Expr::Field { base, name, .. } => {
                 let Value::Record(fields) = self.evaluate(base, scope, depth + 1)? else {
+                    if self.transfer.is_some() {
+                        return Ok(Value::Null);
+                    }
                     return Err(error("ORNA-EVAL-TYPE"));
                 };
                 fields
@@ -1009,6 +1047,7 @@ impl Context<'_, '_> {
                 alternate,
                 ..
             } => match self.evaluate(condition, scope, depth + 1)? {
+                _ if self.transfer.is_some() => Ok(Value::Null),
                 Value::Bool(true) => self.evaluate(body, scope, depth + 1),
                 Value::Bool(false) => alternate.as_deref().map_or(Ok(Value::Null), |value| {
                     self.evaluate(value, scope, depth + 1)
@@ -1038,6 +1077,9 @@ impl Context<'_, '_> {
                     return Err(error("ORNA-EVAL-UNSUPPORTED"));
                 }
                 let iterable = self.evaluate(iterable, scope, depth + 1)?;
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
                 let values = self.finite_iterable(iterable)?;
                 let outer_names = scope.0.keys().cloned().collect::<Vec<_>>();
                 let bound_names = pattern_names(binding);
@@ -1047,6 +1089,28 @@ impl Context<'_, '_> {
                         return Err(error("ORNA-EVAL-TYPE"));
                     }
                     self.evaluate(body, &mut iteration, depth + 1)?;
+                    match self.transfer.take() {
+                        Some(Transfer::Continue) => {}
+                        Some(Transfer::Break(value)) => {
+                            if !matches!(value, Value::Null) {
+                                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                            }
+                            for name in &outer_names {
+                                if bound_names.contains(name) {
+                                    continue;
+                                }
+                                if let Some(value) = iteration.0.get(name).cloned() {
+                                    scope.0.insert(name.clone(), value);
+                                }
+                            }
+                            return Ok(Value::Null);
+                        }
+                        Some(transfer @ Transfer::Return(_)) => {
+                            self.transfer = Some(transfer);
+                            return Ok(Value::Null);
+                        }
+                        None => {}
+                    }
                     for name in &outer_names {
                         if bound_names.contains(name) {
                             continue;
@@ -1065,6 +1129,11 @@ impl Context<'_, '_> {
                 .ok_or_else(|| error("ORNA-EVAL-NAME")),
             Expr::ReplBinding { .. } => Err(error("ORNA-EVAL-UNSUPPORTED")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        };
+        if self.transfer.is_some() {
+            Ok(Value::Null)
+        } else {
+            result
         }
     }
     fn literal(&self, text: &str, kind: LiteralKind) -> Result<Value, EvaluationError> {
@@ -1128,10 +1197,14 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Result<Vec<Value>, EvaluationError> {
         self.items(elements.len())?;
-        elements
-            .iter()
-            .map(|element| self.evaluate(element, scope, depth + 1))
-            .collect()
+        let mut values = Vec::with_capacity(elements.len());
+        for element in elements {
+            values.push(self.evaluate(element, scope, depth + 1)?);
+            if self.transfer.is_some() {
+                return Ok(Vec::new());
+            }
+        }
+        Ok(values)
     }
     fn block(
         &mut self,
@@ -1174,12 +1247,37 @@ impl Context<'_, '_> {
                 Statement::Control { value, .. } => {
                     self.evaluate(value, &mut local, depth + 1)?;
                 }
-                _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+                Statement::Return { value, .. } => {
+                    let value = value.as_ref().map_or(Ok(Value::Null), |value| {
+                        self.evaluate(value, &mut local, depth + 1)
+                    })?;
+                    if self.transfer.is_none() {
+                        self.transfer = Some(Transfer::Return(value));
+                    }
+                }
+                Statement::Break { value, .. } => {
+                    let value = value.as_ref().map_or(Ok(Value::Null), |value| {
+                        self.evaluate(value, &mut local, depth + 1)
+                    })?;
+                    if self.transfer.is_none() {
+                        self.transfer = Some(Transfer::Break(value));
+                    }
+                }
+                Statement::Continue { .. } => {
+                    self.transfer = Some(Transfer::Continue);
+                }
+            }
+            if self.transfer.is_some() {
+                break;
             }
         }
-        let result = tail.map_or(Ok(Value::Null), |value| {
-            self.evaluate(value, &mut local, depth + 1)
-        })?;
+        let result = if self.transfer.is_some() {
+            Value::Null
+        } else {
+            tail.map_or(Ok(Value::Null), |value| {
+                self.evaluate(value, &mut local, depth + 1)
+            })?
+        };
         for name in outer_names {
             if declared_names.contains(&name) {
                 continue;
@@ -1210,6 +1308,9 @@ impl Context<'_, '_> {
             .cloned()
             .ok_or_else(|| error("ORNA-EVAL-NAME"))?;
         let value = self.evaluate(expression, scope, depth + 1)?;
+        if self.transfer.is_some() {
+            return Ok(());
+        }
         let value = match operator {
             AssignmentOperator::Set => value,
             AssignmentOperator::Add => self.apply_binary("+", current, value)?,
@@ -1243,16 +1344,31 @@ impl Context<'_, '_> {
         match op {
             ".." | "..=" => {
                 let lower = self.evaluate(lhs, scope, depth + 1)?;
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
                 let upper = self.evaluate(rhs, scope, depth + 1)?;
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
                 self.integer_range(lower, upper, op == "..=")
             }
             "in" => {
                 let value = self.evaluate(lhs, scope, depth + 1)?;
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
                 let range = self.evaluate(rhs, scope, depth + 1)?;
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
                 self.range_contains(value, range)
             }
             "|" => {
                 let input = self.evaluate(lhs, scope, depth + 1)?;
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
                 let (callee, arguments) = match rhs {
                     Expr::Call {
                         callee, arguments, ..
@@ -1262,11 +1378,13 @@ impl Context<'_, '_> {
                 self.call(callee, arguments, Some(input), scope, depth)
             }
             "??" => match self.evaluate(lhs, scope, depth + 1)? {
+                _ if self.transfer.is_some() => Ok(Value::Null),
                 Value::Option(Some(value)) => Ok(*value),
                 Value::Option(None) | Value::Null => self.evaluate(rhs, scope, depth + 1),
                 _ => Err(error("ORNA-EVAL-TYPE")),
             },
             "&&" => match self.evaluate(lhs, scope, depth + 1)? {
+                _ if self.transfer.is_some() => Ok(Value::Null),
                 Value::Bool(false) => Ok(Value::Bool(false)),
                 Value::Bool(true) => match self.evaluate(rhs, scope, depth + 1)? {
                     Value::Bool(value) => Ok(Value::Bool(value)),
@@ -1275,6 +1393,7 @@ impl Context<'_, '_> {
                 _ => Err(error("ORNA-EVAL-TYPE")),
             },
             "||" => match self.evaluate(lhs, scope, depth + 1)? {
+                _ if self.transfer.is_some() => Ok(Value::Null),
                 Value::Bool(true) => Ok(Value::Bool(true)),
                 Value::Bool(false) => match self.evaluate(rhs, scope, depth + 1)? {
                     Value::Bool(value) => Ok(Value::Bool(value)),
@@ -1284,7 +1403,13 @@ impl Context<'_, '_> {
             },
             _ => {
                 let left = self.evaluate(lhs, scope, depth + 1)?;
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
                 let right = self.evaluate(rhs, scope, depth + 1)?;
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
                 self.apply_binary(op, left, right)
             }
         }
@@ -1467,6 +1592,9 @@ impl Context<'_, '_> {
                 let mut values = input.clone().into_iter().collect::<Vec<_>>();
                 for argument in arguments {
                     values.push(self.evaluate(&argument.value, scope, depth + 1)?);
+                    if self.transfer.is_some() {
+                        return Ok(Value::Null);
+                    }
                 }
                 let values = values
                     .into_iter()
@@ -1496,6 +1624,9 @@ impl Context<'_, '_> {
             } else {
                 self.evaluate(callee, scope, depth + 1)?
             };
+            if self.transfer.is_some() {
+                return Ok(Value::Null);
+            }
             let functions = self.functions;
             let (parameters, body, mut captured, session_owned) = match &callable {
                 Value::Function(name) => {
@@ -1554,6 +1685,9 @@ impl Context<'_, '_> {
                     return Err(error("ORNA-EVAL-ARGUMENT"));
                 }
                 let value = self.evaluate(&argument.value, scope, depth + 1)?;
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
                 supplied.insert(key, value);
             }
             let previous_repl_bindings = self.repl_bindings;
@@ -1581,10 +1715,13 @@ impl Context<'_, '_> {
         let implicit = usize::from(input.is_some());
         self.items(arguments.len() + implicit)?;
         let mut values = input.into_iter().collect::<Vec<_>>();
-        let explicit = arguments
-            .iter()
-            .map(|argument| self.evaluate(&argument.value, scope, depth + 1))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut explicit = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            explicit.push(self.evaluate(&argument.value, scope, depth + 1)?);
+            if self.transfer.is_some() {
+                return Ok(Value::Null);
+            }
+        }
         values.extend(explicit);
         let values = named_arguments(name, arguments, values, implicit)?;
         if math.is_some() {
@@ -1651,6 +1788,9 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         let value = self.evaluate(condition, scope, depth + 1)?;
+        if self.transfer.is_some() {
+            return Ok(Value::Null);
+        }
         self.items(arms.len())?;
         for arm in arms {
             let mut local = scope.clone();
@@ -1659,6 +1799,7 @@ impl Context<'_, '_> {
             }
             if let Some(guard) = &arm.guard {
                 match self.evaluate(guard, &mut local, depth + 1)? {
+                    _ if self.transfer.is_some() => return Ok(Value::Null),
                     Value::Bool(true) => {}
                     Value::Bool(false) => continue,
                     _ => return Err(error("ORNA-EVAL-TYPE")),
