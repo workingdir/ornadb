@@ -372,6 +372,8 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
                 Some("LET-REBIND-091" | "PIPE-001" | "PIPE-002")
             ) {
                 "scenario execution skipped: no compiler-produced executable artifact crosses the semantic-to-runtime adapter; the bounded evaluator reinterprets source"
+            } else if result["scenario"] == "EVAL-001" {
+                "scenario execution skipped: production remote Eval admits pure source but rejects table mutations, so it cannot satisfy ORNA-EVAL-003's required served-CWD activation transaction"
             } else {
                 "scenario execution skipped: scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution"
             };
@@ -452,7 +454,7 @@ fn remote_eval_contract_remains_skipped_without_an_authoritative_host_witness() 
     assert_eq!(eval["status"], "skipped");
     assert_eq!(
         eval["detail"],
-        "scenario execution skipped: scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution"
+        "scenario execution skipped: production remote Eval admits pure source but rejects table mutations, so it cannot satisfy ORNA-EVAL-003's required served-CWD activation transaction"
     );
     assert!(
         !report["implementation_claim"]["executed_scenario_contracts"]
