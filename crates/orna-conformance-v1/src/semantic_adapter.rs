@@ -4664,6 +4664,7 @@ fn table_error_code(error: TableError) -> &'static str {
         TableError::ChildCannotCommit => "ORNA-EVAL-TABLE-CHILD-COMMIT",
         TableError::DoubleCommit => "ORNA-EVAL-TABLE-DOUBLE-COMMIT",
         TableError::UseAfterClose => "ORNA-EVAL-TABLE-CLOSED",
+        TableError::ForeignSavepoint => "ORNA-EVAL-TABLE-FOREIGN-SAVEPOINT",
     }
 }
 
