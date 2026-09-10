@@ -414,6 +414,21 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
     assert_eq!(actual_short.stdout, expected_short.stdout);
     assert!(actual_short.stderr.is_empty());
 
+    let actual_explicit_short = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(repository.path().join("nested"))
+        .args([
+            "--db",
+            repository.path().to_str().expect("UTF-8 path"),
+            "status",
+            "--short",
+        ])
+        .output()
+        .expect("CLI explicit short status");
+    assert!(actual_explicit_short.status.success());
+    assert_eq!(actual_explicit_short.stdout, expected_short.stdout);
+    assert!(actual_explicit_short.stderr.is_empty());
+
     let outside = tempfile::tempdir().expect("non-repository directory");
     let failure = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
