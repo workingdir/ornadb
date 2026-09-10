@@ -7,7 +7,7 @@ mod repl;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -153,6 +153,7 @@ enum Invocation {
 enum Command {
     Repl(Option<String>),
     Init(Option<PathBuf>),
+    Status,
     Check,
     Invoke(String),
     Run(Invocation),
@@ -212,6 +213,23 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             }
             Command::Init(target)
         }
+        Some("status") => match words.next() {
+            Some("--porcelain") => Command::Status,
+            Some(_) => {
+                return Err(Diagnostic::usage(
+                    "E1002",
+                    "`status` only supports `--porcelain`",
+                    "use `status --porcelain`",
+                ));
+            }
+            None => {
+                return Err(Diagnostic::usage(
+                    "E1001",
+                    "`status` needs `--porcelain`",
+                    "use `status --porcelain`",
+                ));
+            }
+        },
         Some("check") => Command::Check,
         Some("invoke") => Command::Invoke(
             words
@@ -495,6 +513,34 @@ fn local_project_path(endpoint: &Endpoint) -> Result<&str, Diagnostic> {
             "use `check` with the current worktree or `--db PATH check`",
         )),
     }
+}
+
+fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+    let path = local_project_path(endpoint)?;
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree could not be discovered",
+            "run the command inside a Git worktree or provide a local project path",
+        )
+    })?;
+    let state = repository.worktree_state().map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be read",
+            "check that Git can read the local worktree, then retry `status --porcelain`",
+        )
+    })?;
+    io::stdout()
+        .write_all(state.as_porcelain_v2_z())
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "local Git worktree status could not be written",
+                "retry `status --porcelain`",
+            )
+        })?;
+    Ok(())
 }
 
 fn load_project(endpoint: &Endpoint) -> Result<orna_project_v1::LoadedProject, Diagnostic> {
@@ -974,7 +1020,7 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     match parsed.command.clone() {
         Command::Help => {
             println!(
-                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|check|invoke TARGET|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
+                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|status --porcelain|check|invoke TARGET|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
             );
             println!("orna-cli-v1 init [DIRECTORY]");
             Ok(())
@@ -984,6 +1030,7 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             Ok(())
         }
         Command::Init(ref target) => initialize_repository(target.as_deref()),
+        Command::Status => run_status(&parsed.endpoint),
         Command::Check => check_project(&parsed.endpoint),
         Command::Invoke(ref target) => run_pure_invocation(&parsed.endpoint, target),
         Command::Repl(ref expression) => run_repl(&parsed.endpoint, expression.as_deref()),
@@ -1075,6 +1122,24 @@ mod tests {
                 .expect("parses")
                 .command,
             Command::Repl(Some("1 + 2".into()))
+        );
+        assert_eq!(
+            parse_cli(&["status".into(), "--porcelain".into()])
+                .expect("parses")
+                .command,
+            Command::Status
+        );
+        assert_eq!(
+            parse_cli(&["status".into()])
+                .expect_err("status format is required")
+                .code,
+            "E1001"
+        );
+        assert_eq!(
+            parse_cli(&["status".into(), "--porcelain=v2".into()])
+                .expect_err("status format is exact")
+                .code,
+            "E1002"
         );
         assert_eq!(
             parse_cli(&["init".into()]).expect("parses").command,
