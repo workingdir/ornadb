@@ -878,6 +878,9 @@ impl TryFrom<&RunObservation> for SysRunProjection {
         if observation.live && observation.status.is_terminal() {
             return Err(RuntimeError::RecoveryInvalid);
         }
+        if observation.status == RunObservationStatus::Failed && observation.diagnostic.is_none() {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
         Ok(Self {
             reference,
             id: observation.id.0,
@@ -17587,6 +17590,15 @@ mod tests {
         assert_eq!(
             SysRunProjection::try_from(&invalid_invocation),
             Err(RuntimeError::InvalidIdentity)
+        );
+        let mut failed_without_diagnostic = invalid_invocation;
+        failed_without_diagnostic.invocation_id = invocation_id;
+        failed_without_diagnostic.status = RunObservationStatus::Failed;
+        failed_without_diagnostic.ended_ms = Some(failed_without_diagnostic.started_ms);
+        failed_without_diagnostic.live = false;
+        assert_eq!(
+            SysRunProjection::try_from(&failed_without_diagnostic),
+            Err(RuntimeError::RecoveryInvalid)
         );
     }
 
