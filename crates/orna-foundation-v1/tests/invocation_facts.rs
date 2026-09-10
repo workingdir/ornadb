@@ -64,12 +64,23 @@ fn accepts_top_level_command_without_parent_or_session() {
 
 #[test]
 fn enforces_active_and_terminal_result_failure_invariants() {
-    let mut candidate = facts(InvocationStatus::Running);
-    candidate.has_result = true;
-    assert_eq!(
-        candidate.validate(),
-        Err(InvocationFactsError::ActiveHasTerminalEvidence)
-    );
+    for status in [InvocationStatus::Queued, InvocationStatus::Running] {
+        let mut candidate = facts(status);
+        candidate.has_result = true;
+        assert_eq!(
+            candidate.validate(),
+            Err(InvocationFactsError::ActiveHasTerminalEvidence),
+            "{status:?} with a result"
+        );
+
+        candidate.has_result = false;
+        candidate.has_failure = true;
+        assert_eq!(
+            candidate.validate(),
+            Err(InvocationFactsError::ActiveHasTerminalEvidence),
+            "{status:?} with a failure"
+        );
+    }
 
     let mut candidate = facts(InvocationStatus::Succeeded);
     assert_eq!(
