@@ -9,11 +9,7 @@ use std::{cmp::Ordering, error::Error, fmt};
 
 use crate::{
     FieldId, ObjectId, ParameterId, TypeId,
-    catalogue::{
-        CatalogueSnapshot, QualifiedSemanticName, ValueTypeKind, ValueTypeMutability,
-        ValueTypePersistence,
-    },
-    inspect_carrier::InspectCarrierEnvelope,
+    catalogue::CatalogueSnapshot,
     revision::{
         ActiveDatabaseRevision, RecordValueFieldDescriptorClass, VerifiedStandardLibrarySnapshot,
         classify_record_value_field_descriptor,
@@ -33,56 +29,25 @@ use crate::{
         SYS_INSPECT_SNAPSHOT_TYPE_NAME, SYS_INSPECT_STATE_CELLS_REPRESENTATION_CONTRACT,
         SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_NAME,
         SYS_INSPECT_UI_NODES_REPRESENTATION_CONTRACT, SYS_INSPECT_UI_NODES_TYPE_ID,
-        SYS_INSPECT_UI_NODES_TYPE_NAME, SYS_SOURCE_FUNCTION_TYPE_ID,
+        SYS_INSPECT_UI_NODES_TYPE_NAME,
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
 };
 
 mod opaque_codec;
 
+#[cfg(test)]
+use opaque_codec::{ACTION_DOMAIN_CLIENT, ACTION_IDENTITY_BYTES};
+
 pub use opaque_codec::{
-    OpaqueCodecRegistration, OpaqueCodecRegistry, OpaqueCodecRegistryError, OpaqueValue,
-    OpaqueValueError,
+    MAX_OPAQUE_CODEC_ACTION_ARGUMENTS, MAX_OPAQUE_CODEC_PAYLOAD_LENGTH, MAX_ROWS_CELLS,
+    MAX_ROWS_COLUMNS, MAX_ROWS_PAYLOAD_LENGTH, MAX_ROWS_ROWS, OpaqueCodecRegistration,
+    OpaqueCodecRegistry, OpaqueCodecRegistryError, OpaqueValue, OpaqueValueError,
+    ROWS_FRAME_VERSION, ROWS_MAGIC,
 };
-
-/// The maximum payload length accepted by every registered opaque codec.
-pub const MAX_OPAQUE_CODEC_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024;
-
-/// The largest number of argument frames accepted by the generic action
-/// descriptor codec. The semantic target and parameter checks remain in the
-/// CLIENT action decoder.
-pub const MAX_OPAQUE_CODEC_ACTION_ARGUMENTS: usize = 64;
-
-const ACTION_DOMAIN_CLIENT: u8 = 1;
-const ACTION_DOMAIN_SERVER: u8 = 2;
-const ACTION_IDENTITY_BYTES: usize = 16;
-const ACTION_IDENTITY_FIELDS: usize = 5;
-const ACTION_BODY_PREFIX_BYTES: usize = 1 + (ACTION_IDENTITY_FIELDS * ACTION_IDENTITY_BYTES) + 4;
-const ORV3_HEADER_BYTES: usize = 25;
-const ORV3_MARKER: &[u8; 4] = b"ORV3";
-
-/// The largest accepted framed-codec magic prefix length in bytes.
-const MAX_OPAQUE_CODEC_MAGIC_LENGTH: usize = 64;
 
 /// The largest accepted number of runtime-value nodes.
 pub const MAX_RUNTIME_VALUE_NODES: usize = 65_536;
-/// The exact ASCII magic prefix of the canonical `std.data.Rows` payload.
-pub const ROWS_MAGIC: &[u8; 12] = b"ORNA-ROWS/1 ";
-
-/// The only supported canonical `std.data.Rows` frame version.
-pub const ROWS_FRAME_VERSION: u16 = 1;
-
-/// The maximum number of ordered columns in one materialised Rows value.
-pub const MAX_ROWS_COLUMNS: usize = 1_000_000;
-
-/// The maximum number of ordered rows in one materialised Rows value.
-pub const MAX_ROWS_ROWS: usize = 10_000;
-
-/// The maximum number of cells in one materialised Rows value.
-pub const MAX_ROWS_CELLS: usize = 1_000_000;
-
-/// The maximum complete payload length of one materialised Rows value.
-pub const MAX_ROWS_PAYLOAD_LENGTH: usize = MAX_OPAQUE_CODEC_PAYLOAD_LENGTH;
 
 /// One immutable checked-in contract for a sealed `sys.inspect` carrier.
 ///
