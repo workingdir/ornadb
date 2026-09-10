@@ -344,19 +344,24 @@ fn scenario_witnesses_bind_only_declared_passed_implementation_scenarios() {
             .is_err()
     );
 
-    let mut declared_report = report.clone();
-    declared_report
-        .implementation_claim
-        .executed_scenario_contracts
-        .extend([
-            "LET-REBIND-091".into(),
-            "PIPE-001".into(),
-            "PIPE-002".into(),
-            "REPL-001".into(),
-            "TXN-001".into(),
-            "TXN-002".into(),
-        ]);
-    let witnesses = harness
+    let declared_harness = Harness::new(Corpus::load_default().expect("reference corpus loads"))
+        .with_claim(ImplementationClaim {
+            implementation_id: "orna-conformance-v1".into(),
+            profile: "bounded-expression-runtime".into(),
+            command: "orna-conformance --profile bounded-expression-runtime".into(),
+            environment: std::collections::BTreeMap::new(),
+            executed_scenario_contracts: vec![
+                "LET-REBIND-091".into(),
+                "PIPE-001".into(),
+                "PIPE-002".into(),
+                "REPL-001".into(),
+                "TXN-001".into(),
+                "TXN-002".into(),
+            ],
+        });
+    let mut declared_adapter = RuntimeAdapter::new(BoundedEvaluator::default());
+    let declared_report = declared_harness.run(&mut declared_adapter);
+    let witnesses = declared_harness
         .scenario_execution_witnesses(&declared_report, &bindings)
         .expect("declared passed scenario becomes implementation-scenario traceability evidence");
     assert_eq!(witnesses.witnesses().len(), 3);
