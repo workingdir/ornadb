@@ -10,7 +10,16 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     iter::Peekable,
     ops::RangeBounds,
+    sync::atomic::{AtomicU64, Ordering},
 };
+
+static NEXT_ACTIVATION_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_activation_id() -> u64 {
+    let activation_id = NEXT_ACTIVATION_ID.fetch_add(1, Ordering::Relaxed);
+    assert_ne!(activation_id, 0, "activation identifier space exhausted");
+    activation_id
+}
 
 /// The committed relation for one table.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -44,6 +53,7 @@ where
             runtime: self,
             overlay: BTreeMap::new(),
             state: ActivationState::Open,
+            activation_id: next_activation_id(),
         }
     }
 
@@ -161,6 +171,8 @@ pub enum TableError {
     DoubleCommit,
     /// A mutation or read was attempted after the activation closed.
     UseAfterClose,
+    /// A statement savepoint belongs to a different activation root.
+    ForeignSavepoint,
 }
 
 /// The result of an activation closure or its root publication.
@@ -181,12 +193,14 @@ enum ActivationState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Savepoint<Key, Row> {
     overlay: BTreeMap<Key, Option<Row>>,
+    activation_id: u64,
 }
 
 /// A private copy of all relation overlays used for database statement recovery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatabaseSavepoint<Table, Key, Row> {
     overlay: BTreeMap<Table, BTreeMap<Key, Option<Row>>>,
+    activation_id: u64,
 }
 
 type CommittedRows<'a, Key, Row> = Box<dyn Iterator<Item = (&'a Key, &'a Row)> + 'a>;
@@ -533,6 +547,7 @@ pub struct Activation<'runtime, Key, Row> {
     /// `Some(row)` is an insert or replacement; `None` is a deletion.
     overlay: BTreeMap<Key, Option<Row>>,
     state: ActivationState,
+    activation_id: u64,
 }
 
 impl<'runtime, Key, Row> Activation<'runtime, Key, Row>
@@ -642,12 +657,16 @@ where
         self.require_open()?;
         Ok(Savepoint {
             overlay: self.overlay.clone(),
+            activation_id: self.activation_id,
         })
     }
 
     /// Restores a previously captured overlay without affecting committed rows.
     pub fn rollback_to(&mut self, savepoint: Savepoint<Key, Row>) -> Result<(), TableError> {
         self.require_open()?;
+        if savepoint.activation_id != self.activation_id {
+            return Err(TableError::ForeignSavepoint);
+        }
         self.overlay = savepoint.overlay;
         Ok(())
     }
@@ -809,6 +828,7 @@ where
             runtime: self,
             overlay: BTreeMap::new(),
             state: ActivationState::Open,
+            activation_id: next_activation_id(),
         }
     }
 
@@ -950,6 +970,7 @@ pub struct DatabaseActivation<'runtime, Table, Key, Row> {
     runtime: &'runtime mut DatabaseRuntime<Table, Key, Row>,
     overlay: BTreeMap<Table, BTreeMap<Key, Option<Row>>>,
     state: ActivationState,
+    activation_id: u64,
 }
 
 impl<'runtime, Table, Key, Row> DatabaseActivation<'runtime, Table, Key, Row>
@@ -1095,6 +1116,7 @@ where
         self.require_open()?;
         Ok(DatabaseSavepoint {
             overlay: self.overlay.clone(),
+            activation_id: self.activation_id,
         })
     }
 
@@ -1104,6 +1126,9 @@ where
         savepoint: DatabaseSavepoint<Table, Key, Row>,
     ) -> Result<(), TableError> {
         self.require_open()?;
+        if savepoint.activation_id != self.activation_id {
+            return Err(TableError::ForeignSavepoint);
+        }
         self.overlay = savepoint.overlay;
         Ok(())
     }
@@ -1382,6 +1407,28 @@ mod tests {
     }
 
     #[test]
+    fn statement_savepoint_cannot_restore_another_table_activation_overlay() {
+        let mut table = TableRuntime::<u64, &'static str>::default();
+        let savepoint = {
+            let mut source = table.begin();
+            source.insert(1, "source-only").unwrap();
+            source.savepoint().unwrap()
+        };
+
+        let mut target = table.begin();
+        target.insert(2, "target-only").unwrap();
+        assert_eq!(
+            target.rollback_to(savepoint),
+            Err(TableError::ForeignSavepoint)
+        );
+        assert_eq!(target.read(&2).unwrap(), Some(&"target-only"));
+        target.commit().unwrap();
+
+        assert_eq!(table.committed(&1), None);
+        assert_eq!(table.committed(&2), Some(&"target-only"));
+    }
+
+    #[test]
     fn nested_statement_savepoint_restores_parent_overlay() {
         let mut table = TableRuntime::<u64, &'static str>::default();
         let mut activation = table.begin();
@@ -1413,6 +1460,28 @@ mod tests {
         assert_eq!(database.committed(&"orders", &1), Some(&"earlier"));
         assert_eq!(database.committed(&"orders", &2), None);
         assert_eq!(database.committed(&"audits", &1), None);
+    }
+
+    #[test]
+    fn statement_savepoint_cannot_restore_another_database_activation_overlay() {
+        let mut database = DatabaseRuntime::<&'static str, u64, &'static str>::default();
+        let savepoint = {
+            let mut source = database.begin();
+            source.insert("source", 1, "source-only").unwrap();
+            source.savepoint().unwrap()
+        };
+
+        let mut target = database.begin();
+        target.insert("target", 1, "target-only").unwrap();
+        assert_eq!(
+            target.rollback_to(savepoint),
+            Err(TableError::ForeignSavepoint)
+        );
+        assert_eq!(target.read(&"target", &1).unwrap(), Some(&"target-only"));
+        target.commit().unwrap();
+
+        assert_eq!(database.committed(&"source", &1), None);
+        assert_eq!(database.committed(&"target", &1), Some(&"target-only"));
     }
 
     #[test]
