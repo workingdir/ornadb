@@ -10,6 +10,7 @@ use std::{
 };
 
 const EMBEDDED_SYSTEM_API: &str = include_str!("../../../api/sys.json");
+const MAX_JSON_NESTING_DEPTH: usize = 128;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SystemApi {
@@ -1200,6 +1201,7 @@ struct RawRemovedName {
 }
 
 fn raw_document(source: &str) -> Result<RawSystemApi, SystemApiError> {
+    reject_duplicate_json_members(source)?;
     let value: serde_json::Value =
         serde_json::from_str(source).map_err(|_| SystemApiError::InvalidJson)?;
     let document = object(&value)?;
@@ -1261,6 +1263,176 @@ fn raw_document(source: &str) -> Result<RawSystemApi, SystemApiError> {
         failure_codes,
         removed_names,
     })
+}
+
+/// `serde_json::Value` stores object members in a map and therefore cannot
+/// report duplicate keys after decoding.  The API artifact is a closed
+/// descriptor, so accepting a duplicate would make validation depend on which
+/// occurrence the decoder retained.  Scan the JSON structure first and
+/// compare decoded member names (including escaped spellings); serde_json
+/// remains responsible for the complete syntax and value validation below.
+fn reject_duplicate_json_members(source: &str) -> Result<(), SystemApiError> {
+    let mut parser = JsonMemberParser {
+        source: source.as_bytes(),
+        position: 0,
+        depth: 0,
+    };
+    parser.value()?;
+    Ok(())
+}
+
+struct JsonMemberParser<'a> {
+    source: &'a [u8],
+    position: usize,
+    depth: usize,
+}
+
+impl JsonMemberParser<'_> {
+    fn value(&mut self) -> Result<(), SystemApiError> {
+        self.whitespace();
+        match self.source.get(self.position).copied() {
+            Some(b'{') => {
+                self.enter_container()?;
+                let result = self.object();
+                self.depth -= 1;
+                result
+            }
+            Some(b'[') => {
+                self.enter_container()?;
+                let result = self.array();
+                self.depth -= 1;
+                result
+            }
+            Some(b'"') => {
+                self.string()?;
+                Ok(())
+            }
+            Some(b't') => self.literal(b"true"),
+            Some(b'f') => self.literal(b"false"),
+            Some(b'n') => self.literal(b"null"),
+            Some(b'-' | b'0'..=b'9') => {
+                self.primitive();
+                Ok(())
+            }
+            _ => Err(SystemApiError::InvalidJson),
+        }
+    }
+
+    fn enter_container(&mut self) -> Result<(), SystemApiError> {
+        if self.depth >= MAX_JSON_NESTING_DEPTH {
+            return Err(SystemApiError::InvalidJson);
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    fn object(&mut self) -> Result<(), SystemApiError> {
+        self.position += 1;
+        self.whitespace();
+        let mut names = BTreeSet::new();
+        if self.take(b'}') {
+            return Ok(());
+        }
+        loop {
+            self.whitespace();
+            let name = self.string()?;
+            if !names.insert(name) {
+                return Err(SystemApiError::InvalidJson);
+            }
+            self.whitespace();
+            if !self.take(b':') {
+                return Err(SystemApiError::InvalidJson);
+            }
+            self.value()?;
+            self.whitespace();
+            if self.take(b'}') {
+                return Ok(());
+            }
+            if !self.take(b',') {
+                return Err(SystemApiError::InvalidJson);
+            }
+        }
+    }
+
+    fn array(&mut self) -> Result<(), SystemApiError> {
+        self.position += 1;
+        self.whitespace();
+        if self.take(b']') {
+            return Ok(());
+        }
+        loop {
+            self.value()?;
+            self.whitespace();
+            if self.take(b']') {
+                return Ok(());
+            }
+            if !self.take(b',') {
+                return Err(SystemApiError::InvalidJson);
+            }
+        }
+    }
+
+    fn string(&mut self) -> Result<String, SystemApiError> {
+        let start = self.position;
+        if !self.take(b'"') {
+            return Err(SystemApiError::InvalidJson);
+        }
+        let mut escaped = false;
+        while let Some(byte) = self.source.get(self.position).copied() {
+            self.position += 1;
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                return serde_json::from_slice(&self.source[start..self.position])
+                    .map_err(|_| SystemApiError::InvalidJson);
+            }
+        }
+        Err(SystemApiError::InvalidJson)
+    }
+
+    fn literal(&mut self, literal: &[u8]) -> Result<(), SystemApiError> {
+        let end = self
+            .position
+            .checked_add(literal.len())
+            .ok_or(SystemApiError::InvalidJson)?;
+        if self.source.get(self.position..end) == Some(literal) {
+            self.position = end;
+            Ok(())
+        } else {
+            Err(SystemApiError::InvalidJson)
+        }
+    }
+
+    fn primitive(&mut self) {
+        while self
+            .source
+            .get(self.position)
+            .is_some_and(|byte| !matches!(byte, b' ' | b'\n' | b'\r' | b'\t' | b',' | b']' | b'}'))
+        {
+            self.position += 1;
+        }
+    }
+
+    fn whitespace(&mut self) {
+        while self
+            .source
+            .get(self.position)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+        {
+            self.position += 1;
+        }
+    }
+
+    fn take(&mut self, expected: u8) -> bool {
+        if self.source.get(self.position) == Some(&expected) {
+            self.position += 1;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 fn raw_counts(value: &serde_json::Value) -> Result<RawCounts, SystemApiError> {
@@ -1493,6 +1665,63 @@ mod tests {
         let error = SystemApi::from_json(&unresolved.to_string()).unwrap_err();
         assert_eq!(error, SystemApiError::UnresolvedType);
         assert!(!format!("{error:?}").contains(protected_name));
+    }
+
+    #[test]
+    fn duplicate_json_members_are_rejected_at_the_sys_api_boundary() {
+        let mut nested_object = EMBEDDED_SYSTEM_API.to_owned();
+        let insertion = nested_object
+            .find(r#""counts": {"#)
+            .expect("the API document has a counts object")
+            + r#""counts": {"#.len();
+        nested_object.insert_str(insertion, r#""\u0073ingletons":0,"#);
+        assert_eq!(
+            SystemApi::from_json(&nested_object),
+            Err(SystemApiError::InvalidJson)
+        );
+
+        let mut nested_array = EMBEDDED_SYSTEM_API.to_owned();
+        let array = nested_array
+            .find(r#""singletons": ["#)
+            .expect("the API document has a singleton array");
+        let insertion = array
+            + nested_array[array..]
+                .find('{')
+                .expect("the singleton array has an object")
+            + 1;
+        nested_array.insert_str(insertion, r#""\u006eame":"shadow","#);
+        assert_eq!(
+            SystemApi::from_json(&nested_array),
+            Err(SystemApiError::InvalidJson)
+        );
+
+        for malformed in [
+            r#"{"counts":{"singletons":1}"#,
+            r#"{"counts":{"singletons":1},"unterminated":"x}"#,
+        ] {
+            assert_eq!(
+                SystemApi::from_json(malformed),
+                Err(SystemApiError::InvalidJson)
+            );
+        }
+    }
+
+    #[test]
+    fn deeply_nested_json_is_rejected_before_stack_exhaustion() {
+        let opening = "[".repeat(MAX_JSON_NESTING_DEPTH + 1);
+        let closing = "]".repeat(MAX_JSON_NESTING_DEPTH + 1);
+        let mut deeply_nested = EMBEDDED_SYSTEM_API.to_owned();
+        let insertion = deeply_nested
+            .rfind('}')
+            .expect("the API document has a root object");
+        let field = format!(",\"unknown_nested_field\":{opening}null{closing}");
+        deeply_nested.insert_str(insertion, &field);
+
+        assert_eq!(
+            SystemApi::from_json(&deeply_nested),
+            Err(SystemApiError::InvalidJson)
+        );
+        assert!(SystemApi::embedded().is_ok());
     }
 
     #[test]
