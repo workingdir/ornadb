@@ -4301,11 +4301,18 @@ fn validate_table_assertions(
         for assertion in assertions {
             let (kind, binding, predicate) = table_assertion_predicate(assertion)?;
             let mut projections = BTreeSet::new();
+            let mut candidate_rows = 0usize;
             for (_, row) in activation
                 .candidate_relation(table)
                 .map_err(|error| transaction_error(table_error_code(error)))?
             {
                 debit_host_step(budget)?;
+                candidate_rows = candidate_rows
+                    .checked_add(1)
+                    .ok_or_else(|| transaction_error("ORNA-EVAL-LIMIT"))?;
+                limits
+                    .check_items(candidate_rows)
+                    .map_err(|_| transaction_error("ORNA-EVAL-LIMIT"))?;
                 let environment = Environment::from([(binding.to_owned(), row)]);
                 let value = evaluate_with_functions_and_budget(
                     predicate,
@@ -5038,6 +5045,46 @@ mod transaction_admission_tests {
                 StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-EFFECT"
             )),
             Ok(_) => panic!("external project entry effect reached transaction retention"),
+        }
+    }
+
+    #[test]
+    fn table_assertion_item_limit_rolls_back_the_complete_activation() {
+        let unit = SourceUnit {
+            fixture_id: "table-assertion-item-limit".into(),
+            source_id: "table-assertion-item-limit.orna".into(),
+            parse_as: "module_unit".into(),
+            source: r#"
+                pub table Note(id: Int) {
+                    text: Str,
+                    assert every(note => note.text != "");
+                }
+                fn main() {
+                    Note.insert({ id: 1, text: "one" });
+                    Note.insert({ id: 2, text: "two" });
+                    Note.insert({ id: 3, text: "three" });
+                }
+            "#
+            .into(),
+        };
+        let limits = Limits {
+            max_collection_items: 2,
+            ..Default::default()
+        };
+        let mut evaluator = TransactionalEvaluator::new("main", limits);
+
+        let outcome = evaluator.execute_source(&unit);
+
+        assert!(matches!(
+            outcome,
+            StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+        ));
+        for id in 1..=3 {
+            assert_eq!(
+                evaluator.committed_row("Note", &Value::int(id.into())),
+                None,
+                "row {id} escaped the assertion-limit rollback"
+            );
         }
     }
 }
