@@ -4561,8 +4561,9 @@ impl LiveTransport {
                 .receive_one_with_application(socket, now, input, application)
                 .await?
             {
+                let closing = matches!(next, WebSocketOutput::Close { .. });
                 output.push(next);
-                if socket.closed {
+                if socket.closed && !closing {
                     output.push(WebSocketOutput::Close { code: None });
                 }
             }
@@ -4592,7 +4593,16 @@ impl LiveTransport {
                     .await?;
                 Ok(Some(self.websocket_output(dispatched)?))
             }
-            SocketEvent::Text => Err(Error::InvalidFrame),
+            SocketEvent::Text => {
+                socket.closed = true;
+                socket.fragment = None;
+                socket.pending.clear();
+                let _ = self
+                    .host
+                    .dispatch_frame(socket.attachment, now, Frame::Close, application)
+                    .await;
+                Ok(Some(WebSocketOutput::Close { code: Some(1003) }))
+            }
             SocketEvent::Ping(payload) => Ok(Some(WebSocketOutput::Pong(payload))),
             SocketEvent::Pong => Ok(None),
             SocketEvent::Close => {
@@ -5798,7 +5808,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_post_upgrade_frame_closes_its_attachment() {
+    fn fragmented_text_with_co_read_input_closes_with_unsupported_data_code() {
         let origin = Origin::parse("https://app.example").unwrap();
         let mut host = LiveHost::new(
             Limits::default(),
@@ -5860,7 +5870,36 @@ mod tests {
             encode_token([7; 32]),
         )
         .into_bytes();
-        input.extend([0x89, 0x00]);
+        input.extend([
+            // A fragmented text message, followed in the same read by a ping
+            // that must not be processed after the unsupported-data close.
+            0x01,
+            0x82,
+            1,
+            2,
+            3,
+            4,
+            b't' ^ 1,
+            b'e' ^ 2,
+            0x80,
+            0x82,
+            1,
+            2,
+            3,
+            4,
+            b'x' ^ 1,
+            b't' ^ 2,
+            0x89,
+            0x84,
+            1,
+            2,
+            3,
+            4,
+            b'p' ^ 1,
+            b'i' ^ 2,
+            b'n' ^ 3,
+            b'g' ^ 4,
+        ]);
         let mut reader = futures::io::Cursor::new(input);
         let mut writer = futures::io::Cursor::new(Vec::new());
         let mut connection = HttpConnection::new(TransportLimits::default());
@@ -5868,7 +5907,7 @@ mod tests {
         let mut cancellation = std::future::pending::<()>();
         let mut application = RejectApplication;
 
-        assert_eq!(
+        assert!(
             futures::executor::block_on(transport.serve_websocket_connection(
                 &mut reader,
                 &mut writer,
@@ -5877,10 +5916,15 @@ mod tests {
                 &mut clock,
                 &mut cancellation,
                 &mut application,
-            )),
-            Err(HttpIoError::Transport(HttpConnectionError::Protocol(
-                Error::InvalidFrame
-            )))
+            ))
+            .is_ok()
+        );
+        assert!(writer.get_ref().ends_with(&[0x88, 2, 0x03, 0xeb]));
+        assert!(
+            !writer
+                .get_ref()
+                .windows(6)
+                .any(|frame| frame == [0x8a, 4, b'p', b'i', b'n', b'g'])
         );
         assert_eq!(
             futures::executor::block_on(transport.host.handle_frame([4; 16], 2, Frame::Close)),

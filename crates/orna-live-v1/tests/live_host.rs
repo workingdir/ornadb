@@ -5397,10 +5397,6 @@ fn websocket_upgrade_fragmentation_and_controls_are_checked_and_forwarded() {
         encode_websocket_output(&pong[0], TransportLimits::default()).unwrap(),
         Some(vec![0x8a, 1, b'p'])
     );
-    assert_eq!(
-        block_on(transport.receive(&mut socket, 2, &masked(true, 1, b"text"))),
-        Err(Error::InvalidFrame)
-    );
     let close = block_on(transport.receive(
         &mut socket,
         2,
@@ -5417,6 +5413,14 @@ fn websocket_upgrade_fragmentation_and_controls_are_checked_and_forwarded() {
     assert_eq!(
         block_on(transport.receive(&mut socket, 2, &masked(true, 2, &message))),
         Err(Error::Closed)
+    );
+    assert_eq!(
+        block_on(transport.receive(
+            &mut WebSocketState::new([5; 16]),
+            2,
+            &masked(true, 1, b"text"),
+        )),
+        Ok(vec![WebSocketOutput::Close { code: Some(1003) }])
     );
 }
 
