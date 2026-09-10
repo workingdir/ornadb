@@ -364,6 +364,79 @@ impl Serialize for InvocationStatus {
     }
 }
 
+/// Redaction-safe facts used to validate a durable `sys.Invocation` row.
+///
+/// This model intentionally stores only presence bits. It does not retain or
+/// construct parent, session, trace, idempotency, result, or failure values,
+/// so validation cannot manufacture public references or leak protected
+/// payloads while the durable store lacks authoritative coordinates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvocationFacts {
+    pub status: InvocationStatus,
+    pub has_parent: bool,
+    pub has_owner_session: bool,
+    pub is_top_level_command: bool,
+    pub has_result: bool,
+    pub has_failure: bool,
+    pub has_trace: bool,
+    pub has_idempotency_key_hash: bool,
+}
+
+impl InvocationFacts {
+    /// Validates ownership, terminal outcome, and unsupported-link facts.
+    pub fn validate(self) -> Result<(), InvocationFactsError> {
+        let owner_count =
+            self.has_parent as u8 + self.has_owner_session as u8 + self.is_top_level_command as u8;
+        if owner_count != 1 {
+            return Err(InvocationFactsError::OwnerExclusivity);
+        }
+        if self.has_trace || self.has_idempotency_key_hash {
+            return Err(InvocationFactsError::UnsupportedLinkPresent);
+        }
+
+        match self.status {
+            InvocationStatus::Queued | InvocationStatus::Running => {
+                if self.has_result || self.has_failure {
+                    return Err(InvocationFactsError::ActiveHasTerminalEvidence);
+                }
+            }
+            InvocationStatus::Succeeded => {
+                if !self.has_result || self.has_failure {
+                    return Err(InvocationFactsError::SucceededOutcome);
+                }
+            }
+            InvocationStatus::Failed => {
+                if self.has_result || !self.has_failure {
+                    return Err(InvocationFactsError::FailedOutcome);
+                }
+            }
+            InvocationStatus::Cancelled | InvocationStatus::Orphaned => {
+                if self.has_result {
+                    return Err(InvocationFactsError::CancelledOrOrphanedOutcome);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A redaction-safe failure from [`InvocationFacts::validate`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InvocationFactsError {
+    /// Exactly one of parent, owner session, or top-level command is required.
+    OwnerExclusivity,
+    /// Trace and idempotency-key links are not retained by this projection.
+    UnsupportedLinkPresent,
+    /// Active invocations cannot expose terminal result or failure evidence.
+    ActiveHasTerminalEvidence,
+    /// A succeeded invocation requires a result and no failure.
+    SucceededOutcome,
+    /// A failed invocation requires a failure and no result.
+    FailedOutcome,
+    /// Cancelled and orphaned invocations cannot expose a result.
+    CancelledOrOrphanedOutcome,
+}
+
 /// Checks a candidate `sys.InvocationRef` against a supplied CWD context,
 /// fixed `sys.Invocation` relation identity, and the declared `id` key. This
 /// is reference-coordinate validation only; it does not establish
