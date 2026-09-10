@@ -15,7 +15,7 @@ use num_bigint::BigInt;
 use orna_evaluator_v1::{
     EffectHandler, Environment, EvaluationError, Functions, Limits as EvaluatorLimits,
     PureFunction as RetainedFunction, StepBudget, evaluate_expression_with_functions,
-    evaluate_with_functions, invoke_named, invoke_named_with_effects,
+    evaluate_with_functions_and_budget, invoke_named, invoke_named_with_effects_and_budget,
 };
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
 use orna_repository_v1::Repository;
@@ -1049,11 +1049,16 @@ impl TransactionalEvaluator {
                 mutations: &mut mutations,
                 next_mutation: 0,
                 limits,
-                activation_budget: None,
             };
-            let result =
-                invoke_named_with_effects(&entry, &functions, arguments, limits, &mut effects);
-            let mut budget = effects.activation_budget.take();
+            let mut budget = StepBudget::new(limits.max_steps);
+            let result = invoke_named_with_effects_and_budget(
+                &entry,
+                &functions,
+                arguments,
+                limits,
+                &mut effects,
+                &mut budget,
+            );
             result.and_then(|_| {
                 validate_table_assertions(
                     activation,
@@ -2601,7 +2606,6 @@ struct TableEffectHandler<'activation, 'runtime> {
     mutations: &'activation mut Vec<TableMutation>,
     next_mutation: u64,
     limits: EvaluatorLimits,
-    activation_budget: Option<StepBudget>,
 }
 
 impl EffectHandler for TableEffectHandler<'_, '_> {
@@ -2637,7 +2641,6 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
             .savepoint()
             .map_err(|error| transaction_error(table_error_code(error)))?;
         let result = self.handle_inner_with_budget(callee, arguments, Some(budget));
-        self.activation_budget = Some(*budget);
         if result.is_err() {
             self.activation
                 .rollback_to(savepoint)
@@ -4292,7 +4295,7 @@ fn validate_table_assertions(
     assertions: &TableAssertions,
     functions: &Functions,
     limits: EvaluatorLimits,
-    budget: &mut Option<StepBudget>,
+    budget: &mut StepBudget,
 ) -> Result<(), EvaluationError> {
     for (table, assertions) in assertions {
         for assertion in assertions {
@@ -4304,7 +4307,13 @@ fn validate_table_assertions(
             {
                 debit_host_step(budget)?;
                 let environment = Environment::from([(binding.to_owned(), row)]);
-                let value = evaluate_with_functions(predicate, &environment, functions, limits)?;
+                let value = evaluate_with_functions_and_budget(
+                    predicate,
+                    &environment,
+                    functions,
+                    limits,
+                    budget,
+                )?;
                 match kind {
                     TableAssertionKind::Every => match value.raw() {
                         OvbRaw::Bool(true) => {}
@@ -4337,7 +4346,7 @@ fn validate_module_assertions(
     assertions: &[Expr],
     functions: &Functions,
     limits: EvaluatorLimits,
-    budget: &mut Option<StepBudget>,
+    budget: &mut StepBudget,
 ) -> Result<(), EvaluationError> {
     for assertion in assertions {
         let value = evaluate_module_assertion(
@@ -4361,10 +4370,16 @@ fn evaluate_module_assertion(
     environment: &Environment,
     functions: &Functions,
     limits: EvaluatorLimits,
-    budget: &mut Option<StepBudget>,
+    budget: &mut StepBudget,
 ) -> Result<Value, EvaluationError> {
     let Some((kind, table, binding, body)) = module_assertion_quantifier(expression) else {
-        return evaluate_with_functions(expression, environment, functions, limits);
+        return evaluate_with_functions_and_budget(
+            expression,
+            environment,
+            functions,
+            limits,
+            budget,
+        );
     };
     let table = table.to_owned();
     let relation = activation
@@ -4411,11 +4426,8 @@ fn debit_effect_step(budget: &mut Option<&mut StepBudget>) -> Result<(), Evaluat
     Ok(())
 }
 
-fn debit_host_step(budget: &mut Option<StepBudget>) -> Result<(), EvaluationError> {
-    if let Some(budget) = budget {
-        budget.debit(1)?;
-    }
-    Ok(())
+fn debit_host_step(budget: &mut StepBudget) -> Result<(), EvaluationError> {
+    budget.debit(1)
 }
 
 fn canonical_bool(value: bool) -> Result<Value, EvaluationError> {
