@@ -153,7 +153,7 @@ enum Invocation {
 enum Command {
     Repl(Option<String>),
     Init(Option<PathBuf>),
-    Status,
+    Status { short: bool },
     Check,
     Invoke(String),
     Run(Invocation),
@@ -214,19 +214,20 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             Command::Init(target)
         }
         Some("status") => match words.next() {
-            Some("--porcelain") => Command::Status,
+            Some("--porcelain") => Command::Status { short: false },
+            Some("--short") => Command::Status { short: true },
             Some(_) => {
                 return Err(Diagnostic::usage(
                     "E1002",
-                    "`status` only supports `--porcelain`",
-                    "use `status --porcelain`",
+                    "`status` only supports `--porcelain` or `--short`",
+                    "use `status --porcelain` or `status --short`",
                 ));
             }
             None => {
                 return Err(Diagnostic::usage(
                     "E1001",
-                    "`status` needs `--porcelain`",
-                    "use `status --porcelain`",
+                    "`status` needs an output format",
+                    "use `status --porcelain` or `status --short`",
                 ));
             }
         },
@@ -540,6 +541,43 @@ fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
                 "retry `status --porcelain`",
             )
         })?;
+    Ok(())
+}
+
+fn run_status_short(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+    let path = local_project_path(endpoint)?;
+    orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree could not be discovered",
+            "run the command inside a Git worktree or provide a local project path",
+        )
+    })?;
+    let output = std::process::Command::new("git")
+        .args(["status", "--short"])
+        .current_dir(path)
+        .output()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "local Git worktree status could not be read",
+                "check that Git can read the local worktree, then retry `status --short`",
+            )
+        })?;
+    if !output.status.success() {
+        return Err(Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be read",
+            "check that Git can read the local worktree, then retry `status --short`",
+        ));
+    }
+    io::stdout().write_all(&output.stdout).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be written",
+            "retry `status --short`",
+        )
+    })?;
     Ok(())
 }
 
@@ -1020,7 +1058,7 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     match parsed.command.clone() {
         Command::Help => {
             println!(
-                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|status --porcelain|check|invoke TARGET|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
+                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|status --porcelain|status --short|check|invoke TARGET|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
             );
             println!("orna-cli-v1 init [DIRECTORY]");
             Ok(())
@@ -1030,7 +1068,8 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             Ok(())
         }
         Command::Init(ref target) => initialize_repository(target.as_deref()),
-        Command::Status => run_status(&parsed.endpoint),
+        Command::Status { short: false } => run_status(&parsed.endpoint),
+        Command::Status { short: true } => run_status_short(&parsed.endpoint),
         Command::Check => check_project(&parsed.endpoint),
         Command::Invoke(ref target) => run_pure_invocation(&parsed.endpoint, target),
         Command::Repl(ref expression) => run_repl(&parsed.endpoint, expression.as_deref()),
@@ -1127,13 +1166,19 @@ mod tests {
             parse_cli(&["status".into(), "--porcelain".into()])
                 .expect("parses")
                 .command,
-            Command::Status
+            Command::Status { short: false }
         );
         assert_eq!(
             parse_cli(&["status".into()])
                 .expect_err("status format is required")
                 .code,
             "E1001"
+        );
+        assert_eq!(
+            parse_cli(&["status".into(), "--short".into()])
+                .expect("short status parses")
+                .command,
+            Command::Status { short: true }
         );
         assert_eq!(
             parse_cli(&["status".into(), "--porcelain=v2".into()])
