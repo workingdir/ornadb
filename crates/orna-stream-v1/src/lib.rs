@@ -586,6 +586,16 @@ impl InMemoryCheckpointBackend {
                 )
         })
     }
+
+    fn has_ordered_blocking_failure(&self, key: &CheckpointKey) -> bool {
+        self.failures.values().any(|failure| {
+            &failure.identity.0.checkpoint_key() == key
+                && matches!(
+                    failure.status,
+                    FailureStatus::Failed | FailureStatus::Retrying
+                )
+        })
+    }
 }
 
 impl CheckpointBackend for InMemoryCheckpointBackend {
@@ -672,7 +682,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                     (LeasePurpose::Deliver, Some(FailureStatus::Retrying))
                         | (LeasePurpose::Skip, Some(FailureStatus::Failed))
                 );
-                if self.has_blocking_failure(&key) && !authorised_blocking_delivery {
+                if self.has_ordered_blocking_failure(&key) && !authorised_blocking_delivery {
                     return CommitResult::Rejected(RejectReason::BlockingFailure);
                 }
                 if let Some(existing) = self.leases.get(&key).cloned() {
@@ -1406,6 +1416,48 @@ mod tests {
         assert_eq!(
             backend.failure(&failure.identity).unwrap().status,
             FailureStatus::Replayed
+        );
+    }
+
+    #[test]
+    fn admitted_replay_does_not_block_later_ordered_delivery() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let item = delivery("receipt:zero", "resume:one");
+        let failed = acquire_and_fail(&mut backend, item.clone());
+        let skip_lease = acquire_skip(&mut backend, item.clone());
+        assert!(matches!(
+            backend.apply(CommitIntent::Skip {
+                lease: skip_lease,
+                expected: expected(&backend, &item),
+                expected_failure_version: failed.version,
+            }),
+            CommitResult::CheckpointAdvanced { .. }
+        ));
+        let skipped = backend.failure(&failed.identity).unwrap().clone();
+        let replay = match backend.apply(CommitIntent::Replay {
+            failure: failed.identity.clone(),
+            expected_version: skipped.version,
+        }) {
+            CommitResult::ReplayGranted { grant } => grant,
+            result => panic!("unexpected replay result: {result:?}"),
+        };
+        assert_eq!(
+            backend.failure(&failed.identity).unwrap().status,
+            FailureStatus::Replaying
+        );
+
+        let later = delivery("receipt:later", "resume:later");
+        assert!(matches!(
+            backend.apply(CommitIntent::Acquire {
+                delivery: later,
+                expected: expected(&backend, &item),
+                purpose: LeasePurpose::Deliver,
+            }),
+            CommitResult::Acquired { .. }
+        ));
+        assert_eq!(
+            backend.failure(&replay.failure).unwrap().status,
+            FailureStatus::Replaying
         );
     }
 

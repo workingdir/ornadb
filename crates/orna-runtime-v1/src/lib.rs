@@ -8026,6 +8026,30 @@ async fn has_blocking_stream_failure(
         .is_some())
 }
 
+async fn has_ordered_blocking_stream_failure(
+    connection: &Connection,
+    key: &CheckpointKey,
+) -> Result<bool, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT 1 FROM stream_failure
+             WHERE key_id = ?1 AND status IN (?2, ?3)
+             LIMIT 1",
+            params![
+                stream_key_id(key),
+                encode_status(FailureStatus::Failed),
+                encode_status(FailureStatus::Retrying),
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some())
+}
+
 /// Verifies the durable evidence needed to reopen abandoned stream attempts.
 ///
 /// A writer takeover fences the former runtime owner, which is the authority
@@ -8438,7 +8462,8 @@ async fn apply_stream_intent_tx(
                 (LeasePurpose::Deliver, Some(FailureStatus::Retrying))
                     | (LeasePurpose::Skip, Some(FailureStatus::Failed))
             );
-            if has_blocking_stream_failure(connection, &key).await? && !authorised_blocking_delivery
+            if has_ordered_blocking_stream_failure(connection, &key).await?
+                && !authorised_blocking_delivery
             {
                 return Ok(CommitResult::Rejected(RejectReason::BlockingFailure));
             }
@@ -14100,6 +14125,48 @@ mod tests {
                 .unwrap(),
             checkpoint
         );
+    }
+
+    #[tokio::test]
+    async fn durable_admitted_replay_does_not_block_later_ordered_delivery() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let (grant, checkpoint, _) =
+            protected_replay_fixture(&state, writer, "replay-admission", digest(5)).await;
+        let later = stream_delivery("replay-later", "replay-later-next");
+
+        let lease = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Acquire {
+                delivery: later,
+                expected: (&checkpoint).into(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected later delivery result: {other:?}"),
+        };
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_async(&grant.failure)
+                .await
+                .unwrap()
+                .expect("replaying failure")
+                .status,
+            FailureStatus::Replaying
+        );
+        assert!(matches!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Cancel { lease })
+                .await
+                .unwrap(),
+            CommitResult::Cancelled { .. }
+        ));
     }
 
     #[tokio::test]
