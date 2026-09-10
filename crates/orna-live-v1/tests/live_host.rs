@@ -5553,7 +5553,7 @@ fn websocket_close_payloads_require_valid_codes_and_utf8_reasons() {
         let mut socket = WebSocketState::new([5; 16]);
         assert_eq!(
             block_on(transport.receive(&mut socket, 2, &masked(true, 8, &payload))),
-            Err(Error::InvalidFrame)
+            Ok(vec![WebSocketOutput::Close { code: Some(1002) }])
         );
     }
 }
@@ -5574,7 +5574,7 @@ fn websocket_input_rejects_noncanonical_extended_lengths() {
                 2,
                 &masked_with_length_code(true, 2, &body, length_code, encoded_length),
             )),
-            Err(Error::InvalidFrame)
+            Ok(vec![WebSocketOutput::Close { code: Some(1002) }])
         );
     }
 
@@ -5586,7 +5586,7 @@ fn websocket_input_rejects_noncanonical_extended_lengths() {
             2,
             &masked_with_length_code(true, 2, &[], 127, 1_u64 << 63),
         )),
-        Err(Error::InvalidFrame)
+        Ok(vec![WebSocketOutput::Close { code: Some(1002) }])
     );
 }
 
@@ -5646,7 +5646,80 @@ fn websocket_input_rejects_oversized_control_frames_as_invalid() {
 
     assert_eq!(
         block_on(transport.receive(&mut socket, 2, &frame)),
-        Err(Error::InvalidFrame)
+        Ok(vec![WebSocketOutput::Close { code: Some(1002) }])
+    );
+}
+
+#[test]
+fn websocket_input_malformed_frame_emits_protocol_close_once() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut socket = WebSocketState::new([5; 16]);
+    let malformed = masked(true, 0, b"");
+
+    let output = block_on(transport.receive(&mut socket, 2, &malformed)).unwrap();
+    assert_eq!(output, vec![WebSocketOutput::Close { code: Some(1002) }]);
+    assert_eq!(
+        encode_websocket_output(&output[0], TransportLimits::default()).unwrap(),
+        Some(vec![0x88, 2, 0x03, 0xea])
+    );
+    assert_eq!(transport.take_retired_attachments(), Vec::<[u8; 16]>::new());
+    assert_eq!(
+        block_on(transport.receive(&mut socket, 2, &masked(true, 9, b"p"))),
+        Err(Error::Closed)
+    );
+}
+
+#[test]
+fn websocket_input_malformed_application_message_closes_and_retires_attachment() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let credential = token(&created);
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &credential), [5; 16], 1)).status,
+        101
+    );
+
+    let mut socket = WebSocketState::new([5; 16]);
+    assert_eq!(
+        block_on(transport.receive(&mut socket, 2, &masked(true, 2, &[0xff]))),
+        Ok(vec![WebSocketOutput::Close { code: Some(1002) }])
+    );
+    assert_eq!(
+        block_on(transport.close_attachment([5; 16], 2)),
+        Err(Error::Closed)
+    );
+}
+
+#[test]
+fn websocket_input_coalesced_malformed_frame_closes_after_prior_output() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut socket = WebSocketState::new([5; 16]);
+    let mut bytes = masked(true, 9, b"p");
+    bytes.extend(masked(true, 0, b""));
+
+    assert_eq!(
+        block_on(transport.receive(&mut socket, 2, &bytes)),
+        Ok(vec![
+            WebSocketOutput::Pong(vec![b'p']),
+            WebSocketOutput::Close { code: Some(1002) },
+        ])
     );
 }
 
