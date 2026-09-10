@@ -7234,6 +7234,18 @@ async fn load_stream_observation_tx(
         ),
         None => None,
     };
+    let items_seen = decode_u64(row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let items_committed = decode_u64(row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let items_failed = decode_u64(row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let last_item_ms: Option<i64> = row.get(24).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let observed_ms: i64 = row.get(25).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    if items_committed.saturating_add(items_failed) > items_seen
+        || last_item_ms.is_some_and(|last_item| last_item > observed_ms)
+        || (status == StreamObservationStatus::Failed
+            && (last_failure.is_none() || diagnostic.is_none()))
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
     let live = parent_capture == *capture
         && !run_status.is_terminal()
         && !matches!(
@@ -7259,12 +7271,12 @@ async fn load_stream_observation_tx(
         checkpoint,
         last_failure,
         status,
-        items_seen: decode_u64(row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        items_committed: decode_u64(row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        items_failed: decode_u64(row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        last_item_ms: row.get(24).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        items_seen,
+        items_committed,
+        items_failed,
+        last_item_ms,
         diagnostic,
-        observed_ms: row.get(25).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        observed_ms,
         live,
     }))
 }
@@ -18512,6 +18524,88 @@ mod tests {
             run_status_code(RunObservationStatus::Completed)
         );
         assert_eq!(row.get::<Option<i64>>(1).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn stream_observation_loader_fails_closed_on_persisted_invariant_mismatch() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let request = request(226, 227);
+        state.reserve_request(request, digest(228)).await.unwrap();
+        let key = stream_delivery("malformed", "stream").checkpoint_key();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: key.consumer.clone(),
+                function: "pkg.malformed-stream".into(),
+                source_identity: None,
+                invocation_id: id(229),
+            })
+            .await
+            .unwrap();
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: None,
+                checkpoint: key,
+            })
+            .await
+            .unwrap();
+
+        state
+            .connection
+            .execute(
+                "UPDATE sys_stream_observation
+                 SET status = ?1, diagnostic_code = NULL, diagnostic_class = NULL,
+                     last_failure_identity = NULL
+                 WHERE stream_id = ?2",
+                params![
+                    stream_observation_status_code(StreamObservationStatus::Failed),
+                    stream.id.0.to_vec()
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.stream_observation(stream.id).await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+
+        state
+            .connection
+            .execute(
+                "UPDATE sys_stream_observation
+                 SET status = ?1, items_seen = 0, items_committed = 1,
+                     items_failed = 0
+                 WHERE stream_id = ?2",
+                params![
+                    stream_observation_status_code(StreamObservationStatus::Starting),
+                    stream.id.0.to_vec()
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.stream_observation(stream.id).await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+
+        state
+            .connection
+            .execute(
+                "UPDATE sys_stream_observation
+                 SET items_seen = 0, items_committed = 0, items_failed = 0,
+                     last_item_ms = observed_ms + 1
+                 WHERE stream_id = ?1",
+                params![stream.id.0.to_vec()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.stream_observation(stream.id).await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
     }
 
     #[tokio::test]
