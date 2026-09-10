@@ -19,6 +19,34 @@ fn source(body: &str) -> SourceUnit {
     }
 }
 
+fn table_assertion_source(assertion: &str, body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "relation-assertion-budget".into(),
+        source_id: "relation-assertion-budget.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            r#"
+                pub table Reading(id: Int) {{ value: Int, assert {assertion}; }}
+                fn parent() {{ {body} }}
+            "#
+        ),
+    }
+}
+
+fn table_source(body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "relation-assertion-budget".into(),
+        source_id: "relation-assertion-budget.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            r#"
+                pub table Reading(id: Int) {{ value: Int, }}
+                fn parent() {{ {body} }}
+            "#
+        ),
+    }
+}
+
 #[test]
 fn relation_integer_aggregates_read_candidate_rows_in_canonical_order() {
     let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
@@ -274,6 +302,148 @@ fn assertion_scan_consumes_shared_budget_and_preserves_rollback() {
             evaluator.committed_row("Reading", &Value::int(id.into())),
             None,
             "row {id} escaped assertion-limit rollback"
+        );
+    }
+}
+
+#[test]
+fn table_assertion_predicate_vm_work_shares_one_activation_budget() {
+    let mut limits = Limits::default();
+    limits.max_steps = 20;
+    let mut evaluator = TransactionalEvaluator::new("parent", limits);
+    assert!(matches!(
+        evaluator.execute_source(&table_source(
+            "Reading.insert({ id: 1, value: 2 }); Reading.insert({ id: 2, value: 2 });",
+        )),
+        StageOutcome::Passed
+    ));
+    let outcome = evaluator.execute_source(&table_assertion_source(
+        "every(reading => reading.value + 1 + 1 + 1 + 1 == 6)",
+        "",
+    ));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+    ));
+    for id in [1, 2] {
+        assert!(
+            evaluator
+                .committed_row("Reading", &Value::int(id.into()))
+                .is_some(),
+            "seed row {id} disappeared after predicate-budget exhaustion"
+        );
+    }
+}
+
+#[test]
+fn nested_module_quantifier_cannot_reset_the_activation_budget() {
+    let seed = SourceUnit {
+        fixture_id: "nested-assertion-budget".into(),
+        source_id: "nested-assertion-budget.orna".into(),
+        parse_as: "module_unit".into(),
+        source: r#"
+            pub table Book(id: Int) { title: Str, }
+            pub table Loan(id: Int) { book_id: Int, }
+            fn parent() {
+                Book.insert({ id: 1, title: "one" });
+                Book.insert({ id: 2, title: "two" });
+                Loan.insert({ id: 10, book_id: 1 });
+                Loan.insert({ id: 11, book_id: 2 });
+            }
+        "#
+        .into(),
+    };
+    let assertion = SourceUnit {
+        fixture_id: "nested-assertion-budget".into(),
+        source_id: "nested-assertion-budget.orna".into(),
+        parse_as: "module_unit".into(),
+        source: r#"
+            pub table Book(id: Int) { title: Str, }
+            pub table Loan(id: Int) { book_id: Int, }
+            assert every(Loan, loan => exists(Book, book => book.id == loan.book_id));
+            fn parent() { }
+        "#
+        .into(),
+    };
+    let mut limits = Limits::default();
+    limits.max_steps = 20;
+    let mut evaluator = TransactionalEvaluator::new("parent", limits);
+    assert!(matches!(
+        evaluator.execute_source(&seed),
+        StageOutcome::Passed
+    ));
+
+    let outcome = evaluator.execute_source(&assertion);
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+    ));
+    for (table, ids) in [("Book", [1, 2]), ("Loan", [10, 11])] {
+        for id in ids {
+            assert!(
+                evaluator
+                    .committed_row(table, &Value::int(id.into()))
+                    .is_some(),
+                "seed {table} row {id} disappeared after nested-budget exhaustion"
+            );
+        }
+    }
+}
+
+#[test]
+fn zero_and_exhausted_assertion_budgets_publish_nothing() {
+    let unit = table_assertion_source(
+        "every(reading => reading.value > 0)",
+        "Reading.insert({ id: 1, value: 1 }); Reading.insert({ id: 2, value: 2 });",
+    );
+
+    let mut zero_limits = Limits::default();
+    zero_limits.max_steps = 0;
+    let mut zero = TransactionalEvaluator::new("parent", zero_limits);
+    let zero_outcome = zero.execute_source(&unit);
+    assert!(matches!(
+        zero_outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+    ));
+    for id in [1, 2] {
+        assert_eq!(zero.committed_row("Reading", &Value::int(id.into())), None);
+    }
+
+    let mut exhausted_limits = Limits::default();
+    exhausted_limits.max_steps = 10;
+    let mut exhausted = TransactionalEvaluator::new("parent", exhausted_limits);
+    let exhausted_outcome = exhausted.execute_source(&unit);
+    assert!(matches!(
+        exhausted_outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+    ));
+    for id in [1, 2] {
+        assert_eq!(
+            exhausted.committed_row("Reading", &Value::int(id.into())),
+            None
+        );
+    }
+}
+
+#[test]
+fn generous_assertion_budget_preserves_successful_publication() {
+    let mut limits = Limits::default();
+    limits.max_steps = 1_000;
+    let mut evaluator = TransactionalEvaluator::new("parent", limits);
+    let outcome = evaluator.execute_source(&table_assertion_source(
+        "every(reading => reading.value > 0)",
+        "Reading.insert({ id: 1, value: 1 }); Reading.insert({ id: 2, value: 2 });",
+    ));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    for id in [1, 2] {
+        assert!(
+            evaluator
+                .committed_row("Reading", &Value::int(id.into()))
+                .is_some(),
+            "row {id} was not published under generous limits"
         );
     }
 }
