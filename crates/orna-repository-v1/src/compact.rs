@@ -1703,6 +1703,120 @@ impl Repository {
         Ok(Some(manifest))
     }
 
+    /// Observes whether the locally materialized compact manifest at `commit`
+    /// declares only materialized or locally proven-promised segment blobs.
+    ///
+    /// This is deliberately a storage-manifest observation, not a claim that
+    /// every object required by an Orna logical snapshot has been declared.
+    /// The manifest and shard metadata must themselves be locally readable;
+    /// their absence or an unavailable declared segment fails closed. Git lazy
+    /// fetch is disabled for every metadata read.
+    pub fn observe_compact_manifest_segment_blobs(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+    ) -> Result<crate::GitDeclaredObjectSetState, RepositoryError> {
+        if !matches!(
+            self.observe_git_object(commit.as_str())?,
+            crate::GitObjectState::Materialized {
+                kind: crate::GitObjectKind::Commit,
+                ..
+            }
+        ) {
+            return Ok(crate::GitDeclaredObjectSetState::Incomplete);
+        }
+        let manifest_path = managed_child(&compact_root(table), "manifest.orna")?;
+        let Some(bytes) = self.observed_committed_file_bytes(commit, &manifest_path)? else {
+            return Ok(crate::GitDeclaredObjectSetState::Incomplete);
+        };
+        let header = match parse_manifest_header(&bytes) {
+            Ok(header) if header.table == table => header,
+            _ => return Ok(crate::GitDeclaredObjectSetState::Malformed),
+        };
+        let mut entries = Vec::new();
+        let mut shard_bytes_by_path = Vec::new();
+        for shard in &header.shards {
+            let Some(shard_bytes) = self.observed_committed_file_bytes(commit, &shard.file)? else {
+                return Ok(crate::GitDeclaredObjectSetState::Incomplete);
+            };
+            if Sha256::digest(&shard_bytes).as_slice() != shard.hash {
+                return Ok(crate::GitDeclaredObjectSetState::Malformed);
+            }
+            let parsed = match parse_shard(&shard_bytes) {
+                Ok(parsed) => parsed,
+                Err(_) => return Ok(crate::GitDeclaredObjectSetState::Malformed),
+            };
+            if parsed.len() != shard.entries
+                || parsed.iter().map(|entry| entry.min_key.as_slice()).min()
+                    != Some(shard.min_key.as_slice())
+                || parsed.iter().map(|entry| entry.max_key.as_slice()).max()
+                    != Some(shard.max_key.as_slice())
+            {
+                return Ok(crate::GitDeclaredObjectSetState::Malformed);
+            }
+            shard_bytes_by_path.push((shard.file.clone(), shard_bytes));
+            entries.extend(parsed);
+        }
+        let manifest = CompactManifest {
+            table: header.table,
+            schema: header.schema,
+            next_generation: header.next_generation,
+            entries,
+        };
+        if manifest
+            .validate(Some(self.native_object_id_length()?))
+            .is_err()
+            || verify_canonical_manifest_files(&manifest, &bytes, &shard_bytes_by_path).is_err()
+        {
+            return Ok(crate::GitDeclaredObjectSetState::Malformed);
+        }
+        for entry in manifest.entries() {
+            let Ok(Some((_mode, object))) =
+                self.observed_tree_entry_at(commit, &entry.relative_path)
+            else {
+                return Ok(crate::GitDeclaredObjectSetState::Malformed);
+            };
+            if object != entry.git_object_id {
+                return Ok(crate::GitDeclaredObjectSetState::Malformed);
+            }
+        }
+        let object_ids = manifest
+            .entries()
+            .iter()
+            .map(CompactManifestEntry::git_object_id)
+            .collect::<Vec<_>>();
+        self.observe_declared_segment_blob_set(&object_ids)
+    }
+
+    fn observed_committed_file_bytes(
+        &self,
+        commit: &GitCommitRef,
+        path: &ManagedPath,
+    ) -> Result<Option<Vec<u8>>, RepositoryError> {
+        let Some((_mode, object)) = self.observed_tree_entry_at(commit, path)? else {
+            return Ok(None);
+        };
+        let mut command = self.observer_command();
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["cat-file", "blob", &object]);
+        Ok(Some(self.run(command)?.stdout))
+    }
+
+    fn observed_tree_entry_at(
+        &self,
+        commit: &GitCommitRef,
+        path: &ManagedPath,
+    ) -> Result<Option<(String, String)>, RepositoryError> {
+        let mut command = self.observer_command();
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["ls-tree", "-z", "--full-tree", commit.as_str(), "--"])
+            .arg(path.as_path());
+        let output = self.run(command)?.stdout;
+        parse_tree_entry(&output, path, self.native_object_id_length()?)
+    }
+
     /// Builds a compact publication from the manifest committed by
     /// `expected_head`.  The candidate generation is taken solely from that
     /// verified base manifest, and the returned journal binds all resulting
