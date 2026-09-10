@@ -3156,13 +3156,23 @@ impl Repository {
 
     /// Atomically materialises one repository-managed file while preserving
     /// an ordinary editor's later change. The expected bytes are checked both
-    /// before and immediately before replacement; `None` removes an existing
-    /// regular file and is a no-op when the file is already absent.
+    /// before and immediately before replacement or removal; `None` removes
+    /// an existing regular file and is a no-op when the file is already absent.
     pub fn materialize_managed_file(
         &self,
         path: &ManagedPath,
         expected: Option<&[u8]>,
         next: Option<&[u8]>,
+    ) -> Result<(), RepositoryError> {
+        self.materialize_managed_file_impl(path, expected, next, None)
+    }
+
+    fn materialize_managed_file_impl(
+        &self,
+        path: &ManagedPath,
+        expected: Option<&[u8]>,
+        next: Option<&[u8]>,
+        mut before_delete: Option<&mut dyn FnMut()>,
     ) -> Result<(), RepositoryError> {
         self.ensure_atomic_worktree_install_supported()?;
         let _lock = self.acquire_coordination_lock()?;
@@ -3215,6 +3225,12 @@ impl Repository {
                     .is_file()
                 {
                     return Err(RepositoryError::UnsafeManagedPath);
+                }
+                if let Some(hook) = before_delete.as_mut() {
+                    hook();
+                }
+                if self.read_managed_file(&target)?.as_deref() != expected {
+                    return Err(RepositoryError::ManagedContentConflict);
                 }
                 fs::remove_file(&target).map_err(|_| RepositoryError::LocalStateUnavailable)?;
                 if let Some(parent) = target.parent() {
@@ -4620,5 +4636,53 @@ mod tests {
                 .stdout,
             b"interleaved\n"
         );
+    }
+
+    #[test]
+    fn deletion_revalidates_editor_race_and_retries_idempotently() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        git(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(root.path(), &["config", "user.name", "Repository test"]);
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let path = super::ManagedPath::new("generated/row.orna").unwrap();
+        repository
+            .materialize_managed_file(&path, None, Some(b"first"))
+            .unwrap();
+        let head_before = repository.head().unwrap();
+        let index_before = repository.index_generation().unwrap();
+        let target = root.path().join(path.as_path());
+        let mut editor_race = || {
+            fs::write(&target, b"editor").unwrap();
+        };
+
+        assert!(matches!(
+            repository.materialize_managed_file_impl(
+                &path,
+                Some(b"first"),
+                None,
+                Some(&mut editor_race),
+            ),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(fs::read(&target).unwrap(), b"editor");
+        assert_eq!(repository.head().unwrap(), head_before);
+        assert_eq!(repository.index_generation().unwrap(), index_before);
+
+        repository
+            .materialize_managed_file(&path, Some(b"editor"), None)
+            .unwrap();
+        repository
+            .materialize_managed_file(&path, None, None)
+            .unwrap();
+        assert!(!target.exists());
     }
 }
