@@ -549,8 +549,9 @@ pub fn validate_stream_reference(
     };
     let run = row_ref_from_raw(run).map_err(|_| SystemReferenceError::InvalidStreamKey)?;
     validate_run_reference(run, capture).map_err(|_| SystemReferenceError::InvalidStreamKey)?;
-    if !matches!(source_identity, OvbRaw::Text(_))
-        || !matches!(partition, OvbRaw::Null | OvbRaw::Text(_))
+    if !matches!(source_identity, OvbRaw::Text(value) if !value.is_empty())
+        || !(matches!(partition, OvbRaw::Null)
+            || matches!(partition, OvbRaw::Text(value) if !value.is_empty()))
     {
         return Err(SystemReferenceError::InvalidStreamKey);
     }
