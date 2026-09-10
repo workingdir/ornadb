@@ -187,6 +187,26 @@ fn runtime_reference_validation_requires_exact_coordinates_and_key_shapes() {
         Err(SystemReferenceError::InvalidStreamKey)
     );
 
+    for (source_identity, partition) in [("", None), ("source", Some(""))] {
+        let invalid_stream = RowRef::new(
+            capture.database_id(),
+            SYS_STREAM_TABLE_ID,
+            OvbRaw::Array(vec![
+                encoded_run(&run(&capture)),
+                OvbRaw::Text(source_identity.into()),
+                partition
+                    .map(|value| OvbRaw::Text(value.into()))
+                    .unwrap_or(OvbRaw::Null),
+            ]),
+            capture.snapshot().clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_stream_reference(invalid_stream, &capture),
+            Err(SystemReferenceError::InvalidStreamKey)
+        );
+    }
+
     for invalid_id in [
         OvbRaw::Text("run-id-is-not-a-uuid".into()),
         OvbRaw::Tag(
