@@ -1271,6 +1271,42 @@ async fn sealed_cancellation_leaves_competing_terminal_outcomes_unresolved() {
     );
 }
 
+#[tokio::test]
+async fn sealed_producer_error_leaves_rollback_uncertainty_unresolved() {
+    let dispatcher = TestDispatch::new(Vec::new());
+    let invocation = InvocationId::from_bytes([0xa6; 16]);
+    let stream = 26;
+    let mut completion =
+        sealed_producer_completion(stream, invocation, ResourceCancellation::new());
+
+    handle_sealed_producer_event(
+        &dispatcher,
+        stream,
+        &mut completion,
+        &mut BTreeMap::new(),
+        Err(PostgresKernelError::DurableInvariant {
+            relation: "resource producer",
+            record: "test".to_owned(),
+            rule: "terminal transaction outcome is unknown",
+        }),
+    )
+    .await
+    .expect("rollback uncertainty is retained for recovery");
+
+    assert!(
+        dispatcher
+            .sealed_finalizations
+            .lock()
+            .expect("sealed finalization lock")
+            .is_empty(),
+        "a producer error cannot finalize the sealed lifecycle as failed or cancelled"
+    );
+    assert!(
+        completion.actions.is_empty(),
+        "rollback uncertainty cannot claim a terminal protocol result"
+    );
+}
+
 #[derive(Clone)]
 struct SessionBridgeDispatch {
     bridge: Arc<SessionBridge>,
