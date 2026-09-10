@@ -4346,15 +4346,17 @@ async fn handle_sealed_producer_event<D: DispatchService>(
             )) | Err(_)
         )
         && !cancellation_acknowledged;
-    if cancellation_terminal_without_acknowledgement {
+    let rollback_uncertain = matches!(&event, Err(_));
+    if cancellation_terminal_without_acknowledgement || rollback_uncertain {
         if let Err(source) = &event {
             report_private_dispatch_source(source);
         }
-        // A cancellation request is not durable proof that rollback completed.
-        // Only a worker-sent Cancelled event acknowledges the terminal
-        // rollback. Retain the invocation as unresolved for recovery and do
-        // not publish a terminal protocol outcome for competing terminal
-        // events, synthetic cancellation, or producer failure.
+        // A cancellation request, or a producer error while it owns the
+        // transaction, is not durable proof that rollback completed. Only a
+        // worker-sent terminal event acknowledges its matching outcome;
+        // Cancelled additionally needs explicit acknowledgement provenance.
+        // Retain the invocation as unresolved for recovery and do not publish
+        // Failed or Cancelled for an unproven rollback.
         waiting_bytes.remove(&stream);
         completion.sealed_producer.take();
         return Ok(());
