@@ -1275,6 +1275,70 @@ fn websocket_connection_driver_preserves_a_co_read_frame_after_upgrade() {
 }
 
 #[test]
+fn websocket_connection_driver_emits_exact_canonical_result_envelope() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let input = format!(
+        "GET /orna/live/{} HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {}\r\nCookie: orna_session={}\r\n\r\n",
+        uuid(1),
+        SUBPROTOCOL,
+        token(&created)
+    );
+    let mut bytes = input.into_bytes();
+    bytes.extend(masked(true, 2, &eval([1; 16], [12; 16], "1")));
+    let mut reader = Cursor::new(bytes);
+    let mut writer = RecordingWriter::default();
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let mut application = UnitApplication::default();
+    let mut clock = || 1;
+    let mut cancellation = std::future::pending::<()>();
+    block_on(transport.serve_websocket_connection(
+        &mut reader,
+        &mut writer,
+        &mut connection,
+        [5; 16],
+        &mut clock,
+        &mut cancellation,
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(application.calls, 1);
+    let output = writer.bytes;
+    let header_end = output
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("serialized handshake response");
+    assert_eq!(
+        &output[header_end + 4..],
+        [
+            0x82, 0x47, 0xa5, 0x00, 0x01, 0x01, 0x12, 0x02, 0x50, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c,
+            0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x03, 0xf6, 0x04,
+            0xa4, 0x00, 0x00, 0x01, 0xd9, 0xea, 0x6e, 0x80, 0x02, 0x58, 0x20, 0x1b, 0xb0, 0xd4,
+            0x0c, 0x76, 0x63, 0x36, 0x3d, 0xb5, 0x3a, 0x62, 0xce, 0xc1, 0x03, 0x2c, 0x9f, 0x1d,
+            0x86, 0xc4, 0x26, 0x70, 0x08, 0xc1, 0x3b, 0x8c, 0xb6, 0x46, 0x0d, 0x0e, 0xde, 0x23,
+            0x35, 0x03, 0xf6,
+        ]
+    );
+}
+
+#[test]
 fn websocket_connection_driver_cancellation_after_delivery_commits_then_cleans_attachment() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
