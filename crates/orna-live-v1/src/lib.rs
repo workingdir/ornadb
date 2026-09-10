@@ -12,6 +12,7 @@ use futures::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    fmt,
     future::Future,
     io,
     net::{Ipv4Addr, SocketAddr, TcpListener},
@@ -2528,9 +2529,17 @@ pub trait LiveCredentialIssuer: CredentialIssuer {
 /// Entropy failures are reduced to the existing denied boundary error; the
 /// transport never receives native provider details or a partially generated
 /// credential.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct SystemCredentialIssuer {
     last: Option<[u8; 32]>,
+}
+
+impl fmt::Debug for SystemCredentialIssuer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SystemCredentialIssuer")
+            .finish_non_exhaustive()
+    }
 }
 
 impl CredentialIssuer for SystemCredentialIssuer {
@@ -4582,7 +4591,21 @@ impl LiveTransport {
         bytes: &[u8],
         application: &mut impl LiveApplication,
     ) -> Result<Option<WebSocketOutput>> {
-        let Some(event) = socket.push_one(bytes, self.limits.max_frame_bytes)? else {
+        let event = match socket.push_one(bytes, self.limits.max_frame_bytes) {
+            Ok(event) => event,
+            Err(Error::Limit) => {
+                socket.closed = true;
+                socket.fragment = None;
+                socket.pending.clear();
+                let _ = self
+                    .host
+                    .dispatch_frame(socket.attachment, now, Frame::Close, application)
+                    .await;
+                return Ok(Some(WebSocketOutput::Close { code: Some(1009) }));
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(event) = event else {
             return Ok(None);
         };
         match event {
@@ -4977,9 +5000,6 @@ impl WebSocketState {
             return Err(Error::Closed);
         }
         self.pending.extend_from_slice(bytes);
-        if self.pending.len() > limit.saturating_add(14) {
-            return Err(Error::Limit);
-        }
         let Some((used, fin, opcode, payload)) = ws_frame(&self.pending, limit)? else {
             return Ok(None);
         };
@@ -5095,8 +5115,11 @@ fn ws_frame(bytes: &[u8], limit: usize) -> Result<Option<ParsedFrame>> {
         len = usize::try_from(size).map_err(|_| Error::Limit)?;
         at = 10;
     }
-    if len > limit || matches!(opcode, 8..=10) && (!fin || len > 125) {
+    if matches!(opcode, 8..=10) && (!fin || len > 125) {
         return Err(Error::InvalidFrame);
+    }
+    if len > limit {
+        return Err(Error::Limit);
     }
     let total = at.saturating_add(4).saturating_add(len);
     if bytes.len() < total {
@@ -5588,6 +5611,14 @@ mod tests {
         let token = issuer.issue_credential().unwrap();
         assert_ne!(token, [0; 32]);
         assert_eq!(issuer.last_issued(), Some(token));
+    }
+
+    #[test]
+    fn system_credential_issuer_debug_does_not_render_authorization_material() {
+        let mut issuer = SystemCredentialIssuer::default();
+        issuer.issue_credential().unwrap();
+
+        assert_eq!(format!("{issuer:?}"), "SystemCredentialIssuer { .. }");
     }
 
     #[test]
