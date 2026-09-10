@@ -3892,7 +3892,7 @@ fn durable_runtime_recovery_does_not_cancel_or_replay_a_running_request() {
 }
 
 #[test]
-fn durable_runtime_orphans_a_running_eval_after_host_reconstruction() {
+fn durable_runtime_recovers_a_legacy_running_eval_as_uncertain_after_takeover() {
     let (root, repository) = durable_repository();
     let request = eval([1; 16], [25; 16], "1");
     let fingerprint = request_fingerprint(&request, [1; 16]);
@@ -3907,7 +3907,11 @@ fn durable_runtime_orphans_a_running_eval_after_host_reconstruction() {
     block_on(runtime.recover_abandoned(old.owner_id, [82; 16])).unwrap();
     drop(runtime);
 
-    let mut host = durable_host_with_owner(open_durable_state(&repository), [82; 16]);
+    let mut host = durable_host_after_takeover(
+        open_durable_state(&repository),
+        [82; 16],
+        RequestOwner::from(old),
+    );
     let mut issuer = Issuer(1, None);
     let credential = create(&mut host, &mut issuer);
     block_on(host.resume(ResumeRequest {
