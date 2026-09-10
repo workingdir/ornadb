@@ -130,7 +130,7 @@ const SOCKET_NAME: &str = "orna.sock";
 type SealedPullTaskResult = (
     u64,
     AuthenticatedServerResourceProducer,
-    Result<AuthenticatedServerResourceEvent, PostgresKernelError>,
+    Result<(AuthenticatedServerResourceEvent, bool), PostgresKernelError>,
 );
 type SealedLifecycleFinalizationFuture =
     Pin<Box<dyn Future<Output = Result<(), PostgresKernelError>> + Send>>;
@@ -4321,7 +4321,7 @@ async fn handle_sealed_producer_event<D: DispatchService>(
     stream: u64,
     completion: &mut DispatchCompletion,
     waiting_bytes: &mut BTreeMap<u64, u64>,
-    event: Result<AuthenticatedServerResourceEvent, PostgresKernelError>,
+    event: Result<(AuthenticatedServerResourceEvent, bool), PostgresKernelError>,
 ) -> Result<(), PostgresKernelError> {
     let invocation = completion
         .sealed_invocation
@@ -4331,6 +4331,38 @@ async fn handle_sealed_producer_event<D: DispatchService>(
         .as_ref()
         .is_some_and(ResourceCancellation::is_requested)
         && !completion.terminal_claimed;
+    let cancellation_acknowledged = matches!(
+        &event,
+        Ok((AuthenticatedServerResourceEvent::Cancelled, true))
+    );
+    let cancellation_terminal_without_acknowledgement = cancellation_requested
+        && matches!(
+            &event,
+            Ok((
+                AuthenticatedServerResourceEvent::Completed { .. }
+                    | AuthenticatedServerResourceEvent::Failed { .. }
+                    | AuthenticatedServerResourceEvent::Cancelled,
+                _
+            )) | Err(_)
+        )
+        && !cancellation_acknowledged;
+    if cancellation_terminal_without_acknowledgement {
+        if let Err(source) = &event {
+            report_private_dispatch_source(source);
+        }
+        // A cancellation request is not durable proof that rollback completed.
+        // Only a worker-sent Cancelled event acknowledges the terminal
+        // rollback. Retain the invocation as unresolved for recovery and do
+        // not publish a terminal protocol outcome for competing terminal
+        // events, synthetic cancellation, or producer failure.
+        waiting_bytes.remove(&stream);
+        completion.sealed_producer.take();
+        return Ok(());
+    }
+    let event = match event {
+        Ok((event, _)) => Ok(event),
+        Err(source) => Err(source),
+    };
     match event {
         Ok(AuthenticatedServerResourceEvent::Values { values, .. }) => {
             waiting_bytes.remove(&stream);
@@ -4428,19 +4460,13 @@ async fn handle_sealed_producer_event<D: DispatchService>(
         }
         Ok(AuthenticatedServerResourceEvent::Completed { .. }) => {
             waiting_bytes.remove(&stream);
-            let finalization = if cancellation_requested {
-                SealedInvocationLifecycleFinalization::Cancelled
-            } else {
-                SealedInvocationLifecycleFinalization::Completed
-            };
             dispatcher
-                .finalize_sealed_invocation_lifecycle(invocation, finalization)
+                .finalize_sealed_invocation_lifecycle(
+                    invocation,
+                    SealedInvocationLifecycleFinalization::Completed,
+                )
                 .await?;
             completion.sealed_producer.take();
-            if cancellation_requested {
-                completion.actions = cancellation_actions(stream, completion.cancellation.clone());
-                return Ok(());
-            }
             let event = InvokeEvent::new(
                 invocation,
                 completion.sealed_next_event_sequence,
@@ -4464,16 +4490,6 @@ async fn handle_sealed_producer_event<D: DispatchService>(
         }
         Ok(AuthenticatedServerResourceEvent::Failed { failure }) => {
             waiting_bytes.remove(&stream);
-            if cancellation_requested {
-                dispatcher
-                    .finalize_sealed_invocation_lifecycle(
-                        invocation,
-                        SealedInvocationLifecycleFinalization::Cancelled,
-                    )
-                    .await?;
-                completion.actions = cancellation_actions(stream, completion.cancellation.clone());
-                return Ok(());
-            }
             dispatcher
                 .finalize_sealed_invocation_lifecycle(
                     invocation,
@@ -4523,16 +4539,6 @@ async fn handle_sealed_producer_event<D: DispatchService>(
         Err(source) => {
             waiting_bytes.remove(&stream);
             report_private_dispatch_source(&source);
-            if cancellation_requested {
-                dispatcher
-                    .finalize_sealed_invocation_lifecycle(
-                        invocation,
-                        SealedInvocationLifecycleFinalization::Cancelled,
-                    )
-                    .await?;
-                completion.actions = cancellation_actions(stream, completion.cancellation.clone());
-                return Ok(());
-            }
             dispatcher
                 .finalize_sealed_invocation_lifecycle(
                     invocation,
@@ -4698,7 +4704,7 @@ async fn flush_pending_with_fairness_boundary(
                     // shutdown signal cannot be hidden behind a producer drain.
                     sealed_pull_in_flight.insert(stream_id);
                     sealed_pull_tasks.spawn(async move {
-                        let event = producer.pull(credit).await;
+                        let event = producer.pull_observed(credit).await;
                         (stream_id, producer, event)
                     });
                     break;

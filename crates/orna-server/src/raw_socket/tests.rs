@@ -1138,7 +1138,7 @@ async fn sealed_producer_terminals_finalize_before_queuing_protocol_actions() {
             stream,
             &mut completion,
             &mut waiting_bytes,
-            Ok(event),
+            Ok((event, true)),
         )
         .await
         .expect("sealed terminal finalizes");
@@ -1160,27 +1160,50 @@ async fn sealed_producer_terminals_finalize_before_queuing_protocol_actions() {
 }
 
 #[tokio::test]
-async fn sealed_producer_cancellation_wins_before_completed_protocol_action() {
+async fn sealed_cancellation_requires_an_explicit_worker_acknowledgement() {
     let dispatcher = TestDispatch::new(Vec::new());
-    let invocation = InvocationId::from_bytes([0xa8; 16]);
-    let stream = 28;
+    let invocation = InvocationId::from_bytes([0xa9; 16]);
+    let stream = 29;
     let cancellation = ResourceCancellation::new();
     assert!(cancellation.request_cancel());
-    let mut completion = sealed_producer_completion(stream, invocation, cancellation);
+    let mut synthetic = sealed_producer_completion(stream, invocation, cancellation);
 
     handle_sealed_producer_event(
         &dispatcher,
         stream,
-        &mut completion,
+        &mut synthetic,
         &mut BTreeMap::new(),
-        Ok(AuthenticatedServerResourceEvent::Completed {
-            final_batch_sequence: 0,
-            total_items: 0,
-            total_bytes: 0,
-        }),
+        Ok((AuthenticatedServerResourceEvent::Cancelled, false)),
     )
     .await
-    .expect("cancelled terminal finalizes");
+    .expect("synthetic cancellation is handled");
+
+    assert!(
+        dispatcher
+            .sealed_finalizations
+            .lock()
+            .expect("sealed finalization lock")
+            .is_empty(),
+        "closed pull channels cannot terminalize the lifecycle"
+    );
+    assert_eq!(
+        synthetic.actions,
+        VecDeque::new(),
+        "synthetic cancellation cannot claim a protocol terminal result"
+    );
+
+    let cancellation = ResourceCancellation::new();
+    assert!(cancellation.request_cancel());
+    let mut acknowledged = sealed_producer_completion(stream, invocation, cancellation);
+    handle_sealed_producer_event(
+        &dispatcher,
+        stream,
+        &mut acknowledged,
+        &mut BTreeMap::new(),
+        Ok((AuthenticatedServerResourceEvent::Cancelled, true)),
+    )
+    .await
+    .expect("worker acknowledgement finalizes");
 
     assert_eq!(
         dispatcher
@@ -1189,11 +1212,62 @@ async fn sealed_producer_cancellation_wins_before_completed_protocol_action() {
             .expect("sealed finalization lock")
             .last()
             .copied(),
-        Some((invocation, SealedInvocationLifecycleFinalization::Cancelled,))
+        Some((invocation, SealedInvocationLifecycleFinalization::Cancelled))
     );
-    assert_eq!(
-        completion.actions,
-        cancellation_actions(stream, ServerAction::InvokeCancelled { stream })
+}
+
+#[tokio::test]
+async fn sealed_cancellation_leaves_competing_terminal_outcomes_unresolved() {
+    let dispatcher = TestDispatch::new(Vec::new());
+    let invocation = InvocationId::from_bytes([0xa8; 16]);
+    let stream = 28;
+    for event in [
+        Ok((
+            AuthenticatedServerResourceEvent::Completed {
+                final_batch_sequence: 0,
+                total_items: 0,
+                total_bytes: 0,
+            },
+            false,
+        )),
+        Ok((
+            AuthenticatedServerResourceEvent::Failed {
+                failure: CallFailure::TargetUnavailable,
+            },
+            false,
+        )),
+        Err(PostgresKernelError::DurableInvariant {
+            relation: "resource producer",
+            record: "test".to_owned(),
+            rule: "worker failed before acknowledgement",
+        }),
+    ] {
+        let cancellation = ResourceCancellation::new();
+        assert!(cancellation.request_cancel());
+        let mut completion = sealed_producer_completion(stream, invocation, cancellation);
+
+        handle_sealed_producer_event(
+            &dispatcher,
+            stream,
+            &mut completion,
+            &mut BTreeMap::new(),
+            event,
+        )
+        .await
+        .expect("unacknowledged terminal outcome is retained for recovery");
+
+        assert!(
+            completion.actions.is_empty(),
+            "unacknowledged cancellation cannot claim a protocol terminal result"
+        );
+    }
+    assert!(
+        dispatcher
+            .sealed_finalizations
+            .lock()
+            .expect("sealed finalization lock")
+            .is_empty(),
+        "only a worker-sent Cancelled acknowledgement finalizes cancellation"
     );
 }
 
