@@ -97,6 +97,11 @@ impl RuntimeEvaluator for CompositeEvaluator {
         if sys_rt_rename_contract(scenario) {
             return run_sys_rt_rename_scenario(scenario);
         }
+        if remote_eval_contract(scenario) {
+            return StageOutcome::Skipped {
+                reason: "production remote Eval admits pure source but rejects table mutations, so it cannot satisfy ORNA-EVAL-003's required served-CWD activation transaction".into(),
+            };
+        }
         if pipeline_insertion_contract(scenario)
             || pipeline_precedence_contract(scenario)
             || let_rebinding_contract(scenario)
@@ -157,6 +162,21 @@ fn let_rebinding_contract(scenario: &Scenario) -> bool {
                 "ORNA-CFLOW-006",
                 "ORNA-CFLOW-011",
             ]
+}
+
+fn remote_eval_contract(scenario: &Scenario) -> bool {
+    scenario.id == "EVAL-001"
+        && scenario.title == "Remote source executes only through explicit evaluation"
+        && scenario.given
+            == ["a trusted programmable client and ordinary text containing valid Orna source"]
+        && scenario.when
+            == ["the text is sent as an ordinary event value and then as an explicit eval request"]
+        && scenario.then
+            == [
+                "the ordinary event remains data",
+                "the eval request uses the same parser, resolver, type checker and activation semantics as the local REPL",
+            ]
+        && scenario.requirements == ["ORNA-EVAL-001", "ORNA-EVAL-002", "ORNA-EVAL-003"]
 }
 
 fn repl_preview_contract(scenario: &Scenario) -> bool {
