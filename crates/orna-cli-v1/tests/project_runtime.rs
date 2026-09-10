@@ -303,6 +303,90 @@ fn binary_managed_local_repl_executes_integer_list_aggregates() {
     assert!(output.stderr.is_empty());
 }
 
+#[test]
+fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_paths() {
+    let repository = tempfile::tempdir().expect("status repository");
+    std::fs::write(repository.path().join("tracked.txt"), "before\n").expect("tracked file");
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(repository.path())
+            .status()
+            .expect("git init")
+            .success()
+    );
+    for (key, value) in [
+        ("user.name", "Orna Test"),
+        ("user.email", "orna@example.invalid"),
+    ] {
+        assert!(
+            Command::new("git")
+                .args(["config", key, value])
+                .current_dir(repository.path())
+                .status()
+                .expect("git config")
+                .success()
+        );
+    }
+    assert!(
+        Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(repository.path())
+            .status()
+            .expect("git add")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial"
+            ])
+            .current_dir(repository.path())
+            .status()
+            .expect("git commit")
+            .success()
+    );
+    std::fs::write(repository.path().join("tracked.txt"), "after\n").expect("modified file");
+    std::fs::create_dir(repository.path().join("nested")).expect("untracked directory");
+    std::fs::write(repository.path().join("nested/untracked.txt"), "new\n")
+        .expect("untracked file");
+
+    let expected = Command::new("git")
+        .args(["status", "--porcelain=v2", "-z", "--untracked-files=all"])
+        .current_dir(repository.path())
+        .output()
+        .expect("git status");
+    let actual = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(repository.path())
+        .args(["status", "--porcelain"])
+        .output()
+        .expect("CLI status");
+    assert!(actual.status.success());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert!(actual.stderr.is_empty());
+
+    let outside = tempfile::tempdir().expect("non-repository directory");
+    let failure = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(outside.path())
+        .args(["status", "--porcelain"])
+        .output()
+        .expect("CLI status failure");
+    assert!(!failure.status.success());
+    assert_eq!(
+        failure.stderr,
+        b"error[E2100]: local Git worktree could not be discovered\nhelp: run the command inside a Git worktree or provide a local project path\n"
+    );
+    assert!(failure.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&failure.stderr).contains("status repository"));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_failure() {
     let directory = reference_project();
