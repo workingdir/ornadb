@@ -316,9 +316,9 @@ impl SessionBoundary {
         else {
             return Err(BoundaryError::Closed);
         };
-        let outcome = match current.take() {
+        let outcome = match current.as_ref() {
             None => AttachOutcome::Attached,
-            Some(Attachment::Active(existing)) => AttachOutcome::Replaced(existing),
+            Some(Attachment::Active(existing)) => AttachOutcome::Replaced(*existing),
             Some(Attachment::Disconnected(lease)) if now <= lease.expires_at => {
                 AttachOutcome::Reconnected
             }
@@ -607,6 +607,30 @@ mod tests {
         assert_eq!(
             boundary.attach(session, &app, &credential, attachment(3), 8),
             Ok(AttachOutcome::Reconnected)
+        );
+    }
+
+    #[test]
+    fn expired_reconnect_attempt_cannot_consume_the_disconnected_lease() {
+        let mut boundary = boundary();
+        let mut issuer = Issuer(1);
+        let session = id(1);
+        let app = origin("https://app.example");
+        let credential = boundary
+            .create(session, app.clone(), 20, 0, &mut issuer)
+            .unwrap();
+        boundary
+            .attach(session, &app, &credential, attachment(1), 1)
+            .unwrap();
+        boundary.disconnect(session, attachment(1), 2).unwrap();
+
+        assert_eq!(
+            boundary.attach(session, &app, &credential, attachment(2), 8),
+            Err(BoundaryError::Expired)
+        );
+        assert_eq!(
+            boundary.attach(session, &app, &credential, attachment(2), 8),
+            Err(BoundaryError::Expired)
         );
     }
 
