@@ -5188,6 +5188,29 @@ fn masked(fin: bool, opcode: u8, body: &[u8]) -> Vec<u8> {
     frame
 }
 
+fn masked_with_length_code(
+    fin: bool,
+    opcode: u8,
+    body: &[u8],
+    length_code: u8,
+    encoded_length: u64,
+) -> Vec<u8> {
+    let key = [1, 2, 3, 4];
+    let mut frame = vec![(if fin { 128 } else { 0 }) | opcode, 128 | length_code];
+    match length_code {
+        126 => frame.extend_from_slice(&(encoded_length as u16).to_be_bytes()),
+        127 => frame.extend_from_slice(&encoded_length.to_be_bytes()),
+        _ => unreachable!("test helper only encodes extended lengths"),
+    }
+    frame.extend(key);
+    frame.extend(
+        body.iter()
+            .enumerate()
+            .map(|(index, byte)| byte ^ key[index % 4]),
+    );
+    frame
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn live_http_routes_are_exact_origin_checked_and_rotate_scoped_tokens() {
@@ -5533,6 +5556,38 @@ fn websocket_close_payloads_require_valid_codes_and_utf8_reasons() {
             Err(Error::InvalidFrame)
         );
     }
+}
+
+#[test]
+fn websocket_input_rejects_noncanonical_extended_lengths() {
+    let cases = [
+        (126_u8, 125_u64, vec![7; 125]),
+        (127_u8, 126_u64, vec![7; 126]),
+        (127_u8, u64::from(u16::MAX), vec![7; u16::MAX as usize]),
+    ];
+    for (length_code, encoded_length, body) in cases {
+        let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+        let mut socket = WebSocketState::new([5; 16]);
+        assert_eq!(
+            block_on(transport.receive(
+                &mut socket,
+                2,
+                &masked_with_length_code(true, 2, &body, length_code, encoded_length),
+            )),
+            Err(Error::InvalidFrame)
+        );
+    }
+
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut socket = WebSocketState::new([5; 16]);
+    assert_eq!(
+        block_on(transport.receive(
+            &mut socket,
+            2,
+            &masked_with_length_code(true, 2, &[], 127, 1_u64 << 63),
+        )),
+        Err(Error::InvalidFrame)
+    );
 }
 
 #[test]
