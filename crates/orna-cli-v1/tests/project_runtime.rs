@@ -1,6 +1,7 @@
 use std::{
     fmt::Write,
-    process::{Command, Output},
+    io::Write as _,
+    process::{Command, Output, Stdio},
 };
 
 use orna_foundation_v1::{OvbRaw, Value};
@@ -215,6 +216,48 @@ fn binary_repl_executes_a_pure_expression_at_the_cli_boundary() {
 
     assert!(output.status.success());
     assert_eq!(output.stdout, b"3 : Int\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_managed_local_repl_executes_a_project_standard_import() {
+    let directory = tempfile::tempdir().expect("REPL working directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        "use std.math; pub fn run(): Int = std.math.increment(41);",
+    )
+    .expect("project source");
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(directory.path())
+            .status()
+            .expect("git")
+            .success()
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["repl"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("CLI process");
+    child
+        .stdin
+        .take()
+        .expect("CLI stdin")
+        .write_all(b"use std.math;\nstd.math.clamp(99, 20, 22)\n:quit\n")
+        .expect("REPL input");
+    let output = child.wait_with_output().expect("CLI process output");
+
+    assert!(output.status.success());
+    assert_eq!(
+        output.stdout, b"> > 22 : Int\n> ",
+        "managed-local REPL must return the typed bridge result"
+    );
     assert!(output.stderr.is_empty());
 }
 
