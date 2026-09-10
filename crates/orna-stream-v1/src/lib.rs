@@ -704,6 +704,10 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                     let allowed = matches!(
                         (purpose, status),
                         (LeasePurpose::Deliver, FailureStatus::Retrying)
+                            | (
+                                LeasePurpose::Deliver,
+                                FailureStatus::Succeeded | FailureStatus::Resolved
+                            )
                             | (LeasePurpose::Skip, FailureStatus::Failed)
                     );
                     if !allowed {
@@ -1811,6 +1815,81 @@ mod tests {
         assert_eq!(succeeded.identity, failed.identity);
         assert_eq!(succeeded.attempts, retry.attempts);
         assert_eq!(succeeded.status, FailureStatus::Succeeded);
+    }
+
+    #[test]
+    fn reset_allows_reprocessing_a_resolved_failure_with_one_stable_identity() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let item = delivery("receipt:resolved", "resume:resolved");
+        let failure = acquire_and_fail(&mut backend, item.clone());
+        let skip_lease = acquire_skip(&mut backend, item.clone());
+        assert!(matches!(
+            backend.apply(CommitIntent::Skip {
+                lease: skip_lease,
+                expected: expected(&backend, &item),
+                expected_failure_version: failure.version,
+            }),
+            CommitResult::CheckpointAdvanced { .. }
+        ));
+        let skipped = backend.failure(&failure.identity).unwrap().clone();
+        let replay = match backend.apply(CommitIntent::Replay {
+            failure: skipped.identity.clone(),
+            expected_version: skipped.version,
+        }) {
+            CommitResult::ReplayGranted { grant } => grant,
+            result => panic!("unexpected replay result: {result:?}"),
+        };
+        let replayed = match backend.apply(CommitIntent::ReplayComplete {
+            failure: replay.failure,
+            expected_version: replay.version,
+        }) {
+            CommitResult::ReplayCompleted { failure } => failure,
+            result => panic!("unexpected replay completion result: {result:?}"),
+        };
+        let resolved = match backend.apply(CommitIntent::Resolve {
+            failure: replayed.identity.clone(),
+            expected_version: replayed.version,
+        }) {
+            CommitResult::Resolved { failure } => failure,
+            result => panic!("unexpected resolve result: {result:?}"),
+        };
+
+        let paused = backend.apply(CommitIntent::Pause {
+            key: item.checkpoint_key(),
+        });
+        assert!(matches!(paused, CommitResult::StreamStatusChanged { .. }));
+        let reset = match backend.apply(CommitIntent::Reset {
+            key: item.checkpoint_key(),
+            expected: expected(&backend, &item),
+            to: item.position.clone(),
+        }) {
+            CommitResult::CheckpointReset { checkpoint } => checkpoint,
+            result => panic!("unexpected reset result: {result:?}"),
+        };
+        assert!(matches!(
+            backend.apply(CommitIntent::Resume {
+                key: item.checkpoint_key(),
+            }),
+            CommitResult::StreamStatusChanged { .. }
+        ));
+        let lease = match backend.apply(CommitIntent::Acquire {
+            delivery: item.clone(),
+            expected: (&reset).into(),
+            purpose: LeasePurpose::Deliver,
+        }) {
+            CommitResult::Acquired { lease } => lease,
+            result => panic!("unexpected reprocessing acquire result: {result:?}"),
+        };
+        let again = match backend.apply(CommitIntent::Fail {
+            lease,
+            diagnostic: diagnostic(),
+        }) {
+            CommitResult::Failed { failure } => failure,
+            result => panic!("unexpected reprocessing failure result: {result:?}"),
+        };
+        assert_eq!(again.identity, resolved.identity);
+        assert_eq!(again.attempts, resolved.attempts + 1);
+        assert_eq!(again.status, FailureStatus::Failed);
     }
 
     #[test]
