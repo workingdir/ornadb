@@ -220,6 +220,34 @@ fn binary_repl_executes_a_pure_expression_at_the_cli_boundary() {
 }
 
 #[test]
+fn binary_repl_recovers_from_malformed_terminal_input() {
+    let directory = tempfile::tempdir().expect("REPL working directory");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["repl"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("CLI process");
+    child
+        .stdin
+        .take()
+        .expect("REPL stdin")
+        .write_all(b"2\n\xff\n$_\n:quit\n")
+        .expect("REPL input");
+    let output = child.wait_with_output().expect("CLI process output");
+
+    assert!(output.status.success());
+    assert_eq!(
+        output.stdout, b"> 2 : Int\n> error[ORNA-REPL-INPUT-UTF8]\n> 2 : Int\n> ",
+        "malformed terminal input must not consume the retained last result"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn binary_managed_local_repl_executes_a_project_standard_import() {
     let directory = tempfile::tempdir().expect("REPL working directory");
     std::fs::write(
