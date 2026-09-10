@@ -1838,24 +1838,8 @@ impl LiveHost {
         let disposition = runtime
             .request_recovery_disposition(status.identity, status.fingerprint)
             .await
-            .map_err(|_| Error::RuntimeUnavailable)?
-            .ok_or(Error::RuntimeUnavailable)?;
-        let expected = match disposition {
-            RecoveryDisposition::RollbackProven => ResultStatus::Failure,
-            RecoveryDisposition::ExternalEffectsUncertain => ResultStatus::RetainedWithoutValue,
-        };
-        if !matches!(
-            &response.message,
-            Message::Result {
-                status: response_status,
-                value: None,
-                fingerprint: response_fingerprint,
-                diagnostic: None,
-            } if *response_status == expected && *response_fingerprint == status.fingerprint
-        ) {
-            return Err(Error::RuntimeUnavailable);
-        }
-        Ok(())
+            .map_err(|_| Error::RuntimeUnavailable)?;
+        validate_recovered_result(disposition, response, status.fingerprint)
     }
 
     fn validate_retained_response(
@@ -2344,6 +2328,34 @@ fn durable_result_body(
     ResultBody::from_result(&response, limits)
         .map(Some)
         .map_err(|_| Error::RuntimeUnavailable)
+}
+
+fn validate_recovered_result(
+    disposition: Option<RecoveryDisposition>,
+    response: &Envelope,
+    fingerprint: [u8; 32],
+) -> Result<()> {
+    let expected = match disposition {
+        Some(RecoveryDisposition::RollbackProven) => ResultStatus::Failure,
+        // A pre-evidence Orphaned row is legacy uncertainty. It has no proof
+        // that permits the rollback-shaped result, so only the existing
+        // retained-without-value representation may be projected.
+        None | Some(RecoveryDisposition::ExternalEffectsUncertain) => {
+            ResultStatus::RetainedWithoutValue
+        }
+    };
+    if !matches!(
+        &response.message,
+        Message::Result {
+            status: response_status,
+            value: None,
+            fingerprint: response_fingerprint,
+            diagnostic: None,
+        } if *response_status == expected && *response_fingerprint == fingerprint
+    ) {
+        return Err(Error::RuntimeUnavailable);
+    }
+    Ok(())
 }
 
 fn live_run_registration(
@@ -5630,6 +5642,47 @@ mod tests {
 
         assert_eq!(
             durable_result_body([1; 16], [2; 32], &durable, ProtocolLimits::default()),
+            Err(Error::RuntimeUnavailable)
+        );
+    }
+
+    #[test]
+    fn legacy_recovery_only_projects_uncertainty_without_rollback_proof() {
+        let fingerprint = [2; 32];
+        let uncertain = retained_without_value_outcome([1; 16], fingerprint)
+            .response
+            .unwrap();
+        let rollback = redacted_failure_outcome([1; 16], fingerprint)
+            .response
+            .unwrap();
+
+        assert!(validate_recovered_result(None, &uncertain, fingerprint).is_ok());
+        assert!(
+            validate_recovered_result(
+                Some(RecoveryDisposition::ExternalEffectsUncertain),
+                &uncertain,
+                fingerprint,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_recovered_result(
+                Some(RecoveryDisposition::RollbackProven),
+                &rollback,
+                fingerprint,
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate_recovered_result(None, &rollback, fingerprint),
+            Err(Error::RuntimeUnavailable)
+        );
+        assert_eq!(
+            validate_recovered_result(
+                Some(RecoveryDisposition::RollbackProven),
+                &uncertain,
+                fingerprint,
+            ),
             Err(Error::RuntimeUnavailable)
         );
     }
