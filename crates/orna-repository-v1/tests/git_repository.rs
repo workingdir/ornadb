@@ -2387,6 +2387,85 @@ fn declared_segment_blob_set_rejects_non_blobs_without_hydrating_promises() {
 }
 
 #[test]
+fn compact_manifest_observation_fails_closed_without_manifest_metadata() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let before = git_state(&repo, root.path());
+
+    assert_eq!(
+        repo.observe_compact_manifest_segment_blobs(&head, Uuid::nil())
+            .unwrap(),
+        GitDeclaredObjectSetState::Incomplete
+    );
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
+fn compact_manifest_observation_uses_the_committed_manifest_segment_set() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0042);
+    let plan = compact_plan(
+        &repo,
+        table,
+        [42; 16],
+        &[compact_segment(table, 42, b"manifest-backed".to_vec())],
+    );
+    publish_compact_repository_boundary(&repo, plan).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let before = git_state(&repo, root.path());
+
+    assert_eq!(
+        repo.observe_compact_manifest_segment_blobs(&head, table)
+            .unwrap(),
+        GitDeclaredObjectSetState::Complete
+    );
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
+fn compact_manifest_observation_keeps_a_declared_promised_segment_unhydrated() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0043);
+    let plan = compact_plan(
+        &repo,
+        table,
+        [43; 16],
+        &[compact_segment(
+            table,
+            43,
+            b"promised-manifest-segment".to_vec(),
+        )],
+    );
+    publish_compact_repository_boundary(&repo, plan).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
+    let object = manifest.entries()[0].git_object_id().to_owned();
+    let object_path = root
+        .path()
+        .join(".git/objects")
+        .join(&object[..2])
+        .join(&object[2..]);
+    assert!(object_path.is_file());
+    with_partial_clone(root.path());
+    fs::remove_file(&object_path).unwrap();
+    let before = git_state(&repo, root.path());
+
+    assert_eq!(
+        repo.observe_compact_manifest_segment_blobs(&head, table)
+            .unwrap(),
+        GitDeclaredObjectSetState::Complete
+    );
+    assert!(
+        !object_path.exists(),
+        "observation hydrated a promised segment"
+    );
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
 fn observes_combined_sparse_and_partial_capabilities() {
     let root = repository();
     with_partial_clone(root.path());
