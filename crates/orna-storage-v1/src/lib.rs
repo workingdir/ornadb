@@ -1391,7 +1391,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(runtime.pending().await.unwrap().len(), 1);
+        assert!(runtime.pending_through(&freeze).await.unwrap().is_empty());
+        let pending = runtime.pending().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, [78; 16]);
         assert_eq!(repository.read_publication_journal().unwrap(), None);
     }
 
