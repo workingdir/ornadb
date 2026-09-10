@@ -261,6 +261,48 @@ fn binary_managed_local_repl_executes_a_project_standard_import() {
     assert!(output.stderr.is_empty());
 }
 
+#[test]
+fn binary_managed_local_repl_executes_integer_list_aggregates() {
+    let directory = tempfile::tempdir().expect("REPL working directory");
+    std::fs::write(directory.path().join("main.orna"), "pub fn run(): Int = 0;")
+        .expect("project source");
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(directory.path())
+            .status()
+            .expect("git")
+            .success()
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["repl"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("CLI process");
+    child
+        .stdin
+        .take()
+        .expect("CLI stdin")
+        .write_all(
+            b"sum([3, 1, 2])\nmin([3, 1, 2]) ?? 0\nmax([3, 1, 2]) ?? 0\nsum([])\nmin([])\nmax([])\n:quit\n",
+        )
+        .expect("REPL input");
+    let output = child.wait_with_output().expect("CLI process output");
+
+    assert!(output.status.success());
+    assert_eq!(
+        output.stdout,
+        b"> 6 : Int\n> 1 : Int\n> 3 : Int\n> 0 : Int\n> null : Null\n> null : Null\n> ",
+        "managed-local REPL must preserve typed aggregate results and null extrema"
+    );
+    assert!(output.stderr.is_empty());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_failure() {
     let directory = reference_project();
