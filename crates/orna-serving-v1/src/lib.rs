@@ -135,6 +135,15 @@ impl core::fmt::Display for Error {
 impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[inline(never)]
+fn credentials_equal(left: &Credential, right: &Credential) -> bool {
+    let mut difference = 0u8;
+    for (&left, &right) in left.0.iter().zip(right.0.iter()) {
+        difference |= left ^ right;
+    }
+    std::hint::black_box(difference == 0)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Patch {
     Set { key: String, value: String },
@@ -242,7 +251,7 @@ impl Serving {
     /// required and a deletion failure leaves this session closed.
     pub fn reconnect(&mut self, session_id: Id, credential: &Credential) -> Result<()> {
         let session = self.session_mut(session_id)?;
-        if &session.credential != credential {
+        if !credentials_equal(&session.credential, credential) {
             return Err(Error::CredentialRejected);
         }
         session.connected = true;
@@ -257,7 +266,7 @@ impl Serving {
     /// Returns the same session or credential error as [`Self::reconnect`].
     pub fn validate_reconnect(&self, session_id: Id, credential: &Credential) -> Result<()> {
         let session = self.session(session_id)?;
-        if &session.credential != credential {
+        if !credentials_equal(&session.credential, credential) {
             return Err(Error::CredentialRejected);
         }
         Ok(())
@@ -273,7 +282,7 @@ impl Serving {
         replacement: Credential,
     ) -> Result<()> {
         let session = self.session_mut(session_id)?;
-        if &session.credential != current {
+        if !credentials_equal(&session.credential, current) {
             return Err(Error::CredentialRejected);
         }
         session.credential = replacement;
@@ -606,6 +615,10 @@ mod tests {
             state.reconnect(id(1), &Credential::new([8; 32])),
             Err(Error::CredentialRejected)
         );
+        assert_eq!(
+            state.validate_reconnect(id(1), &Credential::new([8; 32])),
+            Err(Error::CredentialRejected)
+        );
         let replacement = Credential::new([9; 32]);
         state
             .rotate_credential(id(1), &credential(), replacement.clone())
@@ -614,7 +627,28 @@ mod tests {
             state.rotate_credential(id(1), &credential(), Credential::new([10; 32])),
             Err(Error::CredentialRejected)
         );
+        state.validate_reconnect(id(1), &replacement).unwrap();
         state.reconnect(id(1), &replacement).unwrap();
+    }
+
+    #[test]
+    fn credential_matching_is_exact_and_redacted() {
+        let expected = credential();
+        assert!(credentials_equal(&expected, &Credential::new([7; 32])));
+
+        let mut first_byte_differs = [7; 32];
+        first_byte_differs[0] = 8;
+        let mut last_byte_differs = [7; 32];
+        last_byte_differs[31] = 8;
+        assert!(!credentials_equal(
+            &expected,
+            &Credential::new(first_byte_differs)
+        ));
+        assert!(!credentials_equal(
+            &expected,
+            &Credential::new(last_byte_differs)
+        ));
+        assert_eq!(format!("{expected:?}"), "Credential(REDACTED)");
     }
 
     #[test]
