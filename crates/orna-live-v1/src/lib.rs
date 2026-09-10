@@ -4594,14 +4594,14 @@ impl LiveTransport {
         let event = match socket.push_one(bytes, self.limits.max_frame_bytes) {
             Ok(event) => event,
             Err(Error::Limit) => {
-                socket.closed = true;
-                socket.fragment = None;
-                socket.pending.clear();
-                let _ = self
-                    .host
-                    .dispatch_frame(socket.attachment, now, Frame::Close, application)
-                    .await;
-                return Ok(Some(WebSocketOutput::Close { code: Some(1009) }));
+                return Ok(Some(
+                    self.close_socket(socket, now, 1009, application).await,
+                ));
+            }
+            Err(Error::InvalidFrame) => {
+                return Ok(Some(
+                    self.close_socket(socket, now, 1002, application).await,
+                ));
             }
             Err(error) => return Err(error),
         };
@@ -4610,22 +4610,29 @@ impl LiveTransport {
         };
         match event {
             SocketEvent::Binary(message) => {
-                let dispatched = self
+                let dispatched = match self
                     .host
                     .dispatch_frame(socket.attachment, now, Frame::Binary(message), application)
-                    .await?;
+                    .await
+                {
+                    Ok(dispatched) => dispatched,
+                    Err(Error::Limit) => {
+                        return Ok(Some(
+                            self.close_socket(socket, now, 1009, application).await,
+                        ));
+                    }
+                    Err(Error::InvalidMessage) => {
+                        return Ok(Some(
+                            self.close_socket(socket, now, 1002, application).await,
+                        ));
+                    }
+                    Err(error) => return Err(error),
+                };
                 Ok(Some(self.websocket_output(dispatched)?))
             }
-            SocketEvent::Text => {
-                socket.closed = true;
-                socket.fragment = None;
-                socket.pending.clear();
-                let _ = self
-                    .host
-                    .dispatch_frame(socket.attachment, now, Frame::Close, application)
-                    .await;
-                Ok(Some(WebSocketOutput::Close { code: Some(1003) }))
-            }
+            SocketEvent::Text => Ok(Some(
+                self.close_socket(socket, now, 1003, application).await,
+            )),
             SocketEvent::Ping(payload) => Ok(Some(WebSocketOutput::Pong(payload))),
             SocketEvent::Pong => Ok(None),
             SocketEvent::Close => {
@@ -4637,6 +4644,23 @@ impl LiveTransport {
                 Ok(Some(WebSocketOutput::Accepted(outcome)))
             }
         }
+    }
+
+    async fn close_socket(
+        &mut self,
+        socket: &mut WebSocketState,
+        now: u64,
+        code: u16,
+        application: &mut impl LiveApplication,
+    ) -> WebSocketOutput {
+        socket.closed = true;
+        socket.fragment = None;
+        socket.pending.clear();
+        let _ = self
+            .host
+            .dispatch_frame(socket.attachment, now, Frame::Close, application)
+            .await;
+        WebSocketOutput::Close { code: Some(code) }
     }
 
     async fn serve_websocket_bytes<W, C, X, A>(
@@ -5053,7 +5077,13 @@ impl WebSocketState {
     }
 
     fn has_complete_frame(&self, limit: usize) -> Result<bool> {
-        Ok(ws_frame(&self.pending, limit)?.is_some())
+        match ws_frame(&self.pending, limit) {
+            Ok(frame) => Ok(frame.is_some()),
+            // Let the receive path perform the same state retirement and
+            // wire-close transition for malformed or oversized pending input.
+            Err(Error::InvalidFrame | Error::Limit) => Ok(true),
+            Err(error) => Err(error),
+        }
     }
 }
 enum SocketEvent {
