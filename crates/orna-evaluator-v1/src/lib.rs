@@ -122,7 +122,9 @@ pub struct StepBudget {
 }
 
 impl StepBudget {
-    fn new(max_steps: u64) -> Self {
+    /// Create an activation budget with the supplied step capacity.
+    #[must_use]
+    pub fn new(max_steps: u64) -> Self {
         Self {
             remaining: max_steps,
         }
@@ -279,10 +281,24 @@ pub fn evaluate_with_functions(
     functions: &Functions,
     limits: Limits,
 ) -> Result<CanonicalValue, EvaluationError> {
+    let mut budget = StepBudget::new(limits.max_steps);
+    evaluate_with_functions_and_budget(expression, environment, functions, limits, &mut budget)
+}
+
+/// Evaluate a parsed expression while consuming a caller-owned activation
+/// budget. The budget includes expression evaluation and any work debited by
+/// handled effects, so callers can continue accounting across host boundaries.
+pub fn evaluate_with_functions_and_budget(
+    expression: &Expr,
+    environment: &Environment,
+    functions: &Functions,
+    limits: Limits,
+    budget: &mut StepBudget,
+) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
     let mut context = Context {
         limits,
-        steps: 0,
+        steps: limits.max_steps.saturating_sub(budget.remaining()),
         functions,
         aliases: None,
         session_functions: None,
@@ -293,13 +309,17 @@ pub fn evaluate_with_functions(
         namespace: None,
         transfer: None,
     };
-    context.items(functions.len())?;
-    let mut scope = Scope::from_environment(environment, &mut context)?;
-    let value = context.evaluate(expression, &mut scope, 0)?;
-    if context.transfer.is_some() {
-        return Err(error("ORNA-EVAL-UNSUPPORTED"));
-    }
-    value.canonical()
+    let result = (|| {
+        context.items(functions.len())?;
+        let mut scope = Scope::from_environment(environment, &mut context)?;
+        let value = context.evaluate(expression, &mut scope, 0)?;
+        if context.transfer.is_some() {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        value.canonical()
+    })();
+    *budget = StepBudget::new(limits.max_steps.saturating_sub(context.steps));
+    result
 }
 
 /// Invoke a parsed, statically checked pure function with canonical named
@@ -370,19 +390,21 @@ pub fn invoke_named(
     .and_then(Value::canonical)
 }
 
-/// Invokes an admitted function with one effect handler. Nested pure calls and
-/// handled effects share the same evaluator resource context.
-pub fn invoke_named_with_effects(
+/// Invoke an admitted function while consuming a caller-owned activation
+/// budget. The budget covers argument/default evaluation, the function body,
+/// handled effects, and nested calls in one shared accounting context.
+pub fn invoke_named_with_effects_and_budget(
     name: &str,
     functions: &Functions,
     arguments: &Environment,
     limits: Limits,
     effects: &mut dyn EffectHandler,
+    budget: &mut StepBudget,
 ) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
     let mut context = Context {
         limits,
-        steps: 0,
+        steps: limits.max_steps.saturating_sub(budget.remaining()),
         functions,
         aliases: None,
         session_functions: None,
@@ -393,19 +415,36 @@ pub fn invoke_named_with_effects(
         namespace: function_namespace(name),
         transfer: None,
     };
-    context.items(functions.len())?;
-    let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
-    let supplied = supplied_arguments(arguments, &mut context)?;
-    let captured = Scope::from_environment(&function.environment, &mut context)?;
-    invoke_pure(
-        &mut context,
-        &function.parameters,
-        &function.body,
-        captured,
-        supplied,
-        0,
-    )
-    .and_then(Value::canonical)
+    let result = (|| {
+        context.items(functions.len())?;
+        let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+        let supplied = supplied_arguments(arguments, &mut context)?;
+        let captured = Scope::from_environment(&function.environment, &mut context)?;
+        invoke_pure(
+            &mut context,
+            &function.parameters,
+            &function.body,
+            captured,
+            supplied,
+            0,
+        )
+        .and_then(Value::canonical)
+    })();
+    *budget = StepBudget::new(limits.max_steps.saturating_sub(context.steps));
+    result
+}
+
+/// Invokes an admitted function with one effect handler. Nested pure calls and
+/// handled effects share the same evaluator resource context.
+pub fn invoke_named_with_effects(
+    name: &str,
+    functions: &Functions,
+    arguments: &Environment,
+    limits: Limits,
+    effects: &mut dyn EffectHandler,
+) -> Result<CanonicalValue, EvaluationError> {
+    let mut budget = StepBudget::new(limits.max_steps);
+    invoke_named_with_effects_and_budget(name, functions, arguments, limits, effects, &mut budget)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
