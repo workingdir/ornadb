@@ -546,16 +546,64 @@ fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
 
 fn run_status_short(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     let path = local_project_path(endpoint)?;
-    orna_repository_v1::Repository::discover(path).map_err(|_| {
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
             "E2100",
             "local Git worktree could not be discovered",
             "run the command inside a Git worktree or provide a local project path",
         )
     })?;
+    let mut git_dir = std::process::Command::new("git");
+    let git_dir_output = git_dir
+        .arg("-C")
+        .arg(repository.worktree())
+        .args(["rev-parse", "--git-dir"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .output()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "local Git worktree status could not be read",
+                "check that Git can read the local worktree, then retry `status --short`",
+            )
+        })?;
+    if !git_dir_output.status.success() {
+        return Err(Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be read",
+            "check that Git can read the local worktree, then retry `status --short`",
+        ));
+    }
+    let git_dir = String::from_utf8(git_dir_output.stdout).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be read",
+            "check that Git can read the local worktree, then retry `status --short`",
+        )
+    })?;
+    let git_dir = std::path::Path::new(git_dir.trim());
+    let git_dir = if git_dir.is_absolute() {
+        git_dir.to_owned()
+    } else {
+        repository.worktree().join(git_dir)
+    };
     let output = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&git_dir)
+        .arg("--work-tree")
+        .arg(repository.worktree())
         .args(["status", "--short"])
-        .current_dir(path)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
         .output()
         .map_err(|_| {
             Diagnostic::target(
