@@ -3238,7 +3238,7 @@ impl Repository {
     /// Constructs a Git command for a passive observer.  This intentionally
     /// ignores inherited routing and object-store overrides so every query is
     /// bound to this repository's selected worktree.
-    fn observer_command(&self) -> Command {
+    pub(crate) fn observer_command(&self) -> Command {
         let mut command = self.command();
         scrub_git_routing_environment(&mut command);
         command
@@ -3433,7 +3433,7 @@ impl Repository {
         let output = run_command(command)?;
         Ok(trim_output(&output.stdout))
     }
-    fn run(&self, command: Command) -> Result<Output, RepositoryError> {
+    pub(crate) fn run(&self, command: Command) -> Result<Output, RepositoryError> {
         run_command(command)
     }
 
@@ -3530,7 +3530,7 @@ impl Repository {
         IndexTreeRef::from_verified_tree(oid, self.native_object_id_length()?)
     }
 
-    fn native_object_id_length(&self) -> Result<usize, RepositoryError> {
+    pub(crate) fn native_object_id_length(&self) -> Result<usize, RepositoryError> {
         match self.git(["rev-parse", "--show-object-format"])?.as_str() {
             "sha1" => Ok(40),
             "sha256" => Ok(64),
