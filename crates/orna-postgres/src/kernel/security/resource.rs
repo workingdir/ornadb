@@ -136,14 +136,27 @@ impl AuthenticatedServerResourceProducer {
     }
 
     /// Requests one bounded batch or terminal result.
+    ///
+    /// This compatibility surface represents cancellation-caused channel
+    /// closure as `Cancelled`. Lifecycle owners that require proof of an
+    /// explicit worker acknowledgement must call [`Self::pull_observed`].
     pub async fn pull(
         &self,
         credit: ResourceCredit,
     ) -> Result<AuthenticatedServerResourceEvent, PostgresKernelError> {
+        Ok(self.pull_observed(credit).await?.0)
+    }
+
+    /// Requests one bounded batch or terminal result with cancellation
+    /// acknowledgement provenance.
+    pub async fn pull_observed(
+        &self,
+        credit: ResourceCredit,
+    ) -> Result<(AuthenticatedServerResourceEvent, bool), PostgresKernelError> {
         let (response, receiver) = tokio::sync::oneshot::channel();
-        // Cancellation may close the worker response channel after a pull is
-        // queued. Preserve the cancellation outcome; unrelated task exits stay
-        // durable invariant failures.
+        // Cancellation may close either channel after a pull is queued. Keep
+        // the legacy cancellation surface while retaining the absence of a
+        // worker acknowledgement for lifecycle owners.
         if self
             .commands
             .send(ResourceProducerCommand::Pull(ResourceProducerPull {
@@ -154,7 +167,7 @@ impl AuthenticatedServerResourceProducer {
             .is_err()
         {
             if self.cancellation.is_requested() {
-                return Ok(AuthenticatedServerResourceEvent::Cancelled);
+                return Ok((AuthenticatedServerResourceEvent::Cancelled, false));
             }
             return Err(PostgresKernelError::DurableInvariant {
                 relation: "resource producer",
@@ -163,9 +176,13 @@ impl AuthenticatedServerResourceProducer {
             });
         }
         match receiver.await {
-            Ok(result) => result,
+            Ok(result) => result.map(|event| {
+                let cancellation_acknowledged =
+                    matches!(event, AuthenticatedServerResourceEvent::Cancelled);
+                (event, cancellation_acknowledged)
+            }),
             Err(_) if self.cancellation.is_requested() => {
-                Ok(AuthenticatedServerResourceEvent::Cancelled)
+                Ok((AuthenticatedServerResourceEvent::Cancelled, false))
             }
             Err(_) => Err(PostgresKernelError::DurableInvariant {
                 relation: "resource producer",
@@ -193,5 +210,102 @@ impl std::fmt::Debug for AuthenticatedServerResourceProducer {
             .debug_struct("AuthenticatedServerResourceProducer")
             .field("accepted", &self.accepted)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orna_core::{CatalogueRevisionId, SourceRevisionId};
+
+    fn producer(
+        commands: tokio::sync::mpsc::Sender<ResourceProducerCommand>,
+        cancellation: ResourceCancellation,
+    ) -> AuthenticatedServerResourceProducer {
+        AuthenticatedServerResourceProducer {
+            accepted: AuthenticatedServerResourceAccepted {
+                stream_id: 1,
+                request_id: InvocationId::from_bytes([0x41; 16]),
+                nested_invocation_id: InvocationId::from_bytes([0x42; 16]),
+                target_revision: RevisionPair::new(
+                    SourceRevisionId::from_bytes([0x43; 16]),
+                    CatalogueRevisionId::from_bytes([0x44; 16]),
+                ),
+                resource_kind: AuthenticatedServerResourceKind::Stream,
+            },
+            commands,
+            cancellation,
+        }
+    }
+
+    #[tokio::test]
+    async fn observed_pull_marks_worker_cancelled_event_as_acknowledged() {
+        let cancellation = ResourceCancellation::new();
+        let (commands, mut worker) = tokio::sync::mpsc::channel(1);
+        let producer = producer(commands, cancellation.clone());
+        assert!(cancellation.request_cancel());
+
+        let pull = tokio::spawn(async move {
+            producer
+                .pull_observed(ResourceCredit::new(1, 1).expect("bounded credit"))
+                .await
+        });
+        let Some(ResourceProducerCommand::Pull(command)) = worker.recv().await else {
+            panic!("producer sends a pull command");
+        };
+        command
+            .response
+            .send(Ok(AuthenticatedServerResourceEvent::Cancelled))
+            .expect("worker response remains open");
+
+        let outcome = pull
+            .await
+            .expect("pull task joins")
+            .expect("worker response succeeds");
+        assert_eq!(outcome, (AuthenticatedServerResourceEvent::Cancelled, true));
+    }
+
+    #[tokio::test]
+    async fn observed_pull_marks_closed_response_as_unacknowledged_cancellation() {
+        let cancellation = ResourceCancellation::new();
+        let (commands, mut worker) = tokio::sync::mpsc::channel(1);
+        let producer = producer(commands, cancellation.clone());
+        assert!(cancellation.request_cancel());
+
+        let pull = tokio::spawn(async move {
+            producer
+                .pull_observed(ResourceCredit::new(1, 1).expect("bounded credit"))
+                .await
+        });
+        let Some(ResourceProducerCommand::Pull(command)) = worker.recv().await else {
+            panic!("producer sends a pull command");
+        };
+        drop(command);
+
+        let outcome = pull
+            .await
+            .expect("pull task joins")
+            .expect("closed response preserves cancellation outcome");
+        assert_eq!(
+            outcome,
+            (AuthenticatedServerResourceEvent::Cancelled, false)
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_pull_preserves_synthetic_cancelled_event() {
+        let cancellation = ResourceCancellation::new();
+        let (commands, worker) = tokio::sync::mpsc::channel(1);
+        drop(worker);
+        let producer = producer(commands, cancellation.clone());
+        assert!(cancellation.request_cancel());
+
+        assert_eq!(
+            producer
+                .pull(ResourceCredit::new(1, 1).expect("bounded credit"))
+                .await
+                .expect("cancelled channel remains legacy cancellation"),
+            AuthenticatedServerResourceEvent::Cancelled
+        );
     }
 }
