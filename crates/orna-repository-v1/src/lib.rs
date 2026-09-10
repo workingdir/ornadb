@@ -1730,6 +1730,17 @@ impl Repository {
         // post-ref/pre-index race where an ordinary Git writer could publish
         // the captured, stale index.
         let git_lock = GitIndexLock::acquire(index.with_extension("lock"))?;
+        // A managed file may have changed after preparation but before the
+        // publication boundary.  Refuse that known conflict before advancing
+        // the ref; the later worktree check still protects the unavoidable
+        // race with an editor that writes during publication.
+        for entry in journal.entries() {
+            let current = self.managed_file_bytes(&entry.path)?;
+            if current.as_deref() != entry.expected() && current.as_deref() != entry.next() {
+                drop(git_lock);
+                return Err(RepositoryError::ManagedContentConflict);
+            }
+        }
         self.write_publication_journal(journal)?;
         self.advance_current_ref_bound(
             journal.old_head(),
