@@ -2,15 +2,52 @@
 
 use std::{collections::HashSet, error::Error, fmt};
 
-use super::{
-    ACTION_BODY_PREFIX_BYTES, ACTION_DOMAIN_CLIENT, ACTION_DOMAIN_SERVER, ACTION_IDENTITY_BYTES,
-    ACTION_IDENTITY_FIELDS, ActiveDatabaseRevision, InspectCarrierEnvelope,
-    MAX_OPAQUE_CODEC_ACTION_ARGUMENTS, MAX_OPAQUE_CODEC_MAGIC_LENGTH,
-    MAX_OPAQUE_CODEC_PAYLOAD_LENGTH, MAX_ROWS_CELLS, MAX_ROWS_COLUMNS, MAX_ROWS_PAYLOAD_LENGTH,
-    MAX_ROWS_ROWS, MAX_RUNTIME_VALUE_NODES, ORV3_HEADER_BYTES, ORV3_MARKER, QualifiedSemanticName,
-    ROWS_FRAME_VERSION, SYS_SOURCE_FUNCTION_TYPE_ID, TypeId, ValueTypeKind, ValueTypeMutability,
-    ValueTypePersistence, VerifiedStandardLibrarySnapshot, inspect_carrier_codec_by_type_id,
+use crate::{
+    TypeId,
+    catalogue::{QualifiedSemanticName, ValueTypeKind, ValueTypeMutability, ValueTypePersistence},
+    inspect_carrier::InspectCarrierEnvelope,
+    revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
+    system::SYS_SOURCE_FUNCTION_TYPE_ID,
 };
+
+use super::{MAX_RUNTIME_VALUE_NODES, inspect_carrier_codec_by_type_id};
+
+/// The maximum payload length accepted by every registered opaque codec.
+pub const MAX_OPAQUE_CODEC_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024;
+
+/// The largest number of argument frames accepted by the generic action
+/// descriptor codec. The semantic target and parameter checks remain in the
+/// CLIENT action decoder.
+pub const MAX_OPAQUE_CODEC_ACTION_ARGUMENTS: usize = 64;
+
+pub(super) const ACTION_DOMAIN_CLIENT: u8 = 1;
+const ACTION_DOMAIN_SERVER: u8 = 2;
+pub(super) const ACTION_IDENTITY_BYTES: usize = 16;
+const ACTION_IDENTITY_FIELDS: usize = 5;
+const ACTION_BODY_PREFIX_BYTES: usize = 1 + (ACTION_IDENTITY_FIELDS * ACTION_IDENTITY_BYTES) + 4;
+const ORV3_HEADER_BYTES: usize = 25;
+const ORV3_MARKER: &[u8; 4] = b"ORV3";
+
+/// The largest accepted framed-codec magic prefix length in bytes.
+const MAX_OPAQUE_CODEC_MAGIC_LENGTH: usize = 64;
+
+/// The exact ASCII magic prefix of the canonical `std.data.Rows` payload.
+pub const ROWS_MAGIC: &[u8; 12] = b"ORNA-ROWS/1 ";
+
+/// The only supported canonical `std.data.Rows` frame version.
+pub const ROWS_FRAME_VERSION: u16 = 1;
+
+/// The maximum number of ordered columns in one materialised Rows value.
+pub const MAX_ROWS_COLUMNS: usize = 1_000_000;
+
+/// The maximum number of ordered rows in one materialised Rows value.
+pub const MAX_ROWS_ROWS: usize = 10_000;
+
+/// The maximum number of cells in one materialised Rows value.
+pub const MAX_ROWS_CELLS: usize = 1_000_000;
+
+/// The maximum complete payload length of one materialised Rows value.
+pub const MAX_ROWS_PAYLOAD_LENGTH: usize = MAX_OPAQUE_CODEC_PAYLOAD_LENGTH;
 
 /// The canonical payload contract of one checked-in opaque codec.
 ///
@@ -1755,3 +1792,131 @@ impl fmt::Display for OpaqueValueError {
 }
 
 impl Error for OpaqueValueError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_OPAQUE_TYPE: TypeId = TypeId::from_bytes([0xa5; 16]);
+
+    fn push_u32(payload: &mut Vec<u8>, value: usize) {
+        payload.extend_from_slice(&u32::try_from(value).unwrap().to_be_bytes());
+    }
+
+    fn rows_columns(payload: &mut Vec<u8>, column_count: usize) {
+        push_u32(payload, column_count);
+        for column in 0..column_count {
+            let name = format!("c{column}");
+            push_u32(payload, name.len());
+            payload.extend_from_slice(name.as_bytes());
+            payload.push(0x01);
+            let mut type_id = [0; 16];
+            type_id[15] = 0x01;
+            payload.extend_from_slice(&type_id);
+            payload.push(0);
+        }
+    }
+
+    fn rows_prefix(column_count: usize, row_count: usize) -> Vec<u8> {
+        let mut payload = ROWS_MAGIC.to_vec();
+        payload.extend_from_slice(&ROWS_FRAME_VERSION.to_be_bytes());
+        rows_columns(&mut payload, column_count);
+        push_u32(&mut payload, row_count);
+        payload
+    }
+
+    fn rows_counts_only(column_count: usize) -> Vec<u8> {
+        let mut payload = ROWS_MAGIC.to_vec();
+        payload.extend_from_slice(&ROWS_FRAME_VERSION.to_be_bytes());
+        push_u32(&mut payload, column_count);
+        payload
+    }
+
+    fn valid_bool_cell() -> Vec<u8> {
+        let mut cell = b"ORV5".to_vec();
+        cell.push(0x02);
+        cell.extend_from_slice(&[0; 16]);
+        push_u32(&mut cell, 1);
+        cell.push(1);
+        cell
+    }
+
+    fn rows_with_bool_rows(column_count: usize, row_count: usize) -> Vec<u8> {
+        let cell = valid_bool_cell();
+        let mut payload = rows_prefix(column_count, row_count);
+        for _ in 0..row_count {
+            push_u32(&mut payload, column_count);
+            for _ in 0..column_count {
+                push_u32(&mut payload, cell.len());
+                payload.extend_from_slice(&cell);
+            }
+        }
+        payload
+    }
+
+    fn rows_with_blob(blob_length: usize) -> Vec<u8> {
+        let mut payload = rows_prefix(1, 1);
+        let mut cell = b"ORV5".to_vec();
+        cell.push(0x07);
+        let mut type_id = [0; 16];
+        type_id[15] = 0x07;
+        cell.extend_from_slice(&type_id);
+        push_u32(&mut cell, blob_length);
+        cell.resize(cell.len() + blob_length, 0);
+        push_u32(&mut payload, 1);
+        push_u32(&mut payload, cell.len());
+        payload.extend_from_slice(&cell);
+        payload
+    }
+
+    fn assert_valid_rows(payload: &[u8]) {
+        assert_eq!(
+            validate_rows_payload(TEST_OPAQUE_TYPE, ROWS_MAGIC, payload),
+            Ok(())
+        );
+    }
+
+    fn assert_invalid_rows(payload: &[u8]) {
+        assert_eq!(
+            validate_rows_payload(TEST_OPAQUE_TYPE, ROWS_MAGIC, payload),
+            Err(OpaqueValueError::InvalidRowsFrame {
+                opaque_type: TEST_OPAQUE_TYPE,
+            })
+        );
+    }
+
+    #[test]
+    fn rows_limits_pin_normative_literals() {
+        assert_eq!(MAX_ROWS_COLUMNS, 1_000_000);
+        assert_eq!(MAX_ROWS_ROWS, 10_000);
+        assert_eq!(MAX_ROWS_CELLS, 1_000_000);
+        assert_eq!(MAX_ROWS_PAYLOAD_LENGTH, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn rows_codec_accepts_reachable_row_and_payload_boundaries() {
+        let at_row_limit = rows_with_bool_rows(1, 10_000);
+        assert_valid_rows(&at_row_limit);
+
+        let empty = rows_with_blob(0);
+        let blob_length = (16usize * 1024 * 1024).checked_sub(empty.len()).unwrap();
+        let mut at_payload_limit = rows_with_blob(blob_length);
+        assert_eq!(at_payload_limit.len(), 16 * 1024 * 1024);
+        assert_valid_rows(&at_payload_limit);
+
+        at_payload_limit.push(0);
+        assert_invalid_rows(&at_payload_limit);
+    }
+
+    #[test]
+    fn rows_codec_rejects_over_limit_columns_rows_and_cells() {
+        let too_many_columns = rows_counts_only(1_000_001);
+        assert_invalid_rows(&too_many_columns);
+
+        let too_many_rows = rows_prefix(1, 10_001);
+        assert_invalid_rows(&too_many_rows);
+
+        let too_many_cells = rows_prefix(1_001, 1_000);
+        assert_invalid_rows(&too_many_cells);
+    }
+}
