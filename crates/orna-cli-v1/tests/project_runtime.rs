@@ -399,6 +399,21 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
     assert_eq!(actual.stdout, expected.stdout);
     assert!(actual.stderr.is_empty());
 
+    let expected_short = Command::new("git")
+        .args(["status", "--short"])
+        .current_dir(repository.path().join("nested"))
+        .output()
+        .expect("git short status");
+    let actual_short = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(repository.path().join("nested"))
+        .args(["status", "--short"])
+        .output()
+        .expect("CLI short status");
+    assert!(actual_short.status.success());
+    assert_eq!(actual_short.stdout, expected_short.stdout);
+    assert!(actual_short.stderr.is_empty());
+
     let outside = tempfile::tempdir().expect("non-repository directory");
     let failure = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -413,6 +428,17 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
     );
     assert!(failure.stdout.is_empty());
     assert!(!String::from_utf8_lossy(&failure.stderr).contains("status repository"));
+
+    let short_failure = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(outside.path())
+        .args(["status", "--short"])
+        .output()
+        .expect("CLI short status failure");
+    assert!(!short_failure.status.success());
+    assert_eq!(short_failure.stderr, failure.stderr);
+    assert!(short_failure.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&short_failure.stderr).contains("status repository"));
 }
 
 #[tokio::test(flavor = "current_thread")]
