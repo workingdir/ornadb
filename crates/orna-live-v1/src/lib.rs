@@ -5073,18 +5073,25 @@ fn ws_frame(bytes: &[u8], limit: usize) -> Result<Option<ParsedFrame>> {
         return Err(Error::InvalidFrame);
     }
     let mut at: usize = 2;
-    let mut len = usize::from(second & 127);
-    if len == 126 {
+    let length_code = second & 127;
+    let mut len = usize::from(length_code);
+    if length_code == 126 {
         if bytes.len() < 4 {
             return Ok(None);
         }
         len = usize::from(u16::from_be_bytes([bytes[2], bytes[3]]));
+        if len < 126 {
+            return Err(Error::InvalidFrame);
+        }
         at = 4;
-    } else if len == 127 {
+    } else if length_code == 127 {
         if bytes.len() < 10 {
             return Ok(None);
         }
         let size = u64::from_be_bytes(bytes[2..10].try_into().map_err(|_| Error::InvalidFrame)?);
+        if size & (1 << 63) != 0 || size < 65_536 {
+            return Err(Error::InvalidFrame);
+        }
         len = usize::try_from(size).map_err(|_| Error::Limit)?;
         at = 10;
     }
