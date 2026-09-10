@@ -3560,20 +3560,35 @@ fn optional_numeric_ranges_infer_from_endpoints_or_expected_range_context() {
 }
 
 #[test]
-fn affine_collection_aggregates_keep_mean_and_reject_integer_only_extrema() {
+fn affine_collection_aggregates_keep_mean_and_admit_extrema() {
     let valid = analyze(&[ModuleInput::new(
         "average.orna",
         "pub fn average_temperature(values: [Float<C>]) = values | mean;",
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
 
-    let invalid = analyze(&[
+    let extrema = analyze(&[
         ModuleInput::new(
             "maximum.orna",
             "pub fn hottest(values: [Float<C>]) = values | max;",
         ),
-        ModuleInput::new("sum.orna", "pub fn bad(values: [Float<C>]) = values | sum;"),
+        ModuleInput::new(
+            "minimum.orna",
+            "pub fn coldest(values: [Float<C>]) = values | min;",
+        ),
     ]);
+    assert!(extrema.is_ok(), "{:?}", extrema.diagnostics);
+
+    let shadowed = analyze(&[ModuleInput::new(
+        "shadowed-max.orna",
+        "pub fn max(value: Int) = value; pub fn caller(values: [Float<C>]) = values | max;",
+    )]);
+    assert!(has(&shadowed, DIAG_TYPE));
+
+    let invalid = analyze(&[ModuleInput::new(
+        "sum.orna",
+        "pub fn bad(values: [Float<C>]) = values | sum;",
+    )]);
     assert!(has(&invalid, DIAG_TYPE));
     assert!(!has(&invalid, DIAG_UNSUPPORTED));
 }

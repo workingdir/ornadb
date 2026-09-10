@@ -6135,6 +6135,16 @@ fn infer_success_pipeline(
         };
         return Inferred { ty, effects };
     }
+    if let Type::List(element) = &input.ty
+        && let Expr::Name { text, .. } = rhs
+        && (text == "mean" || root_collection_intrinsic_is_unshadowed(text, scope, local))
+        && let Some(ty) = infer_affine_collection_aggregate(text, element, diagnostics)
+    {
+        return Inferred {
+            ty,
+            effects: input.effects,
+        };
+    }
     if let Type::List(_) = &input.ty
         && let Some(operation @ ("sum" | "min" | "max")) =
             finite_list_collection_operation(rhs, scope, local)
@@ -6148,15 +6158,6 @@ fn infer_success_pipeline(
             local,
             diagnostics,
         );
-    }
-    if let Expr::Name { text, .. } = rhs
-        && let Type::List(element) = &input.ty
-        && let Some(ty) = infer_affine_collection_aggregate(text, element, diagnostics)
-    {
-        return Inferred {
-            ty,
-            effects: input.effects,
-        };
     }
     if let Expr::Name { text, .. } = rhs
         && let Type::Relation(element) = &input.ty
@@ -6653,6 +6654,7 @@ fn infer_affine_collection_aggregate(
     }
     match operation {
         "mean" => Some(Type::Optional(Box::new(element.clone()))),
+        "min" | "max" => Some(Type::Optional(Box::new(element.clone()))),
         "sum" => {
             diagnostics.push(diag(DIAG_TYPE, "cannot sum absolute affine quantities"));
             Some(Type::Error)
