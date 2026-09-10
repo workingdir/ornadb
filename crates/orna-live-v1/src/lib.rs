@@ -1819,12 +1819,7 @@ impl LiveHost {
         let response =
             Envelope::decode(bytes, self.limits.protocol).map_err(|_| Error::RuntimeUnavailable)?;
         self.validate_recovered_response(status, &response).await?;
-        Ok(durable_result_body(
-            request,
-            fingerprint,
-            status,
-            self.limits.protocol,
-        ))
+        durable_result_body(request, fingerprint, status, self.limits.protocol)
     }
 
     /// An orphaned request has one of two persisted meanings. Do not replay a
@@ -2334,11 +2329,20 @@ fn durable_result_body(
     fingerprint: [u8; 32],
     status: &DurableRequestStatus,
     limits: ProtocolLimits,
-) -> Option<ResultBody> {
-    let bytes = status.terminal_outcome.as_ref()?.as_bytes();
-    let response = Envelope::decode(bytes, limits).ok()?;
-    validate_result_response(request, fingerprint, response.clone(), limits).ok()?;
-    ResultBody::from_result(&response, limits).ok()
+) -> Result<Option<ResultBody>> {
+    let Some(bytes) = status
+        .terminal_outcome
+        .as_ref()
+        .map(TerminalOutcome::as_bytes)
+    else {
+        return Ok(None);
+    };
+    let response = Envelope::decode(bytes, limits).map_err(|_| Error::RuntimeUnavailable)?;
+    validate_result_response(request, fingerprint, response.clone(), limits)
+        .map_err(|_| Error::RuntimeUnavailable)?;
+    ResultBody::from_result(&response, limits)
+        .map(Some)
+        .map_err(|_| Error::RuntimeUnavailable)
 }
 
 fn live_run_registration(
@@ -5533,7 +5537,30 @@ mod tests {
             terminal_outcome: Some(terminal),
         };
         assert!(
-            durable_result_body([1; 16], [2; 32], &durable, ProtocolLimits::default(),).is_some()
+            durable_result_body([1; 16], [2; 32], &durable, ProtocolLimits::default(),)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn request_status_rejects_a_durable_non_result_payload() {
+        let response = watch_diagnostic_response([1; 16], None);
+        let terminal =
+            TerminalOutcome::new(response.encode(ProtocolLimits::default()).unwrap()).unwrap();
+        let durable = DurableRequestStatus {
+            identity: RequestIdentity {
+                session_id: [4; 16],
+                request_id: [1; 16],
+            },
+            fingerprint: [2; 32],
+            state: DurableRequestState::Completed,
+            terminal_outcome: Some(terminal),
+        };
+
+        assert_eq!(
+            durable_result_body([1; 16], [2; 32], &durable, ProtocolLimits::default()),
+            Err(Error::RuntimeUnavailable)
         );
     }
 
