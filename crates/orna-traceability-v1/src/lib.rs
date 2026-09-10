@@ -1065,15 +1065,18 @@ mod tests {
         let root = corpus();
         let harness = orna_conformance_v1::Harness::new(
             orna_conformance_v1::Corpus::load(&root).expect("conformance corpus loads"),
-        );
+        )
+        .with_claim(orna_conformance_v1::ImplementationClaim {
+            implementation_id: "orna-conformance-v1".into(),
+            profile: "bounded-expression-runtime".into(),
+            command: "orna-conformance --profile bounded-expression-runtime".into(),
+            environment: std::collections::BTreeMap::new(),
+            executed_scenario_contracts: vec!["LET-REBIND-091".into()],
+        });
         let mut adapter = orna_conformance_v1::RuntimeAdapter::new(
             orna_conformance_v1::BoundedEvaluator::default(),
         );
-        let mut conformance_report = harness.run(&mut adapter);
-        conformance_report
-            .implementation_claim
-            .executed_scenario_contracts
-            .push("LET-REBIND-091".into());
+        let conformance_report = harness.run(&mut adapter);
         let binding = orna_conformance_v1::ScenarioExecutionBinding {
             requirement_id: "ORNA-VALUE-006".into(),
             scenario_id: "LET-REBIND-091".into(),
@@ -1114,15 +1117,18 @@ mod tests {
         let root = corpus();
         let harness = orna_conformance_v1::Harness::new(
             orna_conformance_v1::Corpus::load(&root).expect("conformance corpus loads"),
-        );
+        )
+        .with_claim(orna_conformance_v1::ImplementationClaim {
+            implementation_id: "orna-conformance-v1".into(),
+            profile: "bounded-expression-runtime".into(),
+            command: "orna-conformance --profile bounded-expression-runtime".into(),
+            environment: std::collections::BTreeMap::new(),
+            executed_scenario_contracts: vec!["LET-REBIND-091".into()],
+        });
         let mut adapter = orna_conformance_v1::RuntimeAdapter::new(
             orna_conformance_v1::BoundedEvaluator::default(),
         );
-        let mut conformance_report = harness.run(&mut adapter);
-        conformance_report
-            .implementation_claim
-            .executed_scenario_contracts
-            .push("LET-REBIND-091".into());
+        let conformance_report = harness.run(&mut adapter);
         let binding = orna_conformance_v1::ScenarioExecutionBinding {
             requirement_id: "ORNA-EVIDENCE-001".into(),
             scenario_id: "LET-REBIND-091".into(),
