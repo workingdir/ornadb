@@ -25,6 +25,10 @@ fn capability_gate_denies_an_ungranted_declared_capability() {
             capability,
         } if context.function() == function && capability == "std.fs.read"
     ));
+    assert_eq!(
+        error.to_string(),
+        "the CLIENT function requires a capability which is not granted"
+    );
 }
 
 #[test]
@@ -102,8 +106,9 @@ fn version_five_stored_literal_capability_denies_without_grants() {
     ));
     assert_eq!(
         error.to_string(),
-        "the CLIENT function requires the capability std.fs.read which is not granted"
+        "the CLIENT function requires a capability which is not granted"
     );
+    assert!(!error.to_string().contains("std.fs.read"));
 }
 
 #[test]
@@ -212,6 +217,7 @@ fn version_five_unknown_stored_capability_name_fails_closed() {
             capability,
         } if context.function() == function && capability == "std.bogus.op"
     ));
+    assert!(!error.to_string().contains("std.bogus.op"));
 }
 
 #[test]
