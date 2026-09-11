@@ -462,6 +462,47 @@ fn standard_function_hover_and_signature_use_catalogue_data() {
     assert!(signature.signatures[0].label.contains("std.math.increment"));
     assert!(signature.signatures[0].label.contains("p_value"));
 }
+
+#[test]
+fn signature_help_accepts_unicode_and_quoted_callable_names() {
+    let text = concat!(
+        "CREATE CLIENT FUNCTION café(p_value INTEGER) RETURNS INTEGER AS p_value;\n",
+        "CREATE CLIENT FUNCTION caller() RETURNS INTEGER AS café(1);\n",
+        "CREATE CLIENT FUNCTION \"app\".\"item\"(p_value BOOLEAN) RETURNS BOOLEAN AS p_value;\n",
+        "CREATE CLIENT FUNCTION quoted_caller() RETURNS BOOLEAN AS \"app\".\"item\"(TRUE);\n",
+    );
+    let document = Document::new(
+        "file:///signature-name-forms.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let parse = orna_syntax::parse(text);
+    assert!(
+        parse.diagnostics().is_empty(),
+        "unexpected parse diagnostics"
+    );
+    let mapper = PositionMapper::new(text);
+
+    for (call, expected) in [
+        ("AS café(", "café"),
+        ("AS \"app\".\"item\"(", "\"app\".\"item\""),
+    ] {
+        let open = text.find(call).expect("call");
+        let signature = super::signature_help(
+            &document,
+            &parse,
+            None,
+            mapper.position(open + call.len()),
+            &mapper,
+        )
+        .expect("signature help");
+        assert!(
+            signature.signatures[0].label.contains(expected),
+            "signature label for {expected}: {}",
+            signature.signatures[0].label
+        );
+    }
+}
 #[test]
 fn hover_multiword_scalars_cover_the_complete_type_span() {
     let text = "CREATE TYPE files.document AS OBJECT (body CHARACTER LARGE OBJECT, data BINARY LARGE OBJECT);";
