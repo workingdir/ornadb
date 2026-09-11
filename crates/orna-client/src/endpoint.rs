@@ -142,9 +142,7 @@ pub enum EndpointParseError {
 impl fmt::Display for EndpointParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedScheme(scheme) => {
-                write!(formatter, "unsupported Orna endpoint scheme `{scheme}`")
-            }
+            Self::UnsupportedScheme(_) => formatter.write_str("unsupported Orna endpoint scheme"),
             Self::Invalid(reason) => write!(formatter, "invalid Orna endpoint: {reason}"),
         }
     }
@@ -399,6 +397,15 @@ mod tests {
         ] {
             assert!(DatabaseEndpoint::parse(value).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn unsupported_scheme_diagnostic_does_not_echo_untrusted_text() {
+        let error =
+            DatabaseEndpoint::parse("secret-host-token://private/database").expect_err("scheme");
+        assert_eq!(error.to_string(), "unsupported Orna endpoint scheme");
+        assert!(!error.to_string().contains("secret-host-token"));
+        assert!(!error.to_string().contains("private/database"));
     }
 
     #[test]
