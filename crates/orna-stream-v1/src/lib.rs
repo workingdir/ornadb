@@ -744,12 +744,17 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                     .failures
                     .entry(identity.clone())
                     .or_insert(FailureRecord {
-                        identity,
+                        identity: identity.clone(),
                         version: 0,
                         attempts: 0,
                         status: FailureStatus::Failed,
                         diagnostic,
                     });
+                // A provider may select a different successor when the same
+                // opaque delivery is retried. Keep the natural identity
+                // stable while retaining the newest successor for a later
+                // explicit skip.
+                failure.identity = identity;
                 failure.version += 1;
                 failure.attempts += u32::from(failure.status != FailureStatus::Retrying);
                 failure.status = FailureStatus::Failed;
@@ -1815,6 +1820,42 @@ mod tests {
         assert_eq!(succeeded.identity, failed.identity);
         assert_eq!(succeeded.attempts, retry.attempts);
         assert_eq!(succeeded.status, FailureStatus::Succeeded);
+    }
+
+    #[test]
+    fn failed_retry_refreshes_successor_without_changing_identity() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let original = delivery("receipt:retry-failed", "resume:original");
+        let first = acquire_and_fail(&mut backend, original.clone());
+        let revised = delivery("receipt:retry-failed", "resume:revised");
+        let scheduled = backend.apply(CommitIntent::Retry {
+            failure: first.identity.clone(),
+            expected_version: first.version,
+            expected: expected(&backend, &revised),
+        });
+        assert!(matches!(scheduled, CommitResult::RetryScheduled { .. }));
+        let revised_lease = acquire(&mut backend, revised.clone());
+        let failed = fail(&mut backend, revised_lease);
+        assert_eq!(failed.identity, first.identity);
+        assert_eq!(failed.identity.0.successor, revised.successor);
+        assert_eq!(failed.attempts, 2);
+        assert_eq!(failed.status, FailureStatus::Failed);
+        assert_eq!(backend.checkpoint(&revised.checkpoint_key()).version, 0);
+        assert_eq!(
+            backend.checkpoint(&revised.checkpoint_key()).committed,
+            None
+        );
+        let skip_lease = acquire_skip(&mut backend, revised.clone());
+        let skipped = backend.apply(CommitIntent::Skip {
+            lease: skip_lease,
+            expected: expected(&backend, &revised),
+            expected_failure_version: failed.version,
+        });
+        assert!(matches!(
+            skipped,
+            CommitResult::CheckpointAdvanced { ref checkpoint }
+                if checkpoint.committed == Some(revised.successor)
+        ));
     }
 
     #[test]
