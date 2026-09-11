@@ -908,6 +908,29 @@ impl Harness {
             .flat_map(|fixture| &fixture.stages)
             .filter(|e| matches!(e.requirement_mapping, RequirementMapping::Unmapped { .. }))
             .count();
+        // The claim is metadata supplied by the runner, not evidence.  Only
+        // scenarios that actually passed through this adapter may appear as
+        // executed contracts in the published report.  Preserve the caller's
+        // order while removing unknown, duplicate, skipped, and failed claims.
+        let passed_scenarios = report
+            .scenarios
+            .iter()
+            .filter(|scenario| {
+                scenario.class == EvidenceClass::Runtime
+                    && scenario.status == EvidenceStatus::Passed
+            })
+            .map(|scenario| scenario.scenario.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut seen = BTreeSet::new();
+        let executed = report
+            .implementation_claim
+            .executed_scenario_contracts
+            .iter()
+            .filter(|scenario| passed_scenarios.contains(scenario.as_str()))
+            .filter(|scenario| seen.insert(scenario.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        report.implementation_claim.executed_scenario_contracts = executed;
         report
     }
 
