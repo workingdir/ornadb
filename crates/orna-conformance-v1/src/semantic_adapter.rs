@@ -899,7 +899,7 @@ impl TransactionalEvaluator {
     /// Executes the configured entry function inside one root activation.
     /// Errors escaping the function leave all table writes unpublished.
     pub fn execute_source(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        let (functions, key_fields, table_assertions, module_assertions) =
+        let (functions, key_fields, float_fields, table_assertions, module_assertions) =
             match admit_transaction_source(unit, self.limits, &self.entry) {
                 Ok(value) => value,
                 Err(outcome) => return *outcome,
@@ -907,6 +907,7 @@ impl TransactionalEvaluator {
         match self.execute_admitted(
             &functions,
             &key_fields,
+            &float_fields,
             &table_assertions,
             &module_assertions,
         ) {
@@ -927,7 +928,7 @@ impl TransactionalEvaluator {
             return None;
         }
         let mut evaluator = Self::new("bad", self.limits);
-        let (functions, _, table_assertions, module_assertions) =
+        let (functions, _, _, table_assertions, module_assertions) =
             match admit_transaction_source(unit, self.limits, "bad") {
                 Ok(value) => value,
                 Err(outcome) => return Some(*outcome),
@@ -936,6 +937,7 @@ impl TransactionalEvaluator {
         let outcome = match evaluator.execute_admitted(
             &functions,
             &key_fields,
+            &TableFloatFields::new(),
             &table_assertions,
             &module_assertions,
         ) {
@@ -1018,12 +1020,14 @@ impl TransactionalEvaluator {
         &mut self,
         functions: &Functions,
         key_fields: &TableKeys,
+        float_fields: &TableFloatFields,
         table_assertions: &TableAssertions,
         module_assertions: &[Expr],
     ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
         self.execute_admitted_with_arguments(
             functions,
             key_fields,
+            float_fields,
             table_assertions,
             module_assertions,
             &Environment::new(),
@@ -1034,6 +1038,7 @@ impl TransactionalEvaluator {
         &mut self,
         functions: &Functions,
         key_fields: &TableKeys,
+        float_fields: &TableFloatFields,
         table_assertions: &TableAssertions,
         module_assertions: &[Expr],
         arguments: &Environment,
@@ -1042,7 +1047,7 @@ impl TransactionalEvaluator {
         let limits = self.limits;
         let mut mutations = Vec::new();
         let result = self.database.activate(|activation| {
-            let functions = lower_relation_bindings(functions, key_fields);
+            let functions = lower_relation_bindings(functions, key_fields, float_fields);
             let mut effects = TableEffectHandler {
                 activation,
                 key_fields,
@@ -1142,7 +1147,7 @@ impl DurableTransactionalEvaluator {
         initial_digest: [u8; 32],
         unit: &SourceUnit,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
-        let (functions, key_fields, table_assertions, module_assertions) =
+        let (functions, key_fields, float_fields, table_assertions, module_assertions) =
             match admit_transaction_source(unit, self.limits, &self.entry) {
                 Ok(value) => value,
                 Err(outcome) => return Ok(*outcome),
@@ -1170,6 +1175,7 @@ impl DurableTransactionalEvaluator {
         let mutations = match evaluator.execute_admitted(
             &functions,
             &key_fields,
+            &float_fields,
             &table_assertions,
             &module_assertions,
         ) {
@@ -1277,7 +1283,7 @@ impl DurableTransactionalEvaluator {
             return replay_or_fence_request(start.request);
         }
 
-        let (functions, key_fields, table_assertions, module_assertions) =
+        let (functions, key_fields, float_fields, table_assertions, module_assertions) =
             match admit_transaction_source(unit, self.limits, &self.entry) {
                 Ok(value) => value,
                 Err(outcome) => {
@@ -1333,6 +1339,7 @@ impl DurableTransactionalEvaluator {
         let mutations = match evaluator.execute_admitted(
             &functions,
             &key_fields,
+            &float_fields,
             &table_assertions,
             &module_assertions,
         ) {
@@ -1421,7 +1428,7 @@ impl DurableTransactionalEvaluator {
             Err(error) => return RunningTableRequestDisposition::Fenced(error),
         };
 
-        let (functions, key_fields, table_assertions, module_assertions) =
+        let (functions, key_fields, float_fields, table_assertions, module_assertions) =
             match admit_transaction_source(unit, self.limits, &self.entry) {
                 Ok(value) => value,
                 Err(outcome) => return RunningTableRequestDisposition::Semantic(*outcome),
@@ -1464,6 +1471,7 @@ impl DurableTransactionalEvaluator {
         let mutations = match evaluator.execute_admitted(
             &functions,
             &key_fields,
+            &float_fields,
             &table_assertions,
             &module_assertions,
         ) {
@@ -1630,7 +1638,7 @@ impl DurableTransactionalEvaluator {
         admitted: AdmittedTransaction,
         arguments: &Environment,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
-        let (functions, key_fields, table_assertions, module_assertions) = admitted;
+        let (functions, key_fields, float_fields, table_assertions, module_assertions) = admitted;
         let state = RuntimeState::open(repository, identity, initial_digest).await?;
         let lease = state.acquire_lease(owner_id).await?;
         let tables = key_fields.keys().map(String::as_str).collect::<Vec<_>>();
@@ -1646,6 +1654,7 @@ impl DurableTransactionalEvaluator {
         let mutations = match evaluator.execute_admitted_with_arguments(
             &functions,
             &key_fields,
+            &float_fields,
             &table_assertions,
             &module_assertions,
             arguments,
@@ -2020,7 +2029,7 @@ fn admit_list_stream_source(
     limits: EvaluatorLimits,
     entry: &str,
 ) -> Result<ListStreamBridge, AdmissionFailure> {
-    let (_, key_fields, _, _) = admit_transaction_source(unit, limits, entry)?;
+    let (_, key_fields, _, _, _) = admit_transaction_source(unit, limits, entry)?;
     if key_fields.len() != 1 {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "literal list stream bridge requires one explicit-key table".into(),
@@ -2095,7 +2104,7 @@ fn admit_project_list_stream(
     root_entry: &str,
     identity: RuntimeIdentity,
 ) -> Result<ListStreamBridge, AdmissionFailure> {
-    let (functions, key_fields, _, _) = admitted;
+    let (functions, key_fields, _, _, _) = admitted;
     let root = functions.get(root_entry).ok_or_else(|| {
         Box::new(StageOutcome::Skipped {
             reason: "configured qualified project stream root is not present".into(),
@@ -2665,22 +2674,32 @@ impl TableEffectHandler<'_, '_> {
                 name,
                 ..
             } if matches!(base.as_ref(), Expr::ReplBinding { text, .. } if text == "$__orna_relation")
-                && name == "integer_aggregate"
+                && name == "aggregate"
         ) {
-            let [table, field, operation] = arguments else {
+            let [table, field, operation, kind] = arguments else {
                 return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
             };
-            let (OvbRaw::Text(table), OvbRaw::Text(field), OvbRaw::Text(operation)) =
-                (table.raw(), field.raw(), operation.raw())
+            let (
+                OvbRaw::Text(table),
+                OvbRaw::Text(field),
+                OvbRaw::Text(operation),
+                OvbRaw::Text(kind),
+            ) = (table.raw(), field.raw(), operation.raw(), kind.raw())
             else {
                 return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
             };
             let operation = operation.as_str();
-            if !self.key_fields.contains_key(table) || !matches!(operation, "min" | "max" | "sum") {
+            let kind = kind.as_str();
+            if !self.key_fields.contains_key(table)
+                || !matches!(operation, "min" | "max" | "sum")
+                || !matches!(kind, "integer" | "float")
+                || kind == "float" && operation != "sum"
+            {
                 return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
             }
-            let mut extreme = None;
-            let mut total = BigInt::ZERO;
+            let mut integer_extreme = None;
+            let mut integer_total = BigInt::ZERO;
+            let mut float_total = None;
             let mut candidate_rows: usize = 0;
             for (_, row) in self
                 .activation
@@ -2696,41 +2715,55 @@ impl TableEffectHandler<'_, '_> {
                     .map_err(|_| transaction_error("ORNA-EVAL-LIMIT"))?;
                 let value = record_field(&row, field)
                     .ok_or_else(|| transaction_error("ORNA-EVAL-UNSUPPORTED"))?;
-                let OvbRaw::Int(value) = value.raw() else {
-                    return Err(transaction_error("ORNA-EVAL-UNSUPPORTED"));
-                };
-                self.limits
-                    .check_integer(value)
-                    .map_err(|_| transaction_error("ORNA-EVAL-LIMIT"))?;
-                match operation {
-                    "sum" => {
-                        total += value;
+                match value.raw() {
+                    OvbRaw::Int(value) if kind == "integer" => {
                         self.limits
-                            .check_integer(&total)
+                            .check_integer(value)
                             .map_err(|_| transaction_error("ORNA-EVAL-LIMIT"))?;
-                    }
-                    "min" => {
-                        if extreme
-                            .as_ref()
-                            .is_none_or(|current: &BigInt| value < current)
-                        {
-                            extreme = Some(value.clone());
+                        match operation {
+                            "sum" => {
+                                integer_total += value;
+                                self.limits
+                                    .check_integer(&integer_total)
+                                    .map_err(|_| transaction_error("ORNA-EVAL-LIMIT"))?;
+                            }
+                            "min" => {
+                                if integer_extreme
+                                    .as_ref()
+                                    .is_none_or(|current: &BigInt| value < current)
+                                {
+                                    integer_extreme = Some(value.clone());
+                                }
+                            }
+                            "max" => {
+                                if integer_extreme
+                                    .as_ref()
+                                    .is_none_or(|current: &BigInt| value > current)
+                                {
+                                    integer_extreme = Some(value.clone());
+                                }
+                            }
+                            _ => unreachable!("aggregate operation was checked above"),
                         }
                     }
-                    "max" => {
-                        if extreme
-                            .as_ref()
-                            .is_none_or(|current: &BigInt| value > current)
-                        {
-                            extreme = Some(value.clone());
-                        }
+                    OvbRaw::Float(bits) if kind == "float" => {
+                        let canonical = Value::new(OvbRaw::Float(*bits))
+                            .map_err(|_| transaction_error("ORNA-EVAL-UNSUPPORTED"))?;
+                        let OvbRaw::Float(bits) = canonical.raw() else {
+                            unreachable!("Float canonicalization preserves the Float variant")
+                        };
+                        let value = f64::from_bits(*bits);
+                        float_total = Some(float_total.map_or(value, |total: f64| total + value));
                     }
-                    _ => unreachable!("integer aggregate operation was checked above"),
+                    _ => return Err(transaction_error("ORNA-EVAL-UNSUPPORTED")),
                 }
             }
             return match operation {
-                "sum" => Ok(Some(Value::int(total))),
-                "min" | "max" => match extreme {
+                "sum" if kind == "float" => Ok(Some(Value::float_bits(
+                    float_total.map_or(0.0f64.to_bits(), f64::to_bits),
+                ))),
+                "sum" => Ok(Some(Value::int(integer_total))),
+                "min" | "max" => match integer_extreme {
                     Some(value) => Value::option(Some(Value::int(value)))
                         .map(Some)
                         .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ARGUMENT")),
@@ -2740,7 +2773,7 @@ impl TableEffectHandler<'_, '_> {
                         })?))
                     }
                 },
-                _ => unreachable!("integer aggregate operation was checked above"),
+                _ => unreachable!("aggregate operation was checked above"),
             };
         }
         if let Expr::Field { base, name, .. } = callee
@@ -3045,7 +3078,14 @@ impl TableEffectHandler<'_, '_> {
 type TableAssertions = BTreeMap<String, Vec<Expr>>;
 type ModuleAssertions = Vec<Expr>;
 type TableKeys = BTreeMap<String, Vec<String>>;
-type AdmittedTransaction = (Functions, TableKeys, TableAssertions, ModuleAssertions);
+type TableFloatFields = BTreeMap<String, BTreeSet<String>>;
+type AdmittedTransaction = (
+    Functions,
+    TableKeys,
+    TableFloatFields,
+    TableAssertions,
+    ModuleAssertions,
+);
 type AdmissionFailure = Box<StageOutcome<Diagnostic>>;
 
 fn relation_window_arguments(arguments: &[Value]) -> Result<(&str, usize, usize), EvaluationError> {
@@ -3128,7 +3168,7 @@ fn admit_transaction_source(
             diagnostic.clone().redacted(),
         )));
     }
-    let (functions, key_fields, table_assertions, module_assertions) =
+    let (functions, key_fields, float_fields, table_assertions, module_assertions) =
         admitted_transaction_module(&parsed.value.items, None)
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
     if let Err(error) = limits.check_items(functions.len()) {
@@ -3139,7 +3179,13 @@ fn admit_transaction_source(
             reason: "configured transaction entry function is not present".into(),
         }));
     }
-    Ok((functions, key_fields, table_assertions, module_assertions))
+    Ok((
+        functions,
+        key_fields,
+        float_fields,
+        table_assertions,
+        module_assertions,
+    ))
 }
 
 /// Admits a project as a graph of independently parsed modules.  The retained
@@ -3181,6 +3227,7 @@ fn admit_transaction_project(
     }
     let mut functions = Functions::new();
     let mut key_fields = BTreeMap::new();
+    let mut float_fields = TableFloatFields::new();
     let mut table_assertions = TableAssertions::new();
     let mut module_assertions = ModuleAssertions::new();
     for unit in &project.modules {
@@ -3197,9 +3244,14 @@ fn admit_transaction_project(
         }
         let namespace = project_transaction_namespace(project, unit)
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
-        let (module_functions, module_keys, module_assertions_by_table, module_assertions_only) =
-            admitted_transaction_module(&parsed.value.items, Some(&namespace))
-                .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+        let (
+            module_functions,
+            module_keys,
+            module_float_fields,
+            module_assertions_by_table,
+            module_assertions_only,
+        ) = admitted_transaction_module(&parsed.value.items, Some(&namespace))
+            .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
         if let Err(error) = limits.check_items(module_functions.len()) {
             return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
         }
@@ -3218,6 +3270,7 @@ fn admit_transaction_project(
         }
         functions.extend(module_functions);
         key_fields.extend(module_keys);
+        float_fields.extend(module_float_fields);
         table_assertions.extend(module_assertions_by_table);
         module_assertions.extend(module_assertions_only);
     }
@@ -3226,7 +3279,13 @@ fn admit_transaction_project(
             reason: "configured qualified project transaction entry function is not present".into(),
         }));
     }
-    Ok((functions, key_fields, table_assertions, module_assertions))
+    Ok((
+        functions,
+        key_fields,
+        float_fields,
+        table_assertions,
+        module_assertions,
+    ))
 }
 
 fn controlled_table_effects(summary: &EffectSummary) -> bool {
@@ -3324,6 +3383,7 @@ fn admitted_transaction_module(
 ) -> Result<AdmittedTransaction, String> {
     let mut functions = Functions::new();
     let mut key_fields = BTreeMap::new();
+    let mut float_fields = TableFloatFields::new();
     let mut assertions = TableAssertions::new();
     let mut module_assertions = ModuleAssertions::new();
     for item in items {
@@ -3358,6 +3418,20 @@ fn admitted_transaction_module(
                     return Err("transactional source seam requires an explicit table key".into());
                 }
                 key_fields.insert(name.clone(), fields);
+                float_fields.insert(
+                    name.clone(),
+                    members
+                        .iter()
+                        .filter_map(|member| match member {
+                            orna_syntax_v1::TableMember::Field {
+                                name,
+                                ty: orna_syntax_v1::TypeExpr::Name { path, .. },
+                                ..
+                            } if path.len() == 1 && path[0] == "Float" => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                );
                 let expressions = members
                     .iter()
                     .filter_map(|member| match member {
@@ -3389,22 +3463,34 @@ fn admitted_transaction_module(
             }
         }
     }
-    Ok((functions, key_fields, assertions, module_assertions))
+    Ok((
+        functions,
+        key_fields,
+        float_fields,
+        assertions,
+        module_assertions,
+    ))
 }
 
 /// Materializes the narrow relation forms admitted by the durable transaction
-/// seam. `Table | map(row => row.integer_field) | min/max/sum` becomes an
+/// seam. `Table | map(row => row.integer_field) | min/max/sum` and
+/// `Table | map(row => row.float_field) | sum` become an
 /// internal candidate-relation fold, `Table | filter(predicate) | one()`
 /// becomes a keyed lookup, `Table | filter(row => row.field == value) | count`
 /// becomes an internal lazy candidate-relation count, and the terminal
 /// `Table | count` / `Table | count()` form becomes `Table.count()`. All read
 /// the active candidate relation; other relation operators stay unsupported
-/// rather than being materialized by this seam. Integer aggregate lowering is
-/// deliberately shape-limited; the effect handler rejects non-Int projections
-/// so Decimal, Float, Money, affine, and other unsupported values fail closed.
+/// rather than being materialized by this seam. Aggregate lowering is
+/// deliberately shape-limited: the effect handler admits Int `min`/`max`/`sum`
+/// and Float `sum`, while Decimal, Money, affine, and other unsupported values
+/// fail closed.
 /// Internal forms use a ReplBinding AST marker which ordinary source cannot
 /// spell, rather than an undocumented table member.
-fn lower_relation_bindings(functions: &Functions, table_keys: &TableKeys) -> Functions {
+fn lower_relation_bindings(
+    functions: &Functions,
+    table_keys: &TableKeys,
+    float_fields: &TableFloatFields,
+) -> Functions {
     let mut materialized = functions.clone();
     for (name, function) in materialized.iter_mut() {
         let mut shadowed = BTreeSet::new();
@@ -3414,6 +3500,7 @@ fn lower_relation_bindings(functions: &Functions, table_keys: &TableKeys) -> Fun
         lower_relation_expression_with_resolution(
             &mut function.body,
             table_keys,
+            float_fields,
             functions,
             name.rsplit_once('.').map(|(namespace, _)| namespace),
             &shadowed,
@@ -3425,18 +3512,25 @@ fn lower_relation_bindings(functions: &Functions, table_keys: &TableKeys) -> Fun
 fn lower_relation_expression_with_resolution(
     expression: &mut Expr,
     table_keys: &TableKeys,
+    float_fields: &TableFloatFields,
     functions: &Functions,
     namespace: Option<&str>,
     shadowed: &BTreeSet<String>,
 ) {
-    if let Some(lowered) =
-        relation_integer_aggregate(expression, table_keys, functions, namespace, shadowed)
-            .or_else(|| relation_window_count(expression, table_keys))
-            .or_else(|| relation_lookup(expression, table_keys))
-            .or_else(|| relation_filtered_one(expression, table_keys))
-            .or_else(|| relation_filter_count(expression, table_keys))
-            .or_else(|| relation_count(expression, table_keys))
-            .or_else(|| relation_window(expression, table_keys))
+    if let Some(lowered) = relation_aggregate(
+        expression,
+        table_keys,
+        float_fields,
+        functions,
+        namespace,
+        shadowed,
+    )
+    .or_else(|| relation_window_count(expression, table_keys))
+    .or_else(|| relation_lookup(expression, table_keys))
+    .or_else(|| relation_filtered_one(expression, table_keys))
+    .or_else(|| relation_filter_count(expression, table_keys))
+    .or_else(|| relation_count(expression, table_keys))
+    .or_else(|| relation_window(expression, table_keys))
     {
         *expression = lowered;
         return;
@@ -3444,34 +3538,60 @@ fn lower_relation_expression_with_resolution(
     match expression {
         Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
             lower_relation_expression_with_resolution(
-                rhs, table_keys, functions, namespace, shadowed,
+                rhs,
+                table_keys,
+                float_fields,
+                functions,
+                namespace,
+                shadowed,
             );
         }
         Expr::Range { lower, upper, .. } => {
             for endpoint in [lower, upper].into_iter().flatten() {
                 lower_relation_expression_with_resolution(
-                    endpoint, table_keys, functions, namespace, shadowed,
+                    endpoint,
+                    table_keys,
+                    float_fields,
+                    functions,
+                    namespace,
+                    shadowed,
                 );
             }
         }
         Expr::Binary { lhs, rhs, .. } => {
             lower_relation_expression_with_resolution(
-                lhs, table_keys, functions, namespace, shadowed,
+                lhs,
+                table_keys,
+                float_fields,
+                functions,
+                namespace,
+                shadowed,
             );
             lower_relation_expression_with_resolution(
-                rhs, table_keys, functions, namespace, shadowed,
+                rhs,
+                table_keys,
+                float_fields,
+                functions,
+                namespace,
+                shadowed,
             );
         }
         Expr::Call {
             callee, arguments, ..
         } => {
             lower_relation_expression_with_resolution(
-                callee, table_keys, functions, namespace, shadowed,
+                callee,
+                table_keys,
+                float_fields,
+                functions,
+                namespace,
+                shadowed,
             );
             for argument in arguments {
                 lower_relation_expression_with_resolution(
                     &mut argument.value,
                     table_keys,
+                    float_fields,
                     functions,
                     namespace,
                     shadowed,
@@ -3480,19 +3600,39 @@ fn lower_relation_expression_with_resolution(
         }
         Expr::Index { base, index, .. } => {
             lower_relation_expression_with_resolution(
-                base, table_keys, functions, namespace, shadowed,
+                base,
+                table_keys,
+                float_fields,
+                functions,
+                namespace,
+                shadowed,
             );
             lower_relation_expression_with_resolution(
-                index, table_keys, functions, namespace, shadowed,
+                index,
+                table_keys,
+                float_fields,
+                functions,
+                namespace,
+                shadowed,
             );
         }
         Expr::Field { base, .. } => lower_relation_expression_with_resolution(
-            base, table_keys, functions, namespace, shadowed,
+            base,
+            table_keys,
+            float_fields,
+            functions,
+            namespace,
+            shadowed,
         ),
         Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
             for element in elements {
                 lower_relation_expression_with_resolution(
-                    element, table_keys, functions, namespace, shadowed,
+                    element,
+                    table_keys,
+                    float_fields,
+                    functions,
+                    namespace,
+                    shadowed,
                 );
             }
         }
@@ -3501,6 +3641,7 @@ fn lower_relation_expression_with_resolution(
                 lower_relation_expression_with_resolution(
                     &mut field.value,
                     table_keys,
+                    float_fields,
                     functions,
                     namespace,
                     shadowed,
@@ -3515,7 +3656,12 @@ fn lower_relation_expression_with_resolution(
                 shadowed.extend(relation_pattern_names(&parameter.pattern));
             }
             lower_relation_expression_with_resolution(
-                body, table_keys, functions, namespace, &shadowed,
+                body,
+                table_keys,
+                float_fields,
+                functions,
+                namespace,
+                &shadowed,
             );
         }
         Expr::Block {
@@ -3526,6 +3672,7 @@ fn lower_relation_expression_with_resolution(
                 lower_relation_statement_with_resolution(
                     statement,
                     table_keys,
+                    float_fields,
                     functions,
                     namespace,
                     &mut shadowed,
@@ -3533,7 +3680,12 @@ fn lower_relation_expression_with_resolution(
             }
             if let Some(tail) = tail {
                 lower_relation_expression_with_resolution(
-                    tail, table_keys, functions, namespace, &shadowed,
+                    tail,
+                    table_keys,
+                    float_fields,
+                    functions,
+                    namespace,
+                    &shadowed,
                 );
             }
         }
@@ -3545,7 +3697,12 @@ fn lower_relation_expression_with_resolution(
         } => {
             for expression in [condition, body, alternate].into_iter().flatten() {
                 lower_relation_expression_with_resolution(
-                    expression, table_keys, functions, namespace, shadowed,
+                    expression,
+                    table_keys,
+                    float_fields,
+                    functions,
+                    namespace,
+                    shadowed,
                 );
             }
         }
@@ -3613,9 +3770,10 @@ fn root_relation_intrinsic_is_unshadowed(
             .unwrap_or(true)
 }
 
-fn relation_integer_aggregate(
+fn relation_aggregate(
     expression: &Expr,
     table_keys: &TableKeys,
+    float_fields: &TableFloatFields,
     functions: &Functions,
     namespace: Option<&str>,
     shadowed: &BTreeSet<String>,
@@ -3684,6 +3842,15 @@ fn relation_integer_aggregate(
     if !matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) {
         return None;
     }
+    let kind = if operation == "sum"
+        && float_fields
+            .get(table)
+            .is_some_and(|fields| fields.contains(field))
+    {
+        "float"
+    } else {
+        "integer"
+    };
 
     let table = Expr::Literal {
         text: format!("{table:?}"),
@@ -3700,13 +3867,18 @@ fn relation_integer_aggregate(
         kind: orna_syntax_v1::LiteralKind::String,
         span: rhs.span(),
     };
+    let kind = Expr::Literal {
+        text: format!("{kind:?}"),
+        kind: orna_syntax_v1::LiteralKind::String,
+        span: body.span(),
+    };
     Some(Expr::Call {
         callee: Box::new(Expr::Field {
             base: Box::new(Expr::ReplBinding {
                 text: "$__orna_relation".into(),
                 span: expression.span(),
             }),
-            name: "integer_aggregate".into(),
+            name: "aggregate".into(),
             span: expression.span(),
         }),
         arguments: vec![
@@ -3724,6 +3896,11 @@ fn relation_integer_aggregate(
                 name: None,
                 span: operation.span(),
                 value: operation,
+            },
+            orna_syntax_v1::Argument {
+                name: None,
+                span: kind.span(),
+                value: kind,
             },
         ],
         span: expression.span(),
@@ -3763,6 +3940,7 @@ fn relation_integer_aggregate_operation<'a>(
 fn lower_relation_statement_with_resolution(
     statement: &mut Statement,
     table_keys: &TableKeys,
+    float_fields: &TableFloatFields,
     functions: &Functions,
     namespace: Option<&str>,
     shadowed: &mut BTreeSet<String>,
@@ -3770,7 +3948,12 @@ fn lower_relation_statement_with_resolution(
     match statement {
         Statement::Let { pattern, value, .. } => {
             lower_relation_expression_with_resolution(
-                value, table_keys, functions, namespace, shadowed,
+                value,
+                table_keys,
+                float_fields,
+                functions,
+                namespace,
+                shadowed,
             );
             shadowed.extend(relation_pattern_names(pattern));
         }
@@ -3778,12 +3961,22 @@ fn lower_relation_statement_with_resolution(
         | Statement::Assignment { value, .. }
         | Statement::Expression { value, .. }
         | Statement::Control { value, .. } => lower_relation_expression_with_resolution(
-            value, table_keys, functions, namespace, shadowed,
+            value,
+            table_keys,
+            float_fields,
+            functions,
+            namespace,
+            shadowed,
         ),
         Statement::Return { value, .. } | Statement::Break { value, .. } => {
             if let Some(value) = value {
                 lower_relation_expression_with_resolution(
-                    value, table_keys, functions, namespace, shadowed,
+                    value,
+                    table_keys,
+                    float_fields,
+                    functions,
+                    namespace,
+                    shadowed,
                 );
             }
         }
@@ -5388,12 +5581,12 @@ mod bounded_tests {
 mod durable_tests {
     use super::{
         DurableTransactionalEvaluator, Functions, RunningTableRequestDisposition, SourceUnit,
-        StageOutcome, admitted_transaction_module, lower_relation_bindings,
+        StageOutcome, TransactionalEvaluator, admitted_transaction_module, lower_relation_bindings,
         replay_request_terminal, request_terminal,
     };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use orna_evaluator_v1::Limits;
-    use orna_foundation_v1::Value;
+    use orna_foundation_v1::{OvbRaw, Value};
     use orna_repository_v1::Repository;
     use orna_runtime_v1::{
         FaultInjector, FaultPoint, NoFault, RecoveryDisposition, RequestIdentity, RequestOwner,
@@ -6463,6 +6656,7 @@ mod durable_tests {
         super::lower_relation_expression_with_resolution(
             &mut expression,
             &keys,
+            &super::TableFloatFields::new(),
             &Functions::new(),
             None,
             &std::collections::BTreeSet::new(),
@@ -6508,9 +6702,9 @@ mod durable_tests {
             );
             let parsed = parse_module(&source);
             assert!(parsed.is_ok(), "{operation}: {:?}", parsed.diagnostics);
-            let (functions, keys, _, _) =
+            let (functions, keys, float_fields, _, _) =
                 admitted_transaction_module(&parsed.value.items, None).expect("valid source");
-            let lowered = lower_relation_bindings(&functions, &keys);
+            let lowered = lower_relation_bindings(&functions, &keys, &float_fields);
 
             assert!(
                 matches!(&lowered["total"].body, Expr::Binary { op, .. } if op == "|"),
@@ -6518,6 +6712,59 @@ mod durable_tests {
                 lowered["total"].body
             );
         }
+    }
+
+    #[test]
+    fn relation_float_sum_returns_a_canonical_nan_from_a_canonical_nan_row() {
+        let unit = SourceUnit {
+            fixture_id: "relation-float-sum-nan".into(),
+            source_id: "relation-float-sum-nan.orna".into(),
+            parse_as: "module_unit".into(),
+            source: r#"
+                pub table Reading(id: Int) { value: Float, }
+                fn total(): Float = Reading | map(reading => reading.value) | sum;
+                fn parent() {
+                    assert total() != total();
+                    Reading.insert({ id: 2, value: total() });
+                }
+            "#
+            .into(),
+        };
+        let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
+        let canonical_nan = 0x7ff8_0000_0000_0000;
+        let seeded_nan = Value::float_bits(0x7ff8_0000_0000_0001);
+        assert_eq!(seeded_nan.raw(), &OvbRaw::Float(canonical_nan));
+        let row = Value::new(OvbRaw::Map(vec![
+            (OvbRaw::Text("id".into()), OvbRaw::Int(1.into())),
+            (OvbRaw::Text("value".into()), seeded_nan.raw().clone()),
+        ]))
+        .expect("canonical seeded Float row");
+        evaluator
+            .seed_committed(
+                "Reading".into(),
+                Value::int(1.into())
+                    .encode()
+                    .expect("canonical integer key"),
+                row,
+            )
+            .expect("seeded relation row");
+
+        let outcome = evaluator.execute_source(&unit);
+
+        assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+        let row = evaluator
+            .committed_row("Reading", &Value::int(2.into()))
+            .expect("sum result row was committed");
+        let OvbRaw::Map(fields) = row.raw() else {
+            panic!("committed row is not a record");
+        };
+        let Some((_, OvbRaw::Float(bits))) = fields
+            .iter()
+            .find(|(key, _)| matches!(key, OvbRaw::Text(name) if name == "value"))
+        else {
+            panic!("committed row does not contain a Float value field");
+        };
+        assert_eq!(*bits, canonical_nan);
     }
 }
 
