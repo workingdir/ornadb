@@ -983,6 +983,69 @@ fn accepted_tcp_socket_hands_off_an_upgrade_to_the_websocket_driver() {
 }
 
 #[test]
+fn accepted_tcp_socket_rejects_an_unmasked_client_frame_with_protocol_close() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let (outcome_sender, outcome_receiver) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+        let mut authority = Authority;
+        let mut issuer = Issuer(7, None);
+        let mut deletion = Delete(true);
+        let created = block_on(transport.handle(
+            wire(
+                "POST",
+                "/orna/session",
+                &format!(
+                    r#"{{"database":"{}","protocol":"{}"}}"#,
+                    uuid(2),
+                    SUBPROTOCOL
+                ),
+            ),
+            0,
+            &mut authority,
+            &mut issuer,
+            &mut deletion,
+        ));
+        sender.send(token(&created)).unwrap();
+        let mut connection = HttpConnection::new(TransportLimits::default());
+        let mut application = UnitApplication::default();
+        let result = transport.serve_one_websocket_listener(
+            &listener,
+            &mut connection,
+            [5; 16],
+            &mut || 1,
+            &mut application,
+        );
+        outcome_sender.send((result, application.calls)).unwrap();
+    });
+
+    let request = format!(
+        "GET /orna/live/{} HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {}\r\nCookie: orna_session={}\r\n\r\n",
+        uuid(1),
+        SUBPROTOCOL,
+        receiver.recv().unwrap()
+    );
+    let mut client = TcpStream::connect(address).unwrap();
+    client.write_all(request.as_bytes()).unwrap();
+    client.write_all(&unmasked(true, 2, b"")).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("serialized handshake response");
+    assert!(response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
+    assert_eq!(&response[header_end + 4..], b"\x88\x02\x03\xea");
+    let (result, application_calls) = outcome_receiver.recv().unwrap();
+    assert_eq!(result, Ok(()));
+    assert_eq!(application_calls, 0);
+    server.join().unwrap();
+}
+
+#[test]
 fn accepted_websocket_eof_disconnects_its_attachment() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let address = listener.local_addr().unwrap();
@@ -5281,6 +5344,14 @@ fn masked(fin: bool, opcode: u8, body: &[u8]) -> Vec<u8> {
             .enumerate()
             .map(|(index, byte)| byte ^ key[index % 4]),
     );
+    frame
+}
+
+fn unmasked(fin: bool, opcode: u8, body: &[u8]) -> Vec<u8> {
+    assert!(body.len() < 126);
+    let length = u8::try_from(body.len()).expect("test frame is short");
+    let mut frame = vec![(if fin { 128 } else { 0 }) | opcode, length];
+    frame.extend_from_slice(body);
     frame
 }
 
