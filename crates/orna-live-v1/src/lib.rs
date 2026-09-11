@@ -3282,10 +3282,12 @@ struct PendingUpgrade {
 /// A reservation authorizes exactly one later commit. It leaves the current
 /// attachment unchanged until that commit succeeds, and callers must abort it
 /// if delivery of its handshake response does not succeed.
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebSocketUpgrade {
     owner: u64,
     reservation: u128,
+    session: [u8; 16],
+    deadline: u64,
     response: WireResponse,
 }
 
@@ -3293,6 +3295,17 @@ impl WebSocketUpgrade {
     #[must_use]
     pub const fn response(&self) -> &WireResponse {
         &self.response
+    }
+
+    #[must_use]
+    pub const fn deadline(&self) -> u64 {
+        self.deadline
+    }
+
+    /// Returns whether this reservation's delivery-and-commit window has closed.
+    #[must_use]
+    pub const fn is_expired(&self, now: u64) -> bool {
+        now >= self.deadline
     }
 }
 
@@ -3305,6 +3318,11 @@ pub struct LiveTransport {
     limits: TransportLimits,
     sessions: BTreeMap<[u8; 16], SessionRecord>,
     pending_upgrades: BTreeMap<[u8; 16], PendingUpgrade>,
+    // The executable actor marks a reservation before its worker can expose
+    // the provisional 101. While marked, transport-wide cleanup must leave
+    // that exact reservation to its delivery owner: the worker will either
+    // commit it or return through the serialized abort path.
+    delivering_upgrades: BTreeMap<[u8; 16], u128>,
     next_upgrade_reservation: u128,
     retired_attachments: VecDeque<[u8; 16]>,
     delivered_retired_attachments: BTreeSet<[u8; 16]>,
@@ -3402,6 +3420,7 @@ impl LiveTransport {
             host,
             sessions: BTreeMap::new(),
             pending_upgrades: BTreeMap::new(),
+            delivering_upgrades: BTreeMap::new(),
             next_upgrade_reservation: 0,
             retired_attachments: VecDeque::new(),
             delivered_retired_attachments: BTreeSet::new(),
@@ -3441,7 +3460,11 @@ impl LiveTransport {
         let expired = self
             .pending_upgrades
             .iter()
-            .filter_map(|(session, pending)| (now >= pending.deadline).then_some(*session))
+            .filter_map(|(session, pending)| {
+                (now >= pending.deadline
+                    && self.delivering_upgrades.get(session) != Some(&pending.reservation))
+                .then_some(*session)
+            })
             .collect::<Vec<_>>();
         for session in expired {
             if let Some(pending) = self.pending_upgrades.remove(&session) {
@@ -3467,7 +3490,11 @@ impl LiveTransport {
         let expired = self
             .sessions
             .iter()
-            .filter_map(|(session, record)| (record.metadata.expires_at <= now).then_some(*session))
+            .filter_map(|(session, record)| {
+                (!self.delivering_upgrades.contains_key(session)
+                    && record.metadata.expires_at <= now)
+                    .then_some(*session)
+            })
             .collect::<Vec<_>>();
         for session in expired {
             let Some(record) = self.sessions.get(&session).cloned() else {
@@ -3723,6 +3750,13 @@ impl LiveTransport {
                 }
                 if let Err(error) = self.host.validate_delete(&delete_request) {
                     return host_error(error);
+                }
+                // A worker that has entered the executable delivery barrier
+                // may already be flushing its 101. Letting DELETE consume its
+                // pending reservation here would make that visible upgrade
+                // stale. The owner will either commit or abort it first.
+                if self.delivering_upgrades.contains_key(&id) {
+                    return wire_error(503, "live.unavailable");
                 }
                 // The child-free route has no executable supervisor that can
                 // prove session-owned socket workers have terminated.  Do not
@@ -4328,9 +4362,10 @@ impl LiveTransport {
         if deadline <= now {
             return Err(wire_error(410, "live.expired"));
         }
+        let session = admission.id;
         let response = admission.response.clone();
         self.pending_upgrades.insert(
-            admission.id,
+            session,
             PendingUpgrade {
                 reservation,
                 deadline,
@@ -4340,8 +4375,52 @@ impl LiveTransport {
         Ok(WebSocketUpgrade {
             owner: self.owner,
             reservation,
+            session,
+            deadline,
             response,
         })
+    }
+
+    /// Starts the executable delivery-to-commit barrier for one reservation.
+    ///
+    /// This does not commit the attachment. It only prevents transport expiry,
+    /// resume, and deletion from consuming this reservation while the owning
+    /// worker is writing its provisional response. The executable owner must
+    /// release it through commit or abort after delivery finishes.
+    pub fn begin_websocket_upgrade_delivery(
+        &mut self,
+        upgrade: &WebSocketUpgrade,
+        now: u64,
+    ) -> bool {
+        if upgrade.owner != self.owner || self.delivering_upgrades.contains_key(&upgrade.session) {
+            return false;
+        }
+        let Some(pending) = self.pending_upgrades.get(&upgrade.session) else {
+            return false;
+        };
+        if now >= pending.deadline
+            || pending.reservation != upgrade.reservation
+            || pending.deadline != upgrade.deadline
+        {
+            return false;
+        }
+        self.delivering_upgrades
+            .insert(upgrade.session, upgrade.reservation);
+        true
+    }
+
+    /// Releases an executable delivery-to-commit barrier after its owner has
+    /// chosen commit or abort. A stale or foreign reservation cannot release a
+    /// newer barrier for the same session.
+    pub fn finish_websocket_upgrade_delivery(&mut self, upgrade: &WebSocketUpgrade) -> bool {
+        if upgrade.owner != self.owner {
+            return false;
+        }
+        if self.delivering_upgrades.get(&upgrade.session) != Some(&upgrade.reservation) {
+            return false;
+        }
+        self.delivering_upgrades.remove(&upgrade.session);
+        true
     }
 
     /// Idempotently aborts a pending WebSocket admission reservation.
@@ -4366,6 +4445,9 @@ impl LiveTransport {
         let Some(pending) = self.pending_upgrades.remove(&session) else {
             return false;
         };
+        if self.delivering_upgrades.get(&session) == Some(&upgrade.reservation) {
+            self.delivering_upgrades.remove(&session);
+        }
         self.queue_retired_attachment(session, pending.admission.attachment);
         true
     }
@@ -4399,6 +4481,14 @@ impl LiveTransport {
         {
             return Err(Error::Closed);
         }
+        // A delivery barrier deliberately defers the periodic expiry sweep so
+        // a visible 101 cannot lose its reservation between delivery and its
+        // actor turn. It must not, however, extend the reservation deadline:
+        // a late commit is an abort and retires its candidate.
+        if upgrade.is_expired(now) {
+            self.abort_websocket_upgrade(&upgrade);
+            return Err(Error::Closed);
+        }
         self.expire_pending_websocket_upgrades(now);
         let session = self
             .pending_upgrades
@@ -4413,6 +4503,9 @@ impl LiveTransport {
             .ok_or(Error::Closed)?;
         if pending.reservation != upgrade.reservation {
             return Err(Error::Closed);
+        }
+        if self.delivering_upgrades.get(&session) == Some(&upgrade.reservation) {
+            self.delivering_upgrades.remove(&session);
         }
         let attachment = pending.admission.attachment;
         match self.commit_upgrade(pending.admission, now).await {
@@ -6055,5 +6148,58 @@ mod tests {
             futures::executor::block_on(transport.host.handle_frame([4; 16], 2, Frame::Close)),
             Err(Error::Closed)
         );
+    }
+
+    #[test]
+    fn delivery_barrier_rejects_expired_delivery_and_late_commit() {
+        let mut transport = LiveTransport::new(subscribed_host(None), TransportLimits::default())
+            .expect("transport is configured");
+        let response = WireResponse {
+            status: 101,
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let upgrade = WebSocketUpgrade {
+            owner: transport.owner,
+            reservation: 41,
+            session: [12; 16],
+            deadline: 10,
+            response: response.clone(),
+        };
+        transport.pending_upgrades.insert(
+            [12; 16],
+            PendingUpgrade {
+                reservation: 41,
+                deadline: 10,
+                admission: UpgradeAdmission {
+                    id: [12; 16],
+                    origin: Origin::parse("https://app.example").unwrap(),
+                    credential: SessionCredential {
+                        security: OpaqueCredential::from_bytes([7; 32]),
+                        serving: ServingCredential::new([7; 32]),
+                    },
+                    attachment: [13; 16],
+                    response,
+                },
+            },
+        );
+
+        assert!(!transport.begin_websocket_upgrade_delivery(&upgrade, 10));
+        assert!(transport.pending_upgrades.contains_key(&[12; 16]));
+
+        assert!(transport.begin_websocket_upgrade_delivery(&upgrade, 9));
+        transport.expire_pending_websocket_upgrades(10);
+        assert!(transport.pending_upgrades.contains_key(&[12; 16]));
+
+        // This models a Commit queued after its deadline but before the
+        // executor's periodic expiry ticker. The protected reservation must
+        // not become an attachment merely because that ticker has not run.
+        assert!(upgrade.is_expired(10));
+        assert_eq!(
+            futures::executor::block_on(transport.commit_websocket_upgrade(upgrade, 10)),
+            Err(Error::Closed)
+        );
+        assert!(!transport.pending_upgrades.contains_key(&[12; 16]));
+        assert_eq!(transport.take_retired_attachments(), vec![[13; 16]]);
     }
 }
