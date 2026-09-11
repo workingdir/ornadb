@@ -3911,6 +3911,9 @@ fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
         block_on(host.dispatch_frame([6; 16], 2, Frame::Binary(mismatch), &mut application,)),
         Err(Error::RequestMismatch)
     );
+    // RequestStatus only reads durable state: neither active rows nor
+    // retained terminal rows may invoke the application while reporting it.
+    assert_eq!(application.calls, 0);
     drop(host);
     remove_test_repository(&root);
 }

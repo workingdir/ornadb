@@ -1821,6 +1821,13 @@ impl LiveHost {
         else {
             return Ok(None);
         };
+        // Rich terminal presentation may be pruned while the durable
+        // request identity, fingerprint, and terminal disposition remain.
+        // An empty retained payload therefore maps to the protocol's null
+        // result body instead of making a read-only status lookup fail.
+        if bytes.is_empty() {
+            return Ok(None);
+        }
         let response =
             Envelope::decode(bytes, self.limits.protocol).map_err(|_| Error::RuntimeUnavailable)?;
         self.validate_recovered_response(status, &response).await?;
