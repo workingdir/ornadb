@@ -146,6 +146,12 @@ pub type CheckpointRef = TypedRowRef<CheckpointKind>;
 /// exists or grants retry, skip, replay, or resolution authority.
 pub type FailureRef = TypedRowRef<FailureKind>;
 
+pub mod object_reference;
+pub use object_reference::{
+    SYS_OBJECT_TABLE_ID, object_reference, validate_object_reference,
+    validate_object_reference_for_id,
+};
+
 /// Checks only that a row reference is pinned to the supplied CWD context,
 /// then attaches a noninterchangeable marker. It intentionally does not
 /// validate a relation identity: physical relation identities and row keys
@@ -619,6 +625,7 @@ fn catalogue_reference<Kind>(
     object: ObjectRef,
 ) -> Result<TypedRowRef<Kind>, SystemReferenceError> {
     let object = object.into_row_ref();
+    object_reference::validate_object_reference_shape(&object)?;
     ensure_snapshot_database(object.database_id, &object.snapshot)?;
     Ok(TypedRowRef::from_row_ref(RowRef {
         database_id: object.database_id,
@@ -636,7 +643,7 @@ fn validate_catalogue_reference<Kind>(
     validate_coordinates(&reference, capture, expected_table)?;
     let object =
         row_ref_from_raw(&reference.key).map_err(|_| SystemReferenceError::InvalidObjectKey)?;
-    validate_reference_context::<ObjectKind>(object, capture)
+    object_reference::validate_object_reference(object, capture)
         .map_err(|_| SystemReferenceError::InvalidObjectKey)?;
     Ok(TypedRowRef::from_row_ref(reference))
 }
@@ -1668,9 +1675,7 @@ mod tests {
     fn catalogue_and_snapshot_references_use_exact_pinned_natural_keys() {
         let snapshot = Snapshot::cwd([1; 16], [2; 16], 3.into()).unwrap();
         let capture = CwdCapture::new(snapshot.clone(), [4; 32]).unwrap();
-        let object = ObjectRef::from_row_ref(
-            RowRef::new([1; 16], [5; 16], uuid([6; 16]), snapshot.clone()).unwrap(),
-        );
+        let object = object_reference([1; 16], [6; 16], snapshot.clone()).unwrap();
 
         let type_reference = type_reference(object.clone()).unwrap();
         let function_reference = function_reference(object.clone()).unwrap();
@@ -1735,9 +1740,7 @@ mod tests {
     fn catalogue_and_snapshot_reference_validation_rejects_invalid_coordinates_and_keys() {
         let snapshot = Snapshot::cwd([1; 16], [2; 16], 3.into()).unwrap();
         let capture = CwdCapture::new(snapshot.clone(), [4; 32]).unwrap();
-        let object = ObjectRef::from_row_ref(
-            RowRef::new([1; 16], [5; 16], uuid([6; 16]), snapshot.clone()).unwrap(),
-        );
+        let object = object_reference([1; 16], [6; 16], snapshot.clone()).unwrap();
         let type_reference = type_reference(object).unwrap().into_row_ref();
         let snapshot_ref = snapshot_reference([1; 16], snapshot.clone())
             .unwrap()
@@ -1753,8 +1756,11 @@ mod tests {
         wrong_object_snapshot.key = row_ref_raw(
             &RowRef::new(
                 [1; 16],
-                [5; 16],
-                uuid([6; 16]),
+                SYS_OBJECT_TABLE_ID,
+                OvbRaw::Array(vec![
+                    OvbRaw::Tag(37, Box::new(OvbRaw::Bytes([6; 16].to_vec()))),
+                    Snapshot::cwd([1; 16], [2; 16], 4.into()).unwrap().raw(),
+                ]),
                 Snapshot::cwd([1; 16], [2; 16], 4.into()).unwrap(),
             )
             .unwrap(),
