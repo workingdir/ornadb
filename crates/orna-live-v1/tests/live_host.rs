@@ -24,7 +24,7 @@ use orna_security_v1::{
     AttachmentId, BoundaryError, CredentialIssuer, Origin, OriginPolicy, SessionBoundary,
     SessionDeletionAdapter,
 };
-use orna_serving_v1::{Limits as ServingLimits, Serving};
+use orna_serving_v1::{Credential as ServingCredential, Limits as ServingLimits, Serving};
 use std::{
     collections::BTreeMap,
     fs,
@@ -1963,6 +1963,38 @@ fn http_create_and_resume_negotiate_and_replace_connections() {
         }))
         .unwrap(),
         orna_security_v1::AttachOutcome::Reconnected
+    );
+}
+
+#[test]
+fn rejected_cross_layer_reconnect_preserves_a_valid_session() {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    let mismatched = SessionCredential {
+        security: credential.security.clone(),
+        serving: ServingCredential::new([9; 32]),
+    };
+
+    assert_eq!(
+        block_on(host.resume(ResumeRequest {
+            id: [1; 16],
+            origin: &origin(),
+            credential: &mismatched,
+            attachment: [5; 16],
+            now: 1,
+        })),
+        Err(Error::Denied)
+    );
+    assert_eq!(
+        block_on(host.resume(ResumeRequest {
+            id: [1; 16],
+            origin: &origin(),
+            credential: &credential,
+            attachment: [6; 16],
+            now: 1,
+        })),
+        Ok(orna_security_v1::AttachOutcome::Attached)
     );
 }
 
