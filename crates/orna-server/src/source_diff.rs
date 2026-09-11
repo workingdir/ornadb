@@ -227,25 +227,9 @@ impl fmt::Display for InstalledSourceDiffError {
 }
 
 impl Error for InstalledSourceDiffError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::SourceRead {
-                source: Some(source),
-                ..
-            } => Some(source),
-            Self::SourceBundle { source } => Some(source),
-            Self::Host { source, .. } => Some(source),
-            Self::Attach { source } | Self::Recovery { source } => Some(source),
-            Self::StandardLibrary { source } => Some(source),
-            Self::StandardSource { source } => Some(source),
-            Self::ApplicationContext { source } => Some(source),
-            Self::Preparation { source } => Some(source),
-            Self::Output { source } | Self::Runtime { source } => Some(source),
-            Self::SourceRead { source: None, .. }
-            | Self::SourceUtf8 { .. }
-            | Self::ActiveStandardMismatch => None,
-        }
-    }
+    // Installed command failures may retain paths, SQL, socket details, or
+    // other private causes. Keep those details in the typed value for local
+    // mapping, but do not expose them through the public error chain.
 }
 
 /// Checks one file and renders the semantic diff against the active revision.
@@ -1077,6 +1061,8 @@ fn map_storage_recovery_error(
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use super::{
         FunctionRevisionChange, InstalledSourceDiffError, changed_function_revisions, digest_hex,
         map_recovery_error, qualified, read_source_bundle, render_change,
@@ -1099,6 +1085,24 @@ mod tests {
         types::TypeDescriptor,
     };
     use orna_postgres::PostgresKernelError;
+
+    #[test]
+    fn public_error_chain_does_not_expose_private_source_or_backend_details() {
+        let source_read = InstalledSourceDiffError::SourceRead {
+            path: "/private/secret-source.orna".to_owned(),
+            source: Some(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "private source path",
+            )),
+        };
+        assert!(source_read.source().is_none());
+
+        let recovery_source = "port=invalid"
+            .parse::<tokio_postgres::Config>()
+            .expect_err("invalid port must produce a PostgreSQL error");
+        let recovery = map_recovery_error(PostgresKernelError::Database(recovery_source));
+        assert!(recovery.source().is_none());
+    }
 
     fn function_revision(
         function: FunctionId,
