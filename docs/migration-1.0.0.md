@@ -1,9 +1,27 @@
 # Migrating to OrnaDB 1.0.0
 
 **Status:** This is migration guidance for the current source tree, not a
-promise that a production `1.0.0-1` package is available. The checkout has no
-tracked production package or in-place upgrade command. The canonical
-normative `spec` bundle is also absent from both `./spec/` and `../spec/`.
+promise that a production package is available. The checkout has no
+tracked production package or in-place upgrade command. The immutable Orna
+1.0.0 reference bundle is present separately and is the authority for the
+current contract; this note does not amend it or claim implementation
+conformance.
+
+## Authority boundary
+
+Chapter 1 of the immutable Orna 1.0.0 specification
+defines the language, repository, embedded-runtime, system, storage, and
+live-presentation profiles. It explicitly does not prescribe a compiler
+implementation language, a user-interface toolkit, or a hosting provider.
+Its conformance requirements in chapters 1 and 32 require claims to identify
+their classes, publication digest, and actually
+executed tests; a fixture, index, or source-tree check is not implementation
+conformance by itself.
+
+The workflows and boundaries below describe this checkout's managed-product
+and implementation evidence. Their command examples remain source-tree
+guidance; they do not rename or enlarge the immutable specification's CLI
+contract.
 
 ## Read this before changing anything
 
@@ -25,14 +43,15 @@ predecessor and forward-edge sets. In particular:
   subset; an unsupported shape must fail closed, not acquire different
   backend-specific semantics.
 - Do not treat a CI retention artifact, a local binary, or a build directory as
-  a production distribution authority. The intended release authority and its
-  required gates are recorded in the
-  [first-release decision](decisions/0047-first-one-zero-release.md).
+  a production distribution authority. The old
+  [first-release decision](decisions/0047-first-one-zero-release.md) records a
+  historical managed-product release plan; it does not amend the immutable
+  1.0.0 contract or establish a current distribution requirement.
 
 The distinction below is important: changing an application source revision is
 implemented; upgrading the Orna engine/product from a predecessor is not.
 
-## Application source changes
+## Application source changes (managed-product route)
 
 Use this workflow when the database is already on a supported current engine
 and you are changing its backend-neutral `.orna` source.
@@ -129,7 +148,7 @@ SQL. The checked-in application migration source is
 `crates/orna-storage/migrations/0046_application_migrations.orna`; users should
 not edit it or its generated adapter artifacts.
 
-## Engine and internal schema migrations
+## Engine and internal schema migrations (managed-product route)
 
 The PostgreSQL bootstrap currently applies a contiguous internal migration
 registry through version 47. Version 46 establishes the application-migration
@@ -147,7 +166,7 @@ SQLite has its own internal schema bootstrap and migration boundary. That is an
 adapter implementation detail. It does not alter the source language or create
 a supported PostgreSQL-to-SQLite physical/runtime parity guarantee.
 
-## Standard-library compatibility
+## Standard-library compatibility (managed-product evidence)
 
 Standard-library snapshots are content-addressed and immutable. The code in
 this checkout defines retained revisions from `orna.std/1` through
@@ -219,28 +238,31 @@ other explicit Unix command routes and remote routes fail closed because their
 session or transport support is unavailable. Parsing an endpoint is not
 evidence that migration or a general remote session can use it.
 
-## Runtime and editor limits
+## Runtime and editor limits (source-tree evidence)
 
-The installed runtime boundary is `tty`. The Qt path and native ABI checks are
-separately gated and require the canonical ABI header plus native dependencies;
-they cannot be called production-supported from this checkout while the
-canonical bundle is absent. Direct SQLite does not provide Qt.
+For this checkout's installed managed-product route, the documented runtime
+boundary is `tty`. The optional Qt path and native ABI checks are separately
+gated implementation evidence requiring their own ABI input, native
+dependencies, and retained results; no Qt conformance or production-support
+claim is made here. The immutable specification does not prescribe a UI
+toolkit or hosting provider. Direct SQLite does not provide Qt.
 
 `orna-lsp`, Tree-sitter, TextMate, and the editor integration packages cover
 the checked-in static tooling surface. The accepted corpus is evidence for that
 bounded surface only. Static checks do not launch Neovim, Vim, Helix, Zed,
 VS Code, Sublime, or Emacs host sessions and do not establish full grammar
-parity with the absent spec.
+parity with the immutable 1.0.0 reference bundle.
 
-## Release and evidence boundary
+## Release and evidence boundary (legacy managed-product plan)
 
-The intended 1.0 release identity is Debian 12 amd64 `1.0.0-1` with a signed
-`v1.0.0` source tag. This checkout includes `packaging/linux/`, a minimal
-provenance/install artifact recipe, but it does not contain a Debian release
-package or production-package evidence. Before treating a future package as
-an upgrade source, the product baseline must explicitly accept its language,
-commands, protocols, persistence, security, installation, recovery, upgrade,
-and compatibility scope.
+ADR 0047 records a historical managed-product release plan: Debian 12 amd64
+`1.0.0-1` with a signed `v1.0.0` source tag. That plan is not a requirement of
+the immutable 1.0.0 specification. Neither its scope nor its conformance
+chapter supplies a Debian, package, or distribution mandate. This checkout
+includes `packaging/linux/`, a minimal provenance/install artifact recipe, but
+it does not contain a Debian release package or production-package evidence.
+No package described by the old plan is an upgrade source; the product
+baseline has no accepted predecessor or forward upgrade edge.
 
 The [maintainer runbook](maintainer-runbook.md) defines the required
 prerequisites and evidence vocabulary. In particular:
@@ -251,9 +273,12 @@ prerequisites and evidence vocabulary. In particular:
 - The embedded PostgreSQL submodule must be the pinned clean gitlink documented
   by the runbook. Native engine, Compose/PostgreSQL, Qt/ABI, and clean-host
   package gates require their own commands and retained output.
-- The absent `./spec` and `../spec` inputs make canonical conformance and ABI
-  parity unavailable. A successful local/static command must not be upgraded
-  into that claim.
+- The immutable 1.0.0 reference bundle supplies the current normative contract
+  and authored conformance cases. Local implementation, ABI, and native-host
+  gates may still be unavailable or unexecuted; under the bundle's conformance
+  and evidence rules, that limits the corresponding implementation claim but
+  does not make the specification absent. A successful local/static command
+  must not be upgraded into a broader conformance claim.
 - Backup/DR policy, production recovery guarantees, support period, SLA, and
   later predecessor edges remain deferred. Do not present the application
   ledger or source files as a backup or restore protocol.
@@ -269,7 +294,7 @@ prerequisites and evidence vocabulary. In particular:
 | Application source revisions | Typed ledger, hashes, atomic apply | Supported only on a ready compatible engine |
 | Engine predecessor upgrade | Empty accepted predecessor/edge sets | No 0.x/development in-place upgrade |
 | Standard library | Code through V11; acceptance records through V9 | V10/V11 not promised until evidence is reconciled |
-| Package distribution | Tracked minimal `packaging/linux/` artifact recipe; no Debian package | No published production upgrade source |
+| Package distribution | Historical ADR0047 Debian plan plus tracked minimal `packaging/linux/` artifact recipe; no Debian package | No distribution mandate and no product upgrade source |
 
 For command details and the current evidence map, see the
 [maintainer runbook](maintainer-runbook.md),
