@@ -2402,6 +2402,38 @@ fn compact_manifest_observation_fails_closed_without_manifest_metadata() {
 }
 
 #[test]
+fn empty_compact_manifest_is_a_valid_committed_snapshot() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    let schema = [7; 32];
+    let manifest_path = ManagedPath::new(format!(".orna/storage/{table}/manifest.orna")).unwrap();
+    let manifest = format!(
+        "{{profile: \"compact-storage-v1\", table: \"{table}\", schema: \"{}\", next_generation: 1, shards: []}}\n",
+        hex_digest(&schema),
+    )
+    .into_bytes();
+    let head = repo.head().unwrap().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                manifest_path,
+                Some(manifest),
+            )],
+            "test: commit empty compact manifest",
+        )
+        .unwrap();
+    repo.advance_current_ref(&head, &candidate).unwrap();
+
+    assert_eq!(
+        repo.read_compact_manifest(&candidate.commit().clone(), table)
+            .unwrap(),
+        Some(CompactManifest::empty(table, schema))
+    );
+}
+
+#[test]
 fn compact_manifest_observation_uses_the_committed_manifest_segment_set() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
