@@ -574,32 +574,7 @@ fn validate_rows_value(
             },
         });
     }
-    let (type_form, type_id) = rows_type_wire(active, column.resolved_type(), column_index)?;
-    match type_form {
-        0x02 if active.catalogue().enum_type_by_id(type_id).is_none()
-            && active
-                .catalogue()
-                .record_value_type_by_id(type_id)
-                .is_none()
-            && active
-                .catalogue_hash_context()
-                .standard()
-                .is_none_or(|standard| {
-                    standard.catalogue().enum_type_by_id(type_id).is_none()
-                        && standard
-                            .catalogue()
-                            .record_value_type_by_id(type_id)
-                            .is_none()
-                }) =>
-        {
-            return Err(RowsCodecError::InactiveType {
-                column: column_index,
-                type_form,
-                type_id,
-            });
-        }
-        _ => {}
-    }
+    rows_type_wire(active, column.resolved_type(), column_index)?;
     Ok(())
 }
 
