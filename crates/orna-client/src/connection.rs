@@ -166,11 +166,9 @@ pub enum InvocationConnectionError {
 impl fmt::Display for InvocationConnectionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(source) => write!(formatter, "invocation transport I/O failed: {source}"),
-            Self::Frame(source) => write!(formatter, "invocation transport frame failed: {source}"),
-            Self::Client(source) => {
-                write!(formatter, "invocation transport lifecycle failed: {source}")
-            }
+            Self::Io(_) => formatter.write_str("invocation transport I/O failed"),
+            Self::Frame(_) => formatter.write_str("invocation transport frame failed"),
+            Self::Client(_) => formatter.write_str("invocation transport lifecycle failed"),
             Self::HandshakeRejected => {
                 formatter.write_str("invocation transport handshake was rejected")
             }
@@ -182,14 +180,9 @@ impl fmt::Display for InvocationConnectionError {
 }
 
 impl Error for InvocationConnectionError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Io(source) => Some(source),
-            Self::Frame(source) => Some(source),
-            Self::Client(source) => Some(source),
-            Self::HandshakeRejected | Self::InvalidControlFrame => None,
-        }
-    }
+    // Transport and codec failures may contain host paths, socket details,
+    // or nested decoder context. Keep those details in the typed value for
+    // local handling, but do not expose them through the public error chain.
 }
 
 fn write_client_frame<S: Write>(
@@ -340,6 +333,35 @@ mod tests {
                 actual,
                 maximum,
             }) if actual == MAX_FRAME_PAYLOAD_LENGTH + 1 && maximum == MAX_FRAME_PAYLOAD_LENGTH
+        ));
+    }
+
+    #[test]
+    fn transport_display_redacts_underlying_io_details() {
+        let error = InvocationConnectionError::Io(io::Error::other(
+            "private socket path and credential: /secret/socket",
+        ));
+
+        assert_eq!(error.to_string(), "invocation transport I/O failed");
+        assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn transport_error_chain_does_not_expose_nested_frame_details() {
+        let error = InvocationConnectionError::Client(InvocationClientError::Frame {
+            source: FrameCodecError::Value {
+                source: orna_protocol::ValueCodecError::InvalidMarker,
+            },
+        });
+
+        assert_eq!(
+            error.to_string(),
+            "invocation transport lifecycle failed"
+        );
+        assert!(error.source().is_none());
+        assert!(matches!(
+            error,
+            InvocationConnectionError::Client(InvocationClientError::Frame { .. })
         ));
     }
 }
