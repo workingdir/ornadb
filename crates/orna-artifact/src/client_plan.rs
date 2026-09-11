@@ -448,6 +448,12 @@ impl ClientPlan {
 
     /// Decodes exactly one canonical version-1 client-plan artefact.
     pub fn decode(bytes: &[u8]) -> Result<Self, ClientPlanError> {
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(ClientPlanError::ArtifactSizeLimit {
+                size: bytes.len(),
+                maximum: MAX_ARTIFACT_BYTES,
+            });
+        }
         let mut reader = Reader::new(bytes);
         if reader.array::<8>()? != MAGIC {
             return Err(ClientPlanError::InvalidMagic);
