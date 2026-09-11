@@ -77,6 +77,40 @@ fn relation_integer_aggregates_read_candidate_rows_in_canonical_order() {
 }
 
 #[test]
+fn relation_float_sum_uses_empty_identity_and_canonical_row_order() {
+    let unit = SourceUnit {
+        fixture_id: "relation-float-sum".into(),
+        source_id: "relation-float-sum.orna".into(),
+        parse_as: "module_unit".into(),
+        source: r#"
+            pub table Reading(id: Int) { value: Float, }
+            fn total(): Float = Reading | map(reading => reading.value) | sum;
+            fn parent() {
+                assert total() == 0.0f;
+                Reading.insert({ id: 3, value: 1.0f });
+                Reading.insert({ id: 2, value: -10000000000000000.0f });
+                Reading.insert({ id: 1, value: 10000000000000000.0f });
+                assert total() == 1.0f;
+            }
+        "#
+        .into(),
+    };
+    let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
+
+    let outcome = evaluator.execute_source(&unit);
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    for id in [1, 2, 3] {
+        assert!(
+            evaluator
+                .committed_row("Reading", &Value::int(id.into()))
+                .is_some(),
+            "row {id} was not published"
+        );
+    }
+}
+
+#[test]
 fn relation_integer_aggregate_observes_writes_but_later_failure_rolls_back() {
     let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = evaluator.execute_source(&source(
@@ -104,33 +138,37 @@ fn relation_integer_aggregate_observes_writes_but_later_failure_rolls_back() {
 }
 
 #[test]
-fn relation_non_integer_projection_aggregate_fails_closed() {
-    let unit = SourceUnit {
-        fixture_id: "relation-float-aggregate".into(),
-        source_id: "relation-float-aggregate.orna".into(),
-        parse_as: "module_unit".into(),
-        source: r#"
-            pub table Reading(id: Int) { value: Float, }
-            fn minimum() = Reading | map(reading => reading.value) | min();
-            fn parent() {
-                Reading.insert({ id: 1, value: 1.5f });
-                minimum();
-            }
-        "#
-        .into(),
-    };
-    let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
+fn relation_float_min_and_max_fail_closed() {
+    for (name, operation) in [("minimum", "min"), ("maximum", "max")] {
+        let unit = SourceUnit {
+            fixture_id: format!("relation-float-{operation}"),
+            source_id: format!("relation-float-{operation}.orna"),
+            parse_as: "module_unit".into(),
+            source: format!(
+                r#"
+                    pub table Reading(id: Int) {{ value: Float, }}
+                    fn {name}() = Reading | map(reading => reading.value) | {operation}();
+                    fn parent() {{
+                        Reading.insert({{ id: 1, value: 1.5f }});
+                        {name}();
+                    }}
+                "#
+            ),
+        };
+        let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
 
-    let outcome = evaluator.execute_source(&unit);
+        let outcome = evaluator.execute_source(&unit);
 
-    assert!(matches!(
-        outcome,
-        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-UNSUPPORTED"
-    ));
-    assert_eq!(
-        evaluator.committed_row("Reading", &Value::int(1.into())),
-        None
-    );
+        assert!(matches!(
+            outcome,
+            StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-UNSUPPORTED"
+        ));
+        assert_eq!(
+            evaluator.committed_row("Reading", &Value::int(1.into())),
+            None,
+            "{operation} published a row despite being unsupported"
+        );
+    }
 }
 
 #[test]
