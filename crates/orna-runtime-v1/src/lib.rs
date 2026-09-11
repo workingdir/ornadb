@@ -8628,6 +8628,7 @@ async fn apply_stream_intent_tx(
                         version = stream_failure.version + 1,
                         attempts = stream_failure.attempts
                             + CASE WHEN stream_failure.status = ?17 THEN 0 ELSE 1 END,
+                        successor_position = excluded.successor_position,
                         status = ?14,
                         diagnostic_code = ?15,
                         diagnostic_class = ?16",
@@ -11789,6 +11790,126 @@ mod tests {
         assert_eq!(succeeded.identity, failed.identity);
         assert_eq!(succeeded.attempts, retry.attempts);
         assert_eq!(succeeded.status, FailureStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn failed_retry_refreshes_durable_successor_without_moving_checkpoint() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let original = stream_delivery("retry-failed", "retry-original-next");
+        let revised = stream_delivery("retry-failed", "retry-revised-next");
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let mut stream = state.stream_backend(writer);
+        let original_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: original.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected stream acquire result: {other:?}"),
+        };
+        let first = match stream
+            .fail_async(
+                original_lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+                StreamFailurePayload::Plaintext(Vec::new()),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected stream failure result: {other:?}"),
+        };
+        assert!(matches!(
+            stream
+                .apply_async(CommitIntent::Retry {
+                    failure: first.identity.clone(),
+                    expected_version: first.version,
+                    expected: expected.clone(),
+                })
+                .await
+                .unwrap(),
+            CommitResult::RetryScheduled { .. }
+        ));
+        let revised_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: revised.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected retry acquire result: {other:?}"),
+        };
+        let failed = match stream
+            .fail_async(
+                revised_lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+                StreamFailurePayload::Plaintext(Vec::new()),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected retry failure result: {other:?}"),
+        };
+        assert_eq!(failed.identity, first.identity);
+        assert_eq!(failed.identity.0.successor, revised.successor);
+        assert_eq!(failed.attempts, 2);
+        assert_eq!(failed.status, FailureStatus::Failed);
+        let checkpoint_before_skip = stream
+            .checkpoint_async(&original.checkpoint_key())
+            .await
+            .unwrap();
+        assert_eq!(
+            checkpoint_before_skip,
+            StreamCheckpoint {
+                key: original.checkpoint_key(),
+                version: 0,
+                committed: None,
+            }
+        );
+        let skip_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: revised.clone(),
+                expected: CheckpointPrecondition::from(&checkpoint_before_skip),
+                purpose: LeasePurpose::Skip,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected skip acquire result: {other:?}"),
+        };
+        let skipped = stream
+            .apply_async(CommitIntent::Skip {
+                lease: skip_lease,
+                expected: CheckpointPrecondition::from(&checkpoint_before_skip),
+                expected_failure_version: failed.version,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            skipped,
+            CommitResult::CheckpointAdvanced { ref checkpoint }
+                if checkpoint.committed == Some(revised.successor)
+        ));
     }
 
     #[tokio::test]
