@@ -470,10 +470,8 @@ impl fmt::Display for ClientExecutionError {
             Self::InvalidArtifact { .. } | Self::InvalidOpaqueValue { .. } => {
                 formatter.write_str("the saved CLIENT function cannot be evaluated")
             }
-            Self::CapabilityDenied { capability, .. } => write!(
-                formatter,
-                "the CLIENT function requires the capability {capability} which is not granted"
-            ),
+            Self::CapabilityDenied { .. } => formatter
+                .write_str("the CLIENT function requires a capability which is not granted"),
             Self::ExpressionEvaluation { source, .. } => source.fmt(formatter),
             Self::ExternalContract { identity, .. } => write!(
                 formatter,
