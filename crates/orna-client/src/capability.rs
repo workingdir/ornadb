@@ -374,14 +374,10 @@ pub enum LocalCapabilityGrantError {
 impl fmt::Display for LocalCapabilityGrantError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownCapability { name } => {
-                write!(formatter, "unknown local capability `{name}`")
-            }
+            Self::UnknownCapability { .. } => formatter.write_str("unknown local capability"),
             Self::EmptyScope => formatter.write_str("local capability scope must not be empty"),
-            Self::InvalidScope { detail } => formatter.write_str(detail),
-            Self::DuplicateGrant { grant } => {
-                write!(formatter, "duplicate local capability grant {grant}")
-            }
+            Self::InvalidScope { .. } => formatter.write_str("invalid local capability scope"),
+            Self::DuplicateGrant { .. } => formatter.write_str("duplicate local capability grant"),
         }
     }
 }
@@ -610,7 +606,11 @@ mod tests {
                 matches!(error, LocalCapabilityGrantError::InvalidScope { .. }),
                 "{name}: {error}"
             );
-            assert!(error.to_string().contains("requires a"), "{name}: {error}");
+            assert_eq!(
+                error.to_string(),
+                "invalid local capability scope",
+                "{name}"
+            );
         }
     }
 
@@ -880,11 +880,38 @@ mod tests {
                 name: "std.fs.call".to_owned()
             }
             .to_string(),
-            "unknown local capability `std.fs.call`"
+            "unknown local capability"
         );
         assert_eq!(
             LocalCapabilityGrantError::EmptyScope.to_string(),
             "local capability scope must not be empty"
         );
+    }
+
+    #[test]
+    fn validation_errors_do_not_expose_capability_names_or_scopes() {
+        let unknown = LocalCapabilityGrantError::UnknownCapability {
+            name: "secret-token-at-/private/data".to_owned(),
+        };
+        assert_eq!(unknown.to_string(), "unknown local capability");
+        assert!(!unknown.to_string().contains("secret-token"));
+        assert!(!unknown.to_string().contains("/private/data"));
+
+        let invalid_scope = LocalCapabilityGrantError::InvalidScope {
+            detail: "path scope /private/data contains secret-token".to_owned(),
+        };
+        assert_eq!(invalid_scope.to_string(), "invalid local capability scope");
+        assert!(!invalid_scope.to_string().contains("/private/data"));
+        assert!(!invalid_scope.to_string().contains("secret-token"));
+
+        let duplicate = LocalCapabilityGrantError::DuplicateGrant {
+            grant: grant(
+                "std.secret.use",
+                secret_scope("secret-token-at-/private/data"),
+            ),
+        };
+        assert_eq!(duplicate.to_string(), "duplicate local capability grant");
+        assert!(!duplicate.to_string().contains("secret-token"));
+        assert!(!duplicate.to_string().contains("/private/data"));
     }
 }
