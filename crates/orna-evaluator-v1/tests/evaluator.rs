@@ -325,6 +325,26 @@ fn effect_handler_runs_for_a_nested_non_pure_field_call_with_once_evaluated_argu
 }
 
 #[test]
+fn dynamic_field_calls_evaluate_callee_before_effectful_arguments() {
+    let functions = functions_from_source(
+        "fn make() = Note.insert(1); fn run() = make().field(Note.insert(2));",
+    );
+    let mut effects = NoteEffects::default();
+
+    assert_eq!(
+        code(invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut effects,
+        )),
+        "ORNA-EVAL-TYPE"
+    );
+    assert_eq!(effects.calls, vec![vec![Value::int(1.into())]]);
+}
+
+#[test]
 fn effect_handler_none_falls_through_without_intercepting_pure_calls() {
     let functions =
         functions_from_source("fn helper(value: Int) = value + 1; fn entry() = helper(41);");
