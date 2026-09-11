@@ -2051,13 +2051,11 @@ impl Repository {
     ) -> Result<(), RepositoryError> {
         let expected = manifest.canonical_files()?;
         if manifest.entries.is_empty() {
-            if self
-                .committed_file_bytes(commit, &manifest.manifest_path())?
-                .is_some()
-            {
-                return Err(RepositoryError::InvalidCompactManifest);
+            match self.committed_file_bytes(commit, &manifest.manifest_path())? {
+                Some(actual) if expected[0].bytes() == Some(actual.as_slice()) => {}
+                Some(_) => return Err(RepositoryError::InvalidCompactManifest),
+                None => return Ok(()),
             }
-            return Ok(());
         }
         for change in expected {
             if self.committed_file_bytes(commit, change.path())?.as_deref() != change.bytes() {
@@ -2084,14 +2082,11 @@ impl Repository {
         commit: &GitCommitRef,
         manifest: &CompactManifest,
     ) -> Result<[u8; 32], RepositoryError> {
-        if manifest.entries.is_empty() {
-            return Ok([0; 32]);
+        match self.committed_file_bytes(commit, &manifest.manifest_path())? {
+            Some(bytes) => Ok(Sha256::digest(bytes).into()),
+            None if manifest.entries.is_empty() => Ok([0; 32]),
+            None => Err(RepositoryError::InvalidCompactManifest),
         }
-        Ok(Sha256::digest(
-            self.committed_file_bytes(commit, &manifest.manifest_path())?
-                .ok_or(RepositoryError::InvalidCompactManifest)?,
-        )
-        .into())
     }
 
     fn verify_candidate_compact_manifest(
