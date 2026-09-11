@@ -1640,17 +1640,17 @@ impl SealedInvocationOperation {
         if let Some(hooks) = self.test_hooks.as_ref() {
             return (hooks.dispatch)(&self.outcome);
         }
-        // Native STREAM and accepted mutation ROWS targets use a live
-        // producer. Read-only ROWS targets use the existing sealed executor.
+        // Native STREAM targets use a live producer. Bounded ROWS targets,
+        // including mutation results, must materialise their complete shape
+        // before the enclosing transaction commits.
         if let SealedInvocationPreparedOutcome::Allowed {
             target: PreparedSealedTarget::Application { definition },
             authorisation,
             ..
         } = &self.outcome
             && definition.domain() == FunctionDomain::Server
-            && (matches!(definition.return_type(), FunctionReturn::Stream(_))
-                || (matches!(definition.return_type(), FunctionReturn::Rows(_))
-                    && sealed_server_target_is_mutation(&self.active, definition.id())))
+            && matches!(definition.return_type(), FunctionReturn::Stream(_))
+            && !sealed_server_target_is_mutation(&self.active, definition.id())
         {
             let arguments = match bind_sealed_invoke_arguments(definition, self.decoded.arguments())
             {
