@@ -354,10 +354,7 @@ mod tests {
             },
         });
 
-        assert_eq!(
-            error.to_string(),
-            "invocation transport lifecycle failed"
-        );
+        assert_eq!(error.to_string(), "invocation transport lifecycle failed");
         assert!(error.source().is_none());
         assert!(matches!(
             error,
