@@ -2,6 +2,7 @@ use orna_foundation_v1::{CanonicalSnapshot, FileRef, OvbRaw, RowRef};
 use orna_syntax_v1::{
     ParseContext, SourceDocumentId, SyntaxAdmissionError, SyntaxSpan, admit_span,
 };
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 fn pinned() -> ParseContext {
     let snapshot = CanonicalSnapshot::Commit {
@@ -36,5 +37,16 @@ fn pinned_span_admits_losslessly_and_ephemeral_is_rejected() {
     assert_eq!(
         admit_span(&context, &span),
         Err(SyntaxAdmissionError::NotPinned)
+    );
+}
+
+#[test]
+fn locating_a_non_boundary_offset_does_not_panic_before_admission() {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        SyntaxSpan::new(1, 2).located("memory.orna", "β")
+    }));
+    assert!(
+        result.is_ok(),
+        "span annotation must not panic on UTF-8 offsets"
     );
 }
