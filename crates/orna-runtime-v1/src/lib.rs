@@ -6254,6 +6254,7 @@ impl RuntimeState {
         self.validate_stream_controls().await?;
         self.validate_stream_provider_failures().await?;
         self.validate_stream_failure_payloads().await?;
+        validate_recoverable_stream_attempts(&self.connection).await?;
         self.validate_session_deletions().await?;
         let mut request_rows = self
             .connection
@@ -8066,10 +8067,11 @@ async fn has_ordered_blocking_stream_failure(
 ///
 /// A writer takeover fences the former runtime owner, which is the authority
 /// that prevents a displaced callback from committing.  For a `Retrying`
-/// delivery, the corresponding delivery lease and retry claim are the
-/// remaining durable evidence that the row was the one admitted callback.
-/// Without that exact tuple, recovery must leave all state untouched rather
-/// than guessing which delivery an administrative retry represented.
+/// delivery, the matching delivery lease is the durable evidence that the row
+/// was the admitted callback. A scheduled retry retains its matching claim;
+/// an acquired retry consumes that claim while retaining the lease. Without
+/// either valid shape, recovery must leave all state untouched rather than
+/// guessing which delivery an administrative retry represented.
 /// `Replaying` has no live-checkpoint lease by design, so it is recovered only
 /// when it has not been confused with a retry claim for that same failure.
 async fn validate_recoverable_stream_attempts(connection: &Connection) -> Result<(), RuntimeError> {
@@ -8083,7 +8085,6 @@ async fn validate_recoverable_stream_attempts(connection: &Connection) -> Result
              LEFT JOIN stream_lease AS lease ON lease.key_id = failure.key_id
              LEFT JOIN stream_retry_claim AS claim
                ON claim.key_id = failure.key_id
-              AND claim.identity_id = failure.identity_id
              WHERE failure.status IN (?1, ?2)
              ORDER BY failure.identity_id",
             params![
@@ -8117,7 +8118,7 @@ async fn validate_recoverable_stream_attempts(connection: &Connection) -> Result
                 if leased_delivery.as_deref() != Some(delivery.as_str())
                     || leased_successor.as_deref() != Some(successor.as_str())
                     || purpose.map(decode_purpose).transpose()? != Some(LeasePurpose::Deliver)
-                    || claimed.as_deref() != Some(identity.as_str())
+                    || claimed.is_some_and(|claim| claim != identity)
                 {
                     return Err(RuntimeError::RecoveryInvalid);
                 }
@@ -12821,7 +12822,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_refuses_retry_without_its_durable_claim() {
+    async fn recovery_refuses_retry_with_missing_or_mismatched_durable_evidence() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(4)).await.unwrap();
@@ -12872,15 +12873,46 @@ mod tests {
                 other => panic!("unexpected stream retry result: {other:?}"),
             }
         };
+        state.validate_recovery().await.unwrap();
         state
             .connection
             .execute(
-                "DELETE FROM stream_retry_claim WHERE key_id = ?1",
-                params![stream_key_id(&delivery.checkpoint_key())],
+                "UPDATE stream_retry_claim SET identity_id = ?2 WHERE key_id = ?1",
+                params![
+                    stream_key_id(&delivery.checkpoint_key()),
+                    "mismatched-retry-claim"
+                ],
             )
             .await
             .unwrap();
 
+        assert_eq!(
+            state.validate_recovery().await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        state
+            .connection
+            .execute(
+                "UPDATE stream_retry_claim SET identity_id = ?2 WHERE key_id = ?1",
+                params![
+                    stream_key_id(&delivery.checkpoint_key()),
+                    stream_identity_id(&retrying.identity)
+                ],
+            )
+            .await
+            .unwrap();
+        state
+            .connection
+            .execute(
+                "DELETE FROM stream_lease WHERE key_id = ?1",
+                params![stream_key_id(&delivery.checkpoint_key())],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.validate_recovery().await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
         assert_eq!(
             state.recover_abandoned(id(4), id(5)).await,
             Err(RuntimeError::RecoveryInvalid)
@@ -12896,10 +12928,23 @@ mod tests {
                 .status,
             FailureStatus::Retrying
         );
+        drop(state);
+        assert!(matches!(
+            RuntimeState::open(
+                &repo,
+                RuntimeIdentity {
+                    database_id: id(1),
+                    repository_id: id(2),
+                },
+                digest(3),
+            )
+            .await,
+            Err(RuntimeError::RecoveryInvalid)
+        ));
     }
 
     #[tokio::test]
-    async fn reopen_recovers_interrupted_retry_without_advancing_or_rekeying_failure() {
+    async fn reopen_recovers_an_acquired_retry_without_advancing_or_rekeying_failure() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(4)).await.unwrap();
@@ -12950,6 +12995,20 @@ mod tests {
                 other => panic!("unexpected stream retry result: {other:?}"),
             }
         };
+        let acquired = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Acquire {
+                delivery: delivery.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected acquired retry: {other:?}"),
+        };
+        assert_eq!(acquired.delivery, delivery);
         let stale_version = retrying.version;
         drop(state);
 
