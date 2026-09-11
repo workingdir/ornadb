@@ -3631,14 +3631,7 @@ pub fn signature_help(
         }
     }
     let open = open?;
-    let function_start = document.text[..open]
-        .char_indices()
-        .rev()
-        .take_while(|(_, character)| {
-            character.is_ascii_alphanumeric() || *character == '_' || *character == '.'
-        })
-        .last()
-        .map_or(0, |(index, _)| index);
+    let function_start = callable_name_start(&document.text, open);
     let name = document.text[function_start..open].trim().to_owned();
     let active_parameter = document.text[open + 1..byte]
         .chars()
@@ -3699,6 +3692,71 @@ pub fn signature_help(
         active_parameter,
     ))
 }
+
+/// Finds the start of the qualified callable name immediately before `open`.
+///
+/// The compiler accepts Unicode and quoted identifier components. A plain
+/// ASCII backward scan loses both forms before declaration lookup can use the
+/// parsed name, so keep the scan lexical and preserve the original spelling.
+fn callable_name_start(text: &str, open: usize) -> usize {
+    let mut cursor = open;
+    loop {
+        while cursor > 0 {
+            let character = text[..cursor]
+                .chars()
+                .next_back()
+                .expect("cursor is on a character boundary");
+            if !character.is_whitespace() {
+                break;
+            }
+            cursor -= character.len_utf8();
+        }
+        if cursor == 0 {
+            return cursor;
+        }
+
+        if text[..cursor].ends_with('"') {
+            let mut characters = text[..cursor - '"'.len_utf8()].char_indices().rev();
+            let mut start = None;
+            while let Some((index, character)) = characters.next() {
+                if character != '"' {
+                    continue;
+                }
+                if text[..index].ends_with('"') {
+                    let _ = characters.next();
+                    continue;
+                }
+                start = Some(index);
+                break;
+            }
+            let Some(start) = start else {
+                return cursor;
+            };
+            cursor = start;
+        } else {
+            let mut characters = text[..cursor].char_indices().rev();
+            let mut start = None;
+            while let Some((index, character)) = characters.next() {
+                if character == '_' || character.is_alphanumeric() {
+                    start = Some(index);
+                } else {
+                    break;
+                }
+            }
+            let Some(start) = start else {
+                return cursor;
+            };
+            cursor = start;
+        }
+
+        if cursor > 0 && text.as_bytes()[cursor - 1] == b'.' {
+            cursor -= 1;
+        } else {
+            return cursor;
+        }
+    }
+}
+
 fn resolved_type_name(
     return_type: orna_core::types::ResolvedType,
     standard: &StandardLibrary,
