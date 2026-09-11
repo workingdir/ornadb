@@ -285,32 +285,9 @@ impl fmt::Display for InstalledSourceApplyError {
 }
 
 impl Error for InstalledSourceApplyError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::SourceRead {
-                source: Some(source),
-                ..
-            } => Some(source),
-            Self::SourceBundle { source } => Some(source),
-            Self::Host { source, .. } => Some(source.as_ref()),
-            Self::Attach { source }
-            | Self::Recovery { source }
-            | Self::Apply { source }
-            | Self::SessionClose { source } => Some(source),
-            Self::StandardLibrary { source } => Some(source),
-            Self::StandardSource { source } => Some(source),
-            Self::ApplicationContext { source } => Some(source),
-            Self::Artifact { source } => Some(source),
-            Self::Preparation { source } => Some(source),
-            Self::ResultDocument { source } => Some(source),
-            Self::Output { source } | Self::Runtime { source } => Some(source),
-            Self::SourceRead { source: None, .. }
-            | Self::SourceUtf8 { .. }
-            | Self::ActiveStandardMismatch
-            | Self::ExpectedBaseMismatch { .. }
-            | Self::RecoveryMismatch => None,
-        }
-    }
+    // Installed command failures may retain paths, SQL, socket details, or
+    // other private causes. Keep those details in the typed value for local
+    // mapping, but do not expose them through the public error chain.
 }
 
 /// Checks, prepares, and atomically applies one complete source file to the installed database.
@@ -655,6 +632,8 @@ fn build_success_document(
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use super::*;
     use orna_core::catalogue::{
         CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn,
@@ -769,6 +748,7 @@ mod tests {
                 .contains("/private/secret-source-bytes.orna")
         );
         assert!(!source_read.to_string().contains("secret source bytes"));
+        assert!(source_read.source().is_none());
 
         let source_utf8 = InstalledSourceApplyError::SourceUtf8 {
             path: "/private/secret-source-bytes.orna".to_owned(),
@@ -783,6 +763,7 @@ mod tests {
                 .contains("/private/secret-source-bytes.orna")
         );
         assert!(!source_utf8.to_string().contains("secret source bytes"));
+        assert!(source_utf8.source().is_none());
     }
 
     #[test]
@@ -964,6 +945,7 @@ mod tests {
                 !error.to_string().contains(private),
                 "{name} leaked private host detail"
             );
+            assert!(error.source().is_none(), "{name} exposed a private cause");
         }
     }
 
@@ -1067,6 +1049,7 @@ mod tests {
                 !error.to_string().contains(private),
                 "{name} leaked private detail"
             );
+            assert!(error.source().is_none(), "{name} exposed a private cause");
         }
     }
 
