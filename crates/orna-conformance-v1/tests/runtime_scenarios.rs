@@ -43,6 +43,7 @@ fn durable_repository() -> (TempDir, Repository) {
         &["config", "user.email", "test@example.invalid"],
     );
     git(temp.path(), &["config", "user.name", "conformance test"]);
+    git(temp.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(temp.path().join("main.orna"), "module main;\n").expect("source");
     git(temp.path(), &["add", "main.orna"]);
     git(temp.path(), &["commit", "--quiet", "-m", "initial"]);
