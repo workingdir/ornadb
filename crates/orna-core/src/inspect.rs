@@ -526,6 +526,15 @@ impl CallRow {
     pub const fn duration_nanoseconds(&self) -> u64 {
         self.duration_nanoseconds
     }
+
+    /// Returns a copy of this row with its typed batch schema redacted.
+    ///
+    /// The value count remains structural metadata, while the schema is a
+    /// typed inspection value and therefore follows the `Values` classifier.
+    fn redact(mut self) -> Self {
+        self.schema = None;
+        self
+    }
 }
 
 /// The closed kind of one captured resource.
@@ -1333,6 +1342,11 @@ impl InspectSnapshotEpoch {
         if row_count == 0 {
             return Err(InspectError::EmptyEpoch { id });
         }
+        let calls = if options.include_values() {
+            calls
+        } else {
+            calls.into_iter().map(CallRow::redact).collect()
+        };
         let state_cells = if options.include_values() {
             state_cells
         } else {
@@ -2077,6 +2091,7 @@ mod tests {
         assert_eq!(row.value_type(), type_id(TYPE_INT));
         assert_eq!(row.revision(), 3);
         assert_eq!(row.updated_at(), SystemTime::UNIX_EPOCH);
+        assert_eq!(epoch.calls()[0].schema(), None);
     }
 
     #[test]
@@ -2088,6 +2103,7 @@ mod tests {
         );
         assert_eq!(epoch.state_cells().len(), 1);
         assert_eq!(epoch.state_cells()[0].value(), Some(&captured));
+        assert_eq!(epoch.calls()[0].schema(), Some(&captured));
     }
 
     #[test]
