@@ -1,8 +1,13 @@
 //! Atomic client-side ownership of one live Present watch.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::BTreeMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
-use orna_protocol_v1::{CanonicalSnapshot, Envelope, Limits, Message, PatchList, PresentNode};
+use orna_protocol_v1::{
+    CanonicalSnapshot, Envelope, Error as ProtocolError, Limits, Message, PatchList, PresentNode,
+};
 
 static NEXT_LIFECYCLE_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -47,8 +52,33 @@ pub struct ResyncRequest {
 }
 
 impl ResyncRequest {
+    /// Returns the watch identity that must be carried by the resync frame.
+    pub const fn watch(self) -> [u8; 16] {
+        self.watch
+    }
+
     pub const fn generation(self) -> u64 {
         self.generation
+    }
+
+    /// Builds the existing protocol resync envelope using a request identity
+    /// supplied by the owning live session.
+    ///
+    /// `WatchPresentation` deliberately does not mint request identities:
+    /// request allocation and session binding remain transport-owned.
+    pub fn envelope(self, request: [u8; 16]) -> Envelope {
+        Envelope {
+            request: Some(request),
+            watch: Some(self.watch),
+            message: Message::Resync,
+            extensions: BTreeMap::new(),
+        }
+    }
+
+    /// Encodes the existing protocol resync envelope at the caller's
+    /// negotiated protocol limit.
+    pub fn encode(self, request: [u8; 16], limits: Limits) -> Result<Vec<u8>, ProtocolError> {
+        self.envelope(request).encode(limits)
     }
 }
 
@@ -180,6 +210,20 @@ impl WatchPresentation {
             } => Ok(self.apply_delta(*base_revision, *new_revision, patches, snapshot.clone())),
             _ => Err(LivePresentationError::UnexpectedMessage),
         }
+    }
+
+    /// Decodes one bounded canonical protocol envelope and passes it to the
+    /// authoritative state owner. A malformed envelope is treated like any
+    /// other unusable presentation update: the visible tree is preserved and
+    /// the caller is asked to resynchronize.
+    pub fn receive_encoded(
+        &mut self,
+        encoded: &[u8],
+    ) -> Result<LivePresentationUpdate, LivePresentationError> {
+        let Ok(frame) = Envelope::decode(encoded, self.limits) else {
+            return Ok(self.require_resync());
+        };
+        self.receive(&frame)
     }
 
     /// A complete snapshot is the recovery boundary after reconnect or resync.
@@ -1375,5 +1419,51 @@ mod tests {
             .receive(&frame(16, watch, snapshot(1, "recovered")))
             .unwrap();
         assert!(!state.awaiting_snapshot());
+    }
+
+    #[test]
+    fn encoded_present_frames_install_and_malformed_bytes_request_resync() {
+        let watch = [7; 16];
+        let mut state = default_presentation(watch);
+        let encoded = frame(16, watch, snapshot(3, "current"))
+            .encode(Limits::default())
+            .expect("snapshot encodes");
+
+        assert_eq!(
+            state.receive_encoded(&encoded),
+            Ok(LivePresentationUpdate::SnapshotInstalled)
+        );
+        let visible = state.published().cloned();
+
+        assert_eq!(
+            state.receive_encoded(&[0xff]),
+            Ok(LivePresentationUpdate::ResyncRequired)
+        );
+        assert_eq!(state.published().cloned(), visible);
+        assert!(state.awaiting_snapshot());
+        assert!(state.take_resync_request().is_some());
+    }
+
+    #[test]
+    fn resync_request_encodes_existing_message_with_caller_request_identity() {
+        let watch = [7; 16];
+        let mut state = default_presentation(watch);
+        state
+            .receive(&frame(17, watch, delta(0, 1, vec![])))
+            .expect("delta requests recovery");
+        let request = state.take_resync_request().expect("resync request");
+
+        let encoded = request
+            .encode([9; 16], Limits::default())
+            .expect("resync encodes");
+        assert_eq!(
+            Envelope::decode(&encoded, Limits::default()).expect("resync decodes"),
+            Envelope {
+                request: Some([9; 16]),
+                watch: Some(watch),
+                message: Message::Resync,
+                extensions: BTreeMap::new(),
+            }
+        );
     }
 }
