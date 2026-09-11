@@ -784,7 +784,11 @@ impl RawSocketRuntimeAdmission {
         {
             return Err(raw_admission_error("runtime owner fence"));
         }
-        let context = SealedInvocationAdmissionContext::from_runtime_capture(capture.clone())?;
+        let context = SealedInvocationAdmissionContext::from_runtime_capture_with_writer_lease(
+            capture.clone(),
+            lease.owner_id,
+            lease.epoch,
+        )?;
         Ok((
             context,
             RawSocketRuntimeAdmissionFence {
@@ -5169,7 +5173,49 @@ mod runtime_admission_tests {
             context.capture().database_id(),
             *metadata.database_id().as_bytes()
         );
+        assert_eq!(context.writer_lease_owner(), Some(fence.lease.owner_id));
+        assert_eq!(context.writer_lease_epoch(), Some(fence.lease.epoch as i64));
         fence.verify().await.expect("runtime admission fence");
+    }
+
+    #[tokio::test]
+    async fn runtime_admission_lease_evidence_survives_reopen_and_detects_takeover() {
+        let (_directory, _repository, admission) = repository_admission();
+        let (context, fence) = admission
+            .capture()
+            .await
+            .expect("runtime admission capture");
+        let retained = fence.lease;
+        let state = RuntimeState::open(
+            &admission.repository,
+            admission.identity,
+            admission.initial_digest,
+        )
+        .await
+        .expect("runtime state");
+        state
+            .takeover_lease(retained, [0x47; 16])
+            .await
+            .expect("test owner handover");
+
+        drop(fence);
+        let reopened = RuntimeState::open(
+            &admission.repository,
+            admission.identity,
+            admission.initial_digest,
+        )
+        .await
+        .expect("reopened runtime state");
+        let current = reopened
+            .current_lease()
+            .await
+            .expect("current writer lease")
+            .expect("writer lease after reopen");
+        assert_eq!(context.writer_lease_owner(), Some(retained.owner_id));
+        assert_eq!(context.writer_lease_epoch(), Some(retained.epoch as i64));
+        assert_ne!(Some(retained), Some(current));
+        assert_eq!(current.owner_id, [0x47; 16]);
+        assert_eq!(current.epoch, retained.epoch + 1);
     }
 
     #[tokio::test]
