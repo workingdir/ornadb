@@ -330,6 +330,9 @@ impl ActivationCoordinator {
         // lease here would turn the first cancellation into a stale-owner
         // error on retry, leaving structured termination unfinishable.
         self.require_owner_identity(owner)?;
+        if self.phase == TransactionPhase::Committed {
+            return Err(CoordinationError::InvalidPhase);
+        }
         self.ending = true;
         let current = self.owner.as_mut().expect("checked");
         if current.cancellation_epoch == 0 {
@@ -459,7 +462,7 @@ impl ActivationCoordinator {
         checkpoint: CheckpointIntent,
         faults: &mut F,
     ) -> Outcome {
-        if self.require_committable(owner).is_err() {
+        if self.require_completion(owner).is_err() {
             return self.rollback_for(owner);
         }
         self.phase = TransactionPhase::Prepared;
@@ -533,7 +536,20 @@ impl ActivationCoordinator {
     }
     fn require_live(&self, owner: OwnerLease) -> Result<(), CoordinationError> {
         self.require_current(owner)?;
-        if owner.cancellation_epoch == 0 && !self.ending {
+        if self.phase == TransactionPhase::Running && owner.cancellation_epoch == 0 && !self.ending
+        {
+            Ok(())
+        } else {
+            Err(CoordinationError::Cancelled)
+        }
+    }
+    fn require_completion(&self, owner: OwnerLease) -> Result<(), CoordinationError> {
+        self.require_current(owner)?;
+        if matches!(
+            self.phase,
+            TransactionPhase::Running | TransactionPhase::ChildrenJoining
+        ) && owner.cancellation_epoch == 0
+        {
             Ok(())
         } else {
             Err(CoordinationError::Cancelled)
@@ -541,7 +557,7 @@ impl ActivationCoordinator {
     }
     fn require_committable(&self, owner: OwnerLease) -> Result<(), CoordinationError> {
         self.require_current(owner)?;
-        if owner.cancellation_epoch == 0 {
+        if self.phase == TransactionPhase::Prepared && owner.cancellation_epoch == 0 {
             Ok(())
         } else {
             Err(CoordinationError::Cancelled)
@@ -571,6 +587,13 @@ impl ActivationCoordinator {
         // A stale completion belongs to an earlier owner. It must not change
         // the phase of a successor which has already taken the coordinator.
         if reason == RollbackReason::StaleOwner {
+            Outcome::RolledBack { reason }
+        } else if matches!(
+            self.phase,
+            TransactionPhase::ChildrenJoining
+                | TransactionPhase::Committed
+                | TransactionPhase::RolledBack
+        ) {
             Outcome::RolledBack { reason }
         } else if self.children.values().any(|joined| !joined) {
             self.phase = TransactionPhase::ChildrenJoining;

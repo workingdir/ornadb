@@ -28,6 +28,22 @@ impl ProviderExecutor<Value> for Provider {
     }
 }
 
+struct NeverProvider;
+
+impl ProviderExecutor<Value> for NeverProvider {
+    fn execute(&mut self, _: ActivationId) -> Result<Value, ProviderError> {
+        panic!("a committed owner must not re-enter provider execution")
+    }
+}
+
+struct RejectedProvider;
+
+impl ProviderExecutor<Value> for RejectedProvider {
+    fn execute(&mut self, _: ActivationId) -> Result<Value, ProviderError> {
+        Err(ProviderError::Rejected)
+    }
+}
+
 #[derive(Default)]
 struct Store {
     commits: usize,
@@ -163,6 +179,158 @@ fn success_cancels_and_joins_children_in_child_id_order_before_commit() {
         supervisor.events,
         vec![('c', first), ('j', first), ('c', second), ('j', second)]
     );
+    assert_eq!(store.commits, 1);
+    assert_eq!(coordinator.phase(), TransactionPhase::Committed);
+}
+
+#[test]
+fn committed_owner_cannot_be_cancelled_or_relabelled_as_rolled_back() {
+    let (mut coordinator, owner) = active();
+    let mut provider = Provider;
+    let mut store = Store::default();
+    let mut faults = NoFault;
+
+    assert!(matches!(
+        coordinator.execute(owner, &mut provider, &mut store, checkpoint(), &mut faults,),
+        Outcome::Committed { .. }
+    ));
+    assert_eq!(coordinator.phase(), TransactionPhase::Committed);
+
+    assert_eq!(
+        coordinator.cancel(owner),
+        Err(orna_execution_v1::CoordinationError::InvalidPhase)
+    );
+    assert_eq!(coordinator.phase(), TransactionPhase::Committed);
+}
+
+#[test]
+fn committed_owner_cannot_execute_publish_or_pass_its_fence() {
+    let (mut coordinator, owner) = active();
+    let mut provider = Provider;
+    let mut store = Store::default();
+    let mut faults = NoFault;
+
+    assert!(matches!(
+        coordinator.execute(owner, &mut provider, &mut store, checkpoint(), &mut faults,),
+        Outcome::Committed { .. }
+    ));
+    assert_eq!(store.commits, 1);
+    assert!(!coordinator.permits(owner));
+    assert_eq!(
+        store.commit(stale_commit(owner), &coordinator),
+        Err(StoreError::OwnerFenceRejected)
+    );
+
+    let mut never_provider = NeverProvider;
+    assert_eq!(
+        coordinator.execute(
+            owner,
+            &mut never_provider,
+            &mut store,
+            checkpoint(),
+            &mut faults,
+        ),
+        Outcome::RolledBack {
+            reason: RollbackReason::Cancelled,
+        }
+    );
+    assert_eq!(store.commits, 1);
+    assert_eq!(coordinator.phase(), TransactionPhase::Committed);
+}
+
+#[test]
+fn rolled_back_owner_cannot_execute_publish_or_pass_its_fence() {
+    let (mut coordinator, owner) = active();
+    let mut rejected_provider = RejectedProvider;
+    let mut store = Store::default();
+    let mut faults = NoFault;
+
+    assert_eq!(
+        coordinator.execute(
+            owner,
+            &mut rejected_provider,
+            &mut store,
+            checkpoint(),
+            &mut faults,
+        ),
+        Outcome::RolledBack {
+            reason: RollbackReason::ProviderFailed,
+        }
+    );
+    assert_eq!(coordinator.phase(), TransactionPhase::RolledBack);
+    assert!(!coordinator.permits(owner));
+    assert_eq!(
+        store.commit(stale_commit(owner), &coordinator),
+        Err(StoreError::OwnerFenceRejected)
+    );
+
+    let mut never_provider = NeverProvider;
+    assert_eq!(
+        coordinator.execute(
+            owner,
+            &mut never_provider,
+            &mut store,
+            checkpoint(),
+            &mut faults,
+        ),
+        Outcome::RolledBack {
+            reason: RollbackReason::Cancelled,
+        }
+    );
+    assert_eq!(store.commits, 0);
+    assert_eq!(coordinator.phase(), TransactionPhase::RolledBack);
+}
+
+#[test]
+fn children_joining_owner_cannot_execute_or_pass_its_fence_before_retrying_cleanup() {
+    let (mut coordinator, owner) = active();
+    let child = coordinator.spawn_child(owner).unwrap();
+    let mut provider = Provider;
+    let mut store = Store::default();
+    let mut faults = NoFault;
+
+    assert_eq!(
+        coordinator.execute(owner, &mut provider, &mut store, checkpoint(), &mut faults),
+        Outcome::ChildrenJoining {
+            reason: RollbackReason::ChildOutstanding,
+        }
+    );
+    assert_eq!(coordinator.phase(), TransactionPhase::ChildrenJoining);
+    assert!(!coordinator.permits(owner));
+    assert_eq!(
+        store.commit(stale_commit(owner), &coordinator),
+        Err(StoreError::OwnerFenceRejected)
+    );
+
+    let mut never_provider = NeverProvider;
+    assert_eq!(
+        coordinator.execute(
+            owner,
+            &mut never_provider,
+            &mut store,
+            checkpoint(),
+            &mut faults,
+        ),
+        Outcome::RolledBack {
+            reason: RollbackReason::Cancelled,
+        }
+    );
+    assert_eq!(coordinator.phase(), TransactionPhase::ChildrenJoining);
+    assert_eq!(store.commits, 0);
+
+    let mut supervisor = Supervisor::default();
+    assert!(matches!(
+        coordinator.execute_with_children(
+            owner,
+            &mut provider,
+            &mut store,
+            checkpoint(),
+            &mut faults,
+            &mut supervisor,
+        ),
+        Outcome::Committed { .. }
+    ));
+    assert_eq!(supervisor.events, vec![('c', child), ('j', child)]);
     assert_eq!(store.commits, 1);
     assert_eq!(coordinator.phase(), TransactionPhase::Committed);
 }
