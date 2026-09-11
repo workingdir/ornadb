@@ -205,6 +205,20 @@ fn rejects_invalid_magic_version_operation_boolean_and_trailing_bytes() {
 }
 
 #[test]
+fn client_plan_rejects_oversized_artifact_before_decoding() {
+    let mut bytes = TRUE_BYTES.to_vec();
+    bytes.resize(MAX_ARTIFACT_BYTES + 1, 0);
+
+    assert_eq!(
+        ClientPlan::decode(&bytes),
+        Err(ClientPlanError::ArtifactSizeLimit {
+            size: MAX_ARTIFACT_BYTES + 1,
+            maximum: MAX_ARTIFACT_BYTES,
+        })
+    );
+}
+
+#[test]
 fn displays_the_public_error_contract() {
     let duplicate_slot = StateSlotId::from_bytes([0x61; 16]);
     let duplicate_display = format!("duplicate client-plan state slot identity {duplicate_slot}");
