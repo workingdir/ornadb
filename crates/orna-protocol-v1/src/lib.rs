@@ -1257,11 +1257,73 @@ impl ResultBody {
 }
 
 fn validate_present(node: &Node) -> Result<()> {
-    if !matches!(node, Node::Tag(60012, _)) {
+    let Node::Tag(60012, body) = node else {
+        return Err(Error::InvalidValue);
+    };
+    let fields = array(body).ok_or(Error::InvalidValue)?;
+    if fields.len() != 4 {
         return Err(Error::InvalidValue);
     }
-    let _ = canonical_value(node)?;
+
+    if !matches!(&fields[0], Node::Text(_)) && uuid(&fields[0]).is_err() {
+        return Err(Error::InvalidValue);
+    }
+    validate_present_key(&fields[1])?;
+
+    let properties = map(&fields[2]).ok_or(Error::InvalidValue)?;
+    for (key, value) in properties {
+        if !matches!(key, Node::Text(_)) && uuid(key).is_err() {
+            return Err(Error::InvalidValue);
+        }
+        let _ = canonical_value(value)?;
+        if matches!(value, Node::Tag(60012, _)) {
+            validate_present(value)?;
+        }
+    }
+
+    let children = array(&fields[3]).ok_or(Error::InvalidValue)?;
+    let mut stable_keys = Vec::new();
+    for child in children {
+        validate_present(child)?;
+        let Node::Tag(60012, body) = child else {
+            return Err(Error::InvalidValue);
+        };
+        let child_fields = array(body).ok_or(Error::InvalidValue)?;
+        let key = child_fields.get(1).ok_or(Error::InvalidValue)?;
+        if !matches!(key, Node::Null) {
+            if stable_keys.iter().any(|current| current == key) {
+                return Err(Error::InvalidValue);
+            }
+            stable_keys.push(key.clone());
+        }
+    }
     Ok(())
+}
+
+fn validate_present_key(node: &Node) -> Result<()> {
+    let (Node::Null | Node::Array(_)) = node else {
+        return Err(Error::InvalidValue);
+    };
+    let Some(fields) = array(node) else {
+        return Ok(());
+    };
+    let kind = u64_value(fields.first().ok_or(Error::InvalidValue)?)?;
+    match kind {
+        0 if fields.len() == 2
+            && (matches!(&fields[1], Node::Text(_)) || uuid(&fields[1]).is_ok()) =>
+        {
+            Ok(())
+        }
+        1 if fields.len() == 3 && uuid(&fields[1]).is_ok() => {
+            let _ = canonical_value(&fields[2])?;
+            Ok(())
+        }
+        3 if fields.len() == 2 => {
+            let _ = canonical_value(&fields[1])?;
+            Ok(())
+        }
+        _ => Err(Error::InvalidValue),
+    }
 }
 fn validate_patches(node: &Node) -> Result<()> {
     for operation in array(node).ok_or(Error::InvalidValue)? {
@@ -2465,6 +2527,53 @@ mod tests {
             Envelope::decode(&bytes, Limits::default()),
             Err(Error::InvalidValue)
         );
+    }
+    #[test]
+    fn present_rejects_malformed_shape_and_stable_key() {
+        let malformed = [
+            Node::Tag(
+                60012,
+                Box::new(Node::Array(vec![
+                    Node::Text("text".into()),
+                    Node::Null,
+                    Node::Map(vec![]),
+                ])),
+            ),
+            Node::Tag(
+                60012,
+                Box::new(Node::Array(vec![
+                    Node::Int(1.into()),
+                    Node::Null,
+                    Node::Map(vec![]),
+                    Node::Array(vec![]),
+                ])),
+            ),
+            Node::Tag(
+                60012,
+                Box::new(Node::Array(vec![
+                    Node::Text("text".into()),
+                    Node::Array(vec![uint(0)]),
+                    Node::Map(vec![]),
+                    Node::Array(vec![]),
+                ])),
+            ),
+        ];
+        for present in malformed {
+            let bytes = wire(
+                16,
+                Some(id(1)),
+                Some(id(2)),
+                Node::Map(vec![
+                    (uint(0), uint(0)),
+                    (uint(1), present),
+                    (uint(2), snapshot_node(&snapshot()).unwrap()),
+                ]),
+            );
+            assert_eq!(
+                Envelope::decode(&bytes, Limits::default()),
+                Err(Error::InvalidValue)
+            );
+        }
     }
     #[test]
     fn diagnostics_do_not_disclose_payloads() {
