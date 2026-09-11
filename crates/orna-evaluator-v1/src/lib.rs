@@ -1765,7 +1765,14 @@ impl Context<'_, '_> {
             && root_collection.is_none()
             || self.resolve_function_name(callee, scope).is_some()
         {
-            if matches!(callee, Expr::Field { .. }) && self.effects.is_some() {
+            // Only an unresolved, statically rooted field path is an effect
+            // dispatch candidate. Dynamic field callees must be evaluated by
+            // the ordinary call path first, otherwise their argument effects
+            // would run before the callee (for example,
+            // `make().field(effectful_arg)`).
+            let static_effect_path = matches!(callee, Expr::Field { .. })
+                && function_root_name(callee).is_some_and(|root| !scope.0.contains_key(root));
+            if static_effect_path && self.effects.is_some() {
                 self.items(arguments.len() + usize::from(input.is_some()))?;
                 let mut values = input.clone().into_iter().collect::<Vec<_>>();
                 for argument in arguments {
