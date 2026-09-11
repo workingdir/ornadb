@@ -1770,8 +1770,7 @@ impl Context<'_, '_> {
             // the ordinary call path first, otherwise their argument effects
             // would run before the callee (for example,
             // `make().field(effectful_arg)`).
-            let static_effect_path = matches!(callee, Expr::Field { .. })
-                && function_root_name(callee).is_some_and(|root| !scope.0.contains_key(root));
+            let static_effect_path = is_static_effect_path(callee, scope);
             if static_effect_path && self.effects.is_some() {
                 self.items(arguments.len() + usize::from(input.is_some()))?;
                 let mut values = input.clone().into_iter().collect::<Vec<_>>();
@@ -3126,6 +3125,13 @@ fn function_root_name(expression: &Expr) -> Option<&str> {
     }
 }
 
+fn is_static_effect_path(callee: &Expr, scope: &Scope) -> bool {
+    matches!(callee, Expr::Field { base, .. }
+        if matches!(base.as_ref(), Expr::ReplBinding { text, .. } if text == "$__orna_relation"))
+        || matches!(callee, Expr::Field { .. })
+            && function_root_name(callee).is_some_and(|root| !scope.0.contains_key(root))
+}
+
 fn one_like(value: &Value) -> Result<Value, EvaluationError> {
     match value {
         Value::Int(_) => Ok(Value::Int(1.into())),
@@ -3348,4 +3354,72 @@ fn unescape_string_body(body: &str) -> Result<String, EvaluationError> {
         }
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct RelationEffects {
+        calls: usize,
+    }
+
+    impl EffectHandler for RelationEffects {
+        fn handle(
+            &mut self,
+            callee: &Expr,
+            _: &[CanonicalValue],
+        ) -> Result<Option<CanonicalValue>, EvaluationError> {
+            if matches!(callee, Expr::Field { base, name, .. }
+                if matches!(base.as_ref(), Expr::ReplBinding { text, .. } if text == "$__orna_relation")
+                    && name == "integer_aggregate")
+            {
+                self.calls += 1;
+                return Ok(Some(
+                    CanonicalValue::new(Raw::Int(7.into())).expect("integer is canonical"),
+                ));
+            }
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn synthetic_relation_receiver_is_a_static_effect_path() {
+        let span = orna_syntax_v1::SyntaxSpan::new(0, 0);
+        let expression = Expr::Call {
+            callee: Box::new(Expr::Field {
+                base: Box::new(Expr::ReplBinding {
+                    text: "$__orna_relation".into(),
+                    span: span.clone(),
+                }),
+                name: "integer_aggregate".into(),
+                span: span.clone(),
+            }),
+            arguments: Vec::new(),
+            span,
+        };
+        let functions = Functions::new();
+        let mut effects = RelationEffects { calls: 0 };
+        let mut context = Context {
+            limits: Limits::default(),
+            steps: 0,
+            functions: &functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: true,
+            restrict_function_names: true,
+            reject_unhandled_field_calls: true,
+            effects: Some(&mut effects),
+            namespace: None,
+            transfer: None,
+        };
+        let mut scope = Scope(BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
+
+        assert_eq!(
+            context.evaluate(&expression, &mut scope, 0).unwrap(),
+            Value::Int(7.into())
+        );
+        drop(context);
+        assert_eq!(effects.calls, 1);
+    }
 }
