@@ -384,3 +384,33 @@ fn scenario_witnesses_bind_only_declared_passed_implementation_scenarios() {
         ["LET-REBIND-091", "PIPE-001", "PIPE-002"]
     );
 }
+
+#[test]
+fn report_reconciles_claimed_scenarios_with_passed_runtime_evidence() {
+    let harness = Harness::new(Corpus::load_default().expect("reference corpus loads")).with_claim(
+        ImplementationClaim {
+            implementation_id: "test-runner".into(),
+            profile: "test".into(),
+            command: "test-runner".into(),
+            environment: std::collections::BTreeMap::new(),
+            executed_scenario_contracts: vec![
+                "TXN-001".into(),
+                "PIPE-001".into(),
+                "PIPE-001".into(),
+                "unknown-scenario".into(),
+            ],
+        },
+    );
+    let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
+    let report = harness.run(&mut adapter);
+    let executed = report
+        .implementation_claim
+        .executed_scenario_contracts
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(
+        executed,
+        ["PIPE-001"].into_iter().map(String::from).collect()
+    );
+}
