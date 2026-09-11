@@ -562,6 +562,10 @@ impl LiveHost {
     /// Returns a redacted boundary error when the session, credential,
     /// attachment, or serving state is not admissible.
     pub async fn resume(&mut self, request: ResumeRequest<'_>) -> Result<AttachOutcome> {
+        // Reconnect admission spans two state machines. Validate both before
+        // mutating either one so a credential rejected by the serving layer
+        // cannot consume the security attachment or revoke the session.
+        self.validate_resume(&request)?;
         let outcome = self
             .security
             .attach(
