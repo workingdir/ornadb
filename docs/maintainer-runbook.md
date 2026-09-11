@@ -565,6 +565,51 @@ cross-reader profile evidence, full publication fault profile, and production
 throughput claim remain unimplemented or unproven. Treat a failure or missing
 prerequisite as unavailable or failed evidence, never as successful recovery.
 
+## Orna 1.0.0 traceability and evidence boundary
+
+The immutable Orna 1.0.0 reference publication identifies version `1.0.0`,
+870 normative requirements, and a 46-entry SHA-256 inventory of normative
+payloads. Its primary Markdown publication digest is
+`d12cf5d86b9337ccbe45f257bcb8c25bc769e0505500bdc68e21a1b67d728d7d`.
+The publication's selected contract and protocol models are reference evidence
+only: the publication explicitly records that no complete Orna compiler/runtime
+was executed, and that independent Parquet and network interoperability were
+not performed.
+
+Generate the logical traceability report against the exact reference bundle:
+
+```text
+cargo run --locked --offline -p orna-traceability-v1 -- <reference-bundle>
+```
+
+The generator verifies the bundle's exact payload digests and emits
+`orna.traceability.v1` without source bodies or host paths. In the current
+no-witness report, all 870 requirements, all 46 normative payloads, all 167
+fixtures (86 valid, 80 invalid, and one complete project), and all 144
+behavioural scenarios are `justified-gap`. This is the honest result of the
+reference evidence recording implementation results as not executed and tests
+as planned; it is not a conformance pass. An implementation/test witness may
+promote only the exact digest-matched boundary it names. Skipped, specified, or
+missing runtime evidence cannot be promoted to `Executed`.
+
+The current bounded harness evidence was separately observed with the exact
+reference bundle:
+
+```text
+ORNA_REFERENCE_DIR=<reference-bundle> cargo test --locked --offline \
+  -p orna-conformance-v1 --test reference_corpus
+ORNA_REFERENCE_DIR=<reference-bundle> cargo test --locked --offline \
+  -p orna-conformance-v1 --test runtime_scenarios
+```
+
+The exact-bundle traceability command and the focused `reference_corpus` suite
+passed in this audit; the latter ran 11 tests. The `runtime_scenarios` command
+is shown for reproducibility, but its status is not claimed here. The passing
+checks verify corpus loading, evidence redaction, witness fencing, and the rule
+that skipped or unimplemented work is not a pass. They do not establish full
+Orna 1.0.0 language, runtime, serving, storage, security, or interoperability
+conformance; those claims still require their own executed evidence.
+
 ## Linux distribution artifact
 
 The checked-in `packaging/linux/` command builds the smallest accepted Linux
