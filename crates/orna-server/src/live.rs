@@ -235,6 +235,7 @@ impl LiveOnceHost {
                 issuer: SystemCredentialIssuer::default(),
                 deletion,
                 application,
+                delivering_upgrades: BTreeMap::new(),
             },
             Rc::clone(&registry),
             retirement_ack_receiver,
@@ -343,13 +344,14 @@ impl LiveOnceHost {
                     let task = workers.spawn_local(async move {
                         serve_socket_worker(
                             stream,
-                            actor,
+                            actor.clone(),
                             retirement,
                             worker_registry,
                             worker_id,
                             cancellation_receiver,
                         )
                         .await;
+                        actor_worker_exited(&actor, worker_id).await;
                         worker_id
                     });
                     registry.borrow_mut().bind_task(worker_id, task.id());
@@ -492,6 +494,10 @@ struct ConcurrentHostState {
     issuer: SystemCredentialIssuer,
     deletion: HostDeletion,
     application: SharedApplication,
+    // This is the executable half of the handshake linearization barrier.
+    // It pairs the worker that may write a provisional 101 with the exact
+    // transport reservation until commit or serialized abort.
+    delivering_upgrades: BTreeMap<u64, orna_live_v1::WebSocketUpgrade>,
 }
 
 enum ActorCommand {
@@ -508,14 +514,25 @@ enum ActorCommand {
             Result<orna_live_v1::WebSocketUpgrade, orna_live_v1::WireResponse>,
         >,
     },
+    Deliver {
+        upgrade: orna_live_v1::WebSocketUpgrade,
+        worker_id: u64,
+        reply: futures::channel::oneshot::Sender<Result<(), ()>>,
+    },
     Commit {
         upgrade: orna_live_v1::WebSocketUpgrade,
+        worker_id: u64,
         reply: futures::channel::oneshot::Sender<
             Result<(orna_live_v1::WireResponse, RetirementGates), ()>,
         >,
     },
     Abort {
         upgrade: orna_live_v1::WebSocketUpgrade,
+        worker_id: u64,
+        reply: futures::channel::oneshot::Sender<()>,
+    },
+    WorkerExited {
+        worker_id: u64,
         reply: futures::channel::oneshot::Sender<()>,
     },
     Receive {
@@ -576,6 +593,17 @@ async fn run_host_actor(
             },
             _ = ticker.tick() => {
                 let now = system_milliseconds();
+                // The deadline revokes only the worker's right to keep
+                // delivering. Its reservation remains protected until that
+                // worker returns through Abort and the supervisor joins it.
+                let overdue = state
+                    .delivering_upgrades
+                    .iter()
+                    .filter_map(|(worker, upgrade)| (now >= upgrade.deadline()).then_some(*worker))
+                    .collect::<Vec<_>>();
+                for worker in overdue {
+                    registry.borrow_mut().cancel(worker);
+                }
                 let mut children = HostApplicationChildren::new(Rc::clone(&state.application));
                 state
                     .transport
@@ -705,11 +733,60 @@ async fn run_host_actor(
                 }
                 let _ = reply.send(result);
             }
-            ActorCommand::Commit { upgrade, reply } => {
+            ActorCommand::Deliver {
+                upgrade,
+                worker_id,
+                reply,
+            } => {
+                let accepted = !state.delivering_upgrades.contains_key(&worker_id)
+                    && state
+                        .transport
+                        .begin_websocket_upgrade_delivery(&upgrade, system_milliseconds());
+                if accepted {
+                    state.delivering_upgrades.insert(worker_id, upgrade);
+                }
+                let _ = reply.send(accepted.then_some(()).ok_or(()));
+            }
+            ActorCommand::Commit {
+                upgrade,
+                worker_id,
+                reply,
+            } => {
+                if state.delivering_upgrades.get(&worker_id) != Some(&upgrade)
+                    || !registry.borrow().may_commit(worker_id)
+                {
+                    let _ = reply.send(Err(()));
+                    continue;
+                }
+                let now = system_milliseconds();
+                // The timer is only a backstop. A Commit is itself a
+                // linearization point, so it must fence an expired delivery
+                // even when it was queued just before the next ticker turn.
+                if upgrade.is_expired(now) {
+                    registry.borrow_mut().cancel(worker_id);
+                    state.delivering_upgrades.remove(&worker_id);
+                    let _ = state.transport.finish_websocket_upgrade_delivery(&upgrade);
+                    state.transport.abort_websocket_upgrade(&upgrade);
+                    let Ok(retirement) = capture_retirement_gates(
+                        &registry,
+                        state.transport.take_retired_attachments(),
+                    ) else {
+                        let _ = reply.send(Err(()));
+                        return;
+                    };
+                    if retirement_gates.unbounded_send(retirement).is_err() {
+                        let _ = reply.send(Err(()));
+                        return;
+                    }
+                    let _ = reply.send(Err(()));
+                    continue;
+                }
                 let result = state
                     .transport
-                    .commit_websocket_upgrade(upgrade, system_milliseconds())
+                    .commit_websocket_upgrade(upgrade.clone(), now)
                     .await;
+                state.delivering_upgrades.remove(&worker_id);
+                let _ = state.transport.finish_websocket_upgrade_delivery(&upgrade);
                 let Ok(retirement) =
                     capture_retirement_gates(&registry, state.transport.take_retired_attachments())
                 else {
@@ -722,7 +799,15 @@ async fn run_host_actor(
                 };
                 let _ = reply.send(Ok((response, retirement)));
             }
-            ActorCommand::Abort { upgrade, reply } => {
+            ActorCommand::Abort {
+                upgrade,
+                worker_id,
+                reply,
+            } => {
+                if state.delivering_upgrades.get(&worker_id) == Some(&upgrade) {
+                    state.delivering_upgrades.remove(&worker_id);
+                    let _ = state.transport.finish_websocket_upgrade_delivery(&upgrade);
+                }
                 state.transport.abort_websocket_upgrade(&upgrade);
                 let Ok(retirement) =
                     capture_retirement_gates(&registry, state.transport.take_retired_attachments())
@@ -732,6 +817,25 @@ async fn run_host_actor(
                 if retirement_gates.unbounded_send(retirement).is_err() {
                     return;
                 }
+                let _ = reply.send(());
+            }
+            ActorCommand::WorkerExited { worker_id, reply } => {
+                if let Some(upgrade) = state.delivering_upgrades.remove(&worker_id) {
+                    let _ = state.transport.finish_websocket_upgrade_delivery(&upgrade);
+                    state.transport.abort_websocket_upgrade(&upgrade);
+                    let Ok(retirement) = capture_retirement_gates(
+                        &registry,
+                        state.transport.take_retired_attachments(),
+                    ) else {
+                        return;
+                    };
+                    if retirement_gates.unbounded_send(retirement).is_err() {
+                        return;
+                    }
+                }
+                // The worker waits for this reply before it returns to the
+                // JoinSet, so an aborted candidate is captured while its
+                // supervisor-owned termination gate is still available.
                 let _ = reply.send(());
             }
             ActorCommand::Receive {
@@ -1150,6 +1254,20 @@ mod shutdown_tests {
     }
 
     #[test]
+    fn deadline_cancelled_worker_cannot_commit_and_preserves_the_join_gate() {
+        let mut registry = WorkerRegistry::default();
+        let (worker_id, cancellation) = registry.register();
+        let attachment = [17; 16];
+        assert!(registry.attach(attachment, worker_id));
+        assert!(registry.may_commit(worker_id));
+
+        registry.cancel(worker_id);
+        assert_eq!(cancellation.now_or_never(), Some(Ok(())));
+        assert!(!registry.may_commit(worker_id));
+        assert!(registry.take_retired(vec![attachment]).is_ok());
+    }
+
+    #[test]
     fn cancellation_during_upgrade_flush_keeps_the_handshake_undelivered() {
         run_local(async {
             let response = b"HTTP/1.1 101 Switching Protocols\r\n\r\n";
@@ -1376,7 +1494,7 @@ mod shutdown_tests {
 }
 
 struct WorkerSlot {
-    cancellation: futures::channel::oneshot::Sender<()>,
+    cancellation: Option<futures::channel::oneshot::Sender<()>>,
     termination: futures::channel::oneshot::Receiver<Result<(), ()>>,
 }
 
@@ -1398,7 +1516,7 @@ impl WorkerRegistry {
         self.workers.insert(
             id,
             WorkerSlot {
-                cancellation,
+                cancellation: Some(cancellation),
                 termination,
             },
         );
@@ -1475,7 +1593,9 @@ impl WorkerRegistry {
             let Some(slot) = self.workers.remove(&id) else {
                 return Err(());
             };
-            let _ = slot.cancellation.send(());
+            if let Some(cancellation) = slot.cancellation {
+                let _ = cancellation.send(());
+            }
             terminations.push(RetirementGate {
                 attachment,
                 completion: slot.termination,
@@ -1485,10 +1605,31 @@ impl WorkerRegistry {
     }
 
     fn cancel_all(&mut self) {
-        let workers = std::mem::take(&mut self.workers);
-        for slot in workers.into_values() {
-            let _ = slot.cancellation.send(());
+        for slot in self.workers.values_mut() {
+            if let Some(cancellation) = slot.cancellation.take() {
+                let _ = cancellation.send(());
+            }
         }
+    }
+
+    /// Deadline cancellation revokes a worker's ability to extend a protected
+    /// delivery window. Its slot remains registered so the actor can still
+    /// capture the real supervisor join during the subsequent abort.
+    fn cancel(&mut self, id: u64) {
+        if let Some(slot) = self.workers.get_mut(&id)
+            && let Some(cancellation) = slot.cancellation.take()
+        {
+            let _ = cancellation.send(());
+        }
+    }
+
+    /// A consumed cancellation sender is the actor's fencing record: a
+    /// deadline-cancelled worker may clean up its reservation, but cannot
+    /// commit it from an already queued command.
+    fn may_commit(&self, id: u64) -> bool {
+        self.workers
+            .get(&id)
+            .is_some_and(|slot| slot.cancellation.is_some())
     }
 }
 
@@ -1818,25 +1959,32 @@ async fn serve_websocket_worker<C>(
     let encoded = match response.encode_http(TransportLimits::default()) {
         Ok(encoded) => encoded,
         Err(_) => {
-            actor_abort(&actor, prepared).await;
+            actor_abort(&actor, prepared, worker_id).await;
             return;
         }
     };
+    // Enter the actor-owned barrier before a byte of 101 can be exposed.
+    // From this point expiry and same-session lifecycle operations leave the
+    // exact reservation to this worker until it commits or aborts.
+    if actor_deliver(&actor, &prepared, worker_id).await.is_err() {
+        actor_abort(&actor, prepared, worker_id).await;
+        return;
+    }
     if deliver_websocket_upgrade_response(&mut writer, &encoded, cancellation)
         .await
         .is_err()
     {
-        actor_abort(&actor, prepared).await;
+        actor_abort(&actor, prepared, worker_id).await;
         return;
     }
     if response.status != 101 {
-        actor_abort(&actor, prepared).await;
+        actor_abort(&actor, prepared, worker_id).await;
         return;
     }
     // Commit deliberately cannot be interrupted. Once the 101 response has
     // crossed the delivery boundary, abandoning its actor turn could leave an
     // attachment without a socket owner.
-    let retirement = match actor_commit(&actor, prepared).await {
+    let retirement = match actor_commit(&actor, prepared, worker_id).await {
         Ok(retirement) => retirement,
         Err(()) => {
             registry.borrow_mut().detach(attachment, worker_id);
@@ -1909,16 +2057,37 @@ async fn actor_begin(
 async fn actor_commit(
     actor: &futures::channel::mpsc::UnboundedSender<ActorCommand>,
     upgrade: orna_live_v1::WebSocketUpgrade,
+    worker_id: u64,
 ) -> Result<RetirementGates, ()> {
     let (sender, receiver) = futures::channel::oneshot::channel();
     actor
         .unbounded_send(ActorCommand::Commit {
             upgrade,
+            worker_id,
             reply: sender,
         })
         .map_err(|_| ())?;
     let (_, retirement) = receiver.await.map_err(|_| ())?.map_err(|_| ())?;
     Ok(retirement)
+}
+
+/// Enters the actor-owned delivery-to-commit barrier before the worker writes
+/// a provisional 101. This wait is deliberately non-cancellable: cancellation
+/// before delivery still has to return through the matching Abort command.
+async fn actor_deliver(
+    actor: &futures::channel::mpsc::UnboundedSender<ActorCommand>,
+    upgrade: &orna_live_v1::WebSocketUpgrade,
+    worker_id: u64,
+) -> Result<(), ()> {
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    actor
+        .unbounded_send(ActorCommand::Deliver {
+            upgrade: upgrade.clone(),
+            worker_id,
+            reply: sender,
+        })
+        .map_err(|_| ())?;
+    receiver.await.map_err(|_| ())?
 }
 
 /// Serializes abandonment of an opaque admission with the actor. This wait is
@@ -1927,11 +2096,32 @@ async fn actor_commit(
 async fn actor_abort(
     actor: &futures::channel::mpsc::UnboundedSender<ActorCommand>,
     upgrade: orna_live_v1::WebSocketUpgrade,
+    worker_id: u64,
 ) {
     let (sender, receiver) = futures::channel::oneshot::channel();
     if actor
         .unbounded_send(ActorCommand::Abort {
             upgrade,
+            worker_id,
+            reply: sender,
+        })
+        .is_ok()
+    {
+        let _ = receiver.await;
+    }
+}
+
+/// Makes worker exit observable to the actor before the outer supervisor can
+/// join it. If the worker died while holding a delivery barrier, this drives
+/// the reservation through abort and captures its retirement gate first.
+async fn actor_worker_exited(
+    actor: &futures::channel::mpsc::UnboundedSender<ActorCommand>,
+    worker_id: u64,
+) {
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    if actor
+        .unbounded_send(ActorCommand::WorkerExited {
+            worker_id,
             reply: sender,
         })
         .is_ok()
