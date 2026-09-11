@@ -5,6 +5,7 @@ use super::sealed_server_contract::{
     resource_values_from_server_result,
 };
 use super::*;
+use orna_core::value::{ResultColumn, ResultRow};
 
 /// Internal result boundary for one sealed SERVER target.
 ///
@@ -14,6 +15,38 @@ use super::*;
 pub(super) enum SealedServerTargetResult {
     Values(Vec<RuntimeValue>),
     Rows(ResultRows),
+}
+
+/// Rebuilds a mutation's flat returned values as its declared bounded row
+/// shape. Mutation rows are materialised results, not resource-stream items;
+/// retaining the declaration here prevents the sealed path from narrowing a
+/// result to an arbitrary first value before presentation.
+fn materialize_mutation_rows(
+    active: &ActiveDatabaseRevision,
+    function: FunctionId,
+    values: Vec<RuntimeValue>,
+) -> Result<ResultRows, ()> {
+    let definition = active.catalogue().function_by_id(function).ok_or(())?;
+    let FunctionReturn::Rows(columns) = definition.return_type() else {
+        return Err(());
+    };
+    if columns.is_empty() {
+        return Err(());
+    }
+    let columns = columns
+        .iter()
+        .map(|column| ResultColumn::new(column.name(), column.resolved_type(), false))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ())?;
+    let width = columns.len();
+    let chunks = values.chunks_exact(width);
+    if !chunks.remainder().is_empty() {
+        return Err(());
+    }
+    let rows = chunks
+        .map(|values| ResultRow::new(values.iter().cloned()))
+        .collect::<Vec<_>>();
+    ResultRows::new(columns, rows).map_err(|_| ())
 }
 
 pub(super) async fn execute_sealed_server_target(
@@ -106,6 +139,24 @@ pub(super) async fn execute_sealed_server_target(
             return Err(SealedInvocationFailureClass::Internal);
         }
         return Err(SealedInvocationFailureClass::Target);
+    };
+    let result = if preserve_rows && mutation.is_some() {
+        match result {
+            SealedServerTargetResult::Values(values) => {
+                match materialize_mutation_rows(active, function, values) {
+                    Ok(rows) => SealedServerTargetResult::Rows(rows),
+                    Err(()) => {
+                        if savepoint.rollback().await.is_err() {
+                            return Err(SealedInvocationFailureClass::Internal);
+                        }
+                        return Err(SealedInvocationFailureClass::Target);
+                    }
+                }
+            }
+            SealedServerTargetResult::Rows(rows) => SealedServerTargetResult::Rows(rows),
+        }
+    } else {
+        result
     };
     let result = match result {
         SealedServerTargetResult::Values(values) => {
