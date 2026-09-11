@@ -46,11 +46,27 @@ impl SourceSpan {
     }
 }
 fn position_at(source: &str, at: usize) -> SourcePosition {
-    let before = &source[..at.min(source.len())];
-    SourcePosition {
-        line: before.bytes().filter(|b| *b == b'\n').count() as u32 + 1,
-        column: before.rsplit('\n').next().unwrap_or("").chars().count() as u32 + 1,
+    // Offsets produced by the lexer and parser are always UTF-8 boundaries,
+    // but `SourceSpan` is public and callers can construct an unchecked span.
+    // Walk complete scalars instead of slicing at `at`; this keeps diagnostic
+    // annotation total for malformed local spans, which admission will reject
+    // later, while leaving valid boundary coordinates unchanged.
+    let at = at.min(source.len());
+    let mut line = 1;
+    let mut column = 1;
+    for (index, scalar) in source.char_indices() {
+        let end = index + scalar.len_utf8();
+        if end > at {
+            break;
+        }
+        if scalar == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
     }
+    SourcePosition { line, column }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
