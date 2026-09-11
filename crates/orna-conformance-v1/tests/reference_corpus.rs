@@ -414,3 +414,79 @@ fn report_reconciles_claimed_scenarios_with_passed_runtime_evidence() {
         ["PIPE-001"].into_iter().map(String::from).collect()
     );
 }
+
+struct FailedScenario;
+impl ConformanceAdapter for FailedScenario {
+    type Diagnostic = serde_json::Value;
+
+    fn diagnostic_code(&self, _: &Self::Diagnostic) -> String {
+        "E-TEST".into()
+    }
+
+    fn diagnostic_message(&self, _: &Self::Diagnostic) -> String {
+        "scenario failed".into()
+    }
+
+    fn parse(&mut self, _: &SourceUnit) -> StageOutcome<Self::Diagnostic> {
+        StageOutcome::Passed
+    }
+
+    fn resolve(&mut self, _: &SourceUnit) -> StageOutcome<Self::Diagnostic> {
+        StageOutcome::Passed
+    }
+
+    fn typecheck(&mut self, _: &SourceUnit) -> StageOutcome<Self::Diagnostic> {
+        StageOutcome::Passed
+    }
+
+    fn evaluate(&mut self, _: &SourceUnit) -> StageOutcome<Self::Diagnostic> {
+        StageOutcome::Passed
+    }
+
+    fn validate_row(&mut self, _: &SourceUnit) -> StageOutcome<Self::Diagnostic> {
+        StageOutcome::Passed
+    }
+
+    fn validate_rows(&mut self, _: &ProjectUnit) -> StageOutcome<Self::Diagnostic> {
+        StageOutcome::Passed
+    }
+
+    fn run_scenario(&mut self, scenario: &Scenario) -> StageOutcome<Self::Diagnostic> {
+        match scenario.id.as_str() {
+            "PIPE-001" => StageOutcome::Failed(serde_json::json!({"code": "E-TEST"})),
+            "PIPE-002" => StageOutcome::Passed,
+            _ => StageOutcome::Skipped {
+                reason: "scenario omitted by focused predicate test".into(),
+            },
+        }
+    }
+}
+
+#[test]
+fn report_reconciliation_excludes_failed_runtime_claims() {
+    let harness = Harness::new(Corpus::load_default().expect("reference corpus loads")).with_claim(
+        ImplementationClaim {
+            implementation_id: "test-runner".into(),
+            profile: "test".into(),
+            command: "test-runner".into(),
+            environment: std::collections::BTreeMap::new(),
+            executed_scenario_contracts: vec!["PIPE-001".into(), "PIPE-002".into()],
+        },
+    );
+    let mut adapter = FailedScenario;
+    let report = harness.run(&mut adapter);
+
+    assert_eq!(
+        report.implementation_claim.executed_scenario_contracts,
+        vec!["PIPE-002"]
+    );
+    assert_eq!(
+        report
+            .scenarios
+            .iter()
+            .find(|scenario| scenario.scenario == "PIPE-001")
+            .expect("failed scenario is reported")
+            .status,
+        EvidenceStatus::Failed
+    );
+}
