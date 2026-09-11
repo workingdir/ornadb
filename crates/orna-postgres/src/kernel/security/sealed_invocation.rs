@@ -17,6 +17,8 @@ pub struct SealedInvocationAdmissionContext {
     capture: CwdCapture,
     encoded_snapshot: Vec<u8>,
     runtime_generation: i64,
+    writer_lease_owner: Option<[u8; 16]>,
+    writer_lease_epoch: Option<i64>,
 }
 
 impl SealedInvocationAdmissionContext {
@@ -60,7 +62,41 @@ impl SealedInvocationAdmissionContext {
             capture,
             encoded_snapshot,
             runtime_generation,
+            writer_lease_owner: None,
+            writer_lease_epoch: None,
         })
+    }
+
+    /// Derives admission evidence while the executable owner still holds its
+    /// durable writer lease. The kernel stores this tuple as private evidence;
+    /// it does not treat the tuple as proof that a later owner takeover was
+    /// legitimate.
+    #[doc(hidden)]
+    pub fn from_runtime_capture_with_writer_lease(
+        capture: CwdCapture,
+        owner_id: [u8; 16],
+        epoch: u64,
+    ) -> Result<Self, PostgresKernelError> {
+        if owner_id == [0; 16] || epoch == 0 {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: "sealed invocation admission",
+                record: "writer lease".to_owned(),
+                rule: "admission writer lease evidence must have a nonzero owner and epoch",
+            });
+        }
+        let mut context = Self::from_runtime_capture(capture)?;
+        context.writer_lease_owner = Some(owner_id);
+        context.writer_lease_epoch =
+            Some(
+                epoch
+                    .try_into()
+                    .map_err(|_| PostgresKernelError::DurableInvariant {
+                        relation: "sealed invocation admission",
+                        record: "writer lease".to_owned(),
+                        rule: "admission writer lease epoch must fit PostgreSQL bigint",
+                    })?,
+            );
+        Ok(context)
     }
 
     /// Returns the authoritative capture retained for this admission.
@@ -87,6 +123,19 @@ impl SealedInvocationAdmissionContext {
     pub const fn runtime_generation(&self) -> i64 {
         self.runtime_generation
     }
+
+    /// Returns the private writer-lease owner captured at admission, when the
+    /// executable composition supplied one.
+    #[doc(hidden)]
+    pub const fn writer_lease_owner(&self) -> Option<[u8; 16]> {
+        self.writer_lease_owner
+    }
+
+    /// Returns the private writer-lease epoch captured at admission.
+    #[doc(hidden)]
+    pub const fn writer_lease_epoch(&self) -> Option<i64> {
+        self.writer_lease_epoch
+    }
 }
 
 fn sealed_invocation_admission_evidence(
@@ -99,22 +148,42 @@ fn sealed_invocation_admission_evidence(
         Option<Vec<u8>>,
         Option<Vec<u8>>,
         Option<i64>,
+        Option<Vec<u8>>,
+        Option<i64>,
     ),
     PostgresKernelError,
 > {
     if !resolved_target {
-        return Ok((None, None, None, None));
+        return Ok((None, None, None, None, None, None));
     }
     let context = context.ok_or_else(|| PostgresKernelError::DurableInvariant {
         relation: "_orna_kernel.sealed_invocation_lifecycle",
         record: invocation.canonical(),
         rule: "resolved sealed invocation admission requires trusted runtime capture evidence",
     })?;
+    let owner =
+        context
+            .writer_lease_owner()
+            .ok_or_else(|| PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.sealed_invocation_lifecycle",
+                record: invocation.canonical(),
+                rule: "resolved sealed invocation admission requires exact writer lease evidence",
+            })?;
+    let epoch =
+        context
+            .writer_lease_epoch()
+            .ok_or_else(|| PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.sealed_invocation_lifecycle",
+                record: invocation.canonical(),
+                rule: "resolved sealed invocation admission requires exact writer lease evidence",
+            })?;
     Ok((
         Some(context.encoded_snapshot().to_vec()),
         Some(context.generation_digest().to_vec()),
         Some(context.runtime_id().to_vec()),
         Some(context.runtime_generation()),
+        Some(owner.to_vec()),
+        Some(epoch),
     ))
 }
 
@@ -148,6 +217,44 @@ mod admission_context_tests {
         assert_eq!(context.generation_digest(), [0x33; 32]);
         assert_eq!(context.runtime_id(), [0x22; 16]);
         assert_eq!(context.runtime_generation(), 7);
+        assert_eq!(context.writer_lease_owner(), None);
+        assert_eq!(context.writer_lease_epoch(), None);
+    }
+
+    #[test]
+    fn admission_context_retains_exact_writer_lease_evidence() {
+        let context = SealedInvocationAdmissionContext::from_runtime_capture_with_writer_lease(
+            capture(),
+            [0x44; 16],
+            9,
+        )
+        .expect("writer lease evidence");
+        assert_eq!(context.writer_lease_owner(), Some([0x44; 16]));
+        assert_eq!(context.writer_lease_epoch(), Some(9));
+        let evidence = sealed_invocation_admission_evidence(
+            Some(&context),
+            true,
+            InvocationId::from_bytes([0x55; 16]),
+        )
+        .expect("lifecycle evidence");
+        assert_eq!(evidence.4, Some(vec![0x44; 16]));
+        assert_eq!(evidence.5, Some(9));
+    }
+
+    #[test]
+    fn resolved_admission_rejects_capture_without_writer_lease_evidence() {
+        let context = SealedInvocationAdmissionContext::from_runtime_capture(capture())
+            .expect("capture must encode canonically");
+        let error = sealed_invocation_admission_evidence(
+            Some(&context),
+            true,
+            InvocationId::from_bytes([0x66; 16]),
+        )
+        .expect_err("resolved lifecycle evidence must retain its lease");
+        assert!(matches!(
+            error,
+            PostgresKernelError::DurableInvariant { .. }
+        ));
     }
 
     #[test]
@@ -169,7 +276,7 @@ mod admission_context_tests {
         assert_eq!(
             sealed_invocation_admission_evidence(None, false, InvocationId::new())
                 .expect("unresolved denial must remain private"),
-            (None, None, None, None)
+            (None, None, None, None, None, None)
         );
     }
 }
@@ -1211,6 +1318,8 @@ impl SealedInvocationOperation {
             Option<Vec<u8>>,
             Option<Vec<u8>>,
             Option<i64>,
+            Option<Vec<u8>>,
+            Option<i64>,
         ),
         PostgresKernelError,
     > {
@@ -1292,6 +1401,8 @@ impl SealedInvocationOperation {
             admission_generation_digest,
             admission_runtime_id,
             admission_runtime_generation,
+            admission_writer_lease_owner,
+            admission_writer_lease_epoch,
         ) = self.admission_evidence_for_lifecycle(target.is_some())?;
         let owner = self.authenticated_session.principal().to_bytes().to_vec();
         transaction
@@ -1300,8 +1411,9 @@ impl SealedInvocationOperation {
                     invocation_id, source_revision_id, catalogue_revision_id, function_id, \
                     owner_principal_id, status, admission_snapshot, \
                     admission_generation_digest, admission_runtime_id, \
-                    admission_runtime_generation\
-                 ) VALUES ($1, $2, $3, $4, $5, 'running', $6, $7, $8, $9)",
+                    admission_runtime_generation, admission_writer_lease_owner, \
+                    admission_writer_lease_epoch\
+                 ) VALUES ($1, $2, $3, $4, $5, 'running', $6, $7, $8, $9, $10, $11)",
                 &[
                     &invocation,
                     &source,
@@ -1312,6 +1424,8 @@ impl SealedInvocationOperation {
                     &admission_generation_digest,
                     &admission_runtime_id,
                     &admission_runtime_generation,
+                    &admission_writer_lease_owner,
+                    &admission_writer_lease_epoch,
                 ],
             )
             .await

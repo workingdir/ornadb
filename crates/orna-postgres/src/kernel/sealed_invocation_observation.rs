@@ -560,7 +560,8 @@ async fn load_observation_by_id(
             "SELECT source_revision_id, catalogue_revision_id, function_id, status, \
                     started_at, ended_at, admission_snapshot, \
                     admission_generation_digest, admission_runtime_id, \
-                    admission_runtime_generation \
+                    admission_runtime_generation, admission_writer_lease_owner, \
+                    admission_writer_lease_epoch \
              FROM _orna_kernel.sealed_invocation_lifecycle \
              WHERE invocation_id = $1 \
                AND source_revision_id IS NOT NULL \
@@ -578,6 +579,7 @@ async fn load_observation_by_id(
         return Ok(None);
     };
     let record = invocation.canonical();
+    validate_writer_lease_evidence(&row, &record)?;
     let capture = decode_admission_capture(&row, &record)?;
     let reference = invocation_observation_reference(&capture, invocation, &record)?;
     let source_revision =
@@ -641,6 +643,35 @@ async fn load_observation_by_id(
         ended,
         arguments,
     }))
+}
+
+fn validate_writer_lease_evidence(row: &Row, record: &str) -> Result<(), PostgresKernelError> {
+    let owner: Option<Vec<u8>> = row
+        .try_get("admission_writer_lease_owner")
+        .map_err(PostgresKernelError::Database)?;
+    let epoch: Option<i64> = row
+        .try_get("admission_writer_lease_epoch")
+        .map_err(PostgresKernelError::Database)?;
+    validate_writer_lease_evidence_fields(owner, epoch, record)
+}
+
+fn validate_writer_lease_evidence_fields(
+    owner: Option<Vec<u8>>,
+    epoch: Option<i64>,
+    record: &str,
+) -> Result<(), PostgresKernelError> {
+    match (owner, epoch) {
+        (None, None) => Ok(()),
+        (Some(owner), Some(epoch))
+            if owner.len() == 16 && owner.iter().any(|byte| *byte != 0) && epoch > 0 =>
+        {
+            Ok(())
+        }
+        _ => Err(observation_invariant(
+            record,
+            "retained lifecycle row contains malformed writer lease evidence",
+        )),
+    }
 }
 
 fn decode_admission_capture(row: &Row, record: &str) -> Result<CwdCapture, PostgresKernelError> {
@@ -1132,6 +1163,16 @@ mod tests {
             validate_invocation_argument_reference(invalid_position, &pinned_capture),
             Err(SystemReferenceError::InvalidInvocationArgumentKey)
         );
+    }
+
+    #[test]
+    fn retained_writer_lease_evidence_accepts_legacy_or_exact_pairs_only() {
+        assert!(validate_writer_lease_evidence_fields(None, None, "test").is_ok());
+        assert!(validate_writer_lease_evidence_fields(Some(vec![1; 16]), Some(2), "test").is_ok());
+        assert!(validate_writer_lease_evidence_fields(Some(vec![1; 15]), Some(2), "test").is_err());
+        assert!(validate_writer_lease_evidence_fields(Some(vec![0; 16]), Some(2), "test").is_err());
+        assert!(validate_writer_lease_evidence_fields(Some(vec![1; 16]), Some(0), "test").is_err());
+        assert!(validate_writer_lease_evidence_fields(Some(vec![1; 16]), None, "test").is_err());
     }
 
     fn observation(
