@@ -4,7 +4,11 @@
 //! validated before they become digest input, and errors describe malformed
 //! structure without echoing decoded payloads.
 
-use std::{cmp::Ordering, collections::BTreeMap, fmt};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
@@ -1448,14 +1452,16 @@ fn validate_schema(raw: &Raw) -> Result<()> {
         return Err(Error::InvalidSchema);
     }
     let mut key_ids = Vec::new();
+    let mut key_id_set = BTreeSet::new();
     for key in keys {
         let key = uuid_array(key)?;
-        if !ids.contains(&key) || key_ids.contains(&key) {
+        if !ids.contains(&key) || !key_id_set.insert(key) {
             return Err(Error::InvalidSchema);
         }
         key_ids.push(key);
     }
-    if key_ids != key_role_ids {
+    let key_role_set: BTreeSet<_> = key_role_ids.iter().copied().collect();
+    if key_id_set != key_role_set || key_ids.len() != key_role_ids.len() {
         return Err(Error::InvalidSchema);
     }
     let mut definition_ids = Vec::new();
@@ -2160,6 +2166,110 @@ mod tests {
             .is_err()
         );
     }
+    #[test]
+    fn schema_preserves_key_order_independently_of_field_order() {
+        let table = [9u8; 16];
+        let first = [1u8; 16];
+        let second = [2u8; 16];
+        let type_int = Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Int".into())]);
+        let schema = |keys: Vec<Raw>| {
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Int(1.into())),
+                (Raw::Int(1.into()), uuid_raw(table)),
+                (Raw::Int(2.into()), Raw::Array(keys)),
+                (
+                    Raw::Int(3.into()),
+                    Raw::Array(vec![
+                        Raw::Array(vec![
+                            uuid_raw(first),
+                            Raw::Text("first".into()),
+                            type_int.clone(),
+                            Raw::Int(0.into()),
+                            Raw::Array(vec![Raw::Int(0.into())]),
+                        ]),
+                        Raw::Array(vec![
+                            uuid_raw(second),
+                            Raw::Text("second".into()),
+                            type_int.clone(),
+                            Raw::Int(0.into()),
+                            Raw::Array(vec![Raw::Int(0.into())]),
+                        ]),
+                    ]),
+                ),
+                (Raw::Int(4.into()), Raw::Array(vec![])),
+            ])
+        };
+        let key_order = |descriptor: &SchemaDescriptor| {
+            let Raw::Map(entries) = descriptor.raw() else {
+                unreachable!()
+            };
+            let keys = entries
+                .iter()
+                .find(|(key, _)| int_u64(key).ok() == Some(2))
+                .map(|(_, value)| array(value).unwrap())
+                .unwrap();
+            keys.iter()
+                .map(|key| uuid_array(key).unwrap())
+                .collect::<Vec<_>>()
+        };
+
+        let forward =
+            SchemaDescriptor::new(schema(vec![uuid_raw(first), uuid_raw(second)])).unwrap();
+        let reverse =
+            SchemaDescriptor::new(schema(vec![uuid_raw(second), uuid_raw(first)])).unwrap();
+        assert_eq!(key_order(&forward), vec![first, second]);
+        assert_eq!(key_order(&reverse), vec![second, first]);
+        assert_ne!(
+            schema_identity(&forward).unwrap(),
+            schema_identity(&reverse).unwrap()
+        );
+    }
+
+    #[test]
+    fn schema_key_lists_reject_missing_duplicate_and_wrong_role_ids() {
+        let table = [9u8; 16];
+        let first = [1u8; 16];
+        let second = [2u8; 16];
+        let type_int = Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Int".into())]);
+        let schema = |keys: Vec<Raw>, second_role: i64| {
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Int(1.into())),
+                (Raw::Int(1.into()), uuid_raw(table)),
+                (Raw::Int(2.into()), Raw::Array(keys)),
+                (
+                    Raw::Int(3.into()),
+                    Raw::Array(vec![
+                        Raw::Array(vec![
+                            uuid_raw(first),
+                            Raw::Text("first".into()),
+                            type_int.clone(),
+                            Raw::Int(0.into()),
+                            Raw::Array(vec![Raw::Int(0.into())]),
+                        ]),
+                        Raw::Array(vec![
+                            uuid_raw(second),
+                            Raw::Text("second".into()),
+                            type_int.clone(),
+                            Raw::Int(second_role.into()),
+                            Raw::Array(vec![Raw::Int(0.into())]),
+                        ]),
+                    ]),
+                ),
+                (Raw::Int(4.into()), Raw::Array(vec![])),
+            ])
+        };
+
+        assert!(SchemaDescriptor::new(schema(vec![uuid_raw(first)], 0)).is_err());
+        assert!(
+            SchemaDescriptor::new(schema(
+                vec![uuid_raw(first), uuid_raw(second), uuid_raw(first)],
+                0
+            ))
+            .is_err()
+        );
+        assert!(SchemaDescriptor::new(schema(vec![uuid_raw(first), uuid_raw(second)], 1)).is_err());
+    }
+
     #[test]
     fn snapshot_vectors() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
