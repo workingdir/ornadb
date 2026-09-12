@@ -330,7 +330,10 @@ fn reconnect_success_drops_old_queued_frame_and_publishes_fresh_snapshot_atomica
         };
         assert_eq!(rotated.session_id(), session.session_id());
         assert_eq!(driver.watch(), [8; 16]);
-        assert_eq!(driver.presentation().published().unwrap().revision(), 0);
+        assert!(
+            driver.presentation().published().is_none(),
+            "fresh watch state remains empty until its complete snapshot arrives"
+        );
         assert!(matches!(
             driver.receive_once().await,
             Ok(LiveSessionEvent::SnapshotPublished { revision: 1 })
