@@ -5030,15 +5030,21 @@ fn decode_object_id(value: &str) -> Result<Vec<u8>, RepositoryError> {
 mod tests {
     use std::{
         collections::BTreeMap,
-        env, fs,
-        path::{Path, PathBuf},
+        fs,
+        path::Path,
         process::Command,
     };
+
+    #[cfg(target_os = "linux")]
+    use std::{env, path::PathBuf};
 
     use super::{
         GitIndexLock, PublicationJournal, PublicationJournalEntry, PublicationJournalStage,
         RemoteContinuity, Repository, RepositoryError, RuntimeGeneration, parse_remote_orna_refs,
     };
+
+    #[cfg(target_os = "linux")]
+    use super::GitIndexLockMarker;
 
     #[test]
     fn only_verified_remote_continuity_permits_a_continuity_claim() {
@@ -5086,6 +5092,48 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn dead_publisher_lock_bytes(binding: [u8; 32], nonce: [u8; 16]) -> Vec<u8> {
+        let mut marker = GitIndexLockMarker::new(binding).unwrap();
+        marker.pid = u32::MAX;
+        marker.nonce = nonce;
+        marker.encode()
+    }
+
+    #[test]
+    fn recovery_refuses_a_live_publishers_matching_lock() {
+        let root = tempfile::TempDir::new().unwrap();
+        let lock_path = root.path().join("index.lock");
+        let binding = [7; 32];
+        let lock = GitIndexLock::acquire_owned(lock_path.clone(), binding).unwrap();
+
+        assert!(matches!(
+            GitIndexLock::reclaim_abandoned(lock_path.clone(), binding),
+            Err(RepositoryError::GitIndexLockPresent)
+        ));
+        assert!(lock_path.is_file());
+
+        drop(lock);
+        assert!(!lock_path.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_refuses_a_lock_with_a_mismatched_journal_binding() {
+        let root = tempfile::TempDir::new().unwrap();
+        let lock_path = root.path().join("index.lock");
+        let lock_binding = [8; 32];
+        let journal_binding = [7; 32];
+        let original = dead_publisher_lock_bytes(lock_binding, [1; 16]);
+        fs::write(&lock_path, &original).unwrap();
+
+        assert!(matches!(
+            GitIndexLock::reclaim_abandoned(lock_path.clone(), journal_binding),
+            Err(RepositoryError::GitIndexLockPresent)
+        ));
+        assert_eq!(fs::read(&lock_path).unwrap(), original);
     }
 
     #[cfg(target_os = "linux")]
