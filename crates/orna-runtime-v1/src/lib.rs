@@ -221,6 +221,12 @@ CREATE TABLE IF NOT EXISTS stream_retry_claim (
     key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
     identity_id TEXT NOT NULL CHECK (length(identity_id) > 0)
 );
+CREATE TABLE IF NOT EXISTS stream_replay_claim (
+    identity_id TEXT PRIMARY KEY CHECK (length(identity_id) > 0),
+    version INTEGER NOT NULL CHECK (version >= 0),
+    owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
+    owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0)
+);
 CREATE TABLE IF NOT EXISTS stream_control (
     key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
     status INTEGER NOT NULL CHECK (status IN (1, 2))
@@ -1371,6 +1377,12 @@ pub struct StreamReplayCommit<'a> {
     pub next_digest: [u8; 32],
     pub grant: ReplayGrant,
     pub faults: &'a dyn FaultInjector,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StoredStreamReplayClaim {
+    version: u64,
+    owner: WriterLease,
 }
 
 /// Connector-owned refetch for a protected failed-delivery reference.
@@ -4215,6 +4227,10 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         transaction
+            .execute("DELETE FROM stream_replay_claim", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
             .execute(
                 "UPDATE stream_failure
                  SET version = version + 1, status = ?1
@@ -4556,6 +4572,70 @@ impl RuntimeState {
         Ok(result)
     }
 
+    /// Claims one admitted replay before reading retained data or contacting
+    /// its provider. The claim is intentionally separate from the replay
+    /// admission transition: an administrator may cancel a grant that has
+    /// not started execution, but cannot invalidate work already in flight.
+    async fn claim_stream_replay(
+        &self,
+        writer: WriterLease,
+        grant: &ReplayGrant,
+    ) -> Result<Result<(), RejectReason>, RuntimeError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, writer).await?;
+        let Some(record) = load_stream_failure(&tx, &grant.failure).await? else {
+            return Ok(Err(RejectReason::FailureMissing));
+        };
+        if record.version != grant.version {
+            return Ok(Err(RejectReason::StaleFailure));
+        }
+        if record.status != FailureStatus::Replaying {
+            return Ok(Err(RejectReason::RetryNotAllowed));
+        }
+        let changed = tx
+            .execute(
+                "INSERT OR IGNORE INTO stream_replay_claim
+                 (identity_id, version, owner_id, owner_epoch)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    stream_identity_id(&grant.failure),
+                    i64::try_from(grant.version).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    writer.owner_id.to_vec(),
+                    i64::try_from(writer.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Ok(Err(RejectReason::LeaseAlreadyHeld));
+        }
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(Ok(()))
+    }
+
+    /// Rechecks the owner and exact durable replay claim after an awaited
+    /// provider operation and before user handler code can run.
+    async fn verify_stream_replay_claim(
+        &self,
+        writer: WriterLease,
+        grant: &ReplayGrant,
+    ) -> Result<(), RuntimeError> {
+        self.require_owner(&self.connection, writer).await?;
+        let Some(claim) = load_stream_replay_claim(&self.connection, &grant.failure).await? else {
+            return Err(RuntimeError::OwnerLost);
+        };
+        if claim.version != grant.version || claim.owner != writer {
+            return Err(RuntimeError::OwnerLost);
+        }
+        Ok(())
+    }
+
     /// Executes one replay grant against its retained plaintext payload. A
     /// protected reference remains explicitly unavailable until its connector
     /// supplies a refetch implementation; it is returned to `Skipped` rather
@@ -4607,20 +4687,12 @@ impl RuntimeState {
         P: StreamFailurePayloadProvider + ?Sized,
         H: StreamHandler,
     {
-        self.require_owner(&self.connection, writer)
-            .await
-            .map_err(StreamStepError::Runtime)?;
-        let Some(record) = load_stream_failure(&self.connection, &grant.failure)
+        if let Err(reason) = self
+            .claim_stream_replay(writer, &grant)
             .await
             .map_err(StreamStepError::Runtime)?
-        else {
-            return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
-        };
-        if record.version != grant.version {
-            return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
-        }
-        if record.status != FailureStatus::Replaying {
-            return Ok(CommitResult::Rejected(RejectReason::RetryNotAllowed));
+        {
+            return Ok(CommitResult::Rejected(reason));
         }
         let payload = match load_stored_stream_failure_payload(&self.connection, &grant.failure)
             .await
@@ -4699,6 +4771,9 @@ impl RuntimeState {
                     .map_err(StreamStepError::Runtime);
             }
         };
+        self.verify_stream_replay_claim(writer, &grant)
+            .await
+            .map_err(StreamStepError::Runtime)?;
         let expected_capture = self.capture().await.map_err(StreamStepError::Runtime)?;
         let item = StreamItem {
             delivery: grant.failure.0.clone(),
@@ -8223,6 +8298,28 @@ async fn validate_recoverable_stream_attempts(connection: &Connection) -> Result
             _ => return Err(RuntimeError::RecoveryInvalid),
         }
     }
+    let mut replay_claims = connection
+        .query(
+            "SELECT 1
+             FROM stream_replay_claim AS claim
+             LEFT JOIN stream_failure AS failure
+               ON failure.identity_id = claim.identity_id
+             WHERE failure.identity_id IS NULL
+                OR failure.status != ?1
+                OR failure.version != claim.version
+             LIMIT 1",
+            params![encode_status(FailureStatus::Replaying)],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if replay_claims
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some()
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
     Ok(())
 }
 
@@ -8274,6 +8371,47 @@ async fn load_stream_failure(
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         )?,
         diagnostic: decode_diagnostic(&row, 14)?,
+    }))
+}
+
+async fn load_stream_replay_claim(
+    connection: &Connection,
+    identity: &FailureIdentity,
+) -> Result<Option<StoredStreamReplayClaim>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT version, owner_id, owner_epoch
+             FROM stream_replay_claim WHERE identity_id = ?1",
+            params![stream_identity_id(identity)],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let version = decode_u64(
+        row.get::<i64>(0)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?;
+    let owner_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let owner_epoch = decode_u64(
+        row.get::<i64>(2)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?;
+    validate_id(owner_id)?;
+    if owner_epoch == 0 {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok(Some(StoredStreamReplayClaim {
+        version,
+        owner: WriterLease {
+            owner_id,
+            epoch: owner_epoch,
+        },
     }))
 }
 
@@ -9002,6 +9140,10 @@ async fn apply_stream_intent_tx(
             if record.status != FailureStatus::Replaying {
                 return Ok(CommitResult::Rejected(RejectReason::RetryNotAllowed));
             }
+            let replay_claim = load_stream_replay_claim(connection, &failure).await?;
+            if replay_claim.is_some_and(|claim| claim.version != expected_version) {
+                return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
+            }
             connection
                 .execute(
                     "UPDATE stream_failure SET version = version + 1, status = ?2
@@ -9013,6 +9155,23 @@ async fn apply_stream_intent_tx(
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
+            if replay_claim.is_some() {
+                let deleted = connection
+                    .execute(
+                        "DELETE FROM stream_replay_claim
+                         WHERE identity_id = ?1 AND version = ?2",
+                        params![
+                            stream_identity_id(&failure),
+                            i64::try_from(expected_version)
+                                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                        ],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                if deleted != 1 {
+                    return Err(RuntimeError::RecoveryInvalid);
+                }
+            }
             Ok(CommitResult::ReplayCompleted {
                 failure: load_stream_failure(connection, &failure)
                     .await?
@@ -9035,6 +9194,10 @@ async fn apply_stream_intent_tx(
             if record.status != FailureStatus::Replaying {
                 return Ok(CommitResult::Rejected(RejectReason::RetryNotAllowed));
             }
+            let replay_claim = load_stream_replay_claim(connection, &failure).await?;
+            if replay_claim.is_some_and(|claim| claim.version != expected_version) {
+                return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
+            }
             connection
                 .execute(
                     "UPDATE stream_failure
@@ -9050,6 +9213,23 @@ async fn apply_stream_intent_tx(
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
+            if replay_claim.is_some() {
+                let deleted = connection
+                    .execute(
+                        "DELETE FROM stream_replay_claim
+                         WHERE identity_id = ?1 AND version = ?2",
+                        params![
+                            stream_identity_id(&failure),
+                            i64::try_from(expected_version)
+                                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                        ],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                if deleted != 1 {
+                    return Err(RuntimeError::RecoveryInvalid);
+                }
+            }
             Ok(CommitResult::ReplayFailed {
                 failure: load_stream_failure(connection, &failure)
                     .await?
@@ -9070,6 +9250,12 @@ async fn apply_stream_intent_tx(
             }
             if record.status != FailureStatus::Replaying {
                 return Ok(CommitResult::Rejected(RejectReason::RetryNotAllowed));
+            }
+            if let Some(replay_claim) = load_stream_replay_claim(connection, &failure).await? {
+                if replay_claim.version != expected_version {
+                    return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
+                }
+                return Ok(CommitResult::Rejected(RejectReason::LeaseAlreadyHeld));
             }
             connection
                 .execute(
