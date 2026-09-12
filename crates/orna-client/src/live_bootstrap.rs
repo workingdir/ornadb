@@ -12,6 +12,9 @@ use crate::live_session::{
     AuthenticatedLiveTransport, LiveSessionDriver, LiveSessionError, PresentRenderer,
     RequestIdAllocator,
 };
+use crate::live_transport::{LiveClient, LiveSession, LiveTransportError};
+use tokio::net::TcpStream;
+use tokio_tungstenite::MaybeTlsStream;
 
 /// Errors while admitting the initial typed subscription and snapshot.
 #[derive(Debug)]
@@ -20,6 +23,55 @@ pub enum LiveBootstrapError<E> {
     Protocol(ProtocolError),
     InvalidRequest,
     UnexpectedResponse,
+    WatchIdentity,
+}
+
+#[derive(Debug)]
+pub enum LiveReconnectCause {
+    Transport(LiveTransportError),
+    Bootstrap(LiveBootstrapError<LiveTransportError>),
+    LimitsChanged,
+    WatchIdentity,
+}
+
+pub struct LiveReconnectFailure {
+    session: LiveSession,
+    cause: LiveReconnectCause,
+}
+
+impl LiveReconnectFailure {
+    pub fn session(&self) -> &LiveSession {
+        &self.session
+    }
+
+    pub fn into_session(self) -> LiveSession {
+        self.session
+    }
+
+    pub fn cause(&self) -> &LiveReconnectCause {
+        &self.cause
+    }
+}
+
+pub enum LiveReconnectError {
+    Resume(LiveTransportError),
+    AfterResume(LiveReconnectFailure),
+}
+
+impl LiveReconnectError {
+    pub fn rotated_session(&self) -> Option<&LiveSession> {
+        match self {
+            Self::Resume(_) => None,
+            Self::AfterResume(failure) => Some(failure.session()),
+        }
+    }
+
+    pub fn into_rotated_session(self) -> Option<LiveSession> {
+        match self {
+            Self::Resume(_) => None,
+            Self::AfterResume(failure) => Some(failure.into_session()),
+        }
+    }
 }
 
 /// A binary transport which returns the bootstrap snapshot once, then
@@ -149,5 +201,88 @@ where
             renderer,
             request_ids,
         )
+    }
+
+    pub fn replace_driver<R, A>(
+        self,
+        driver: &mut LiveSessionDriver<PrefetchedBinaryTransport<I>, R, A>,
+    ) -> Result<(), LiveBootstrapError<I::Error>>
+    where
+        R: PresentRenderer,
+        A: RequestIdAllocator,
+    {
+        if self.watch == driver.watch() {
+            return Err(LiveBootstrapError::WatchIdentity);
+        }
+        if self.limits != driver.limits() {
+            return Err(LiveBootstrapError::UnexpectedResponse);
+        }
+        driver
+            .replace_authenticated_attachment_with_watch(self.transport, self.watch)
+            .map_err(|_| LiveBootstrapError::WatchIdentity)
+    }
+}
+
+impl LiveClient {
+    /// Resumes the HTTP session, opens a new authenticated WebSocket, admits a
+    /// fresh subscription, and only then replaces the existing driver.
+    pub async fn reconnect_driver<R, A>(
+        &self,
+        session: &LiveSession,
+        driver: &mut LiveSessionDriver<
+            PrefetchedBinaryTransport<
+                crate::live_transport::AuthenticatedWebSocketTransport<MaybeTlsStream<TcpStream>>,
+            >,
+            R,
+            A,
+        >,
+        request: Envelope,
+    ) -> Result<LiveSession, LiveReconnectError>
+    where
+        R: PresentRenderer,
+        A: RequestIdAllocator,
+    {
+        let mut replacement = Some(
+            self.resume_session(session)
+                .await
+                .map_err(LiveReconnectError::Resume)?,
+        );
+        if replacement.as_ref().unwrap().limits() != driver.limits() {
+            return Err(LiveReconnectError::AfterResume(LiveReconnectFailure {
+                session: replacement.take().unwrap(),
+                cause: LiveReconnectCause::LimitsChanged,
+            }));
+        }
+        let replacement_limits = replacement.as_ref().unwrap().limits();
+        let transport = match self.connect(replacement.as_ref().unwrap()).await {
+            Ok(transport) => transport,
+            Err(error) => {
+                return Err(LiveReconnectError::AfterResume(LiveReconnectFailure {
+                    session: replacement.take().unwrap(),
+                    cause: LiveReconnectCause::Transport(error),
+                }));
+            }
+        };
+        let attachment =
+            match BootstrappedLiveAttachment::start(transport, request, replacement_limits).await {
+                Ok(attachment) => attachment,
+                Err(error) => {
+                    return Err(LiveReconnectError::AfterResume(LiveReconnectFailure {
+                        session: replacement.take().unwrap(),
+                        cause: LiveReconnectCause::Bootstrap(error),
+                    }));
+                }
+            };
+        if let Err(error) = attachment.replace_driver(driver) {
+            let cause = match error {
+                LiveBootstrapError::WatchIdentity => LiveReconnectCause::WatchIdentity,
+                other => LiveReconnectCause::Bootstrap(other),
+            };
+            return Err(LiveReconnectError::AfterResume(LiveReconnectFailure {
+                session: replacement.take().unwrap(),
+                cause,
+            }));
+        }
+        Ok(replacement.take().unwrap())
     }
 }
