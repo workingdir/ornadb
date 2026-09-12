@@ -3604,7 +3604,10 @@ impl Parser {
             TokenKind::Punct("!") | TokenKind::Punct("-") | TokenKind::Punct("+")
         ) {
             self.bump();
-            let rhs = self.recurse(|parser| parser.prefix())?;
+            // Unary operators bind below the complete postfix spine. This
+            // keeps `-value.field`, `-value.call()`, and `-value[index]`
+            // equivalent to applying the operator to the selected value.
+            let rhs = self.recurse(|parser| parser.pratt(10))?;
             if !self.within_depth(expr_depth(&rhs) + 1) {
                 return None;
             }
