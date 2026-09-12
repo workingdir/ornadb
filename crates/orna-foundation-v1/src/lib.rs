@@ -113,6 +113,20 @@ pub enum StreamKind {}
 pub enum CheckpointKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FailureKind {}
+/// Compile-time marker for `sys.AssertionRef`.
+///
+/// This marker is non-authoritative: attaching it to a generic row reference
+/// does not validate a physical relation identity, row existence, provenance,
+/// or authorization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AssertionKind {}
+/// Compile-time marker for `sys.ExpressionRef` coordinates.
+///
+/// `sys.ExpressionRef` is an opaque, snapshot-pinned system value. This
+/// compatibility marker deliberately adds no physical relation identity or
+/// validation and grants no authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExpressionKind {}
 /// Typed portable row references. `SnapshotRef` is a snapshot metadata row
 /// reference, deliberately distinct from `CanonicalSnapshot` pin bytes.
 pub type FileRef = TypedRowRef<FileKind>;
@@ -122,6 +136,12 @@ pub type ObjectRef = TypedRowRef<ObjectKind>;
 pub type DefinitionRef = TypedRowRef<DefinitionKind>;
 pub type TypeRef = TypedRowRef<TypeKind>;
 pub type TraceRef = TypedRowRef<TraceKind>;
+/// Typed `sys.RowRef<sys.Assertion>` marker. This is not proof that the
+/// referenced row is an assertion, exists, or authorizes assertion handling.
+pub type AssertionRef = TypedRowRef<AssertionKind>;
+/// Typed marker for `sys.ExpressionRef` coordinates. This is not proof that
+/// an opaque expression reference is valid, exists, or authorizes evaluation.
+pub type ExpressionRef = TypedRowRef<ExpressionKind>;
 /// Typed `sys.RowRef<sys.Function>` marker. This is not proof that the
 /// referenced row is a function, exists, or may be invoked.
 pub type FunctionRef = TypedRowRef<FunctionKind>;
@@ -1649,12 +1669,17 @@ mod tests {
         assert_eq!(decoded, reference);
 
         let function: FunctionRef = validate_reference_context(decoded.clone(), &capture).unwrap();
+        let assertion: AssertionRef =
+            validate_reference_context(decoded.clone(), &capture).unwrap();
+        let expression: ExpressionRef =
+            validate_reference_context(decoded.clone(), &capture).unwrap();
         let invocation: InvocationRef =
             validate_reference_context(decoded.clone(), &capture).unwrap();
         let checkpoint: CheckpointRef =
             validate_reference_context(decoded.clone(), &capture).unwrap();
         let failure: FailureRef = validate_reference_context(decoded.clone(), &capture).unwrap();
         assert_eq!(function.as_row_ref(), invocation.as_row_ref());
+        assert_eq!(assertion.as_row_ref(), expression.as_row_ref());
         assert_eq!(checkpoint.as_row_ref(), failure.as_row_ref());
 
         let wrong_database =
