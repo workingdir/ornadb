@@ -296,6 +296,22 @@ fn validate_schema(
                     field: field.id,
                 });
             }
+            if let Some(fallback) = &field.introduction_fallback {
+                if fallback.encode().is_err() {
+                    return Err(PlanningError::IncompatibleField {
+                        table: table.id,
+                        field: field.id,
+                        reason: "field introduction fallback is not canonical",
+                    });
+                }
+                if field.optional || field.role != FieldRole::Stored {
+                    return Err(PlanningError::IncompatibleField {
+                        table: table.id,
+                        field: field.id,
+                        reason: "field introduction fallback requires a required stored field",
+                    });
+                }
+            }
         }
     }
     Ok(())
@@ -336,6 +352,13 @@ fn compare_fields(
                 table,
                 field: id,
                 reason: "optional field became required",
+            });
+        }
+        if old_field.introduction_fallback != new_field.introduction_fallback {
+            return Err(PlanningError::IncompatibleField {
+                table,
+                field: id,
+                reason: "field introduction fallback changed",
             });
         }
         if old_field.name != new_field.name {
@@ -489,6 +512,18 @@ mod tests {
             rekeys,
         }
     }
+    fn field_with_fallback(n: u8, name: &str) -> Field {
+        Field {
+            id: id(n),
+            name: name.into(),
+            ty: FieldType::Str,
+            role: FieldRole::Stored,
+            optional: false,
+            introduction_fallback: Some(
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Text("GB".into())).unwrap(),
+            ),
+        }
+    }
 
     #[test]
     fn table_driven_compatible_changes_are_planned() {
@@ -542,6 +577,70 @@ mod tests {
         for next in cases {
             assert!(plan(&old, &next, &request(vec![])).is_err());
         }
+    }
+
+    #[test]
+    fn existing_field_fallback_is_immutable() {
+        let old = schema(table(true, vec![field_with_fallback(2, "country")]));
+        let mut changed_field = field_with_fallback(2, "country");
+        changed_field.introduction_fallback =
+            Some(CanonicalValue::new(orna_foundation_v1::OvbRaw::Text("US".into())).unwrap());
+        let changed = schema(table(true, vec![changed_field]));
+        let removed = schema(table(true, vec![field(2, "country", false)]));
+        let added = schema(table(true, vec![field_with_fallback(2, "country")]));
+        let without_fallback = schema(table(true, vec![field(2, "country", false)]));
+
+        for (from, to) in [
+            (&old, &changed),
+            (&old, &removed),
+            (&without_fallback, &added),
+        ] {
+            assert!(matches!(
+                plan(from, to, &request(vec![])),
+                Err(PlanningError::IncompatibleField {
+                    reason: "field introduction fallback changed",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn fallback_metadata_requires_a_required_stored_field() {
+        let old = schema(table(true, vec![field(2, "name", false)]));
+        let mut optional = field_with_fallback(3, "email");
+        optional.optional = true;
+        let mut key = field_with_fallback(3, "id");
+        key.role = FieldRole::Key;
+        let mut computed = field_with_fallback(3, "display_name");
+        computed.role = FieldRole::Computed;
+
+        for candidate in [optional, key, computed] {
+            let next = schema(table(true, vec![field(2, "name", false), candidate]));
+            assert!(matches!(
+                plan(&old, &next, &request(vec![])),
+                Err(PlanningError::IncompatibleField {
+                    reason: "field introduction fallback requires a required stored field",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn required_stored_field_with_canonical_fallback_has_one_operation() {
+        let old = schema(table(true, vec![field(2, "name", false)]));
+        let fallback = field_with_fallback(3, "country");
+        let next = schema(table(true, vec![field(2, "name", false), fallback.clone()]));
+
+        let plan = plan(&old, &next, &request(vec![])).unwrap();
+        assert_eq!(
+            plan.operations(),
+            &[MigrationOperation::AddRequiredFieldWithFallback {
+                table: id(1),
+                field: fallback,
+            }]
+        );
     }
 
     #[test]
