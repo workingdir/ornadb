@@ -868,6 +868,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                     return CommitResult::Rejected(RejectReason::RetryNotAllowed);
                 }
                 record.version += 1;
+                record.attempts += 1;
                 record.status = FailureStatus::Replaying;
                 CommitResult::ReplayGranted {
                     grant: ReplayGrant {
@@ -910,7 +911,6 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                     return CommitResult::Rejected(RejectReason::RetryNotAllowed);
                 }
                 record.version += 1;
-                record.attempts += 1;
                 record.status = FailureStatus::Skipped;
                 record.diagnostic = diagnostic;
                 CommitResult::ReplayFailed {
@@ -931,7 +931,6 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                     return CommitResult::Rejected(RejectReason::RetryNotAllowed);
                 }
                 record.version += 1;
-                record.attempts += 1;
                 record.status = FailureStatus::Skipped;
                 CommitResult::ReplayCancelled {
                     failure: record.clone(),
