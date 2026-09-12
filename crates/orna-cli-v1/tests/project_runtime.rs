@@ -39,6 +39,17 @@ fn invoke(directory: &std::path::Path, command: &str, argument: &str) -> Output 
         .expect("CLI process")
 }
 
+fn initialize_project(directory: &std::path::Path) {
+    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["init", directory.to_str().expect("UTF-8 path")])
+        .output()
+        .expect("CLI initialization");
+    assert!(output.status.success(), "init stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"initialized Orna repository\n");
+    assert!(output.stderr.is_empty());
+}
+
 fn identity(directory: &std::path::Path) -> (RuntimeIdentity, [u8; 32]) {
     let repository = Repository::discover(directory).expect("repository");
     let metadata = inspect_metadata(&repository)
@@ -329,6 +340,73 @@ fn binary_managed_local_repl_executes_integer_list_aggregates() {
         "managed-local REPL must preserve typed aggregate results and null extrema"
     );
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_run_executes_a_named_public_project_function() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        "use library; pub fn main(): Int = library.answer();",
+    )
+    .expect("root source");
+    std::fs::write(
+        directory.path().join("library.orna"),
+        "pub fn answer(): Int = 42;",
+    )
+    .expect("library source");
+    initialize_project(directory.path());
+
+    let output = invoke(directory.path(), "run", "library.answer");
+
+    assert!(output.status.success(), "run stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_run_without_a_target_executes_root_main() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        "pub fn main(): Int = 42;",
+    )
+    .expect("root source");
+    initialize_project(directory.path());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+        ])
+        .output()
+        .expect("CLI process");
+
+    assert!(output.status.success(), "run stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_run_rejects_private_function_targets_before_runtime_admission() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        "fn hidden(): Int = 42; pub fn main(): Int = hidden();",
+    )
+    .expect("root source");
+    initialize_project(directory.path());
+
+    let output = invoke(directory.path(), "run", "main.hidden");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"error[E2000]: durable project invocation is not available\nhelp: use a supported table transaction; stream roots require the explicit stream runtime\n"
+    );
 }
 
 #[test]
