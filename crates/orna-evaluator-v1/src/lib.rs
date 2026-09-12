@@ -592,6 +592,42 @@ fn error(code: &'static str) -> EvaluationError {
     EvaluationError::redacted(SafeText::new(code).expect("static safe code"))
 }
 
+fn valid_date_literal(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let year = value[0..4].parse::<u32>().ok();
+    let month = value[5..7].parse::<u32>().ok();
+    let day = value[8..10].parse::<u32>().ok();
+    let Some((year, month, day)) = year
+        .zip(month)
+        .zip(day)
+        .map(|((year, month), day)| (year, month, day))
+    else {
+        return false;
+    };
+    if !(1..=9999).contains(&year) || !(1..=12).contains(&month) {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let maximum = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=maximum).contains(&day)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Value {
     Null,
@@ -601,6 +637,7 @@ enum Value {
     Decimal(DecimalValue),
     Float(u64),
     String(String),
+    Date(String),
     Range {
         lower: Option<BigInt>,
         upper: Option<BigInt>,
@@ -769,6 +806,7 @@ impl Value {
             ),
             Self::Float(bits) => Raw::Float(bits),
             Self::String(value) => Raw::Text(value),
+            Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
             Self::Range {
                 lower,
                 upper,
@@ -858,6 +896,15 @@ impl Value {
                 Ok(Self::Float(*bits))
             }
             Raw::Text(value) => context.string(value.clone()).map(Self::String),
+            Raw::Tag(60001, boxed) => {
+                let Raw::Text(value) = boxed.as_ref() else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                };
+                if !valid_date_literal(value) {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                context.string(value.clone()).map(Self::Date)
+            }
             Raw::Array(values) => {
                 context.items(values.len())?;
                 values
@@ -1346,6 +1393,15 @@ impl Context<'_, '_> {
                     Err(error("ORNA-EVAL-VALUE"))
                 }
             }
+            LiteralKind::Date => {
+                let value = text.to_owned();
+                if !valid_date_literal(&value) {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                CanonicalValue::new(Raw::Tag(60001, Box::new(Raw::Text(value.clone()))))
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                self.string(value).map(Value::Date)
+            }
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -1616,6 +1672,7 @@ impl Context<'_, '_> {
             (Value::Decimal(a), Value::Decimal(b)) => self.decimal_binary(op, a, b),
             (Value::Float(a), Value::Float(b)) => self.float_binary(op, a, b),
             (Value::String(a), Value::String(b)) => compare(op, a.cmp(&b)),
+            (Value::Date(a), Value::Date(b)) => compare(op, a.cmp(&b)),
             (Value::Bool(a), Value::Bool(b)) => compare(op, a.cmp(&b)),
             _ => Err(error("ORNA-EVAL-TYPE")),
         }
