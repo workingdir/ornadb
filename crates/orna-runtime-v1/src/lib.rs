@@ -5099,6 +5099,12 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         self.require_owner(&tx, writer).await?;
+        let Some(replay_claim) = load_stream_replay_claim(&tx, &grant.failure).await? else {
+            return Err(RuntimeError::RecoveryInvalid);
+        };
+        if replay_claim.version != grant.version || replay_claim.owner != writer {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
         let result = apply_stream_intent_tx(
             &tx,
             CommitIntent::ReplayComplete {
@@ -5168,6 +5174,19 @@ impl RuntimeState {
         self.require_owner(&tx, writer)
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
+        let Some(replay_claim) = load_stream_replay_claim(&tx, &grant.failure)
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?
+        else {
+            return Err(StreamTableDeliveryError::Runtime(
+                RuntimeError::RecoveryInvalid,
+            ));
+        };
+        if replay_claim.version != grant.version || replay_claim.owner != writer {
+            return Err(StreamTableDeliveryError::Runtime(
+                RuntimeError::RecoveryInvalid,
+            ));
+        }
         let result = apply_stream_intent_tx(
             &tx,
             CommitIntent::ReplayComplete {
@@ -9736,6 +9755,18 @@ async fn apply_stream_intent(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     state.require_owner(&transaction, lease).await?;
+    if let CommitIntent::ReplayComplete {
+        failure,
+        expected_version,
+    } = &intent
+    {
+        let Some(replay_claim) = load_stream_replay_claim(&transaction, failure).await? else {
+            return Err(RuntimeError::RecoveryInvalid);
+        };
+        if replay_claim.version != *expected_version || replay_claim.owner != lease {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+    }
     if let Some(expected_capture) = expected_capture {
         let current_capture = capture_tx(&transaction).await?;
         if &current_capture != expected_capture {
@@ -15823,6 +15854,11 @@ mod tests {
                 CommitResult::ReplayGranted { grant } => grant,
                 other => panic!("unexpected second replay result: {other:?}"),
             };
+            state
+                .claim_stream_replay(writer, &replay)
+                .await
+                .unwrap()
+                .unwrap();
             let replayed = match stream
                 .apply_async(CommitIntent::ReplayComplete {
                     failure: replay.failure,
@@ -16021,6 +16057,11 @@ mod tests {
                 CommitResult::ReplayGranted { grant } => grant,
                 other => panic!("unexpected replay grant: {other:?}"),
             };
+            state
+                .claim_stream_replay(writer, &replay)
+                .await
+                .unwrap()
+                .unwrap();
             let replayed = match stream
                 .apply_async(CommitIntent::ReplayComplete {
                     failure: replay.failure,
@@ -16405,6 +16446,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_replay_completion_requires_execution_claim_but_replay_async_succeeds() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let payload = b"claim-required-payload".to_vec();
+        let payload_digest: [u8; 32] = Sha256::digest(&payload).into();
+        let (grant, checkpoint, delivery) =
+            protected_replay_fixture(&state, writer, "claim-required", payload_digest).await;
+        let capture = state.capture().await.unwrap();
+        let empty_mutations = Vec::new();
+        let empty_table_mutations = Vec::new();
+
+        assert_eq!(
+            state
+                .commit_stream_replay(StreamReplayCommit {
+                    writer,
+                    expected_capture: &capture,
+                    mutations: &empty_mutations,
+                    table_mutations: &empty_table_mutations,
+                    next_digest: capture.generation_digest(),
+                    grant: grant.clone(),
+                    faults: &NoFault,
+                })
+                .await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        assert_eq!(state.capture().await.unwrap(), capture);
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_async(&grant.failure)
+                .await
+                .unwrap()
+                .expect("replay failure remains retained")
+                .status,
+            FailureStatus::Replaying
+        );
+
+        let raw_result = {
+            let mut stream = state.stream_backend(writer);
+            stream
+                .apply_async(CommitIntent::ReplayComplete {
+                    failure: grant.failure.clone(),
+                    expected_version: grant.version,
+                })
+                .await
+        };
+        assert_eq!(raw_result, Err(RuntimeError::RecoveryInvalid));
+
+        let mut validator = TablesOnlyValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+        };
+        assert!(matches!(
+            state
+                .commit_stream_validated_table_replay(StreamValidatedTableReplayCommit {
+                    writer,
+                    expected_capture: &capture,
+                    mutations: &empty_table_mutations,
+                    next_digest: capture.generation_digest(),
+                    grant: grant.clone(),
+                    validator: &mut validator,
+                    faults: &NoFault,
+                })
+                .await,
+            Err(StreamTableDeliveryError::Runtime(
+                RuntimeError::RecoveryInvalid
+            ))
+        ));
+        assert_eq!(validator.calls, 0);
+
+        let provider = ReplayProvider {
+            payload: payload.clone(),
+        };
+        let mut handler = ReplayHandler {
+            payload: Vec::new(),
+            result: Some(StreamHandlerResult::Commit(StreamMutationBatch {
+                mutations: empty_mutations,
+                next_digest: capture.generation_digest(),
+            })),
+        };
+        let result = state
+            .stream_backend(writer)
+            .replay_async_with_provider(grant, &provider, &mut handler)
+            .await
+            .unwrap();
+        let replayed = match result {
+            CommitResult::ReplayCompleted { failure } => failure,
+            other => panic!("unexpected replay result: {other:?}"),
+        };
+        assert_eq!(replayed.status, FailureStatus::Replayed);
+        assert_eq!(handler.payload, payload);
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
+        );
+    }
+
+    #[tokio::test]
     async fn durable_admitted_replay_does_not_block_later_ordered_delivery() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -16725,6 +16877,13 @@ mod tests {
         let capture = state.capture().await.unwrap();
         let table = table_mutation(32, 5, Some(13));
         let encoded = table.runtime_mutation().unwrap();
+        assert!(
+            state
+                .claim_stream_replay(writer, &grant)
+                .await
+                .unwrap()
+                .is_ok()
+        );
 
         assert_eq!(
             state
