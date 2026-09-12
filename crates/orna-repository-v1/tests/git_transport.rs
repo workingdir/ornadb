@@ -133,6 +133,30 @@ impl Fixture {
         next
     }
 
+    fn relocate_source_origin(&self) -> PathBuf {
+        let relocated = self.root.path().join("relocated.git");
+        git(
+            self.root.path(),
+            &["init", "--bare", relocated.to_str().unwrap()],
+        );
+        git(
+            &self.source,
+            &["remote", "set-url", "origin", relocated.to_str().unwrap()],
+        );
+        let internal_refspec = format!("{INTERNAL_REF}:{INTERNAL_REF}");
+        git(
+            &self.source,
+            &[
+                "push",
+                "origin",
+                "refs/heads/main:refs/heads/main",
+                "refs/tags/v1:refs/tags/v1",
+                &internal_refspec,
+            ],
+        );
+        relocated
+    }
+
     fn advance_branch_only(&self) -> String {
         fs::write(self.source.join("main.orna"), "module main;\n\n// branch\n").unwrap();
         git(&self.source, &["add", "main.orna"]);
@@ -335,6 +359,56 @@ fn fetch_updates_branch_and_internal_refs_without_mutating_local_state() {
     assert_eq!(repository.index_generation().unwrap(), index_before);
     assert_eq!(repository.worktree_state().unwrap(), worktree_before);
     assert_eq!(fs::read(&runtime_marker).unwrap(), b"preserve");
+}
+
+#[test]
+fn fetch_after_remote_set_url_updates_requested_ordinary_and_internal_refs() {
+    let fixture = Fixture::new();
+    let repository = fixture.repository();
+    let initial = fixture.initial_head();
+    fixture.install_local_internal(&initial);
+    let relocated = fixture.relocate_source_origin();
+    let next = fixture.advance_branch_and_internal();
+    git(
+        &fixture.local,
+        &["remote", "set-url", "origin", relocated.to_str().unwrap()],
+    );
+
+    let head_before = repository.head().unwrap();
+    let index_before = repository.index_generation().unwrap();
+    let worktree_before = repository.worktree_state().unwrap();
+    let runtime_marker = repository.runtime_paths().root().join("transport-marker");
+    repository.runtime_paths().ensure_exists().unwrap();
+    fs::write(&runtime_marker, b"preserve-after-relocation").unwrap();
+    let runtime_before = fs::read(&runtime_marker).unwrap();
+
+    let report = repository
+        .fetch(&request(
+            [
+                RequestedRef::branch("main").unwrap(),
+                RequestedRef::tag("v1").unwrap(),
+            ],
+            [internal_witness(&next)],
+        ))
+        .unwrap();
+
+    assert_eq!(
+        git(&fixture.local, &["remote", "get-url", "origin"]),
+        relocated.to_str().unwrap()
+    );
+    assert_eq!(report.continuity(), Some(RemoteContinuity::Continuous));
+    assert!(report.ordinary()[0].updated());
+    assert!(!report.ordinary()[1].updated());
+    assert!(report.internal()[0].updated());
+    assert_eq!(
+        git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]),
+        next
+    );
+    assert_eq!(git(&fixture.local, &["rev-parse", INTERNAL_REF]), next);
+    assert_eq!(repository.head().unwrap(), head_before);
+    assert_eq!(repository.index_generation().unwrap(), index_before);
+    assert_eq!(repository.worktree_state().unwrap(), worktree_before);
+    assert_eq!(fs::read(&runtime_marker).unwrap(), runtime_before);
 }
 
 #[test]
