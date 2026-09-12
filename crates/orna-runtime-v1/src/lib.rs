@@ -18314,6 +18314,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_takeover_allows_only_the_winning_recovery_owner() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = request(161, 162);
+        let fingerprint = digest(163);
+        let abandoned = state.acquire_lease(id(164)).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        state
+            .start_request_with_owner_and_admission(
+                identity,
+                fingerprint,
+                abandoned,
+                capability.expect("owner-bound admission capability"),
+            )
+            .await
+            .unwrap();
+
+        let first = open_state(&repo).await;
+        let second = open_state(&repo).await;
+        let first_candidate = id(165);
+        let second_candidate = id(166);
+        let (first_takeover, second_takeover) = tokio::join!(
+            first.takeover_lease(abandoned, first_candidate),
+            second.takeover_lease(abandoned, second_candidate),
+        );
+        let (winner, loser) = match (first_takeover, second_takeover) {
+            (Ok(winner), Err(RuntimeError::OwnerLost)) => (
+                winner,
+                WriterLease {
+                    owner_id: second_candidate,
+                    epoch: abandoned.epoch + 1,
+                },
+            ),
+            (Err(RuntimeError::OwnerLost), Ok(winner)) => (
+                winner,
+                WriterLease {
+                    owner_id: first_candidate,
+                    epoch: abandoned.epoch + 1,
+                },
+            ),
+            (first_result, second_result) => {
+                panic!(
+                    "expected exactly one takeover winner, got {first_result:?} and {second_result:?}"
+                )
+            }
+        };
+
+        assert_eq!(first.current_lease().await.unwrap(), Some(winner));
+        assert_eq!(winner.epoch, abandoned.epoch + 1);
+        assert_eq!(
+            second.reserve_request(request(167, 168), digest(169)).await,
+            Err(RuntimeError::RecoveryPending)
+        );
+        assert_eq!(
+            second
+                .recover_running_request(
+                    identity,
+                    fingerprint,
+                    RequestOwner::from(abandoned),
+                    loser,
+                    outcome(170),
+                )
+                .await,
+            Err(RuntimeError::OwnerLost)
+        );
+        assert_eq!(
+            second.complete_takeover_recovery(loser).await,
+            Err(RuntimeError::OwnerLost)
+        );
+        assert_eq!(
+            second
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            RequestState::Running
+        );
+
+        let recovered = first
+            .recover_running_request(
+                identity,
+                fingerprint,
+                RequestOwner::from(abandoned),
+                winner,
+                outcome(171),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.status.state, RequestState::Orphaned);
+        assert_eq!(
+            second
+                .reserve_request(request(167, 168), digest(169))
+                .await
+                .unwrap()
+                .state,
+            RequestState::Reserved
+        );
+    }
+
+    #[tokio::test]
     async fn request_recovery_evidence_migration_is_idempotent() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
