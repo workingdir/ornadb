@@ -469,3 +469,58 @@ fn same_origin_resume_with_rotated_credentials_succeeds() {
         server.await.expect("same-origin server completed");
     });
 }
+
+#[test]
+fn session_credentials_are_bound_to_the_issuing_endpoint_origin() {
+    run(async {
+        let (origin, endpoint) = listener().await;
+        let other = StdTcpListener::bind("127.0.0.1:0").expect("bind other endpoint");
+        other
+            .set_nonblocking(true)
+            .expect("make other endpoint nonblocking");
+        let other_endpoint = Url::parse(&format!("http://{}/", other.local_addr().unwrap()))
+            .expect("other endpoint URL");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = origin.accept().await.expect("accept create");
+            assert_post(
+                &read_request(&mut stream).await,
+                "/orna/session",
+                json!({"database": DATABASE, "protocol": PROTOCOL}),
+            );
+            reply_session(
+                &mut stream,
+                "201 Created",
+                &session_body(RUNTIME, &token(b'A')),
+                "synthetic-create-cookie",
+            )
+            .await;
+        });
+        let session = client(endpoint).create_session([2; 16]).await.unwrap();
+        let other_client = client(other_endpoint);
+
+        assert!(matches!(
+            other_client.resume_session(&session).await,
+            Err(LiveTransportError::Response(
+                "session belongs to a different endpoint origin"
+            ))
+        ));
+        assert!(matches!(
+            other_client.delete_session(&session).await,
+            Err(LiveTransportError::Response(
+                "session belongs to a different endpoint origin"
+            ))
+        ));
+        assert!(matches!(
+            other_client.connect(&session).await,
+            Err(LiveTransportError::Response(
+                "session belongs to a different endpoint origin"
+            ))
+        ));
+        assert_eq!(
+            other.accept().unwrap_err().kind(),
+            ErrorKind::WouldBlock,
+            "a mismatched endpoint must receive no credential-bearing request"
+        );
+        server.await.expect("same-origin create completed");
+    });
+}
