@@ -25,9 +25,13 @@ use orna_value_v1::{
 use unicode_normalization::UnicodeNormalization;
 
 mod admitted_repl;
+mod cancellation;
+mod relation;
 mod repl;
 
 pub use admitted_repl::{AdmittedReplSession, ReplError};
+pub use cancellation::CancellationToken;
+use relation::{RelationPlan, RelationStage};
 pub use repl::{ReplSession, parse_admitted_repl};
 
 /// The verified standard-source bundle used by the bounded local and remote
@@ -119,6 +123,16 @@ impl Limits {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StepBudget {
     remaining: u64,
+}
+
+/// One bounded, canonical page of a relation scan. `next` is an exclusive
+/// canonical key cursor owned by the source; when `after` is present, the
+/// next cursor MUST be lexicographically greater than it. An absent cursor
+/// means exhaustion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelationPage {
+    pub rows: Vec<CanonicalValue>,
+    pub next: Option<Vec<u8>>,
 }
 
 impl StepBudget {
@@ -218,6 +232,19 @@ pub trait EffectHandler {
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         self.handle(callee, arguments)
     }
+
+    /// Supplies one bounded page for an evaluator-owned relation plan at its
+    /// first observation. Existing handlers return `Ok(None)` by default so
+    /// this remains a backward-compatible extension of the effect boundary.
+    fn scan_relation_page(
+        &mut self,
+        _source: &str,
+        _after: Option<&[u8]>,
+        _limit: usize,
+        _budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        Ok(None)
+    }
 }
 
 /// Evaluate one expression using [`parse_expression`].
@@ -308,6 +335,7 @@ pub fn evaluate_with_functions_and_budget(
         effects: None,
         namespace: None,
         transfer: None,
+        cancellation: None,
     };
     let result = (|| {
         context.items(functions.len())?;
@@ -347,6 +375,7 @@ pub fn evaluate_function(
         effects: None,
         namespace: None,
         transfer: None,
+        cancellation: None,
     };
     let supplied = supplied_arguments(arguments, &mut context)?;
     let captured = Scope::from_environment(environment, &mut context)?;
@@ -374,6 +403,7 @@ pub fn invoke_named(
         effects: None,
         namespace: function_namespace(name),
         transfer: None,
+        cancellation: None,
     };
     context.items(functions.len())?;
     let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
@@ -414,6 +444,7 @@ pub fn invoke_named_with_effects_and_budget(
         effects: Some(effects),
         namespace: function_namespace(name),
         transfer: None,
+        cancellation: None,
     };
     let result = (|| {
         context.items(functions.len())?;
@@ -576,6 +607,7 @@ enum Value {
         upper_inclusive: bool,
     },
     List(Vec<Value>),
+    Relation(RelationPlan),
     Tuple(Vec<Value>),
     Record(BTreeMap<String, Value>),
     NominalRecord {
@@ -699,6 +731,7 @@ impl Value {
             Self::Enum { payload, .. } | Self::Option(payload) => payload
                 .as_ref()
                 .is_some_and(|value| value.contains_callable()),
+            Self::Relation(_) => true,
             _ => false,
         }
     }
@@ -722,6 +755,7 @@ impl Value {
     fn raw(self) -> Result<Raw, EvaluationError> {
         Ok(match self {
             Self::Function(_) | Self::Closure(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+            Self::Relation(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
             Self::Null => Raw::Null,
             Self::Unit => Raw::Tag(60014, Box::new(Raw::Array(vec![]))),
             Self::Bool(value) => Raw::Bool(value),
@@ -991,6 +1025,7 @@ struct Context<'functions, 'effects> {
     effects: Option<&'effects mut dyn EffectHandler>,
     namespace: Option<String>,
     transfer: Option<Transfer>,
+    cancellation: Option<&'functions CancellationToken>,
 }
 
 /// An evaluator-only non-local control transfer. It never crosses the public
@@ -1001,8 +1036,17 @@ enum Transfer {
     Break(Value),
     Continue,
 }
+
+enum RelationRow {
+    Skip,
+    Yield(Value),
+    End,
+}
 impl Context<'_, '_> {
     fn step(&mut self) -> Result<(), EvaluationError> {
+        if let Some(cancellation) = self.cancellation {
+            cancellation.check()?;
+        }
         self.steps = self
             .steps
             .checked_add(1)
@@ -1736,6 +1780,490 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
+
+    fn relation_call(
+        &mut self,
+        callee: &Expr,
+        arguments: &[orna_syntax_v1::Argument],
+        input: Option<Value>,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Option<Result<Value, EvaluationError>> {
+        let name = root_collection_name(callee)?;
+        if scope.0.contains_key(name) || self.resolve_function_name(callee, scope).is_some() {
+            return None;
+        }
+        let pipeline_relation = matches!(input, Some(Value::Relation(_)));
+        if input.is_some() && !pipeline_relation {
+            return None;
+        }
+        if input.is_none() && !relation_call_candidate(name, arguments, scope) {
+            return None;
+        }
+
+        Some((|| {
+            let implicit = usize::from(input.is_some());
+            let mut values = input.into_iter().collect::<Vec<_>>();
+            for argument in arguments {
+                let value = self.evaluate(&argument.value, scope, depth + 1)?;
+                values.push(value);
+            }
+            let ordered = relation_named_arguments(name, arguments, values, implicit)?;
+            let Value::Relation(mut plan) = ordered[0].clone() else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+
+            match name {
+                "filter" => {
+                    plan = plan.with_stage(RelationStage::Filter(ordered[1].clone()));
+                    Ok(Value::Relation(plan))
+                }
+                "map" => {
+                    plan = plan.with_stage(RelationStage::Map(ordered[1].clone()));
+                    Ok(Value::Relation(plan))
+                }
+                "sort_by" => {
+                    plan = plan.with_stage(RelationStage::SortBy(ordered[1].clone()));
+                    Ok(Value::Relation(plan))
+                }
+                "take" | "drop" => {
+                    let Value::Int(count) = &ordered[1] else {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    };
+                    if count.sign() == num_bigint::Sign::Minus {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
+                    let count = count.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                    plan = plan.with_stage(if name == "take" {
+                        RelationStage::Take(count)
+                    } else {
+                        RelationStage::Drop(count)
+                    });
+                    Ok(Value::Relation(plan))
+                }
+                "count" | "first" | "one" => {
+                    self.observe_relation(&plan, name, &ordered[1..], depth)
+                }
+                _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+            }
+        })())
+    }
+
+    fn observe_relation(
+        &mut self,
+        plan: &RelationPlan,
+        operation: &str,
+        arguments: &[Value],
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        if plan
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, RelationStage::SortBy(_)))
+        {
+            return self.observe_sorted_relation(plan, operation, arguments, depth);
+        }
+
+        match operation {
+            "first" => {
+                let mut first = None;
+                self.for_each_relation_value(plan, depth, |_, value| {
+                    first = Some(value);
+                    Ok(false)
+                })?;
+                Ok(Value::Option(first.map(Box::new)))
+            }
+            "one" => {
+                let predicate = arguments.first();
+                let mut found = None;
+                self.for_each_relation_value(plan, depth, |context, value| {
+                    if let Some(predicate) = predicate {
+                        match context.invoke_predicate(predicate, value.clone(), depth + 1)? {
+                            Value::Bool(true) => {}
+                            Value::Bool(false) => return Ok(true),
+                            _ => return Err(error("ORNA-EVAL-TYPE")),
+                        }
+                    }
+                    if found.is_some() {
+                        return Err(error("ORNA-EVAL-RELATION-ONE-MULTIPLE"));
+                    }
+                    found = Some(value);
+                    Ok(true)
+                })?;
+                found.ok_or_else(|| error("ORNA-EVAL-RELATION-ONE-ZERO"))
+            }
+            "count" => {
+                let mut count = 0usize;
+                self.for_each_relation_value(plan, depth, |context, _| {
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                    context.items(count)?;
+                    Ok(true)
+                })?;
+                Ok(Value::Int(BigInt::from(count)))
+            }
+            "every" | "exists" => {
+                let predicate = arguments
+                    .first()
+                    .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
+                let want_exists = operation == "exists";
+                let mut result = !want_exists;
+                self.for_each_relation_value(plan, depth, |context, value| {
+                    let value = context.invoke_predicate(predicate, value, depth + 1)?;
+                    let Value::Bool(value) = value else {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    };
+                    if value == want_exists {
+                        result = value;
+                        return Ok(false);
+                    }
+                    Ok(true)
+                })?;
+                Ok(Value::Bool(result))
+            }
+            "window" => {
+                let values = self.collect_relation_values(plan, depth)?;
+                self.observe_list_relation(operation, values, arguments, depth)
+            }
+            "sum" | "min" | "max" => {
+                let values = self.collect_relation_values(plan, depth)?;
+                self.observe_list_relation(operation, values, arguments, depth)
+            }
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+
+    fn observe_sorted_relation(
+        &mut self,
+        plan: &RelationPlan,
+        operation: &str,
+        arguments: &[Value],
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        match operation {
+            "first" => {
+                let mut first = None;
+                self.for_each_sorted_relation(plan, depth, |_, value| {
+                    first = Some(value);
+                    Ok(false)
+                })?;
+                Ok(Value::Option(first.map(Box::new)))
+            }
+            "one" => {
+                let predicate = arguments.first();
+                let mut found = None;
+                self.for_each_sorted_relation(plan, depth, |context, value| {
+                    if let Some(predicate) = predicate {
+                        match context.invoke_predicate(predicate, value.clone(), depth + 1)? {
+                            Value::Bool(true) => {}
+                            Value::Bool(false) => return Ok(true),
+                            _ => return Err(error("ORNA-EVAL-TYPE")),
+                        }
+                    }
+                    if found.is_some() {
+                        return Err(error("ORNA-EVAL-RELATION-ONE-MULTIPLE"));
+                    }
+                    found = Some(value);
+                    Ok(true)
+                })?;
+                found.ok_or_else(|| error("ORNA-EVAL-RELATION-ONE-ZERO"))
+            }
+            "count" => {
+                let mut count = 0usize;
+                self.for_each_sorted_relation(plan, depth, |context, _| {
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                    context.items(count)?;
+                    Ok(true)
+                })?;
+                Ok(Value::Int(BigInt::from(count)))
+            }
+            "every" | "exists" => {
+                let predicate = arguments
+                    .first()
+                    .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
+                let want_exists = operation == "exists";
+                let mut result = !want_exists;
+                self.for_each_sorted_relation(plan, depth, |context, value| {
+                    let value = context.invoke_predicate(predicate, value, depth + 1)?;
+                    let Value::Bool(value) = value else {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    };
+                    if value == want_exists {
+                        result = value;
+                        return Ok(false);
+                    }
+                    Ok(true)
+                })?;
+                Ok(Value::Bool(result))
+            }
+            "window" | "sum" | "min" | "max" => {
+                let mut values = Vec::new();
+                self.for_each_sorted_relation(plan, depth, |context, value| {
+                    values.push(value);
+                    context.items(values.len())?;
+                    Ok(true)
+                })?;
+                self.observe_list_relation(operation, values, arguments, depth)
+            }
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+
+    fn observe_list_relation(
+        &mut self,
+        operation: &str,
+        values: Vec<Value>,
+        arguments: &[Value],
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let mut inputs = vec![Value::List(values)];
+        inputs.extend(arguments.iter().cloned());
+        self.collection(operation, inputs, depth)
+    }
+
+    fn collect_relation_values(
+        &mut self,
+        plan: &RelationPlan,
+        depth: usize,
+    ) -> Result<Vec<Value>, EvaluationError> {
+        let mut values = Vec::new();
+        self.for_each_relation_value(plan, depth, |context, value| {
+            values.push(value);
+            context.items(values.len())?;
+            Ok(true)
+        })?;
+        Ok(values)
+    }
+
+    fn for_each_relation_value(
+        &mut self,
+        plan: &RelationPlan,
+        depth: usize,
+        mut visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
+    ) -> Result<(), EvaluationError> {
+        if plan
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, RelationStage::Take(0)))
+        {
+            return Ok(());
+        }
+        let mut after = None;
+        let mut counters = vec![0usize; plan.stages.len()];
+        let mut seen = 0usize;
+        loop {
+            // Relation work has its own cancellation checkpoints. A plan
+            // must remain interruptible even when its callbacks are absent,
+            // short-circuiting, or otherwise do not execute.
+            self.step()?;
+            let page = self.relation_page(&plan.source, after.as_deref())?;
+            let page_len = page.rows.len();
+            for canonical in page.rows {
+                self.step()?;
+                seen = seen
+                    .checked_add(1)
+                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                self.items(seen)?;
+                let value = Value::from_canonical(&canonical, self, depth + 1)?;
+                match self.apply_relation_stages(value, &plan.stages, &mut counters, depth + 1)? {
+                    RelationRow::Skip => {}
+                    RelationRow::End => return Ok(()),
+                    RelationRow::Yield(value) => {
+                        if !visit(self, value)? {
+                            return Ok(());
+                        }
+                        if plan.stages.iter().enumerate().any(|(index, stage)| {
+                            matches!(stage, RelationStage::Take(count) if counters[index] >= *count)
+                        }) {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            let Some(next) = page.next else {
+                return Ok(());
+            };
+            if page_len == 0 {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+            after = Some(next);
+        }
+    }
+
+    fn apply_relation_stages(
+        &mut self,
+        mut value: Value,
+        stages: &[RelationStage],
+        counters: &mut [usize],
+        depth: usize,
+    ) -> Result<RelationRow, EvaluationError> {
+        for (index, stage) in stages.iter().enumerate() {
+            match stage {
+                RelationStage::Filter(predicate) => {
+                    let result = self.invoke_predicate(predicate, value.clone(), depth + 1)?;
+                    let Value::Bool(result) = result else {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    };
+                    if !result {
+                        return Ok(RelationRow::Skip);
+                    }
+                }
+                RelationStage::Map(transform) => {
+                    value = self.invoke_predicate(transform, value, depth + 1)?;
+                }
+                RelationStage::Drop(count) => {
+                    if counters[index] < *count {
+                        counters[index] += 1;
+                        return Ok(RelationRow::Skip);
+                    }
+                }
+                RelationStage::Take(count) => {
+                    if counters[index] >= *count {
+                        return Ok(RelationRow::End);
+                    }
+                    counters[index] += 1;
+                }
+                RelationStage::SortBy(_) => {
+                    return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                }
+            }
+        }
+        Ok(RelationRow::Yield(value))
+    }
+
+    fn for_each_sorted_relation(
+        &mut self,
+        plan: &RelationPlan,
+        depth: usize,
+        visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
+    ) -> Result<(), EvaluationError> {
+        if plan
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, RelationStage::Take(0)))
+        {
+            return Ok(());
+        }
+        let Some(sort_index) = plan
+            .stages
+            .iter()
+            .position(|stage| matches!(stage, RelationStage::SortBy(_)))
+        else {
+            return self.for_each_relation_value(plan, depth, visit);
+        };
+        let prefix = RelationPlan {
+            source: plan.source.clone(),
+            stages: plan.stages[..sort_index].to_vec(),
+        };
+        let RelationStage::SortBy(key) = &plan.stages[sort_index] else {
+            unreachable!("sort stage index")
+        };
+        let mut values = Vec::new();
+        self.for_each_relation_value(&prefix, depth, |context, value| {
+            values.push(value);
+            context.items(values.len())?;
+            Ok(true)
+        })?;
+        let sorted = self.collection("sort_by", vec![Value::List(values), key.clone()], depth)?;
+        let Value::List(sorted) = sorted else {
+            unreachable!("sort_by returns a list")
+        };
+        let suffix = &plan.stages[sort_index + 1..];
+        self.for_each_buffered_relation(sorted, suffix, depth, visit)
+    }
+
+    fn for_each_buffered_relation(
+        &mut self,
+        values: Vec<Value>,
+        stages: &[RelationStage],
+        depth: usize,
+        visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
+    ) -> Result<(), EvaluationError> {
+        let Some(sort_index) = stages
+            .iter()
+            .position(|stage| matches!(stage, RelationStage::SortBy(_)))
+        else {
+            return self.for_each_buffered_stages(values, stages, depth, visit);
+        };
+        let prefix = &stages[..sort_index];
+        let mut upstream = Vec::new();
+        self.for_each_buffered_stages(values, prefix, depth, |context, value| {
+            upstream.push(value);
+            context.items(upstream.len())?;
+            Ok(true)
+        })?;
+        let RelationStage::SortBy(key) = &stages[sort_index] else {
+            unreachable!("sort stage index")
+        };
+        let sorted = self.collection("sort_by", vec![Value::List(upstream), key.clone()], depth)?;
+        let Value::List(sorted) = sorted else {
+            unreachable!("sort_by returns a list")
+        };
+        self.for_each_buffered_relation(sorted, &stages[sort_index + 1..], depth, visit)
+    }
+
+    fn for_each_buffered_stages(
+        &mut self,
+        values: Vec<Value>,
+        stages: &[RelationStage],
+        depth: usize,
+        mut visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
+    ) -> Result<(), EvaluationError> {
+        if stages
+            .iter()
+            .any(|stage| matches!(stage, RelationStage::Take(0)))
+        {
+            return Ok(());
+        }
+        let mut counters = vec![0usize; stages.len()];
+        for value in values {
+            match self.apply_relation_stages(value, stages, &mut counters, depth + 1)? {
+                RelationRow::Skip => {}
+                RelationRow::End => return Ok(()),
+                RelationRow::Yield(value) => {
+                    if !visit(self, value)? {
+                        return Ok(());
+                    }
+                    if stages.iter().enumerate().any(|(index, stage)| {
+                        matches!(stage, RelationStage::Take(count) if counters[index] >= *count)
+                    }) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+    ) -> Result<RelationPage, EvaluationError> {
+        let remaining = self.limits.max_steps.saturating_sub(self.steps);
+        let mut budget = StepBudget::new(remaining);
+        let result = self
+            .effects
+            .as_deref_mut()
+            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))
+            .and_then(|effects| effects.scan_relation_page(source, after, 1, &mut budget));
+        let debited = remaining.saturating_sub(budget.remaining());
+        self.steps = self
+            .steps
+            .checked_add(debited)
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        let page = result?.ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+        if let (Some(after), Some(next)) = (after, page.next.as_deref()) {
+            if next <= after {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+        }
+        Ok(page)
+    }
+
     fn call(
         &mut self,
         callee: &Expr,
@@ -1744,6 +2272,19 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
+        if is_relation_source(callee) {
+            if input.is_some() || arguments.len() != 1 {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+            let source = self.evaluate(&arguments[0].value, scope, depth + 1)?;
+            let Value::String(source) = source else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            return Ok(Value::Relation(RelationPlan::new(source)));
+        }
+        if let Some(result) = self.relation_call(callee, arguments, input.clone(), scope, depth) {
+            return result;
+        }
         let root_collection =
             root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
         if collection_name(callee).is_some()
@@ -3074,6 +3615,7 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
         text.as_str(),
         "first"
             | "one"
+            | "count"
             | "min"
             | "max"
             | "sum"
@@ -3082,8 +3624,116 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
             | "map"
             | "flat_map"
             | "sort_by"
+            | "filter"
+            | "take"
+            | "drop"
+            | "window"
     )
     .then_some(text.as_str())
+}
+
+fn is_relation_source(expression: &Expr) -> bool {
+    matches!(
+        expression,
+        Expr::Field { base, name, .. }
+            if name == "source"
+                && matches!(base.as_ref(), Expr::ReplBinding { text, .. } if text == "$__orna_relation")
+    )
+}
+
+fn relation_call_candidate(
+    _name: &str,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+) -> bool {
+    let relation_argument = arguments
+        .iter()
+        .find(|argument| argument.name.as_deref() == Some("rows"))
+        .or_else(|| arguments.first());
+    let Some(argument) = relation_argument else {
+        return false;
+    };
+    relation_expression_candidate(&argument.value, scope)
+}
+
+fn relation_expression_candidate(expression: &Expr, scope: &Scope) -> bool {
+    if let Expr::Name { text, .. } = expression {
+        return matches!(scope.0.get(text), Some(Value::Relation(_)));
+    }
+    match expression {
+        Expr::Call {
+            callee, arguments, ..
+        } if is_relation_source(callee) && arguments.len() == 1 => true,
+        Expr::Binary { lhs, op, .. } if op == "|" => relation_expression_candidate(lhs, scope),
+        Expr::Call {
+            callee, arguments, ..
+        } if root_collection_name(callee).is_some() => arguments
+            .iter()
+            .find(|argument| argument.name.as_deref() == Some("rows"))
+            .or_else(|| arguments.first())
+            .is_some_and(|argument| relation_expression_candidate(&argument.value, scope)),
+        _ => false,
+    }
+}
+
+fn relation_named_arguments(
+    function: &str,
+    arguments: &[orna_syntax_v1::Argument],
+    values: Vec<Value>,
+    implicit: usize,
+) -> Result<Vec<Value>, EvaluationError> {
+    let expected: &[&str] = match function {
+        "filter" => &["rows", "predicate"],
+        "map" => &["rows", "transform"],
+        "sort_by" => &["rows", "key"],
+        "take" | "drop" => &["rows", "count"],
+        "window" => match values.len() {
+            2 => &["rows", "size"],
+            3 => &["rows", "size", "step"],
+            _ => return Err(error("ORNA-EVAL-ARGUMENT")),
+        },
+        "one" => match values.len() {
+            1 => &["rows"],
+            2 => &["rows", "predicate"],
+            _ => return Err(error("ORNA-EVAL-ARGUMENT")),
+        },
+        "every" | "exists" => &["rows", "predicate"],
+        "count" | "first" | "sum" | "min" | "max" => &["rows"],
+        _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+    };
+    if values.len() > expected.len() {
+        return Err(error("ORNA-EVAL-ARGUMENT"));
+    }
+    let mut ordered = vec![None; expected.len()];
+    let mut positional = 0usize;
+    let mut named_started = false;
+    for (index, value) in values.into_iter().enumerate() {
+        let name = index
+            .checked_sub(implicit)
+            .and_then(|index| arguments.get(index))
+            .and_then(|argument| argument.name.as_deref());
+        let position = if let Some(name) = name {
+            named_started = true;
+            expected.iter().position(|expected| *expected == name)
+        } else if named_started {
+            None
+        } else {
+            let position = Some(positional);
+            positional += 1;
+            position
+        }
+        .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
+        if implicit > 0 && position == 0 && name.is_some() {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        }
+        if ordered[position].replace(value).is_some() {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        }
+    }
+    ordered
+        .into_iter()
+        .map(|value| value.ok_or_else(|| error("ORNA-EVAL-ARGUMENT")))
+        .collect()
 }
 
 fn standard_name<'a>(expression: &'a Expr, module: &str) -> Option<&'a str> {
@@ -3383,6 +4033,35 @@ mod tests {
         }
     }
 
+    struct NonAdvancingRelationEffects;
+
+    impl EffectHandler for NonAdvancingRelationEffects {
+        fn handle(
+            &mut self,
+            _: &Expr,
+            _: &[CanonicalValue],
+        ) -> Result<Option<CanonicalValue>, EvaluationError> {
+            Ok(None)
+        }
+
+        fn scan_relation_page(
+            &mut self,
+            _: &str,
+            after: Option<&[u8]>,
+            _: usize,
+            budget: &mut StepBudget,
+        ) -> Result<Option<RelationPage>, EvaluationError> {
+            budget.debit(1)?;
+            let value = if after.is_some() { 8 } else { 7 };
+            Ok(Some(RelationPage {
+                rows: vec![
+                    CanonicalValue::new(Raw::Int(value.into())).expect("integer is canonical"),
+                ],
+                next: Some(vec![1]),
+            }))
+        }
+    }
+
     #[test]
     fn synthetic_relation_receiver_is_a_static_effect_path() {
         let span = orna_syntax_v1::SyntaxSpan::new(0, 0);
@@ -3412,6 +4091,7 @@ mod tests {
             effects: Some(&mut effects),
             namespace: None,
             transfer: None,
+            cancellation: None,
         };
         let mut scope = Scope(BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
 
@@ -3421,5 +4101,99 @@ mod tests {
         );
         drop(context);
         assert_eq!(effects.calls, 1);
+    }
+
+    #[test]
+    fn nonadvancing_relation_cursor_rejects_page_before_callback() {
+        let functions = Functions::new();
+        let mut effects = NonAdvancingRelationEffects;
+        let mut context = Context {
+            limits: Limits::default(),
+            steps: 0,
+            functions: &functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: true,
+            restrict_function_names: true,
+            reject_unhandled_field_calls: true,
+            effects: Some(&mut effects),
+            namespace: None,
+            transfer: None,
+            cancellation: None,
+        };
+        let plan = RelationPlan::new("Note".into());
+        let mut callbacks = 0;
+
+        let result = context.for_each_relation_value(&plan, 0, |_, _| {
+            callbacks += 1;
+            Ok(true)
+        });
+
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-VALUE");
+        assert_eq!(callbacks, 1);
+    }
+
+    #[test]
+    fn relation_scan_checks_cancellation_before_each_page() {
+        let functions = Functions::new();
+        let cancellation = CancellationToken::new();
+        cancellation.request_after_checks(1);
+        let mut effects = NonAdvancingRelationEffects;
+        let mut context = Context {
+            limits: Limits::default(),
+            steps: 0,
+            functions: &functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: true,
+            restrict_function_names: true,
+            reject_unhandled_field_calls: true,
+            effects: Some(&mut effects),
+            namespace: None,
+            transfer: None,
+            cancellation: Some(&cancellation),
+        };
+        let plan = RelationPlan::new("Note".into());
+        let mut callbacks = 0;
+
+        let result = context.for_each_relation_value(&plan, 0, |_, _| {
+            callbacks += 1;
+            Ok(true)
+        });
+
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-CANCELLED");
+        assert_eq!(callbacks, 0);
+    }
+
+    #[test]
+    fn relation_scan_checks_cancellation_before_each_row_callback() {
+        let functions = Functions::new();
+        let cancellation = CancellationToken::new();
+        cancellation.request_after_checks(2);
+        let mut effects = NonAdvancingRelationEffects;
+        let mut context = Context {
+            limits: Limits::default(),
+            steps: 0,
+            functions: &functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: true,
+            restrict_function_names: true,
+            reject_unhandled_field_calls: true,
+            effects: Some(&mut effects),
+            namespace: None,
+            transfer: None,
+            cancellation: Some(&cancellation),
+        };
+        let plan = RelationPlan::new("Note".into());
+        let mut callbacks = 0;
+
+        let result = context.for_each_relation_value(&plan, 0, |_, _| {
+            callbacks += 1;
+            Ok(true)
+        });
+
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-CANCELLED");
+        assert_eq!(callbacks, 0);
     }
 }
