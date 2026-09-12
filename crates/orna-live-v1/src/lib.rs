@@ -412,12 +412,25 @@ impl LiveApplicationWorkSupervisor {
             .keys()
             .copied()
             .collect::<Vec<_>>();
+        let mut admission_error = None;
+        for session in &sessions {
+            if let Err(error) = self.begin_draining(*session)
+                && admission_error.is_none()
+            {
+                admission_error = Some(error);
+            }
+        }
         let supervisor = self.clone();
         Box::pin(async move {
+            let mut first_error = admission_error;
             for session in sessions {
-                supervisor.cancel_and_join(session).await?;
+                if let Err(error) = supervisor.cancel_and_join(session).await
+                    && first_error.is_none()
+                {
+                    first_error = Some(error);
+                }
             }
-            Ok(())
+            first_error.map_or(Ok(()), Err)
         })
     }
 
