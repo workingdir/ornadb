@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+futures-util = "0.3.31"
 orna-artifact = { path = "../orna-artifact" }
 orna-core = { path = "../orna-core" }
 orna-protocol = { path = "../orna-protocol" }
@@ -16,6 +17,9 @@ orna-standard = { path = "../orna-standard" }
 libloading = "0.9.0"
 serde_json = "1.0.151"
 stacker = "0.1.25"
+reqwest = { version = "0.12.7", default-features = false, features = ["json", "rustls-tls-webpki-roots", "http2"] }
+tokio = { version = "1.48.0", features = ["net", "time"] }
+tokio-tungstenite = { version = "0.26.2", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
 orna-compiler = { path = "../orna-compiler" }
