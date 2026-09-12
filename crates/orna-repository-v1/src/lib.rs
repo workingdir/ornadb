@@ -6,7 +6,7 @@
 //! only the supplied worktree-relative paths.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     fmt, fs,
     io::Write,
     path::{Component, Path, PathBuf},
@@ -461,12 +461,17 @@ impl IndexGeneration {
 /// status.  It deliberately is not a content hash; callers can compare it but
 /// must not treat it as a cryptographic integrity assertion.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorktreeState(Vec<u8>);
+pub struct WorktreeState(Vec<u8>, [u8; 32]);
 
 impl WorktreeState {
     pub fn as_porcelain_v2_z(&self) -> &[u8] {
         &self.0
     }
+
+    fn content_digest(&self) -> &[u8; 32] {
+        &self.1
+    }
+
     pub fn is_clean(&self) -> bool {
         self.0.is_empty()
     }
@@ -534,6 +539,7 @@ pub struct CheckoutPreflight {
     expected_head: Option<GitCommitRef>,
     cwd: CwdGeneration,
     git: CheckoutGitSubplan,
+    dirty_content_digest: [u8; 32],
 }
 
 /// The read-only Git portion of a checkout plan. Paths are repository-relative
@@ -691,7 +697,7 @@ impl CheckoutRecoveryJournal {
     fn encode(&self) -> Result<Vec<u8>, RepositoryError> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(CHECKOUT_JOURNAL_MAGIC);
-        bytes.push(2);
+        bytes.push(3);
         bytes.extend_from_slice(&self.runtime.get().to_be_bytes());
         match &self.target {
             CheckoutTarget::Branch { name, commit } => {
@@ -740,7 +746,7 @@ impl CheckoutRecoveryJournal {
         }
         let mut cursor = CHECKOUT_JOURNAL_MAGIC.len();
         let version = take_byte(bytes, &mut cursor)?;
-        if version != 1 && version != 2 {
+        if version != 1 && version != 2 && version != 3 {
             return Err(RepositoryError::InvalidCheckoutJournal);
         }
         let runtime = RuntimeGeneration::new(u64::from_be_bytes(take_fixed_array::<8>(
@@ -801,9 +807,16 @@ impl CheckoutRecoveryJournal {
             3 => CheckoutRecoveryPhase::Applied,
             _ => return Err(RepositoryError::InvalidCheckoutJournal),
         };
-        let before = Some(decode_checkout_cwd(bytes, &mut cursor, object_id_length)?);
-        let discarded = decode_optional_checkout_cwd(bytes, &mut cursor, object_id_length)?;
-        let after = decode_optional_checkout_cwd(bytes, &mut cursor, object_id_length)?;
+        let before = Some(decode_checkout_cwd(
+            bytes,
+            &mut cursor,
+            object_id_length,
+            version >= 3,
+        )?);
+        let discarded =
+            decode_optional_checkout_cwd(bytes, &mut cursor, object_id_length, version >= 3)?;
+        let after =
+            decode_optional_checkout_cwd(bytes, &mut cursor, object_id_length, version >= 3)?;
         if cursor != bytes.len()
             || before.as_ref().is_none_or(|cwd| cwd.runtime != runtime)
             || discarded.as_ref().is_some_and(|cwd| cwd.runtime != runtime)
@@ -857,7 +870,7 @@ impl CheckoutPreflight {
     pub fn force_token(&self) -> CheckoutPlanToken {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"ORNA-CHECKOUT-PLAN-TOKEN\0");
-        bytes.push(1);
+        bytes.push(2);
         match &self.target {
             CheckoutTarget::Branch { name, commit } => {
                 bytes.push(1);
@@ -883,6 +896,8 @@ impl CheckoutPreflight {
             self.cwd.index.tree.as_ref().map(IndexTreeRef::as_str),
         );
         token_bytes(&mut bytes, self.cwd.worktree.as_porcelain_v2_z());
+        token_bytes(&mut bytes, self.cwd.worktree.content_digest());
+        token_bytes(&mut bytes, &self.dirty_content_digest);
         bytes.extend_from_slice(&self.cwd.runtime.get().to_be_bytes());
         token_paths(&mut bytes, &self.git.affected_paths);
         token_paths(&mut bytes, &self.git.conflicting_paths);
@@ -1990,12 +2005,66 @@ impl Repository {
 
     /// Captures Git's ordinary worktree/index status in machine-readable form.
     pub fn worktree_state(&self) -> Result<WorktreeState, RepositoryError> {
-        Ok(WorktreeState(self.git_bytes([
-            "status",
-            "--porcelain=v2",
-            "-z",
-            "--untracked-files=all",
-        ])?))
+        let status = self.git_bytes(["status", "--porcelain=v2", "-z", "--untracked-files=all"])?;
+        Ok(WorktreeState(status, self.worktree_content_digest(&[])?))
+    }
+
+    fn worktree_content_digest(
+        &self,
+        extra_paths: &[ManagedPath],
+    ) -> Result<[u8; 32], RepositoryError> {
+        let mut paths = BTreeSet::new();
+        for path in self
+            .git_bytes(["diff", "--no-renames", "--name-only", "-z", "--"])?
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            paths.insert(path.to_vec());
+        }
+        for path in self
+            .git_bytes(["ls-files", "--others", "--exclude-standard", "-z", "--"])?
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            paths.insert(path.to_vec());
+        }
+        for path in extra_paths {
+            paths.insert(path.as_path().as_os_str().as_encoded_bytes().to_vec());
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"ORNA-WORKTREE-CONTENT\0");
+        for encoded_path in paths {
+            let path =
+                String::from_utf8(encoded_path).map_err(|_| RepositoryError::UnsafeManagedPath)?;
+            let path = ManagedPath::new(path)?;
+            let encoded_path = path.as_path().as_os_str().as_encoded_bytes();
+            digest.update((encoded_path.len() as u64).to_be_bytes());
+            digest.update(encoded_path);
+            let target = self.worktree.join(path.as_path());
+            match fs::symlink_metadata(&target) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    digest.update([1]);
+                    let link = fs::read_link(&target)
+                        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                    let link = link.as_os_str().as_encoded_bytes();
+                    digest.update((link.len() as u64).to_be_bytes());
+                    digest.update(link);
+                }
+                Ok(metadata) if metadata.is_file() => {
+                    digest.update([2]);
+                    let contents =
+                        fs::read(&target).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                    digest.update((contents.len() as u64).to_be_bytes());
+                    digest.update(contents);
+                }
+                Ok(_) => digest.update([3]),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    digest.update([0]);
+                }
+                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+            }
+        }
+        Ok(digest.finalize().into())
     }
 
     /// Observes CWD. The runtime generation must come from the runtime owner,
@@ -2092,11 +2161,13 @@ impl Repository {
         let target = self.resolve_checkout_target(selector)?;
         let cwd = self.cwd_generation_locked(runtime)?;
         let git = self.checkout_git_subplan(cwd.head.as_ref(), target.commit())?;
+        let dirty_content_digest = self.worktree_content_digest(&git.discardable_paths)?;
         Ok(CheckoutPreflight {
             expected_head: cwd.head.clone(),
             target,
             cwd,
             git,
+            dirty_content_digest,
         })
     }
 
@@ -2120,6 +2191,9 @@ impl Repository {
             return Err(RepositoryError::CheckoutPlanStale);
         }
         if self.checkout_git_subplan(current_cwd.head.as_ref(), plan.target.commit())? != plan.git {
+            return Err(RepositoryError::CheckoutPlanStale);
+        }
+        if self.worktree_content_digest(&plan.git.discardable_paths)? != plan.dirty_content_digest {
             return Err(RepositoryError::CheckoutPlanStale);
         }
         let selector = plan
@@ -2570,6 +2644,24 @@ impl Repository {
         self.run(command).map(|_| ())
     }
 
+    fn verify_prepared_checkout_journal_locked(
+        &self,
+        journal: &CheckoutRecoveryJournal,
+    ) -> Result<(), RepositoryError> {
+        let selector = journal.target.branch_name().map_or_else(
+            || journal.target.commit().as_str().to_owned(),
+            str::to_owned,
+        );
+        let plan = self.plan_checkout_locked(&selector, journal.runtime)?;
+        if plan.target != journal.target
+            || plan.force_token() != journal.force_token
+            || plan.git.discardable_paths != journal.discard_paths
+        {
+            return Err(RepositoryError::CheckoutRecoveryRequired);
+        }
+        Ok(())
+    }
+
     /// Resolves a force-discard journal after restart.
     ///
     /// A prepared transition preserves the recorded old CWD. A journalled
@@ -2585,6 +2677,7 @@ impl Repository {
             let current = self.cwd_generation_locked(journal.runtime)?;
             return match journal.phase {
                 CheckoutRecoveryPhase::Prepared if &current == before => {
+                    self.verify_prepared_checkout_journal_locked(&journal)?;
                     self.clear_checkout_recovery_journal_locked()
                 }
                 CheckoutRecoveryPhase::Applied if journal.after.as_ref() == Some(&current) => {
@@ -2623,17 +2716,7 @@ impl Repository {
         // Version-one journals did not contain enough state to recognize a
         // post-mutation CWD. Retain their historical no-mutation recovery
         // behavior rather than assuming a destructive transition completed.
-        let selector = journal.target.branch_name().map_or_else(
-            || journal.target.commit().as_str().to_owned(),
-            str::to_owned,
-        );
-        let plan = self.plan_checkout_locked(&selector, journal.runtime)?;
-        if plan.target != journal.target
-            || plan.force_token() != journal.force_token
-            || plan.git.discardable_paths != journal.discard_paths
-        {
-            return Err(RepositoryError::CheckoutRecoveryRequired);
-        }
+        self.verify_prepared_checkout_journal_locked(&journal)?;
         self.clear_checkout_recovery_journal_locked()
     }
 
@@ -3985,6 +4068,7 @@ fn encode_checkout_cwd(bytes: &mut Vec<u8>, cwd: &CwdGeneration) -> Result<(), R
         .map_err(|_| RepositoryError::InvalidCheckoutJournal)?;
     put_optional_bytes(bytes, Some(cwd.worktree.as_porcelain_v2_z()))
         .map_err(|_| RepositoryError::InvalidCheckoutJournal)?;
+    bytes.extend_from_slice(cwd.worktree.content_digest());
     bytes.extend_from_slice(&cwd.runtime.get().to_be_bytes());
     Ok(())
 }
@@ -4009,6 +4093,7 @@ fn decode_checkout_cwd(
     bytes: &[u8],
     cursor: &mut usize,
     object_id_length: usize,
+    has_content_digest: bool,
 ) -> Result<CwdGeneration, RepositoryError> {
     let head = checkout_journal_optional_string(bytes, cursor)?
         .map(|value| GitCommitRef::from_verified_commit(value, object_id_length))
@@ -4028,6 +4113,11 @@ fn decode_checkout_cwd(
         .transpose()?;
     let worktree = checkout_journal_optional_bytes(bytes, cursor)?
         .ok_or(RepositoryError::InvalidCheckoutJournal)?;
+    let content_digest = if has_content_digest {
+        take_fixed_array::<32>(bytes, cursor)?
+    } else {
+        [0; 32]
+    };
     let runtime = RuntimeGeneration::new(u64::from_be_bytes(take_fixed_array::<8>(bytes, cursor)?));
     if head != index_head {
         return Err(RepositoryError::InvalidCheckoutJournal);
@@ -4039,7 +4129,7 @@ fn decode_checkout_cwd(
             head: index_head,
             tree: index_tree,
         },
-        worktree: WorktreeState(worktree),
+        worktree: WorktreeState(worktree, content_digest),
         runtime,
     })
 }
@@ -4048,10 +4138,11 @@ fn decode_optional_checkout_cwd(
     bytes: &[u8],
     cursor: &mut usize,
     object_id_length: usize,
+    has_content_digest: bool,
 ) -> Result<Option<CwdGeneration>, RepositoryError> {
     match take_byte(bytes, cursor)? {
         0 => Ok(None),
-        1 => decode_checkout_cwd(bytes, cursor, object_id_length).map(Some),
+        1 => decode_checkout_cwd(bytes, cursor, object_id_length, has_content_digest).map(Some),
         _ => Err(RepositoryError::InvalidCheckoutJournal),
     }
 }
@@ -4640,6 +4731,82 @@ mod tests {
                 .stdout,
             b"interleaved\n"
         );
+    }
+
+    #[test]
+    fn checkout_force_witness_rejects_same_status_content_drift() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        git(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(root.path(), &["config", "user.name", "Repository test"]);
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        fs::write(root.path().join("ordinary.txt"), "base\n").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-m", "initial"]);
+        git(root.path(), &["branch", "experiment"]);
+        git(root.path(), &["switch", "experiment"]);
+        fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+        fs::write(root.path().join("ignored.txt"), "ignored target\n").unwrap();
+        git(root.path(), &["add", "ordinary.txt"]);
+        git(root.path(), &["add", "-f", "ignored.txt"]);
+        git(root.path(), &["commit", "-m", "target"]);
+        git(root.path(), &["switch", "main"]);
+        fs::write(root.path().join("ordinary.txt"), "first local edit\n").unwrap();
+        fs::write(root.path().join("ignored.txt"), "first ignored edit\n").unwrap();
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let plan = repository
+            .plan_checkout("experiment", RuntimeGeneration::new(51))
+            .unwrap();
+        let token = plan.force_token();
+        let discard = repository
+            .validate_checkout_discard_set(
+                &plan,
+                true,
+                Some(&token),
+                plan.git().discardable_paths(),
+            )
+            .unwrap();
+
+        fs::write(root.path().join("ordinary.txt"), "second local edit\n").unwrap();
+        assert!(matches!(
+            repository.verify_validated_checkout_discard(&discard),
+            Err(RepositoryError::CheckoutPlanStale)
+        ));
+        fs::write(root.path().join("ordinary.txt"), "first local edit\n").unwrap();
+        repository
+            .persist_validated_checkout_discard(&discard)
+            .unwrap();
+
+        fs::write(root.path().join("ignored.txt"), "second ignored edit\n").unwrap();
+        let head_before = repository.head().unwrap();
+        assert!(matches!(
+            repository.verify_validated_checkout_discard(&discard),
+            Err(RepositoryError::CheckoutPlanStale)
+        ));
+        assert!(matches!(
+            repository.recover_pre_execution_checkout(),
+            Err(RepositoryError::CheckoutRecoveryRequired)
+        ));
+        assert_eq!(repository.head().unwrap(), head_before);
+        assert_eq!(
+            repository.current_branch().unwrap().as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("ordinary.txt")).unwrap(),
+            "first local edit\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("ignored.txt")).unwrap(),
+            "second ignored edit\n"
+        );
+        assert!(repository.has_pending_pre_execution_checkout().unwrap());
     }
 
     #[test]
