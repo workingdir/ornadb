@@ -8,3 +8,4 @@ description = "Bounded stream checkpoint administration for Orna 1.0"
 publish = false
 
 [dependencies]
+orna-foundation-v1 = { path = "../orna-foundation-v1" }
