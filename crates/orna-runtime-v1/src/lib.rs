@@ -8749,13 +8749,12 @@ async fn has_blocking_stream_failure(
     let mut rows = connection
         .query(
             "SELECT 1 FROM stream_failure
-             WHERE key_id = ?1 AND status IN (?2, ?3, ?4)
+             WHERE key_id = ?1 AND status IN (?2, ?3)
              LIMIT 1",
             params![
                 stream_key_id(key),
                 encode_status(FailureStatus::Failed),
                 encode_status(FailureStatus::Retrying),
-                encode_status(FailureStatus::Replaying),
             ],
         )
         .await
@@ -15258,6 +15257,73 @@ mod tests {
                 .unwrap(),
             CommitResult::Cancelled { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn durable_admitted_replay_does_not_block_stream_resume() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let (grant, checkpoint, delivery) =
+            protected_replay_fixture(&state, writer, "replay-resume", digest(5)).await;
+        let key = delivery.checkpoint_key();
+
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_async(&grant.failure)
+                .await
+                .unwrap()
+                .expect("replaying failure")
+                .status,
+            FailureStatus::Replaying
+        );
+        assert!(matches!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Pause { key: key.clone() })
+                .await
+                .unwrap(),
+            CommitResult::StreamStatusChanged {
+                state: StreamState {
+                    status: StreamStatus::Paused,
+                    ..
+                },
+                changed: true,
+            }
+        ));
+        assert!(matches!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Resume { key: key.clone() })
+                .await
+                .unwrap(),
+            CommitResult::StreamStatusChanged {
+                state: StreamState {
+                    status: StreamStatus::Running,
+                    ..
+                },
+                changed: true,
+            }
+        ));
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&key)
+                .await
+                .unwrap(),
+            checkpoint
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_async(&grant.failure)
+                .await
+                .unwrap()
+                .expect("replaying failure")
+                .status,
+            FailureStatus::Replaying
+        );
     }
 
     #[tokio::test]
