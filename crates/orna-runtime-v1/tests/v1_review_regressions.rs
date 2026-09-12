@@ -254,3 +254,86 @@ async fn catalogue_same_revision_changed_hash_is_rejected_across_snapshots() {
     assert_eq!(function.object.revision_id, [12; 32]);
     assert_eq!(function.object.semantic_hash, [13; 32]);
 }
+
+#[tokio::test]
+async fn catalogue_carried_forward_generation_rejects_signature_replacement() {
+    let (_directory, state, lease, mut batch, first) = admitted_state().await;
+    let context = state.begin_activation().await.expect("begin generation");
+    let mutation = TableMutation::new([43; 16], "catalogue-review", vec![2], Some(vec![2]))
+        .expect("valid generation mutation");
+    let next = state
+        .commit_table_activation(lease, &context, &[mutation], [44; 32], &NoFault)
+        .await
+        .expect("advance generation with carried-forward catalogue");
+    let before = state
+        .catalogue_function("pkg.f")
+        .await
+        .expect("read carried-forward function")
+        .expect("carried-forward function exists");
+
+    batch.predecessor_capture = Some(first.capture.clone());
+    batch.functions[0]
+        .parameters
+        .push(CatalogueParameterDeclaration {
+            name: "y".into(),
+            position: 1,
+            type_name: "pkg.T".into(),
+        });
+    assert_eq!(
+        state.admit_catalogue_at(lease, &next, batch).await,
+        Err(CatalogueError::CatalogueRevisionConflict)
+    );
+    assert_eq!(
+        state.capture().await.expect("capture after rejection"),
+        next
+    );
+    assert_eq!(
+        state
+            .catalogue_function("pkg.f")
+            .await
+            .expect("read function after rejection")
+            .expect("function remains present"),
+        before,
+        "an observable carried-forward generation must not be replaced"
+    );
+}
+
+#[tokio::test]
+async fn unadmitted_data_only_generation_allows_first_catalogue_admission() {
+    let (_directory, repository) = repository();
+    let state = RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [1; 16],
+            repository_id: [2; 16],
+        },
+        [3; 32],
+    )
+    .await
+    .expect("open fresh runtime");
+    let lease = state
+        .acquire_lease([15; 16])
+        .await
+        .expect("acquire writer lease");
+    let predecessor = state.capture().await.expect("capture initial generation");
+    let context = state.begin_activation().await.expect("begin generation");
+    let mutation = TableMutation::new([45; 16], "catalogue-review", vec![3], Some(vec![3]))
+        .expect("valid generation mutation");
+    let next = state
+        .commit_table_activation(lease, &context, &[mutation], [46; 32], &NoFault)
+        .await
+        .expect("advance unadmitted generation");
+
+    let mut batch = complete_batch();
+    batch.predecessor_capture = Some(predecessor);
+    let admitted = state
+        .admit_catalogue_at(lease, &next, batch)
+        .await
+        .expect("first complete catalogue admission remains allowed");
+    assert_eq!(admitted.capture, next);
+    assert!(state
+        .catalogue_function("pkg.f")
+        .await
+        .expect("read first admitted function")
+        .is_some());
+}
