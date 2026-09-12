@@ -10,8 +10,10 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::{Client as HttpClient, StatusCode, Url};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_tungstenite::tungstenite::{
+    Message, client::IntoClientRequest, protocol::WebSocketConfig,
+};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
 
 use orna_protocol_v1::Limits;
 
@@ -289,7 +291,10 @@ impl LiveClient {
         request
             .headers_mut()
             .insert("sec-websocket-protocol", "orna.present.v1".parse().unwrap());
-        let (socket, response) = connect_async(request)
+        let websocket_config = WebSocketConfig::default()
+            .max_message_size(Some(session.limits.max_message_bytes))
+            .max_frame_size(Some(session.limits.max_message_bytes));
+        let (socket, response) = connect_async_with_config(request, Some(websocket_config), false)
             .await
             .map_err(LiveTransportError::WebSocket)?;
         if response
