@@ -679,6 +679,18 @@ impl RuntimePublicationCoordinator {
         if self.journal.compact_manifest().is_some() {
             return Err(Error::InvalidTransition);
         }
+        if self.journal.stage() != orna_repository_v1::PublicationJournalStage::WorktreeReconciled
+        {
+            return Err(Error::PublicationPending);
+        }
+        if repository
+            .head()
+            .map_err(map_publication_repository_error)?
+            .as_ref()
+            != Some(self.journal.new_head())
+        {
+            return Err(Error::RefConflict);
+        }
         runtime
             .complete_publication(freeze, &commit)
             .await
@@ -1932,6 +1944,77 @@ mod tests {
                 .unwrap(),
             Some(b"row".to_vec())
         );
+    }
+
+    #[tokio::test]
+    async fn coordinator_rejects_runtime_cleanup_before_reconciliation() {
+        let (_temp, repository) = repository();
+        let runtime = RuntimeState::open(
+            &repository,
+            orna_runtime_v1::RuntimeIdentity {
+                database_id: [31; 16],
+                repository_id: [32; 16],
+            },
+            [33; 32],
+        )
+        .await
+        .unwrap();
+        let lease = runtime.acquire_lease([34; 16]).await.unwrap();
+        let context = runtime.begin_activation().await.unwrap();
+        runtime
+            .commit_table_activation(
+                lease,
+                &context,
+                &[TableMutation::new(
+                    [35; 16],
+                    "Contact",
+                    b"Alice".to_vec(),
+                    Some(b"row".to_vec()),
+                )
+                .unwrap()],
+                [36; 32],
+                &orna_runtime_v1::NoFault,
+            )
+            .await
+            .unwrap();
+        let freeze = runtime
+            .freeze(
+                [37; 16],
+                &orna_runtime_v1::Checkpoint {
+                    generation: 1,
+                    digest: [36; 32],
+                    mutation_sequence: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
+            &repository,
+            &runtime,
+            &head,
+            index,
+            &freeze,
+            |mutation| {
+                LoosePath::for_key(
+                    mutation.table(),
+                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+                )
+            },
+            "orna: publish runtime data",
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            plan.complete(&repository, &runtime, &freeze).await,
+            Err(Error::PublicationPending)
+        ));
+        assert_eq!(plan.journal().stage(), orna_repository_v1::PublicationJournalStage::Prepared);
+        assert_eq!(runtime.pending().await.unwrap().len(), 1);
+        assert_eq!(repository.head().unwrap(), Some(head));
+        assert_eq!(repository.read_publication_journal().unwrap(), None);
     }
 
     #[test]
