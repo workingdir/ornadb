@@ -1387,7 +1387,7 @@ mod shutdown_tests {
 
     pub(super) fn run_local(future: impl Future<Output = ()> + 'static) {
         let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
+            .enable_all()
             .build()
             .unwrap();
         tokio::task::LocalSet::new().block_on(&runtime, future);
@@ -3045,8 +3045,9 @@ mod tests {
     use crate::live_eval::PureEvalApplication;
     use futures::StreamExt;
     use orna_live_v1::{
-        ApplicationPreparation, CreateRequest, Frame, Limits, LiveHost, ResumeRequest,
-        SessionCredential, WebSocketState,
+        ApplicationPreparation, CreateRequest, Frame, HttpConnection, Limits, LiveCredentialIssuer,
+        LiveHost, LiveTransport, ResumeRequest, SessionCredential, SystemCredentialIssuer,
+        TransportLimits, WebSocketState, WireRequest,
     };
     use orna_project_v1::ProjectLoader;
     use orna_protocol_v1::{
@@ -3118,6 +3119,221 @@ mod tests {
         assert_eq!(deletion.delete(session), Err(()));
         assert_eq!(expiries.borrow().get(&session), Some(&100));
         assert!(deleted_leases.borrow().is_empty());
+    }
+
+    #[test]
+    fn same_session_delete_during_deliver_preserves_reservation_until_abort_and_join() {
+        let repository = worker_repository();
+        let session = [21; 16];
+        let attachment = [22; 16];
+        let now = super::system_milliseconds();
+        let expires_at = now.saturating_add(60_000);
+        let origin = Origin::parse("https://app.example").unwrap();
+        let expiries = Rc::new(RefCell::new(BTreeMap::from([(
+            SessionId::new(session),
+            expires_at,
+        )])));
+        let mut host = LiveHost::new(
+            Limits::default(),
+            SessionBoundary::new(OriginPolicy::new([origin.clone()], []), 60_000),
+            Serving::new(orna_serving_v1::Limits::default()).unwrap(),
+        )
+        .unwrap();
+        let mut issuer = SystemCredentialIssuer::default();
+        futures::executor::block_on(host.create(
+            CreateRequest {
+                id: session,
+                origin: origin.clone(),
+                expires_at,
+                now,
+                subscribe: &subscribe_payload(),
+            },
+            &mut issuer,
+        ))
+        .unwrap();
+        let token = issuer.last_issued().unwrap();
+        let transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+        let application = PureEvalApplication::from_repository_with_project(
+            &repository.recipe.repository,
+            repository.recipe.database_id,
+            repository.recipe.identity,
+            repository.recipe.initial_digest,
+            repository.recipe.runtime_owner,
+            Rc::clone(&expiries),
+            Some(repository.recipe.project.clone()),
+            Some(repository.recipe.capture.clone()),
+        )
+        .unwrap();
+        let application_work = transport.application_work_supervisor();
+        let application_workers = ApplicationWorkerRegistry::new(repository.recipe.clone());
+        let deletion = HostDeletion {
+            expiries: Rc::clone(&expiries),
+            deleted_leases: Rc::new(RefCell::new(BTreeMap::new())),
+            application: Rc::new(RefCell::new(Some(application))),
+            application_workers: Some(application_workers.clone()),
+        };
+        let mut token_text = String::with_capacity(43);
+        const BASE64URL: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        for chunk in token.chunks(3) {
+            token_text.push(BASE64URL[(chunk[0] >> 2) as usize] as char);
+            token_text.push(
+                BASE64URL
+                    [(((chunk[0] & 3) << 4) | (chunk.get(1).copied().unwrap_or(0) >> 4)) as usize]
+                    as char,
+            );
+            if chunk.len() > 1 {
+                token_text.push(
+                    BASE64URL[(((chunk[1] & 15) << 2) | (chunk.get(2).copied().unwrap_or(0) >> 6))
+                        as usize] as char,
+                );
+            }
+            if chunk.len() > 2 {
+                token_text.push(BASE64URL[(chunk[2] & 63) as usize] as char);
+            }
+        }
+        let session_path = "/orna/live/15151515-1515-1515-1515-151515151515";
+        let upgrade = WireRequest {
+            method: "GET".into(),
+            path: session_path.into(),
+            headers: vec![
+                ("origin".into(), "https://app.example".into()),
+                ("connection".into(), "Upgrade".into()),
+                ("upgrade".into(), "websocket".into()),
+                ("sec-websocket-version".into(), "13".into()),
+                (
+                    "sec-websocket-key".into(),
+                    "dGhlIHNhbXBsZSBub25jZQ==".into(),
+                ),
+                ("sec-websocket-protocol".into(), "orna.present.v1".into()),
+                ("cookie".into(), format!("orna_session={token_text}")),
+            ],
+            body: Vec::new(),
+        };
+        let delete_request = format!(
+            "DELETE /orna/session/15151515-1515-1515-1515-151515151515 HTTP/1.1\r\nHost: app.example\r\nOrigin: {}\r\nAuthorization: Bearer {token_text}\r\n\r\n",
+            "https://app.example"
+        );
+        super::shutdown_tests::run_local(async move {
+            let registry = Rc::new(RefCell::new(super::WorkerRegistry::default()));
+            let (worker_id, cancellation) = registry.borrow_mut().register();
+            let mut workers = tokio::task::JoinSet::new();
+            let (actor_sender, actor_receiver) = futures::channel::mpsc::unbounded();
+            let (retirement_acknowledgements, retirement_ack_receiver) =
+                futures::channel::mpsc::unbounded();
+            let (retirement_gate_sender, mut retirement_gate_receiver) =
+                futures::channel::mpsc::unbounded();
+            let actor = tokio::task::spawn_local(super::run_host_actor(
+                actor_receiver,
+                actor_sender.clone(),
+                super::ConcurrentHostState {
+                    transport,
+                    authority: super::HostAuthority {
+                        database_id: repository.recipe.database_id,
+                        runtime_id: [23; 16],
+                        expiries: Rc::clone(&expiries),
+                    },
+                    issuer: SystemCredentialIssuer::default(),
+                    deletion,
+                    application_workers,
+                    application_work,
+                    delivering_upgrades: BTreeMap::new(),
+                },
+                Rc::clone(&registry),
+                retirement_ack_receiver,
+                retirement_gate_sender,
+            ));
+            let worker_actor = actor_sender.clone();
+            let task = workers.spawn_local(async move {
+                cancellation.await.unwrap();
+                super::actor_worker_exited(&worker_actor, worker_id).await;
+                worker_id
+            });
+            registry.borrow_mut().bind_task(worker_id, task.id());
+
+            let unavailable_body = br#"{"code":"live.unavailable","message":"request rejected"}"#;
+            let unavailable = [
+                b"HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\nContent-Length: ".as_slice(),
+                unavailable_body.len().to_string().as_bytes(),
+                b"\r\n\r\n".as_slice(),
+                unavailable_body,
+            ]
+            .concat();
+
+            let upgrade = super::actor_begin(&actor_sender, upgrade, attachment, worker_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(retirement_gate_receiver.next().await.unwrap().len(), 0);
+            super::actor_deliver(&actor_sender, &upgrade, worker_id)
+                .await
+                .unwrap();
+
+            let mut cancellation = futures::future::pending();
+            let (_, responses, retirement) = super::actor_http(
+                &actor_sender,
+                HttpConnection::new(TransportLimits::default()),
+                delete_request.as_bytes(),
+                &mut cancellation,
+            )
+            .await
+            .unwrap();
+            assert_eq!(responses, vec![unavailable.clone()]);
+            assert!(retirement.is_empty());
+
+            super::actor_abort(&actor_sender, upgrade, worker_id).await;
+            let retirement = loop {
+                let retirement = retirement_gate_receiver
+                    .next()
+                    .await
+                    .expect("aborted delivery must publish its retirement gate");
+                if retirement.iter().any(|gate| gate.attachment == attachment) {
+                    break retirement;
+                }
+                assert!(retirement.is_empty());
+            };
+            assert_eq!(retirement.len(), 1);
+            assert_eq!(retirement[0].attachment, attachment);
+            let joined = workers
+                .join_next_with_id()
+                .await
+                .expect("aborted worker must be joined");
+            assert!(!super::acknowledge_worker_join(&registry, joined));
+
+            let mut cancellation = futures::future::pending();
+            let (_, responses, retirement_before_ack) = super::actor_http(
+                &actor_sender,
+                HttpConnection::new(TransportLimits::default()),
+                delete_request.as_bytes(),
+                &mut cancellation,
+            )
+            .await
+            .unwrap();
+            assert_eq!(responses, vec![unavailable]);
+            assert!(retirement_before_ack.is_empty());
+
+            assert_eq!(
+                super::retire_and_join(&retirement_acknowledgements, retirement).await,
+                Ok(())
+            );
+
+            let mut cancellation = futures::future::pending();
+            let (_, responses, retirement) = super::actor_http(
+                &actor_sender,
+                HttpConnection::new(TransportLimits::default()),
+                delete_request.as_bytes(),
+                &mut cancellation,
+            )
+            .await
+            .unwrap();
+            assert_eq!(responses, vec![b"HTTP/1.1 204 No Content\r\n\r\n".to_vec()]);
+            assert!(retirement.is_empty());
+
+            actor_sender
+                .unbounded_send(super::ActorCommand::Shutdown)
+                .unwrap();
+            actor.await.unwrap();
+        });
     }
 
     struct WorkerRepository {
