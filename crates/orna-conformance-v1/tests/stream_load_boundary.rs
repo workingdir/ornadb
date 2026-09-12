@@ -1,9 +1,11 @@
 use orna_conformance_v1::{DurableTransactionalEvaluator, SourceUnit, StageOutcome};
 use orna_evaluator_v1::Limits;
 use orna_foundation_v1::Value;
+use orna_project_v1::ProjectLoader;
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{RuntimeError, RuntimeIdentity, RuntimeState};
-use std::{path::Path, process::Command};
+use orna_semantic_v1::{Catalogue, analyze_with_catalogue};
+use std::{fs, path::Path, process::Command};
 use tempfile::TempDir;
 
 fn git(path: &Path, arguments: &[&str]) {
@@ -54,6 +56,86 @@ fn stream_source() -> SourceUnit {
             }
         "#
         .into(),
+    }
+}
+
+#[tokio::test]
+async fn loading_and_semantic_admission_do_not_start_a_literal_stream() {
+    let (directory, repository) = repository();
+    let identity = identity();
+    let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+    let source = stream_source();
+    fs::write(directory.path().join("main.orna"), source.source.as_bytes()).expect("module source");
+    let state = RuntimeState::open(&repository, identity, [73; 32])
+        .await
+        .expect("runtime state");
+    let capture_before_load = state.capture().await.expect("initial capture");
+
+    let loaded = ProjectLoader::default()
+        .load(&repository)
+        .expect("stream module loads without execution");
+    assert_eq!(
+        loaded
+            .identities()
+            .iter()
+            .map(|module| module.logical_path())
+            .collect::<Vec<_>>(),
+        ["main.orna"]
+    );
+    let analysis = analyze_with_catalogue(loaded.modules(), &Catalogue::authoritative_fixture());
+    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+    assert_eq!(
+        evaluator.admit_list_stream_source(&source),
+        StageOutcome::Passed
+    );
+
+    assert_eq!(state.current_lease().await, Ok(None));
+    assert_eq!(state.capture().await, Ok(capture_before_load));
+    assert_eq!(state.latest_checkpoint().await, Ok(None));
+    assert!(state.pending().await.expect("load mutations").is_empty());
+    assert!(
+        state
+            .run_observations()
+            .await
+            .expect("load runs")
+            .is_empty()
+    );
+    assert!(
+        state
+            .stream_observations()
+            .await
+            .expect("load streams")
+            .is_empty()
+    );
+    assert!(
+        state
+            .committed_table_rows("Reading")
+            .await
+            .expect("load rows")
+            .is_empty()
+    );
+
+    assert!(matches!(
+        evaluator
+            .execute_source(&repository, identity, [75; 16], [73; 32], &source)
+            .await,
+        Ok(StageOutcome::Passed)
+    ));
+    assert_eq!(
+        state.latest_checkpoint().await.unwrap().unwrap().generation,
+        2
+    );
+    assert_eq!(state.pending().await.expect("run mutations").len(), 2);
+    for value in [1, 2] {
+        let key = Value::int(value.into()).encode().expect("encoded key");
+        assert!(
+            state
+                .committed_table_row("Reading", &key)
+                .await
+                .expect("stream row")
+                .is_some(),
+            "the explicit stream runner must invoke the callback for item {value}"
+        );
     }
 }
 
