@@ -338,6 +338,55 @@ fn fetch_updates_branch_and_internal_refs_without_mutating_local_state() {
 }
 
 #[test]
+fn fetch_rejects_a_force_rewound_remote_branch_without_mutating_local_state() {
+    let fixture = Fixture::new();
+    let repository = fixture.repository();
+    let initial = fixture.initial_head();
+    let advanced = fixture.advance_branch_only();
+
+    let report = repository
+        .fetch(&request([RequestedRef::branch("main").unwrap()], []))
+        .unwrap();
+    assert!(report.ordinary()[0].updated());
+    assert_eq!(
+        git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]),
+        advanced
+    );
+
+    git(
+        &fixture.remote,
+        &["update-ref", "refs/heads/main", &initial, &advanced],
+    );
+    assert_eq!(
+        git(&fixture.remote, &["rev-parse", "refs/heads/main"]),
+        initial
+    );
+
+    let tracking_before = git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]);
+    let head_before = repository.head().unwrap();
+    let index_before = repository.index_generation().unwrap();
+    let worktree_before = repository.worktree_state().unwrap();
+    let runtime_marker = repository.runtime_paths().root().join("transport-marker");
+    repository.runtime_paths().ensure_exists().unwrap();
+    fs::write(&runtime_marker, b"preserve-after-rewind").unwrap();
+    let runtime_before = fs::read(&runtime_marker).unwrap();
+
+    let error = repository
+        .fetch(&request([RequestedRef::branch("main").unwrap()], []))
+        .expect_err("a force-rewound remote branch must fail closed");
+
+    assert!(matches!(error, FetchError::RefConflict));
+    assert_eq!(
+        git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]),
+        tracking_before
+    );
+    assert_eq!(repository.head().unwrap(), head_before);
+    assert_eq!(repository.index_generation().unwrap(), index_before);
+    assert_eq!(repository.worktree_state().unwrap(), worktree_before);
+    assert_eq!(fs::read(&runtime_marker).unwrap(), runtime_before);
+}
+
+#[test]
 fn fetch_reports_missing_internal_ref_without_fabricating_it() {
     let fixture = Fixture::new();
     let initial = fixture.initial_head();
