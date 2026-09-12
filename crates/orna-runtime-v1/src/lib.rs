@@ -18418,6 +18418,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn takeover_recovery_validation_rolls_back_lease_and_barrier() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(172)).await.unwrap();
+        let running_identity = request(173, 174);
+        let running_fingerprint = digest(175);
+        let (_, capability) = state
+            .reserve_request_with_admission(running_identity, running_fingerprint)
+            .await
+            .unwrap();
+        state
+            .start_request_with_owner_and_admission(
+                running_identity,
+                running_fingerprint,
+                writer,
+                capability.expect("owner-bound admission capability"),
+            )
+            .await
+            .unwrap();
+
+        let delivery = stream_delivery("takeover-rollback", "takeover-rollback-next");
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let retrying = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream acquire result: {other:?}"),
+            };
+            let failed = match stream
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::DecodeRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(vec![1, 2, 3]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected stream failure result: {other:?}"),
+            };
+            match stream
+                .apply_async(CommitIntent::Retry {
+                    failure: failed.identity,
+                    expected_version: failed.version,
+                    expected,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::RetryScheduled { failure } => failure,
+                other => panic!("unexpected stream retry result: {other:?}"),
+            }
+        };
+        state
+            .connection
+            .execute(
+                "DELETE FROM stream_lease WHERE key_id = ?1",
+                params![stream_key_id(&delivery.checkpoint_key())],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.takeover_lease(writer, id(176)).await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        assert_eq!(state.current_lease().await.unwrap(), Some(writer));
+        assert_eq!(
+            state
+                .request_status(running_identity, running_fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            RequestState::Running
+        );
+        let mut pending = state
+            .connection
+            .query("SELECT COUNT(*) FROM takeover_recovery_pending", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            pending
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<i64>(0)
+                .unwrap(),
+            0
+        );
+        assert_eq!(retrying.status, FailureStatus::Retrying);
+
+        drop(state);
+        assert!(matches!(
+            RuntimeState::open(
+                &repo,
+                RuntimeIdentity {
+                    database_id: id(1),
+                    repository_id: id(2),
+                },
+                digest(3),
+            )
+            .await,
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+    }
+
+    #[tokio::test]
     async fn request_recovery_evidence_migration_is_idempotent() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
