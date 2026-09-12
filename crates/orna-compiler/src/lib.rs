@@ -12,6 +12,7 @@ use orna_syntax::{
 mod mutation;
 mod prepare;
 pub(crate) mod relational;
+mod resolved_catalogue;
 mod resolver;
 
 pub use prepare::{
@@ -21,6 +22,10 @@ pub use prepare::{
 };
 
 pub use orna_core::revision::EMPTY_APPLICATION_CATALOGUE_REVISION_ID;
+pub use resolved_catalogue::{
+    materialize_resolved_source_catalogue, ResolvedSourceCatalogue, ResolvedSourceCatalogueError,
+    SignatureSlot, UnsupportedReturnShape,
+};
 pub use resolver::{
     CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientBodyKind,
     CheckedClientCapability, CheckedClientCapabilityArgument, CheckedClientFunction,
