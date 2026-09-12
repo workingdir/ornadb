@@ -1,7 +1,7 @@
 //! Descriptor-driven physical compact key decoding.
 //!
 //! This module is the first physical reader slice. It decodes only required
-//! INT64 and BOOLEAN key columns from an already verified compact Parquet segment and
+//! INT64, BOOLEAN, and UTF-8 BYTE_ARRAY key columns from an already verified compact Parquet segment and
 //! emits the canonical OVB scalar/tuple representation consumed by the frozen
 //! logical generation index. It does not decode arbitrary rows or infer a
 //! logical type from a Parquet sample.
@@ -31,6 +31,7 @@ pub enum CompactParquetError {
     Repository(RepositoryError),
     InvalidParquet,
     InvalidMetadata,
+    InvalidUtf8,
     UnsupportedKeyMapping,
     MissingKeyColumn([u8; 16]),
     DuplicateFieldColumn([u8; 16]),
@@ -46,6 +47,7 @@ impl fmt::Display for CompactParquetError {
             Self::Repository(error) => error.fmt(f),
             Self::InvalidParquet => f.write_str("invalid compact Parquet data"),
             Self::InvalidMetadata => f.write_str("invalid compact Parquet metadata"),
+            Self::InvalidUtf8 => f.write_str("compact string key is not valid UTF-8"),
             Self::UnsupportedKeyMapping => f.write_str("unsupported compact key mapping"),
             Self::MissingKeyColumn(id) => write!(f, "compact key column is missing: {id:?}"),
             Self::DuplicateFieldColumn(id) => {
@@ -158,6 +160,10 @@ impl CompactParquetKeySource {
                         .into_iter()
                         .map(OvbRaw::Bool)
                         .collect(),
+                    KeyColumnKind::Str => read_str_column(&*row_group, column.index, rows)?
+                        .into_iter()
+                        .map(OvbRaw::Text)
+                        .collect(),
                 };
                 group_values.push(column_values);
             }
@@ -238,6 +244,7 @@ struct KeyColumn {
 enum KeyColumnKind {
     Int,
     Bool,
+    Str,
 }
 
 fn ensure_supported_profile(
@@ -252,6 +259,7 @@ fn ensure_supported_profile(
         .map(|kind| match kind {
             KeyColumnKind::Int => OvbRaw::Int(0.into()),
             KeyColumnKind::Bool => OvbRaw::Bool(false),
+            KeyColumnKind::Str => OvbRaw::Text(String::new()),
         })
         .collect::<Vec<_>>();
     let raw = match components.as_slice() {
@@ -415,11 +423,17 @@ fn descriptor_field_id(
             && column.physical_type() == Type::BOOLEAN
         {
             KeyColumnKind::Bool
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Str".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "utf8")
+            && column.physical_type() == Type::BYTE_ARRAY
+            && column.logical_type_ref() == Some(&parquet::basic::LogicalType::String)
+        {
+            KeyColumnKind::Str
         } else {
             return Err(CompactParquetError::UnsupportedKeyMapping);
         };
         if !matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty())
-            || column.logical_type_ref().is_some()
+            || (kind != KeyColumnKind::Str && column.logical_type_ref().is_some())
             || column.max_rep_level() != 0
         {
             return Err(CompactParquetError::UnsupportedKeyMapping);
@@ -477,6 +491,11 @@ fn profile_key_kinds(
                 if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Bool".to_owned())] =>
             {
                 KeyColumnKind::Bool
+            }
+            OvbRaw::Array(logical_type)
+                if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Str".to_owned())] =>
+            {
+                KeyColumnKind::Str
             }
             _ => continue,
         };
@@ -617,6 +636,68 @@ fn read_bool_column(
     Ok(values)
 }
 
+fn read_str_column(
+    row_group: &dyn parquet::file::reader::RowGroupReader,
+    index: usize,
+    expected_rows: usize,
+) -> Result<Vec<String>, CompactParquetError> {
+    let reader = row_group
+        .get_column_reader(index)
+        .map_err(|_| CompactParquetError::InvalidParquet)?;
+    let ColumnReader::ByteArrayColumnReader(mut reader) = reader else {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    };
+    let descriptor = row_group.metadata().schema_descr().column(index);
+    if descriptor.max_rep_level() != 0 {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    }
+    let mut values = Vec::with_capacity(expected_rows);
+    let mut definition_levels = Vec::new();
+    let mut records = 0usize;
+    loop {
+        let remaining = expected_rows.saturating_sub(records);
+        if remaining == 0 {
+            break;
+        }
+        let definition_levels_ref =
+            (descriptor.max_def_level() != 0).then_some(&mut definition_levels);
+        let (read_records, values_read, levels_read) = reader
+            .read_records(remaining, definition_levels_ref, None, &mut values)
+            .map_err(|_| CompactParquetError::InvalidParquet)?;
+        if read_records == 0 {
+            break;
+        }
+        if levels_read != read_records {
+            return Err(CompactParquetError::NullKey);
+        }
+        if descriptor.max_def_level() != 0
+            && definition_levels
+                .iter()
+                .any(|level| *level != descriptor.max_def_level())
+        {
+            return Err(CompactParquetError::NullKey);
+        }
+        if values_read != read_records {
+            return Err(CompactParquetError::NullKey);
+        }
+        records = records
+            .checked_add(read_records)
+            .ok_or(CompactParquetError::InvalidParquet)?;
+    }
+    if records != expected_rows || values.len() != expected_rows {
+        return Err(CompactParquetError::RowCountMismatch {
+            expected: expected_rows as u64,
+            observed: records as u64,
+        });
+    }
+    values
+        .into_iter()
+        .map(|value| {
+            String::from_utf8(value.data().to_vec()).map_err(|_| CompactParquetError::InvalidUtf8)
+        })
+        .collect()
+}
+
 fn hex_digest(bytes: [u8; 32]) -> String {
     let mut value = String::with_capacity(64);
     for byte in bytes {
@@ -635,7 +716,7 @@ mod tests {
     };
     use parquet::{
         basic::Compression,
-        data_type::{BoolType, Int64Type},
+        data_type::{BoolType, ByteArray, ByteArrayType, Int64Type},
         file::{
             metadata::KeyValue,
             properties::{WriterProperties, WriterVersion},
@@ -665,6 +746,10 @@ mod tests {
 
     fn bool_type() -> OvbRaw {
         OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Bool".into())])
+    }
+
+    fn str_type() -> OvbRaw {
+        OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Str".into())])
     }
 
     fn field_with_type(id: [u8; 16], logical_type: OvbRaw) -> OvbRaw {
@@ -808,6 +893,7 @@ mod tests {
     enum TestColumn<'a> {
         Int(&'a [i64]),
         Bool(&'a [bool]),
+        Str(&'a [Vec<u8>]),
     }
 
     fn mixed_parquet(
@@ -816,6 +902,24 @@ mod tests {
         values: &[TestColumn<'_>],
         optional_first: bool,
         descriptor_types: Option<Vec<OvbRaw>>,
+    ) -> Vec<u8> {
+        mixed_parquet_with_dictionary(
+            profile,
+            ids,
+            values,
+            optional_first,
+            descriptor_types,
+            false,
+        )
+    }
+
+    fn mixed_parquet_with_dictionary(
+        profile: &CompactOvbProfile,
+        ids: &[[u8; 16]],
+        values: &[TestColumn<'_>],
+        optional_first: bool,
+        descriptor_types: Option<Vec<OvbRaw>>,
+        dictionary_enabled: bool,
     ) -> Vec<u8> {
         assert_eq!(ids.len(), values.len());
         let mut message = String::from("message schema {");
@@ -828,10 +932,16 @@ mod tests {
             let physical = match &values[index] {
                 TestColumn::Int(_) => "INT64",
                 TestColumn::Bool(_) => "BOOLEAN",
+                TestColumn::Str(_) => "BYTE_ARRAY",
+            };
+            let annotation = match &values[index] {
+                TestColumn::Str(_) => " (STRING)",
+                _ => "",
             };
             message.push_str(&format!(
-                " {repetition} {physical} f_{};",
-                Uuid::from_bytes(*id).simple()
+                " {repetition} {physical} f_{}{};",
+                Uuid::from_bytes(*id).simple(),
+                annotation
             ));
         }
         message.push('}');
@@ -843,6 +953,7 @@ mod tests {
                 .map(|(id, value)| match value {
                     TestColumn::Int(_) => descriptor(id, int_type()),
                     TestColumn::Bool(_) => descriptor_with_encoding(id, bool_type(), "bool"),
+                    TestColumn::Str(_) => descriptor_with_encoding(id, str_type(), "utf8"),
                 })
                 .collect()
         });
@@ -862,7 +973,7 @@ mod tests {
         let properties = Arc::new(
             WriterProperties::builder()
                 .set_compression(Compression::ZSTD(Default::default()))
-                .set_dictionary_enabled(false)
+                .set_dictionary_enabled(dictionary_enabled)
                 .set_writer_version(WriterVersion::PARQUET_2_0)
                 .set_key_value_metadata(Some(metadata))
                 .build(),
@@ -885,6 +996,17 @@ mod tests {
                         .write_batch(&values[1..], Some(&[0, 1]), None)
                         .unwrap();
                 }
+                TestColumn::Str(values) if optional_first && index == 0 => {
+                    let values = values
+                        .iter()
+                        .skip(1)
+                        .map(|value| ByteArray::from(value.as_slice()))
+                        .collect::<Vec<_>>();
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, Some(&[0, 1]), None)
+                        .unwrap();
+                }
                 TestColumn::Int(values) => {
                     column
                         .typed::<Int64Type>()
@@ -895,6 +1017,16 @@ mod tests {
                     column
                         .typed::<BoolType>()
                         .write_batch(values, None, None)
+                        .unwrap();
+                }
+                TestColumn::Str(values) => {
+                    let values = values
+                        .iter()
+                        .map(|value| ByteArray::from(value.as_slice()))
+                        .collect::<Vec<_>>();
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, None, None)
                         .unwrap();
                 }
             }
@@ -919,6 +1051,13 @@ mod tests {
             .unwrap()
     }
 
+    fn expected_text(value: &str) -> Vec<u8> {
+        CanonicalValue::new(OvbRaw::Text(value.to_owned()))
+            .unwrap()
+            .encode()
+            .unwrap()
+    }
+
     fn expected_tuple(first: i64, second: i64) -> Vec<u8> {
         CanonicalValue::new(OvbRaw::Tag(
             60015,
@@ -938,6 +1077,19 @@ mod tests {
             Box::new(OvbRaw::Array(vec![
                 OvbRaw::Bool(first),
                 OvbRaw::Int(second.into()),
+            ])),
+        ))
+        .unwrap()
+        .encode()
+        .unwrap()
+    }
+
+    fn expected_text_bool_tuple(first: &str, second: bool) -> Vec<u8> {
+        CanonicalValue::new(OvbRaw::Tag(
+            60015,
+            Box::new(OvbRaw::Array(vec![
+                OvbRaw::Text(first.to_owned()),
+                OvbRaw::Bool(second),
             ])),
         ))
         .unwrap()
@@ -1163,7 +1315,130 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bool_mapping_null_and_unsupported_profile() {
+    fn reads_utf8_scalar_from_plain_and_rle_dictionary_pages() {
+        let profile = profile_with_types(&[KEY_A], &[str_type()]);
+        let strings = [b"alpha".to_vec(), b"beta".to_vec()];
+        let plain = mixed_parquet(
+            &profile,
+            &[KEY_A],
+            &[TestColumn::Str(&strings)],
+            false,
+            None,
+        );
+        assert_eq!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &plain, 2).unwrap(),
+            vec![expected_text("alpha"), expected_text("beta")]
+        );
+
+        let dictionary_strings = [b"same".to_vec(), b"same".to_vec(), b"other".to_vec()];
+        let dictionary = mixed_parquet_with_dictionary(
+            &profile,
+            &[KEY_A],
+            &[TestColumn::Str(&dictionary_strings)],
+            false,
+            None,
+            true,
+        );
+        let reader = SerializedFileReader::new(Bytes::copy_from_slice(&dictionary)).unwrap();
+        assert!(reader
+            .metadata()
+            .row_group(0)
+            .column(0)
+            .encodings()
+            .any(|encoding| { encoding == parquet::basic::Encoding::RLE_DICTIONARY }));
+        assert_eq!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &dictionary, 3)
+                .unwrap(),
+            vec![
+                expected_text("same"),
+                expected_text("same"),
+                expected_text("other")
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_str_bool_tuple_in_declared_primary_key_order() {
+        let profile = profile_with_types(&[KEY_A, KEY_B], &[str_type(), bool_type()]);
+        let strings = [b"key".to_vec()];
+        let bytes = mixed_parquet(
+            &profile,
+            &[KEY_B, KEY_A],
+            &[TestColumn::Bool(&[true]), TestColumn::Str(&strings)],
+            false,
+            None,
+        );
+        assert_eq!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 1).unwrap(),
+            vec![expected_text_bool_tuple("key", true)]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_mapping_null_and_row_counts() {
+        let profile = profile_with_types(&[KEY_A], &[str_type()]);
+        let invalid = [vec![0xff, 0xfe]];
+        let invalid_bytes = mixed_parquet(
+            &profile,
+            &[KEY_A],
+            &[TestColumn::Str(&invalid)],
+            false,
+            None,
+        );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &invalid_bytes, 1),
+            Err(CompactParquetError::InvalidUtf8)
+        ));
+
+        let wrong_mapping = [b"key".to_vec()];
+        let wrong_descriptor = mixed_parquet(
+            &profile,
+            &[KEY_A],
+            &[TestColumn::Str(&wrong_mapping)],
+            false,
+            Some(vec![descriptor_with_encoding(KEY_A, str_type(), "blob")]),
+        );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &wrong_descriptor, 1),
+            Err(CompactParquetError::UnsupportedKeyMapping)
+        ));
+
+        let nullable = [b"key".to_vec(), b"other".to_vec()];
+        let nullable_bytes = mixed_parquet(
+            &profile,
+            &[KEY_A],
+            &[TestColumn::Str(&nullable)],
+            true,
+            None,
+        );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &nullable_bytes, 2),
+            Err(CompactParquetError::NullKey)
+        ));
+
+        let valid = [b"key".to_vec(), b"other".to_vec()];
+        let valid_bytes =
+            mixed_parquet(&profile, &[KEY_A], &[TestColumn::Str(&valid)], false, None);
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &valid_bytes, 1),
+            Err(CompactParquetError::RowCountMismatch {
+                expected: 1,
+                observed: 2
+            })
+        ));
+        let one = [b"key".to_vec()];
+        let one_bytes = mixed_parquet(&profile, &[KEY_A], &[TestColumn::Str(&one)], false, None);
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &one_bytes, 2),
+            Err(CompactParquetError::RowCountMismatch {
+                expected: 2,
+                observed: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_bool_mapping_null_and_profile_table_mismatch() {
         let profile = profile_with_types(&[KEY_A], &[bool_type()]);
         assert!(matches!(
             CompactParquetKeySource::decode_verified_bytes(
@@ -1226,18 +1501,6 @@ mod tests {
                 expected: 2,
                 observed: 1
             })
-        ));
-
-        let unsupported = profile_with_types(
-            &[KEY_A],
-            &[OvbRaw::Array(vec![
-                OvbRaw::Int(0.into()),
-                OvbRaw::Text("Str".into()),
-            ])],
-        );
-        assert!(matches!(
-            CompactParquetKeySource::decode_verified_bytes(&unsupported, TABLE, b"not parquet", 1),
-            Err(CompactParquetError::UnsupportedKeyMapping)
         ));
     }
 
