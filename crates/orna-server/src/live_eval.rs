@@ -7,10 +7,18 @@
 //! admitted operation initializes the resumable session overlay for that pin;
 //! deletion or expiry removes all application state.
 
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::BTreeMap,
+    pin::Pin,
+    rc::Rc,
+    sync::{Arc, atomic::AtomicBool},
+};
 
+use futures::Future;
 use orna_evaluator_v1::{
-    AdmittedReplSession, Limits, reference_standard_profile, reference_standard_sources,
+    AdmittedReplSession, CancellationToken, Limits, ReplSession, parse_admitted_repl,
+    reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::{
     CanonicalSnapshot, CwdCapture, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, OvbRaw,
@@ -57,10 +65,15 @@ struct RepositoryAdmissionSource {
     repository: Repository,
     identity: RuntimeIdentity,
     initial_digest: [u8; 32],
+    project: Option<orna_project_v1::LoadedProject>,
+    capture: Option<CwdCapture>,
 }
 
 impl OperationAdmissionSource for RepositoryAdmissionSource {
     fn capture(&self) -> std::result::Result<CwdCapture, &'static str> {
+        if let Some(capture) = &self.capture {
+            return Ok(capture.clone());
+        }
         let state = futures::executor::block_on(RuntimeState::open(
             &self.repository,
             self.identity,
@@ -71,9 +84,12 @@ impl OperationAdmissionSource for RepositoryAdmissionSource {
     }
 
     fn repl(&self) -> std::result::Result<AdmittedReplSession, &'static str> {
-        let project = ProjectLoader::default()
-            .load_with_standard_profile(&self.repository, Some(reference_standard_profile()))
-            .map_err(|_| "wire.invalid_message")?;
+        let project = match self.project.as_ref() {
+            Some(project) => project.clone(),
+            None => ProjectLoader::default()
+                .load_with_standard_profile(&self.repository, Some(reference_standard_profile()))
+                .map_err(|_| "wire.invalid_message")?,
+        };
         AdmittedReplSession::from_loaded_project(
             &project,
             reference_standard_sources(),
@@ -93,9 +109,24 @@ pub(crate) struct PureEvalApplication {
     /// could be admitted. They are still bound to a live session lease, so an
     /// exact retry cannot re-admit against later repository state.
     rejected_terminals: BTreeMap<SessionId, BTreeMap<[u8; 16], ([u8; 32], Envelope)>>,
+    #[cfg(test)]
+    eval_started: Option<Arc<AtomicBool>>,
+    #[cfg(test)]
+    panic_on_eval: bool,
 }
 
 impl PureEvalApplication {
+    /// Activates a session inside its dedicated evaluator worker. The worker
+    /// owns this expiry index, so no Rc-backed application state crosses the
+    /// OS-thread boundary; transport admission and deletion remain the
+    /// authoritative lifetime fences.
+    pub(crate) fn activate_worker_session(&mut self, session: [u8; 16]) {
+        self.expiries
+            .borrow_mut()
+            .entry(SessionId::new(session))
+            .or_insert(u64::MAX);
+    }
+
     /// Builds the per-operation evaluator boundary for one served repository.
     pub(crate) fn from_repository(
         repository: &Repository,
@@ -104,6 +135,31 @@ impl PureEvalApplication {
         initial_digest: [u8; 32],
         _runtime_owner: [u8; 16],
         expiries: SessionExpiries,
+    ) -> std::result::Result<Self, ()> {
+        Self::from_repository_with_project(
+            repository,
+            database_id,
+            identity,
+            initial_digest,
+            _runtime_owner,
+            expiries,
+            None,
+            None,
+        )
+    }
+
+    /// Builds a worker-owned application from an immutable project snapshot.
+    /// The repository is retained only for the durable CWD capture used when
+    /// admitting each request; source loading never re-reads it.
+    pub(crate) fn from_repository_with_project(
+        repository: &Repository,
+        database_id: [u8; 16],
+        identity: RuntimeIdentity,
+        initial_digest: [u8; 32],
+        _runtime_owner: [u8; 16],
+        expiries: SessionExpiries,
+        project: Option<orna_project_v1::LoadedProject>,
+        capture: Option<CwdCapture>,
     ) -> std::result::Result<Self, ()> {
         if identity.database_id != database_id {
             return Err(());
@@ -114,10 +170,16 @@ impl PureEvalApplication {
                 repository: repository.clone(),
                 identity,
                 initial_digest,
+                project,
+                capture,
             }),
             expiries,
             sessions: BTreeMap::new(),
             rejected_terminals: BTreeMap::new(),
+            #[cfg(test)]
+            eval_started: None,
+            #[cfg(test)]
+            panic_on_eval: false,
         })
     }
 
@@ -325,6 +387,69 @@ impl LiveApplication for PureEvalApplication {
         request: [u8; 16],
         message: &Message,
     ) -> Result<Envelope> {
+        self.eval_with_cancellation(session, request, message, None)
+    }
+
+    fn dispatch_with_work<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        watch: Option<[u8; 16]>,
+        fingerprint: [u8; 32],
+        work: &'a mut orna_live_v1::LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<Envelope>> + 'a>> {
+        #[cfg(test)]
+        if let Some(started) = &self.eval_started {
+            started.store(true, std::sync::atomic::Ordering::Release);
+        }
+        #[cfg(test)]
+        if self.panic_on_eval {
+            panic!("test evaluator panic is owned by the application worker");
+        }
+        let cancellation = CancellationToken::from_shared(work.cancellation_flag());
+        Box::pin(async move {
+            work.check_active()?;
+            let response = match message {
+                Message::Eval { .. } => {
+                    self.eval_with_cancellation(session, request, message, Some(&cancellation))
+                }
+                Message::Subscribe { .. } => self.subscribe(session, request, message),
+                Message::Resync => self.resync(
+                    session,
+                    request,
+                    watch.ok_or(Error::InvalidMessage)?,
+                    message,
+                ),
+                Message::Unsubscribe => self.unsubscribe(session, request, fingerprint, message),
+                Message::Event { .. } => self.event(session, request, message),
+                Message::Watch { .. } => self.watch(session, request, message),
+                Message::Cancel { .. } => self.cancel(session, request, fingerprint, message),
+                _ => Err(Error::InvalidMessage),
+            };
+            work.complete();
+            let response = response?;
+            work.check_active()?;
+            Ok(response)
+        })
+    }
+
+    fn watch(&mut self, _: [u8; 16], request: [u8; 16], message: &Message) -> Result<Envelope> {
+        if !matches!(message, Message::Watch { .. }) {
+            return Err(Error::InvalidMessage);
+        }
+        self.watch_failure(request)
+    }
+}
+
+impl PureEvalApplication {
+    fn eval_with_cancellation(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &Message,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Envelope> {
         let Message::Eval {
             source,
             database,
@@ -355,7 +480,24 @@ impl LiveApplication for PureEvalApplication {
                     return Ok(response);
                 }
             };
-            state.repl.submit(source)
+            match cancellation {
+                Some(cancellation) => {
+                    let input = match parse_admitted_repl(source, Limits::default()) {
+                        Ok(input) => input,
+                        Err(error) => {
+                            return self.failure_diagnostic(
+                                request,
+                                *fingerprint,
+                                error.diagnostic().clone(),
+                            );
+                        }
+                    };
+                    state
+                        .repl
+                        .submit_admitted_with_cancellation(&input, cancellation)
+                }
+                None => state.repl.submit(source),
+            }
         };
         let response = match result {
             Ok(Some(value)) => Ok(Envelope {
@@ -388,11 +530,14 @@ impl LiveApplication for PureEvalApplication {
         Ok(response)
     }
 
-    fn watch(&mut self, _: [u8; 16], request: [u8; 16], message: &Message) -> Result<Envelope> {
-        if !matches!(message, Message::Watch { .. }) {
-            return Err(Error::InvalidMessage);
-        }
-        self.watch_failure(request)
+    #[cfg(test)]
+    pub(crate) fn set_test_controls(
+        &mut self,
+        started: Option<Arc<AtomicBool>>,
+        panic_on_eval: bool,
+    ) {
+        self.eval_started = started;
+        self.panic_on_eval = panic_on_eval;
     }
 }
 
@@ -428,7 +573,7 @@ fn decode_envelope(raw: OvbRaw) -> Result<Envelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::{cell::Cell, sync::atomic::Ordering, thread};
 
     struct TestAdmissionSource {
         capture: Rc<RefCell<CwdCapture>>,
@@ -497,6 +642,10 @@ mod tests {
             expiries: Rc::clone(&expiries),
             sessions: BTreeMap::new(),
             rejected_terminals: BTreeMap::new(),
+            #[cfg(test)]
+            eval_started: None,
+            #[cfg(test)]
+            panic_on_eval: false,
         };
         (
             application,
@@ -578,8 +727,8 @@ mod tests {
         let (mut application, expiries, database_id, _, _, _) = application();
         let session = [6; 16];
         expiries.borrow_mut().insert(SessionId::new(session), 100);
-        assert_eq!(
-            application.watch(
+        let response = application
+            .watch(
                 session,
                 [7; 16],
                 &Message::Watch {
@@ -588,11 +737,43 @@ mod tests {
                     presentation: presentation(),
                     refresh_floor: None,
                 },
-            ),
-            Err(Error::UnsupportedOperation)
+            )
+            .unwrap();
+        assert!(matches!(response.message, Message::Diagnostic { .. }));
+        assert_eq!(
+            response_diagnostic(&response).code(),
+            "live.unsupported_operation"
         );
         let session_id = SessionId::new(session);
         assert!(!application.sessions.contains_key(&session_id));
+    }
+
+    #[test]
+    fn live_lease_cancellation_reaches_the_evaluator_loop() {
+        let limits = Limits {
+            max_source_bytes: 65_536,
+            max_steps: 1_000_000_000,
+            max_depth: 64,
+            max_collection_items: 20_000_000,
+            max_string_bytes: 16_384,
+            max_integer_digits: 1_024,
+        };
+        let mut session = ReplSession::new(limits);
+        let input =
+            parse_admitted_repl("if true { for value in 1..=10000000 { value }; 0 }", limits)
+                .unwrap();
+        let flag = Arc::new(AtomicBool::new(false));
+        let token = CancellationToken::from_shared(Arc::clone(&flag));
+        let request = thread::spawn(move || {
+            for _ in 0..128 {
+                thread::yield_now();
+            }
+            flag.store(true, Ordering::Release);
+        });
+
+        let result = session.submit_admitted_with_cancellation(&input, &token);
+        request.join().unwrap();
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-CANCELLED");
     }
 
     #[test]

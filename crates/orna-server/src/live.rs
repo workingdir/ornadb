@@ -15,10 +15,13 @@ use futures::{
     io::{AsyncReadExt, AsyncWriteExt},
 };
 use orna_live_v1::{
-    HttpConnection, HttpConnectionError, HttpIoError, Limits, LiveHost, LiveSessionAuthority,
+    HttpConnection, HttpConnectionError, HttpIoError, Limits, LiveApplicationCompletion,
+    LiveApplicationTicket, LiveApplicationWorkSupervisor, LiveHost, LiveSessionAuthority,
     LiveSessionChildren, LiveTransport, SessionMetadata, SystemCredentialIssuer, TransportLimits,
-    WebSocketOutput, WebSocketState, encode_websocket_output, parse_http_request,
+    WebSocketApplicationPreparation, WebSocketOutput, WebSocketState, encode_websocket_output,
+    parse_http_request,
 };
+use orna_project_v1::ProjectLoader;
 use orna_protocol_v1::{Envelope, Limits as ProtocolLimits, Message, PresentationContext};
 use orna_repository_v1::{Repository, inspect_metadata};
 use orna_runtime_v1::{RequestIdentity, RuntimeIdentity, RuntimeState};
@@ -69,10 +72,299 @@ pub struct LiveOnceHost {
     authority: HostAuthority,
     deletion: HostDeletion,
     application: SharedApplication,
+    application_work: LiveApplicationWorkSupervisor,
+    application_recipe: ApplicationWorkerRecipe,
 }
 
 type SharedApplication = Rc<RefCell<Option<PureEvalApplication>>>;
 type DeletedLeaseIndex = Rc<RefCell<BTreeMap<SessionId, u64>>>;
+
+#[derive(Clone)]
+struct ApplicationWorkerRecipe {
+    repository: Repository,
+    project: orna_project_v1::LoadedProject,
+    capture: orna_foundation_v1::CwdCapture,
+    database_id: [u8; 16],
+    identity: RuntimeIdentity,
+    initial_digest: [u8; 32],
+    runtime_owner: [u8; 16],
+    #[cfg(test)]
+    eval_started: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    #[cfg(test)]
+    panic_on_eval: bool,
+}
+
+struct ApplicationWorkerRegistry {
+    recipe: ApplicationWorkerRecipe,
+    workers: Rc<RefCell<BTreeMap<SessionId, ApplicationWorkerHandle>>>,
+}
+
+struct ApplicationWorkerHandle {
+    sender: std::sync::mpsc::Sender<ApplicationWorkerCommand>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+enum ApplicationWorkerCommand {
+    Execute(ApplicationJob),
+    Shutdown,
+}
+
+struct ApplicationJob {
+    socket: Option<WebSocketState>,
+    ticket: Option<LiveApplicationTicket>,
+    reply: Option<
+        futures::channel::oneshot::Sender<
+            Result<(WebSocketState, Vec<WebSocketOutput>), orna_live_v1::Error>,
+        >,
+    >,
+    completion_sender: futures::channel::mpsc::UnboundedSender<ActorCommand>,
+}
+
+// A deliberately smaller executable cap than the transport's retained-session
+// bound. A session consumes one evaluator OS thread, so this is checked before
+// spawn. Cancellation is a shared atomic flag consumed directly by the
+// evaluator token; it does not require a second polling thread.
+const MAX_EVALUATOR_WORKERS: usize = 64;
+
+impl ApplicationWorkerRegistry {
+    fn new(recipe: ApplicationWorkerRecipe) -> Self {
+        Self {
+            recipe,
+            workers: Rc::new(RefCell::new(BTreeMap::new())),
+        }
+    }
+
+    fn submit(
+        &self,
+        session: [u8; 16],
+        job: ApplicationJob,
+    ) -> std::result::Result<(), ApplicationJob> {
+        let session = SessionId::new(session);
+        if !self.workers.borrow().contains_key(&session) {
+            if self.workers.borrow().len() >= MAX_EVALUATOR_WORKERS {
+                return Err(job);
+            }
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let recipe = self.recipe.clone();
+            let join = std::thread::Builder::new()
+                .name("orna-live-evaluator".into())
+                .spawn(move || application_worker_loop(recipe, receiver))
+                .map_err(|_| ())
+                .ok();
+            let Some(join) = join else {
+                return Err(job);
+            };
+            self.workers.borrow_mut().insert(
+                session,
+                ApplicationWorkerHandle {
+                    sender,
+                    join: Some(join),
+                },
+            );
+        }
+        let result = {
+            let workers = self.workers.borrow();
+            let worker = workers.get(&session).expect("worker was inserted");
+            worker.sender.send(ApplicationWorkerCommand::Execute(job))
+        };
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // A worker which has exited (including after an evaluator
+                // panic) must not remain as a dead registry entry. Remove and
+                // join it before returning the unadmitted job so a later
+                // request can establish a fresh, bounded owner.
+                let handle = self.workers.borrow_mut().remove(&session);
+                if let Some(mut handle) = handle {
+                    if let Some(join) = handle.join.take() {
+                        let _ = join.join();
+                    }
+                }
+                match error.0 {
+                    ApplicationWorkerCommand::Execute(job) => Err(job),
+                    ApplicationWorkerCommand::Shutdown => unreachable!(),
+                }
+            }
+        }
+    }
+
+    fn stop_and_join(
+        &self,
+        session: SessionId,
+    ) -> Pin<Box<dyn Future<Output = orna_live_v1::Result<()>>>> {
+        let handle = self
+            .workers
+            .borrow_mut()
+            .remove(&session)
+            .map(|mut handle| {
+                let _ = handle.sender.send(ApplicationWorkerCommand::Shutdown);
+                handle.join.take().expect("worker join handle retained")
+            });
+        Box::pin(async move {
+            let Some(handle) = handle else {
+                return Ok(());
+            };
+            tokio::task::spawn_blocking(move || handle.join().map_err(|_| ()))
+                .await
+                .map_err(|_| orna_live_v1::Error::DeletionFailed)?
+                .map_err(|_| orna_live_v1::Error::DeletionFailed)
+        })
+    }
+
+    fn stop_and_join_blocking(&self, session: SessionId) -> std::result::Result<(), ()> {
+        let handle = self
+            .workers
+            .borrow_mut()
+            .remove(&session)
+            .map(|mut handle| {
+                let _ = handle.sender.send(ApplicationWorkerCommand::Shutdown);
+                handle.join.take().expect("worker join handle retained")
+            });
+        handle.map_or(Ok(()), |handle| handle.join().map_err(|_| ()))
+    }
+
+    fn stop_all(&self) -> Pin<Box<dyn Future<Output = orna_live_v1::Result<()>>>> {
+        let sessions = self.workers.borrow().keys().copied().collect::<Vec<_>>();
+        let registry = self.clone();
+        Box::pin(async move {
+            for session in sessions {
+                registry.stop_and_join(session).await?;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl Clone for ApplicationWorkerRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            recipe: self.recipe.clone(),
+            workers: Rc::clone(&self.workers),
+        }
+    }
+}
+
+impl Drop for ApplicationWorkerRegistry {
+    fn drop(&mut self) {
+        if Rc::strong_count(&self.workers) != 1 {
+            return;
+        }
+        let handles = std::mem::take(&mut *self.workers.borrow_mut());
+        for (_, mut handle) in handles {
+            let _ = handle.sender.send(ApplicationWorkerCommand::Shutdown);
+            if let Some(join) = handle.join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+}
+
+fn application_worker_loop(
+    recipe: ApplicationWorkerRecipe,
+    receiver: std::sync::mpsc::Receiver<ApplicationWorkerCommand>,
+) {
+    let expiries = Rc::new(RefCell::new(BTreeMap::new()));
+    #[cfg(test)]
+    let eval_started = recipe.eval_started.clone();
+    #[cfg(test)]
+    let panic_on_eval = recipe.panic_on_eval;
+    let mut application = match PureEvalApplication::from_repository_with_project(
+        &recipe.repository,
+        recipe.database_id,
+        recipe.identity,
+        recipe.initial_digest,
+        recipe.runtime_owner,
+        Rc::clone(&expiries),
+        Some(recipe.project),
+        Some(recipe.capture.clone()),
+    ) {
+        Ok(application) => application,
+        Err(()) => {
+            for command in receiver {
+                if let ApplicationWorkerCommand::Execute(mut job) = command {
+                    job.reject(orna_live_v1::Error::ApplicationRejected);
+                }
+            }
+            return;
+        }
+    };
+    #[cfg(test)]
+    application.set_test_controls(eval_started, panic_on_eval);
+    while let Ok(command) = receiver.recv() {
+        match command {
+            ApplicationWorkerCommand::Shutdown => break,
+            ApplicationWorkerCommand::Execute(mut job) => {
+                let Some(ticket) = job.ticket.take() else {
+                    continue;
+                };
+                let completion = if ticket.is_cancelled() {
+                    ticket.reject(orna_live_v1::Error::Closed)
+                } else {
+                    application.activate_worker_session(ticket.session());
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        futures::executor::block_on(ticket.execute(&mut application))
+                    }));
+                    match result {
+                        Ok(completion) => completion,
+                        Err(_) => {
+                            // The ticket's lease is dropped while unwinding,
+                            // so the supervisor records a failed child. The
+                            // socket reply still needs a stable terminal
+                            // result; otherwise a panic strands the caller
+                            // even though the worker is about to exit.
+                            job.fail(orna_live_v1::Error::ApplicationRejected);
+                            // The application owner is no longer trusted after
+                            // a panic; queued jobs are rejected by ApplicationJob
+                            // drops as the receiver is abandoned.
+                            return;
+                        }
+                    }
+                };
+                job.finish(completion);
+            }
+        }
+    }
+}
+
+impl ApplicationJob {
+    fn finish(&mut self, completion: LiveApplicationCompletion) {
+        let Some(socket) = self.socket.take() else {
+            return;
+        };
+        let Some(reply) = self.reply.take() else {
+            return;
+        };
+        let _ = self
+            .completion_sender
+            .unbounded_send(ActorCommand::ApplicationComplete {
+                socket,
+                completion,
+                reply,
+            });
+    }
+
+    fn reject(&mut self, error: orna_live_v1::Error) {
+        let Some(ticket) = self.ticket.take() else {
+            return;
+        };
+        self.finish(ticket.reject(error));
+    }
+
+    fn fail(&mut self, error: orna_live_v1::Error) {
+        if let Some(reply) = self.reply.take() {
+            let _ = reply.send(Err(error));
+        }
+        self.socket.take();
+    }
+}
+
+impl Drop for ApplicationJob {
+    fn drop(&mut self) {
+        if self.ticket.is_some() {
+            self.reject(orna_live_v1::Error::ApplicationRejected);
+        }
+    }
+}
 
 impl LiveOnceHost {
     /// Binds a one-shot host to the default loopback listener.
@@ -93,6 +385,12 @@ impl LiveOnceHost {
             return Err(LiveHostError::Runtime);
         }
         let runtime_id = capture.runtime_id();
+        let project = ProjectLoader::default()
+            .load_with_standard_profile(
+                repository,
+                Some(orna_evaluator_v1::reference_standard_profile()),
+            )
+            .map_err(|_| LiveHostError::Repository)?;
         let expiries: SessionExpiries = Rc::new(RefCell::new(BTreeMap::new()));
         let deleted_leases: DeletedLeaseIndex = Rc::new(RefCell::new(BTreeMap::new()));
         let mut runtime_owner = [0; 16];
@@ -111,6 +409,19 @@ impl LiveOnceHost {
             )
             .map_err(|_| LiveHostError::Repository)?,
         )));
+        let application_recipe = ApplicationWorkerRecipe {
+            repository: repository.clone(),
+            project,
+            capture: capture.clone(),
+            database_id,
+            identity,
+            initial_digest,
+            runtime_owner,
+            #[cfg(test)]
+            eval_started: None,
+            #[cfg(test)]
+            panic_on_eval: false,
+        };
         let retained_capture = block_on(state.capture()).map_err(|_| LiveHostError::Runtime)?;
         if retained_capture != capture {
             return Err(LiveHostError::Runtime);
@@ -138,6 +449,7 @@ impl LiveOnceHost {
         .map_err(|_| LiveHostError::Configuration)?;
         let transport = LiveTransport::new(host, TransportLimits::default())
             .map_err(|_| LiveHostError::Configuration)?;
+        let application_work = transport.application_work_supervisor();
         Ok(Self {
             listener,
             transport,
@@ -150,8 +462,11 @@ impl LiveOnceHost {
                 expiries,
                 deleted_leases,
                 application: Rc::clone(&application),
+                application_workers: None,
             },
             application,
+            application_work,
+            application_recipe,
         })
     }
 
@@ -210,8 +525,10 @@ impl LiveOnceHost {
             listener,
             transport,
             authority,
-            deletion,
-            application,
+            mut deletion,
+            application: _,
+            application_work,
+            application_recipe,
         } = self;
         let listener = listener
             .listener()
@@ -227,14 +544,18 @@ impl LiveOnceHost {
         let (retirement_ack_sender, retirement_ack_receiver) = futures::channel::mpsc::unbounded();
         let (retirement_gate_sender, mut retirement_gate_receiver) =
             futures::channel::mpsc::unbounded();
+        let application_workers = ApplicationWorkerRegistry::new(application_recipe);
+        deletion.application_workers = Some(application_workers.clone());
         let actor = tokio::task::spawn_local(run_host_actor(
             actor_receiver,
+            actor_sender.clone(),
             ConcurrentHostState {
                 transport,
                 authority,
                 issuer: SystemCredentialIssuer::default(),
                 deletion,
-                application,
+                application_workers,
+                application_work,
                 delivering_upgrades: BTreeMap::new(),
             },
             Rc::clone(&registry),
@@ -467,7 +788,7 @@ impl LiveOnceHost {
                 let response = if self.deletion.expired_deleted_lease(&request, now) {
                     expired_delete_response()
                 } else {
-                    let mut children = HostApplicationChildren::new(Rc::clone(&self.application));
+                    let mut children = HostApplicationChildren::new(self.application_work.clone());
                     self.transport
                         .handle_with_children(
                             request,
@@ -493,11 +814,29 @@ struct ConcurrentHostState {
     authority: HostAuthority,
     issuer: SystemCredentialIssuer,
     deletion: HostDeletion,
-    application: SharedApplication,
+    application_workers: ApplicationWorkerRegistry,
+    application_work: LiveApplicationWorkSupervisor,
     // This is the executable half of the handshake linearization barrier.
     // It pairs the worker that may write a provisional 101 with the exact
     // transport reservation until commit or serialized abort.
     delivering_upgrades: BTreeMap<u64, orna_live_v1::WebSocketUpgrade>,
+}
+
+fn schedule_application(
+    state: &mut ConcurrentHostState,
+    pending: PendingApplication,
+    actor_sender: &futures::channel::mpsc::UnboundedSender<ActorCommand>,
+) {
+    let session = pending.ticket.session();
+    let job = ApplicationJob {
+        socket: Some(pending.socket),
+        ticket: Some(pending.ticket),
+        reply: Some(pending.reply),
+        completion_sender: actor_sender.clone(),
+    };
+    if let Err(mut job) = state.application_workers.submit(session, job) {
+        job.reject(orna_live_v1::Error::Limit);
+    }
 }
 
 enum ActorCommand {
@@ -543,6 +882,14 @@ enum ActorCommand {
             Result<(WebSocketState, Vec<WebSocketOutput>), orna_live_v1::Error>,
         >,
     },
+    ApplicationComplete {
+        socket: WebSocketState,
+        completion: LiveApplicationCompletion,
+        reply: futures::channel::oneshot::Sender<
+            Result<(WebSocketState, Vec<WebSocketOutput>), orna_live_v1::Error>,
+        >,
+    },
+    Shutdown,
     Close {
         attachment: [u8; 16],
         now: u64,
@@ -550,6 +897,14 @@ enum ActorCommand {
             Result<orna_live_v1::FrameOutcome, orna_live_v1::Error>,
         >,
     },
+}
+
+struct PendingApplication {
+    socket: WebSocketState,
+    ticket: LiveApplicationTicket,
+    reply: futures::channel::oneshot::Sender<
+        Result<(WebSocketState, Vec<WebSocketOutput>), orna_live_v1::Error>,
+    >,
 }
 
 struct ActorHttpResult {
@@ -574,6 +929,7 @@ enum RetirementAcknowledgement {
 
 async fn run_host_actor(
     mut commands: futures::channel::mpsc::UnboundedReceiver<ActorCommand>,
+    actor_sender: futures::channel::mpsc::UnboundedSender<ActorCommand>,
     mut state: ConcurrentHostState,
     registry: Rc<RefCell<WorkerRegistry>>,
     mut retirement_acknowledgements: futures::channel::mpsc::UnboundedReceiver<
@@ -604,8 +960,11 @@ async fn run_host_actor(
                 for worker in overdue {
                     registry.borrow_mut().cancel(worker);
                 }
-                let mut children = HostApplicationChildren::new(Rc::clone(&state.application));
-                state
+                let mut children = HostApplicationChildren::with_workers(
+                    state.application_work.clone(),
+                    state.application_workers.clone(),
+                );
+                let _ = state
                     .transport
                     .expire_sessions_with_children(now, &mut state.deletion, &mut children)
                     .await;
@@ -631,6 +990,7 @@ async fn run_host_actor(
             }
         };
         match command {
+            ActorCommand::Shutdown => break,
             ActorCommand::Http {
                 mut connection,
                 bytes,
@@ -647,7 +1007,10 @@ async fn run_host_actor(
                         continue;
                     }
                 };
-                let mut children = HostApplicationChildren::new(Rc::clone(&state.application));
+                let mut children = HostApplicationChildren::with_workers(
+                    state.application_work.clone(),
+                    state.application_workers.clone(),
+                );
                 let mut responses = Vec::with_capacity(requests.len());
                 let mut failed = None;
                 for request in requests {
@@ -844,22 +1207,49 @@ async fn run_host_actor(
                 now,
                 reply,
             } => {
-                let mut application = match state.application.borrow_mut().take() {
-                    Some(application) => application,
-                    None => {
-                        let _ = reply.send(Err(orna_live_v1::Error::Closed));
-                        continue;
-                    }
-                };
-                let result = state
+                let preparation = state
                     .transport
-                    .receive_with_application(&mut socket, now, &bytes, &mut application)
+                    .prepare_websocket_application(&mut socket, now, &bytes)
                     .await;
-                state.application.borrow_mut().replace(application);
+                match preparation {
+                    Ok(WebSocketApplicationPreparation::Pending) => {
+                        let _ = reply.send(Ok((socket, Vec::new())));
+                    }
+                    Ok(WebSocketApplicationPreparation::Output(output)) => {
+                        let _ = reply.send(Ok((socket, vec![output])));
+                    }
+                    Ok(WebSocketApplicationPreparation::Work(ticket)) => {
+                        schedule_application(
+                            &mut state,
+                            PendingApplication {
+                                socket,
+                                ticket,
+                                reply,
+                            },
+                            &actor_sender,
+                        );
+                    }
+                    Err(orna_live_v1::Error::InvalidMessage) => {
+                        let _ = reply.send(Ok((
+                            socket,
+                            vec![WebSocketOutput::Close { code: Some(1002) }],
+                        )));
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
+            ActorCommand::ApplicationComplete {
+                socket,
+                completion,
+                reply,
+            } => {
+                let result = state.transport.complete_application(completion).await;
                 let result = match result {
-                    Ok(outputs) => Ok((socket, outputs)),
+                    Ok(output) => Ok((socket, vec![output])),
                     // A canonical server-direction envelope, malformed CBOR,
-                    // or another invalid envelope is a protocol failure, not
+                    // or a stale fenced completion is a protocol failure, not
                     // an application diagnostic. Send RFC 6455 1002 before
                     // this worker retires the attachment.
                     Err(orna_live_v1::Error::InvalidMessage) => {
@@ -887,6 +1277,12 @@ async fn run_host_actor(
             }
         }
     }
+
+    // The actor is the owner of all per-session evaluator workers. Once its
+    // command channel closes, cancel every admitted session and join every
+    // worker before returning.
+    let _ = state.application_work.cancel_and_join_all().await;
+    let _ = state.application_workers.stop_all().await;
 }
 
 /// Ends the host owner after admission has stopped. Every active socket worker
@@ -924,6 +1320,7 @@ async fn shutdown_concurrent_host(
     // Keep the actor and acknowledgement channel alive until every tracked
     // gate has either acknowledged the fence or observed a failed join.
     while retirement_tasks.join_next().await.is_some() {}
+    let _ = actor_sender.unbounded_send(ActorCommand::Shutdown);
     drop(actor_sender);
     let actor_failed = match actor {
         Some(actor) => actor.await.is_err(),
@@ -944,9 +1341,14 @@ async fn shutdown_concurrent_host(
 mod shutdown_tests {
     use super::*;
     use futures::io::AsyncWrite;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
     struct FlushStall {
         written: Vec<u8>,
+        flush_entered: Arc<AtomicBool>,
     }
 
     impl AsyncWrite for FlushStall {
@@ -959,7 +1361,9 @@ mod shutdown_tests {
             Poll::Ready(Ok(bytes.len()))
         }
 
-        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.flush_entered.store(true, Ordering::Release);
+            context.waker().wake_by_ref();
             Poll::Pending
         }
 
@@ -968,7 +1372,20 @@ mod shutdown_tests {
         }
     }
 
-    fn run_local(future: impl Future<Output = ()> + 'static) {
+    struct FlushCancellation(Arc<AtomicBool>);
+
+    impl Future for FlushCancellation {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+            self.0
+                .load(Ordering::Acquire)
+                .then_some(())
+                .map_or(Poll::Pending, Poll::Ready)
+        }
+    }
+
+    pub(super) fn run_local(future: impl Future<Output = ()> + 'static) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .build()
@@ -1268,13 +1685,35 @@ mod shutdown_tests {
     }
 
     #[test]
-    fn cancellation_during_upgrade_flush_keeps_the_handshake_undelivered() {
+    fn cancellation_before_upgrade_write_keeps_the_handshake_undelivered() {
         run_local(async {
             let response = b"HTTP/1.1 101 Switching Protocols\r\n\r\n";
             let mut writer = FlushStall {
                 written: Vec::new(),
+                flush_entered: Arc::new(AtomicBool::new(false)),
             };
             let mut cancellation = futures::future::ready(());
+
+            assert_eq!(
+                deliver_websocket_upgrade_response(&mut writer, response, &mut cancellation).await,
+                Err(())
+            );
+            // Cancellation is checked before the first write, so an
+            // interrupted handshake has no externally visible prefix.
+            assert!(writer.written.is_empty());
+        });
+    }
+
+    #[test]
+    fn cancellation_entered_during_upgrade_flush_keeps_handshake_uncommitted() {
+        run_local(async {
+            let response = b"HTTP/1.1 101 Switching Protocols\r\n\r\n";
+            let flush_entered = Arc::new(AtomicBool::new(false));
+            let mut writer = FlushStall {
+                written: Vec::new(),
+                flush_entered: Arc::clone(&flush_entered),
+            };
+            let mut cancellation = FlushCancellation(flush_entered);
 
             assert_eq!(
                 deliver_websocket_upgrade_response(&mut writer, response, &mut cancellation).await,
@@ -1388,7 +1827,10 @@ mod shutdown_tests {
             completion.send(Err(())).unwrap();
             supervisor.await.unwrap();
             use futures::StreamExt;
-            assert!(commands.next().now_or_never().is_none());
+            // The supervisor owns the sole sender and closes the stream after
+            // observing the failed join. Closure is evidence of no command;
+            // `now_or_never()` therefore returns `Some(None)` here.
+            assert!(matches!(commands.next().now_or_never(), Some(None)));
         });
     }
 
@@ -2411,6 +2853,7 @@ struct HostDeletion {
     expiries: SessionExpiries,
     deleted_leases: DeletedLeaseIndex,
     application: SharedApplication,
+    application_workers: Option<ApplicationWorkerRegistry>,
 }
 
 impl HostDeletion {
@@ -2432,23 +2875,34 @@ impl HostDeletion {
     }
 }
 
-/// Executable ownership proof for the concrete live application.
+/// Executable ownership boundary shared by application callbacks and DELETE.
 ///
-/// `PureEvalApplication` runs only inside the host actor: callbacks never
-/// spawn detached work and are returned to the actor before the next command
-/// is admitted. Session deletion therefore either obtains its unique mutable
-/// application owner and proves no callback remains in flight, or fails
-/// closed if a callback owner cannot be obtained. The deletion adapter removes
-/// evaluator/watch state only after this proof succeeds, while the actor's
-/// worker registry separately cancels and joins transport-owned socket tasks
-/// before an HTTP response is written.
+/// The live protocol owns admission and durable request fencing; this shared
+/// supervisor owns the callback/descendant leases. `HostDeletion` still takes
+/// the evaluator's unique mutable owner before removing its retained state, so
+/// a successful deletion has both application-work and evaluator-ownership
+/// evidence.
 struct HostApplicationChildren {
-    application: SharedApplication,
+    supervisor: LiveApplicationWorkSupervisor,
+    workers: Option<ApplicationWorkerRegistry>,
 }
 
 impl HostApplicationChildren {
-    fn new(application: SharedApplication) -> Self {
-        Self { application }
+    fn new(supervisor: LiveApplicationWorkSupervisor) -> Self {
+        Self {
+            supervisor,
+            workers: None,
+        }
+    }
+
+    fn with_workers(
+        supervisor: LiveApplicationWorkSupervisor,
+        workers: ApplicationWorkerRegistry,
+    ) -> Self {
+        Self {
+            supervisor,
+            workers: Some(workers),
+        }
     }
 }
 
@@ -2458,24 +2912,19 @@ impl LiveSessionChildren for HostApplicationChildren {
         session: [u8; 16],
         requests: &'a [RequestIdentity],
     ) -> Pin<Box<dyn Future<Output = orna_live_v1::Result<()>> + 'a>> {
+        if requests.iter().any(|request| request.session_id != session) {
+            return Box::pin(async { Err(orna_live_v1::Error::DeletionFailed) });
+        }
+        let supervisor = self.supervisor.clone();
+        let workers = self.workers.clone();
         Box::pin(async move {
-            if requests.iter().any(|request| request.session_id != session) {
-                return Err(orna_live_v1::Error::DeletionFailed);
+            let drained = supervisor.cancel_and_join(session).await;
+            if drained.is_err() {
+                if let Some(workers) = workers {
+                    let _ = workers.stop_and_join(SessionId::new(session)).await;
+                }
             }
-            let mut application = self
-                .application
-                .try_borrow_mut()
-                .map_err(|_| orna_live_v1::Error::DeletionFailed)?;
-            let application = application
-                .as_mut()
-                .ok_or(orna_live_v1::Error::DeletionFailed)?;
-            // Holding the unique mutable application owner is the complete
-            // supervisor proof for this synchronous adapter. It has no
-            // spawned callback, transaction, or writer to cancel or join;
-            // `HostDeletion` performs resource removal after this boundary
-            // returns successfully.
-            let _ = application;
-            Ok(())
+            drained
         })
     }
 }
@@ -2489,7 +2938,11 @@ impl SessionDeletionAdapter for HostDeletion {
         // and cannot create an idempotency record for incomplete cleanup.
         let mut application = self.application.try_borrow_mut().map_err(|_| ())?;
         let application = application.as_mut().ok_or(())?;
-        let expires_at = self.expiries.borrow_mut().remove(&session).ok_or(())?;
+        let expires_at = self.expiries.borrow().get(&session).copied().ok_or(())?;
+        if let Some(workers) = &self.application_workers {
+            workers.stop_and_join_blocking(session).map_err(|_| ())?;
+        }
+        self.expiries.borrow_mut().remove(&session);
         self.deleted_leases.borrow_mut().insert(session, expires_at);
         application.remove(session);
         Ok(())
@@ -2585,12 +3038,39 @@ fn duration_milliseconds(duration: std::time::Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeletedLeaseIndex, HostDeletion, SharedApplication, duration_milliseconds,
-        expired_delete_response,
+        ActorCommand, ApplicationJob, ApplicationWorkerRecipe, ApplicationWorkerRegistry,
+        DeletedLeaseIndex, HostApplicationChildren, HostDeletion, SharedApplication,
+        duration_milliseconds, expired_delete_response, runtime_identity, subscribe_payload,
     };
-    use orna_security_v1::{SessionDeletionAdapter, SessionId};
+    use crate::live_eval::PureEvalApplication;
+    use futures::StreamExt;
+    use orna_live_v1::{
+        ApplicationPreparation, CreateRequest, Frame, Limits, LiveHost, ResumeRequest,
+        SessionCredential, WebSocketState,
+    };
+    use orna_project_v1::ProjectLoader;
+    use orna_protocol_v1::{
+        DatabaseContext, Envelope, Message, PresentationContext, canonical_request_fingerprint,
+    };
+    use orna_repository_v1::{initialize_repository, inspect_metadata};
+    use orna_runtime_v1::RuntimeState;
+    use orna_security_v1::{
+        Origin, OriginPolicy, SessionBoundary, SessionDeletionAdapter, SessionId,
+    };
+    use orna_serving_v1::Serving;
     use std::time::Duration;
-    use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+    use std::{
+        cell::RefCell,
+        collections::BTreeMap,
+        fs,
+        path::PathBuf,
+        rc::Rc,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        thread,
+    };
 
     #[test]
     fn live_clock_uses_milliseconds_for_the_advertised_lease() {
@@ -2606,6 +3086,7 @@ mod tests {
             expiries: Rc::new(RefCell::new(BTreeMap::new())),
             deleted_leases,
             application: Rc::new(RefCell::new(None)) as SharedApplication,
+            application_workers: None,
         };
         let request = orna_live_v1::WireRequest {
             method: "DELETE".into(),
@@ -2631,10 +3112,341 @@ mod tests {
             expiries: Rc::clone(&expiries),
             deleted_leases: Rc::clone(&deleted_leases),
             application: Rc::new(RefCell::new(None)) as SharedApplication,
+            application_workers: None,
         };
 
         assert_eq!(deletion.delete(session), Err(()));
         assert_eq!(expiries.borrow().get(&session), Some(&100));
         assert!(deleted_leases.borrow().is_empty());
+    }
+
+    struct WorkerRepository {
+        root: PathBuf,
+        recipe: ApplicationWorkerRecipe,
+    }
+
+    impl Drop for WorkerRepository {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn worker_repository() -> WorkerRepository {
+        static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/gov5-15-4-12-tmp");
+        fs::create_dir_all(&base).unwrap();
+        let root = loop {
+            let candidate = base.join(format!(
+                "live-worker-{}-{}",
+                std::process::id(),
+                NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("fixture directory: {error}"),
+            }
+        };
+        let initialized = initialize_repository(&root).unwrap();
+        let repository = initialized.into_repository();
+        let database_id = *inspect_metadata(&repository)
+            .unwrap()
+            .unwrap()
+            .database_id()
+            .as_bytes();
+        let project = ProjectLoader::default()
+            .load_with_standard_profile(
+                &repository,
+                Some(orna_evaluator_v1::reference_standard_profile()),
+            )
+            .unwrap();
+        let (identity, initial_digest) = runtime_identity(database_id);
+        let state =
+            futures::executor::block_on(RuntimeState::open(&repository, identity, initial_digest))
+                .unwrap();
+        let capture = futures::executor::block_on(state.capture()).unwrap();
+        WorkerRepository {
+            root,
+            recipe: ApplicationWorkerRecipe {
+                repository,
+                project,
+                capture,
+                database_id,
+                identity,
+                initial_digest,
+                runtime_owner: [44; 16],
+                #[cfg(test)]
+                eval_started: None,
+                #[cfg(test)]
+                panic_on_eval: false,
+            },
+        }
+    }
+
+    fn worker_host(
+        session: [u8; 16],
+        attachment: [u8; 16],
+    ) -> (LiveHost, Origin, SessionCredential) {
+        let origin = Origin::parse("https://app.example").unwrap();
+        let mut host = LiveHost::new(
+            Limits::default(),
+            SessionBoundary::new(OriginPolicy::new([origin.clone()], []), 60_000),
+            Serving::new(orna_serving_v1::Limits::default()).unwrap(),
+        )
+        .unwrap();
+        let mut issuer = orna_live_v1::SystemCredentialIssuer::default();
+        let credential = futures::executor::block_on(host.create(
+            CreateRequest {
+                id: session,
+                origin: origin.clone(),
+                expires_at: 60_000,
+                now: 1,
+                subscribe: &subscribe_payload(),
+            },
+            &mut issuer,
+        ))
+        .unwrap();
+        futures::executor::block_on(host.resume(ResumeRequest {
+            id: session,
+            origin: &origin,
+            credential: &credential,
+            attachment,
+            now: 2,
+        }))
+        .unwrap();
+        (host, origin, credential)
+    }
+
+    fn worker_eval_frame(
+        session: [u8; 16],
+        request: [u8; 16],
+        database: [u8; 16],
+        source: &str,
+    ) -> Frame {
+        let mut envelope = Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::Eval {
+                source: source.into(),
+                database: DatabaseContext {
+                    database,
+                    snapshot: None,
+                },
+                presentation: PresentationContext {
+                    locale: "en-GB".into(),
+                    timezone: None,
+                    width: None,
+                    theme: "terminal/dark".into(),
+                    supported_kinds: Vec::new(),
+                },
+                fingerprint: [0; 32],
+            },
+            extensions: BTreeMap::new(),
+        };
+        let fingerprint =
+            canonical_request_fingerprint(session, &envelope, orna_protocol_v1::Limits::default())
+                .unwrap();
+        if let Message::Eval {
+            fingerprint: sent, ..
+        } = &mut envelope.message
+        {
+            *sent = fingerprint;
+        }
+        Frame::Binary(
+            envelope
+                .encode(orna_protocol_v1::Limits::default())
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn repository_worker_delete_cancels_evaluation_joins_and_fences_state() {
+        let repository = worker_repository();
+        let session = [31; 16];
+        let attachment = [32; 16];
+        let (mut host, origin, credential) = worker_host(session, attachment);
+        let ticket = match futures::executor::block_on(host.prepare_application_frame(
+            attachment,
+            3,
+            worker_eval_frame(
+                session,
+                [33; 16],
+                repository.recipe.database_id,
+                "if true { for value in 1..=1000000000 { value }; let aborted: Int = 1; aborted }",
+            ),
+        ))
+        .unwrap()
+        {
+            ApplicationPreparation::Work(ticket) => ticket,
+            ApplicationPreparation::Completed(_) => panic!("evaluation was not admitted"),
+        };
+        let started = Arc::new(AtomicBool::new(false));
+        let mut worker_recipe = repository.recipe.clone();
+        worker_recipe.eval_started = Some(Arc::clone(&started));
+        let (reply, _reply_receiver) = futures::channel::oneshot::channel();
+        let (completion_sender, mut completions) = futures::channel::mpsc::unbounded();
+        let workers = ApplicationWorkerRegistry::new(worker_recipe);
+        if workers
+            .submit(
+                session,
+                ApplicationJob {
+                    socket: Some(WebSocketState::new(attachment)),
+                    ticket: Some(ticket),
+                    reply: Some(reply),
+                    completion_sender,
+                },
+            )
+            .is_err()
+        {
+            panic!("bounded worker admission failed");
+        }
+        while !started.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
+
+        let expiries = Rc::new(RefCell::new(BTreeMap::from([(
+            SessionId::new(session),
+            60_000,
+        )])));
+        let application = PureEvalApplication::from_repository_with_project(
+            &repository.recipe.repository,
+            repository.recipe.database_id,
+            repository.recipe.identity,
+            repository.recipe.initial_digest,
+            repository.recipe.runtime_owner,
+            Rc::clone(&expiries),
+            Some(repository.recipe.project.clone()),
+            Some(repository.recipe.capture.clone()),
+        )
+        .unwrap();
+        let mut deletion = HostDeletion {
+            expiries,
+            deleted_leases: Rc::new(RefCell::new(BTreeMap::new())),
+            application: Rc::new(RefCell::new(Some(application))),
+            application_workers: Some(workers.clone()),
+        };
+        let mut children = HostApplicationChildren::with_workers(
+            host.application_work_supervisor(),
+            workers.clone(),
+        );
+        super::shutdown_tests::run_local(async move {
+            assert_eq!(
+                host.delete_with_children(
+                    orna_live_v1::DeleteRequest {
+                        id: session,
+                        origin: &origin,
+                        credential: &credential,
+                        now: 4,
+                    },
+                    &mut deletion,
+                    &mut children,
+                )
+                .await,
+                Ok(())
+            );
+            assert!(workers.workers.borrow().is_empty());
+
+            let command = completions
+                .next()
+                .await
+                .expect("joined worker must report its fenced completion");
+            let ActorCommand::ApplicationComplete {
+                completion,
+                socket,
+                reply,
+            } = command
+            else {
+                panic!("worker reported an unexpected actor command");
+            };
+            drop(socket);
+            drop(reply);
+            assert_eq!(
+                host.complete_application(completion).await,
+                Err(orna_live_v1::Error::Closed)
+            );
+            assert!(matches!(
+                host.prepare_application_frame(
+                    attachment,
+                    5,
+                    worker_eval_frame(session, [34; 16], repository.recipe.database_id, "1"),
+                )
+                .await,
+                Err(orna_live_v1::Error::Closed)
+            ));
+        });
+    }
+
+    #[test]
+    fn repository_worker_panic_replies_and_releases_its_join_slot() {
+        let repository = worker_repository();
+        let session = [35; 16];
+        let attachment = [36; 16];
+        let (mut host, _origin, _credential) = worker_host(session, attachment);
+        let ticket = match futures::executor::block_on(host.prepare_application_frame(
+            attachment,
+            3,
+            worker_eval_frame(session, [37; 16], repository.recipe.database_id, "1"),
+        ))
+        .unwrap()
+        {
+            ApplicationPreparation::Work(ticket) => ticket,
+            ApplicationPreparation::Completed(_) => panic!("evaluation was not admitted"),
+        };
+        let mut worker_recipe = repository.recipe.clone();
+        worker_recipe.panic_on_eval = true;
+        let workers = ApplicationWorkerRegistry::new(worker_recipe);
+        let (reply, reply_receiver) = futures::channel::oneshot::channel();
+        let (completion_sender, _completions) = futures::channel::mpsc::unbounded();
+        if workers
+            .submit(
+                session,
+                ApplicationJob {
+                    socket: Some(WebSocketState::new(attachment)),
+                    ticket: Some(ticket),
+                    reply: Some(reply),
+                    completion_sender,
+                },
+            )
+            .is_err()
+        {
+            panic!("bounded worker admission failed");
+        }
+
+        assert!(matches!(
+            futures::executor::block_on(reply_receiver),
+            Ok(Err(orna_live_v1::Error::ApplicationRejected))
+        ));
+        workers
+            .stop_and_join_blocking(SessionId::new(session))
+            .expect("panicked worker must remain joinable");
+        assert!(workers.workers.borrow().is_empty());
+    }
+
+    #[test]
+    fn failed_worker_submission_removes_and_joins_dead_registry_entry() {
+        let repository = worker_repository();
+        let session = SessionId::new([38; 16]);
+        let workers = ApplicationWorkerRegistry::new(repository.recipe.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        drop(receiver);
+        let join = thread::spawn(|| ());
+        workers.workers.borrow_mut().insert(
+            session,
+            super::ApplicationWorkerHandle {
+                sender,
+                join: Some(join),
+            },
+        );
+        let (completion_sender, _completions) = futures::channel::mpsc::unbounded();
+        let (reply, _reply_receiver) = futures::channel::oneshot::channel();
+        let job = ApplicationJob {
+            socket: None,
+            ticket: None,
+            reply: Some(reply),
+            completion_sender,
+        };
+
+        assert!(workers.submit([38; 16], job).is_err());
+        assert!(workers.workers.borrow().is_empty());
     }
 }
