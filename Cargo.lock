@@ -2228,6 +2228,9 @@ dependencies = [
 [[package]]
 name = "orna-stream-v1"
 version = "1.0.0"
+dependencies = [
+ "orna-foundation-v1",
+]
 
 [[package]]
 name = "orna-syntax"
