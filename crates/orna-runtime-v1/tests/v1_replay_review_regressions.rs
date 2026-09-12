@@ -14,13 +14,20 @@
 //! administration route, source polling, module loading, or physical process
 //! crash is exercised.
 
-use std::{cell::Cell, path::Path, process::Command, sync::Arc};
+use std::{
+    cell::Cell,
+    future::{Ready, ready},
+    path::Path,
+    process::Command,
+    sync::Arc,
+};
 
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    RuntimeError, RuntimeIdentity, RuntimeState, StreamFailurePayloadFuture,
+    RuntimeError, RuntimeIdentity, RuntimeState, StreamCheckpoint, StreamFailurePayloadFuture,
     StreamFailurePayloadProvider, StreamHandler, StreamHandlerResult, StreamItem,
-    StreamMutationBatch, StreamStepError, WriterLease,
+    StreamMutationBatch, StreamSource, StreamSourceDescriptor, StreamSourceKind, StreamSourcePoll,
+    StreamStepError, WriterLease,
 };
 use orna_stream_v1::{
     AsyncCheckpointBackend, Checkpoint, CommitIntent, CommitResult, Component, ConsumerIdentity,
@@ -277,6 +284,45 @@ impl Fixture {
 struct CountingHandler {
     calls: usize,
     result: Option<StreamHandlerResult>,
+}
+
+struct CountingSource {
+    key: orna_stream_v1::CheckpointKey,
+    polls: usize,
+}
+
+impl StreamSource for CountingSource {
+    type NextFuture<'a>
+        = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
+    where
+        Self: 'a;
+    type WaitFuture<'a>
+        = Ready<Result<(), SafeDiagnostic>>
+    where
+        Self: 'a;
+
+    fn descriptor(&self) -> StreamSourceDescriptor {
+        StreamSourceDescriptor {
+            kind: StreamSourceKind::Finite,
+            replayable: true,
+        }
+    }
+
+    fn checkpoint_key(&self) -> orna_stream_v1::CheckpointKey {
+        self.key.clone()
+    }
+
+    fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
+        self.polls += 1;
+        ready(Ok(StreamSourcePoll::Exhausted))
+    }
+
+    fn wait<'a>(
+        &'a mut self,
+        _: &'a dyn orna_runtime_v1::StreamRunControl,
+    ) -> Self::WaitFuture<'a> {
+        ready(Ok(()))
+    }
 }
 
 impl CountingHandler {
@@ -596,4 +642,52 @@ async fn replay_cancel_counts_one_attempt_without_moving_checkpoint() {
     assert_eq!(cancelled.diagnostic, fixture.skipped.diagnostic);
     assert_eq!(fixture.state.capture().await.unwrap(), capture);
     fixture.assert_one_replay_attempt(&cancelled);
+}
+
+#[tokio::test]
+async fn stale_stream_writer_is_rejected_before_source_poll() {
+    let (directory, repository) = repository();
+    let state = RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [11; 16],
+            repository_id: [12; 16],
+        },
+        [13; 32],
+    )
+    .await
+    .expect("open stale-writer fixture");
+    let stale = state.acquire_lease([14; 16]).await.expect("acquire writer");
+    let current = state
+        .takeover_lease(stale, [15; 16])
+        .await
+        .expect("take over stale writer");
+    let key = delivery().checkpoint_key();
+    let mut source = CountingSource {
+        key: key.clone(),
+        polls: 0,
+    };
+    let mut handler = CountingHandler::new(StreamHandlerResult::Cancelled);
+
+    assert_eq!(
+        state
+            .run_stream_once(stale, &key, &mut source, &mut handler)
+            .await,
+        Err(StreamStepError::Runtime(RuntimeError::OwnerLost))
+    );
+    assert_eq!(source.polls, 0, "a stale writer must not poll its provider");
+    assert_eq!(handler.calls, 0);
+    assert_eq!(state.current_lease().await.unwrap(), Some(current));
+    assert_eq!(
+        state
+            .stream_backend(current)
+            .checkpoint_async(&key)
+            .await
+            .unwrap()
+            .version,
+        0
+    );
+    drop(state);
+    drop(repository);
+    drop(directory);
 }
