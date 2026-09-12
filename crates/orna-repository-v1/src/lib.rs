@@ -114,6 +114,7 @@ pub struct PrivateCommit {
 
 const JOURNAL_MAGIC: &[u8] = b"ORNA-PUB-JOURNAL\0";
 const CHECKOUT_JOURNAL_MAGIC: &[u8] = b"ORNA-CHECKOUT-JOURNAL\0";
+const GIT_INDEX_LOCK_MAGIC: &[u8] = b"ORNA-GIT-INDEX-LOCK\0";
 const MAX_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 
 /// The recovery stages persisted for one publication attempt.
@@ -342,6 +343,12 @@ impl PublicationJournal {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         Ok(bytes)
+    }
+
+    fn lock_binding(&self) -> Result<[u8; 32], RepositoryError> {
+        let mut stable = self.clone();
+        stable.stage = PublicationJournalStage::Prepared;
+        Ok(Sha256::digest(stable.encode()?).into())
     }
 
     fn decode(bytes: &[u8], object_id_length: usize) -> Result<Self, RepositoryError> {
@@ -1623,6 +1630,21 @@ impl Repository {
         Ok(())
     }
 
+    fn reclaim_abandoned_publication_index_lock(
+        &self,
+        journal: &PublicationJournal,
+    ) -> Result<(), RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        let current = self
+            .read_publication_journal_locked()?
+            .ok_or(RepositoryError::GitIndexLockPresent)?;
+        if &current != journal {
+            return Err(RepositoryError::GitIndexLockPresent);
+        }
+        let index = self.git_path("index")?;
+        GitIndexLock::reclaim_abandoned(index.with_extension("lock"), journal.lock_binding()?)
+    }
+
     fn write_checkout_recovery_journal_locked(
         &self,
         journal: &CheckoutRecoveryJournal,
@@ -1745,10 +1767,12 @@ impl Repository {
         self.ensure_atomic_index_install_supported()?;
         let index = self.git_path("index")?;
         let base_index = self.capture_index_for_expected(expected_index, &index)?;
+        let lock_binding = journal.lock_binding()?;
+        self.write_publication_journal(journal)?;
         // Own Git's writer lock before exposing the new ref. This closes the
         // post-ref/pre-index race where an ordinary Git writer could publish
         // the captured, stale index.
-        let git_lock = GitIndexLock::acquire(index.with_extension("lock"))?;
+        let git_lock = GitIndexLock::acquire_owned(index.with_extension("lock"), lock_binding)?;
         // A managed file may have changed after preparation but before the
         // publication boundary.  Refuse that known conflict before advancing
         // the ref; the later worktree check still protects the unavoidable
@@ -1760,7 +1784,6 @@ impl Repository {
                 return Err(RepositoryError::ManagedContentConflict);
             }
         }
-        self.write_publication_journal(journal)?;
         self.advance_current_ref_bound(
             journal.old_head(),
             candidate,
@@ -1832,6 +1855,7 @@ impl Repository {
         let Some(mut journal) = self.read_publication_journal()? else {
             return Ok(None);
         };
+        self.reclaim_abandoned_publication_index_lock(&journal)?;
         let candidate = self.candidate_from_journal(&journal)?;
         let base_tree = journal
             .base_index_tree()
@@ -3940,27 +3964,157 @@ impl Drop for CoordinationLock {
 
 struct GitIndexLock {
     path: PathBuf,
+    marker: Vec<u8>,
     _file: fs::File,
 }
 impl GitIndexLock {
     fn acquire(path: PathBuf) -> Result<Self, RepositoryError> {
-        fs::File::create_new(&path)
-            .map(|file| Self { path, _file: file })
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    // Never remove an existing Git lock: it may belong to a
-                    // live ordinary Git writer or require Git's own recovery.
-                    RepositoryError::GitIndexLockPresent
-                } else {
-                    RepositoryError::LocalStateUnavailable
-                }
-            })
+        Self::acquire_with_binding(path, [0; 32])
+    }
+
+    fn acquire_owned(path: PathBuf, journal_binding: [u8; 32]) -> Result<Self, RepositoryError> {
+        Self::acquire_with_binding(path, journal_binding)
+    }
+
+    fn acquire_with_binding(
+        path: PathBuf,
+        journal_binding: [u8; 32],
+    ) -> Result<Self, RepositoryError> {
+        let marker = GitIndexLockMarker::new(journal_binding)?.encode();
+        let mut options = fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        let mut file = options.open(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                // Never remove an existing Git lock: it may belong to a live
+                // ordinary Git writer or require Git's own recovery.
+                RepositoryError::GitIndexLockPresent
+            } else {
+                RepositoryError::LocalStateUnavailable
+            }
+        })?;
+        if file
+            .write_all(&marker)
+            .and_then(|_| file.sync_all())
+            .is_err()
+        {
+            let _ = fs::remove_file(&path);
+            return Err(RepositoryError::LocalStateUnavailable);
+        }
+        Ok(Self {
+            path,
+            marker,
+            _file: file,
+        })
+    }
+
+    fn reclaim_abandoned(path: PathBuf, journal_binding: [u8; 32]) -> Result<(), RepositoryError> {
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(RepositoryError::GitIndexLockPresent);
+        }
+        let bytes = fs::read(&path).map_err(|_| RepositoryError::GitIndexLockPresent)?;
+        let Some(marker) = GitIndexLockMarker::decode(&bytes) else {
+            return Err(RepositoryError::GitIndexLockPresent);
+        };
+        if marker.journal_binding != journal_binding || marker.owner_is_live() {
+            return Err(RepositoryError::GitIndexLockPresent);
+        }
+        if fs::read(&path).map_err(|_| RepositoryError::GitIndexLockPresent)? != bytes {
+            return Err(RepositoryError::GitIndexLockPresent);
+        }
+        fs::remove_file(path).map_err(|_| RepositoryError::GitIndexLockPresent)
     }
 }
 impl Drop for GitIndexLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if fs::read(&self.path).ok().as_deref() == Some(self.marker.as_slice()) {
+            let _ = fs::remove_file(&self.path);
+        }
     }
+}
+
+#[derive(Clone, Copy)]
+struct GitIndexLockMarker {
+    pid: u32,
+    process_start: u64,
+    nonce: [u8; 16],
+    journal_binding: [u8; 32],
+}
+
+impl GitIndexLockMarker {
+    fn new(journal_binding: [u8; 32]) -> Result<Self, RepositoryError> {
+        Ok(Self {
+            pid: std::process::id(),
+            process_start: process_start_time(std::process::id())
+                .ok_or(RepositoryError::LocalStateUnavailable)?,
+            nonce: Uuid::new_v4().into_bytes(),
+            journal_binding,
+        })
+    }
+
+    fn encode(self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(GIT_INDEX_LOCK_MAGIC.len() + 1 + 4 + 8 + 16 + 32);
+        bytes.extend_from_slice(GIT_INDEX_LOCK_MAGIC);
+        bytes.push(1);
+        bytes.extend_from_slice(&self.pid.to_be_bytes());
+        bytes.extend_from_slice(&self.process_start.to_be_bytes());
+        bytes.extend_from_slice(&self.nonce);
+        bytes.extend_from_slice(&self.journal_binding);
+        bytes
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let mut cursor = GIT_INDEX_LOCK_MAGIC.len();
+        if !bytes.starts_with(GIT_INDEX_LOCK_MAGIC) || bytes.get(cursor)? != &1 {
+            return None;
+        }
+        cursor += 1;
+        let pid = u32::from_be_bytes(bytes.get(cursor..cursor + 4)?.try_into().ok()?);
+        cursor += 4;
+        let process_start = u64::from_be_bytes(bytes.get(cursor..cursor + 8)?.try_into().ok()?);
+        cursor += 8;
+        let nonce = bytes.get(cursor..cursor + 16)?.try_into().ok()?;
+        cursor += 16;
+        let journal_binding = bytes.get(cursor..cursor + 32)?.try_into().ok()?;
+        cursor += 32;
+        (pid != 0 && cursor == bytes.len()).then_some(Self {
+            pid,
+            process_start,
+            nonce,
+            journal_binding,
+        })
+    }
+
+    fn owner_is_live(self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            process_start_time(self.pid) == Some(self.process_start)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            true
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_start_time(pid: u32) -> Option<u64> {
+    let contents = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = contents
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    fields.get(19)?.parse().ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_start_time(_pid: u32) -> Option<u64> {
+    Some(0)
 }
 
 fn trim_output(bytes: &[u8]) -> String {
@@ -4638,9 +4792,15 @@ fn decode_object_id(value: &str) -> Result<Vec<u8>, RepositoryError> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs, path::Path, process::Command};
+    use std::{
+        collections::BTreeMap,
+        env, fs,
+        path::{Path, PathBuf},
+        process::Command,
+    };
 
     use super::{
+        GitIndexLock, PublicationJournal, PublicationJournalEntry, PublicationJournalStage,
         RemoteContinuity, Repository, RepositoryError, RuntimeGeneration, parse_remote_orna_refs,
     };
 
@@ -4678,7 +4838,7 @@ mod tests {
         );
     }
 
-    fn git(directory: &Path, arguments: &[&str]) {
+    fn git(directory: &Path, arguments: &[&str]) -> String {
         let output = Command::new("git")
             .current_dir(directory)
             .args(arguments)
@@ -4689,6 +4849,118 @@ mod tests {
             "git {arguments:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn publisher_index_lock_child() {
+        let Some(path) = env::var_os("ORNA_TEST_GIT_INDEX_LOCK_PATH") else {
+            return;
+        };
+        let encoded = env::var("ORNA_TEST_GIT_INDEX_LOCK_BINDING").unwrap();
+        let bytes = (0..32)
+            .map(|index| u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        let binding: [u8; 32] = bytes.try_into().unwrap();
+        let lock = GitIndexLock::acquire_owned(PathBuf::from(path), binding).unwrap();
+        std::mem::forget(lock);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_reclaims_a_dead_publisher_index_lock() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        git(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(root.path(), &["config", "user.name", "Repository test"]);
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        fs::write(root.path().join("ordinary.txt"), "base\n").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        fs::write(root.path().join("ordinary.txt"), "staged human edit\n").unwrap();
+        git(root.path(), &["add", "ordinary.txt"]);
+        fs::write(root.path().join("main.orna"), "unstaged human edit\n").unwrap();
+        let managed = super::ManagedPath::new("generated/row.orna").unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let index_before = repository.index_generation().unwrap();
+        let candidate = repository
+            .build_private_commit(
+                &head,
+                &[super::ManagedFileChange::new(
+                    managed.clone(),
+                    Some(b"candidate row\n".to_vec()),
+                )],
+                "orna: publish runtime data",
+            )
+            .unwrap();
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            head.clone(),
+            candidate.commit().clone(),
+            index_before.tree().unwrap().clone(),
+            [7; 16],
+            vec![PublicationJournalEntry::new(
+                managed.clone(),
+                None,
+                Some(b"candidate row\n".to_vec()),
+            )],
+        )
+        .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        repository.advance_current_ref(&head, &candidate).unwrap();
+        journal
+            .advance(PublicationJournalStage::RefAdvanced)
+            .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+
+        let lock_path = repository.git_path("index").unwrap().with_extension("lock");
+        let binding = journal.lock_binding().unwrap();
+        let encoded_binding = binding
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let child = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::publisher_index_lock_child",
+                "--nocapture",
+            ])
+            .env("ORNA_TEST_GIT_INDEX_LOCK_PATH", &lock_path)
+            .env("ORNA_TEST_GIT_INDEX_LOCK_BINDING", encoded_binding)
+            .status()
+            .unwrap();
+        assert!(child.success());
+        assert!(lock_path.is_file());
+
+        assert!(matches!(
+            repository.recover_publication(),
+            Err(RepositoryError::RuntimeCompletionRequired)
+        ));
+        assert!(!lock_path.exists());
+        assert_eq!(repository.head().unwrap(), Some(candidate.commit().clone()));
+        assert_eq!(
+            git(root.path(), &["show", ":ordinary.txt"]),
+            "staged human edit"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("main.orna")).unwrap(),
+            "unstaged human edit\n"
+        );
+        assert_eq!(
+            fs::read(root.path().join(managed.as_path())).unwrap(),
+            b"candidate row\n"
+        );
+        let mut completed = repository.read_publication_journal().unwrap().unwrap();
+        repository
+            .mark_runtime_complete([7; 16], &mut completed)
+            .unwrap();
+        assert!(repository.read_publication_journal().unwrap().is_none());
     }
 
     #[test]

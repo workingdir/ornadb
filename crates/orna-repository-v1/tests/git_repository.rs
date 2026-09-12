@@ -3019,7 +3019,7 @@ fn publication_rejects_a_known_managed_edit_before_ref_advance() {
         journal.stage(),
         orna_repository_v1::PublicationJournalStage::Prepared
     );
-    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
 }
 
 #[test]
