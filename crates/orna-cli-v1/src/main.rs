@@ -148,6 +148,7 @@ enum Invocation {
     Exercise,
     SensorsIngest,
     LibraryLend { book_id: String, borrower: String },
+    ProjectFunction(String),
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Command {
@@ -270,20 +271,8 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                     borrower: borrower.to_owned(),
                 })
             }
-            Some(_) => {
-                return Err(Diagnostic::usage(
-                    "E1002",
-                    "reference invocation is not supported by this bounded slice",
-                    "use `run seed`, `run exercise`, `run sensors.ingest`, or `run library.lend BOOK_ID BORROWER`",
-                ));
-            }
-            None => {
-                return Err(Diagnostic::usage(
-                    "E1001",
-                    "`run` needs a reference invocation",
-                    "use `run seed`, `run exercise`, `run sensors.ingest`, or `run library.lend BOOK_ID BORROWER`",
-                ));
-            }
+            Some(target) => Command::Run(Invocation::ProjectFunction(target.to_owned())),
+            None => Command::Run(Invocation::ProjectFunction("main.main".into())),
         },
         Some(_) => {
             return Err(Diagnostic::usage(
@@ -786,6 +775,45 @@ fn run_project_invocation(endpoint: &Endpoint, root_entry: &str) -> Result<(), D
     run_project_invocation_with_arguments(endpoint, root_entry, &Environment::new())
 }
 
+fn public_project_function(analysis: &orna_semantic_v1::Analysis, target: &str) -> bool {
+    let Some((module, function)) = target.rsplit_once('.') else {
+        return false;
+    };
+    let namespace = if module == "main" {
+        Vec::new()
+    } else {
+        module.split('.').map(str::to_owned).collect()
+    };
+    if function.is_empty() || namespace.iter().any(String::is_empty) {
+        return false;
+    }
+    analysis
+        .modules
+        .get(&orna_semantic_v1::Namespace(namespace))
+        .and_then(|module| module.exports.get(function))
+        .is_some_and(|symbol| symbol.kind == orna_semantic_v1::SymbolKind::Function)
+}
+
+fn run_public_project_function(endpoint: &Endpoint, target: &str) -> Result<(), Diagnostic> {
+    let project = load_project(endpoint)?;
+    let catalogue = semantic_catalogue(&project)?;
+    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    if !analysis.is_ok() {
+        return Err(Diagnostic::target(
+            "E2101",
+            "project semantic analysis failed",
+            "fix the first reported source contract error, then run the project again",
+        ));
+    }
+    if !public_project_function(&analysis, target) {
+        return Err(Diagnostic::unavailable(
+            "durable project invocation is not available",
+            "use a supported table transaction; stream roots require the explicit stream runtime",
+        ));
+    }
+    run_project_invocation(endpoint, target)
+}
+
 fn run_project_invocation_with_arguments(
     endpoint: &Endpoint,
     root_entry: &str,
@@ -1106,7 +1134,7 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     match parsed.command.clone() {
         Command::Help => {
             println!(
-                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|status --porcelain|status --short|check|invoke TARGET|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
+                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|status --porcelain|status --short|check|invoke TARGET|run [QUALIFIED_FUNCTION]|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
             );
             println!("orna-cli-v1 init [DIRECTORY]");
             Ok(())
@@ -1155,6 +1183,9 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
                 ),
             ]);
             run_project_invocation_with_arguments(&parsed.endpoint, "library.lend", &arguments)
+        }
+        Command::Run(Invocation::ProjectFunction(ref target)) => {
+            run_public_project_function(&parsed.endpoint, target)
         }
     }
 }
