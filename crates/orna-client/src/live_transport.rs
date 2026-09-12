@@ -11,11 +11,13 @@ use reqwest::{Client as HttpClient, StatusCode, Url};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::{
-    Message, client::IntoClientRequest, protocol::WebSocketConfig,
+    Message,
+    client::IntoClientRequest,
+    protocol::{WebSocketConfig, frame::CloseFrame, frame::coding::CloseCode},
 };
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
 
-use orna_protocol_v1::Limits;
+use orna_protocol_v1::{Envelope, Limits, Message as ProtocolMessage};
 
 use crate::live_session::{AuthenticatedLiveTransport, LiveByteDriver};
 
@@ -310,6 +312,8 @@ impl LiveClient {
         Ok(AuthenticatedWebSocketTransport {
             socket,
             max_message_bytes: session.limits.max_message_bytes,
+            limits: session.limits,
+            closed: false,
         })
     }
 
@@ -800,6 +804,8 @@ fn hex_uuid(value: [u8; 16]) -> String {
 pub struct AuthenticatedWebSocketTransport<S> {
     socket: WebSocketStream<S>,
     max_message_bytes: usize,
+    limits: Limits,
+    closed: bool,
 }
 
 impl<S> AuthenticatedWebSocketTransport<S>
@@ -818,7 +824,40 @@ where
         Ok(Self {
             socket,
             max_message_bytes: limits.max_message_bytes,
+            limits,
+            closed: false,
         })
+    }
+
+    async fn reject_inbound<T>(
+        &mut self,
+        code: CloseCode,
+        error: LiveTransportError,
+    ) -> Result<T, LiveTransportError> {
+        self.closed = true;
+        self.socket
+            .send(Message::Close(Some(CloseFrame {
+                code,
+                reason: "".into(),
+            })))
+            .await
+            .map_err(LiveTransportError::WebSocket)?;
+        Err(error)
+    }
+
+    const fn closed_error() -> LiveTransportError {
+        LiveTransportError::WebSocket(tokio_tungstenite::tungstenite::Error::ConnectionClosed)
+    }
+
+    fn is_host_message(message: &ProtocolMessage) -> bool {
+        matches!(
+            message,
+            ProtocolMessage::Snapshot { .. }
+                | ProtocolMessage::Delta { .. }
+                | ProtocolMessage::Result { .. }
+                | ProtocolMessage::Diagnostic { .. }
+                | ProtocolMessage::RequestStatusResult { .. }
+        )
     }
 }
 
@@ -834,15 +873,42 @@ where
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, Self::Error>> + 'a>>
     {
         Box::pin(async move {
+            if self.closed {
+                return Err(Self::closed_error());
+            }
             let bound = self.max_message_bytes.min(max_bytes);
             loop {
                 match self.socket.next().await {
                     Some(Ok(Message::Binary(bytes))) => {
                         let bytes = bytes.to_vec();
                         if bytes.len() > bound {
-                            return Err(LiveTransportError::Protocol(
-                                orna_protocol_v1::Error::Limit,
-                            ));
+                            return self
+                                .reject_inbound(
+                                    CloseCode::Size,
+                                    LiveTransportError::Protocol(orna_protocol_v1::Error::Limit),
+                                )
+                                .await;
+                        }
+                        let envelope = match Envelope::decode(&bytes, self.limits) {
+                            Ok(envelope) => envelope,
+                            Err(error) => {
+                                return self
+                                    .reject_inbound(
+                                        CloseCode::Protocol,
+                                        LiveTransportError::Protocol(error),
+                                    )
+                                    .await;
+                            }
+                        };
+                        if !Self::is_host_message(&envelope.message) {
+                            return self
+                                .reject_inbound(
+                                    CloseCode::Protocol,
+                                    LiveTransportError::Protocol(
+                                        orna_protocol_v1::Error::InvalidMessage,
+                                    ),
+                                )
+                                .await;
                         }
                         return Ok(bytes);
                     }
@@ -854,17 +920,38 @@ where
                     }
                     Some(Ok(Message::Pong(_))) => {}
                     Some(Ok(Message::Close(_))) | None => {
+                        self.closed = true;
                         return Err(LiveTransportError::WebSocket(
                             tokio_tungstenite::tungstenite::Error::ConnectionClosed,
                         ));
                     }
                     Some(Ok(Message::Text(_))) => {
-                        return Err(LiveTransportError::Response(
-                            "text WebSocket message rejected",
-                        ));
+                        return self
+                            .reject_inbound(
+                                CloseCode::Unsupported,
+                                LiveTransportError::Response("text WebSocket message rejected"),
+                            )
+                            .await;
                     }
                     Some(Ok(Message::Frame(_))) => {}
-                    Some(Err(error)) => return Err(LiveTransportError::WebSocket(error)),
+                    Some(Err(error)) => {
+                        if matches!(
+                            error,
+                            tokio_tungstenite::tungstenite::Error::Capacity(
+                                tokio_tungstenite::tungstenite::error::CapacityError::MessageTooLong {
+                                    ..
+                                }
+                            )
+                        ) {
+                            return self
+                                .reject_inbound(
+                                    CloseCode::Size,
+                                    LiveTransportError::Protocol(orna_protocol_v1::Error::Limit),
+                                )
+                                .await;
+                        }
+                        return Err(LiveTransportError::WebSocket(error));
+                    }
                 }
             }
         })
@@ -875,6 +962,9 @@ where
         bytes: Vec<u8>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Self::Error>> + 'a>> {
         Box::pin(async move {
+            if self.closed {
+                return Err(Self::closed_error());
+            }
             if bytes.len() > self.max_message_bytes {
                 return Err(LiveTransportError::Protocol(orna_protocol_v1::Error::Limit));
             }
