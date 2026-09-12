@@ -17526,6 +17526,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admission_capability_is_not_reissued_after_reopen() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let original = state.acquire_lease(id(32)).await.unwrap();
+        let identity = request(33, 34);
+        let fingerprint = digest(35);
+        let (reserved, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let stale_capability = capability.expect("fresh owner-bound capability");
+        assert_eq!(reserved.state, RequestState::Reserved);
+        assert!(state.run_observations().await.unwrap().is_empty());
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let abandoned = reopened
+            .current_lease()
+            .await
+            .unwrap()
+            .expect("original writer remains durable across reopen");
+        assert_eq!(abandoned, original);
+        let current = reopened.takeover_lease(abandoned, id(36)).await.unwrap();
+
+        let (reopened_status, reissued_capability) = reopened
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        assert_eq!(reopened_status, reserved);
+        assert!(reissued_capability.is_none());
+
+        let registration = RunObservationRegistration {
+            request: identity,
+            consumer_identity: stream_delivery("reopen-admission", "begin").consumer,
+            function: "pkg.reopen_admission".into(),
+            source_identity: Some("source reopen admission".into()),
+            invocation_id: id(37),
+        };
+        assert_eq!(
+            reopened
+                .start_request_with_owner_and_admission(
+                    identity,
+                    fingerprint,
+                    current,
+                    stale_capability.clone(),
+                )
+                .await,
+            Err(RuntimeError::RequestOwnerConflict)
+        );
+        assert_eq!(
+            reopened
+                .begin_observed_request_with_admission(
+                    registration,
+                    fingerprint,
+                    current,
+                    stale_capability,
+                )
+                .await,
+            Err(RuntimeError::RequestOwnerConflict)
+        );
+        assert_eq!(
+            reopened
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            RequestState::Reserved
+        );
+        assert!(reopened.run_observations().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn session_deletion_fence_blocks_external_reservation_until_terminal() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
