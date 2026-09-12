@@ -2085,6 +2085,18 @@ impl LiveHost {
                         return Err(Error::Denied);
                     }
                 }
+                if self.runtime.is_some()
+                    && matches!(
+                        envelope.message,
+                        Message::RequestStatus { .. }
+                            | Message::Cancel {
+                                target_kind: TargetKind::Request,
+                                ..
+                            }
+                    )
+                {
+                    self.ensure_takeover_recovery().await?;
+                }
                 if self.runtime.is_some() {
                     match self
                         .admit_durable_request(session, request, fingerprint, &envelope)
@@ -2644,6 +2656,10 @@ impl LiveHost {
                     .map_err(|error| map_runtime(&error))?;
             }
         }
+        runtime
+            .complete_takeover_recovery(lease)
+            .await
+            .map_err(|error| map_runtime(&error))?;
         self.takeover_recovery_complete = true;
         Ok(())
     }
