@@ -127,6 +127,7 @@ impl LiveClient {
         config.validate()?;
         let http = HttpClient::builder()
             .timeout(config.request_timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(LiveTransportError::Http)?;
         Ok(Self { config, http })
@@ -368,6 +369,19 @@ fn validate_resume_token(token: &str) -> Result<(), LiveTransportError> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
     {
+        return Err(LiveTransportError::Response("invalid resume token"));
+    }
+    let Some(last) = token.as_bytes().last().and_then(|byte| match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'-' => Some(62),
+        b'_' => Some(63),
+        _ => None,
+    }) else {
+        return Err(LiveTransportError::Response("invalid resume token"));
+    };
+    if last & 0b11 != 0 {
         return Err(LiveTransportError::Response("invalid resume token"));
     }
     Ok(())
@@ -658,20 +672,35 @@ fn bind_socket_path(endpoint: &Url, advertised: &str) -> Result<Url, LiveTranspo
 
 fn parse_id(value: &str) -> Result<[u8; 16], LiveTransportError> {
     let bytes = value.as_bytes();
-    if bytes.len() != 36 || ![8, 13, 18, 23].iter().all(|&index| bytes[index] == b'-') {
+    if bytes.len() != 36 {
         return Err(LiveTransportError::Response("invalid session identifier"));
     }
     let mut output = [0; 16];
     let mut output_index = 0;
     let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'-' {
+    for (group, width) in [8, 4, 4, 4, 12].into_iter().enumerate() {
+        if group > 0 {
+            if bytes.get(index) != Some(&b'-') {
+                return Err(LiveTransportError::Response("invalid session identifier"));
+            }
             index += 1;
-            continue;
         }
-        output[output_index] = (hex(bytes[index])? << 4) | hex(bytes[index + 1])?;
-        output_index += 1;
-        index += 2;
+        for _ in 0..(width / 2) {
+            let high = bytes
+                .get(index)
+                .copied()
+                .ok_or(LiveTransportError::Response("invalid session identifier"))?;
+            let low = bytes
+                .get(index + 1)
+                .copied()
+                .ok_or(LiveTransportError::Response("invalid session identifier"))?;
+            output[output_index] = (hex(high)? << 4) | hex(low)?;
+            output_index += 1;
+            index += 2;
+        }
+    }
+    if index != bytes.len() || output_index != output.len() {
+        return Err(LiveTransportError::Response("invalid session identifier"));
     }
     Ok(output)
 }
