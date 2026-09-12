@@ -1209,8 +1209,15 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+    use bytes::Bytes;
     use orna_foundation_v1::{CanonicalValue, OvbRaw};
     use orna_repository_v1::{CompactManifest, CompactSegment, CompactSegmentRole, Uuid};
+    use parquet::file::{
+        metadata::{FileMetaData, KeyValue, ParquetMetaData, ParquetMetaDataWriter},
+        reader::{FileReader, SerializedFileReader},
+    };
+    use sha2::{Digest, Sha256};
     use std::{fs, path::Path, process::Command};
     use tempfile::TempDir;
 
@@ -1317,11 +1324,103 @@ mod tests {
         .unwrap()
     }
 
+    fn compact_schema() -> orna_foundation_v1::SchemaDescriptor {
+        let table = Uuid::from_u128(1);
+        let field_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
+        orna_foundation_v1::SchemaDescriptor::new(OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (
+                OvbRaw::Int(1.into()),
+                OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(table.as_bytes().to_vec()))),
+            ),
+            (
+                OvbRaw::Int(2.into()),
+                OvbRaw::Array(vec![OvbRaw::Tag(
+                    37,
+                    Box::new(OvbRaw::Bytes(field_id.as_bytes().to_vec())),
+                )]),
+            ),
+            (
+                OvbRaw::Int(3.into()),
+                OvbRaw::Array(vec![OvbRaw::Array(vec![
+                    OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(field_id.as_bytes().to_vec()))),
+                    OvbRaw::Text(format!("f_{}", field_id.simple())),
+                    OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]),
+                    OvbRaw::Int(0.into()),
+                    OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                ])]),
+            ),
+            (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+        ]))
+        .unwrap()
+    }
+
+    fn compact_schema_fingerprint(schema: &orna_foundation_v1::SchemaDescriptor) -> [u8; 32] {
+        let bytes = schema.encode().unwrap();
+        let mut digest = Sha256::new();
+        digest.update(b"orna.schema.v1\0");
+        digest.update(bytes);
+        digest.finalize().into()
+    }
+
+    fn compact_schema_hex(schema: [u8; 32]) -> String {
+        schema
+            .into_iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn compact_runtime_parquet() -> (Vec<u8>, [u8; 32]) {
+        const PARQUET: &str = "UEFSMRUGFQoVChXq3ovdBUwVAhUAFQIVChUAFQASAACAAgQBAhkSAhkYCAEAAAAAAAAAGRgIAQAAAAAAAAAVAhkWAAAZHBYIFTYWAAAAFQIZLEgGc2NoZW1hFQIAFQQlABgiZl8wMThmMDAwMDAwMDA3MDAwODAwMDAwMDAwMDAwMDAwMQAWAhkcGRwmABwVBBklBgoZGCJmXzAxOGYwMDAwMDAwMDcwMDA4MDAwMDAwMDAwMDAwMDAxFQwWAhY2FkImCDw2ACgIAQAAAAAAAAAYCAEAAAAAAAAAEREAABZ8FRQWPhU+ABY2FgImCBZCFAAAGXwYDG9ybmEucHJvZmlsZRgSY29tcGFjdC1zdG9yYWdlLXYxABgKb3JuYS50YWJsZRgkMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxABgSb3JuYS5zY2hlbWEuc2hhMjU2GEAwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3ABgPb3JuYS5zY2hlbWEub3ZiGARBQT09ABgQb3JuYS5jb2x1bW5zLm92YhhgZ1lXQjJDVlFBWThBQUFBQWNBQ0FBQUFBQUFBQUFZRjRJbVpmTURFNFpqQXdNREF3TURBd056QXdNRGd3TURBd01EQXdNREF3TURBd01ER0NBR05KYm5SbGFXNTBOalNBABgMb3JuYS5lbmNvZGVyGA90ZXN0LWVuY29kZXItdjEAGBFvcm5hLnRlc3QucGF5bG9hZBgOY29tcGFjdCBvYmplY3QAGBlwYXJxdWV0LXJzIHZlcnNpb24gNTkuMy4wGRwcAAAARgIAAFBBUjE=";
+        let original = decode_base64(PARQUET);
+        let reader = SerializedFileReader::new(Bytes::from(original.clone())).unwrap();
+        let file = reader.metadata().file_metadata();
+        let schema = compact_schema();
+        let schema_ovb = schema.encode().unwrap();
+        let fingerprint = compact_schema_fingerprint(&schema);
+        let metadata = FileMetaData::new(
+            1,
+            file.num_rows(),
+            file.created_by().map(str::to_owned),
+            Some(vec![
+                KeyValue::new("orna.profile".into(), Some("compact-storage-v1".into())),
+                KeyValue::new("orna.table".into(), Some(Uuid::from_u128(1).to_string())),
+                KeyValue::new(
+                    "orna.schema.sha256".into(),
+                    Some(compact_schema_hex(fingerprint)),
+                ),
+                KeyValue::new("orna.schema.ovb".into(), Some(BASE64.encode(schema_ovb))),
+                KeyValue::new(
+                    "orna.columns.ovb".into(),
+                    Some(BASE64.encode(compact_columns())),
+                ),
+                KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
+            ]),
+            file.schema_descr_ptr(),
+            file.column_orders().cloned(),
+        );
+        let metadata = ParquetMetaData::new(metadata, reader.metadata().row_groups().to_vec());
+        let mut footer = Vec::new();
+        ParquetMetaDataWriter::new(&mut footer, &metadata)
+            .finish()
+            .unwrap();
+        let footer_start = original.len()
+            - 8
+            - u32::from_le_bytes(
+                original[original.len() - 8..original.len() - 4]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+        let mut bytes = original[..footer_start].to_vec();
+        bytes.extend(footer);
+        (bytes, fingerprint)
+    }
+
     fn compact_runtime_plan(
         repository: &Repository,
         freeze: &PublicationFreeze,
     ) -> CompactPublicationPlan {
-        const PARQUET: &str = "UEFSMRUGFQoVChXq3ovdBUwVAhUAFQIVChUAFQASAACAAgQBAhkSAhkYCAEAAAAAAAAAGRgIAQAAAAAAAAAVAhkWAAAZHBYIFTYWAAAAFQIZLEgGc2NoZW1hFQIAFQQlABgiZl8wMThmMDAwMDAwMDA3MDAwODAwMDAwMDAwMDAwMDAwMQAWAhkcGRwmABwVBBklBgoZGCJmXzAxOGYwMDAwMDAwMDcwMDA4MDAwMDAwMDAwMDAwMDAxFQwWAhY2FkImCDw2ACgIAQAAAAAAAAAYCAEAAAAAAAAAEREAABZ8FRQWPhU+ABY2FgImCBZCFAAAGXwYDG9ybmEucHJvZmlsZRgSY29tcGFjdC1zdG9yYWdlLXYxABgKb3JuYS50YWJsZRgkMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxABgSb3JuYS5zY2hlbWEuc2hhMjU2GEAwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3ABgPb3JuYS5zY2hlbWEub3ZiGARBQT09ABgQb3JuYS5jb2x1bW5zLm92YhhgZ1lXQjJDVlFBWThBQUFBQWNBQ0FBQUFBQUFBQUFZRjRJbVpmTURFNFpqQXdNREF3TURBd056QXdNRGd3TURBd01EQXdNREF3TURBd01ER0NBR05KYm5SbGFXNTBOalNBABgMb3JuYS5lbmNvZGVyGA90ZXN0LWVuY29kZXItdjEAGBFvcm5hLnRlc3QucGF5bG9hZBgOY29tcGFjdCBvYmplY3QAGBlwYXJxdWV0LXJzIHZlcnNpb24gNTkuMy4wGRwcAAAARgIAAFBBUjE=";
+        let (parquet, schema) = compact_runtime_parquet();
         let table = Uuid::from_u128(1);
         let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
         let segment_path = ManagedPath::new(format!(
@@ -1332,10 +1431,10 @@ mod tests {
         let segment = CompactSegment::new(
             segment_id,
             CompactSegmentRole::Data,
-            [7; 32],
+            schema,
             "test-encoder-v1",
             segment_path,
-            decode_base64(PARQUET),
+            parquet,
             1u64.to_be_bytes().to_vec(),
             1u64.to_be_bytes().to_vec(),
             1,
@@ -1349,7 +1448,7 @@ mod tests {
             .prepare_compact_publication(
                 &head,
                 repository.index_generation().unwrap(),
-                CompactManifest::empty(table, [7; 32]),
+                CompactManifest::empty(table, schema),
                 freeze.intent_id,
                 freeze.checkpoint.digest,
                 &[segment],
