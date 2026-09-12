@@ -168,6 +168,10 @@ impl CompactParquetKeySource {
                         .into_iter()
                         .map(OvbRaw::Text)
                         .collect(),
+                    KeyColumnKind::Date => read_int32_column(&*row_group, column.index, rows)?
+                        .into_iter()
+                        .map(date_value)
+                        .collect::<Result<_, _>>()?,
                 };
                 group_values.push(column_values);
             }
@@ -244,6 +248,13 @@ fn compare_key_components(
             (OvbRaw::Int(left), OvbRaw::Int(right)) => left.cmp(right),
             (OvbRaw::Bool(left), OvbRaw::Bool(right)) => left.cmp(right),
             (OvbRaw::Text(left), OvbRaw::Text(right)) => left.cmp(right),
+            (OvbRaw::Tag(60001, left), OvbRaw::Tag(60001, right)) => {
+                let (OvbRaw::Text(left), OvbRaw::Text(right)) = (left.as_ref(), right.as_ref())
+                else {
+                    return Err(CompactParquetError::InvalidMetadata);
+                };
+                left.cmp(right)
+            }
             _ => return Err(CompactParquetError::InvalidMetadata),
         };
         if ordering != Ordering::Equal {
@@ -277,6 +288,7 @@ enum KeyColumnKind {
     Int,
     Bool,
     Str,
+    Date,
 }
 
 fn ensure_supported_profile(
@@ -292,6 +304,7 @@ fn ensure_supported_profile(
             KeyColumnKind::Int => OvbRaw::Int(0.into()),
             KeyColumnKind::Bool => OvbRaw::Bool(false),
             KeyColumnKind::Str => OvbRaw::Text(String::new()),
+            KeyColumnKind::Date => OvbRaw::Tag(60001, Box::new(OvbRaw::Text("1970-01-01".into()))),
         })
         .collect::<Vec<_>>();
     let raw = match components.as_slice() {
@@ -461,11 +474,18 @@ fn descriptor_field_id(
             && column.logical_type_ref() == Some(&parquet::basic::LogicalType::String)
         {
             KeyColumnKind::Str
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Date".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "date")
+            && column.physical_type() == Type::INT32
+            && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Date)
+        {
+            KeyColumnKind::Date
         } else {
             return Err(CompactParquetError::UnsupportedKeyMapping);
         };
         if !matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty())
-            || (kind != KeyColumnKind::Str && column.logical_type_ref().is_some())
+            || (!(kind == KeyColumnKind::Str || kind == KeyColumnKind::Date)
+                && column.logical_type_ref().is_some())
             || column.max_rep_level() != 0
         {
             return Err(CompactParquetError::UnsupportedKeyMapping);
@@ -528,6 +548,11 @@ fn profile_key_kinds(
                 if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Str".to_owned())] =>
             {
                 KeyColumnKind::Str
+            }
+            OvbRaw::Array(logical_type)
+                if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Date".to_owned())] =>
+            {
+                KeyColumnKind::Date
             }
             _ => continue,
         };
@@ -609,6 +634,83 @@ fn read_int64_column(
         });
     }
     Ok(values)
+}
+
+fn read_int32_column(
+    row_group: &dyn parquet::file::reader::RowGroupReader,
+    index: usize,
+    expected_rows: usize,
+) -> Result<Vec<i32>, CompactParquetError> {
+    let reader = row_group
+        .get_column_reader(index)
+        .map_err(|_| CompactParquetError::InvalidParquet)?;
+    let ColumnReader::Int32ColumnReader(mut reader) = reader else {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    };
+    let descriptor = row_group.metadata().schema_descr().column(index);
+    if descriptor.max_rep_level() != 0 {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    }
+    let mut values = Vec::with_capacity(expected_rows);
+    let mut definition_levels = Vec::new();
+    let mut records = 0usize;
+    while records < expected_rows {
+        let remaining = expected_rows - records;
+        let definition_levels_ref =
+            (descriptor.max_def_level() != 0).then_some(&mut definition_levels);
+        let (read_records, values_read, levels_read) = reader
+            .read_records(remaining, definition_levels_ref, None, &mut values)
+            .map_err(|_| CompactParquetError::InvalidParquet)?;
+        if read_records == 0 {
+            break;
+        }
+        if levels_read != read_records || values_read != read_records {
+            return Err(CompactParquetError::NullKey);
+        }
+        if descriptor.max_def_level() != 0
+            && definition_levels
+                .iter()
+                .any(|level| *level != descriptor.max_def_level())
+        {
+            return Err(CompactParquetError::NullKey);
+        }
+        records = records
+            .checked_add(read_records)
+            .ok_or(CompactParquetError::InvalidParquet)?;
+    }
+    if records != expected_rows || values.len() != expected_rows {
+        return Err(CompactParquetError::RowCountMismatch {
+            expected: expected_rows as u64,
+            observed: records as u64,
+        });
+    }
+    Ok(values)
+}
+
+fn date_value(days: i32) -> Result<OvbRaw, CompactParquetError> {
+    let z = i64::from(days) + 719_468;
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let month0 = (5 * doy + 2) / 153;
+    let day = doy - (153 * month0 + 2) / 5 + 1;
+    let month = month0 + if month0 < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    if !(1..=9_999).contains(&year) {
+        return Err(CompactParquetError::InvalidMetadata);
+    }
+    Ok(OvbRaw::Tag(
+        60001,
+        Box::new(OvbRaw::Text(format!("{year:04}-{month:02}-{day:02}"))),
+    ))
 }
 
 fn read_bool_column(
@@ -748,7 +850,7 @@ mod tests {
     };
     use parquet::{
         basic::Compression,
-        data_type::{BoolType, ByteArray, ByteArrayType, Int64Type},
+        data_type::{BoolType, ByteArray, ByteArrayType, Int32Type, Int64Type},
         file::{
             metadata::KeyValue,
             properties::{WriterProperties, WriterVersion},
@@ -782,6 +884,10 @@ mod tests {
 
     fn str_type() -> OvbRaw {
         OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Str".into())])
+    }
+
+    fn date_type() -> OvbRaw {
+        OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Date".into())])
     }
 
     fn field_with_type(id: [u8; 16], logical_type: OvbRaw) -> OvbRaw {
@@ -926,6 +1032,8 @@ mod tests {
         Int(&'a [i64]),
         Bool(&'a [bool]),
         Str(&'a [Vec<u8>]),
+        Date(&'a [i32]),
+        DateWithoutAnnotation(&'a [i32]),
     }
 
     fn mixed_parquet(
@@ -965,9 +1073,11 @@ mod tests {
                 TestColumn::Int(_) => "INT64",
                 TestColumn::Bool(_) => "BOOLEAN",
                 TestColumn::Str(_) => "BYTE_ARRAY",
+                TestColumn::Date(_) | TestColumn::DateWithoutAnnotation(_) => "INT32",
             };
             let annotation = match &values[index] {
                 TestColumn::Str(_) => " (STRING)",
+                TestColumn::Date(_) => " (DATE)",
                 _ => "",
             };
             message.push_str(&format!(
@@ -986,6 +1096,9 @@ mod tests {
                     TestColumn::Int(_) => descriptor(id, int_type()),
                     TestColumn::Bool(_) => descriptor_with_encoding(id, bool_type(), "bool"),
                     TestColumn::Str(_) => descriptor_with_encoding(id, str_type(), "utf8"),
+                    TestColumn::Date(_) | TestColumn::DateWithoutAnnotation(_) => {
+                        descriptor_with_encoding(id, date_type(), "date")
+                    }
                 })
                 .collect()
         });
@@ -1039,6 +1152,18 @@ mod tests {
                         .write_batch(&values, Some(&[0, 1]), None)
                         .unwrap();
                 }
+                TestColumn::Date(values) if optional_first && index == 0 => {
+                    column
+                        .typed::<Int32Type>()
+                        .write_batch(&values[1..], Some(&[0, 1]), None)
+                        .unwrap();
+                }
+                TestColumn::DateWithoutAnnotation(values) if optional_first && index == 0 => {
+                    column
+                        .typed::<Int32Type>()
+                        .write_batch(&values[1..], Some(&[0, 1]), None)
+                        .unwrap();
+                }
                 TestColumn::Int(values) => {
                     column
                         .typed::<Int64Type>()
@@ -1059,6 +1184,18 @@ mod tests {
                     column
                         .typed::<ByteArrayType>()
                         .write_batch(&values, None, None)
+                        .unwrap();
+                }
+                TestColumn::Date(values) => {
+                    column
+                        .typed::<Int32Type>()
+                        .write_batch(values, None, None)
+                        .unwrap();
+                }
+                TestColumn::DateWithoutAnnotation(values) => {
+                    column
+                        .typed::<Int32Type>()
+                        .write_batch(values, None, None)
                         .unwrap();
                 }
             }
@@ -1088,6 +1225,76 @@ mod tests {
             .unwrap()
             .encode()
             .unwrap()
+    }
+
+    fn expected_date(value: &str) -> Vec<u8> {
+        CanonicalValue::new(OvbRaw::Tag(60001, Box::new(OvbRaw::Text(value.to_owned()))))
+            .unwrap()
+            .encode()
+            .unwrap()
+    }
+
+    fn verified_date_fixture(profile: &CompactOvbProfile) -> Vec<u8> {
+        let days = [0_i32, 1_i32];
+        let mut original =
+            mixed_parquet(profile, &[KEY_A], &[TestColumn::Date(&days)], false, None);
+        let footer_start = original.len()
+            - 8
+            - u32::from_le_bytes(
+                original[original.len() - 8..original.len() - 4]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+        assert_eq!(&original[footer_start..footer_start + 2], &[0x15, 0x04]);
+        original[footer_start + 1] = 0x02;
+        let reader = SerializedFileReader::new(Bytes::from(original.clone())).unwrap();
+        let file = reader.metadata().file_metadata();
+        let metadata = parquet::file::metadata::FileMetaData::new(
+            1,
+            file.num_rows(),
+            file.created_by().map(str::to_owned),
+            Some(vec![
+                KeyValue::new("orna.profile".into(), Some(COMPACT_STORAGE_PROFILE.into())),
+                KeyValue::new("orna.table".into(), Some(TABLE.to_string())),
+                KeyValue::new(
+                    "orna.schema.sha256".into(),
+                    Some(hex_digest(profile.schema_fingerprint())),
+                ),
+                KeyValue::new(
+                    "orna.schema.ovb".into(),
+                    Some(BASE64.encode(profile.schema().encode().unwrap())),
+                ),
+                KeyValue::new(
+                    "orna.columns.ovb".into(),
+                    Some(
+                        BASE64.encode(
+                            CanonicalValue::new(OvbRaw::Array(vec![descriptor_with_encoding(
+                                KEY_A,
+                                date_type(),
+                                "date",
+                            )]))
+                            .unwrap()
+                            .encode()
+                            .unwrap(),
+                        ),
+                    ),
+                ),
+                KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
+            ]),
+            file.schema_descr_ptr(),
+            file.column_orders().cloned(),
+        );
+        let rewritten = parquet::file::metadata::ParquetMetaData::new(
+            metadata,
+            reader.metadata().row_groups().to_vec(),
+        );
+        let mut footer = Vec::new();
+        parquet::file::metadata::ParquetMetaDataWriter::new(&mut footer, &rewritten)
+            .finish()
+            .unwrap();
+        let mut bytes = original[..footer_start].to_vec();
+        bytes.extend(footer);
+        with_page_checksums(bytes)
     }
 
     fn expected_tuple(first: i64, second: i64) -> Vec<u8> {
@@ -1708,6 +1915,257 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(keys, vec![expected_text("alpha"), expected_text("beta")]);
+        drop(temp);
+    }
+
+    #[test]
+    fn reads_real_scalar_date_as_canonical_ovb_date() {
+        let profile = profile_with_types(&[KEY_A], &[date_type()]);
+        let days = [0_i32, 1_i32];
+        let bytes = mixed_parquet(&profile, &[KEY_A], &[TestColumn::Date(&days)], false, None);
+        let keys =
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 2).unwrap();
+        assert_eq!(
+            keys,
+            vec![expected_date("1970-01-01"), expected_date("1970-01-02")]
+        );
+
+        assert_eq!(
+            date_value(-719_162).unwrap(),
+            OvbRaw::Tag(60001, Box::new(OvbRaw::Text("0001-01-01".into())))
+        );
+        assert!(matches!(
+            date_value(-719_163),
+            Err(CompactParquetError::InvalidMetadata)
+        ));
+        assert_eq!(
+            date_value(2_932_896).unwrap(),
+            OvbRaw::Tag(60001, Box::new(OvbRaw::Text("9999-12-31".into())))
+        );
+        assert!(matches!(
+            date_value(2_932_897),
+            Err(CompactParquetError::InvalidMetadata)
+        ));
+    }
+
+    #[test]
+    fn reads_date_from_plain_and_rle_dictionary_pages_and_requires_date_annotation() {
+        let profile = profile_with_types(&[KEY_A], &[date_type()]);
+        let dates = [0_i32, 1_i32, 1_i32];
+        let dictionary = mixed_parquet_with_dictionary(
+            &profile,
+            &[KEY_A],
+            &[TestColumn::Date(&dates)],
+            false,
+            None,
+            true,
+        );
+        let reader = SerializedFileReader::new(Bytes::copy_from_slice(&dictionary)).unwrap();
+        assert!(
+            reader
+                .metadata()
+                .row_group(0)
+                .column(0)
+                .encodings()
+                .any(|encoding| encoding == parquet::basic::Encoding::RLE_DICTIONARY)
+        );
+        assert_eq!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &dictionary, 3)
+                .unwrap(),
+            vec![
+                expected_date("1970-01-01"),
+                expected_date("1970-01-02"),
+                expected_date("1970-01-02"),
+            ]
+        );
+
+        let unannotated = mixed_parquet(
+            &profile,
+            &[KEY_A],
+            &[TestColumn::DateWithoutAnnotation(&dates)],
+            false,
+            None,
+        );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &unannotated, 3),
+            Err(CompactParquetError::UnsupportedKeyMapping)
+        ));
+    }
+
+    #[test]
+    fn reads_date_in_declared_composite_order_and_rejects_nonrepresentable_dates() {
+        let profile = profile_with_types(&[KEY_A, KEY_B], &[date_type(), int_type()]);
+        let dates = [0_i32, 1_i32];
+        let numbers = [9_i64, 8_i64];
+        let bytes = mixed_parquet(
+            &profile,
+            &[KEY_B, KEY_A],
+            &[TestColumn::Int(&numbers), TestColumn::Date(&dates)],
+            false,
+            None,
+        );
+        let keys =
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 2).unwrap();
+        assert_eq!(
+            keys,
+            vec![
+                CanonicalValue::new(OvbRaw::Tag(
+                    60015,
+                    Box::new(OvbRaw::Array(vec![
+                        OvbRaw::Tag(60001, Box::new(OvbRaw::Text("1970-01-01".into()))),
+                        OvbRaw::Int(9.into()),
+                    ])),
+                ))
+                .unwrap()
+                .encode()
+                .unwrap(),
+                CanonicalValue::new(OvbRaw::Tag(
+                    60015,
+                    Box::new(OvbRaw::Array(vec![
+                        OvbRaw::Tag(60001, Box::new(OvbRaw::Text("1970-01-02".into()))),
+                        OvbRaw::Int(8.into()),
+                    ])),
+                ))
+                .unwrap()
+                .encode()
+                .unwrap(),
+            ]
+        );
+        let invalid = [-2_147_483_648_i32];
+        let invalid_bytes = mixed_parquet(
+            &profile_with_types(&[KEY_A], &[date_type()]),
+            &[KEY_A],
+            &[TestColumn::Date(&invalid)],
+            false,
+            None,
+        );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(
+                &profile_with_types(&[KEY_A], &[date_type()]),
+                TABLE,
+                &invalid_bytes,
+                1,
+            ),
+            Err(CompactParquetError::InvalidMetadata)
+        ));
+
+        let wrong_descriptor = mixed_parquet(
+            &profile_with_types(&[KEY_A], &[date_type()]),
+            &[KEY_A],
+            &[TestColumn::Date(&dates)],
+            false,
+            Some(vec![descriptor_with_encoding(KEY_A, date_type(), "int64")]),
+        );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(
+                &profile_with_types(&[KEY_A], &[date_type()]),
+                TABLE,
+                &wrong_descriptor,
+                2,
+            ),
+            Err(CompactParquetError::UnsupportedKeyMapping)
+        ));
+
+        let nullable = mixed_parquet(
+            &profile_with_types(&[KEY_A], &[date_type()]),
+            &[KEY_A],
+            &[TestColumn::Date(&dates)],
+            true,
+            None,
+        );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(
+                &profile_with_types(&[KEY_A], &[date_type()]),
+                TABLE,
+                &nullable,
+                2,
+            ),
+            Err(CompactParquetError::NullKey)
+        ));
+
+        let valid = mixed_parquet(
+            &profile_with_types(&[KEY_A], &[date_type()]),
+            &[KEY_A],
+            &[TestColumn::Date(&dates)],
+            false,
+            None,
+        );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(
+                &profile_with_types(&[KEY_A], &[date_type()]),
+                TABLE,
+                &valid,
+                3,
+            ),
+            Err(CompactParquetError::RowCountMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn repository_publication_verifies_date_bytes_before_logical_read() {
+        let profile = profile_with_types(&[KEY_A], &[date_type()]);
+        let bytes = verified_date_fixture(&profile);
+        let (temp, repository) = repository();
+        let path = ManagedPath::new(format!(
+            ".orna/storage/{TABLE}/data/{}/{SEGMENT_ID}.parquet",
+            &SEGMENT_ID.to_string()[..2]
+        ))
+        .unwrap();
+        let columns = CanonicalValue::new(OvbRaw::Array(vec![descriptor_with_encoding(
+            KEY_A,
+            date_type(),
+            "date",
+        )]))
+        .unwrap()
+        .encode()
+        .unwrap();
+        let segment = CompactSegment::new(
+            SEGMENT_ID,
+            CompactSegmentRole::Data,
+            profile.schema_fingerprint(),
+            "test-encoder-v1",
+            path,
+            bytes,
+            expected_date("1970-01-01"),
+            expected_date("1970-01-02"),
+            2,
+            columns,
+            true,
+            false,
+        )
+        .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let plan = repository
+            .prepare_compact_publication(
+                &head,
+                repository.index_generation().unwrap(),
+                CompactManifest::empty(TABLE, profile.schema_fingerprint()),
+                [4; 16],
+                [5; 32],
+                &[segment],
+                "verified date compact publication",
+            )
+            .unwrap();
+        let manifest = plan.manifest().clone();
+        let pending = repository
+            .publish_compact_repository_boundary(plan)
+            .unwrap();
+        let source = CompactParquetKeySource::from_verified_manifest(
+            &repository,
+            pending.commit(),
+            &manifest,
+            profile,
+        )
+        .unwrap();
+        let keys = source
+            .exact_keys(&manifest.entries()[0])
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            keys,
+            vec![expected_date("1970-01-01"), expected_date("1970-01-02")]
+        );
         drop(temp);
     }
 
