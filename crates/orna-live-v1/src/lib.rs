@@ -129,11 +129,27 @@ impl core::fmt::Display for Error {
 impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum Frame {
     Binary(Vec<u8>),
     Text(String),
     Close,
+}
+
+impl fmt::Debug for Frame {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Binary(bytes) => formatter
+                .debug_struct("Frame::Binary")
+                .field("bytes", &bytes.len())
+                .finish(),
+            Self::Text(text) => formatter
+                .debug_struct("Frame::Text")
+                .field("bytes", &text.len())
+                .finish(),
+            Self::Close => formatter.write_str("Frame::Close"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -146,10 +162,20 @@ pub enum FrameOutcome {
 
 /// A protocol outcome and, where supported by the retained state, its exact
 /// canonical host response.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct DispatchOutcome {
     pub outcome: FrameOutcome,
     pub response: Option<Envelope>,
+}
+
+impl fmt::Debug for DispatchOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DispatchOutcome")
+            .field("outcome", &self.outcome)
+            .field("response_present", &self.response.is_some())
+            .finish()
+    }
 }
 
 /// Shared ownership state for application work admitted by a live session.
@@ -813,10 +839,18 @@ struct DeletedSession {
 
 /// Host-issued identity for a session. The two credential representations are
 /// intentionally separate opaque values for their respective existing APIs.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SessionCredential {
     pub security: OpaqueCredential,
     pub serving: ServingCredential,
+}
+
+impl fmt::Debug for SessionCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionCredential")
+            .finish_non_exhaustive()
+    }
 }
 
 pub struct CreateRequest<'a> {
@@ -844,18 +878,42 @@ pub struct DeleteRequest<'a> {
 /// `POST /v1/live/sessions/{id}/attachments` to resume, and
 /// `DELETE /v1/live/sessions/{id}` to delete. Origins and credentials have
 /// already been parsed into their opaque types before reaching this boundary.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum HttpBody {
     Session(SessionCredential),
     Empty,
     ErrorCode(&'static str),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl fmt::Debug for HttpBody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Session(_) => formatter.write_str("HttpBody::Session(..)"),
+            Self::Empty => formatter.write_str("HttpBody::Empty"),
+            Self::ErrorCode(code) => formatter
+                .debug_tuple("HttpBody::ErrorCode")
+                .field(code)
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct HttpResponse {
     pub status: u16,
     pub headers: Vec<(&'static str, &'static str)>,
     pub body: HttpBody,
+}
+
+impl fmt::Debug for HttpResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpResponse")
+            .field("status", &self.status)
+            .field("header_count", &self.headers.len())
+            .field("body", &self.body)
+            .finish()
+    }
 }
 
 impl HttpResponse {
@@ -3610,13 +3668,26 @@ fn map_runtime(error: &RuntimeError) -> Error {
 /// UUID and admission data supplied by the trusted database/runtime owner.
 /// The transport never accepts filesystem paths or runtime identities from a
 /// client request.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SessionMetadata {
     pub session: [u8; 16],
     pub database: [u8; 16],
     pub runtime: [u8; 16],
     pub expires_at: u64,
     pub subscribe: Vec<u8>,
+}
+
+impl fmt::Debug for SessionMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionMetadata")
+            .field("session", &self.session)
+            .field("database", &self.database)
+            .field("runtime", &self.runtime)
+            .field("expires_at", &self.expires_at)
+            .field("subscribe_bytes", &self.subscribe.len())
+            .finish()
+    }
 }
 
 /// The application-specific admission seam required by the HTTP boundary.
@@ -3745,7 +3816,7 @@ impl TransportLimits {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct WireRequest {
     pub method: String,
     pub path: String,
@@ -3753,11 +3824,34 @@ pub struct WireRequest {
     pub body: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl fmt::Debug for WireRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WireRequest")
+            .field("method", &self.method)
+            .field("path", &self.path)
+            .field("header_count", &self.headers.len())
+            .field("body_bytes", &self.body.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct WireResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+impl fmt::Debug for WireResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WireResponse")
+            .field("status", &self.status)
+            .field("header_count", &self.headers.len())
+            .field("body_bytes", &self.body.len())
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3868,10 +3962,20 @@ impl core::fmt::Display for HttpParseError {
 
 impl std::error::Error for HttpParseError {}
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ParsedHttpRequest {
     request: WireRequest,
     consumed: usize,
+}
+
+impl fmt::Debug for ParsedHttpRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ParsedHttpRequest")
+            .field("request", &self.request)
+            .field("consumed", &self.consumed)
+            .finish()
+    }
 }
 
 impl ParsedHttpRequest {
@@ -3892,11 +3996,22 @@ impl ParsedHttpRequest {
 
 /// Bounded connection-local HTTP read state. It retains incomplete bytes and
 /// drains complete pipelined requests without exposing the backing buffer.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct HttpConnection {
     limits: TransportLimits,
     buffered: Vec<u8>,
     pending: VecDeque<ParsedHttpRequest>,
+}
+
+impl fmt::Debug for HttpConnection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpConnection")
+            .field("limits", &self.limits)
+            .field("buffered_bytes", &self.buffered.len())
+            .field("pending_requests", &self.pending.len())
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4182,7 +4297,7 @@ const fn is_http_header_control(byte: u8) -> bool {
     (byte < 0x20 && byte != b'\t') || byte == 0x7f
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum WebSocketOutput {
     Accepted(FrameOutcome),
     /// A canonical host response ready to send as one binary WebSocket frame.
@@ -4198,6 +4313,30 @@ pub enum WebSocketOutput {
     Close {
         code: Option<u16>,
     },
+}
+
+impl fmt::Debug for WebSocketOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Accepted(outcome) => formatter
+                .debug_tuple("WebSocketOutput::Accepted")
+                .field(outcome)
+                .finish(),
+            Self::Binary { outcome, payload } => formatter
+                .debug_struct("WebSocketOutput::Binary")
+                .field("outcome", outcome)
+                .field("payload_bytes", &payload.len())
+                .finish(),
+            Self::Pong(payload) => formatter
+                .debug_struct("WebSocketOutput::Pong")
+                .field("payload_bytes", &payload.len())
+                .finish(),
+            Self::Close { code } => formatter
+                .debug_struct("WebSocketOutput::Close")
+                .field("code", code)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4286,13 +4425,23 @@ struct PendingUpgrade {
 /// A reservation authorizes exactly one later commit. It leaves the current
 /// attachment unchanged until that commit succeeds, and callers must abort it
 /// if delivery of its handshake response does not succeed.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct WebSocketUpgrade {
     owner: u64,
     reservation: u128,
     session: [u8; 16],
     deadline: u64,
     response: WireResponse,
+}
+
+impl fmt::Debug for WebSocketUpgrade {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WebSocketUpgrade")
+            .field("deadline", &self.deadline)
+            .field("response", &self.response)
+            .finish_non_exhaustive()
+    }
 }
 
 impl WebSocketUpgrade {
@@ -6215,12 +6364,27 @@ fn decode_base64url(value: &str) -> Option<Vec<u8>> {
     (count == 0 || bits == 0).then_some(out)
 }
 
-#[derive(Debug)]
 pub struct WebSocketState {
     attachment: [u8; 16],
     fragment: Option<(u8, Vec<u8>)>,
     pending: Vec<u8>,
     closed: bool,
+}
+
+impl fmt::Debug for WebSocketState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (fragment_opcode, fragment_bytes) = self
+            .fragment
+            .as_ref()
+            .map_or((None, 0), |(opcode, bytes)| (Some(*opcode), bytes.len()));
+        formatter
+            .debug_struct("WebSocketState")
+            .field("fragment_opcode", &fragment_opcode)
+            .field("fragment_bytes", &fragment_bytes)
+            .field("pending_bytes", &self.pending.len())
+            .field("closed", &self.closed)
+            .finish()
+    }
 }
 
 const MAX_WEBSOCKET_FRAME_HEADER_BYTES: usize = 14;
