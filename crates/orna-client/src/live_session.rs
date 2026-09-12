@@ -126,6 +126,14 @@ where
         &self.presentation
     }
 
+    pub const fn watch(&self) -> [u8; 16] {
+        self.watch
+    }
+
+    pub const fn limits(&self) -> Limits {
+        self.limits
+    }
+
     /// Receives at most one bounded binary envelope, publishes an accepted
     /// complete tree, or sends the current resync request. A failed send keeps
     /// the exact encoded bytes and request identity for the next call.
@@ -181,6 +189,32 @@ where
         // state remains available through `presentation()` but must not be
         // rendered ahead of the replacement attachment's complete snapshot.
         self.pending_publication = None;
+    }
+
+    pub(crate) fn replace_authenticated_attachment_with_watch(
+        &mut self,
+        io: I,
+        watch: [u8; 16],
+    ) -> Result<(), ()> {
+        if watch == self.watch {
+            return Err(());
+        }
+        self.io = io;
+        self.watch = watch;
+        let previous = self.presentation.published().cloned();
+        let mut presentation = WatchPresentation::new(watch, self.limits).map_err(|_| ())?;
+        if let Some(previous) = previous {
+            let _ = presentation.install_snapshot(
+                previous.revision(),
+                previous.present().clone(),
+                previous.snapshot().clone(),
+            );
+        }
+        self.presentation = presentation;
+        self.presentation.begin_resubscription();
+        self.pending_resync = None;
+        self.pending_publication = None;
+        Ok(())
     }
 
     async fn flush_resync(
