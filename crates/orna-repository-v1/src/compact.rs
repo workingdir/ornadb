@@ -184,8 +184,18 @@ impl CompactManifestEntry {
         self.segment_id
     }
 
+    /// Returns the immutable logical role recorded for this manifest entry.
+    pub const fn role(&self) -> CompactSegmentRole {
+        self.role
+    }
+
     pub const fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Returns the number of rows the physical segment must enumerate.
+    pub const fn row_count(&self) -> u64 {
+        self.row_count
     }
 
     pub fn relative_path(&self) -> &ManagedPath {
@@ -468,12 +478,15 @@ fn verify_physical_columns(
         let OvbRaw::Text(encoding) = &fields[3] else {
             return Err(RepositoryError::InvalidCompactManifest);
         };
+        let int_mapping =
+            type_name == "Int" && encoding == "int64" && column.physical_type() == Type::INT64;
+        let bool_mapping =
+            type_name == "Bool" && encoding == "bool" && column.physical_type() == Type::BOOLEAN;
         if type_code.to_string() != "0"
-            || type_name != "Int"
-            || encoding != "int64"
+            || !(int_mapping || bool_mapping)
             || !matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty())
-            || column.physical_type() != Type::INT64
             || column.logical_type_ref().is_some()
+            || column.max_rep_level() != 0
         {
             return Err(RepositoryError::InvalidCompactManifest);
         }
@@ -1347,6 +1360,33 @@ struct CompactRuntimeCompletionFence {
 impl CompactRuntimeCompletionFence {}
 
 impl Repository {
+    /// Returns the bytes of one committed compact segment after rechecking its
+    /// committed tree object, digest, size, and physical Parquet witness.
+    ///
+    /// The entry must come from the validated manifest for the same table and
+    /// commit. This is a read-only handoff of verified physical bytes; logical
+    /// row and key decoding remains owned by storage.
+    pub fn read_verified_compact_segment(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+        entry: &CompactManifestEntry,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        let Some((_mode, object)) = self.tree_entry_at(commit, &entry.relative_path)? else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        if object != entry.git_object_id {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let bytes = self.git_bytes(["cat-file", "blob", &object])?;
+        if Sha256::digest(&bytes).as_slice() != entry.sha256
+            || verify_physical_entry(table, entry, &bytes).is_err()
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        Ok(bytes)
+    }
+
     /// Persists a prepared compact journal without advancing the selected ref.
     /// This is the crash-before-publication boundary used by restart tests and
     /// recovery callers; runtime cleanup remains pending.
@@ -2844,12 +2884,362 @@ impl fmt::Display for CompactSegmentRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use parquet::{
+        basic::{Compression, PageType},
+        column::reader::ColumnReader,
+        data_type::BoolType,
+        file::{
+            metadata::{KeyValue, ParquetMetaDataWriter},
+            properties::{WriterProperties, WriterVersion},
+            reader::{FileReader, SerializedFileReader},
+            writer::SerializedFileWriter,
+        },
+        schema::parser::parse_message_type,
+    };
+    use std::{fs, path::Path, process::Command, sync::Arc};
+    use tempfile::TempDir;
+
+    const BOOL_TABLE: Uuid = Uuid::from_u128(2);
+    const BOOL_FIELD: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
+    const BOOL_SEGMENT: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0002);
+
+    fn bool_columns(field: Uuid) -> Vec<u8> {
+        CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Array(vec![
+            OvbRaw::Array(vec![OvbRaw::Tag(
+                37,
+                Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
+            )]),
+            OvbRaw::Array(vec![OvbRaw::Text(format!("f_{}", field.simple()))]),
+            OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Bool".to_owned())]),
+            OvbRaw::Text("bool".to_owned()),
+            OvbRaw::Array(Vec::new()),
+        ])]))
+        .unwrap()
+        .encode()
+        .unwrap()
+    }
+
+    fn test_repository() -> (TempDir, Repository) {
+        let temp = TempDir::new().unwrap();
+        test_git(temp.path(), &["init", "-b", "main"]);
+        test_git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        test_git(temp.path(), &["config", "user.name", "compact-test"]);
+        test_git(temp.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
+        fs::create_dir_all(temp.path().join(".orna")).unwrap();
+        fs::write(temp.path().join(".orna/format.orna"), "format 1\n").unwrap();
+        test_git(temp.path(), &["add", "."]);
+        test_git(temp.path(), &["commit", "-m", "initial"]);
+        let repository = Repository::discover(temp.path()).unwrap();
+        (temp, repository)
+    }
+
+    fn test_git(directory: &Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(directory)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn bool_parquet(table: Uuid, schema: [u8; 32], columns: &[u8]) -> Vec<u8> {
+        let physical_name = format!("f_{}", BOOL_FIELD.simple());
+        let schema_descriptor = Arc::new(
+            parse_message_type(&format!(
+                "message schema {{ REQUIRED BOOLEAN {physical_name}; }}"
+            ))
+            .unwrap(),
+        );
+        let metadata = vec![
+            KeyValue::new("orna.profile".to_owned(), Some(COMPACT_PROFILE.to_owned())),
+            KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
+            KeyValue::new("orna.schema.sha256".to_owned(), Some(hex(&schema))),
+            KeyValue::new("orna.schema.ovb".to_owned(), Some("AA==".to_owned())),
+            KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
+            KeyValue::new(
+                "orna.encoder".to_owned(),
+                Some("test-encoder-v1".to_owned()),
+            ),
+        ];
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::ZSTD(Default::default()))
+                .set_dictionary_enabled(false)
+                .set_writer_version(WriterVersion::PARQUET_2_0)
+                .set_key_value_metadata(Some(metadata))
+                .build(),
+        );
+        let mut bytes = Vec::new();
+        let mut writer =
+            SerializedFileWriter::new(&mut bytes, schema_descriptor, properties).unwrap();
+        let mut row_group = writer.next_row_group().unwrap();
+        let mut column = row_group.next_column().unwrap().unwrap();
+        column
+            .typed::<BoolType>()
+            .write_batch(&[false, true], None, None)
+            .unwrap();
+        column.close().unwrap();
+        row_group.close().unwrap();
+        writer.close().unwrap();
+
+        let footer = footer_start(&bytes);
+        assert_eq!(&bytes[footer..footer + 2], &[0x15, 0x04]);
+        bytes[footer + 1] = 0x02;
+        with_page_checksum(bytes)
+    }
+
+    struct TestPageHeader {
+        encoded_len: usize,
+        compressed_len: usize,
+        checksum_predecessor: u8,
+        next_field_offset: Option<usize>,
+        next_field_id: Option<u8>,
+        stop_offset: usize,
+    }
+
+    fn page_header(bytes: &[u8]) -> TestPageHeader {
+        let mut cursor = 0;
+        let mut previous = 0_u8;
+        let mut compressed_len = None;
+        let mut next_field_offset = None;
+        let mut next_field_id = None;
+        let mut checksum_predecessor = None;
+        loop {
+            let field_offset = cursor;
+            let tag = take_compact_byte(bytes, &mut cursor).unwrap();
+            let kind = tag & 0x0f;
+            if kind == 0 {
+                return TestPageHeader {
+                    encoded_len: cursor,
+                    compressed_len: compressed_len.unwrap(),
+                    checksum_predecessor: checksum_predecessor.unwrap_or(previous),
+                    next_field_offset,
+                    next_field_id,
+                    stop_offset: field_offset,
+                };
+            }
+            let delta = tag >> 4;
+            let field = if delta == 0 {
+                decode_compact_i16(bytes, &mut cursor).unwrap() as u8
+            } else {
+                previous.checked_add(delta).unwrap()
+            };
+            if field > 4 && next_field_offset.is_none() {
+                next_field_offset = Some(field_offset);
+                next_field_id = Some(field);
+                checksum_predecessor = Some(previous);
+            }
+            if field == 3 && kind == 5 {
+                compressed_len =
+                    Some(usize::try_from(decode_compact_i32(bytes, &mut cursor).unwrap()).unwrap());
+            } else {
+                skip_compact_value(bytes, &mut cursor, kind, 0).unwrap();
+            }
+            previous = field;
+        }
+    }
+
+    fn with_page_checksum(bytes: Vec<u8>) -> Vec<u8> {
+        let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+        let metadata = reader.metadata().clone();
+        let column = metadata.row_group(0).column(0);
+        let start = usize::try_from(column.data_page_offset()).unwrap();
+        let length = usize::try_from(column.compressed_size()).unwrap();
+        let header = page_header(&bytes[start..start + length]);
+        let body_start = start + header.encoded_len;
+        let body_end = body_start + header.compressed_len;
+        let checksum = crc32(&bytes[body_start..body_end]) as i32;
+        let checksum_delta = 4_u8
+            .checked_sub(header.checksum_predecessor)
+            .expect("checksum field follows compressed length");
+        let mut checksum_field = vec![(checksum_delta << 4) | 5];
+        encode_compact_varint(
+            ((i64::from(checksum) << 1) ^ (i64::from(checksum) >> 31)) as u64,
+            &mut checksum_field,
+        );
+        let footer = footer_start(&bytes);
+        let mut data = bytes[..footer].to_vec();
+        let insertion = start + header.next_field_offset.unwrap_or(header.stop_offset);
+        data.splice(insertion..insertion, checksum_field.iter().copied());
+        if let Some(next) = header.next_field_offset {
+            let position = start + next + checksum_field.len();
+            let delta = header.next_field_id.unwrap().checked_sub(4).unwrap();
+            data[position] = (data[position] & 0x0f) | (delta << 4);
+        }
+
+        let mut metadata = metadata.into_builder();
+        let mut row_groups = metadata.take_row_groups();
+        let row_group = row_groups.pop().unwrap();
+        let mut row_group = row_group.into_builder();
+        let mut columns = row_group.take_columns();
+        let column = columns.pop().unwrap();
+        let compressed_size = column.compressed_size();
+        columns.push(
+            column
+                .into_builder()
+                .set_total_compressed_size(
+                    compressed_size + i64::try_from(data.len() - footer).unwrap(),
+                )
+                .build()
+                .unwrap(),
+        );
+        let row_group = row_group.set_column_metadata(columns).build().unwrap();
+        let metadata = metadata.add_row_group(row_group).build();
+        let mut new_footer = Vec::new();
+        ParquetMetaDataWriter::new(&mut new_footer, &metadata)
+            .finish()
+            .unwrap();
+        data.extend(new_footer);
+
+        let reader = SerializedFileReader::new(Bytes::from(data.clone())).unwrap();
+        assert_eq!(reader.metadata().file_metadata().version(), 1);
+        let group = reader.get_row_group(0).unwrap();
+        let mut pages = group.get_column_page_reader(0).unwrap();
+        let page = pages.next().unwrap().unwrap();
+        assert!(page.is_data_page());
+        assert_eq!(page.page_type(), PageType::DATA_PAGE_V2);
+        assert!(pages.next().is_none());
+        data
+    }
+
+    fn footer_start(bytes: &[u8]) -> usize {
+        let length =
+            u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap());
+        bytes.len() - 8 - usize::try_from(length).unwrap()
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut value = !0_u32;
+        for byte in bytes {
+            value ^= u32::from(*byte);
+            for _ in 0..8 {
+                let mask = 0_u32.wrapping_sub(value & 1);
+                value = (value >> 1) ^ (0xedb8_8320 & mask);
+            }
+        }
+        !value
+    }
+
+    fn encode_compact_varint(mut value: u64, output: &mut Vec<u8>) {
+        while value >= 0x80 {
+            output.push((value as u8 & 0x7f) | 0x80);
+            value >>= 7;
+        }
+        output.push(value as u8);
+    }
 
     #[test]
     fn compact_manifest_exposes_its_retained_schema_fingerprint() {
         let schema = [0x42; 32];
         let manifest = CompactManifest::empty(Uuid::from_bytes([0x11; 16]), schema);
         assert_eq!(manifest.schema(), schema);
+    }
+
+    #[test]
+    fn compact_manifest_entry_exposes_validated_role_and_row_count() {
+        let table = Uuid::from_bytes([0x11; 16]);
+        let segment_id = Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 1]);
+        let entry = CompactManifestEntry {
+            segment_id,
+            role: CompactSegmentRole::Replacement,
+            generation: 9,
+            schema: [0x42; 32],
+            encoder_version: "test".to_owned(),
+            relative_path: compact_segment_path(table, segment_id).unwrap(),
+            git_object_id: "a".repeat(40),
+            sha256: [0x43; 32],
+            min_key: vec![0],
+            max_key: vec![1],
+            min_event_time: None,
+            max_event_time: None,
+            row_count: 37,
+            compressed_bytes: 1,
+            columns: Vec::new(),
+            row_group_index: true,
+            bloom: true,
+        };
+        entry.validate(table, Some(40)).unwrap();
+        assert_eq!(entry.role(), CompactSegmentRole::Replacement);
+        assert_eq!(entry.generation(), 9);
+        assert_eq!(entry.row_count(), 37);
+    }
+
+    #[test]
+    fn publishes_and_reads_verified_bool_segment_for_bool_decoder() {
+        let schema = [0x42; 32];
+        let columns = bool_columns(BOOL_FIELD);
+        let bytes = bool_parquet(BOOL_TABLE, schema, &columns);
+        let (root, repository) = test_repository();
+        let path = ManagedPath::new(format!(
+            ".orna/storage/{BOOL_TABLE}/data/{}/{BOOL_SEGMENT}.parquet",
+            &BOOL_SEGMENT.to_string()[..2]
+        ))
+        .unwrap();
+        let min_key = CanonicalValue::new(OvbRaw::Bool(false))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let max_key = CanonicalValue::new(OvbRaw::Bool(true))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let segment = CompactSegment::new(
+            BOOL_SEGMENT,
+            CompactSegmentRole::Data,
+            schema,
+            "test-encoder-v1",
+            path,
+            bytes,
+            min_key,
+            max_key,
+            2,
+            columns,
+            true,
+            false,
+        )
+        .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let plan = repository
+            .prepare_compact_publication(
+                &head,
+                repository.index_generation().unwrap(),
+                CompactManifest::empty(BOOL_TABLE, schema),
+                [2; 16],
+                [3; 32],
+                &[segment],
+                "bool compact publication",
+            )
+            .unwrap();
+        let manifest = plan.manifest().clone();
+        let pending = repository
+            .publish_compact_repository_boundary(plan)
+            .unwrap();
+        let entry = &manifest.entries()[0];
+        let verified = repository
+            .read_verified_compact_segment(pending.commit(), BOOL_TABLE, entry)
+            .unwrap();
+        let reader = SerializedFileReader::new(Bytes::from(verified)).unwrap();
+        let group = reader.get_row_group(0).unwrap();
+        let ColumnReader::BoolColumnReader(mut bool_reader) = group.get_column_reader(0).unwrap()
+        else {
+            panic!("verified Bool segment did not reach a Bool decoder");
+        };
+        let mut values = Vec::new();
+        let (records, values_read, levels_read) = bool_reader
+            .read_records(2, None, None, &mut values)
+            .unwrap();
+        assert_eq!((records, values_read, levels_read), (2, 2, 2));
+        assert_eq!(values, [false, true]);
+        drop(root);
     }
 
     #[test]
