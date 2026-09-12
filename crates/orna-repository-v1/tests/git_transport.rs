@@ -235,6 +235,48 @@ fn fetch_preconditions_ignore_inherited_git_routing() {
 }
 
 #[test]
+fn fetch_does_not_dereference_a_symbolic_destination() {
+    let fixture = Fixture::new();
+    let initial = fixture.initial_head();
+    let next = fixture.advance_branch_only();
+    git(&fixture.local, &["update-ref", "refs/heads/main", &initial]);
+    git(
+        &fixture.local,
+        &["symbolic-ref", "HEAD", "refs/heads/main"],
+    );
+    git(
+        &fixture.local,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/main",
+            "refs/heads/main",
+        ],
+    );
+    let repository = fixture.repository();
+    let head_before = repository.head().unwrap();
+    let index_before = repository.index_generation().unwrap();
+    let worktree_before = repository.worktree_state().unwrap();
+    let runtime_marker = repository.runtime_paths().root().join("transport-marker");
+    repository.runtime_paths().ensure_exists().unwrap();
+    fs::write(&runtime_marker, b"preserve").unwrap();
+
+    let report = repository
+        .fetch(&request([RequestedRef::branch("main").unwrap()], []))
+        .unwrap();
+    assert!(report.ordinary()[0].updated());
+    assert_eq!(git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]), next);
+    assert!(!git_status(
+        &fixture.local,
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/main"]
+    ));
+    assert_eq!(git(&fixture.local, &["rev-parse", "refs/heads/main"]), initial);
+    assert_eq!(repository.head().unwrap(), head_before);
+    assert_eq!(repository.index_generation().unwrap(), index_before);
+    assert_eq!(repository.worktree_state().unwrap(), worktree_before);
+    assert_eq!(fs::read(&runtime_marker).unwrap(), b"preserve");
+}
+
+#[test]
 fn fetch_updates_branch_and_internal_refs_without_mutating_local_state() {
     let fixture = Fixture::new();
     let repository = fixture.repository();
