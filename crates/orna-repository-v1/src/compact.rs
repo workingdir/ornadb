@@ -755,6 +755,11 @@ impl CompactManifest {
         self.table
     }
 
+    /// Returns the retained logical schema fingerprint for this manifest.
+    pub const fn schema(&self) -> [u8; 32] {
+        self.schema
+    }
+
     pub const fn next_generation(&self) -> u64 {
         self.next_generation
     }
@@ -2839,6 +2844,13 @@ impl fmt::Display for CompactSegmentRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_manifest_exposes_its_retained_schema_fingerprint() {
+        let schema = [0x42; 32];
+        let manifest = CompactManifest::empty(Uuid::from_bytes([0x11; 16]), schema);
+        assert_eq!(manifest.schema(), schema);
+    }
 
     #[test]
     fn compact_recovery_marks_only_post_receipt_stages_as_runtime_completed() {
