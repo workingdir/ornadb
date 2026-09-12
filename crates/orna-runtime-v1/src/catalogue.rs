@@ -6,16 +6,16 @@
 //! caller supplies names and semantic hashes; it never supplies an ObjectRef
 //! or an ObjectId to this boundary.
 
-use libsql::{Connection, Transaction, params};
+use libsql::{params, Connection, Transaction};
 use orna_foundation_v1::{
-    FunctionRef, ObjectRef, Snapshot, TypeRef, Value, function_reference, object_reference,
-    type_reference, validate_type_reference,
+    function_reference, object_reference, type_reference, validate_type_reference, FunctionRef,
+    ObjectRef, Snapshot, TypeRef, Value,
 };
 use uuid::Uuid;
 
 use crate::{
-    RuntimeError as RuntimeFailure, RuntimeState, capture_tx, fixed, now_ms,
-    validate_observation_text,
+    capture_tx, fixed, now_ms, validate_observation_text, RuntimeError as RuntimeFailure,
+    RuntimeState,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -276,23 +276,8 @@ mod batch_tests {
         .await
         .unwrap();
         advance(&state, lease, 7).await;
-        admit(
-            &state,
-            lease,
-            CatalogueAdmission {
-                predecessor_capture: Some(first.capture.clone()),
-                types: vec![type_declaration(
-                    "pkg.T",
-                    8,
-                    9,
-                    CatalogueTypeSpec::Named,
-                    None,
-                )],
-                functions: Vec::new(),
-            },
-        )
-        .await
-        .unwrap();
+        // A carried-forward admitted catalogue is immutable at this capture.
+        // Source edits must use the combined new-generation activation boundary.
         let forged = CwdCapture::new(first.capture.snapshot().clone(), [99; 32]).unwrap();
         assert_eq!(
             admit(
@@ -403,7 +388,7 @@ mod batch_tests {
     }
 
     #[tokio::test]
-    async fn predecessor_snapshot_preserves_identity_across_edit_rename_and_data_only_generation() {
+    async fn carried_forward_generation_preserves_identity_until_source_activation() {
         let (_directory, state) = state().await;
         let lease = state.acquire_lease([16; 16]).await.unwrap();
         let first = admit(
@@ -424,8 +409,16 @@ mod batch_tests {
         .await
         .unwrap();
         let first_id = first.types[0].object_id();
-        let _second_capture = advance(&state, lease, 16).await;
-        let second = admit(
+        let second_capture = advance(&state, lease, 16).await;
+        let second = state
+            .catalogue_type("pkg.T", CatalogueTypeForm::Named)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_id, second.object_id());
+        assert_eq!(second.snapshot(), capture_bytes(&second_capture).unwrap());
+
+        let rejected_edit = admit(
             &state,
             lease,
             CatalogueAdmission {
@@ -440,52 +433,24 @@ mod batch_tests {
                 functions: Vec::new(),
             },
         )
-        .await
-        .unwrap();
-        assert_eq!(first_id, second.types[0].object_id());
-        advance(&state, lease, 19).await;
-        let renamed = admit(
-            &state,
-            lease,
-            CatalogueAdmission {
-                predecessor_capture: Some(second.capture.clone()),
-                types: vec![type_declaration(
-                    "pkg.Renamed",
-                    20,
-                    21,
-                    CatalogueTypeSpec::Named,
-                    Some("pkg.T"),
-                )],
-                functions: Vec::new(),
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(first_id, renamed.types[0].object_id());
-        let fourth_capture = advance(&state, lease, 22).await;
-        let data_only = admit(
-            &state,
-            lease,
-            CatalogueAdmission {
-                predecessor_capture: Some(renamed.capture.clone()),
-                types: vec![type_declaration(
-                    "pkg.Renamed",
-                    20,
-                    21,
-                    CatalogueTypeSpec::Named,
-                    None,
-                )],
-                functions: Vec::new(),
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(first_id, data_only.types[0].object_id());
-        assert_eq!(data_only.capture, fourth_capture);
+        .await;
+        assert_eq!(
+            rejected_edit,
+            Err(CatalogueError::CatalogueRevisionConflict)
+        );
+
+        let third_capture = advance(&state, lease, 19).await;
+        let data_only = state
+            .catalogue_type("pkg.T", CatalogueTypeForm::Named)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_id, data_only.object_id());
+        assert_eq!(data_only.snapshot(), capture_bytes(&third_capture).unwrap());
     }
 
     #[tokio::test]
-    async fn source_admission_retains_data_only_predecessor_capture() {
+    async fn data_only_predecessor_capture_remains_available_for_replay() {
         let (_directory, state) = state().await;
         let lease = state.acquire_lease([25; 16]).await.unwrap();
         let first = admit(
@@ -513,7 +478,7 @@ mod batch_tests {
 
         // The first generation is the source activation following the
         // admission. The second is a data-only activation with no catalogue
-        // batch. The next source admission must be able to use that exact
+        // batch. The next catalogue replay must be able to use that exact
         // data-only capture as its immediate predecessor.
         let source_capture = advance(&state, lease, 28).await;
         let data_only_capture = advance(&state, lease, 29).await;
@@ -570,7 +535,7 @@ mod batch_tests {
             CatalogueAdmission {
                 predecessor_capture: Some(data_only_capture.clone()),
                 types: vec![
-                    type_declaration("pkg.T", 31, 32, CatalogueTypeSpec::Named, None),
+                    type_declaration("pkg.T", 26, 27, CatalogueTypeSpec::Named, None),
                     type_declaration("pkg.Result", 28, 29, CatalogueTypeSpec::Named, None),
                     type_declaration("pkg.Param", 30, 31, CatalogueTypeSpec::Named, None),
                 ],
@@ -855,10 +820,10 @@ impl RuntimeState {
     ///
     /// This is the only publication boundary for a source catalogue: callers
     /// must submit the complete resolved batch in one transaction. Runtime
-    /// generations that contain no catalogue edits are retained separately by
-    /// the normal generation commit path, so the next admission can name the
-    /// exact immediately preceding capture without pretending a partial
-    /// catalogue was published.
+    /// generations that contain no catalogue edits carry forward the complete
+    /// catalogue and its admission marker. Replaying that catalogue is
+    /// read-only; a source change must use the generation-advancing activation
+    /// boundary rather than replacing an already observable capture.
     pub async fn admit_catalogue_at(
         &self,
         writer: crate::WriterLease,
@@ -1477,6 +1442,9 @@ pub(crate) async fn persist_capture_for_runtime_tx(
     predecessor: &orna_foundation_v1::CwdCapture,
     capture: &orna_foundation_v1::CwdCapture,
 ) -> Result<(), crate::RuntimeError> {
+    persist_capture_tx(connection, predecessor)
+        .await
+        .map_err(map_catalogue_runtime_error)?;
     persist_capture_tx(connection, capture)
         .await
         .map_err(map_catalogue_runtime_error)?;
@@ -1514,6 +1482,18 @@ async fn carry_forward_catalogue_tx(
 ) -> Result<(), RuntimeError> {
     let predecessor_snapshot = capture_bytes(predecessor)?;
     let snapshot = capture_bytes(capture)?;
+    let mut admissions = connection
+        .query(
+            "SELECT 1 FROM runtime_catalogue_admission WHERE snapshot = ?1",
+            params![predecessor_snapshot.clone()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let predecessor_was_admitted = admissions
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some();
     copy_catalogue_relation_tx(
         connection,
         "runtime_catalogue_revision",
@@ -1541,7 +1521,20 @@ async fn carry_forward_catalogue_tx(
         &predecessor_snapshot,
         &snapshot,
     )
-    .await
+    .await?;
+    if predecessor_was_admitted {
+        let inserted = connection
+            .execute(
+                "INSERT INTO runtime_catalogue_admission (snapshot) VALUES (?1)",
+                params![snapshot],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if inserted != 1 {
+            return Err(RuntimeError::CatalogueCorrupt);
+        }
+    }
+    Ok(())
 }
 
 async fn copy_catalogue_relation_tx(
