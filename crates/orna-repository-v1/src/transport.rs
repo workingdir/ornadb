@@ -614,7 +614,7 @@ fn install_refs(repository: &Repository, plans: &[RefPlan]) -> Result<(), FetchE
     let mut command = repository.command();
     scrub_git_routing_environment(&mut command);
     command
-        .args(["update-ref", "--stdin"])
+        .args(["update-ref", "--no-deref", "--stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
