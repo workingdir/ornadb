@@ -3496,10 +3496,29 @@ impl Repository {
         quarantine: &Path,
         target: &Path,
     ) -> Result<(), RepositoryError> {
+        self.restore_managed_quarantine_impl(quarantine, target, None)
+    }
+
+    fn restore_managed_quarantine_impl(
+        &self,
+        quarantine: &Path,
+        target: &Path,
+        mut before_restore: Option<&mut dyn FnMut()>,
+    ) -> Result<(), RepositoryError> {
         match fs::symlink_metadata(target) {
             Ok(_) => Err(RepositoryError::ManagedContentConflict),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::rename(quarantine, target).map_err(|_| RepositoryError::LocalStateUnavailable)
+                if let Some(hook) = before_restore.as_mut() {
+                    hook();
+                }
+                match fs::hard_link(quarantine, target) {
+                    Ok(()) => fs::remove_file(quarantine)
+                        .map_err(|_| RepositoryError::LocalStateUnavailable),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        Err(RepositoryError::ManagedContentConflict)
+                    }
+                    Err(_) => Err(RepositoryError::LocalStateUnavailable),
+                }
             }
             Err(_) => Err(RepositoryError::LocalStateUnavailable),
         }
@@ -5415,6 +5434,41 @@ mod tests {
             .materialize_managed_file(&path, Some(b"editor"), Some(b"second"))
             .unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"second");
+    }
+
+    #[test]
+    fn quarantine_restore_preserves_newer_editor_race_after_absence_check() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        git(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(root.path(), &["config", "user.name", "Repository test"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let parent = root.path().join("generated");
+        fs::create_dir_all(&parent).unwrap();
+        let target = parent.join("row.orna");
+        let quarantine = parent.join(".orna-quarantine-test");
+        fs::write(&quarantine, b"captured editor").unwrap();
+        let mut newer_editor = || {
+            fs::write(&target, b"newer editor").unwrap();
+        };
+
+        assert!(matches!(
+            repository.restore_managed_quarantine_impl(
+                &quarantine,
+                &target,
+                Some(&mut newer_editor),
+            ),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(fs::read(&target).unwrap(), b"newer editor");
+        assert_eq!(fs::read(&quarantine).unwrap(), b"captured editor");
     }
 
     #[test]
