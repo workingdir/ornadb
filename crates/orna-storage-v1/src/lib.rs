@@ -876,6 +876,7 @@ fn map_compact_runtime_error(error: RuntimeError) -> Error {
         | RuntimeError::CompactReceiptKeyMismatch
         | RuntimeError::InvalidCompactReceipt
         | RuntimeError::RecoveryInvalid => Error::InvalidTransition,
+        RuntimeError::RecoveryPending => Error::RuntimeUnavailable,
         RuntimeError::StreamIdentityMismatch
         | RuntimeError::StreamCheckpointStale
         | RuntimeError::LeaseHeld
@@ -1212,6 +1213,14 @@ mod tests {
     use orna_repository_v1::{CompactManifest, CompactSegment, CompactSegmentRole, Uuid};
     use std::{fs, path::Path, process::Command};
     use tempfile::TempDir;
+
+    #[test]
+    fn recovery_pending_maps_to_temporary_storage_unavailability() {
+        assert_eq!(
+            map_compact_runtime_error(RuntimeError::RecoveryPending),
+            Error::RuntimeUnavailable
+        );
+    }
 
     fn git(directory: &Path, arguments: &[&str]) {
         assert!(
