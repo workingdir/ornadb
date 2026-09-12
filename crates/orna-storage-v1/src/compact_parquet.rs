@@ -1,7 +1,7 @@
 //! Descriptor-driven physical compact key decoding.
 //!
 //! This module is the first physical reader slice. It decodes only required
-//! INT64, BOOLEAN, UTF-8 BYTE_ARRAY, and OVB-1 integer BYTE_ARRAY key columns
+//! INT64, BOOLEAN, UTF-8 BYTE_ARRAY, and OVB-1 integer/boolean BYTE_ARRAY key columns
 //! from an already verified compact Parquet segment and emits the canonical OVB
 //! scalar/tuple representation consumed by the frozen logical generation
 //! index. It does not decode arbitrary rows or infer a logical type from a
@@ -16,7 +16,7 @@ use orna_repository_v1::{
     CompactManifest, CompactManifestEntry, GitCommitRef, Repository, RepositoryError, Uuid,
 };
 use parquet::{
-    basic::{Encoding, Type},
+    basic::{ConvertedType, Encoding, Type},
     column::reader::ColumnReader,
     file::reader::{FileReader, SerializedFileReader},
 };
@@ -166,7 +166,9 @@ impl CompactParquetKeySource {
                         .into_iter()
                         .map(|value| OvbRaw::Int(value.into()))
                         .collect(),
-                    KeyColumnKind::OvbInt => read_ovb_int_column(&*row_group, column.index, rows)?,
+                    KeyColumnKind::OvbInt | KeyColumnKind::OvbBool => {
+                        read_ovb_column(&*row_group, column.index, rows, column.kind)?
+                    }
                     KeyColumnKind::Bool => read_bool_column(&*row_group, column.index, rows)?
                         .into_iter()
                         .map(OvbRaw::Bool)
@@ -338,12 +340,15 @@ enum KeyColumnKind {
     Int,
     OvbInt,
     Bool,
+    OvbBool,
     Str,
     Date,
 }
 
 fn matches_profile_key_kind(expected: KeyColumnKind, actual: KeyColumnKind) -> bool {
-    expected == actual || (expected == KeyColumnKind::Int && actual == KeyColumnKind::OvbInt)
+    expected == actual
+        || (expected == KeyColumnKind::Int && actual == KeyColumnKind::OvbInt)
+        || (expected == KeyColumnKind::Bool && actual == KeyColumnKind::OvbBool)
 }
 
 fn ensure_supported_profile(
@@ -357,7 +362,7 @@ fn ensure_supported_profile(
         .iter()
         .map(|kind| match kind {
             KeyColumnKind::Int | KeyColumnKind::OvbInt => OvbRaw::Int(0.into()),
-            KeyColumnKind::Bool => OvbRaw::Bool(false),
+            KeyColumnKind::Bool | KeyColumnKind::OvbBool => OvbRaw::Bool(false),
             KeyColumnKind::Str => OvbRaw::Text(String::new()),
             KeyColumnKind::Date => OvbRaw::Tag(60001, Box::new(OvbRaw::Text("1970-01-01".into()))),
         })
@@ -528,6 +533,11 @@ fn descriptor_field_id(
             && column.physical_type() == Type::BOOLEAN
         {
             KeyColumnKind::Bool
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Bool".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
+            && column.physical_type() == Type::BYTE_ARRAY
+        {
+            KeyColumnKind::OvbBool
         } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Str".to_owned())]
             && matches!(&fields[3], OvbRaw::Text(value) if value == "utf8")
             && column.physical_type() == Type::BYTE_ARRAY
@@ -544,7 +554,7 @@ fn descriptor_field_id(
             return Err(CompactParquetError::UnsupportedKeyMapping);
         };
         let valid_parameters = match kind {
-            KeyColumnKind::OvbInt => {
+            KeyColumnKind::OvbInt | KeyColumnKind::OvbBool => {
                 matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
             }
             _ => matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty()),
@@ -552,6 +562,10 @@ fn descriptor_field_id(
         if !valid_parameters
             || (!(kind == KeyColumnKind::Str || kind == KeyColumnKind::Date)
                 && column.logical_type_ref().is_some())
+            || (matches!(kind, KeyColumnKind::OvbInt | KeyColumnKind::OvbBool)
+                && column.converted_type() != ConvertedType::NONE)
+            || (matches!(kind, KeyColumnKind::OvbInt | KeyColumnKind::OvbBool)
+                && column.max_def_level() != 0)
             || column.max_rep_level() != 0
         {
             return Err(CompactParquetError::UnsupportedKeyMapping);
@@ -753,12 +767,14 @@ fn read_int32_column(
     Ok(values)
 }
 
-/// Reads the immutable profile's `Int`/`ovb` fallback. Each physical cell is
-/// the entire canonical OVB-1 encoding of one Int, never a numeric surrogate.
-fn read_ovb_int_column(
+/// Reads the immutable profile's descriptor-gated scalar `ovb` fallback.
+/// Each physical cell is the complete canonical OVB-1 value, never a scalar
+/// surrogate. The descriptor's logical type determines the accepted value.
+fn read_ovb_column(
     row_group: &dyn parquet::file::reader::RowGroupReader,
     index: usize,
     expected_rows: usize,
+    expected_kind: KeyColumnKind,
 ) -> Result<Vec<OvbRaw>, CompactParquetError> {
     let reader = row_group
         .get_column_reader(index)
@@ -814,9 +830,13 @@ fn read_ovb_int_column(
         .map(|value| {
             let value = CanonicalValue::decode(value.data())
                 .map_err(|_| CompactParquetError::InvalidMetadata)?;
-            let OvbRaw::Int(_) = value.raw() else {
+            let supported = matches!(
+                (expected_kind, value.raw()),
+                (KeyColumnKind::OvbInt, OvbRaw::Int(_)) | (KeyColumnKind::OvbBool, OvbRaw::Bool(_))
+            );
+            if !supported {
                 return Err(CompactParquetError::UnsupportedKeyMapping);
-            };
+            }
             Ok(value.raw().clone())
         })
         .collect()
@@ -1179,7 +1199,12 @@ mod tests {
     enum TestColumn<'a> {
         Int(&'a [i64]),
         OvbInt(&'a [Vec<u8>]),
+        OvbIntOptionalPresent(&'a [Vec<u8>]),
         Bool(&'a [bool]),
+        OvbBool(&'a [Vec<u8>]),
+        OvbBoolOptionalPresent(&'a [Vec<u8>]),
+        OvbBoolLegacyUtf8(&'a [Vec<u8>]),
+        OvbBoolModernString(&'a [Vec<u8>]),
         Str(&'a [Vec<u8>]),
         Date(&'a [i32]),
         DateWithoutAnnotation(&'a [i32]),
@@ -1240,13 +1265,20 @@ mod tests {
             };
             let physical = match &values[index] {
                 TestColumn::Int(_) => "INT64",
-                TestColumn::OvbInt(_) => "BYTE_ARRAY",
+                TestColumn::OvbInt(_)
+                | TestColumn::OvbIntOptionalPresent(_)
+                | TestColumn::OvbBool(_)
+                | TestColumn::OvbBoolOptionalPresent(_)
+                | TestColumn::OvbBoolLegacyUtf8(_)
+                | TestColumn::OvbBoolModernString(_) => "BYTE_ARRAY",
                 TestColumn::Bool(_) => "BOOLEAN",
                 TestColumn::Str(_) => "BYTE_ARRAY",
                 TestColumn::Date(_) | TestColumn::DateWithoutAnnotation(_) => "INT32",
             };
             let annotation = match &values[index] {
                 TestColumn::Str(_) => " (STRING)",
+                TestColumn::OvbBoolLegacyUtf8(_) => " (UTF8)",
+                TestColumn::OvbBoolModernString(_) => " (STRING)",
                 TestColumn::Date(_) => " (DATE)",
                 _ => "",
             };
@@ -1265,6 +1297,19 @@ mod tests {
                 .map(|(id, value)| match value {
                     TestColumn::Int(_) => descriptor(id, int_type()),
                     TestColumn::OvbInt(_) => ovb_int_descriptor(id),
+                    TestColumn::OvbIntOptionalPresent(_) => ovb_int_descriptor(id),
+                    TestColumn::OvbBool(_) => {
+                        descriptor_with_mapping(id, bool_type(), "ovb", vec![OvbRaw::Int(1.into())])
+                    }
+                    TestColumn::OvbBoolOptionalPresent(_) => {
+                        descriptor_with_mapping(id, bool_type(), "ovb", vec![OvbRaw::Int(1.into())])
+                    }
+                    TestColumn::OvbBoolLegacyUtf8(_) => {
+                        descriptor_with_mapping(id, bool_type(), "ovb", vec![OvbRaw::Int(1.into())])
+                    }
+                    TestColumn::OvbBoolModernString(_) => {
+                        descriptor_with_mapping(id, bool_type(), "ovb", vec![OvbRaw::Int(1.into())])
+                    }
                     TestColumn::Bool(_) => descriptor_with_encoding(id, bool_type(), "bool"),
                     TestColumn::Str(_) => descriptor_with_encoding(id, str_type(), "utf8"),
                     TestColumn::Date(_) | TestColumn::DateWithoutAnnotation(_) => {
@@ -1318,6 +1363,61 @@ mod tests {
                         .write_batch(&values, Some(&[0, 1]), None)
                         .unwrap();
                 }
+                TestColumn::OvbIntOptionalPresent(values) if optional_first && index == 0 => {
+                    let values = values
+                        .iter()
+                        .map(|value| ByteArray::from(value.as_slice()))
+                        .collect::<Vec<_>>();
+                    let definitions = vec![1; values.len()];
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, Some(&definitions), None)
+                        .unwrap();
+                }
+                TestColumn::OvbBool(values) if optional_first && index == 0 => {
+                    let values = values
+                        .iter()
+                        .skip(1)
+                        .map(|value| ByteArray::from(value.as_slice()))
+                        .collect::<Vec<_>>();
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, Some(&[0, 1]), None)
+                        .unwrap();
+                }
+                TestColumn::OvbBoolOptionalPresent(values) if optional_first && index == 0 => {
+                    let values = values
+                        .iter()
+                        .map(|value| ByteArray::from(value.as_slice()))
+                        .collect::<Vec<_>>();
+                    let definitions = vec![1; values.len()];
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, Some(&definitions), None)
+                        .unwrap();
+                }
+                TestColumn::OvbBoolLegacyUtf8(values) if optional_first && index == 0 => {
+                    let values = values
+                        .iter()
+                        .skip(1)
+                        .map(|value| ByteArray::from(value.as_slice()))
+                        .collect::<Vec<_>>();
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, Some(&[0, 1]), None)
+                        .unwrap();
+                }
+                TestColumn::OvbBoolModernString(values) if optional_first && index == 0 => {
+                    let values = values
+                        .iter()
+                        .skip(1)
+                        .map(|value| ByteArray::from(value.as_slice()))
+                        .collect::<Vec<_>>();
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, Some(&[0, 1]), None)
+                        .unwrap();
+                }
                 TestColumn::Bool(values) if optional_first && index == 0 => {
                     column
                         .typed::<BoolType>()
@@ -1354,6 +1454,56 @@ mod tests {
                         .unwrap();
                 }
                 TestColumn::OvbInt(values) => {
+                    let values = values
+                        .iter()
+                        .map(|value| ByteArray::from(value.as_slice()))
+                        .collect::<Vec<_>>();
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, None, None)
+                        .unwrap();
+                }
+                TestColumn::OvbIntOptionalPresent(values) => {
+                    let values = values
+                        .iter()
+                        .map(|value| ByteArray::from(value.as_slice()))
+                        .collect::<Vec<_>>();
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, None, None)
+                        .unwrap();
+                }
+                TestColumn::OvbBool(values) => {
+                    let values = values
+                        .iter()
+                        .map(|value| ByteArray::from(value.as_slice()))
+                        .collect::<Vec<_>>();
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, None, None)
+                        .unwrap();
+                }
+                TestColumn::OvbBoolOptionalPresent(values) => {
+                    let values = values
+                        .iter()
+                        .map(|value| ByteArray::from(value.as_slice()))
+                        .collect::<Vec<_>>();
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, None, None)
+                        .unwrap();
+                }
+                TestColumn::OvbBoolLegacyUtf8(values) => {
+                    let values = values
+                        .iter()
+                        .map(|value| ByteArray::from(value.as_slice()))
+                        .collect::<Vec<_>>();
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, None, None)
+                        .unwrap();
+                }
+                TestColumn::OvbBoolModernString(values) => {
                     let values = values
                         .iter()
                         .map(|value| ByteArray::from(value.as_slice()))
@@ -1424,6 +1574,30 @@ mod tests {
             &[TestColumn::OvbInt(values)],
             false,
             descriptors,
+        )
+    }
+
+    fn ovb_bool_parquet(
+        profile: &CompactOvbProfile,
+        values: &[Vec<u8>],
+        descriptors: Option<Vec<OvbRaw>>,
+    ) -> Vec<u8> {
+        mixed_parquet(
+            profile,
+            &[KEY_A],
+            &[TestColumn::OvbBool(values)],
+            false,
+            descriptors,
+        )
+    }
+
+    fn ovb_bool_modern_string_parquet(profile: &CompactOvbProfile, values: &[Vec<u8>]) -> Vec<u8> {
+        mixed_parquet(
+            profile,
+            &[KEY_A],
+            &[TestColumn::OvbBoolModernString(values)],
+            false,
+            None,
         )
     }
 
@@ -2500,6 +2674,190 @@ mod tests {
                 Err(CompactParquetError::UnsupportedKeyMapping)
             ));
         }
+    }
+
+    #[test]
+    fn rejects_optional_or_annotated_ovb_int_scalar_columns() {
+        let profile = profile(&[KEY_A]);
+        let value = canonical_ovb_int("7");
+        let optional = mixed_parquet(
+            &profile,
+            &[KEY_A],
+            &[TestColumn::OvbIntOptionalPresent(std::slice::from_ref(
+                &value,
+            ))],
+            true,
+            None,
+        );
+        let reader = SerializedFileReader::new(Bytes::copy_from_slice(&optional)).unwrap();
+        assert_eq!(
+            reader
+                .metadata()
+                .file_metadata()
+                .schema_descr()
+                .column(0)
+                .max_def_level(),
+            1
+        );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &optional, 1),
+            Err(CompactParquetError::UnsupportedKeyMapping)
+        ));
+
+        for column in [
+            TestColumn::OvbBoolLegacyUtf8(std::slice::from_ref(&value)),
+            TestColumn::OvbBoolModernString(std::slice::from_ref(&value)),
+        ] {
+            let annotated = mixed_parquet(
+                &profile,
+                &[KEY_A],
+                &[column],
+                false,
+                Some(vec![ovb_int_descriptor(KEY_A)]),
+            );
+            assert!(matches!(
+                CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &annotated, 1),
+                Err(CompactParquetError::UnsupportedKeyMapping)
+            ));
+        }
+    }
+
+    #[test]
+    fn reads_ovb_bool_fallback_as_exact_canonical_bools() {
+        let profile = profile_with_types(&[KEY_A], &[bool_type()]);
+        let values = [expected_bool(false), expected_bool(true)];
+        let bytes = ovb_bool_parquet(&profile, &values, None);
+        assert_eq!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 2).unwrap(),
+            values
+        );
+    }
+
+    #[test]
+    fn rejects_noncanonical_non_bool_and_wrong_ovb_bool_fallback_mappings() {
+        let profile = profile_with_types(&[KEY_A], &[bool_type()]);
+        let canonical = expected_bool(true);
+
+        let noncanonical = ovb_bool_parquet(&profile, &[vec![0xf8, 0x15]], None);
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &noncanonical, 1),
+            Err(CompactParquetError::InvalidMetadata)
+        ));
+
+        let non_bool = ovb_bool_parquet(&profile, &[canonical_ovb_int("7")], None);
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &non_bool, 1),
+            Err(CompactParquetError::UnsupportedKeyMapping)
+        ));
+
+        for descriptor in [
+            descriptor_with_mapping(KEY_A, bool_type(), "ovb", Vec::new()),
+            descriptor_with_mapping(KEY_A, bool_type(), "ovb", vec![OvbRaw::Int(2.into())]),
+            descriptor_with_encoding(KEY_A, bool_type(), "bool"),
+            descriptor_with_mapping(KEY_A, int_type(), "ovb", vec![OvbRaw::Int(1.into())]),
+        ] {
+            let bytes = ovb_bool_parquet(
+                &profile,
+                std::slice::from_ref(&canonical),
+                Some(vec![descriptor]),
+            );
+            assert!(matches!(
+                CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 1),
+                Err(CompactParquetError::UnsupportedKeyMapping)
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_legacy_converted_annotation_on_ovb_bool_fallback() {
+        let profile = profile_with_types(&[KEY_A], &[bool_type()]);
+        let value = expected_bool(true);
+        let bytes = mixed_parquet(
+            &profile,
+            &[KEY_A],
+            &[TestColumn::OvbBoolLegacyUtf8(std::slice::from_ref(&value))],
+            false,
+            None,
+        );
+        let reader = SerializedFileReader::new(Bytes::copy_from_slice(&bytes)).unwrap();
+        let column = reader.metadata().file_metadata().schema_descr().column(0);
+        assert_eq!(column.converted_type(), ConvertedType::UTF8);
+        assert!(column.logical_type_ref().is_none());
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 1),
+            Err(CompactParquetError::UnsupportedKeyMapping)
+        ));
+    }
+
+    #[test]
+    fn rejects_modern_string_annotation_on_ovb_bool_fallback() {
+        let profile = profile_with_types(&[KEY_A], &[bool_type()]);
+        let value = expected_bool(true);
+        let bytes = ovb_bool_modern_string_parquet(&profile, std::slice::from_ref(&value));
+        let reader = SerializedFileReader::new(Bytes::copy_from_slice(&bytes)).unwrap();
+        let column = reader.metadata().file_metadata().schema_descr().column(0);
+        assert_eq!(
+            column.logical_type_ref(),
+            Some(&parquet::basic::LogicalType::String)
+        );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 1),
+            Err(CompactParquetError::UnsupportedKeyMapping)
+        ));
+    }
+
+    #[test]
+    fn rejects_ovb_bool_fallback_nulls_row_mismatches_and_decreasing_keys() {
+        let profile = profile_with_types(&[KEY_A], &[bool_type()]);
+        let ordered = [expected_bool(false), expected_bool(true)];
+
+        let nullable = mixed_parquet(
+            &profile,
+            &[KEY_A],
+            &[TestColumn::OvbBool(&ordered)],
+            true,
+            None,
+        );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &nullable, 2),
+            Err(CompactParquetError::UnsupportedKeyMapping)
+        ));
+
+        let valid = ovb_bool_parquet(&profile, &ordered, None);
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &valid, 1),
+            Err(CompactParquetError::RowCountMismatch {
+                expected: 1,
+                observed: 2
+            })
+        ));
+
+        let decreasing = [expected_bool(true), expected_bool(false)];
+        let decreasing = ovb_bool_parquet(&profile, &decreasing, None);
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &decreasing, 2),
+            Err(CompactParquetError::UnorderedPrimaryKeys)
+        ));
+    }
+
+    #[test]
+    fn rejects_optional_ovb_bool_scalar_even_when_all_values_are_present() {
+        let profile = profile_with_types(&[KEY_A], &[bool_type()]);
+        let values = [expected_bool(false), expected_bool(true)];
+        let bytes = mixed_parquet(
+            &profile,
+            &[KEY_A],
+            &[TestColumn::OvbBoolOptionalPresent(&values)],
+            true,
+            None,
+        );
+        let reader = SerializedFileReader::new(Bytes::copy_from_slice(&bytes)).unwrap();
+        let column = reader.metadata().file_metadata().schema_descr().column(0);
+        assert_eq!(column.max_def_level(), 1);
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 2),
+            Err(CompactParquetError::UnsupportedKeyMapping)
+        ));
     }
 
     #[test]
