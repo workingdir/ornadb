@@ -75,6 +75,11 @@ CREATE TABLE IF NOT EXISTS writer_lease (
     owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
     epoch INTEGER NOT NULL CHECK (epoch > 0)
 );
+CREATE TABLE IF NOT EXISTS takeover_recovery_pending (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
+    owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0)
+);
 CREATE TABLE IF NOT EXISTS pending_mutation (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     mutation_id BLOB NOT NULL UNIQUE CHECK (length(mutation_id) = 16),
@@ -1205,6 +1210,7 @@ pub enum RuntimeError {
     StreamCheckpointStale,
     LeaseHeld,
     OwnerLost,
+    RecoveryPending,
     StaleCapture { current: Box<CwdCapture> },
     InvalidCapture,
     EmptyMutationBatch,
@@ -1238,6 +1244,7 @@ impl fmt::Display for RuntimeError {
             Self::StreamCheckpointStale => "stream checkpoint is stale",
             Self::LeaseHeld => "runtime writer is held",
             Self::OwnerLost => "runtime writer ownership was lost",
+            Self::RecoveryPending => "runtime takeover recovery is pending",
             Self::StaleCapture { .. } => "runtime capture is stale",
             Self::InvalidCapture => "invalid runtime capture",
             Self::EmptyMutationBatch => "empty runtime mutation batch",
@@ -1980,6 +1987,7 @@ impl RuntimeState {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_recovery_barrier_clear(&tx).await?;
         let request = request_status_tx(&tx, registration.request)
             .await?
             .ok_or(RuntimeError::RequestUnknown)?;
@@ -2275,6 +2283,7 @@ impl RuntimeState {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_recovery_barrier_clear(&tx).await?;
         let capture = capture_tx(&tx).await?;
         let run = load_run_observation_tx(&tx, registration.run, &capture)
             .await?
@@ -4400,6 +4409,43 @@ impl RuntimeState {
         if changed != 1 {
             return Err(RuntimeError::OwnerLost);
         }
+        let replacement_epoch = abandoned
+            .epoch
+            .checked_add(1)
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let mut running = transaction
+            .query(
+                "SELECT 1 FROM request_ledger WHERE state = ?1 LIMIT 1",
+                params![RequestState::Running.code()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if running
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            transaction
+                .execute(
+                    "INSERT INTO takeover_recovery_pending (singleton, owner_id, owner_epoch)
+                     VALUES (1, ?1, ?2)
+                     ON CONFLICT(singleton) DO UPDATE SET
+                       owner_id = excluded.owner_id, owner_epoch = excluded.owner_epoch",
+                    params![
+                        replacement.to_vec(),
+                        i64::try_from(replacement_epoch)
+                            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        } else {
+            transaction
+                .execute("DELETE FROM takeover_recovery_pending", ())
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
         // A retrying delivery can be returned to `Failed` only when the
         // durable execution lease and its retry claim still describe the same
         // retained failure.  The writer fence prevents the old owner from
@@ -4483,6 +4529,96 @@ impl RuntimeState {
             owner_id: replacement,
             epoch,
         })
+    }
+
+    /// Clears the durable takeover fence after the replacement writer has
+    /// recovered every abandoned Running request. The fence and the
+    /// no-Running check are one immediate transaction, so no ordinary writer
+    /// can slip an admission between the check and reopening the runtime.
+    pub async fn complete_takeover_recovery(
+        &self,
+        replacement: WriterLease,
+    ) -> Result<(), RuntimeError> {
+        validate_writer_lease(replacement)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_recovery_owner(&transaction, replacement)
+            .await?;
+        self.clear_takeover_recovery_if_resolved(&transaction, replacement, true)
+            .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Removes the matching takeover fence only after every Running request
+    /// is terminal. Recovery callers use the non-strict form so the final
+    /// row recovery and fence removal commit together; explicit completion
+    /// uses the strict form and reports a still-pending barrier.
+    async fn clear_takeover_recovery_if_resolved(
+        &self,
+        transaction: &Connection,
+        replacement: WriterLease,
+        strict: bool,
+    ) -> Result<(), RuntimeError> {
+        let mut fence = transaction
+            .query(
+                "SELECT owner_id, owner_epoch FROM takeover_recovery_pending
+                 WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let Some(row) = fence
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        else {
+            return Ok(());
+        };
+        let owner = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let epoch: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if owner != replacement.owner_id || u64::try_from(epoch).ok() != Some(replacement.epoch) {
+            return Err(RuntimeError::RecoveryPending);
+        }
+        let mut running = transaction
+            .query(
+                "SELECT 1 FROM request_ledger WHERE state = ?1 LIMIT 1",
+                params![RequestState::Running.code()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if running
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return if strict {
+                Err(RuntimeError::RecoveryPending)
+            } else {
+                Ok(())
+            };
+        }
+        let cleared = transaction
+            .execute(
+                "DELETE FROM takeover_recovery_pending
+                 WHERE singleton = 1 AND owner_id = ?1 AND owner_epoch = ?2",
+                params![
+                    replacement.owner_id.to_vec(),
+                    i64::try_from(replacement.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if cleared != 1 {
+            return Err(RuntimeError::RecoveryPending);
+        }
+        Ok(())
     }
 
     /// Compatibility handover for callers that only have the prior owner ID.
@@ -5507,6 +5643,7 @@ impl RuntimeState {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_recovery_barrier_clear(&tx).await?;
         ensure_session_admission_open(&tx, identity.session_id).await?;
         if let Some(status) = request_status_tx(&tx, identity).await? {
             require_fingerprint(&status, fingerprint)?;
@@ -6154,7 +6291,7 @@ impl RuntimeState {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        self.require_owner(&tx, fence).await?;
+        self.require_recovery_owner(&tx, fence).await?;
         let current = request_status_tx(&tx, identity)
             .await?
             .ok_or(RuntimeError::RequestUnknown)?;
@@ -6224,6 +6361,8 @@ impl RuntimeState {
             return Err(RuntimeError::RequestOwnerConflict);
         }
         sync_run_request_state_tx(&tx, identity, RunObservationStatus::Orphaned).await?;
+        self.clear_takeover_recovery_if_resolved(&tx, fence, false)
+            .await?;
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -6259,7 +6398,7 @@ impl RuntimeState {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        self.require_owner(&tx, fence).await?;
+        self.require_recovery_owner(&tx, fence).await?;
         let current = request_status_tx(&tx, identity)
             .await?
             .ok_or(RuntimeError::RequestUnknown)?;
@@ -6300,6 +6439,8 @@ impl RuntimeState {
             return Err(RuntimeError::RequestOwnerConflict);
         }
         sync_run_request_state_tx(&tx, identity, RunObservationStatus::Orphaned).await?;
+        self.clear_takeover_recovery_if_resolved(&tx, fence, false)
+            .await?;
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -6462,6 +6603,7 @@ impl RuntimeState {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_recovery_barrier_clear(&tx).await?;
         let current = request_status_tx(&tx, identity)
             .await?
             .ok_or(RuntimeError::RequestUnknown)?;
@@ -7192,6 +7334,72 @@ impl RuntimeState {
     }
 
     async fn require_owner(&self, tx: &Connection, lease: WriterLease) -> Result<(), RuntimeError> {
+        self.require_current_owner(tx, lease).await?;
+        // A takeover with no durable Running request has nothing to recover.
+        // Resolve that already-satisfied barrier in this same writer
+        // transaction; otherwise the strict check keeps every ordinary write
+        // unavailable until recovery has made every Running row terminal.
+        self.clear_takeover_recovery_if_resolved(tx, lease, true)
+            .await
+    }
+
+    /// Permits a recovery write only for the exact replacement lease that
+    /// installed the takeover fence. In the normal (no-fence) case this keeps
+    /// the existing direct recovery APIs compatible; while fenced, a current
+    /// but different writer is never recovery authority.
+    async fn require_recovery_owner(
+        &self,
+        tx: &Connection,
+        lease: WriterLease,
+    ) -> Result<(), RuntimeError> {
+        self.require_current_owner(tx, lease).await?;
+        let mut rows = tx
+            .query(
+                "SELECT owner_id, owner_epoch FROM takeover_recovery_pending
+                 WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        else {
+            return Ok(());
+        };
+        let owner = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let epoch: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if owner != lease.owner_id || u64::try_from(epoch).ok() != Some(lease.epoch) {
+            return Err(RuntimeError::RecoveryPending);
+        }
+        Ok(())
+    }
+
+    async fn require_recovery_barrier_clear(&self, tx: &Connection) -> Result<(), RuntimeError> {
+        let mut rows = tx
+            .query(
+                "SELECT 1 FROM takeover_recovery_pending WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::RecoveryPending);
+        }
+        Ok(())
+    }
+
+    async fn require_current_owner(
+        &self,
+        tx: &Connection,
+        lease: WriterLease,
+    ) -> Result<(), RuntimeError> {
         let mut rows = tx
             .query(
                 "SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1",
@@ -15778,7 +15986,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn running_table_request_continuation_rejects_mismatched_owner() {
+    async fn running_table_request_continuation_is_blocked_during_recovery() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let owner = state.acquire_lease(id(4)).await.unwrap();
@@ -15790,7 +15998,7 @@ mod tests {
             state
                 .continue_running_table_request(identity, fingerprint, replacement)
                 .await,
-            Err(RuntimeError::RequestOwnerConflict)
+            Err(RuntimeError::RecoveryPending)
         );
         assert!(state.pending().await.unwrap().is_empty());
         assert_eq!(state.latest_checkpoint().await.unwrap(), None);
@@ -17908,7 +18116,7 @@ mod tests {
             state
                 .complete_request(identity, fingerprint, outcome(9))
                 .await,
-            Err(RuntimeError::RequestOwnerConflict)
+            Err(RuntimeError::RecoveryPending)
         );
         let recovered = state
             .recover_running_request(
@@ -17961,6 +18169,68 @@ mod tests {
             RequestState::Completed
         );
     }
+
+    #[tokio::test]
+    async fn takeover_recovery_barrier_blocks_other_handles_until_running_rows_recover() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = request(141, 142);
+        let fingerprint = digest(143);
+        let old = state.acquire_lease(id(144)).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        state
+            .start_request_with_owner_and_admission(
+                identity,
+                fingerprint,
+                old,
+                capability.expect("owner-bound admission capability"),
+            )
+            .await
+            .unwrap();
+
+        let other = open_state(&repo).await;
+        let replacement = other.takeover_lease(old, id(145)).await.unwrap();
+        assert_eq!(
+            other.reserve_request(request(146, 147), digest(148)).await,
+            Err(RuntimeError::RecoveryPending)
+        );
+        assert_eq!(
+            other
+                .complete_request_with_owner(identity, fingerprint, replacement, outcome(149))
+                .await,
+            Err(RuntimeError::RecoveryPending)
+        );
+        assert_eq!(
+            state
+                .complete_request_with_owner(identity, fingerprint, old, outcome(149))
+                .await,
+            Err(RuntimeError::OwnerLost)
+        );
+
+        other
+            .recover_running_request(
+                identity,
+                fingerprint,
+                RequestOwner::from(old),
+                replacement,
+                outcome(150),
+            )
+            .await
+            .unwrap();
+        other.complete_takeover_recovery(replacement).await.unwrap();
+        assert_eq!(
+            other
+                .reserve_request(request(146, 147), digest(148))
+                .await
+                .unwrap()
+                .state,
+            RequestState::Reserved
+        );
+    }
+
     #[tokio::test]
     async fn request_recovery_evidence_migration_is_idempotent() {
         let (_temp, repo) = repository();
