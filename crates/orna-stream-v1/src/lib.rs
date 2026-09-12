@@ -11,6 +11,8 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
+use orna_foundation_v1::{AssertionRef, ExpressionRef, ObjectRef, SafeText, SourceSpan};
+
 /// A non-empty, separator-free typed identity component.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Component(String);
@@ -222,6 +224,119 @@ pub struct FailureIdentity(pub DeliveryIdentity);
 pub struct SafeDiagnostic {
     pub code: DiagnosticCode,
     pub class: DiagnosticClass,
+}
+
+/// The required code for a false table or cross-table assertion.
+pub const ORNA_A091_009: &str = "ORNA-A091-009";
+
+/// The catalogue owner category recorded for an assertion diagnostic.
+///
+/// These are the exact `sys.AssertionOwnerKind` variants. The stream crate
+/// does not resolve or authorize the references; that remains the catalogue
+/// and runtime owner's responsibility.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssertionOwnerKind {
+    Executable,
+    RefinedType,
+    Table,
+    Module,
+}
+
+/// A stable assertion-specific diagnostic code.
+///
+/// This is deliberately separate from [`DiagnosticCode`]. Adding a variant
+/// to that pre-existing public enum would require every existing stream
+/// backend and durable decoder to change together. The next runtime step can
+/// persist this structured detail without changing ordinary diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssertionDiagnosticCode {
+    /// `ORNA-A091-009`: a table or cross-table assertion evaluated false.
+    TableOrCrossTableFalse,
+}
+
+impl AssertionDiagnosticCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TableOrCrossTableFalse => ORNA_A091_009,
+        }
+    }
+}
+
+/// A witness admitted to an assertion diagnostic.
+///
+/// The wrapper accepts only the foundation's existing diagnostic-safe text
+/// type, never a source row or raw value. Producers must use a redacted value
+/// when a deterministic witness is not presentable.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SafeAssertionWitness(SafeText);
+
+impl SafeAssertionWitness {
+    pub fn from_safe_presentation(value: SafeText) -> Self {
+        Self(value)
+    }
+
+    pub fn as_safe_presentation(&self) -> &SafeText {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SafeAssertionWitness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SafeAssertionWitness")
+            .field("redacted", &true)
+            .finish()
+    }
+}
+
+/// Structured context for an assertion failure.
+///
+/// The current `CommitIntent` and `FailureRecord` boundary carries only
+/// [`SafeDiagnostic`], so this detail is not yet a durable stream result.
+/// Runtime persistence and projection must be extended before an assertion
+/// producer can enter the normal failure path with this context.
+///
+/// `assertion` and `predicate` are snapshot-pinned `sys.AssertionRef` and
+/// `sys.ExpressionRef` coordinates respectively. These foundation aliases
+/// are compile-time markers, not authority: runtime and catalogue owners must
+/// still verify relation identity, row existence, provenance, authorization,
+/// and pinned-snapshot consistency before persistence or projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssertionDiagnosticDetail {
+    pub code: AssertionDiagnosticCode,
+    pub assertion: AssertionRef,
+    pub owner: ObjectRef,
+    pub owner_kind: AssertionOwnerKind,
+    pub predicate: ExpressionRef,
+    /// The authoritative, snapshot-pinned `sys.SourceSpan` for the assertion.
+    ///
+    /// This retains the typed `sys.FileRef` and one-based coordinates required
+    /// by the system diagnostic contract. It remains diagnostic context only;
+    /// it does not by itself establish catalogue or runtime authority.
+    pub source_span: SourceSpan,
+    /// Present only when the producer has a deterministic, safe presentation.
+    pub witness: Option<SafeAssertionWitness>,
+}
+
+impl AssertionDiagnosticDetail {
+    #[allow(clippy::too_many_arguments)]
+    pub fn table_or_cross_table_false(
+        assertion: AssertionRef,
+        owner: ObjectRef,
+        owner_kind: AssertionOwnerKind,
+        predicate: ExpressionRef,
+        source_span: SourceSpan,
+        witness: Option<SafeAssertionWitness>,
+    ) -> Self {
+        Self {
+            code: AssertionDiagnosticCode::TableOrCrossTableFalse,
+            assertion,
+            owner,
+            owner_kind,
+            predicate,
+            source_span,
+            witness,
+        }
+    }
 }
 
 /// Connector-selected retention for a failed delivery.
@@ -996,6 +1111,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_foundation_v1::FileRef;
     use std::future::Future;
     use std::pin::Pin;
     use std::task::{Context, Poll};
@@ -1199,6 +1315,72 @@ mod tests {
         assert!(!printed.contains("password"));
         assert!(!printed.contains("token="));
         assert!(!printed.contains("secret"));
+    }
+
+    fn diagnostic_snapshot() -> orna_foundation_v1::Snapshot {
+        orna_foundation_v1::Snapshot::cwd([3; 16], [4; 16], 5.into()).unwrap()
+    }
+
+    fn diagnostic_row(key: &str) -> orna_foundation_v1::RowRef {
+        orna_foundation_v1::RowRef::new(
+            [3; 16],
+            [6; 16],
+            orna_foundation_v1::OvbRaw::Text(key.into()),
+            diagnostic_snapshot(),
+        )
+        .unwrap()
+    }
+
+    fn diagnostic_file() -> FileRef {
+        FileRef::from_row_ref(diagnostic_row("orders.orna"))
+    }
+
+    #[test]
+    fn table_assertion_diagnostic_uses_pinned_safe_context() {
+        let assertion = AssertionRef::from_row_ref(diagnostic_row("assertion"));
+        let owner = ObjectRef::from_row_ref(diagnostic_row("owner"));
+        let predicate = ExpressionRef::from_row_ref(diagnostic_row("predicate"));
+        let source_span = SourceSpan::new(
+            diagnostic_file(),
+            24.into(),
+            53.into(),
+            2.into(),
+            5.into(),
+            4.into(),
+            11.into(),
+        )
+        .unwrap();
+        let witness = SafeAssertionWitness::from_safe_presentation(
+            SafeText::new("deterministic-safe-witness").unwrap(),
+        );
+        let detail = AssertionDiagnosticDetail::table_or_cross_table_false(
+            assertion.clone(),
+            owner.clone(),
+            AssertionOwnerKind::Table,
+            predicate.clone(),
+            source_span.clone(),
+            Some(witness),
+        );
+
+        assert_eq!(
+            AssertionDiagnosticCode::TableOrCrossTableFalse.as_str(),
+            ORNA_A091_009
+        );
+        assert_eq!(detail.assertion, assertion);
+        assert_eq!(detail.owner, owner);
+        assert_eq!(detail.predicate, predicate);
+        assert_eq!(detail.source_span, source_span);
+        assert_eq!(detail.owner_kind, AssertionOwnerKind::Table);
+        assert_eq!(
+            detail
+                .witness
+                .as_ref()
+                .unwrap()
+                .as_safe_presentation()
+                .as_str(),
+            "deterministic-safe-witness"
+        );
+        assert!(!format!("{detail:?}").contains("deterministic-safe-witness"));
     }
 
     #[test]
