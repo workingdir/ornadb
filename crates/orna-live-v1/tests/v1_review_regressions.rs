@@ -14,9 +14,10 @@
 
 use futures::executor::block_on;
 use orna_live_v1::{
-    CreateRequest, Error, Limits, LiveApplicationWorkLease, LiveApplicationWorkSupervisor,
-    LiveCredentialIssuer, LiveHost, LiveTransport, ResumeRequest, TransportLimits,
-    WebSocketApplicationPreparation, WebSocketOutput, WebSocketState, encode_websocket_output,
+    CreateRequest, Error, HttpConnection, Limits, LiveApplicationWorkLease,
+    LiveApplicationWorkSupervisor, LiveCredentialIssuer, LiveHost, LiveTransport, ResumeRequest,
+    TransportLimits, WebSocketApplicationPreparation, WebSocketOutput, WebSocketState, WireRequest,
+    WireResponse, encode_websocket_output,
 };
 use orna_protocol_v1::{Envelope, Message, PresentationContext};
 use orna_security_v1::{BoundaryError, CredentialIssuer, Origin, OriginPolicy, SessionBoundary};
@@ -257,6 +258,21 @@ fn masked_control(opcode: u8, payload: &[u8]) -> Vec<u8> {
     frame
 }
 
+fn masked_frame(fin: bool, opcode: u8, payload: &[u8]) -> Vec<u8> {
+    assert!(payload.len() <= 125);
+    let mask = [0x12, 0x34, 0x56, 0x78];
+    let mut frame = vec![if fin { 0x80 | opcode } else { opcode }];
+    frame.push(0x80 | u8::try_from(payload.len()).unwrap());
+    frame.extend_from_slice(&mask);
+    frame.extend(
+        payload
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| byte ^ mask[index % 4]),
+    );
+    frame
+}
+
 fn prepared_output(
     transport: &mut LiveTransport,
     socket: &mut WebSocketState,
@@ -269,6 +285,114 @@ fn prepared_output(
             panic!("control frame scheduled application work")
         }
     }
+}
+
+/// ORNA-SECRET-002: Debug output reports transport structure without
+/// serializing credentials, bodies, incomplete HTTP input, or WebSocket state.
+#[test]
+fn transport_debug_is_structural_and_redacts_credentials_bodies_and_buffers() {
+    const AUTHORIZATION: &str = "Bearer synthetic-authorization-secret";
+    const COOKIE: &str = "orna_session=synthetic-cookie-secret";
+    const SET_COOKIE: &str = "orna_session=synthetic-set-cookie-secret; HttpOnly";
+    const RESUME_BODY: &str = r#"{"resume_token":"synthetic-resume-token-secret"}"#;
+
+    let request = WireRequest {
+        method: "POST".into(),
+        path: "/orna/session/safe/resume".into(),
+        headers: vec![
+            ("Authorization".into(), AUTHORIZATION.into()),
+            ("Cookie".into(), COOKIE.into()),
+        ],
+        body: RESUME_BODY.as_bytes().to_vec(),
+    };
+    let request_debug = format!("{request:?}");
+    assert!(request_debug.contains("method: \"POST\""));
+    assert!(request_debug.contains("path: \"/orna/session/safe/resume\""));
+    assert!(request_debug.contains("header_count: 2"));
+    assert!(request_debug.contains(&format!("body_bytes: {}", RESUME_BODY.len())));
+    for secret in [
+        AUTHORIZATION,
+        COOKIE,
+        RESUME_BODY,
+        "Authorization",
+        "Cookie",
+    ] {
+        assert!(!request_debug.contains(secret));
+    }
+    assert!(!request_debug.contains(&format!("{:?}", request.body)));
+
+    let response = WireResponse {
+        status: 200,
+        headers: vec![("Set-Cookie".into(), SET_COOKIE.into())],
+        body: RESUME_BODY.as_bytes().to_vec(),
+    };
+    let response_debug = format!("{response:?}");
+    assert!(response_debug.contains("status: 200"));
+    assert!(response_debug.contains("header_count: 1"));
+    assert!(response_debug.contains(&format!("body_bytes: {}", RESUME_BODY.len())));
+    for secret in [SET_COOKIE, RESUME_BODY, "Set-Cookie"] {
+        assert!(!response_debug.contains(secret));
+    }
+    assert!(!response_debug.contains(&format!("{:?}", response.body)));
+
+    let incomplete_http = format!(
+        "POST /orna/session/safe/resume HTTP/1.1\\r\\nHost: app.example\\r\\nAuthorization: {AUTHORIZATION}\\r\\nCookie: {COOKIE}\\r\\nContent-Length: {}\\r\\n\\r\\n{RESUME_BODY}",
+        RESUME_BODY.len() + 1,
+    );
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    assert!(
+        connection
+            .push(incomplete_http.as_bytes())
+            .unwrap()
+            .is_empty()
+    );
+    let connection_debug = format!("{connection:?}");
+    assert!(connection_debug.contains(&format!("buffered_bytes: {}", incomplete_http.len())));
+    assert!(connection_debug.contains("pending_requests: 0"));
+    for secret in [
+        AUTHORIZATION,
+        COOKIE,
+        RESUME_BODY,
+        "Authorization",
+        "Cookie",
+    ] {
+        assert!(!connection_debug.contains(secret));
+    }
+    assert!(!connection_debug.contains(&format!("{:?}", incomplete_http.as_bytes())));
+
+    let (mut transport, mut socket) = attached_transport();
+    let fragment = b"synthetic-websocket-fragment-secret";
+    assert!(matches!(
+        block_on(transport.prepare_websocket_application(
+            &mut socket,
+            2,
+            &masked_frame(false, 2, fragment)
+        )),
+        Ok(WebSocketApplicationPreparation::Pending)
+    ));
+    let pending = {
+        let declared_payload = fragment.len() + 1;
+        let mut bytes = vec![0x80, 0x80 | u8::try_from(declared_payload).unwrap()];
+        bytes.extend([0, 0, 0, 0]);
+        bytes.extend_from_slice(b"synthetic-websocket-pending-secret");
+        bytes
+    };
+    assert!(matches!(
+        block_on(transport.prepare_websocket_application(&mut socket, 3, &pending)),
+        Ok(WebSocketApplicationPreparation::Pending)
+    ));
+    let socket_debug = format!("{socket:?}");
+    assert!(socket_debug.contains("fragment_opcode: Some(2)"));
+    assert!(socket_debug.contains(&format!("fragment_bytes: {}", fragment.len())));
+    assert!(socket_debug.contains(&format!("pending_bytes: {}", pending.len())));
+    for secret in [
+        "synthetic-websocket-fragment-secret",
+        "synthetic-websocket-pending-secret",
+    ] {
+        assert!(!socket_debug.contains(secret));
+    }
+    assert!(!socket_debug.contains(&format!("{:?}", fragment)));
+    assert!(!socket_debug.contains(&format!("{:?}", pending)));
 }
 
 /// Chapter 30 transport profile; RFC 6455 section 5.5.1 requires a Close reply.
