@@ -2,7 +2,7 @@ use futures::executor::block_on;
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, Corpus, DurableTransactionalEvaluator, EvidenceStatus,
     Harness, ImplementationClaim, RuntimeAdapter, RuntimeEvaluator, Scenario, SourceUnit,
-    StageOutcome, TransactionalEvaluator,
+    StageOutcome, SyntaxAdapter, TransactionalEvaluator,
 };
 use orna_evaluator_v1::Limits as EvaluatorLimits;
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText, Value};
@@ -732,46 +732,156 @@ fn run_sys_rt_rename_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     StageOutcome::Passed
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunnerProfile {
+    SyntaxParse,
+    BoundedExpressionRuntime,
+}
+
+impl RunnerProfile {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "syntax-parse" => Ok(Self::SyntaxParse),
+            "bounded-expression-runtime" => Ok(Self::BoundedExpressionRuntime),
+            _ => Err(format!("unknown conformance profile: {value}")),
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::SyntaxParse => "syntax-parse",
+            Self::BoundedExpressionRuntime => "bounded-expression-runtime",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunnerCommand {
+    Help,
+    Run(RunnerProfile),
+}
+
+fn parse_runner_command<I>(args: I) -> Result<RunnerCommand, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let args = args.into_iter().collect::<Vec<_>>();
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return if args.len() == 1 {
+            Ok(RunnerCommand::Help)
+        } else {
+            Err("help cannot be combined with other arguments".into())
+        };
+    }
+    let mut profile = None;
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        let value = if argument == "--profile" {
+            index += 1;
+            args.get(index)
+                .ok_or_else(|| "--profile requires a value".to_owned())?
+                .clone()
+        } else if let Some(value) = argument.strip_prefix("--profile=") {
+            value.to_owned()
+        } else {
+            return Err(format!("unknown conformance argument: {argument}"));
+        };
+        if profile.replace(value).is_some() {
+            return Err("--profile may be supplied only once".into());
+        }
+        index += 1;
+    }
+    RunnerProfile::parse(
+        profile
+            .as_deref()
+            .unwrap_or(RunnerProfile::BoundedExpressionRuntime.name()),
+    )
+    .map(RunnerCommand::Run)
+}
+
+fn print_usage() {
+    println!("Usage: orna-conformance [--profile <syntax-parse|bounded-expression-runtime>]");
+}
+
+fn run_profile(corpus: Corpus, profile: RunnerProfile) -> orna_conformance_v1::RunReport {
+    match profile {
+        RunnerProfile::SyntaxParse => {
+            let mut adapter = SyntaxAdapter;
+            Harness::new(corpus)
+                .with_claim(ImplementationClaim {
+                    implementation_id: "orna-conformance-v1".into(),
+                    profile: profile.name().into(),
+                    command: "orna-conformance --profile syntax-parse".into(),
+                    environment: BTreeMap::from([(
+                        "adapter".into(),
+                        "SyntaxAdapter (parse-only)".into(),
+                    )]),
+                    executed_scenario_contracts: Vec::new(),
+                })
+                .run(&mut adapter)
+        }
+        RunnerProfile::BoundedExpressionRuntime => {
+            let mut adapter = RuntimeAdapter::new(CompositeEvaluator::default());
+            Harness::new(corpus)
+                .with_claim(ImplementationClaim {
+                    implementation_id: "orna-conformance-v1".into(),
+                    profile: profile.name().into(),
+                    command: "orna-conformance --profile bounded-expression-runtime".into(),
+                    environment: [
+                        (
+                            "adapter".into(),
+                            "RuntimeAdapter (syntax, semantic analysis, and bounded expression evaluator)"
+                                .into(),
+                        ),
+                        (
+                            "semantic-stages".into(),
+                            "semantic stages execute through the read-only v1 analyzer".into(),
+                        ),
+                        (
+                            "runtime-stages".into(),
+                            "pure row/expression units, the authoritative duplicate-key fixture, SYS-RT-RENAME-100 system-name resolution, and the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, and LIVE-004 universal subtree-replacement contracts execute; other behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    executed_scenario_contracts: vec![
+                        "REPL-001".into(),
+                        "TXN-001".into(),
+                        "TXN-002".into(),
+                        "LIVE-001".into(),
+                        "LIVE-002".into(),
+                        "LIVE-003".into(),
+                        "LIVE-004".into(),
+                        "SYS-RT-RENAME-100".into(),
+                    ],
+                })
+                .run(&mut adapter)
+        }
+    }
+}
+
 fn main() {
+    let command = match parse_runner_command(std::env::args().skip(1)) {
+        Ok(command) => command,
+        Err(error) => {
+            eprintln!("{error}");
+            print_usage();
+            std::process::exit(2);
+        }
+    };
+    if command == RunnerCommand::Help {
+        print_usage();
+        return;
+    }
     let corpus = Corpus::load_default().unwrap_or_else(|error| {
         eprintln!("cannot load authoritative Orna corpus: {error}");
         std::process::exit(2)
     });
-    let mut adapter = RuntimeAdapter::new(CompositeEvaluator::default());
-    let report = Harness::new(corpus)
-        .with_claim(ImplementationClaim {
-            implementation_id: "orna-conformance-v1".into(),
-            profile: "bounded-expression-runtime".into(),
-            command: "orna-conformance --profile bounded-expression-runtime".into(),
-            environment: [
-                (
-                    "adapter".into(),
-                    "RuntimeAdapter (syntax, semantic analysis, and bounded expression evaluator)"
-                        .into(),
-                ),
-                (
-                    "semantic-stages".into(),
-                    "semantic stages execute through the read-only v1 analyzer".into(),
-                ),
-                (
-                    "runtime-stages".into(),
-                    "pure row/expression units, the authoritative duplicate-key fixture, SYS-RT-RENAME-100 system-name resolution, and the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, and LIVE-004 universal subtree-replacement contracts execute; other behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-            executed_scenario_contracts: vec![
-                "REPL-001".into(),
-                "TXN-001".into(),
-                "TXN-002".into(),
-                "LIVE-001".into(),
-                "LIVE-002".into(),
-                "LIVE-003".into(),
-                "LIVE-004".into(),
-                "SYS-RT-RENAME-100".into(),
-            ],
-        })
-        .run(&mut adapter);
+    let RunnerCommand::Run(profile) = command else {
+        unreachable!("help returned before corpus execution");
+    };
+    let report = run_profile(corpus, profile);
     println!(
         "{}",
         serde_json::to_string_pretty(&report).expect("report serializes")
@@ -798,9 +908,10 @@ fn report_exit_code(report: &orna_conformance_v1::RunReport) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        report_exit_code, run_live_fallback_scenario, run_live_keyed_update_scenario,
-        run_live_resync_scenario, run_live_unkeyed_update_scenario, run_sys_rt_rename_scenario,
-        CompositeEvaluator, Corpus, Harness, RuntimeAdapter, Scenario, StageOutcome,
+        parse_runner_command, report_exit_code, run_live_fallback_scenario,
+        run_live_keyed_update_scenario, run_live_resync_scenario, run_live_unkeyed_update_scenario,
+        run_profile, run_sys_rt_rename_scenario, CompositeEvaluator, Corpus, Harness,
+        RunnerCommand, RunnerProfile, RuntimeAdapter, Scenario, StageOutcome,
     };
     use orna_conformance_v1::EvidenceStatus;
 
@@ -817,6 +928,59 @@ mod tests {
             .scenarios
             .retain(|scenario| scenario.status != EvidenceStatus::Failed);
         assert_eq!(report_exit_code(&report), 0);
+    }
+
+    #[test]
+    fn runner_profile_selection_is_explicit_and_defaults_to_bounded_runtime() {
+        assert_eq!(
+            parse_runner_command(Vec::<String>::new()),
+            Ok(RunnerCommand::Run(RunnerProfile::BoundedExpressionRuntime))
+        );
+        assert_eq!(
+            parse_runner_command(vec!["--profile".into(), "syntax-parse".into()]),
+            Ok(RunnerCommand::Run(RunnerProfile::SyntaxParse))
+        );
+        assert_eq!(
+            parse_runner_command(vec!["--profile=bounded-expression-runtime".into()]),
+            Ok(RunnerCommand::Run(RunnerProfile::BoundedExpressionRuntime))
+        );
+        assert_eq!(
+            parse_runner_command(vec!["--help".into()]),
+            Ok(RunnerCommand::Help)
+        );
+    }
+
+    #[test]
+    fn runner_profile_selection_rejects_unknown_or_duplicate_arguments() {
+        assert!(parse_runner_command(vec!["--profile".into(), "unknown".into()]).is_err());
+        assert!(parse_runner_command(vec!["--unknown".into()]).is_err());
+        assert!(parse_runner_command(vec![
+            "--profile".into(),
+            "syntax-parse".into(),
+            "--profile".into(),
+            "syntax-parse".into(),
+        ])
+        .is_err());
+        assert!(parse_runner_command(vec!["--profile".into()]).is_err());
+    }
+
+    #[test]
+    fn syntax_profile_claim_matches_selected_adapter() {
+        let report = run_profile(
+            Corpus::load_default().expect("reference corpus loads"),
+            RunnerProfile::SyntaxParse,
+        );
+        assert_eq!(report.implementation_claim.profile, "syntax-parse");
+        assert_eq!(
+            report.implementation_claim.command,
+            "orna-conformance --profile syntax-parse"
+        );
+        assert!(report.fixtures.iter().any(|fixture| !fixture.passed));
+        assert!(report
+            .scenarios
+            .iter()
+            .all(|scenario| scenario.status != EvidenceStatus::Failed));
+        assert_eq!(report_exit_code(&report), 1);
     }
 
     #[test]
