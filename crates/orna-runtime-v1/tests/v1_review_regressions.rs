@@ -20,8 +20,8 @@ use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
     CatalogueFunctionDeclaration, CatalogueObjectKind, CatalogueParameterDeclaration,
-    CatalogueTypeDeclaration, CatalogueTypeForm, CatalogueTypeSpec, RuntimeIdentity, RuntimeState,
-    WriterLease,
+    CatalogueTypeDeclaration, CatalogueTypeForm, CatalogueTypeSpec, NoFault, RuntimeIdentity,
+    RuntimeState, TableMutation, WriterLease,
 };
 use tempfile::{Builder, TempDir};
 
@@ -173,7 +173,6 @@ async fn catalogue_identical_same_snapshot_replay_is_idempotent() {
 }
 
 #[tokio::test]
-#[ignore = "Known Orna 1.0.0 gap: #787; run explicitly for review"]
 async fn catalogue_same_snapshot_additive_replay_is_rejected_without_changes() {
     let (_directory, state, lease, mut batch, first) = admitted_state().await;
     batch.types.push(named_type("pkg.U", 6, 7));
@@ -188,7 +187,6 @@ async fn catalogue_same_snapshot_additive_replay_is_rejected_without_changes() {
 }
 
 #[tokio::test]
-#[ignore = "Known Orna 1.0.0 gap: #787; run explicitly for review"]
 async fn catalogue_same_revision_appended_parameter_is_rejected_without_changes() {
     let (_directory, state, lease, mut batch, first) = admitted_state().await;
     batch.functions[0]
@@ -224,4 +222,35 @@ async fn catalogue_same_revision_changed_hash_is_rejected_without_changes() {
     let replay = state.admit_catalogue_at(lease, &first.capture, batch).await;
     assert_eq!(replay, Err(CatalogueError::CatalogueRevisionConflict));
     assert_unchanged(&state, &first).await;
+}
+
+#[tokio::test]
+async fn catalogue_same_revision_changed_hash_is_rejected_across_snapshots() {
+    let (_directory, state, lease, batch, first) = admitted_state().await;
+    let context = state.begin_activation().await.expect("begin generation");
+    let mutation = TableMutation::new([41; 16], "catalogue-review", vec![1], Some(vec![1]))
+        .expect("valid generation mutation");
+    let next = state
+        .commit_table_activation(lease, &context, &[mutation], [42; 32], &NoFault)
+        .await
+        .expect("advance generation with carried-forward catalogue");
+
+    let mut changed = batch;
+    changed.predecessor_capture = Some(first.capture.clone());
+    changed.functions[0].declaration.semantic_hash = [14; 32];
+    assert_eq!(
+        state.admit_catalogue_at(lease, &next, changed).await,
+        Err(CatalogueError::CatalogueRevisionConflict)
+    );
+    assert_eq!(
+        state.capture().await.expect("capture after rejection"),
+        next
+    );
+    let function = state
+        .catalogue_function("pkg.f")
+        .await
+        .expect("read carried-forward function")
+        .expect("carried-forward function exists");
+    assert_eq!(function.object.revision_id, [12; 32]);
+    assert_eq!(function.object.semantic_hash, [13; 32]);
 }
