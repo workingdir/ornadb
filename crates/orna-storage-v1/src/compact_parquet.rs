@@ -1,14 +1,15 @@
 //! Descriptor-driven physical compact key decoding.
 //!
 //! This module is the first physical reader slice. It decodes only required
-//! INT64, BOOLEAN, and UTF-8 BYTE_ARRAY key columns from an already verified compact Parquet segment and
-//! emits the canonical OVB scalar/tuple representation consumed by the frozen
-//! logical generation index. It does not decode arbitrary rows or infer a
-//! logical type from a Parquet sample.
+//! INT64, BOOLEAN, UTF-8 BYTE_ARRAY, and OVB-1 integer BYTE_ARRAY key columns
+//! from an already verified compact Parquet segment and emits the canonical OVB
+//! scalar/tuple representation consumed by the frozen logical generation
+//! index. It does not decode arbitrary rows or infer a logical type from a
+//! Parquet sample.
 
 use std::{cmp::Ordering, collections::BTreeMap, error::Error, fmt};
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use orna_repository_v1::{
@@ -21,7 +22,7 @@ use parquet::{
 };
 
 use crate::compact::{
-    CompactExactKeySource, CompactKeyError, CompactOvbProfile, COMPACT_STORAGE_PROFILE,
+    COMPACT_STORAGE_PROFILE, CompactExactKeySource, CompactKeyError, CompactOvbProfile,
 };
 
 /// A physical reader failure. Unsupported mappings are explicit: this slice
@@ -165,6 +166,7 @@ impl CompactParquetKeySource {
                         .into_iter()
                         .map(|value| OvbRaw::Int(value.into()))
                         .collect(),
+                    KeyColumnKind::OvbInt => read_ovb_int_column(&*row_group, column.index, rows)?,
                     KeyColumnKind::Bool => read_bool_column(&*row_group, column.index, rows)?
                         .into_iter()
                         .map(OvbRaw::Bool)
@@ -334,9 +336,14 @@ struct KeyColumn {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum KeyColumnKind {
     Int,
+    OvbInt,
     Bool,
     Str,
     Date,
+}
+
+fn matches_profile_key_kind(expected: KeyColumnKind, actual: KeyColumnKind) -> bool {
+    expected == actual || (expected == KeyColumnKind::Int && actual == KeyColumnKind::OvbInt)
 }
 
 fn ensure_supported_profile(
@@ -349,7 +356,7 @@ fn ensure_supported_profile(
     let components = kinds
         .iter()
         .map(|kind| match kind {
-            KeyColumnKind::Int => OvbRaw::Int(0.into()),
+            KeyColumnKind::Int | KeyColumnKind::OvbInt => OvbRaw::Int(0.into()),
             KeyColumnKind::Bool => OvbRaw::Bool(false),
             KeyColumnKind::Str => OvbRaw::Text(String::new()),
             KeyColumnKind::Date => OvbRaw::Tag(60001, Box::new(OvbRaw::Text("1970-01-01".into()))),
@@ -448,7 +455,7 @@ fn key_columns(
     for (index, (descriptor, column)) in descriptors.iter().zip(schema.columns()).enumerate() {
         let (id, kind) = descriptor_field_id(descriptor, column, profile)?;
         if let Some(expected) = expected_by_id.get(&id) {
-            if Some(*expected) != kind {
+            if !matches!(kind, Some(kind) if matches_profile_key_kind(*expected, kind)) {
                 return Err(CompactParquetError::UnsupportedKeyMapping);
             }
         }
@@ -511,6 +518,11 @@ fn descriptor_field_id(
             && column.physical_type() == Type::INT64
         {
             KeyColumnKind::Int
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
+            && column.physical_type() == Type::BYTE_ARRAY
+        {
+            KeyColumnKind::OvbInt
         } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Bool".to_owned())]
             && matches!(&fields[3], OvbRaw::Text(value) if value == "bool")
             && column.physical_type() == Type::BOOLEAN
@@ -531,7 +543,13 @@ fn descriptor_field_id(
         } else {
             return Err(CompactParquetError::UnsupportedKeyMapping);
         };
-        if !matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty())
+        let valid_parameters = match kind {
+            KeyColumnKind::OvbInt => {
+                matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
+            }
+            _ => matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty()),
+        };
+        if !valid_parameters
             || (!(kind == KeyColumnKind::Str || kind == KeyColumnKind::Date)
                 && column.logical_type_ref().is_some())
             || column.max_rep_level() != 0
@@ -733,6 +751,75 @@ fn read_int32_column(
         });
     }
     Ok(values)
+}
+
+/// Reads the immutable profile's `Int`/`ovb` fallback. Each physical cell is
+/// the entire canonical OVB-1 encoding of one Int, never a numeric surrogate.
+fn read_ovb_int_column(
+    row_group: &dyn parquet::file::reader::RowGroupReader,
+    index: usize,
+    expected_rows: usize,
+) -> Result<Vec<OvbRaw>, CompactParquetError> {
+    let reader = row_group
+        .get_column_reader(index)
+        .map_err(|_| CompactParquetError::InvalidParquet)?;
+    let ColumnReader::ByteArrayColumnReader(mut reader) = reader else {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    };
+    let descriptor = row_group.metadata().schema_descr().column(index);
+    if descriptor.max_rep_level() != 0 {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    }
+    let mut values = Vec::with_capacity(expected_rows);
+    let mut definition_levels = Vec::new();
+    let mut records = 0usize;
+    loop {
+        let remaining = expected_rows.saturating_sub(records);
+        if remaining == 0 {
+            break;
+        }
+        let definition_levels_ref =
+            (descriptor.max_def_level() != 0).then_some(&mut definition_levels);
+        let (read_records, values_read, levels_read) = reader
+            .read_records(remaining, definition_levels_ref, None, &mut values)
+            .map_err(|_| CompactParquetError::InvalidParquet)?;
+        if read_records == 0 {
+            break;
+        }
+        if levels_read != read_records {
+            return Err(CompactParquetError::NullKey);
+        }
+        if descriptor.max_def_level() != 0
+            && definition_levels
+                .iter()
+                .any(|level| *level != descriptor.max_def_level())
+        {
+            return Err(CompactParquetError::NullKey);
+        }
+        if values_read != read_records {
+            return Err(CompactParquetError::NullKey);
+        }
+        records = records
+            .checked_add(read_records)
+            .ok_or(CompactParquetError::InvalidParquet)?;
+    }
+    if records != expected_rows || values.len() != expected_rows {
+        return Err(CompactParquetError::RowCountMismatch {
+            expected: expected_rows as u64,
+            observed: records as u64,
+        });
+    }
+    values
+        .into_iter()
+        .map(|value| {
+            let value = CanonicalValue::decode(value.data())
+                .map_err(|_| CompactParquetError::InvalidMetadata)?;
+            let OvbRaw::Int(_) = value.raw() else {
+                return Err(CompactParquetError::UnsupportedKeyMapping);
+            };
+            Ok(value.raw().clone())
+        })
+        .collect()
 }
 
 fn date_value(days: i32) -> Result<OvbRaw, CompactParquetError> {
@@ -991,6 +1078,15 @@ mod tests {
     }
 
     fn descriptor_with_encoding(id: [u8; 16], logical_type: OvbRaw, encoding: &str) -> OvbRaw {
+        descriptor_with_mapping(id, logical_type, encoding, Vec::new())
+    }
+
+    fn descriptor_with_mapping(
+        id: [u8; 16],
+        logical_type: OvbRaw,
+        encoding: &str,
+        parameters: Vec<OvbRaw>,
+    ) -> OvbRaw {
         OvbRaw::Array(vec![
             OvbRaw::Array(vec![uuid_raw(id)]),
             OvbRaw::Array(vec![OvbRaw::Text(format!(
@@ -999,8 +1095,12 @@ mod tests {
             ))]),
             logical_type,
             OvbRaw::Text(encoding.into()),
-            OvbRaw::Array(Vec::new()),
+            OvbRaw::Array(parameters),
         ])
+    }
+
+    fn ovb_int_descriptor(id: [u8; 16]) -> OvbRaw {
+        descriptor_with_mapping(id, int_type(), "ovb", vec![OvbRaw::Int(1.into())])
     }
 
     fn parquet(
@@ -1078,6 +1178,7 @@ mod tests {
 
     enum TestColumn<'a> {
         Int(&'a [i64]),
+        OvbInt(&'a [Vec<u8>]),
         Bool(&'a [bool]),
         Str(&'a [Vec<u8>]),
         Date(&'a [i32]),
@@ -1139,6 +1240,7 @@ mod tests {
             };
             let physical = match &values[index] {
                 TestColumn::Int(_) => "INT64",
+                TestColumn::OvbInt(_) => "BYTE_ARRAY",
                 TestColumn::Bool(_) => "BOOLEAN",
                 TestColumn::Str(_) => "BYTE_ARRAY",
                 TestColumn::Date(_) | TestColumn::DateWithoutAnnotation(_) => "INT32",
@@ -1162,6 +1264,7 @@ mod tests {
                 .zip(values)
                 .map(|(id, value)| match value {
                     TestColumn::Int(_) => descriptor(id, int_type()),
+                    TestColumn::OvbInt(_) => ovb_int_descriptor(id),
                     TestColumn::Bool(_) => descriptor_with_encoding(id, bool_type(), "bool"),
                     TestColumn::Str(_) => descriptor_with_encoding(id, str_type(), "utf8"),
                     TestColumn::Date(_) | TestColumn::DateWithoutAnnotation(_) => {
@@ -1204,6 +1307,17 @@ mod tests {
                         .write_batch(&values[1..], Some(&[0, 1]), None)
                         .unwrap();
                 }
+                TestColumn::OvbInt(values) if optional_first && index == 0 => {
+                    let values = values
+                        .iter()
+                        .skip(1)
+                        .map(|value| ByteArray::from(value.as_slice()))
+                        .collect::<Vec<_>>();
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, Some(&[0, 1]), None)
+                        .unwrap();
+                }
                 TestColumn::Bool(values) if optional_first && index == 0 => {
                     column
                         .typed::<BoolType>()
@@ -1237,6 +1351,16 @@ mod tests {
                     column
                         .typed::<Int64Type>()
                         .write_batch(values, None, None)
+                        .unwrap();
+                }
+                TestColumn::OvbInt(values) => {
+                    let values = values
+                        .iter()
+                        .map(|value| ByteArray::from(value.as_slice()))
+                        .collect::<Vec<_>>();
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, None, None)
                         .unwrap();
                 }
                 TestColumn::Bool(values) => {
@@ -1280,6 +1404,27 @@ mod tests {
             .unwrap()
             .encode()
             .unwrap()
+    }
+
+    fn canonical_ovb_int(value: &str) -> Vec<u8> {
+        CanonicalValue::new(OvbRaw::Int(value.parse().unwrap()))
+            .unwrap()
+            .encode()
+            .unwrap()
+    }
+
+    fn ovb_int_parquet(
+        profile: &CompactOvbProfile,
+        values: &[Vec<u8>],
+        descriptors: Option<Vec<OvbRaw>>,
+    ) -> Vec<u8> {
+        mixed_parquet(
+            profile,
+            &[KEY_A],
+            &[TestColumn::OvbInt(values)],
+            false,
+            descriptors,
+        )
     }
 
     fn expected_bool(value: bool) -> Vec<u8> {
@@ -1919,17 +2064,19 @@ mod tests {
         let (temp, repository) = repository();
         let head = repository.head().unwrap().unwrap();
         let generation = repository.index_generation().unwrap();
-        assert!(repository
-            .prepare_compact_publication(
-                &head,
-                generation.clone(),
-                CompactManifest::empty(TABLE, expected_profile.schema_fingerprint()),
-                [9; 16],
-                [8; 32],
-                &[valid],
-                "valid schema descriptor fixture",
-            )
-            .is_ok());
+        assert!(
+            repository
+                .prepare_compact_publication(
+                    &head,
+                    generation.clone(),
+                    CompactManifest::empty(TABLE, expected_profile.schema_fingerprint()),
+                    [9; 16],
+                    [8; 32],
+                    &[valid],
+                    "valid schema descriptor fixture",
+                )
+                .is_ok()
+        );
         assert!(matches!(
             repository.prepare_compact_publication(
                 &head,
@@ -2050,12 +2197,14 @@ mod tests {
         let dates = [0_i32, 1_i32, 1_i32];
         let plain = mixed_parquet(&profile, &[KEY_A], &[TestColumn::Date(&dates)], false, None);
         let reader = SerializedFileReader::new(Bytes::copy_from_slice(&plain)).unwrap();
-        assert!(reader
-            .metadata()
-            .row_group(0)
-            .column(0)
-            .encodings()
-            .any(|encoding| encoding == Encoding::PLAIN));
+        assert!(
+            reader
+                .metadata()
+                .row_group(0)
+                .column(0)
+                .encodings()
+                .any(|encoding| encoding == Encoding::PLAIN)
+        );
         assert_eq!(
             CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &plain, 3).unwrap(),
             vec![
@@ -2293,6 +2442,67 @@ mod tests {
     }
 
     #[test]
+    fn reads_ovb_int_fallback_as_exact_canonical_ints() {
+        let profile = profile(&[KEY_A]);
+        let values = [
+            canonical_ovb_int("-9223372036854775809"),
+            canonical_ovb_int("-7"),
+            canonical_ovb_int("0"),
+            canonical_ovb_int("7"),
+            canonical_ovb_int("9223372036854775808"),
+            canonical_ovb_int("1234567890123456789012345678901234567890"),
+        ];
+        let bytes = ovb_int_parquet(&profile, &values, None);
+        let keys = CompactParquetKeySource::decode_verified_bytes(
+            &profile,
+            TABLE,
+            &bytes,
+            values.len() as u64,
+        )
+        .unwrap();
+        assert_eq!(keys, values);
+        assert!(matches!(
+            CanonicalValue::decode(&keys[5]).unwrap().raw(),
+            OvbRaw::Int(value) if value.to_string() == "1234567890123456789012345678901234567890"
+        ));
+    }
+
+    #[test]
+    fn rejects_noncanonical_non_int_and_wrong_ovb_int_fallback_mappings() {
+        let profile = profile(&[KEY_A]);
+        let canonical = canonical_ovb_int("7");
+
+        let noncanonical = ovb_int_parquet(&profile, &[vec![0x18, 0x07]], None);
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &noncanonical, 1),
+            Err(CompactParquetError::InvalidMetadata)
+        ));
+
+        let non_int = ovb_int_parquet(&profile, &[expected_bool(true)], None);
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &non_int, 1),
+            Err(CompactParquetError::UnsupportedKeyMapping)
+        ));
+
+        for descriptor in [
+            descriptor_with_mapping(KEY_A, int_type(), "ovb", Vec::new()),
+            descriptor_with_mapping(KEY_A, int_type(), "ovb", vec![OvbRaw::Int(2.into())]),
+            descriptor_with_encoding(KEY_A, int_type(), "int64"),
+            descriptor_with_mapping(KEY_A, str_type(), "ovb", vec![OvbRaw::Int(1.into())]),
+        ] {
+            let bytes = ovb_int_parquet(
+                &profile,
+                std::slice::from_ref(&canonical),
+                Some(vec![descriptor]),
+            );
+            assert!(matches!(
+                CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 1),
+                Err(CompactParquetError::UnsupportedKeyMapping)
+            ));
+        }
+    }
+
+    #[test]
     fn rejects_decreasing_scalar_primary_keys_without_reordering() {
         let profile = profile(&[KEY_A]);
         let bytes = parquet(&profile, &[KEY_A], &[vec![42, 7]], false, None);
@@ -2411,12 +2621,14 @@ mod tests {
             None,
         );
         let reader = SerializedFileReader::new(Bytes::copy_from_slice(&plain)).unwrap();
-        assert!(reader
-            .metadata()
-            .row_group(0)
-            .column(0)
-            .encodings()
-            .any(|encoding| encoding == Encoding::PLAIN));
+        assert!(
+            reader
+                .metadata()
+                .row_group(0)
+                .column(0)
+                .encodings()
+                .any(|encoding| encoding == Encoding::PLAIN)
+        );
         assert_eq!(
             CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &plain, 2).unwrap(),
             vec![expected_text("alpha"), expected_text("beta")]
@@ -2432,12 +2644,14 @@ mod tests {
             true,
         );
         let reader = SerializedFileReader::new(Bytes::copy_from_slice(&dictionary)).unwrap();
-        assert!(reader
-            .metadata()
-            .row_group(0)
-            .column(0)
-            .encodings()
-            .any(|encoding| { encoding == parquet::basic::Encoding::RLE_DICTIONARY }));
+        assert!(
+            reader
+                .metadata()
+                .row_group(0)
+                .column(0)
+                .encodings()
+                .any(|encoding| { encoding == parquet::basic::Encoding::RLE_DICTIONARY })
+        );
         assert_eq!(
             CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &dictionary, 3)
                 .unwrap(),
