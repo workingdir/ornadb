@@ -2530,11 +2530,28 @@ impl LiveHost {
         }
         let lease = self.writer_lease().await?;
         let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
+        let (reserved, capability) = runtime
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .map_err(|error| map_runtime(&error))?;
+        let Some(capability) = capability else {
+            return match reserved.state {
+                DurableRequestState::Reserved => Ok(DurableAdmission::Active),
+                DurableRequestState::Running => {
+                    self.admit_running_request(identity, session, request, fingerprint, envelope)
+                        .await
+                }
+                DurableRequestState::Completed
+                | DurableRequestState::Cancelled
+                | DurableRequestState::Orphaned => self.durable_admission(reserved, envelope).await,
+            };
+        };
         match runtime
-            .begin_observed_request(
+            .begin_observed_request_with_admission(
                 live_run_registration(identity, &envelope.message),
                 fingerprint,
                 lease,
+                capability,
             )
             .await
         {
@@ -7042,8 +7059,103 @@ mod tests {
         assert_eq!(status.state, DurableRequestState::Running);
         assert!(status.terminal_outcome.is_none());
         assert!(host.requests[&([1; 16], request)].terminal.is_none());
+        assert_eq!(
+            futures::executor::block_on(host.dispatch_frame(
+                [4; 16],
+                2,
+                Frame::Binary(eval_frame(request)),
+                &mut application,
+            )),
+            Ok(DispatchOutcome {
+                outcome: FrameOutcome::Accepted,
+                response: None,
+            })
+        );
+        assert_eq!(
+            futures::executor::block_on(host.runtime.as_ref().unwrap().run_observations())
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(HttpResponse::error(Error::ApplicationDeferred).status, 503);
         assert_eq!(host_error(Error::ApplicationDeferred).status, 503);
+
+        drop(host);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn durable_reserved_request_never_reexecutes_without_its_admission() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("orna-live-reserved-{nonce}"));
+        fs::create_dir(&root).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(&root).unwrap();
+        let runtime = futures::executor::block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [16; 16],
+                repository_id: [17; 16],
+            },
+            [18; 32],
+        ))
+        .unwrap();
+        let owner = futures::executor::block_on(runtime.acquire_lease([9; 16])).unwrap();
+        assert_eq!(owner.owner_id, [9; 16]);
+        let request = [19; 16];
+        let frame = eval_frame(request);
+        let envelope = Envelope::decode(&frame, ProtocolLimits::default()).unwrap();
+        let fingerprint =
+            canonical_request_fingerprint([1; 16], &envelope, ProtocolLimits::default()).unwrap();
+        let identity = RequestIdentity {
+            session_id: [1; 16],
+            request_id: request,
+        };
+        futures::executor::block_on(runtime.reserve_request_with_admission(identity, fingerprint))
+            .unwrap();
+
+        let mut host = subscribed_host(Some(runtime));
+        let mut application = RejectingApplication;
+        assert_eq!(
+            futures::executor::block_on(host.dispatch_frame(
+                [4; 16],
+                2,
+                Frame::Binary(eval_frame(request)),
+                &mut application,
+            )),
+            Ok(DispatchOutcome {
+                outcome: FrameOutcome::Accepted,
+                response: None,
+            })
+        );
+        let runtime = host.runtime.as_ref().unwrap();
+        assert_eq!(
+            futures::executor::block_on(runtime.request_status_for_identity(identity))
+                .unwrap()
+                .unwrap()
+                .state,
+            DurableRequestState::Reserved
+        );
+        assert!(
+            futures::executor::block_on(runtime.run_observations())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            host.requests
+                .get(&(identity.session_id, request))
+                .is_some_and(|record| record.terminal.is_none())
+        );
 
         drop(host);
         fs::remove_dir_all(root).unwrap();
