@@ -18232,6 +18232,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn takeover_recovery_barrier_survives_reopen_until_running_rows_recover() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = request(151, 152);
+        let fingerprint = digest(153);
+        let original = state.acquire_lease(id(154)).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        state
+            .start_request_with_owner_and_admission(
+                identity,
+                fingerprint,
+                original,
+                capability.expect("owner-bound admission capability"),
+            )
+            .await
+            .unwrap();
+        drop(state);
+
+        let first_reopen = open_state(&repo).await;
+        let abandoned = first_reopen
+            .current_lease()
+            .await
+            .unwrap()
+            .expect("writer lease survives reopen");
+        assert_eq!(abandoned, original);
+        let replacement = first_reopen
+            .takeover_lease(abandoned, id(155))
+            .await
+            .unwrap();
+        drop(first_reopen);
+
+        let second_reopen = open_state(&repo).await;
+        assert_eq!(
+            second_reopen.current_lease().await.unwrap(),
+            Some(replacement)
+        );
+        assert_eq!(
+            second_reopen
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            RequestState::Running
+        );
+        assert_eq!(
+            second_reopen
+                .reserve_request(request(156, 157), digest(158))
+                .await,
+            Err(RuntimeError::RecoveryPending)
+        );
+        assert_eq!(
+            second_reopen
+                .complete_request_with_owner(identity, fingerprint, replacement, outcome(159))
+                .await,
+            Err(RuntimeError::RecoveryPending)
+        );
+
+        second_reopen
+            .recover_running_request(
+                identity,
+                fingerprint,
+                RequestOwner::from(original),
+                replacement,
+                outcome(160),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            second_reopen
+                .reserve_request(request(156, 157), digest(158))
+                .await
+                .unwrap()
+                .state,
+            RequestState::Reserved
+        );
+    }
+
+    #[tokio::test]
     async fn request_recovery_evidence_migration_is_idempotent() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
