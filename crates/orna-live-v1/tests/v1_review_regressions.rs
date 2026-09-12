@@ -274,7 +274,6 @@ fn prepared_output(
 /// Chapter 30 transport profile; RFC 6455 section 5.5.1 requires a Close reply.
 /// No application message or work is outstanding that could delay the reply.
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #789; run explicitly for review"]
 fn prepare_websocket_peer_close_emits_closing_handshake() {
     let (mut transport, mut socket) = attached_transport();
     let output = prepared_output(&mut transport, &mut socket, &masked_control(8, &[]));
