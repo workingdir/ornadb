@@ -4825,6 +4825,13 @@ impl LiveTransport {
                 if self.delivering_upgrades.contains_key(&id) {
                     return wire_error(503, "live.unavailable");
                 }
+                // A prior worker retirement remains an unfinished session
+                // cleanup boundary until its supervisor-side join has been
+                // acknowledged by the actor. Do not let a child-aware DELETE
+                // race that fence and report orderly termination early.
+                if self.retiring_attachments.values().any(|owner| *owner == id) {
+                    return wire_error(503, "live.unavailable");
+                }
                 // The child-free route has no executable supervisor that can
                 // prove session-owned socket workers have terminated.  Do not
                 // revoke a resumable session and manufacture a 204 while an
