@@ -130,7 +130,7 @@ use orna_protocol::{
 };
 use orna_standard::{
     BINARY_LARGE_OBJECT_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
-    STD_UI_TYPE_ID, STD_UI_WINDOW_RUNTIME_CONTRACT, registered_opaque_codecs,
+    STD_UI_TYPE_ID, STD_UI_WINDOW_RUNTIME_CONTRACT, UI_MAGIC, registered_opaque_codecs,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Notify;
@@ -5081,10 +5081,38 @@ mod daemon_session_tests {
             .join()
             .expect("repl worker joins")
             .expect("installed repl evaluates");
-        assert!(matches!(
-            result.value(),
-            RuntimeValue::Opaque(value) if value.opaque_type() == orna_standard::STD_UI_TYPE_ID
-        ));
+        let RuntimeValue::Opaque(value) = result.value() else {
+            panic!("installed repl must return a typed UI value");
+        };
+        assert_eq!(value.opaque_type(), STD_UI_TYPE_ID);
+        let payload = value.canonical_payload();
+        assert!(payload.starts_with(UI_MAGIC.as_bytes()));
+        let length_start = UI_MAGIC.len();
+        let length_end = length_start + 4;
+        assert!(
+            payload.len() >= length_end,
+            "UI payload is missing its four-byte body length"
+        );
+        let body_length = u32::from_be_bytes(
+            payload[length_start..length_end]
+                .try_into()
+                .expect("UI payload has a four-byte body length"),
+        ) as usize;
+        assert_eq!(payload.len(), length_end + body_length);
+        let body = &payload[length_end..];
+        let decoded: serde_json::Value =
+            serde_json::from_slice(body).expect("UI payload contains canonical JSON");
+        assert_eq!(
+            serde_json::to_vec(&decoded).expect("UI JSON re-encodes"),
+            body
+        );
+        assert_eq!(decoded["kind"], "node");
+        assert_eq!(decoded["contract"]["id"], "std.ui.text");
+        assert_eq!(decoded["properties"]["text"]["type"], "std.types.text");
+        assert_eq!(decoded["properties"]["text"]["value"], "Ready");
+        assert_eq!(decoded["slots"], serde_json::json!({}));
+        assert_eq!(decoded["actions"], serde_json::json!({}));
+        assert!(bridge.try_take_outbound().is_none());
     }
 
     #[test]
