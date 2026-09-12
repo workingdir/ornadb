@@ -607,8 +607,7 @@ fn verify_fetched_objects(repository: &Repository, plans: &[RefPlan]) -> Result<
 }
 
 fn install_refs(repository: &Repository, plans: &[RefPlan]) -> Result<(), FetchError> {
-    let updates = plans.iter().filter(|plan| plan.updated).collect::<Vec<_>>();
-    if updates.is_empty() {
+    if plans.is_empty() {
         return Ok(());
     }
     let mut command = repository.command();
@@ -622,12 +621,17 @@ fn install_refs(repository: &Repository, plans: &[RefPlan]) -> Result<(), FetchE
         .spawn()
         .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
     let mut input = String::from("start\n");
-    for plan in updates {
-        match &plan.old {
-            Some(old) => {
-                input.push_str(&format!("update {} {} {}\n", plan.destination, plan.object_id, old));
+    for plan in plans {
+        if plan.updated {
+            match &plan.old {
+                Some(old) => {
+                    input.push_str(&format!("update {} {} {}\n", plan.destination, plan.object_id, old));
+                }
+                None => input.push_str(&format!("create {} {}\n", plan.destination, plan.object_id)),
             }
-            None => input.push_str(&format!("create {} {}\n", plan.destination, plan.object_id)),
+        } else {
+            let old = plan.old.as_deref().expect("unchanged plan has an old object ID");
+            input.push_str(&format!("verify {} {}\n", plan.destination, old));
         }
     }
     input.push_str("prepare\ncommit\n");
