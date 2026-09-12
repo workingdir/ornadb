@@ -15,7 +15,8 @@ use orna_semantic_v1::{Catalogue, ReplContext, analyze_with_catalogue};
 use orna_syntax_v1::{Declaration, ReplInput, parse_module};
 
 use crate::{
-    Environment, EvaluationError, Functions, Limits, PureFunction, ReplSession, parse_admitted_repl,
+    CancellationToken, Environment, EvaluationError, Functions, Limits, PureFunction, ReplSession,
+    parse_admitted_repl,
 };
 
 /// Redacted failure from the admitted REPL boundary.
@@ -180,6 +181,39 @@ impl AdmittedReplSession {
         );
         self.runtime = runtime;
         self.semantic = semantic;
+        Ok(value)
+    }
+
+    /// Executes one already-admitted input with an explicit cancellation
+    /// token. The session is updated only after the semantic and evaluator
+    /// candidates both complete successfully; cancellation therefore leaves
+    /// bindings, $_, and $? unchanged and cannot be recovered by source.
+    pub fn submit_admitted_with_cancellation(
+        &mut self,
+        input: &ReplInput,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<CanonicalValue>, ReplError> {
+        cancellation.check().map_err(ReplError::runtime)?;
+        let mut candidate = self.clone();
+        let admission = candidate.semantic.stage(input).map_err(semantic_error)?;
+        if !admission.effects.effects.is_empty() {
+            return Err(ReplError::fixed("ORNA-REPL-EFFECT"));
+        }
+        let mut runtime = candidate.runtime.clone();
+        let value = runtime
+            .submit_admitted_with_cancellation(input, cancellation)
+            .map_err(ReplError::runtime)?;
+        let mut semantic = candidate.semantic.clone();
+        if semantic.commit(admission).is_err() {
+            return Err(ReplError::fixed("ORNA-REPL-COMMIT"));
+        }
+        runtime.set_last_status(
+            CanonicalValue::new(orna_foundation_v1::OvbRaw::Null).expect("null is canonical"),
+        );
+        candidate.runtime = runtime;
+        candidate.semantic = semantic;
+        cancellation.check().map_err(ReplError::runtime)?;
+        *self = candidate;
         Ok(value)
     }
 
@@ -691,6 +725,46 @@ mod tests {
             session.preview("$?"),
             Ok(CanonicalValue::new(orna_foundation_v1::OvbRaw::Null).unwrap())
         );
+    }
+
+    #[test]
+    fn cancellation_in_long_loop_rolls_back_candidate_and_status() {
+        let mut session = ReplSession::new(Limits::default());
+        assert_eq!(session.submit("let answer = 41;"), Ok(None));
+        assert_eq!(session.submit("answer"), Ok(Some(Value::int(41.into()))));
+        let before_status = session.preview("$?").unwrap();
+        let input = parse_admitted_repl(
+            "if true { for value in 1..=100000 { value }; 0 }",
+            Limits::default(),
+        )
+        .unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.request_after_checks(8);
+
+        let error = session
+            .submit_admitted_with_cancellation(&input, &cancellation)
+            .unwrap_err();
+        assert_eq!(error.code(), "ORNA-EVAL-CANCELLED");
+        assert_eq!(session.preview("answer"), Ok(Value::int(41.into())));
+        assert_eq!(session.preview("$?"), Ok(before_status));
+    }
+
+    #[test]
+    fn cancellation_in_recursive_calls_is_not_recoverable_or_published() {
+        let mut session = AdmittedReplSession::new(Limits::default());
+        assert_eq!(
+            session.submit("fn recurse(n) = if n == 0 { 0 } else { recurse(n - 1) };"),
+            Ok(None)
+        );
+        let input = parse_admitted_repl("recurse(100000)", Limits::default()).unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.request_after_checks(12);
+
+        let error = session
+            .submit_admitted_with_cancellation(&input, &cancellation)
+            .unwrap_err();
+        assert_eq!(error.code(), "ORNA-EVAL-CANCELLED");
+        assert_eq!(session.submit("recurse(0)"), Ok(Some(Value::int(0.into()))));
     }
 
     #[test]
