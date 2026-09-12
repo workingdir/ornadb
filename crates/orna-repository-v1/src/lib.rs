@@ -3826,6 +3826,13 @@ impl Repository {
         if branch && tag {
             return Err(RepositoryError::InvalidSelector);
         }
+        // A full object ID and a local branch name are both valid selectors,
+        // but their attachment semantics differ. Reject the collision before
+        // resolving the target so callers cannot accidentally select a branch
+        // merely because Git gave it precedence during revision parsing.
+        if branch && self.is_full_commit_object_id(selector)? {
+            return Err(RepositoryError::InvalidSelector);
+        }
         let commit = self.resolve_snapshot(selector)?;
         if branch {
             Ok(CheckoutTarget::Branch {
@@ -3835,6 +3842,16 @@ impl Repository {
         } else {
             Ok(CheckoutTarget::Detached { commit })
         }
+    }
+
+    fn is_full_commit_object_id(&self, selector: &str) -> Result<bool, RepositoryError> {
+        let length = self.native_object_id_length()?;
+        if selector.len() != length || !selector.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Ok(false);
+        }
+        Ok(self
+            .commit_optional(&format!("{selector}^{{commit}}"))?
+            .is_some())
     }
 
     fn ref_exists(&self, reference: &str) -> Result<bool, RepositoryError> {
