@@ -5,6 +5,16 @@
 //! adapter must supply observations and enact returned plans.  Unknown or
 //! changed external state is a typed conflict, never permission to overwrite.
 
+mod compact;
+mod compact_parquet;
+
+pub use compact::{
+    COMPACT_STORAGE_PROFILE, CompactExactKeyIndex, CompactExactKeySource, CompactKeyError,
+    CompactKeyIdentity, CompactLogicalKeyError, CompactLogicalReader, CompactOvbProfile,
+    OVB_PROFILE,
+};
+pub use compact_parquet::{CompactParquetError, CompactParquetKeySource};
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
