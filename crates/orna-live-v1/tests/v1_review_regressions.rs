@@ -86,7 +86,6 @@ fn assert_cancellation_delivered(lease: &mut LiveApplicationWorkLease) {
 /// ORNA-CONCUR-001; TASK-END-1 steps 1, 3, 4 and 7. A failed first session
 /// cannot exempt later sessions or descendants from cancellation and joining.
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #789; run explicitly for review"]
 fn cancel_and_join_all_signals_and_joins_later_sessions_after_failed_lease() {
     let supervisor = LiveApplicationWorkSupervisor::new();
     // Deliberately ordered identities: the failed session is visited first.
