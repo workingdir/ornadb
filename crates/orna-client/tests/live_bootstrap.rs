@@ -212,3 +212,78 @@ fn bootstrap_rejects_snapshot_for_a_different_request() {
         Err(orna_client::LiveBootstrapError::UnexpectedResponse)
     ));
 }
+
+#[test]
+fn replacement_bootstrap_preserves_barrier_until_fresh_snapshot() {
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let reads = Rc::new(RefCell::new(0));
+    let first = BootstrappedLiveAttachment::start(
+        FakeBinaryTransport {
+            incoming: VecDeque::from([snapshot([7; 16], [1; 16])]),
+            sent: Rc::clone(&sent),
+            reads: Rc::clone(&reads),
+        },
+        subscribe(),
+        Limits::default(),
+    );
+    let mut driver = block_on(first)
+        .unwrap()
+        .into_driver(Renderer::default(), Requests)
+        .unwrap();
+    assert!(matches!(
+        block_on(driver.receive_once()),
+        Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+    ));
+
+    let replacement = block_on(BootstrappedLiveAttachment::start(
+        FakeBinaryTransport {
+            incoming: VecDeque::from([snapshot([8; 16], [1; 16])]),
+            sent,
+            reads,
+        },
+        subscribe(),
+        Limits::default(),
+    ))
+    .unwrap();
+    assert_eq!(replacement.watch(), [8; 16]);
+    replacement.replace_driver(&mut driver).unwrap();
+    assert_eq!(driver.watch(), [8; 16]);
+    assert_eq!(driver.presentation().published().unwrap().revision(), 0);
+    assert!(matches!(
+        block_on(driver.receive_once()),
+        Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+    ));
+}
+
+#[test]
+fn replacement_bootstrap_rejects_stale_watch_without_mutating_driver() {
+    let mut driver = block_on(BootstrappedLiveAttachment::start(
+        FakeBinaryTransport {
+            incoming: VecDeque::from([snapshot([7; 16], [1; 16])]),
+            sent: Rc::new(RefCell::new(Vec::new())),
+            reads: Rc::new(RefCell::new(0)),
+        },
+        subscribe(),
+        Limits::default(),
+    ))
+    .unwrap()
+    .into_driver(Renderer::default(), Requests)
+    .unwrap();
+    block_on(driver.receive_once()).unwrap();
+    let replacement = block_on(BootstrappedLiveAttachment::start(
+        FakeBinaryTransport {
+            incoming: VecDeque::from([snapshot([7; 16], [1; 16])]),
+            sent: Rc::new(RefCell::new(Vec::new())),
+            reads: Rc::new(RefCell::new(0)),
+        },
+        subscribe(),
+        Limits::default(),
+    ))
+    .unwrap();
+    assert!(matches!(
+        replacement.replace_driver(&mut driver),
+        Err(orna_client::LiveBootstrapError::WatchIdentity)
+    ));
+    assert_eq!(driver.watch(), [7; 16]);
+    assert_eq!(driver.presentation().published().unwrap().revision(), 0);
+}
