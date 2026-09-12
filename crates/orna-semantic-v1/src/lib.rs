@@ -3122,6 +3122,11 @@ fn infer(
                 return inferred;
             }
             if let Some(inferred) =
+                infer_relation_collection_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
                 infer_relation_call(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
@@ -4714,6 +4719,11 @@ fn root_collection_intrinsic_is_unshadowed(
             | "map"
             | "flat_map"
             | "sort_by"
+            | "filter"
+            | "take"
+            | "drop"
+            | "window"
+            | "count"
             | "sum"
             | "min"
             | "max"
@@ -4779,8 +4789,13 @@ fn infer_finite_list_collection_call(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
     let path = qualified_path(callee)?;
-    if matches!(path.as_slice(), ["every"] | ["exists"] | ["sort_by"])
-        && let Some(argument) = arguments.first()
+    if matches!(
+        path.as_slice(),
+        ["every"] | ["exists"] | ["sort_by"] | ["first"] | ["one"] | ["sum"] | ["min"] | ["max"]
+    ) && let Some(argument) = arguments
+        .iter()
+        .find(|argument| argument.name.as_deref() == Some("rows"))
+        .or_else(|| arguments.first())
     {
         let mut probe_diagnostics = Vec::new();
         let inferred = infer(&argument.value, scope, local, &mut probe_diagnostics);
@@ -5773,6 +5788,337 @@ fn infer_relation_call(
     })
 }
 
+/// Checks the direct core relation overloads. The finite-list overloads are
+/// intentionally checked by their existing source/profile path; this helper
+/// only claims an unqualified intrinsic when its rows argument is a relation.
+fn infer_relation_collection_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let path = qualified_path(callee)?;
+    let operation = match path.as_slice() {
+        [operation]
+            if matches!(
+                *operation,
+                "filter"
+                    | "map"
+                    | "sort_by"
+                    | "take"
+                    | "drop"
+                    | "count"
+                    | "first"
+                    | "one"
+                    | "every"
+                    | "exists"
+                    | "sum"
+                    | "min"
+                    | "max"
+                    | "window"
+            ) && root_collection_intrinsic_is_unshadowed(operation, scope, local) =>
+        {
+            *operation
+        }
+        _ => return None,
+    };
+    let mut row_index = None;
+    let mut callback_index = None;
+    let callback_name = match operation {
+        "filter" => "predicate",
+        "map" => "transform",
+        "sort_by" => "key",
+        _ => "",
+    };
+    let mut positional = 0usize;
+    let mut named_started = false;
+    let mut malformed = arguments.len() != 2;
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = match argument.name.as_deref() {
+            Some("rows") => {
+                named_started = true;
+                Some(0)
+            }
+            Some(name) if name == callback_name => {
+                named_started = true;
+                Some(1)
+            }
+            Some(_) => {
+                malformed = true;
+                None
+            }
+            None if named_started => {
+                malformed = true;
+                None
+            }
+            None => {
+                let slot = positional;
+                positional += 1;
+                (slot < 2).then_some(slot)
+            }
+        };
+        match slot {
+            Some(0) if row_index.replace(index).is_some() => malformed = true,
+            Some(1) if callback_index.replace(index).is_some() => malformed = true,
+            None => {}
+            _ => {}
+        }
+    }
+    let row_index = row_index.or_else(|| (!arguments.is_empty()).then_some(0))?;
+    let mut probe_diagnostics = Vec::new();
+    let probe = infer(
+        &arguments[row_index].value,
+        scope,
+        local,
+        &mut probe_diagnostics,
+    );
+    if !matches!(probe.ty, Type::Relation(_)) {
+        return None;
+    }
+
+    if !matches!(operation, "filter" | "map" | "sort_by") {
+        return Some(infer_relation_terminal_call(
+            operation,
+            arguments,
+            row_index,
+            scope,
+            local,
+            diagnostics,
+        ));
+    }
+
+    let inferred = arguments
+        .iter()
+        .map(|argument| infer(&argument.value, scope, local, diagnostics))
+        .collect::<Vec<_>>();
+    let mut effects = EffectSummary::default();
+    for value in &inferred {
+        effects.join(&value.effects);
+    }
+    let Type::Relation(element) = inferred[row_index].ty.clone() else {
+        unreachable!("the probe admitted only a relation rows argument")
+    };
+    let Some(callback_index) = callback_index else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("relation {operation} requires rows and {callback_name}"),
+        ));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects,
+        });
+    };
+    let callback = infer_relation_callback(
+        &arguments[callback_index].value,
+        element.as_ref().clone(),
+        (operation == "filter")
+            .then_some(Type::Bool)
+            .unwrap_or(Type::Error),
+        scope,
+        local,
+        diagnostics,
+    );
+    effects.join(&callback.effects);
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("relation {operation} arguments do not match its static signature"),
+        ));
+    }
+    let valid = !malformed
+        && match operation {
+            "filter" => callback.ty == Type::Bool,
+            "map" => callback.ty != Type::Error,
+            "sort_by" => is_sort_key_type(&callback.ty),
+            _ => false,
+        };
+    Some(Inferred {
+        ty: if valid {
+            match operation {
+                "map" => Type::Relation(Box::new(callback.ty)),
+                _ => Type::Relation(element),
+            }
+        } else {
+            Type::Error
+        },
+        effects,
+    })
+}
+
+fn infer_relation_terminal_call(
+    operation: &str,
+    arguments: &[orna_syntax_v1::Argument],
+    row_index: usize,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let expected = match operation {
+        "count" | "first" | "sum" | "min" | "max" => 1..=1,
+        "one" => 1..=2,
+        "take" | "drop" => 2..=2,
+        "window" => 2..=3,
+        "every" | "exists" => 2..=2,
+        _ => unreachable!("relation terminal operation was checked above"),
+    };
+    let mut effects = EffectSummary::default();
+    let values = arguments
+        .iter()
+        .map(|argument| {
+            let value = infer(&argument.value, scope, local, diagnostics);
+            effects.join(&value.effects);
+            value
+        })
+        .collect::<Vec<_>>();
+    let mut malformed = !expected.contains(&arguments.len());
+    let mut positional = 0usize;
+    let mut named_started = false;
+    let mut slots = vec![None; 3];
+    let callback_name = match operation {
+        "one" | "every" | "exists" => Some("predicate"),
+        "take" | "drop" => Some("count"),
+        "window" => Some("size"),
+        _ => None,
+    };
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = match argument.name.as_deref() {
+            Some("rows") => {
+                named_started = true;
+                Some(0)
+            }
+            Some("predicate") if matches!(operation, "one" | "every" | "exists") => {
+                named_started = true;
+                Some(1)
+            }
+            Some("count") if matches!(operation, "take" | "drop") => {
+                named_started = true;
+                Some(1)
+            }
+            Some("size") if operation == "window" => {
+                named_started = true;
+                Some(1)
+            }
+            Some("step") if operation == "window" => {
+                named_started = true;
+                Some(2)
+            }
+            Some(_) => {
+                malformed = true;
+                None
+            }
+            None if named_started => {
+                malformed = true;
+                None
+            }
+            None => {
+                let slot = positional;
+                positional += 1;
+                (slot < slots.len()).then_some(slot)
+            }
+        };
+        if let Some(slot) = slot {
+            if slots[slot].replace(index).is_some() {
+                malformed = true;
+            }
+        }
+    }
+    if slots[0] != Some(row_index) {
+        malformed = true;
+    }
+    if let Some(callback_name) = callback_name
+        && matches!(operation, "one" | "every" | "exists")
+        && slots[1].is_none()
+    {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("relation {operation} requires rows and {callback_name}"),
+        ));
+        malformed = true;
+    }
+    let Type::Relation(element) = values[row_index].ty.clone() else {
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    let mut valid = !malformed;
+    if matches!(operation, "one" | "every" | "exists")
+        && let Some(index) = slots[1]
+    {
+        let callback = infer_relation_callback(
+            &arguments[index].value,
+            element.as_ref().clone(),
+            Type::Bool,
+            scope,
+            local,
+            diagnostics,
+        );
+        effects.join(&callback.effects);
+        valid &= callback.ty == Type::Bool;
+    }
+    for slot in 1..3 {
+        if let Some(index) = slots[slot] {
+            if matches!(operation, "take" | "drop" | "window")
+                && values[index].ty != Type::Int
+                && values[index].ty != Type::Error
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("relation {operation} parameter must be an Int"),
+                ));
+                valid = false;
+            }
+            if matches!(operation, "take" | "drop")
+                && slot == 1
+                && values[index].ty == Type::Int
+                && is_negative_integer_constant(&arguments[index].value)
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("relation {operation} count must be nonnegative"),
+                ));
+                valid = false;
+            }
+            if operation == "window"
+                && values[index].ty == Type::Int
+                && is_non_positive_integer_constant(&arguments[index].value)
+            {
+                let label = if slot == 1 { "size" } else { "step" };
+                diagnostics.push(diag(DIAG_TYPE, format!("window {label} must be positive")));
+                valid = false;
+            }
+        }
+    }
+    let ty = match operation {
+        "every" | "exists" => Type::Bool,
+        "count" => Type::Int,
+        "first" => Type::Optional(element.clone()),
+        "one" => element.as_ref().clone(),
+        "take" | "drop" => Type::Relation(element.clone()),
+        "window" => Type::Relation(Box::new(Type::List(Box::new(element.as_ref().clone())))),
+        "sum" | "min" | "max" if matches!(element.as_ref(), Type::Int | Type::Float) => {
+            if operation == "sum" {
+                element.as_ref().clone()
+            } else {
+                Type::Optional(element.clone())
+            }
+        }
+        _ => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                format!("relation {operation} requires numeric rows"),
+            ));
+            valid = false;
+            Type::Error
+        }
+    };
+    Inferred {
+        ty: if valid { ty } else { Type::Error },
+        effects,
+    }
+}
+
 /// Admits the positional relation-window signature without claiming that a
 /// dynamic `Int` is positive. The runtime remains responsible for values that
 /// are not statically provable constants.
@@ -5934,10 +6280,11 @@ fn infer_success_pipeline(
         } = rhs
         && let Expr::Name { text, .. } = callee.as_ref()
         && text == "sort_by"
+        && root_collection_intrinsic_is_unshadowed("sort_by", scope, local)
         && let [argument] = arguments.as_slice()
-        && argument.name.is_none()
+        && (argument.name.is_none() || argument.name.as_deref() == Some("key"))
     {
-        let callback = infer_callback(
+        let callback = infer_relation_callback(
             &argument.value,
             element.as_ref().clone(),
             Type::Error,
@@ -6290,7 +6637,7 @@ fn infer_success_pipeline(
         && text == "map"
         && root_collection_intrinsic_is_unshadowed(text, scope, local)
         && let [argument] = arguments.as_slice()
-        && argument.name.is_none()
+        && (argument.name.is_none() || argument.name.as_deref() == Some("transform"))
     {
         if let Some(projection) = infer_table_projection(&argument.value, scope, local) {
             let Type::Function {
@@ -6316,7 +6663,7 @@ fn infer_success_pipeline(
                 effects,
             };
         }
-        let callback = infer_callback(
+        let callback = infer_relation_callback(
             &argument.value,
             element,
             Type::Error,
@@ -6328,6 +6675,34 @@ fn infer_success_pipeline(
         effects.join(&callback.effects);
         return Inferred {
             ty: Type::Relation(Box::new(callback.ty)),
+            effects,
+        };
+    }
+    if !is_stream
+        && matches!(text.as_str(), "take" | "drop")
+        && root_collection_intrinsic_is_unshadowed(text, scope, local)
+        && let [argument] = arguments.as_slice()
+        && (argument.name.is_none() || argument.name.as_deref() == Some("count"))
+    {
+        let count = infer(&argument.value, scope, local, diagnostics);
+        let mut effects = input.effects;
+        effects.join(&count.effects);
+        if count.ty != Type::Int && count.ty != Type::Error {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                format!("relation {text} count must be an Int"),
+            ));
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                format!("relation {text} count is outside the supported bounded form"),
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        }
+        return Inferred {
+            ty: Type::Relation(Box::new(element)),
             effects,
         };
     }
@@ -6378,7 +6753,12 @@ fn infer_success_pipeline(
         };
     }
     let (ty, callback_result) = match (text.as_str(), is_stream, arguments.as_slice()) {
-        ("filter", false, [_]) => (Type::Relation(Box::new(element.clone())), Some(Type::Bool)),
+        ("filter", false, [argument])
+            if (argument.name.is_none() || argument.name.as_deref() == Some("predicate"))
+                && root_collection_intrinsic_is_unshadowed("filter", scope, local) =>
+        {
+            (Type::Relation(Box::new(element.clone())), Some(Type::Bool))
+        }
         ("one", false, []) => (element.clone(), None),
         ("one", false, [_]) => (element.clone(), Some(Type::Bool)),
         ("last", false, []) => (Type::Optional(Box::new(element.clone())), None),
@@ -6767,6 +7147,47 @@ fn infer_callback(
     let inferred = infer(body, scope, &callback_locals, diagnostics);
     require_same(&result, &inferred.ty, diagnostics);
     inferred
+}
+
+fn infer_relation_callback(
+    expression: &Expr,
+    parameter: Type,
+    result: Type,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if matches!(expression, Expr::Lambda { .. }) {
+        return infer_callback(expression, parameter, result, scope, local, diagnostics);
+    }
+    let callback = infer(expression, scope, local, diagnostics);
+    let Type::Function {
+        parameters,
+        result: callback_result,
+        ..
+    } = callback.ty
+    else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "relation callback must be a one-parameter function",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: callback.effects,
+        };
+    };
+    if parameters.len() != 1 {
+        diagnostics.push(diag(DIAG_TYPE, "relation callback must take one parameter"));
+    } else {
+        require_same(&parameter, &parameters[0], diagnostics);
+    }
+    if result != Type::Error {
+        require_same(&result, &callback_result, diagnostics);
+    }
+    Inferred {
+        ty: *callback_result,
+        effects: callback.effects,
+    }
 }
 
 fn infer_finite_list_callback(
