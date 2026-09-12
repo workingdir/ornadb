@@ -201,15 +201,7 @@ where
         }
         self.io = io;
         self.watch = watch;
-        let previous = self.presentation.published().cloned();
-        let mut presentation = WatchPresentation::new(watch, self.limits).map_err(|_| ())?;
-        if let Some(previous) = previous {
-            let _ = presentation.install_snapshot(
-                previous.revision(),
-                previous.present().clone(),
-                previous.snapshot().clone(),
-            );
-        }
+        let presentation = WatchPresentation::new(watch, self.limits).map_err(|_| ())?;
         self.presentation = presentation;
         self.presentation.begin_resubscription();
         self.pending_resync = None;

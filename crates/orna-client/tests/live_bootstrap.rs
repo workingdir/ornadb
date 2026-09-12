@@ -248,7 +248,10 @@ fn replacement_bootstrap_preserves_barrier_until_fresh_snapshot() {
     assert_eq!(replacement.watch(), [8; 16]);
     replacement.replace_driver(&mut driver).unwrap();
     assert_eq!(driver.watch(), [8; 16]);
-    assert_eq!(driver.presentation().published().unwrap().revision(), 0);
+    assert!(
+        driver.presentation().published().is_none(),
+        "a fresh watch must not inherit the previous watch's revision state"
+    );
     assert!(matches!(
         block_on(driver.receive_once()),
         Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
