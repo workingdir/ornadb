@@ -889,6 +889,9 @@ enum ActorCommand {
             Result<(WebSocketState, Vec<WebSocketOutput>), orna_live_v1::Error>,
         >,
     },
+    /// Stops admitted application work without relinquishing the actor's
+    /// responsibility to process socket-worker retirement acknowledgements.
+    DrainApplicationWork,
     Shutdown,
     Close {
         attachment: [u8; 16],
@@ -941,6 +944,7 @@ async fn run_host_actor(
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut retirement_acknowledgements_open = true;
+    let mut application_drain = None;
     loop {
         let command = tokio::select! {
             command = commands.next() => match command {
@@ -990,7 +994,28 @@ async fn run_host_actor(
             }
         };
         match command {
-            ActorCommand::Shutdown => break,
+            ActorCommand::DrainApplicationWork => {
+                // Socket workers can still be awaiting WorkerExited while
+                // their application work drains. This command is deliberately
+                // nonterminal so their actor-owned retirement cleanup remains
+                // available until the outer supervisor has joined them.
+                if application_drain.is_none() {
+                    let application_work = state.application_work.clone();
+                    application_drain = Some(tokio::task::spawn_local(async move {
+                        application_work.cancel_and_join_all().await
+                    }));
+                }
+            }
+            ActorCommand::Shutdown => {
+                // The socket supervisor sends terminal shutdown only after
+                // every WorkerExited acknowledgement and retirement gate has
+                // completed. Joining here therefore preserves actor progress
+                // while the application drain is pending.
+                if let Some(drain) = application_drain.take() {
+                    let _ = drain.await;
+                }
+                break;
+            }
             ActorCommand::Http {
                 mut connection,
                 bytes,
@@ -1302,6 +1327,11 @@ async fn shutdown_concurrent_host(
     requested: LiveHostError,
 ) -> Result<(), LiveHostError> {
     registry.borrow_mut().cancel_all();
+    // The actor must keep serving WorkerExited until every cancelled socket
+    // worker has observed its acknowledgement. Drain application work first,
+    // but reserve terminal shutdown for after those workers and their
+    // retirement gates have been supervised.
+    let _ = actor_sender.unbounded_send(ActorCommand::DrainApplicationWork);
     let mut worker_failed = false;
     while let Some(result) = workers.join_next_with_id().await {
         worker_failed |= acknowledge_worker_join(registry, result);
@@ -3333,6 +3363,203 @@ mod tests {
                 .unbounded_send(super::ActorCommand::Shutdown)
                 .unwrap();
             actor.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn concurrent_shutdown_drains_work_before_worker_exit_and_retirement_acknowledgement() {
+        let repository = worker_repository();
+        super::shutdown_tests::run_local(async move {
+            let session = [24; 16];
+            let attachment = [25; 16];
+            let now = super::system_milliseconds();
+            let expires_at = now.saturating_add(60_000);
+            let origin = Origin::parse("https://app.example").unwrap();
+            let expiries = Rc::new(RefCell::new(BTreeMap::from([(
+                SessionId::new(session),
+                expires_at,
+            )])));
+            let mut host = LiveHost::new(
+                Limits::default(),
+                SessionBoundary::new(OriginPolicy::new([origin.clone()], []), 60_000),
+                Serving::new(orna_serving_v1::Limits::default()).unwrap(),
+            )
+            .unwrap();
+            let mut issuer = SystemCredentialIssuer::default();
+            host.create(
+                CreateRequest {
+                    id: session,
+                    origin: origin.clone(),
+                    expires_at,
+                    now,
+                    subscribe: &subscribe_payload(),
+                },
+                &mut issuer,
+            )
+            .await
+            .unwrap();
+            let token = issuer.last_issued().unwrap();
+            let transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+            let application_work = transport.application_work_supervisor();
+            let mut application_lease = application_work.admit(session, [26; 16]).unwrap();
+            let application_drained = Arc::new(AtomicBool::new(false));
+            let (worker_exit_acknowledged, worker_exit_acknowledgement) =
+                futures::channel::oneshot::channel();
+            let application_drained_for_task = Arc::clone(&application_drained);
+            let application_task = tokio::task::spawn_local(async move {
+                application_lease.cancellation().await.unwrap();
+                worker_exit_acknowledgement.await.unwrap();
+                application_lease.complete();
+                application_drained_for_task.store(true, Ordering::Release);
+            });
+            let application = PureEvalApplication::from_repository_with_project(
+                &repository.recipe.repository,
+                repository.recipe.database_id,
+                repository.recipe.identity,
+                repository.recipe.initial_digest,
+                repository.recipe.runtime_owner,
+                Rc::clone(&expiries),
+                Some(repository.recipe.project.clone()),
+                Some(repository.recipe.capture.clone()),
+            )
+            .unwrap();
+            let application_workers = ApplicationWorkerRegistry::new(repository.recipe.clone());
+            let deletion = HostDeletion {
+                expiries: Rc::clone(&expiries),
+                deleted_leases: Rc::new(RefCell::new(BTreeMap::new())),
+                application: Rc::new(RefCell::new(Some(application))),
+                application_workers: Some(application_workers.clone()),
+            };
+            let mut token_text = String::with_capacity(43);
+            const BASE64URL: &[u8; 64] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            for chunk in token.chunks(3) {
+                token_text.push(BASE64URL[(chunk[0] >> 2) as usize] as char);
+                token_text.push(
+                    BASE64URL[(((chunk[0] & 3) << 4) | (chunk.get(1).copied().unwrap_or(0) >> 4))
+                        as usize] as char,
+                );
+                if chunk.len() > 1 {
+                    token_text.push(
+                        BASE64URL[(((chunk[1] & 15) << 2)
+                            | (chunk.get(2).copied().unwrap_or(0) >> 6))
+                            as usize] as char,
+                    );
+                }
+                if chunk.len() > 2 {
+                    token_text.push(BASE64URL[(chunk[2] & 63) as usize] as char);
+                }
+            }
+            let upgrade_request = WireRequest {
+                method: "GET".into(),
+                path: "/orna/live/18181818-1818-1818-1818-181818181818".into(),
+                headers: vec![
+                    ("origin".into(), "https://app.example".into()),
+                    ("connection".into(), "Upgrade".into()),
+                    ("upgrade".into(), "websocket".into()),
+                    ("sec-websocket-version".into(), "13".into()),
+                    (
+                        "sec-websocket-key".into(),
+                        "dGhlIHNhbXBsZSBub25jZQ==".into(),
+                    ),
+                    ("sec-websocket-protocol".into(), "orna.present.v1".into()),
+                    ("cookie".into(), format!("orna_session={token_text}")),
+                ],
+                body: Vec::new(),
+            };
+            let registry = Rc::new(RefCell::new(super::WorkerRegistry::default()));
+            let (worker_id, cancellation) = registry.borrow_mut().register();
+            let mut workers = tokio::task::JoinSet::new();
+            let mut retirement_tasks = tokio::task::JoinSet::new();
+            let (actor_sender, actor_receiver) = futures::channel::mpsc::unbounded();
+            let (retirement_acknowledgements, retirement_acknowledgement_receiver) =
+                futures::channel::mpsc::unbounded();
+            let (retirement_gate_sender, mut actor_retirement_gates) =
+                futures::channel::mpsc::unbounded();
+            let (retirement_gate_bridge, mut retirement_gates) =
+                futures::channel::mpsc::unbounded();
+            let (retirement_forwarded, retirement_forwarded_signal) =
+                futures::channel::oneshot::channel();
+            let observed_retirement_gate = Arc::new(AtomicBool::new(false));
+            let observed_retirement_gate_for_bridge = Arc::clone(&observed_retirement_gate);
+            let retirement_gate_bridge = tokio::task::spawn_local(async move {
+                let mut retirement_forwarded = Some(retirement_forwarded);
+                while let Some(retirement) = actor_retirement_gates.next().await {
+                    let nonempty = !retirement.is_empty();
+                    if retirement_gate_bridge.unbounded_send(retirement).is_err() {
+                        break;
+                    }
+                    if nonempty {
+                        observed_retirement_gate_for_bridge.store(true, Ordering::Release);
+                        if let Some(retirement_forwarded) = retirement_forwarded.take() {
+                            let _ = retirement_forwarded.send(());
+                        }
+                    }
+                }
+            });
+            let actor = tokio::task::spawn_local(super::run_host_actor(
+                actor_receiver,
+                actor_sender.clone(),
+                super::ConcurrentHostState {
+                    transport,
+                    authority: super::HostAuthority {
+                        database_id: repository.recipe.database_id,
+                        runtime_id: [27; 16],
+                        expiries,
+                    },
+                    issuer: SystemCredentialIssuer::default(),
+                    deletion,
+                    application_workers,
+                    application_work,
+                    delivering_upgrades: BTreeMap::new(),
+                },
+                Rc::clone(&registry),
+                retirement_acknowledgement_receiver,
+                retirement_gate_sender,
+            ));
+            let worker_actor = actor_sender.clone();
+            let task = workers.spawn_local(async move {
+                cancellation.await.unwrap();
+                super::actor_worker_exited(&worker_actor, worker_id).await;
+                retirement_forwarded_signal.await.unwrap();
+                worker_exit_acknowledged.send(()).unwrap();
+                worker_id
+            });
+            registry.borrow_mut().bind_task(worker_id, task.id());
+
+            let upgrade = super::actor_begin(&actor_sender, upgrade_request, attachment, worker_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(retirement_gates.next().await.unwrap().len(), 0);
+            super::actor_deliver(&actor_sender, &upgrade, worker_id)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    super::shutdown_concurrent_host(
+                        &registry,
+                        &mut workers,
+                        &mut retirement_tasks,
+                        &mut retirement_gates,
+                        &retirement_acknowledgements,
+                        actor_sender,
+                        Some(actor),
+                        super::LiveHostError::Cancelled,
+                    ),
+                )
+                .await,
+                Ok(Err(super::LiveHostError::Cancelled))
+            );
+            application_task.await.unwrap();
+            retirement_gate_bridge.await.unwrap();
+            assert!(application_drained.load(Ordering::Acquire));
+            assert!(observed_retirement_gate.load(Ordering::Acquire));
+            assert!(workers.is_empty());
+            assert!(retirement_tasks.is_empty());
+            assert!(registry.borrow().workers.is_empty());
         });
     }
 
