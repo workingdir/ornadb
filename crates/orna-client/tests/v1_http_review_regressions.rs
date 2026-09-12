@@ -82,10 +82,14 @@ fn run<F: Future>(future: F) -> F::Output {
 }
 
 fn client(endpoint: Url) -> LiveClient {
+    client_with_limits(endpoint, Limits::default())
+}
+
+fn client_with_limits(endpoint: Url, limits: Limits) -> LiveClient {
     LiveClient::new(LiveClientConfig {
         endpoint,
         origin: "http://localhost".into(),
-        limits: Limits::default(),
+        limits,
         request_timeout: Duration::from_secs(5),
         tls_policy: TlsPolicy::TrustedLoopbackOnly,
     })
@@ -186,6 +190,58 @@ async fn reply_session(stream: &mut TcpStream, status: &str, body: &str, cookie:
         body,
     )
     .await;
+}
+
+async fn reply_session_with_declared_length(
+    stream: &mut TcpStream,
+    status: &str,
+    declared_length: usize,
+    body: &str,
+    cookie: &str,
+) {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Length: {declared_length}\r\nConnection: close\r\nContent-Type: application/json\r\nSet-Cookie: orna_session={cookie}; Path=/orna/live/{SESSION}; HttpOnly; SameSite=Strict\r\n\r\n{body}"
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write declared-length audit response");
+    stream
+        .shutdown()
+        .await
+        .expect("finish declared-length audit response");
+}
+
+async fn reply_chunked_session(stream: &mut TcpStream, status: &str, body: &[u8], cookie: &str) {
+    let headers = format!(
+        "HTTP/1.1 {status}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nContent-Type: application/json\r\nSet-Cookie: orna_session={cookie}; Path=/orna/live/{SESSION}; HttpOnly; SameSite=Strict\r\n\r\n"
+    );
+    stream
+        .write_all(headers.as_bytes())
+        .await
+        .expect("write chunked audit response headers");
+    for chunk in body.chunks(257) {
+        stream
+            .write_all(format!("{:X}\r\n", chunk.len()).as_bytes())
+            .await
+            .expect("write chunked audit response size");
+        stream
+            .write_all(chunk)
+            .await
+            .expect("write chunked audit response body");
+        stream
+            .write_all(b"\r\n")
+            .await
+            .expect("write chunked audit response terminator");
+    }
+    stream
+        .write_all(b"0\r\n\r\n")
+        .await
+        .expect("finish chunked audit response");
+    stream
+        .shutdown()
+        .await
+        .expect("close chunked audit response");
 }
 
 async fn listener() -> (TcpListener, Url) {
@@ -467,6 +523,82 @@ fn same_origin_resume_with_rotated_credentials_succeeds() {
         let resumed = client.resume_session(&session).await.expect("valid resume");
         assert_identity(&resumed);
         server.await.expect("same-origin server completed");
+    });
+}
+
+#[test]
+fn declared_oversized_session_response_is_rejected_before_body_accumulation() {
+    run(async {
+        let max_message_bytes = 1024;
+        let (listener, endpoint) = listener().await;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept oversized create");
+            assert_post(
+                &read_request(&mut stream).await,
+                "/orna/session",
+                json!({"database": DATABASE, "protocol": PROTOCOL}),
+            );
+            reply_session_with_declared_length(
+                &mut stream,
+                "201 Created",
+                max_message_bytes + 1,
+                "{}",
+                "synthetic-oversized-cookie",
+            )
+            .await;
+        });
+        let limits = Limits {
+            max_message_bytes,
+            ..Limits::default()
+        };
+        let result = client_with_limits(endpoint, limits)
+            .create_session([2; 16])
+            .await;
+        assert!(matches!(
+            result,
+            Err(LiveTransportError::Response(
+                "session response exceeds configured message limit"
+            ))
+        ));
+        server.await.expect("declared oversized server completed");
+    });
+}
+
+#[test]
+fn streamed_oversized_session_response_is_rejected_during_receipt() {
+    run(async {
+        let max_message_bytes = 1024;
+        let (listener, endpoint) = listener().await;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept streamed create");
+            assert_post(
+                &read_request(&mut stream).await,
+                "/orna/session",
+                json!({"database": DATABASE, "protocol": PROTOCOL}),
+            );
+            let body = vec![b'x'; max_message_bytes + 1];
+            reply_chunked_session(
+                &mut stream,
+                "201 Created",
+                &body,
+                "synthetic-streamed-cookie",
+            )
+            .await;
+        });
+        let limits = Limits {
+            max_message_bytes,
+            ..Limits::default()
+        };
+        let result = client_with_limits(endpoint, limits)
+            .create_session([2; 16])
+            .await;
+        assert!(matches!(
+            result,
+            Err(LiveTransportError::Response(
+                "session response exceeds configured message limit"
+            ))
+        ));
+        server.await.expect("streamed oversized server completed");
     });
 }
 
