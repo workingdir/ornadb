@@ -14,7 +14,7 @@ use crate::{
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
     EffectHandler, Environment, EvaluationError, Functions, Limits as EvaluatorLimits,
-    PureFunction as RetainedFunction, StepBudget, evaluate_expression_with_functions,
+    PureFunction as RetainedFunction, RelationPage, StepBudget, evaluate_expression_with_functions,
     evaluate_with_functions_and_budget, invoke_named, invoke_named_with_effects_and_budget,
 };
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
@@ -40,7 +40,10 @@ use orna_sys_v1::{
 };
 use orna_table_v1::{ActivationError, DatabaseActivation, DatabaseRuntime, TableError};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Bound,
+};
 
 pub struct SemanticAdapter {
     syntax: SyntaxAdapter,
@@ -899,15 +902,22 @@ impl TransactionalEvaluator {
     /// Executes the configured entry function inside one root activation.
     /// Errors escaping the function leave all table writes unpublished.
     pub fn execute_source(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        let (functions, key_fields, float_fields, table_assertions, module_assertions) =
-            match admit_transaction_source(unit, self.limits, &self.entry) {
-                Ok(value) => value,
-                Err(outcome) => return *outcome,
-            };
+        let (
+            functions,
+            key_fields,
+            float_fields,
+            table_fields,
+            table_assertions,
+            module_assertions,
+        ) = match admit_transaction_source(unit, self.limits, &self.entry) {
+            Ok(value) => value,
+            Err(outcome) => return *outcome,
+        };
         match self.execute_admitted(
             &functions,
             &key_fields,
             &float_fields,
+            &table_fields,
             &table_assertions,
             &module_assertions,
         ) {
@@ -928,7 +938,7 @@ impl TransactionalEvaluator {
             return None;
         }
         let mut evaluator = Self::new("bad", self.limits);
-        let (functions, _, _, table_assertions, module_assertions) =
+        let (functions, _, _, table_fields, table_assertions, module_assertions) =
             match admit_transaction_source(unit, self.limits, "bad") {
                 Ok(value) => value,
                 Err(outcome) => return Some(*outcome),
@@ -938,6 +948,7 @@ impl TransactionalEvaluator {
             &functions,
             &key_fields,
             &TableFloatFields::new(),
+            &table_fields,
             &table_assertions,
             &module_assertions,
         ) {
@@ -1021,6 +1032,7 @@ impl TransactionalEvaluator {
         functions: &Functions,
         key_fields: &TableKeys,
         float_fields: &TableFloatFields,
+        table_fields: &TableFields,
         table_assertions: &TableAssertions,
         module_assertions: &[Expr],
     ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
@@ -1028,6 +1040,7 @@ impl TransactionalEvaluator {
             functions,
             key_fields,
             float_fields,
+            table_fields,
             table_assertions,
             module_assertions,
             &Environment::new(),
@@ -1039,6 +1052,7 @@ impl TransactionalEvaluator {
         functions: &Functions,
         key_fields: &TableKeys,
         float_fields: &TableFloatFields,
+        table_fields: &TableFields,
         table_assertions: &TableAssertions,
         module_assertions: &[Expr],
         arguments: &Environment,
@@ -1047,10 +1061,12 @@ impl TransactionalEvaluator {
         let limits = self.limits;
         let mut mutations = Vec::new();
         let result = self.database.activate(|activation| {
-            let functions = lower_relation_bindings(functions, key_fields, float_fields);
+            let functions =
+                lower_relation_bindings(functions, key_fields, float_fields, table_fields);
             let mut effects = TableEffectHandler {
                 activation,
                 key_fields,
+                table_fields,
                 mutations: &mut mutations,
                 next_mutation: 0,
                 limits,
@@ -1147,11 +1163,17 @@ impl DurableTransactionalEvaluator {
         initial_digest: [u8; 32],
         unit: &SourceUnit,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
-        let (functions, key_fields, float_fields, table_assertions, module_assertions) =
-            match admit_transaction_source(unit, self.limits, &self.entry) {
-                Ok(value) => value,
-                Err(outcome) => return Ok(*outcome),
-            };
+        let (
+            functions,
+            key_fields,
+            float_fields,
+            table_fields,
+            table_assertions,
+            module_assertions,
+        ) = match admit_transaction_source(unit, self.limits, &self.entry) {
+            Ok(value) => value,
+            Err(outcome) => return Ok(*outcome),
+        };
         if functions
             .get(&self.entry)
             .is_some_and(|function| literal_stream_pipeline(&function.body).is_some())
@@ -1176,6 +1198,7 @@ impl DurableTransactionalEvaluator {
             &functions,
             &key_fields,
             &float_fields,
+            &table_fields,
             &table_assertions,
             &module_assertions,
         ) {
@@ -1283,21 +1306,21 @@ impl DurableTransactionalEvaluator {
             return replay_or_fence_request(start.request);
         }
 
-        let (functions, key_fields, float_fields, table_assertions, module_assertions) =
-            match admit_transaction_source(unit, self.limits, &self.entry) {
-                Ok(value) => value,
-                Err(outcome) => {
-                    let outcome = *outcome;
-                    return terminalize_observed_outcome(
-                        &state,
-                        request,
-                        fingerprint,
-                        lease,
-                        outcome,
-                    )
+        let (
+            functions,
+            key_fields,
+            float_fields,
+            table_fields,
+            table_assertions,
+            module_assertions,
+        ) = match admit_transaction_source(unit, self.limits, &self.entry) {
+            Ok(value) => value,
+            Err(outcome) => {
+                let outcome = *outcome;
+                return terminalize_observed_outcome(&state, request, fingerprint, lease, outcome)
                     .await;
-                }
-            };
+            }
+        };
         if functions
             .get(&self.entry)
             .is_some_and(|function| literal_stream_pipeline(&function.body).is_some())
@@ -1340,6 +1363,7 @@ impl DurableTransactionalEvaluator {
             &functions,
             &key_fields,
             &float_fields,
+            &table_fields,
             &table_assertions,
             &module_assertions,
         ) {
@@ -1428,11 +1452,17 @@ impl DurableTransactionalEvaluator {
             Err(error) => return RunningTableRequestDisposition::Fenced(error),
         };
 
-        let (functions, key_fields, float_fields, table_assertions, module_assertions) =
-            match admit_transaction_source(unit, self.limits, &self.entry) {
-                Ok(value) => value,
-                Err(outcome) => return RunningTableRequestDisposition::Semantic(*outcome),
-            };
+        let (
+            functions,
+            key_fields,
+            float_fields,
+            table_fields,
+            table_assertions,
+            module_assertions,
+        ) = match admit_transaction_source(unit, self.limits, &self.entry) {
+            Ok(value) => value,
+            Err(outcome) => return RunningTableRequestDisposition::Semantic(*outcome),
+        };
         if functions
             .get(&self.entry)
             .is_some_and(|function| literal_stream_pipeline(&function.body).is_some())
@@ -1472,6 +1502,7 @@ impl DurableTransactionalEvaluator {
             &functions,
             &key_fields,
             &float_fields,
+            &table_fields,
             &table_assertions,
             &module_assertions,
         ) {
@@ -1638,7 +1669,14 @@ impl DurableTransactionalEvaluator {
         admitted: AdmittedTransaction,
         arguments: &Environment,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
-        let (functions, key_fields, float_fields, table_assertions, module_assertions) = admitted;
+        let (
+            functions,
+            key_fields,
+            float_fields,
+            table_fields,
+            table_assertions,
+            module_assertions,
+        ) = admitted;
         let state = RuntimeState::open(repository, identity, initial_digest).await?;
         let lease = state.acquire_lease(owner_id).await?;
         let tables = key_fields.keys().map(String::as_str).collect::<Vec<_>>();
@@ -1655,6 +1693,7 @@ impl DurableTransactionalEvaluator {
             &functions,
             &key_fields,
             &float_fields,
+            &table_fields,
             &table_assertions,
             &module_assertions,
             arguments,
@@ -2029,7 +2068,7 @@ fn admit_list_stream_source(
     limits: EvaluatorLimits,
     entry: &str,
 ) -> Result<ListStreamBridge, AdmissionFailure> {
-    let (_, key_fields, _, _, _) = admit_transaction_source(unit, limits, entry)?;
+    let (_, key_fields, _, _, _, _) = admit_transaction_source(unit, limits, entry)?;
     if key_fields.len() != 1 {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "literal list stream bridge requires one explicit-key table".into(),
@@ -2104,7 +2143,7 @@ fn admit_project_list_stream(
     root_entry: &str,
     identity: RuntimeIdentity,
 ) -> Result<ListStreamBridge, AdmissionFailure> {
-    let (functions, key_fields, _, _, _) = admitted;
+    let (functions, key_fields, _, _, _, _) = admitted;
     let root = functions.get(root_entry).ok_or_else(|| {
         Box::new(StageOutcome::Skipped {
             reason: "configured qualified project stream root is not present".into(),
@@ -2612,12 +2651,55 @@ impl RuntimeEvaluator for TransactionalEvaluator {
 struct TableEffectHandler<'activation, 'runtime> {
     activation: &'activation mut TransactionActivation<'runtime>,
     key_fields: &'activation TableKeys,
+    table_fields: &'activation TableFields,
     mutations: &'activation mut Vec<TableMutation>,
     next_mutation: u64,
     limits: EvaluatorLimits,
 }
 
 impl EffectHandler for TableEffectHandler<'_, '_> {
+    fn scan_relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+        max_rows: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        if max_rows == 0 {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        if !self.key_fields.contains_key(source) || !self.table_fields.contains_key(source) {
+            return Ok(None);
+        }
+        let table = source.to_owned();
+        let range = match after {
+            Some(after) => (Bound::Excluded(after.to_vec()), Bound::Unbounded),
+            None => (Bound::Unbounded, Bound::Unbounded),
+        };
+        let mut rows = Vec::with_capacity(max_rows);
+        let mut next = None;
+        for (key, row) in self
+            .activation
+            .candidate_scan_range(&table, range)
+            .map_err(|error| transaction_error(table_error_code(error)))?
+        {
+            budget.debit(1)?;
+            next = Some(key.clone());
+            rows.push(row);
+            if rows.len() == max_rows {
+                break;
+            }
+        }
+        let has_next = rows.len() == max_rows;
+        Ok(Some(RelationPage {
+            rows,
+            next: has_next.then_some(next).flatten(),
+        }))
+    }
+
     fn handle(
         &mut self,
         callee: &Expr,
@@ -3079,10 +3161,12 @@ type TableAssertions = BTreeMap<String, Vec<Expr>>;
 type ModuleAssertions = Vec<Expr>;
 type TableKeys = BTreeMap<String, Vec<String>>;
 type TableFloatFields = BTreeMap<String, BTreeSet<String>>;
+type TableFields = BTreeMap<String, BTreeSet<String>>;
 type AdmittedTransaction = (
     Functions,
     TableKeys,
     TableFloatFields,
+    TableFields,
     TableAssertions,
     ModuleAssertions,
 );
@@ -3168,7 +3252,7 @@ fn admit_transaction_source(
             diagnostic.clone().redacted(),
         )));
     }
-    let (functions, key_fields, float_fields, table_assertions, module_assertions) =
+    let (functions, key_fields, float_fields, table_fields, table_assertions, module_assertions) =
         admitted_transaction_module(&parsed.value.items, None)
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
     if let Err(error) = limits.check_items(functions.len()) {
@@ -3183,6 +3267,7 @@ fn admit_transaction_source(
         functions,
         key_fields,
         float_fields,
+        table_fields,
         table_assertions,
         module_assertions,
     ))
@@ -3228,6 +3313,7 @@ fn admit_transaction_project(
     let mut functions = Functions::new();
     let mut key_fields = BTreeMap::new();
     let mut float_fields = TableFloatFields::new();
+    let mut table_fields = TableFields::new();
     let mut table_assertions = TableAssertions::new();
     let mut module_assertions = ModuleAssertions::new();
     for unit in &project.modules {
@@ -3248,6 +3334,7 @@ fn admit_transaction_project(
             module_functions,
             module_keys,
             module_float_fields,
+            module_table_fields,
             module_assertions_by_table,
             module_assertions_only,
         ) = admitted_transaction_module(&parsed.value.items, Some(&namespace))
@@ -3271,6 +3358,7 @@ fn admit_transaction_project(
         functions.extend(module_functions);
         key_fields.extend(module_keys);
         float_fields.extend(module_float_fields);
+        table_fields.extend(module_table_fields);
         table_assertions.extend(module_assertions_by_table);
         module_assertions.extend(module_assertions_only);
     }
@@ -3283,6 +3371,7 @@ fn admit_transaction_project(
         functions,
         key_fields,
         float_fields,
+        table_fields,
         table_assertions,
         module_assertions,
     ))
@@ -3384,6 +3473,7 @@ fn admitted_transaction_module(
     let mut functions = Functions::new();
     let mut key_fields = BTreeMap::new();
     let mut float_fields = TableFloatFields::new();
+    let mut table_fields = TableFields::new();
     let mut assertions = TableAssertions::new();
     let mut module_assertions = ModuleAssertions::new();
     for item in items {
@@ -3418,6 +3508,16 @@ fn admitted_transaction_module(
                     return Err("transactional source seam requires an explicit table key".into());
                 }
                 key_fields.insert(name.clone(), fields);
+                table_fields.insert(
+                    name.clone(),
+                    members
+                        .iter()
+                        .filter_map(|member| match member {
+                            orna_syntax_v1::TableMember::Field { name, .. } => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                );
                 float_fields.insert(
                     name.clone(),
                     members
@@ -3467,6 +3567,7 @@ fn admitted_transaction_module(
         functions,
         key_fields,
         float_fields,
+        table_fields,
         assertions,
         module_assertions,
     ))
@@ -3490,6 +3591,7 @@ fn lower_relation_bindings(
     functions: &Functions,
     table_keys: &TableKeys,
     float_fields: &TableFloatFields,
+    table_fields: &TableFields,
 ) -> Functions {
     let mut materialized = functions.clone();
     for (name, function) in materialized.iter_mut() {
@@ -3501,6 +3603,7 @@ fn lower_relation_bindings(
             &mut function.body,
             table_keys,
             float_fields,
+            table_fields,
             functions,
             name.rsplit_once('.').map(|(namespace, _)| namespace),
             &shadowed,
@@ -3513,6 +3616,7 @@ fn lower_relation_expression_with_resolution(
     expression: &mut Expr,
     table_keys: &TableKeys,
     float_fields: &TableFloatFields,
+    table_fields: &TableFields,
     functions: &Functions,
     namespace: Option<&str>,
     shadowed: &BTreeSet<String>,
@@ -3525,22 +3629,31 @@ fn lower_relation_expression_with_resolution(
         namespace,
         shadowed,
     )
-    .or_else(|| relation_window_count(expression, table_keys))
-    .or_else(|| relation_lookup(expression, table_keys))
-    .or_else(|| relation_filtered_one(expression, table_keys))
-    .or_else(|| relation_filter_count(expression, table_keys))
-    .or_else(|| relation_count(expression, table_keys))
-    .or_else(|| relation_window(expression, table_keys))
+    .or_else(|| relation_window_count(expression, table_keys, functions, namespace, shadowed))
+    .or_else(|| relation_lookup(expression, table_keys, functions, namespace, shadowed))
+    .or_else(|| relation_filtered_one(expression, table_keys, functions, namespace, shadowed))
+    .or_else(|| relation_filter_count(expression, table_keys, functions, namespace, shadowed))
+    .or_else(|| relation_count(expression, table_keys, functions, namespace, shadowed))
+    .or_else(|| relation_window(expression, table_keys, functions, namespace, shadowed))
     {
         *expression = lowered;
         return;
     }
+    lower_core_relation_input(
+        expression,
+        table_keys,
+        table_fields,
+        functions,
+        namespace,
+        shadowed,
+    );
     match expression {
         Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
             lower_relation_expression_with_resolution(
                 rhs,
                 table_keys,
                 float_fields,
+                table_fields,
                 functions,
                 namespace,
                 shadowed,
@@ -3552,6 +3665,7 @@ fn lower_relation_expression_with_resolution(
                     endpoint,
                     table_keys,
                     float_fields,
+                    table_fields,
                     functions,
                     namespace,
                     shadowed,
@@ -3563,6 +3677,7 @@ fn lower_relation_expression_with_resolution(
                 lhs,
                 table_keys,
                 float_fields,
+                table_fields,
                 functions,
                 namespace,
                 shadowed,
@@ -3571,6 +3686,7 @@ fn lower_relation_expression_with_resolution(
                 rhs,
                 table_keys,
                 float_fields,
+                table_fields,
                 functions,
                 namespace,
                 shadowed,
@@ -3583,6 +3699,7 @@ fn lower_relation_expression_with_resolution(
                 callee,
                 table_keys,
                 float_fields,
+                table_fields,
                 functions,
                 namespace,
                 shadowed,
@@ -3592,6 +3709,7 @@ fn lower_relation_expression_with_resolution(
                     &mut argument.value,
                     table_keys,
                     float_fields,
+                    table_fields,
                     functions,
                     namespace,
                     shadowed,
@@ -3603,6 +3721,7 @@ fn lower_relation_expression_with_resolution(
                 base,
                 table_keys,
                 float_fields,
+                table_fields,
                 functions,
                 namespace,
                 shadowed,
@@ -3611,15 +3730,19 @@ fn lower_relation_expression_with_resolution(
                 index,
                 table_keys,
                 float_fields,
+                table_fields,
                 functions,
                 namespace,
                 shadowed,
             );
         }
+        Expr::Field { base, .. } if matches!(base.as_ref(), Expr::Name { text, .. } if table_keys.contains_key(text)) =>
+            {}
         Expr::Field { base, .. } => lower_relation_expression_with_resolution(
             base,
             table_keys,
             float_fields,
+            table_fields,
             functions,
             namespace,
             shadowed,
@@ -3630,6 +3753,7 @@ fn lower_relation_expression_with_resolution(
                     element,
                     table_keys,
                     float_fields,
+                    table_fields,
                     functions,
                     namespace,
                     shadowed,
@@ -3642,6 +3766,7 @@ fn lower_relation_expression_with_resolution(
                     &mut field.value,
                     table_keys,
                     float_fields,
+                    table_fields,
                     functions,
                     namespace,
                     shadowed,
@@ -3659,6 +3784,7 @@ fn lower_relation_expression_with_resolution(
                 body,
                 table_keys,
                 float_fields,
+                table_fields,
                 functions,
                 namespace,
                 &shadowed,
@@ -3673,6 +3799,7 @@ fn lower_relation_expression_with_resolution(
                     statement,
                     table_keys,
                     float_fields,
+                    table_fields,
                     functions,
                     namespace,
                     &mut shadowed,
@@ -3683,6 +3810,7 @@ fn lower_relation_expression_with_resolution(
                     tail,
                     table_keys,
                     float_fields,
+                    table_fields,
                     functions,
                     namespace,
                     &shadowed,
@@ -3700,6 +3828,7 @@ fn lower_relation_expression_with_resolution(
                     expression,
                     table_keys,
                     float_fields,
+                    table_fields,
                     functions,
                     namespace,
                     shadowed,
@@ -3710,6 +3839,127 @@ fn lower_relation_expression_with_resolution(
         | Expr::Literal { .. }
         | Expr::InterpolatedString { .. }
         | Expr::ReplBinding { .. } => {}
+    }
+}
+
+fn lower_core_relation_input(
+    expression: &mut Expr,
+    table_keys: &TableKeys,
+    table_fields: &TableFields,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
+) {
+    let table = match expression {
+        Expr::Name { text, .. }
+            if table_keys.contains_key(text)
+                && table_fields.contains_key(text)
+                && !shadowed.contains(text) =>
+        {
+            Some(text.clone())
+        }
+        _ => None,
+    };
+    if let Some(table) = table {
+        let span = expression.span();
+        *expression = relation_source_expression(&table, span);
+        return;
+    }
+    match expression {
+        Expr::Group { inner, .. } => lower_core_relation_input(
+            inner,
+            table_keys,
+            table_fields,
+            functions,
+            namespace,
+            shadowed,
+        ),
+        Expr::Binary { lhs, op, rhs, .. }
+            if op == "|" && relation_stage_name(rhs, functions, namespace, shadowed).is_some() =>
+        {
+            lower_core_relation_input(
+                lhs,
+                table_keys,
+                table_fields,
+                functions,
+                namespace,
+                shadowed,
+            );
+        }
+        Expr::Call {
+            callee, arguments, ..
+        } if relation_stage_name(callee, functions, namespace, shadowed).is_some() => {
+            let relation_index = arguments
+                .iter()
+                .position(|argument| argument.name.as_deref() == Some("rows"))
+                .or_else(|| (!arguments.is_empty()).then_some(0));
+            if let Some(relation_index) = relation_index {
+                lower_core_relation_input(
+                    &mut arguments[relation_index].value,
+                    table_keys,
+                    table_fields,
+                    functions,
+                    namespace,
+                    shadowed,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn relation_stage_name<'a>(
+    expression: &'a Expr,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
+) -> Option<&'a str> {
+    let Expr::Name { text, .. } = expression else {
+        return None;
+    };
+    if !matches!(
+        text.as_str(),
+        "filter"
+            | "map"
+            | "sort_by"
+            | "take"
+            | "drop"
+            | "window"
+            | "count"
+            | "first"
+            | "one"
+            | "every"
+            | "exists"
+            | "sum"
+            | "min"
+            | "max"
+    ) {
+        return None;
+    }
+    root_relation_intrinsic_is_unshadowed(text, functions, namespace, shadowed)
+        .then_some(text.as_str())
+}
+
+fn relation_source_expression(table: &str, span: orna_syntax_v1::SyntaxSpan) -> Expr {
+    Expr::Call {
+        callee: Box::new(Expr::Field {
+            base: Box::new(Expr::ReplBinding {
+                text: "$__orna_relation".into(),
+                span: span.clone(),
+            }),
+            name: "source".into(),
+            span: span.clone(),
+        }),
+        arguments: vec![orna_syntax_v1::Argument {
+            name: None,
+            value: Expr::Literal {
+                text: format!("{table:?}"),
+                kind: orna_syntax_v1::LiteralKind::String,
+                span: span.clone(),
+            },
+            span: span.clone(),
+        }],
+        span,
     }
 }
 
@@ -3941,6 +4191,7 @@ fn lower_relation_statement_with_resolution(
     statement: &mut Statement,
     table_keys: &TableKeys,
     float_fields: &TableFloatFields,
+    table_fields: &TableFields,
     functions: &Functions,
     namespace: Option<&str>,
     shadowed: &mut BTreeSet<String>,
@@ -3951,6 +4202,7 @@ fn lower_relation_statement_with_resolution(
                 value,
                 table_keys,
                 float_fields,
+                table_fields,
                 functions,
                 namespace,
                 shadowed,
@@ -3964,6 +4216,7 @@ fn lower_relation_statement_with_resolution(
             value,
             table_keys,
             float_fields,
+            table_fields,
             functions,
             namespace,
             shadowed,
@@ -3974,6 +4227,7 @@ fn lower_relation_statement_with_resolution(
                     value,
                     table_keys,
                     float_fields,
+                    table_fields,
                     functions,
                     namespace,
                     shadowed,
@@ -3984,7 +4238,13 @@ fn lower_relation_statement_with_resolution(
     }
 }
 
-fn relation_count(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
+fn relation_count(
+    expression: &Expr,
+    table_keys: &TableKeys,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
+) -> Option<Expr> {
     let Expr::Binary { lhs, op, rhs, .. } = expression else {
         return None;
     };
@@ -3998,7 +4258,9 @@ fn relation_count(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
     else {
         return None;
     };
-    if !table_keys.contains_key(table) || !relation_count_target(rhs) {
+    if !table_keys.contains_key(table)
+        || !relation_count_target(rhs, functions, namespace, shadowed)
+    {
         return None;
     }
     Some(Expr::Call {
@@ -4015,38 +4277,86 @@ fn relation_count(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
     })
 }
 
-fn relation_count_target(expression: &Expr) -> bool {
-    match expression {
-        Expr::Name { text, .. } => text == "count",
+fn relation_count_target(
+    expression: &Expr,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
+) -> bool {
+    let name = match expression {
+        Expr::Name { text, .. } => text,
         Expr::Call {
             callee, arguments, ..
         } => {
-            arguments.is_empty()
-                && matches!(callee.as_ref(), Expr::Name { text, .. } if text == "count")
+            if !arguments.is_empty() {
+                return false;
+            }
+            let Expr::Name { text, .. } = callee.as_ref() else {
+                return false;
+            };
+            text
         }
-        _ => false,
-    }
+        _ => return false,
+    };
+    name == "count" && root_relation_intrinsic_is_unshadowed(name, functions, namespace, shadowed)
 }
 
-fn relation_window_count(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
+fn relation_window_count(
+    expression: &Expr,
+    table_keys: &TableKeys,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
+) -> Option<Expr> {
     let Expr::Binary { lhs, op, rhs, .. } = expression else {
         return None;
     };
-    if op != "|" || !relation_count_target(rhs) {
+    if op != "|" || !relation_count_target(rhs, functions, namespace, shadowed) {
         return None;
     }
-    relation_window_operation(lhs, table_keys, "window_count")
+    relation_window_operation(
+        lhs,
+        table_keys,
+        functions,
+        namespace,
+        shadowed,
+        "window_count",
+    )
 }
 
-fn relation_window(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
-    relation_window_operation(expression, table_keys, "window")
+fn relation_window(
+    expression: &Expr,
+    table_keys: &TableKeys,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
+) -> Option<Expr> {
+    relation_window_operation(
+        expression,
+        table_keys,
+        functions,
+        namespace,
+        shadowed,
+        "window",
+    )
 }
 
 fn relation_window_operation(
     expression: &Expr,
     table_keys: &TableKeys,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
     operation: &str,
 ) -> Option<Expr> {
+    let intrinsic = if operation == "window_count" {
+        "window"
+    } else {
+        operation
+    };
+    if !root_relation_intrinsic_is_unshadowed(intrinsic, functions, namespace, shadowed) {
+        return None;
+    }
     let (table, table_span, arguments) = match expression {
         Expr::Binary { lhs, op, rhs, .. } if op == "|" => {
             let Expr::Name { text: table, span } = lhs.as_ref() else {
@@ -4154,11 +4464,17 @@ fn relation_window_size_and_step(arguments: &[orna_syntax_v1::Argument]) -> Opti
     Some((size, step))
 }
 
-fn relation_filter_count(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
+fn relation_filter_count(
+    expression: &Expr,
+    table_keys: &TableKeys,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
+) -> Option<Expr> {
     let Expr::Binary { lhs, op, rhs, .. } = expression else {
         return None;
     };
-    if op != "|" || !relation_count_target(rhs) {
+    if op != "|" || !relation_count_target(rhs, functions, namespace, shadowed) {
         return None;
     }
     let Expr::Binary {
@@ -4186,7 +4502,9 @@ fn relation_filter_count(expression: &Expr, table_keys: &TableKeys) -> Option<Ex
     else {
         return None;
     };
-    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "filter") {
+    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "filter")
+        || !root_relation_intrinsic_is_unshadowed("filter", functions, namespace, shadowed)
+    {
         return None;
     }
     let [argument] = arguments.as_slice() else {
@@ -4257,11 +4575,20 @@ fn relation_filter_count(expression: &Expr, table_keys: &TableKeys) -> Option<Ex
 /// key lookup.  It retains the candidate relation's canonical order so the
 /// effect boundary can stop after observing a second match and distinguish
 /// zero from multiple cardinality failures.
-fn relation_filtered_one(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
+fn relation_filtered_one(
+    expression: &Expr,
+    table_keys: &TableKeys,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
+) -> Option<Expr> {
     let Expr::Binary { lhs, op, rhs, .. } = expression else {
         return None;
     };
-    if op != "|" || !relation_one_target(rhs) {
+    if op != "|"
+        || !relation_one_target(rhs)
+        || !root_relation_intrinsic_is_unshadowed("one", functions, namespace, shadowed)
+    {
         return None;
     }
     let Expr::Binary {
@@ -4289,7 +4616,9 @@ fn relation_filtered_one(expression: &Expr, table_keys: &TableKeys) -> Option<Ex
     else {
         return None;
     };
-    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "filter") {
+    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "filter")
+        || !root_relation_intrinsic_is_unshadowed("filter", functions, namespace, shadowed)
+    {
         return None;
     }
     let [argument] = arguments.as_slice() else {
@@ -4365,11 +4694,20 @@ fn relation_one_target(expression: &Expr) -> bool {
     )
 }
 
-fn relation_lookup(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
+fn relation_lookup(
+    expression: &Expr,
+    table_keys: &TableKeys,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
+) -> Option<Expr> {
     let Expr::Binary { lhs, op, rhs, .. } = expression else {
         return None;
     };
-    if op != "|" || !relation_one_target(rhs) {
+    if op != "|"
+        || !relation_one_target(rhs)
+        || !root_relation_intrinsic_is_unshadowed("one", functions, namespace, shadowed)
+    {
         return None;
     }
     let Expr::Binary {
@@ -4415,7 +4753,10 @@ fn relation_lookup(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
     let Pattern::Name(binding, _) = &parameter.pattern else {
         return None;
     };
-    if filter_op != "|" || filter_name != "filter" {
+    if filter_op != "|"
+        || filter_name != "filter"
+        || !root_relation_intrinsic_is_unshadowed("filter", functions, namespace, shadowed)
+    {
         return None;
     }
     let mut arguments = Vec::new();
@@ -6620,25 +6961,53 @@ mod durable_tests {
             r#"Stock | filter(stock => stock.location == "north" && stock.sku == "pencil") | one()"#,
         );
         assert!(ordered.is_ok());
-        assert!(super::relation_lookup(&ordered.value, &keys).is_some());
+        assert!(super::relation_lookup(
+            &ordered.value,
+            &keys,
+            &Functions::new(),
+            None,
+            &std::collections::BTreeSet::new(),
+        )
+        .is_some());
 
         let reordered = orna_syntax_v1::parse_expression(
             r#"Stock | filter(stock => stock.sku == "pencil" && stock.location == "north") | one()"#,
         );
         assert!(reordered.is_ok());
-        assert!(super::relation_lookup(&reordered.value, &keys).is_none());
+        assert!(super::relation_lookup(
+            &reordered.value,
+            &keys,
+            &Functions::new(),
+            None,
+            &std::collections::BTreeSet::new(),
+        )
+        .is_none());
 
         let non_key = orna_syntax_v1::parse_expression(
             r#"Stock | filter(stock => stock.location == "north" && stock.quantity == 12) | one()"#,
         );
         assert!(non_key.is_ok());
-        assert!(super::relation_lookup(&non_key.value, &keys).is_none());
+        assert!(super::relation_lookup(
+            &non_key.value,
+            &keys,
+            &Functions::new(),
+            None,
+            &std::collections::BTreeSet::new(),
+        )
+        .is_none());
 
         let duplicate_key = orna_syntax_v1::parse_expression(
             r#"Stock | filter(stock => stock.location == "north" && stock.location == "south") | one()"#,
         );
         assert!(duplicate_key.is_ok());
-        assert!(super::relation_lookup(&duplicate_key.value, &keys).is_none());
+        assert!(super::relation_lookup(
+            &duplicate_key.value,
+            &keys,
+            &Functions::new(),
+            None,
+            &std::collections::BTreeSet::new(),
+        )
+        .is_none());
     }
 
     #[test]
@@ -6657,6 +7026,7 @@ mod durable_tests {
             &mut expression,
             &keys,
             &super::TableFloatFields::new(),
+            &super::TableFields::new(),
             &Functions::new(),
             None,
             &std::collections::BTreeSet::new(),
@@ -6702,15 +7072,60 @@ mod durable_tests {
             );
             let parsed = parse_module(&source);
             assert!(parsed.is_ok(), "{operation}: {:?}", parsed.diagnostics);
-            let (functions, keys, float_fields, _, _) =
+            let (functions, keys, float_fields, table_fields, _, _) =
                 admitted_transaction_module(&parsed.value.items, None).expect("valid source");
-            let lowered = lower_relation_bindings(&functions, &keys, &float_fields);
+            let lowered = lower_relation_bindings(&functions, &keys, &float_fields, &table_fields);
 
             assert!(
                 matches!(&lowered["total"].body, Expr::Binary { op, .. } if op == "|"),
                 "{operation} shadow was lowered: {:?}",
                 lowered["total"].body
             );
+        }
+    }
+
+    #[test]
+    fn specialized_relation_lowering_respects_declarations_and_bindings() {
+        for source in [
+            r#"
+                pub table Stock(location: Str, sku: Str) { quantity: Int, }
+                fn filter(value: Int) = 99;
+                fn one(value: Int) = 99;
+                fn count(value: Int) = 99;
+                fn window(value: Int) = 99;
+                fn lookup_case() = Stock | filter(stock => stock.location == "north" && stock.sku == "pencil") | one();
+                fn filtered_one_case() = Stock | filter(stock => stock.quantity == 12) | one();
+                fn filter_count_case() = Stock | filter(stock => stock.quantity == 12) | count;
+                fn count_case() = Stock | count;
+                fn window_case() = Stock | window(2) | count;
+            "#,
+            r#"
+                pub table Stock(location: Str, sku: Str) { quantity: Int, }
+                fn lookup_case(filter: Int, one: Int) = Stock | filter(stock => stock.location == "north" && stock.sku == "pencil") | one();
+                fn filtered_one_case(filter: Int, one: Int) = Stock | filter(stock => stock.quantity == 12) | one();
+                fn filter_count_case(filter: Int, count: Int) = Stock | filter(stock => stock.quantity == 12) | count;
+                fn count_case(count: Int) = Stock | count;
+                fn window_case(window: Int) = Stock | window(2) | count;
+            "#,
+        ] {
+            let parsed = parse_module(source);
+            assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+            let (functions, keys, float_fields, table_fields, _, _) =
+                admitted_transaction_module(&parsed.value.items, None).expect("valid source");
+            let lowered = lower_relation_bindings(&functions, &keys, &float_fields, &table_fields);
+            for name in [
+                "lookup_case",
+                "filtered_one_case",
+                "filter_count_case",
+                "count_case",
+                "window_case",
+            ] {
+                assert!(
+                    matches!(&lowered[name].body, Expr::Binary { op, .. } if op == "|"),
+                    "{name} was specialized despite lexical shadowing: {:?}",
+                    lowered[name].body
+                );
+            }
         }
     }
 
