@@ -374,6 +374,9 @@ pub enum DiagnosticCode {
     ExecutionRejected,
     Cancelled,
     Internal,
+    /// A table or cross-table assertion evaluated false. This is the primary
+    /// safe diagnostic code; assertion provenance is carried separately.
+    TableAssertionFalse,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -391,6 +394,10 @@ pub struct FailureRecord {
     pub attempts: u32,
     pub status: FailureStatus,
     pub diagnostic: SafeDiagnostic,
+    /// Optional assertion-specific context carried alongside the stable
+    /// generic diagnostic. Ordinary callers continue to use
+    /// [`SafeDiagnostic`] and receive `None` here.
+    pub assertion_detail: Option<AssertionDiagnosticDetail>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -449,6 +456,13 @@ pub enum CommitIntent {
         lease: DeliveryLease,
         diagnostic: SafeDiagnostic,
     },
+    /// Fails a delivery while retaining safe, assertion-specific context.
+    /// This additive variant keeps existing `Fail` callers source-compatible.
+    FailWithAssertion {
+        lease: DeliveryLease,
+        diagnostic: SafeDiagnostic,
+        detail: AssertionDiagnosticDetail,
+    },
     Retry {
         failure: FailureIdentity,
         expected_version: u64,
@@ -475,6 +489,13 @@ pub enum CommitIntent {
         failure: FailureIdentity,
         expected_version: u64,
         diagnostic: SafeDiagnostic,
+    },
+    /// Fails an admitted replay while retaining safe assertion context.
+    ReplayFailWithAssertion {
+        failure: FailureIdentity,
+        expected_version: u64,
+        diagnostic: SafeDiagnostic,
+        detail: AssertionDiagnosticDetail,
     },
     /// Cancels an admitted replay without changing the live checkpoint.
     ReplayCancel {
@@ -610,6 +631,17 @@ pub trait AsyncFailurePayloadBackend {
         &'a mut self,
         lease: DeliveryLease,
         diagnostic: SafeDiagnostic,
+        payload: StreamFailurePayload,
+    ) -> Pin<Box<dyn Future<Output = Result<CommitResult, Self::Error>> + 'a>>;
+
+    /// Additive assertion-aware failure seam. Implementations must either
+    /// persist the detail or return an explicit unsupported error; silently
+    /// degrading to a generic failure is not permitted.
+    fn fail_with_assertion_detail_and_payload_async<'a>(
+        &'a mut self,
+        lease: DeliveryLease,
+        diagnostic: SafeDiagnostic,
+        detail: AssertionDiagnosticDetail,
         payload: StreamFailurePayload,
     ) -> Pin<Box<dyn Future<Output = Result<CommitResult, Self::Error>> + 'a>>;
 }
@@ -848,6 +880,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 CommitResult::Acquired { lease }
             }
             CommitIntent::Fail { lease, diagnostic } => {
+                let detail = None;
                 if lease.purpose != LeasePurpose::Deliver {
                     return CommitResult::Rejected(RejectReason::LeaseFenced);
                 }
@@ -864,6 +897,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                         attempts: 0,
                         status: FailureStatus::Failed,
                         diagnostic,
+                        assertion_detail: detail.clone(),
                     });
                 // A provider may select a different successor when the same
                 // opaque delivery is retried. Keep the natural identity
@@ -874,6 +908,44 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 failure.attempts += u32::from(failure.status != FailureStatus::Retrying);
                 failure.status = FailureStatus::Failed;
                 failure.diagnostic = diagnostic;
+                failure.assertion_detail = detail;
+                CommitResult::Failed {
+                    failure: failure.clone(),
+                }
+            }
+            CommitIntent::FailWithAssertion {
+                lease,
+                diagnostic: supplied_diagnostic,
+                detail,
+            } => {
+                let diagnostic = SafeDiagnostic {
+                    code: DiagnosticCode::TableAssertionFalse,
+                    class: supplied_diagnostic.class,
+                };
+                if lease.purpose != LeasePurpose::Deliver {
+                    return CommitResult::Rejected(RejectReason::LeaseFenced);
+                }
+                if let Err(reason) = self.consume_lease(&lease) {
+                    return CommitResult::Rejected(reason);
+                }
+                let identity = FailureIdentity(lease.delivery);
+                let failure = self
+                    .failures
+                    .entry(identity.clone())
+                    .or_insert(FailureRecord {
+                        identity: identity.clone(),
+                        version: 0,
+                        attempts: 0,
+                        status: FailureStatus::Failed,
+                        diagnostic,
+                        assertion_detail: Some(detail.clone()),
+                    });
+                failure.identity = identity;
+                failure.version += 1;
+                failure.attempts += u32::from(failure.status != FailureStatus::Retrying);
+                failure.status = FailureStatus::Failed;
+                failure.diagnostic = diagnostic;
+                failure.assertion_detail = Some(detail);
                 CommitResult::Failed {
                     failure: failure.clone(),
                 }
@@ -1028,6 +1100,34 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 record.version += 1;
                 record.status = FailureStatus::Skipped;
                 record.diagnostic = diagnostic;
+                record.assertion_detail = None;
+                CommitResult::ReplayFailed {
+                    failure: record.clone(),
+                }
+            }
+            CommitIntent::ReplayFailWithAssertion {
+                failure,
+                expected_version,
+                diagnostic: supplied_diagnostic,
+                detail,
+            } => {
+                let diagnostic = SafeDiagnostic {
+                    code: DiagnosticCode::TableAssertionFalse,
+                    class: supplied_diagnostic.class,
+                };
+                let Some(record) = self.failures.get_mut(&failure) else {
+                    return CommitResult::Rejected(RejectReason::FailureMissing);
+                };
+                if record.version != expected_version {
+                    return CommitResult::Rejected(RejectReason::StaleFailure);
+                }
+                if record.status != FailureStatus::Replaying {
+                    return CommitResult::Rejected(RejectReason::RetryNotAllowed);
+                }
+                record.version += 1;
+                record.status = FailureStatus::Skipped;
+                record.diagnostic = diagnostic;
+                record.assertion_detail = Some(detail);
                 CommitResult::ReplayFailed {
                     failure: record.clone(),
                 }
@@ -1381,6 +1481,50 @@ mod tests {
             "deterministic-safe-witness"
         );
         assert!(!format!("{detail:?}").contains("deterministic-safe-witness"));
+    }
+
+    #[test]
+    fn assertion_failure_intent_retains_detail_through_retry() {
+        let detail = AssertionDiagnosticDetail::table_or_cross_table_false(
+            AssertionRef::from_row_ref(diagnostic_row("assertion")),
+            ObjectRef::from_row_ref(diagnostic_row("owner")),
+            AssertionOwnerKind::Table,
+            ExpressionRef::from_row_ref(diagnostic_row("predicate")),
+            SourceSpan::new(
+                diagnostic_file(),
+                1.into(),
+                2.into(),
+                1.into(),
+                2.into(),
+                1.into(),
+                3.into(),
+            )
+            .unwrap(),
+            None,
+        );
+        let delivery = delivery("assertion", "after-assertion");
+        let mut backend = InMemoryCheckpointBackend::default();
+        let expected = expected(&backend, &delivery);
+        let lease = acquire(&mut backend, delivery);
+        let failed = match backend.apply(CommitIntent::FailWithAssertion {
+            lease,
+            diagnostic: diagnostic(),
+            detail: detail.clone(),
+        }) {
+            CommitResult::Failed { failure } => failure,
+            result => panic!("unexpected result: {result:?}"),
+        };
+        assert_eq!(failed.assertion_detail, Some(detail.clone()));
+        assert_eq!(failed.diagnostic.code, DiagnosticCode::TableAssertionFalse);
+        assert!(matches!(
+            backend.apply(CommitIntent::Retry {
+                failure: failed.identity,
+                expected_version: failed.version,
+                expected,
+            }),
+            CommitResult::RetryScheduled { ref failure }
+                if failure.assertion_detail == Some(detail)
+        ));
     }
 
     #[test]
