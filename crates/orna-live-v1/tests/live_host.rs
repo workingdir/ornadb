@@ -4162,8 +4162,16 @@ fn durable_runtime_recovers_an_owned_running_request_after_takeover() {
     };
     let runtime = open_durable_state(&repository);
     let old = block_on(runtime.acquire_lease([73; 16])).unwrap();
-    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
-    block_on(runtime.start_request_with_owner(identity, fingerprint, old)).unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(identity, fingerprint)).unwrap();
+    let capability = capability.expect("fresh owner-bound capability");
+    block_on(runtime.start_request_with_owner_and_admission(
+        identity,
+        fingerprint,
+        old,
+        capability,
+    ))
+    .unwrap();
     block_on(runtime.recover_abandoned(old.owner_id, [74; 16])).unwrap();
     drop(runtime);
 
@@ -4224,8 +4232,16 @@ fn durable_replay_rejects_an_uncertain_payload_for_a_proven_rollback() {
     };
     let runtime = open_durable_state(&repository);
     let old = block_on(runtime.acquire_lease([73; 16])).unwrap();
-    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
-    block_on(runtime.start_request_with_owner(identity, fingerprint, old)).unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(identity, fingerprint)).unwrap();
+    let capability = capability.expect("fresh owner-bound capability");
+    block_on(runtime.start_request_with_owner_and_admission(
+        identity,
+        fingerprint,
+        old,
+        capability,
+    ))
+    .unwrap();
     let activation = block_on(runtime.begin_activation()).unwrap();
     let mutation = TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap();
     assert_eq!(
@@ -4301,8 +4317,16 @@ fn durable_replay_rejects_a_rollback_payload_for_external_uncertainty() {
     };
     let runtime = open_durable_state(&repository);
     let old = block_on(runtime.acquire_lease([75; 16])).unwrap();
-    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
-    block_on(runtime.start_request_with_owner(identity, fingerprint, old)).unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(identity, fingerprint)).unwrap();
+    let capability = capability.expect("fresh owner-bound capability");
+    block_on(runtime.start_request_with_owner_and_admission(
+        identity,
+        fingerprint,
+        old,
+        capability,
+    ))
+    .unwrap();
     block_on(runtime.record_external_effect(identity, fingerprint, old)).unwrap();
     let fence = block_on(runtime.recover_abandoned(old.owner_id, [76; 16])).unwrap();
     let mismatched = TerminalOutcome::new(
@@ -4364,8 +4388,16 @@ fn durable_runtime_replays_proven_rollback_as_redacted_orphaned_failure() {
     };
     let runtime = open_durable_state(&repository);
     let old = block_on(runtime.acquire_lease([77; 16])).unwrap();
-    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
-    block_on(runtime.start_request_with_owner(identity, fingerprint, old)).unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(identity, fingerprint)).unwrap();
+    let capability = capability.expect("fresh owner-bound capability");
+    block_on(runtime.start_request_with_owner_and_admission(
+        identity,
+        fingerprint,
+        old,
+        capability,
+    ))
+    .unwrap();
     let activation = block_on(runtime.begin_activation()).unwrap();
     let mutation = TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap();
     assert_eq!(
@@ -4483,8 +4515,16 @@ fn durable_runtime_reports_a_current_owner_as_active_without_reexecution() {
     };
     let runtime = open_durable_state(&repository);
     let owner = block_on(runtime.acquire_lease([75; 16])).unwrap();
-    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
-    block_on(runtime.start_request_with_owner(identity, fingerprint, owner)).unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(identity, fingerprint)).unwrap();
+    let capability = capability.expect("fresh owner-bound capability");
+    block_on(runtime.start_request_with_owner_and_admission(
+        identity,
+        fingerprint,
+        owner,
+        capability,
+    ))
+    .unwrap();
     drop(runtime);
 
     let mut host = durable_host_with_owner(open_durable_state(&repository), [76; 16]);
@@ -4546,8 +4586,17 @@ fn durable_dispatch_rejects_a_fenced_owner_before_cancellation_callback() {
     let target_fingerprint = request_fingerprint(&eval([1; 16], [65; 16], "target"), [1; 16]);
     let target_runtime = open_durable_state(&repository);
     let old = block_on(target_runtime.acquire_lease([66; 16])).unwrap();
-    block_on(target_runtime.reserve_request(target, target_fingerprint)).unwrap();
-    block_on(target_runtime.start_request_with_owner(target, target_fingerprint, old)).unwrap();
+    let (_, capability) =
+        block_on(target_runtime.reserve_request_with_admission(target, target_fingerprint))
+            .unwrap();
+    let capability = capability.expect("fresh owner-bound capability");
+    block_on(target_runtime.start_request_with_owner_and_admission(
+        target,
+        target_fingerprint,
+        old,
+        capability,
+    ))
+    .unwrap();
     block_on(target_runtime.recover_abandoned(old.owner_id, [68; 16])).unwrap();
     drop(target_runtime);
 
@@ -4577,8 +4626,16 @@ fn durable_runtime_rejects_a_stale_terminal_owner_transition() {
     };
     let fingerprint = [78; 32];
     let old = block_on(runtime.acquire_lease([77; 16])).unwrap();
-    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
-    block_on(runtime.start_request_with_owner(identity, fingerprint, old)).unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(identity, fingerprint)).unwrap();
+    let capability = capability.expect("fresh owner-bound capability");
+    block_on(runtime.start_request_with_owner_and_admission(
+        identity,
+        fingerprint,
+        old,
+        capability,
+    ))
+    .unwrap();
     block_on(runtime.recover_abandoned(old.owner_id, [78; 16])).unwrap();
     assert_eq!(
         block_on(runtime.complete_request_with_owner(
@@ -4868,8 +4925,16 @@ fn delete_cancels_durable_session_work_before_returning_success() {
     let fingerprint = [92; 32];
     let owner = [93; 16];
     let lease = block_on(runtime.acquire_lease(owner)).unwrap();
-    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
-    block_on(runtime.start_request_with_owner(identity, fingerprint, lease)).unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(identity, fingerprint)).unwrap();
+    let capability = capability.expect("fresh owner-bound capability");
+    block_on(runtime.start_request_with_owner_and_admission(
+        identity,
+        fingerprint,
+        lease,
+        capability,
+    ))
+    .unwrap();
     drop(runtime);
 
     let mut host = durable_host_with_owner(open_durable_state(&repository), owner);
@@ -4987,8 +5052,16 @@ fn failed_child_join_after_durable_cancellation_never_reports_delete_success() {
     let owner = [100; 16];
     let lease = block_on(runtime.acquire_lease(owner)).unwrap();
     block_on(runtime.reserve_request(reserved, reserved_fingerprint)).unwrap();
-    block_on(runtime.reserve_request(running, running_fingerprint)).unwrap();
-    block_on(runtime.start_request_with_owner(running, running_fingerprint, lease)).unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(running, running_fingerprint)).unwrap();
+    let capability = capability.expect("fresh owner-bound capability");
+    block_on(runtime.start_request_with_owner_and_admission(
+        running,
+        running_fingerprint,
+        lease,
+        capability,
+    ))
+    .unwrap();
     drop(runtime);
 
     let mut host = durable_host_with_owner(open_durable_state(&repository), owner);
@@ -5193,8 +5266,16 @@ fn failed_durable_drain_never_reports_delete_success() {
     };
     let fingerprint = [96; 32];
     let lease = block_on(runtime.acquire_lease([97; 16])).unwrap();
-    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
-    block_on(runtime.start_request_with_owner(identity, fingerprint, lease)).unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(identity, fingerprint)).unwrap();
+    let capability = capability.expect("fresh owner-bound capability");
+    block_on(runtime.start_request_with_owner_and_admission(
+        identity,
+        fingerprint,
+        lease,
+        capability,
+    ))
+    .unwrap();
     drop(runtime);
 
     let mut host = durable_host_with_owner(open_durable_state(&repository), [98; 16]);
@@ -5248,8 +5329,16 @@ fn expired_delete_cannot_cancel_durable_session_work() {
     let fingerprint = [101; 32];
     let owner = [102; 16];
     let lease = block_on(runtime.acquire_lease(owner)).unwrap();
-    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
-    block_on(runtime.start_request_with_owner(identity, fingerprint, lease)).unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(identity, fingerprint)).unwrap();
+    let capability = capability.expect("fresh owner-bound capability");
+    block_on(runtime.start_request_with_owner_and_admission(
+        identity,
+        fingerprint,
+        lease,
+        capability,
+    ))
+    .unwrap();
     drop(runtime);
 
     let mut host = durable_host_with_owner(open_durable_state(&repository), owner);

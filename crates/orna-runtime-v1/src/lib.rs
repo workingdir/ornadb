@@ -5597,9 +5597,9 @@ impl RuntimeState {
         .await
     }
 
-    /// Starts a request with durable ownership. The runtime records effect
-    /// evidence separately at the transaction/effect boundary so restart
-    /// recovery can fence the old activation before changing its record.
+    /// Rejects owner-only promotion of a Reserved row. Reserved requests must
+    /// use the capability-bound start path so persisted reservations cannot be
+    /// promoted without authenticated admission evidence.
     pub async fn start_request_with_owner(
         &self,
         identity: RequestIdentity,
@@ -5624,41 +5624,9 @@ impl RuntimeState {
         if current.state != RequestState::Reserved {
             return Err(RuntimeError::RequestStateConflict);
         }
-        if request_admission_exists_tx(&tx, identity).await? {
-            return Err(RuntimeError::RequestStateConflict);
-        }
-        let changed = tx
-            .execute(
-                "UPDATE request_ledger
-                 SET state = ?1, owner_id = ?2, owner_epoch = ?3,
-                     effect_evidence = 0, recovery_disposition = 0,
-                     controlled_transaction_proof = NULL, controlled_rollback_proof = NULL
-                 WHERE session_id = ?4 AND request_id = ?5 AND fingerprint = ?6 AND state = ?7",
-                params![
-                    RequestState::Running.code(),
-                    owner.owner_id.to_vec(),
-                    i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                    identity.session_id.to_vec(),
-                    identity.request_id.to_vec(),
-                    fingerprint.to_vec(),
-                    RequestState::Reserved.code(),
-                ],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if changed != 1 {
-            return Err(RuntimeError::RecoveryInvalid);
-        }
-        sync_run_request_state_tx(&tx, identity, RunObservationStatus::Running).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        Ok(RequestStatus {
-            identity,
-            fingerprint,
-            state: RequestState::Running,
-            terminal_outcome: None,
-        })
+        // This owner-only compatibility entry point has no capability to
+        // authenticate. Reserved rows must use the capability-bound path.
+        return Err(RuntimeError::RequestStateConflict);
     }
 
     /// Starts a newly admitted request with the exact capability issued by
@@ -15926,9 +15894,13 @@ mod tests {
             let owner = state.acquire_lease(id(4)).await.unwrap();
             let identity = request(4, 5);
             let fingerprint = digest(6);
-            state.reserve_request(identity, fingerprint).await.unwrap();
+            let (_, capability) = state
+                .reserve_request_with_admission(identity, fingerprint)
+                .await
+                .unwrap();
+            let capability = capability.expect("fresh owner-bound capability");
             state
-                .start_request_with_owner(identity, fingerprint, owner)
+                .start_request_with_owner_and_admission(identity, fingerprint, owner, capability)
                 .await
                 .unwrap();
             let context = state.begin_activation().await.unwrap();
@@ -15990,9 +15962,13 @@ mod tests {
         let owner = state.acquire_lease(id(4)).await.unwrap();
         let identity = request(4, 5);
         let fingerprint = digest(6);
-        state.reserve_request(identity, fingerprint).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
         state
-            .start_request_with_owner(identity, fingerprint, owner)
+            .start_request_with_owner_and_admission(identity, fingerprint, owner, capability)
             .await
             .unwrap();
         let context = state.begin_activation().await.unwrap();
@@ -16099,9 +16075,13 @@ mod tests {
         let owner = state.acquire_lease(id(4)).await.unwrap();
         let identity = request(4, 5);
         let fingerprint = digest(6);
-        state.reserve_request(identity, fingerprint).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
         state
-            .start_request_with_owner(identity, fingerprint, owner)
+            .start_request_with_owner_and_admission(identity, fingerprint, owner, capability)
             .await
             .unwrap();
         let context = state.begin_activation().await.unwrap();
@@ -16175,9 +16155,13 @@ mod tests {
         let owner = state.acquire_lease(id(4)).await.unwrap();
         let identity = request(4, 5);
         let fingerprint = digest(6);
-        state.reserve_request(identity, fingerprint).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
         state
-            .start_request_with_owner(identity, fingerprint, owner)
+            .start_request_with_owner_and_admission(identity, fingerprint, owner, capability)
             .await
             .unwrap();
         state
@@ -16246,9 +16230,13 @@ mod tests {
         let owner = state.acquire_lease(id(4)).await.unwrap();
         let identity = request(4, 5);
         let fingerprint = digest(6);
-        state.reserve_request(identity, fingerprint).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
         state
-            .start_request_with_owner(identity, fingerprint, owner)
+            .start_request_with_owner_and_admission(identity, fingerprint, owner, capability)
             .await
             .unwrap();
         let context = state.begin_activation().await.unwrap();
@@ -16294,9 +16282,13 @@ mod tests {
         let owner = state.acquire_lease(id(4)).await.unwrap();
         let identity = request(4, 5);
         let fingerprint = digest(6);
-        state.reserve_request(identity, fingerprint).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
         state
-            .start_request_with_owner(identity, fingerprint, owner)
+            .start_request_with_owner_and_admission(identity, fingerprint, owner, capability)
             .await
             .unwrap();
         let context = state.begin_activation().await.unwrap();
@@ -16348,9 +16340,13 @@ mod tests {
         let owner = state.acquire_lease(id(4)).await.unwrap();
         let identity = request(4, 5);
         let fingerprint = digest(6);
-        state.reserve_request(identity, fingerprint).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
         state
-            .start_request_with_owner(identity, fingerprint, owner)
+            .start_request_with_owner_and_admission(identity, fingerprint, owner, capability)
             .await
             .unwrap();
         let context = state.begin_activation().await.unwrap();
@@ -16947,9 +16943,13 @@ mod tests {
         state.reserve_request(legacy, fingerprint).await.unwrap();
         state.start_request(legacy, fingerprint).await.unwrap();
         let old = state.acquire_lease(id(7)).await.unwrap();
-        state.reserve_request(owned, fingerprint).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(owned, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
         state
-            .start_request_with_owner(owned, fingerprint, old)
+            .start_request_with_owner_and_admission(owned, fingerprint, old, capability)
             .await
             .unwrap();
         assert_eq!(state.running_requests().await.unwrap().len(), 2);
@@ -17824,9 +17824,13 @@ mod tests {
         let identity = request(4, 5);
         let fingerprint = digest(6);
         let active = state.acquire_lease(id(7)).await.unwrap();
-        state.reserve_request(identity, fingerprint).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
         state
-            .start_request_with_owner(identity, fingerprint, active)
+            .start_request_with_owner_and_admission(identity, fingerprint, active, capability)
             .await
             .unwrap();
         assert_eq!(
@@ -17873,14 +17877,18 @@ mod tests {
         let identity = request(4, 5);
         let fingerprint = digest(6);
         let old = state.acquire_lease(id(7)).await.unwrap();
-        state.reserve_request(identity, fingerprint).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
         let reserved_identity = request(4, 7);
         state
             .reserve_request(reserved_identity, fingerprint)
             .await
             .unwrap();
         state
-            .start_request_with_owner(identity, fingerprint, old)
+            .start_request_with_owner_and_admission(identity, fingerprint, old, capability)
             .await
             .unwrap();
         let current = state.recover_abandoned(id(7), id(8)).await.unwrap();
@@ -17935,12 +17943,13 @@ mod tests {
         );
 
         let next_identity = request(4, 6);
-        state
-            .reserve_request(next_identity, fingerprint)
+        let (_, capability) = state
+            .reserve_request_with_admission(next_identity, fingerprint)
             .await
             .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
         state
-            .start_request_with_owner(next_identity, fingerprint, current)
+            .start_request_with_owner_and_admission(next_identity, fingerprint, current, capability)
             .await
             .unwrap();
         assert_eq!(
@@ -18246,9 +18255,13 @@ mod tests {
         let owner = state.acquire_lease(id(4)).await.unwrap();
         let identity = request(4, 5);
         let fingerprint = digest(6);
-        state.reserve_request(identity, fingerprint).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
         state
-            .start_request_with_owner(identity, fingerprint, owner)
+            .start_request_with_owner_and_admission(identity, fingerprint, owner, capability)
             .await
             .unwrap();
         let context = state.begin_activation().await.unwrap();
@@ -18404,10 +18417,8 @@ mod tests {
         assert_eq!(
             state
                 .start_request_with_owner(identity, fingerprint, owner)
-                .await
-                .unwrap()
-                .state,
-            RequestState::Running
+                .await,
+            Err(RuntimeError::RequestStateConflict)
         );
     }
     #[tokio::test]
@@ -18418,9 +18429,13 @@ mod tests {
         let controlled = request(4, 5);
         let external = request(4, 6);
         for identity in [controlled, external] {
-            state.reserve_request(identity, digest(8)).await.unwrap();
+            let (_, capability) = state
+                .reserve_request_with_admission(identity, digest(8))
+                .await
+                .unwrap();
+            let capability = capability.expect("fresh owner-bound capability");
             state
-                .start_request_with_owner(identity, digest(8), owner)
+                .start_request_with_owner_and_admission(identity, digest(8), owner, capability)
                 .await
                 .unwrap();
         }
@@ -18508,9 +18523,13 @@ mod tests {
         let identity = request(4, 5);
         let fingerprint = digest(6);
         let owner = state.acquire_lease(id(7)).await.unwrap();
-        state.reserve_request(identity, fingerprint).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
         state
-            .start_request_with_owner(identity, fingerprint, owner)
+            .start_request_with_owner_and_admission(identity, fingerprint, owner, capability)
             .await
             .unwrap();
         let fence = state.recover_abandoned(id(7), id(8)).await.unwrap();
@@ -18564,9 +18583,13 @@ mod tests {
         let identity = request(4, 5);
         let fingerprint = digest(6);
         let owner = state.acquire_lease(id(7)).await.unwrap();
-        state.reserve_request(identity, fingerprint).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
         state
-            .start_request_with_owner(identity, fingerprint, owner)
+            .start_request_with_owner_and_admission(identity, fingerprint, owner, capability)
             .await
             .unwrap();
         state
@@ -19763,7 +19786,12 @@ mod tests {
         let state = open_state(&repo).await;
         let request = request(41, 42);
         let fingerprint = digest(43);
-        state.reserve_request(request, fingerprint).await.unwrap();
+        let owner = state.acquire_lease(id(45)).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(request, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
         let key = stream_delivery("one", "two").checkpoint_key();
         let run = state
             .register_run_observation(RunObservationRegistration {
@@ -19784,9 +19812,8 @@ mod tests {
             })
             .await
             .unwrap();
-        let owner = state.acquire_lease(id(45)).await.unwrap();
         state
-            .start_request_with_owner(request, fingerprint, owner)
+            .start_request_with_owner_and_admission(request, fingerprint, owner, capability)
             .await
             .unwrap();
         let expected = CheckpointPrecondition {
