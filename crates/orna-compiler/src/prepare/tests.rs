@@ -35,12 +35,12 @@ use orna_core::{
 use super::*;
 use crate::{
     StandardApplicationCheckContext, StandardSourceIdentitySeed, check, check_standard_application,
-    check_standard_library_source,
+    check_standard_library_source, materialize_resolved_source_catalogue,
     mutation::{
         MutationAssignment, MutationExpression, MutationExpressionKind,
         MutationRecordFieldExpression, MutationRecordFieldExpressionKind, MutationValueType,
     },
-    prepare_standard_source,
+    prepare_standard_source, ResolvedSourceCatalogueError, SignatureSlot, UnsupportedReturnShape,
 };
 mod client;
 mod mutation;
@@ -68,6 +68,101 @@ fn stream_signature_reference_sequence_includes_reference_element() {
             DefinitionReferenceTarget::ObjectType(target),
         )],
     );
+}
+
+#[test]
+fn materializes_candidate_snapshot_and_identity_diff_without_runtime_ids() {
+    let active = empty_active();
+    let report = checked_report(
+        "CREATE SCHEMA app; CREATE TYPE app.item AS OBJECT (value INTEGER);",
+        active.catalogue(),
+    );
+    assert!(
+        report.diagnostics().is_empty(),
+        "{:?}",
+        report.diagnostics()
+    );
+
+    let resolved = materialize_resolved_source_catalogue(&report, active.pair(), &active).unwrap();
+
+    assert_eq!(resolved.base().revision(), active.catalogue().revision());
+    assert_eq!(resolved.base().schemas(), active.catalogue().schemas());
+    assert_eq!(
+        resolved.base().object_types(),
+        active.catalogue().object_types()
+    );
+    assert_eq!(resolved.candidate().object_types().len(), 1);
+    assert_eq!(resolved.candidate().functions().len(), 0);
+    assert!(!resolved.diff().is_empty());
+    assert_eq!(resolved.expected_base(), active.pair());
+    assert_eq!(resolved.candidate_pair().source(), resolved.source().id());
+    assert!(resolved.references().is_empty());
+}
+
+#[test]
+fn rejects_scalar_signature_types_without_catalogue_identity() {
+    let active = empty_active();
+    let report = checked_report(
+        "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;",
+        active.catalogue(),
+    );
+    assert!(
+        report.diagnostics().is_empty(),
+        "{:?}",
+        report.diagnostics()
+    );
+
+    let error = materialize_resolved_source_catalogue(&report, active.pair(), &active).unwrap_err();
+    assert!(matches!(
+        error,
+        ResolvedSourceCatalogueError::UnsupportedType {
+            slot: SignatureSlot::Result,
+            resolved_type: ResolvedType::Scalar(StandardScalar::Boolean),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn rejects_rows_and_stream_returns_instead_of_flattening_them() {
+    let active = empty_active();
+    let rows_report = checked_report(
+        "CREATE SCHEMA app; CREATE TYPE app.item AS OBJECT (value BOOLEAN); CREATE SERVER FUNCTION app.read() RETURNS ROWS (value BOOLEAN) AS SELECT i.value FROM app.item i;",
+        active.catalogue(),
+    );
+    assert!(
+        rows_report.diagnostics().is_empty(),
+        "{:?}",
+        rows_report.diagnostics()
+    );
+    let rows_error =
+        materialize_resolved_source_catalogue(&rows_report, active.pair(), &active).unwrap_err();
+    assert!(matches!(
+        rows_error,
+        ResolvedSourceCatalogueError::UnsupportedReturn {
+            shape: UnsupportedReturnShape::Rows,
+            ..
+        }
+    ));
+
+    let stream_report = checked_report(
+        "CREATE SCHEMA app; CREATE TYPE app.item AS OBJECT (value BOOLEAN); CREATE SERVER FUNCTION app.read() RETURNS STREAM<BOOLEAN> AS SELECT i.value FROM app.item i;",
+        active.catalogue(),
+    );
+    assert!(
+        stream_report.diagnostics().is_empty(),
+        "{:?}",
+        stream_report.diagnostics()
+    );
+    let stream_error =
+        materialize_resolved_source_catalogue(&stream_report, active.pair(), &active).unwrap_err();
+    assert!(matches!(
+        stream_error,
+        ResolvedSourceCatalogueError::UnsupportedReturn {
+            shape: UnsupportedReturnShape::Stream,
+            ..
+        }
+    ));
 }
 
 #[test]
