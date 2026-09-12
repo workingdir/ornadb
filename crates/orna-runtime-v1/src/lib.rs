@@ -46,6 +46,14 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+mod catalogue;
+pub use catalogue::{
+    CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
+    CatalogueFunction, CatalogueFunctionDeclaration, CatalogueObject, CatalogueObjectKind,
+    CatalogueParameterDeclaration, CatalogueParameterHandle, CatalogueTypeDeclaration,
+    CatalogueTypeForm, CatalogueTypeHandle, CatalogueTypeSpec,
+};
+
 const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -244,6 +252,61 @@ CREATE TABLE IF NOT EXISTS sys_run_observation (
     diagnostic_code INTEGER,
     diagnostic_class INTEGER,
     CHECK ((diagnostic_code IS NULL) = (diagnostic_class IS NULL))
+);
+CREATE TABLE IF NOT EXISTS runtime_catalogue_identity (
+    object_id BLOB PRIMARY KEY CHECK (length(object_id) = 16),
+    kind INTEGER NOT NULL CHECK (kind IN (1, 2)),
+    created_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS runtime_catalogue_capture (
+    snapshot BLOB PRIMARY KEY CHECK (length(snapshot) > 0),
+    database_id BLOB NOT NULL CHECK (length(database_id) = 16),
+    runtime_id BLOB NOT NULL CHECK (length(runtime_id) = 16),
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    generation_digest BLOB NOT NULL CHECK (length(generation_digest) = 32)
+);
+CREATE TABLE IF NOT EXISTS runtime_catalogue_admission (
+    snapshot BLOB PRIMARY KEY CHECK (length(snapshot) > 0),
+    FOREIGN KEY (snapshot) REFERENCES runtime_catalogue_capture(snapshot)
+);
+CREATE TABLE IF NOT EXISTS runtime_catalogue_revision (
+    object_id BLOB NOT NULL REFERENCES runtime_catalogue_identity(object_id),
+    snapshot BLOB NOT NULL CHECK (length(snapshot) > 0),
+    kind INTEGER NOT NULL CHECK (kind IN (1, 2)),
+    qualified_name TEXT NOT NULL CHECK (length(qualified_name) > 0),
+    revision_id BLOB NOT NULL CHECK (length(revision_id) = 32),
+    semantic_hash BLOB NOT NULL CHECK (length(semantic_hash) = 32),
+    PRIMARY KEY (object_id, snapshot),
+    UNIQUE (snapshot, qualified_name)
+);
+CREATE TABLE IF NOT EXISTS runtime_catalogue_type (
+    object_id BLOB NOT NULL,
+    snapshot BLOB NOT NULL,
+    form TEXT NOT NULL CHECK (form IN ('named', 'value', 'reference')),
+    target_object_id BLOB,
+    PRIMARY KEY (object_id, snapshot),
+    FOREIGN KEY (object_id, snapshot)
+        REFERENCES runtime_catalogue_revision(object_id, snapshot),
+    CHECK ((form = 'reference') = (target_object_id IS NOT NULL)),
+    CHECK (target_object_id IS NULL OR length(target_object_id) = 16)
+);
+CREATE TABLE IF NOT EXISTS runtime_catalogue_function (
+    object_id BLOB NOT NULL,
+    snapshot BLOB NOT NULL,
+    result_type_object_id BLOB NOT NULL CHECK (length(result_type_object_id) = 16),
+    PRIMARY KEY (object_id, snapshot),
+    FOREIGN KEY (object_id, snapshot)
+        REFERENCES runtime_catalogue_revision(object_id, snapshot)
+);
+CREATE TABLE IF NOT EXISTS runtime_catalogue_parameter (
+    object_id BLOB NOT NULL,
+    snapshot BLOB NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    name TEXT NOT NULL CHECK (length(name) > 0),
+    type_object_id BLOB NOT NULL CHECK (length(type_object_id) = 16),
+    PRIMARY KEY (object_id, snapshot, position),
+    FOREIGN KEY (object_id, snapshot)
+        REFERENCES runtime_catalogue_function(object_id, snapshot)
 );
 CREATE TABLE IF NOT EXISTS sys_stream_observation (
     stream_id BLOB PRIMARY KEY CHECK (length(stream_id) = 16),
@@ -1842,6 +1905,7 @@ impl RuntimeState {
         state.migrate_request_recovery_evidence().await?;
         state.migrate_stream_failure_payloads().await?;
         state.migrate_nullable_stream_partitions().await?;
+        state.migrate_catalogue_identity_schema().await?;
         state.validate_recovery().await?;
         Ok(state)
     }
@@ -3769,6 +3833,22 @@ impl RuntimeState {
             .commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Records the additive runtime catalogue identity layer. The tables are
+    /// created by `SCHEMA` for new stores; the marker makes the upgrade
+    /// explicit for existing stores and keeps this prerequisite independently
+    /// observable by later invocation projection migrations.
+    async fn migrate_catalogue_identity_schema(&self) -> Result<(), RuntimeError> {
+        self.connection
+            .execute(
+                "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                 VALUES ('runtime-catalogue-identity-v1')",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(())
     }
 
     /// Adds the durable run observation timestamp without reinterpreting any
@@ -9665,7 +9745,9 @@ async fn append_mutations_tx(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     faults.check(FaultPoint::AfterCapture)?;
-    capture_tx(connection).await
+    let capture = capture_tx(connection).await?;
+    crate::catalogue::persist_capture_for_runtime_tx(connection, &current, &capture).await?;
+    Ok(capture)
 }
 
 async fn migrate_compact_receipt_schema(connection: &Connection) -> Result<(), RuntimeError> {
