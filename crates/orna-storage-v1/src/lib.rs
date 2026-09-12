@@ -2251,6 +2251,97 @@ mod tests {
         assert_eq!(repository.read_publication_journal().unwrap(), None);
     }
 
+    #[tokio::test]
+    async fn coordinator_rejects_runtime_cleanup_after_native_head_drift() {
+        let (_temp, repository) = repository();
+        let runtime = RuntimeState::open(
+            &repository,
+            orna_runtime_v1::RuntimeIdentity {
+                database_id: [31; 16],
+                repository_id: [32; 16],
+            },
+            [33; 32],
+        )
+        .await
+        .unwrap();
+        let lease = runtime.acquire_lease([34; 16]).await.unwrap();
+        let context = runtime.begin_activation().await.unwrap();
+        runtime
+            .commit_table_activation(
+                lease,
+                &context,
+                &[TableMutation::new(
+                    [35; 16],
+                    "Contact",
+                    b"Alice".to_vec(),
+                    Some(b"row".to_vec()),
+                )
+                .unwrap()],
+                [36; 32],
+                &orna_runtime_v1::NoFault,
+            )
+            .await
+            .unwrap();
+        let freeze = runtime
+            .freeze(
+                [37; 16],
+                &orna_runtime_v1::Checkpoint {
+                    generation: 1,
+                    digest: [36; 32],
+                    mutation_sequence: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
+            &repository,
+            &runtime,
+            &head,
+            index,
+            &freeze,
+            |mutation| {
+                LoosePath::for_key(
+                    mutation.table(),
+                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+                )
+            },
+            "orna: publish runtime data",
+        )
+        .await
+        .unwrap();
+        plan.publish(&repository).unwrap();
+        let persisted_journal = repository.read_publication_journal().unwrap().unwrap();
+
+        let candidate = plan.candidate().commit().clone();
+        let pending_before = runtime.pending().await.unwrap();
+        fs::write(
+            repository.worktree().join("ordinary.txt"),
+            "native writer\n",
+        )
+        .unwrap();
+        git(repository.worktree(), &["add", "ordinary.txt"]);
+        git(repository.worktree(), &["commit", "-m", "native writer"]);
+        let newer_head = repository.head().unwrap().unwrap();
+        assert_ne!(newer_head, candidate);
+
+        assert_eq!(
+            plan.complete(&repository, &runtime, &freeze).await,
+            Err(Error::RefConflict)
+        );
+        assert_eq!(runtime.pending().await.unwrap(), pending_before);
+        assert_eq!(
+            plan.journal().stage(),
+            orna_repository_v1::PublicationJournalStage::WorktreeReconciled
+        );
+        assert_eq!(
+            repository.read_publication_journal().unwrap(),
+            Some(persisted_journal)
+        );
+        assert_eq!(repository.head().unwrap(), Some(newer_head));
+    }
+
     #[test]
     fn coordinator_preserves_changed_index_conflict() {
         let (temp, repository) = repository();
