@@ -628,6 +628,109 @@ fn valid_date_literal(value: &str) -> bool {
     (1..=maximum).contains(&day)
 }
 
+/// Parses an Instant literal into the OVB-1 representation defined by the
+/// immutable format profile.  The stored seconds are floor-normalised UTC
+/// seconds, so fractions before the Unix epoch retain a nonnegative remainder.
+fn parse_instant_literal(value: &str) -> Option<(i64, u32)> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20
+        || !bytes.is_ascii()
+        || !valid_date_literal(value.get(..10)?)
+        || bytes.get(10) != Some(&b'T')
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+    {
+        return None;
+    }
+    let component = |start, end| {
+        bytes
+            .get(start..end)
+            .filter(|part| part.iter().all(u8::is_ascii_digit))
+            .and_then(|part| std::str::from_utf8(part).ok())
+            .and_then(|part| part.parse::<u32>().ok())
+    };
+    let (hour, minute, second) = (component(11, 13)?, component(14, 16)?, component(17, 19)?);
+    if hour >= 24 || minute >= 60 || second >= 60 {
+        return None;
+    }
+
+    let mut at = 19;
+    let nanosecond = if bytes.get(at) == Some(&b'.') {
+        at += 1;
+        let start = at;
+        while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+            at += 1;
+        }
+        let digits = at.checked_sub(start)?;
+        if !(1..=9).contains(&digits) {
+            return None;
+        }
+        let fraction = component(start, at)?;
+        fraction.checked_mul(10u32.pow((9 - digits) as u32))?
+    } else {
+        0
+    };
+
+    let offset_seconds = match bytes.get(at) {
+        Some(b'Z') if at + 1 == bytes.len() => 0i64,
+        Some(b'+' | b'-') if at + 6 == bytes.len() && bytes.get(at + 3) == Some(&b':') => {
+            let hours = component(at + 1, at + 3)?;
+            let minutes = component(at + 4, at + 6)?;
+            if hours > 23 || minutes >= 60 {
+                return None;
+            }
+            let seconds = i64::from(hours) * 3_600 + i64::from(minutes) * 60;
+            if bytes[at] == b'+' { seconds } else { -seconds }
+        }
+        _ => return None,
+    };
+
+    let year = component(0, 4)?;
+    let month = component(5, 7)?;
+    let day = component(8, 10)?;
+    let days = days_since_unix_epoch(year, month, day)?;
+    let local_seconds = days
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second))?;
+    local_seconds
+        .checked_sub(offset_seconds)
+        .map(|seconds| (seconds, nanosecond))
+}
+
+fn days_since_unix_epoch(year: u32, month: u32, day: u32) -> Option<i64> {
+    if !valid_date_literal(&format!("{year:04}-{month:02}-{day:02}")) {
+        return None;
+    }
+    let year = i64::from(year);
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let leap_days = |year: i64| year / 4 - year / 100 + year / 400;
+    let years_before = year - 1;
+    let days_before_year = years_before * 365 + leap_days(years_before);
+    let days_before_month =
+        match month {
+            1 => 0,
+            2 => 31,
+            3 => 59,
+            4 => 90,
+            5 => 120,
+            6 => 151,
+            7 => 181,
+            8 => 212,
+            9 => 243,
+            10 => 273,
+            11 => 304,
+            12 => 334,
+            _ => return None,
+        } + if month > 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+            1
+        } else {
+            0
+        };
+    let unix_epoch_days = 719_162;
+    Some(days_before_year + days_before_month + day - 1 - unix_epoch_days)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Value {
     Null,
@@ -638,6 +741,10 @@ enum Value {
     Float(u64),
     String(String),
     Date(String),
+    Instant {
+        unix_seconds: i64,
+        nanosecond: u32,
+    },
     Error(EvaluationError),
     Range {
         lower: Option<BigInt>,
@@ -811,6 +918,16 @@ impl Value {
             Self::Float(bits) => Raw::Float(bits),
             Self::String(value) => Raw::Text(value),
             Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
+            Self::Instant {
+                unix_seconds,
+                nanosecond,
+            } => Raw::Tag(
+                60002,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(unix_seconds.into()),
+                    Raw::Int(nanosecond.into()),
+                ])),
+            ),
             Self::Range {
                 lower,
                 upper,
@@ -909,6 +1026,7 @@ impl Value {
                 }
                 context.string(value.clone()).map(Self::Date)
             }
+            Raw::Tag(60002, boxed) => Self::instant_from_raw(boxed, context),
             Raw::Array(values) => {
                 context.items(values.len())?;
                 values
@@ -956,6 +1074,25 @@ impl Value {
         context.integer(coefficient.clone())?;
         context.integer(exponent.clone())?;
         DecimalValue::new(coefficient.clone(), exponent.clone()).map(Self::Decimal)
+    }
+    fn instant_from_raw(raw: &Raw, context: &mut Context) -> Result<Self, EvaluationError> {
+        let Raw::Array(parts) = raw else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        let [Raw::Int(seconds), Raw::Int(nanosecond)] = parts.as_slice() else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        context.integer(seconds.clone())?;
+        context.integer(nanosecond.clone())?;
+        let unix_seconds = seconds.to_i64().ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+        let nanosecond = nanosecond
+            .to_u32()
+            .filter(|nanosecond| *nanosecond < 1_000_000_000)
+            .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+        Ok(Self::Instant {
+            unix_seconds,
+            nanosecond,
+        })
     }
     fn enum_from_raw(
         raw: &Raw,
@@ -1406,7 +1543,22 @@ impl Context<'_, '_> {
                     .map_err(|_| error("ORNA-EVAL-VALUE"))?;
                 self.string(value).map(Value::Date)
             }
-            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+            LiteralKind::Instant => {
+                let (unix_seconds, nanosecond) =
+                    parse_instant_literal(text).ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                CanonicalValue::new(Raw::Tag(
+                    60002,
+                    Box::new(Raw::Array(vec![
+                        Raw::Int(unix_seconds.into()),
+                        Raw::Int(nanosecond.into()),
+                    ])),
+                ))
+                .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                Ok(Value::Instant {
+                    unix_seconds,
+                    nanosecond,
+                })
+            }
         }
     }
     fn interpolated_string(
@@ -1697,6 +1849,21 @@ impl Context<'_, '_> {
             (Value::Float(a), Value::Float(b)) => self.float_binary(op, a, b),
             (Value::String(a), Value::String(b)) => compare(op, a.cmp(&b)),
             (Value::Date(a), Value::Date(b)) => compare(op, a.cmp(&b)),
+            (
+                Value::Instant {
+                    unix_seconds: a_seconds,
+                    nanosecond: a_nanosecond,
+                },
+                Value::Instant {
+                    unix_seconds: b_seconds,
+                    nanosecond: b_nanosecond,
+                },
+            ) => compare(
+                op,
+                a_seconds
+                    .cmp(&b_seconds)
+                    .then(a_nanosecond.cmp(&b_nanosecond)),
+            ),
             (Value::Bool(a), Value::Bool(b)) => compare(op, a.cmp(&b)),
             _ => Err(error("ORNA-EVAL-TYPE")),
         }
@@ -3932,6 +4099,18 @@ fn compare_values(left: &Value, right: &Value) -> Result<std::cmp::Ordering, Eva
         (Value::Float(a), Value::Float(b)) => f64::from_bits(*a)
             .partial_cmp(&f64::from_bits(*b))
             .ok_or_else(|| error("ORNA-EVAL-VALUE")),
+        (
+            Value::Instant {
+                unix_seconds: left_seconds,
+                nanosecond: left_nanosecond,
+            },
+            Value::Instant {
+                unix_seconds: right_seconds,
+                nanosecond: right_nanosecond,
+            },
+        ) => Ok(left_seconds
+            .cmp(right_seconds)
+            .then(left_nanosecond.cmp(right_nanosecond))),
         (
             Value::Range {
                 lower: left_lower,
