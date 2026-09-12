@@ -745,11 +745,11 @@ fn aggregate(statuses: &[Status]) -> Status {
         Status::SpecifiedModelOnly
     } else if statuses
         .iter()
-        .all(|status| *status == Status::JustifiedGap)
+        .any(|status| matches!(status, Status::Executed | Status::PartiallyExecuted))
     {
-        Status::JustifiedGap
-    } else {
         Status::PartiallyExecuted
+    } else {
+        Status::JustifiedGap
     }
 }
 fn logical_test_id(test: &Test, fallback: &str) -> String {
@@ -909,6 +909,7 @@ mod tests {
     #[test]
     fn aggregate_requires_all_applicable_boundaries_to_execute() {
         let cases = [
+            ("empty", vec![], Status::JustifiedGap),
             (
                 "all executed",
                 vec![Status::Executed, Status::Executed],
@@ -918,6 +919,26 @@ mod tests {
                 "all gaps",
                 vec![Status::JustifiedGap, Status::JustifiedGap],
                 Status::JustifiedGap,
+            ),
+            (
+                "all model",
+                vec![Status::SpecifiedModelOnly, Status::SpecifiedModelOnly],
+                Status::SpecifiedModelOnly,
+            ),
+            (
+                "model and gap without execution",
+                vec![Status::SpecifiedModelOnly, Status::JustifiedGap],
+                Status::JustifiedGap,
+            ),
+            (
+                "gap and model without execution",
+                vec![Status::JustifiedGap, Status::SpecifiedModelOnly],
+                Status::JustifiedGap,
+            ),
+            (
+                "partial execution and gap",
+                vec![Status::PartiallyExecuted, Status::JustifiedGap],
+                Status::PartiallyExecuted,
             ),
             (
                 "executed and model",
