@@ -170,6 +170,29 @@ impl Fixture {
             ],
         );
     }
+
+    fn configure_local_internal_race(&self, raced_object_id: &str) {
+        let script = self.root.path().join("race-local-ref-upload-pack");
+        let state = self.root.path().join("race-local-ref-upload-pack.count");
+        let local_git = self.local.join(".git");
+        let script_contents = format!(
+            "#!/bin/sh\nset -eu\ncount=0\nif [ -f '{state}' ]; then count=$(cat '{state}'); fi\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" > '{state}'\nif [ \"$count\" -eq 2 ]; then env -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES git --git-dir='{local_git}' update-ref {INTERNAL_REF} {raced_object_id}; fi\nexec git-upload-pack \"$@\"\n",
+            state = state.display(),
+            local_git = local_git.display(),
+        );
+        fs::write(&script, script_contents).unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+        git(
+            &self.local,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                script.to_str().unwrap(),
+            ],
+        );
+    }
 }
 
 fn internal_witness(object_id: &str) -> RequiredInternalRef {
@@ -427,6 +450,42 @@ fn fetch_rejects_a_remote_change_between_advertisement_and_install() {
 
     assert!(matches!(error, FetchError::RemoteChanged));
     assert_eq!(git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]), initial);
+    assert_eq!(git(&fixture.local, &["rev-parse", INTERNAL_REF]), initial);
+}
+
+#[test]
+fn fetch_rejects_a_local_change_to_an_unchanged_destination() {
+    let fixture = Fixture::new();
+    let initial = fixture.initial_head();
+    fixture.install_local_internal(&initial);
+    let next = fixture.advance_branch_and_internal();
+    git(
+        &fixture.local,
+        &[
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--refmap=",
+            "origin",
+            "refs/heads/main:",
+        ],
+    );
+    fixture.install_local_internal(&next);
+    fixture.configure_local_internal_race(&initial);
+
+    let repository = fixture.repository();
+    let error = repository
+        .fetch(&request(
+            [RequestedRef::branch("main").unwrap()],
+            [internal_witness(&next)],
+        ))
+        .expect_err("a raced unchanged destination must fail the ref transaction");
+
+    assert!(matches!(error, FetchError::RefConflict));
+    assert_eq!(
+        git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]),
+        initial
+    );
     assert_eq!(git(&fixture.local, &["rev-parse", INTERNAL_REF]), initial);
 }
 
