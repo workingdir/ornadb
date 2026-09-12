@@ -327,18 +327,27 @@ impl<'a> Lexer<'a> {
             self.push(TokenKind::Integer, start);
             return;
         }
-        // Dates and instants contain punctuation that would otherwise be
-        // infix operators.  Their fixed leading shape makes them unambiguous.
-        let date_shaped = self.rest().len() >= 10
-            && self.rest().as_bytes().get(4) == Some(&b'-')
-            && self.rest().as_bytes().get(7) == Some(&b'-');
-        if date_shaped {
-            while self.at < self.source.len()
-                && (self.peek().is_ascii_alphanumeric()
-                    || matches!(self.peek(), '-' | ':' | '.' | '+' | 'T' | 'Z'))
-            {
-                self.bump()
+        // Calendar literals have fixed-width dates and complete, bounded
+        // instant tails.  Do not greedily absorb punctuation after a literal:
+        // outside a complete offset, `+`, `-`, and `..` are operators.
+        if let Some((calendar_end, kind)) = calendar_literal(self.rest()) {
+            self.at += calendar_end;
+            let literal = &self.source[start..self.at];
+            match kind {
+                CalendarLiteral::Date => {
+                    if !valid_date(literal) {
+                        self.error("ORNA-LEX-007", "invalid date literal", start, self.at);
+                    }
+                    self.push(TokenKind::Date, start);
+                }
+                CalendarLiteral::Instant => {
+                    if !valid_instant(literal) {
+                        self.error("ORNA-LEX-008", "invalid instant literal", start, self.at);
+                    }
+                    self.push(TokenKind::Instant, start);
+                }
             }
+            return;
         } else {
             let mut dot = false;
             let mut exponent = false;
@@ -376,17 +385,7 @@ impl<'a> Lexer<'a> {
             }
         }
         let s = &self.source[start..self.at];
-        let kind = if looks_instant(s) {
-            if !valid_instant(s) {
-                self.error("ORNA-LEX-008", "invalid instant literal", start, self.at);
-            }
-            TokenKind::Instant
-        } else if looks_date(s) {
-            if !valid_date(s) {
-                self.error("ORNA-LEX-007", "invalid date literal", start, self.at);
-            }
-            TokenKind::Date
-        } else if let Some(number) = s.strip_suffix('f') {
+        let kind = if let Some(number) = s.strip_suffix('f') {
             if !valid_number(number) {
                 self.error("ORNA-LEX-006", "invalid float literal", start, self.at)
             }
@@ -571,6 +570,80 @@ impl<'a> Lexer<'a> {
         })
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CalendarLiteral {
+    Date,
+    Instant,
+}
+
+/// Recognise only the grammar's complete calendar forms.  A date-shaped
+/// source still becomes a Date token so calendar-invalid input receives a
+/// literal diagnostic rather than being reinterpreted as subtraction.
+fn calendar_literal(source: &str) -> Option<(usize, CalendarLiteral)> {
+    let bytes = source.as_bytes();
+    if bytes.len() < 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
+        return None;
+    }
+    if bytes.get(10) != Some(&b'T') {
+        return Some((10, CalendarLiteral::Date));
+    }
+
+    // Once a date-shaped candidate has a `T`, it is an instant candidate even
+    // if the time tail is malformed.  Treating that case as a Date followed by
+    // ordinary tokens would reinterpret one malformed literal as an
+    // expression, contrary to ORNA-SYNTAX-002.
+    if bytes.len() < 19
+        || !bytes[11..13].iter().all(u8::is_ascii_digit)
+        || bytes.get(13) != Some(&b':')
+        || !bytes[14..16].iter().all(u8::is_ascii_digit)
+        || bytes.get(16) != Some(&b':')
+        || !bytes[17..19].iter().all(u8::is_ascii_digit)
+    {
+        return Some((malformed_instant_end(bytes, 11), CalendarLiteral::Instant));
+    }
+
+    let mut end = 19;
+    if bytes.get(end) == Some(&b'.') {
+        end += 1;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+    }
+    match bytes.get(end) {
+        Some(b'Z') => end += 1,
+        Some(b'+' | b'-')
+            if bytes
+                .get(end + 1..end + 3)
+                .is_some_and(|part| part.iter().all(u8::is_ascii_digit))
+                && bytes.get(end + 3) == Some(&b':')
+                && bytes
+                    .get(end + 4..end + 6)
+                    .is_some_and(|part| part.iter().all(u8::is_ascii_digit)) =>
+        {
+            end += 6;
+        }
+        _ => return Some((malformed_instant_end(bytes, end), CalendarLiteral::Instant)),
+    }
+    Some((end, CalendarLiteral::Instant))
+}
+
+/// Consume the lexical tail of an attempted instant without crossing an
+/// expression boundary. Complete instants are recognised before this helper,
+/// so a valid `...Z+1` remains an instant followed by an operator.
+fn malformed_instant_end(bytes: &[u8], mut end: usize) -> usize {
+    while let Some(byte) = bytes.get(end) {
+        if *byte == b'.' && bytes.get(end + 1) == Some(&b'.') {
+            break;
+        }
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b':' | b'.' | b'+' | b'-') {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    end
+}
+
 fn looks_date(s: &str) -> bool {
     s.len() == 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-')
 }
@@ -619,11 +692,6 @@ fn valid_number(s: &str) -> bool {
         Some(_) => false,
         None => valid_decimal_integer(mantissa),
     }
-}
-fn looks_instant(s: &str) -> bool {
-    s.len() >= 20
-        && s.as_bytes().get(10) == Some(&b'T')
-        && (s.ends_with('Z') || s[19..].contains('+') || s[19..].contains('-'))
 }
 fn valid_date(s: &str) -> bool {
     if !looks_date(s) {
