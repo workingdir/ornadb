@@ -9,16 +9,18 @@
 //! Run them explicitly with --ignored when collecting review evidence.
 //! Every fixture uses an isolated workspace-local artifact directory.
 //!
-//! Scope: cancelled replay grants and replay attempt accounting through public
-//! runtime APIs. No authenticated administration route, source polling, module
-//! loading, concurrent execution, or physical process crash is exercised.
+//! Scope: cancelled replay grants, replay attempt accounting, and concurrent
+//! execution fencing through public runtime APIs. No authenticated
+//! administration route, source polling, module loading, or physical process
+//! crash is exercised.
 
-use std::{cell::Cell, path::Path, process::Command};
+use std::{cell::Cell, path::Path, process::Command, sync::Arc};
 
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    RuntimeIdentity, RuntimeState, StreamFailurePayloadFuture, StreamFailurePayloadProvider,
-    StreamHandler, StreamHandlerResult, StreamItem, StreamMutationBatch, WriterLease,
+    RuntimeError, RuntimeIdentity, RuntimeState, StreamFailurePayloadFuture,
+    StreamFailurePayloadProvider, StreamHandler, StreamHandlerResult, StreamItem,
+    StreamMutationBatch, StreamStepError, WriterLease,
 };
 use orna_stream_v1::{
     AsyncCheckpointBackend, Checkpoint, CommitIntent, CommitResult, Component, ConsumerIdentity,
@@ -28,6 +30,7 @@ use orna_stream_v1::{
 };
 use sha2::{Digest, Sha256};
 use tempfile::{Builder, TempDir};
+use tokio::sync::Notify;
 
 const PAYLOAD: &[u8] = b"replay-review-payload";
 const PROTECTED_REFERENCE: &str = "replay-review-protected-reference";
@@ -319,6 +322,25 @@ impl StreamFailurePayloadProvider for CountingProvider {
     }
 }
 
+struct GatedProvider {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl StreamFailurePayloadProvider for GatedProvider {
+    type Error = ();
+
+    fn refetch<'a>(&'a self, reference: &'a str) -> StreamFailurePayloadFuture<'a, Self::Error> {
+        assert_eq!(reference, PROTECTED_REFERENCE);
+        self.entered.notify_one();
+        let release = Arc::clone(&self.release);
+        Box::pin(async move {
+            release.notified().await;
+            Ok(PAYLOAD.to_vec())
+        })
+    }
+}
+
 #[tokio::test]
 #[ignore = "Known Orna 1.0.0 gap: #786; run explicitly for review"]
 async fn cancelled_plaintext_replay_grant_is_rejected_before_handler() {
@@ -436,6 +458,99 @@ async fn interrupted_replay_recovery_preserves_admitted_attempt() {
     fixture.assert_checkpoint(replacement).await;
     assert_eq!(fixture.state.capture().await.unwrap(), capture);
     fixture.assert_one_replay_attempt(&recovered);
+}
+
+#[tokio::test]
+async fn replay_execution_claim_rejects_concurrent_cancellation() {
+    let fixture = Fixture::new(protected_payload()).await;
+    let grant = fixture.admit().await;
+    let capture = fixture.state.capture().await.unwrap();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let provider = GatedProvider {
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    };
+    let mut handler = CountingHandler::new(StreamHandlerResult::Commit(StreamMutationBatch {
+        mutations: Vec::new(),
+        next_digest: capture.generation_digest(),
+    }));
+    let mut replay = Box::pin(fixture.state.replay_stream_failure_with_provider(
+        fixture.writer,
+        grant.clone(),
+        &provider,
+        &mut handler,
+    ));
+    tokio::select! {
+        result = &mut replay => panic!("replay completed before provider gate: {result:?}"),
+        _ = entered.notified() => {}
+    }
+
+    let cancellation = fixture
+        .state
+        .stream_backend(fixture.writer)
+        .apply_async(CommitIntent::ReplayCancel {
+            failure: grant.failure.clone(),
+            expected_version: grant.version,
+        })
+        .await
+        .expect("cancel request should reach the durable claim");
+    assert_eq!(
+        cancellation,
+        CommitResult::Rejected(RejectReason::LeaseAlreadyHeld),
+        "an in-flight replay claim cannot be invalidated by cancellation"
+    );
+    assert_eq!(
+        fixture.failure(fixture.writer).await.status,
+        FailureStatus::Replaying
+    );
+
+    release.notify_one();
+    let result = replay.await.expect("replay should finish after release");
+    assert!(matches!(result, CommitResult::ReplayCompleted { .. }));
+    assert_eq!(handler.calls, 1);
+    assert_eq!(fixture.state.capture().await.unwrap(), capture);
+    fixture.assert_checkpoint(fixture.writer).await;
+}
+
+#[tokio::test]
+async fn replay_execution_claim_is_fenced_by_owner_takeover() {
+    let fixture = Fixture::new(protected_payload()).await;
+    let grant = fixture.admit().await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let provider = GatedProvider {
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    };
+    let mut handler = CountingHandler::new(StreamHandlerResult::Fail(diagnostic()));
+    let mut replay = Box::pin(fixture.state.replay_stream_failure_with_provider(
+        fixture.writer,
+        grant.clone(),
+        &provider,
+        &mut handler,
+    ));
+    tokio::select! {
+        result = &mut replay => panic!("replay completed before provider gate: {result:?}"),
+        _ = entered.notified() => {}
+    }
+
+    let replacement = fixture
+        .state
+        .takeover_lease(fixture.writer, [5; 16])
+        .await
+        .expect("takeover should fence the in-flight replay claim");
+    let recovered = fixture.failure(replacement).await;
+    assert_eq!(recovered.status, FailureStatus::Skipped);
+    fixture.assert_one_replay_attempt(&recovered);
+    fixture.assert_checkpoint(replacement).await;
+
+    release.notify_one();
+    assert_eq!(
+        replay.await.expect_err("the old owner must be fenced"),
+        StreamStepError::Runtime(RuntimeError::OwnerLost)
+    );
+    assert_eq!(handler.calls, 0, "fenced replay must not reach the handler");
 }
 
 // Ordinary controls assert only their stated invariants. They do not assert
