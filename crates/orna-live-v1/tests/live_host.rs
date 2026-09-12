@@ -3822,6 +3822,30 @@ fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
                 .unwrap(),
             )
             .unwrap()
+        } else if target == [33; 16] {
+            TerminalOutcome::new(
+                unit_result(target, fingerprint)
+                    .encode(Limits::default().protocol)
+                    .unwrap(),
+            )
+            .unwrap()
+        } else if target == [34; 16] {
+            TerminalOutcome::new(
+                Envelope {
+                    request: Some(target),
+                    watch: None,
+                    message: Message::Result {
+                        status: ResultStatus::Cancellation,
+                        value: None,
+                        fingerprint,
+                        diagnostic: None,
+                    },
+                    extensions: BTreeMap::new(),
+                }
+                .encode(Limits::default().protocol)
+                .unwrap(),
+            )
+            .unwrap()
         } else {
             TerminalOutcome::new(Vec::new()).unwrap()
         };
@@ -3905,7 +3929,7 @@ fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
             } if returned_target == target
                 && returned_state == expected_state
                 && returned_fingerprint == fingerprint
-                && result.is_some() == (expected_state == orna_protocol_v1::RequestState::Orphaned)
+                && result.is_some() == (target != [31; 16])
         ));
     }
     let mismatch = Envelope {
