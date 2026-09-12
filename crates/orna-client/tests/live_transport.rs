@@ -3,15 +3,15 @@ use orna_client::{
     AuthenticatedWebSocketTransport, LiveByteDriver, LiveClientConfig, LiveTransportError,
     TlsPolicy,
 };
-use orna_protocol_v1::Limits;
+use orna_protocol_v1::{Envelope, Limits, Message as ProtocolMessage, ResultStatus};
 use reqwest::Url;
-use std::{future::Future, time::Duration};
+use std::{collections::BTreeMap, future::Future, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{
         Message,
-        protocol::{Role, WebSocketConfig},
+        protocol::{Role, WebSocketConfig, frame::coding::CloseCode},
     },
 };
 
@@ -73,8 +73,42 @@ fn block_on<F: Future>(future: F) -> F::Output {
         .expect("fake WebSocket operation timed out")
 }
 
+fn host_result() -> Vec<u8> {
+    Envelope {
+        request: Some([3; 16]),
+        watch: None,
+        message: ProtocolMessage::Result {
+            status: ResultStatus::Failure,
+            value: None,
+            fingerprint: [4; 32],
+            diagnostic: None,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default())
+    .unwrap()
+}
+
+fn wrong_direction() -> Vec<u8> {
+    Envelope {
+        request: Some([5; 16]),
+        watch: Some([6; 16]),
+        message: ProtocolMessage::Resync,
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default())
+    .unwrap()
+}
+
+fn close_code(message: Message) -> CloseCode {
+    let Message::Close(Some(frame)) = message else {
+        panic!("expected a close frame");
+    };
+    frame.code
+}
+
 #[test]
-fn local_fake_wire_handles_text_control_masking_and_bounds() {
+fn local_fake_wire_preserves_ping_pong_and_normal_close() {
     let (client_io, server_io) = duplex(4096);
     let client = block_on(WebSocketStream::from_raw_socket(
         client_io,
@@ -90,19 +124,12 @@ fn local_fake_wire_handles_text_control_masking_and_bounds() {
         AuthenticatedWebSocketTransport::from_authenticated_socket(client, Limits::default())
             .unwrap();
 
-    block_on(server.send(Message::Text("text".into()))).unwrap();
-    assert!(matches!(
-        block_on(transport.receive_binary(Limits::default().max_message_bytes)),
-        Err(LiveTransportError::Response(
-            "text WebSocket message rejected"
-        ))
-    ));
-
     block_on(server.send(Message::Ping(vec![1].into()))).unwrap();
-    block_on(server.send(Message::Binary(vec![3].into()))).unwrap();
+    let result = host_result();
+    block_on(server.send(Message::Binary(result.clone().into()))).unwrap();
     assert_eq!(
         block_on(transport.receive_binary(Limits::default().max_message_bytes)).unwrap(),
-        vec![3]
+        result
     );
     assert_eq!(
         block_on(server.next()).unwrap().unwrap(),
@@ -114,6 +141,14 @@ fn local_fake_wire_handles_text_control_masking_and_bounds() {
         block_on(server.next()).unwrap().unwrap(),
         Message::Binary(vec![7, 8].into())
     );
+
+    block_on(server.send(Message::Close(None))).unwrap();
+    assert!(matches!(
+        block_on(transport.receive_binary(Limits::default().max_message_bytes)),
+        Err(LiveTransportError::WebSocket(
+            tokio_tungstenite::tungstenite::Error::ConnectionClosed
+        ))
+    ));
 
     let (raw_client_io, mut raw_server_io) = duplex(4096);
     let raw_client = block_on(WebSocketStream::from_raw_socket(
@@ -137,43 +172,112 @@ fn local_fake_wire_handles_text_control_masking_and_bounds() {
     let expected = [9, 10];
     let unmasked = [header[6] ^ header[2], header[7] ^ header[3]];
     assert_eq!(unmasked, expected);
+}
 
-    let mut small = Limits::default();
-    small.max_message_bytes = 1;
-    let (small_client_io, mut small_server_io) = duplex(4096);
-    let small_client = block_on(WebSocketStream::from_raw_socket(
-        small_client_io,
+#[test]
+fn protocol_violations_close_without_consuming_or_resyncing() {
+    let (client_io, server_io) = duplex(4096);
+    let client = block_on(WebSocketStream::from_raw_socket(
+        client_io,
         Role::Client,
         None,
     ));
-    let mut small_transport =
-        AuthenticatedWebSocketTransport::from_authenticated_socket(small_client, small).unwrap();
-    block_on(small_server_io.write_all(&[0x02, 0x01, 1, 0x80, 0x01, 2])).unwrap();
+    let mut server = block_on(WebSocketStream::from_raw_socket(
+        server_io,
+        Role::Server,
+        None,
+    ));
+    let mut transport =
+        AuthenticatedWebSocketTransport::from_authenticated_socket(client, Limits::default())
+            .unwrap();
+
+    block_on(server.send(Message::Binary(vec![0xff].into()))).unwrap();
+    block_on(server.send(Message::Ping(vec![9].into()))).unwrap();
     assert!(matches!(
-        block_on(small_transport.receive_binary(1)),
-        Err(LiveTransportError::Protocol(orna_protocol_v1::Error::Limit))
+        block_on(transport.receive_binary(Limits::default().max_message_bytes)),
+        Err(LiveTransportError::Protocol(_))
     ));
+    assert_eq!(
+        close_code(block_on(server.next()).unwrap().unwrap()),
+        CloseCode::Protocol
+    );
+    assert!(matches!(
+        block_on(transport.receive_binary(Limits::default().max_message_bytes)),
+        Err(LiveTransportError::WebSocket(
+            tokio_tungstenite::tungstenite::Error::ConnectionClosed
+        ))
+    ));
+    assert!(matches!(
+        block_on(transport.send_binary(vec![1])),
+        Err(LiveTransportError::WebSocket(
+            tokio_tungstenite::tungstenite::Error::ConnectionClosed
+        ))
+    ));
+    match block_on(async { tokio::time::timeout(Duration::from_millis(20), server.next()).await }) {
+        Ok(Some(Ok(Message::Pong(_) | Message::Binary(_)))) => {
+            panic!("terminal transport must not consume queued input or send a resync")
+        }
+        Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Err(_))) | Ok(None) | Err(_) => {}
+        Ok(Some(Ok(message))) => panic!("unexpected post-close WebSocket message: {message:?}"),
+    }
 
-    let (fragment_client_io, mut fragment_server_io) = duplex(4096);
-    let fragment_client = block_on(WebSocketStream::from_raw_socket(
-        fragment_client_io,
+    let (client_io, server_io) = duplex(4096);
+    let client = block_on(WebSocketStream::from_raw_socket(
+        client_io,
         Role::Client,
         None,
     ));
-    let mut fragment_transport = AuthenticatedWebSocketTransport::from_authenticated_socket(
-        fragment_client,
-        Limits::default(),
-    )
-    .unwrap();
-    block_on(fragment_server_io.write_all(&[0x02, 0x01, 1, 0x80, 0x01, 2])).unwrap();
+    let mut server = block_on(WebSocketStream::from_raw_socket(
+        server_io,
+        Role::Server,
+        None,
+    ));
+    let mut transport =
+        AuthenticatedWebSocketTransport::from_authenticated_socket(client, Limits::default())
+            .unwrap();
+
+    block_on(server.send(Message::Binary(wrong_direction().into()))).unwrap();
+    assert!(matches!(
+        block_on(transport.receive_binary(Limits::default().max_message_bytes)),
+        Err(LiveTransportError::Protocol(
+            orna_protocol_v1::Error::InvalidMessage
+        ))
+    ));
     assert_eq!(
-        block_on(fragment_transport.receive_binary(Limits::default().max_message_bytes)).unwrap(),
-        vec![1, 2]
+        close_code(block_on(server.next()).unwrap().unwrap()),
+        CloseCode::Protocol
+    );
+
+    let (client_io, server_io) = duplex(4096);
+    let client = block_on(WebSocketStream::from_raw_socket(
+        client_io,
+        Role::Client,
+        None,
+    ));
+    let mut server = block_on(WebSocketStream::from_raw_socket(
+        server_io,
+        Role::Server,
+        None,
+    ));
+    let mut transport =
+        AuthenticatedWebSocketTransport::from_authenticated_socket(client, Limits::default())
+            .unwrap();
+
+    block_on(server.send(Message::Text("text".into()))).unwrap();
+    assert!(matches!(
+        block_on(transport.receive_binary(Limits::default().max_message_bytes)),
+        Err(LiveTransportError::Response(
+            "text WebSocket message rejected"
+        ))
+    ));
+    assert_eq!(
+        close_code(block_on(server.next()).unwrap().unwrap()),
+        CloseCode::Unsupported
     );
 }
 
 #[test]
-fn raw_fragmented_binary_message_is_rejected_during_reassembly() {
+fn fragmented_oversize_input_closes_with_1009() {
     let mut small = Limits::default();
     small.max_message_bytes = 1;
     let (client_io, mut server_io) = duplex(4096);
@@ -192,34 +296,19 @@ fn raw_fragmented_binary_message_is_rejected_during_reassembly() {
     block_on(server_io.write_all(&[0x02, 0x01, 1, 0x80, 0x01, 2])).unwrap();
     assert!(matches!(
         block_on(transport.receive_binary(small.max_message_bytes)),
+        Err(LiveTransportError::Protocol(orna_protocol_v1::Error::Limit))
+    ));
+    let mut header = [0; 8];
+    block_on(server_io.read_exact(&mut header)).unwrap();
+    assert_eq!(header[0], 0x88);
+    assert_ne!(header[1] & 0x80, 0);
+    assert_eq!(header[1] & 0x7f, 2);
+    let code = u16::from_be_bytes([header[6] ^ header[2], header[7] ^ header[3]]);
+    assert_eq!(code, 1009);
+    assert!(matches!(
+        block_on(transport.receive_binary(small.max_message_bytes)),
         Err(LiveTransportError::WebSocket(
-            tokio_tungstenite::tungstenite::Error::Capacity(
-                tokio_tungstenite::tungstenite::error::CapacityError::MessageTooLong {
-                    size: 2,
-                    max_size: 1
-                }
-            )
+            tokio_tungstenite::tungstenite::Error::ConnectionClosed
         ))
     ));
-
-    let mut in_limit = Limits::default();
-    in_limit.max_message_bytes = 2;
-    let (client_io, mut server_io) = duplex(4096);
-    let client = block_on(WebSocketStream::from_raw_socket(
-        client_io,
-        Role::Client,
-        Some(
-            WebSocketConfig::default()
-                .max_message_size(Some(in_limit.max_message_bytes))
-                .max_frame_size(Some(in_limit.max_message_bytes)),
-        ),
-    ));
-    let mut transport =
-        AuthenticatedWebSocketTransport::from_authenticated_socket(client, in_limit).unwrap();
-
-    block_on(server_io.write_all(&[0x02, 0x01, 1, 0x80, 0x01, 2])).unwrap();
-    assert_eq!(
-        block_on(transport.receive_binary(in_limit.max_message_bytes)).unwrap(),
-        vec![1, 2]
-    );
 }
