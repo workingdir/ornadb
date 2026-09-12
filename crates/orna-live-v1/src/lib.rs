@@ -4559,23 +4559,37 @@ impl LiveTransport {
         now: u64,
         bytes: &[u8],
     ) -> Result<WebSocketApplicationPreparation> {
-        let event = socket.push_one(bytes, self.limits.max_frame_bytes)?;
+        let event = match socket.push_one(bytes, self.limits.max_frame_bytes) {
+            Ok(event) => event,
+            Err(Error::Limit) => return self.close_prepared_socket(socket, now, 1009).await,
+            Err(Error::InvalidFrame) => {
+                return self.close_prepared_socket(socket, now, 1002).await;
+            }
+            Err(error) => return Err(error),
+        };
         let Some(event) = event else {
             return Ok(WebSocketApplicationPreparation::Pending);
         };
         match event {
-            SocketEvent::Binary(message) => match self
-                .host
-                .prepare_application_frame(socket.attachment, now, Frame::Binary(message))
-                .await?
-            {
-                ApplicationPreparation::Work(ticket) => {
-                    Ok(WebSocketApplicationPreparation::Work(ticket))
+            SocketEvent::Binary(message) => {
+                match self
+                    .host
+                    .prepare_application_frame(socket.attachment, now, Frame::Binary(message))
+                    .await
+                {
+                    Ok(ApplicationPreparation::Work(ticket)) => {
+                        Ok(WebSocketApplicationPreparation::Work(ticket))
+                    }
+                    Ok(ApplicationPreparation::Completed(outcome)) => Ok(
+                        WebSocketApplicationPreparation::Output(self.websocket_output(outcome)?),
+                    ),
+                    Err(Error::Limit) => self.close_prepared_socket(socket, now, 1009).await,
+                    Err(Error::InvalidMessage) => {
+                        self.close_prepared_socket(socket, now, 1002).await
+                    }
+                    Err(error) => Err(error),
                 }
-                ApplicationPreparation::Completed(outcome) => Ok(
-                    WebSocketApplicationPreparation::Output(self.websocket_output(outcome)?),
-                ),
-            },
+            }
             SocketEvent::Ping(payload) => Ok(WebSocketApplicationPreparation::Output(
                 WebSocketOutput::Pong(payload),
             )),
@@ -4586,13 +4600,28 @@ impl LiveTransport {
                     WebSocketOutput::Close { code: None },
                 ))
             }
-            SocketEvent::Text => {
-                let _ = self.host.close_attachment(socket.attachment, now).await;
-                Ok(WebSocketApplicationPreparation::Output(
-                    WebSocketOutput::Close { code: Some(1003) },
-                ))
-            }
+            SocketEvent::Text => self.close_prepared_socket(socket, now, 1003).await,
         }
+    }
+
+    /// Fences a failed WebSocket admission before returning its protocol close.
+    ///
+    /// The executable actor may have additional frames from the same socket
+    /// read queued behind this failure. Clearing that queue here prevents a
+    /// later actor turn from admitting them after the close has been chosen.
+    async fn close_prepared_socket(
+        &mut self,
+        socket: &mut WebSocketState,
+        now: u64,
+        code: u16,
+    ) -> Result<WebSocketApplicationPreparation> {
+        socket.closed = true;
+        socket.fragment = None;
+        socket.pending.clear();
+        let _ = self.host.close_attachment(socket.attachment, now).await;
+        Ok(WebSocketApplicationPreparation::Output(
+            WebSocketOutput::Close { code: Some(code) },
+        ))
     }
 
     /// Publishes a prepared application result after the actor has reacquired
@@ -6193,6 +6222,9 @@ pub struct WebSocketState {
     pending: Vec<u8>,
     closed: bool,
 }
+
+const MAX_WEBSOCKET_FRAME_HEADER_BYTES: usize = 14;
+
 impl WebSocketState {
     #[must_use]
     pub fn new(attachment: [u8; 16]) -> Self {
@@ -6208,11 +6240,12 @@ impl WebSocketState {
             return Err(Error::Closed);
         }
         self.pending.extend_from_slice(bytes);
+        self.enforce_pending_limit(limit)?;
         let Some((used, fin, opcode, payload)) = ws_frame(&self.pending, limit)? else {
             return Ok(None);
         };
         self.pending.drain(..used);
-        match opcode {
+        let event = match opcode {
             0 => {
                 let Some((kind, mut whole)) = self.fragment.take() else {
                     return Err(Error::InvalidFrame);
@@ -6257,10 +6290,35 @@ impl WebSocketState {
             9 => Ok(Some(SocketEvent::Ping(payload))),
             10 => Ok(Some(SocketEvent::Pong)),
             _ => Err(Error::InvalidFrame),
-        }
+        };
+        self.enforce_pending_limit(limit)?;
+        event
     }
 
-    fn has_complete_frame(&self, limit: usize) -> Result<bool> {
+    /// Caps raw incomplete-frame bytes together with a reassembled fragment.
+    ///
+    /// Complete coalesced frames are drained by the owner and are not retained
+    /// as an application message. An incomplete frame behind a fragment is
+    /// retained, however, so its RFC 6455 header is included in the bound.
+    fn enforce_pending_limit(&self, limit: usize) -> Result<()> {
+        let Some((_, fragment)) = &self.fragment else {
+            return Ok(());
+        };
+        let maximum = limit.saturating_add(MAX_WEBSOCKET_FRAME_HEADER_BYTES);
+        let buffered = fragment.len().saturating_add(self.pending.len());
+        if buffered > maximum {
+            return Err(Error::Limit);
+        }
+        Ok(())
+    }
+
+    /// Reports whether the buffered input contains one complete frame.
+    ///
+    /// Callers that hand application work to another owner use this after it
+    /// returns to drain coalesced frames without reading more bytes. Invalid
+    /// and oversized buffered frames report `true` so the normal receive path
+    /// can convert them into the required protocol close.
+    pub fn has_complete_frame(&self, limit: usize) -> Result<bool> {
         match ws_frame(&self.pending, limit) {
             Ok(frame) => Ok(frame.is_some()),
             // Let the receive path perform the same state retirement and
