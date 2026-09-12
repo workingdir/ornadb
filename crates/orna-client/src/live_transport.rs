@@ -96,6 +96,7 @@ pub struct LiveSession {
     session_id: [u8; 16],
     database_id: [u8; 16],
     runtime_id: [u8; 16],
+    endpoint_origin: String,
     websocket_path: String,
     resume_token: String,
     cookie: String,
@@ -153,6 +154,7 @@ impl LiveClient {
         &self,
         session: &LiveSession,
     ) -> Result<LiveSession, LiveTransportError> {
+        self.ensure_session_origin(session)?;
         let endpoint = self
             .config
             .endpoint
@@ -175,6 +177,7 @@ impl LiveClient {
     /// Deletes a session using its current bearer credential. Cookies are
     /// intentionally not sent on this destructive HTTP operation.
     pub async fn delete_session(&self, session: &LiveSession) -> Result<(), LiveTransportError> {
+        self.ensure_session_origin(session)?;
         let endpoint = self
             .config
             .endpoint
@@ -200,6 +203,9 @@ impl LiveClient {
         body: serde_json::Value,
         old: Option<&LiveSession>,
     ) -> Result<LiveSession, LiveTransportError> {
+        if let Some(old) = old {
+            self.ensure_session_origin(old)?;
+        }
         let response = self
             .http
             .post(endpoint)
@@ -228,12 +234,13 @@ impl LiveClient {
         reject_duplicate_json_members(&body)?;
         let value: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|_| LiveTransportError::Response("invalid session JSON"))?;
-        let session = parse_session(
+        let mut session = parse_session(
             value,
             &set_cookie,
             self.config.limits,
             self.config.endpoint.scheme() == "https",
         )?;
+        session.endpoint_origin = endpoint_origin(&self.config.endpoint);
         if let Some(old) = old
             && (session.session_id != old.session_id || session.database_id != old.database_id)
         {
@@ -249,6 +256,7 @@ impl LiveClient {
         session: &LiveSession,
     ) -> Result<AuthenticatedWebSocketTransport<MaybeTlsStream<TcpStream>>, LiveTransportError>
     {
+        self.ensure_session_origin(session)?;
         let ws_scheme = if self.config.endpoint.scheme() == "https" {
             "wss"
         } else {
@@ -298,6 +306,19 @@ impl LiveClient {
             max_message_bytes: session.limits.max_message_bytes,
         })
     }
+
+    fn ensure_session_origin(&self, session: &LiveSession) -> Result<(), LiveTransportError> {
+        if session.endpoint_origin != endpoint_origin(&self.config.endpoint) {
+            return Err(LiveTransportError::Response(
+                "session belongs to a different endpoint origin",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn endpoint_origin(endpoint: &Url) -> String {
+    endpoint.origin().ascii_serialization()
 }
 
 fn parse_session(
@@ -356,6 +377,7 @@ fn parse_session(
         session_id,
         database_id,
         runtime_id,
+        endpoint_origin: String::new(),
         websocket_path,
         resume_token,
         cookie,
