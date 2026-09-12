@@ -317,7 +317,10 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
     let output = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
         .output()
         .expect("conformance binary runs");
-    assert!(output.status.success(), "conformance binary failed");
+    assert!(
+        !output.status.success(),
+        "partial bounded conformance must fail its process gate"
+    );
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("conformance report is JSON");
     let declared = report["implementation_claim"]["executed_scenario_contracts"]
@@ -438,7 +441,10 @@ fn remote_eval_contract_remains_skipped_without_an_authoritative_host_witness() 
     let output = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
         .output()
         .expect("conformance binary runs");
-    assert!(output.status.success(), "conformance binary failed");
+    assert!(
+        !output.status.success(),
+        "partial bounded conformance must fail its process gate"
+    );
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("conformance report is JSON");
     let eval = report["scenarios"]
