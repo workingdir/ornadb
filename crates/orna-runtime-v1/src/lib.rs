@@ -4942,6 +4942,8 @@ impl RuntimeState {
         validate_id(writer.owner_id).map_err(StreamTableDeliveryError::Runtime)?;
         validate_stream_mutations(&encoded, next_digest)
             .map_err(StreamTableDeliveryError::Runtime)?;
+        validate_stream_table_candidate_scope(mutations, validator.tables())
+            .map_err(StreamTableDeliveryError::Runtime)?;
         let current = self
             .capture()
             .await
@@ -5144,6 +5146,8 @@ impl RuntimeState {
             .map_err(StreamTableDeliveryError::Runtime)?;
         validate_id(writer.owner_id).map_err(StreamTableDeliveryError::Runtime)?;
         validate_stream_mutations(&encoded, next_digest)
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        validate_stream_table_candidate_scope(mutations, validator.tables())
             .map_err(StreamTableDeliveryError::Runtime)?;
         let current = self
             .capture()
@@ -11199,6 +11203,19 @@ async fn table_rows_tx(
     Ok(result)
 }
 
+fn validate_stream_table_candidate_scope(
+    mutations: &[TableMutation],
+    tables: &[String],
+) -> Result<(), RuntimeError> {
+    if mutations
+        .iter()
+        .any(|mutation| !tables.iter().any(|table| table == mutation.table()))
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok(())
+}
+
 async fn append_mutations_tx(
     connection: &Connection,
     expected: &CwdCapture,
@@ -12847,6 +12864,22 @@ mod tests {
                 mutations: vec![table_mutation(5, 1, Some(9))],
                 next_digest: digest(9),
             })
+        }
+    }
+
+    struct TablesOnlyValidator {
+        tables: Vec<String>,
+        calls: usize,
+    }
+
+    impl StreamTableCandidateValidator for TablesOnlyValidator {
+        fn tables(&self) -> &[String] {
+            &self.tables
+        }
+
+        fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+            self.calls += 1;
+            Ok(())
         }
     }
 
@@ -16628,6 +16661,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validated_stream_replay_rejects_omitted_mutation_table_before_publication() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let (grant, checkpoint, delivery) =
+            protected_replay_fixture(&state, writer, "validated-replay-scope", digest(5)).await;
+        let capture = state.capture().await.unwrap();
+        let mutation = TableMutation::new(id(32), "magazines", vec![5], Some(vec![13])).unwrap();
+        let mut validator = TablesOnlyValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+        };
+
+        assert!(matches!(
+            state
+                .commit_stream_validated_table_replay(StreamValidatedTableReplayCommit {
+                    writer,
+                    expected_capture: &capture,
+                    mutations: std::slice::from_ref(&mutation),
+                    next_digest: digest(101),
+                    grant: grant.clone(),
+                    validator: &mut validator,
+                    faults: &NoFault,
+                })
+                .await,
+            Err(StreamTableDeliveryError::Runtime(
+                RuntimeError::RecoveryInvalid
+            ))
+        ));
+        assert_eq!(validator.calls, 0);
+        assert_eq!(
+            state.committed_table_row("magazines", &[5]).await.unwrap(),
+            None
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(state.capture().await.unwrap(), capture);
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
+        );
+        let failure = state
+            .stream_backend(writer)
+            .failure_async(&grant.failure)
+            .await
+            .unwrap()
+            .expect("replay failure remains retained");
+        assert_eq!(failure.status, FailureStatus::Replaying);
+        assert_eq!(failure.version, grant.version);
+    }
+
+    #[tokio::test]
     async fn replay_typed_table_delivery_rolls_back_rows_and_terminal_transition_on_fault() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -18014,6 +18102,88 @@ mod tests {
         assert_eq!(pending[0].id, [5; 16]);
         assert!(pending[0].payload.starts_with(b"ORNA-TABLE-MUTATION\0"));
         assert_eq!(next.generation_digest(), digest(9));
+    }
+
+    #[tokio::test]
+    async fn validated_stream_delivery_rejects_omitted_mutation_table_before_publication() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        let delivery = stream_delivery("validated-scope", "validated-scope-next");
+        let key = delivery.checkpoint_key();
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let lease = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Acquire {
+                delivery,
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected delivery lease result: {other:?}"),
+        };
+        let before_checkpoint = state.stream_checkpoint(&key).await.unwrap();
+        let mutation = TableMutation::new(id(5), "magazines", vec![1], Some(vec![9])).unwrap();
+        let mut validator = TablesOnlyValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+        };
+
+        assert!(matches!(
+            state
+                .commit_stream_validated_table_delivery(StreamValidatedTableDeliveryCommit {
+                    writer,
+                    expected_capture: &capture,
+                    mutations: std::slice::from_ref(&mutation),
+                    next_digest: digest(9),
+                    delivery: lease.clone(),
+                    expected_stream: expected,
+                    validator: &mut validator,
+                    faults: &NoFault,
+                })
+                .await,
+            Err(StreamTableDeliveryError::Runtime(
+                RuntimeError::RecoveryInvalid
+            ))
+        ));
+        assert_eq!(validator.calls, 0);
+        assert_eq!(
+            state.committed_table_row("magazines", &[1]).await.unwrap(),
+            None
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(state.capture().await.unwrap(), capture);
+        assert_eq!(
+            state.stream_checkpoint(&key).await.unwrap(),
+            before_checkpoint
+        );
+
+        // The unchanged delivery lease can still produce its first failure;
+        // a malformed batch must not silently complete or fail it.
+        let failure = match state
+            .stream_backend(writer)
+            .fail_async(
+                lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+                StreamFailurePayload::Plaintext(Vec::new()),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unchanged delivery lease must fail once: {other:?}"),
+        };
+        assert_eq!(failure.attempts, 1);
     }
 
     #[tokio::test]
