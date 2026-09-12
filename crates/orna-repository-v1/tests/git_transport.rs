@@ -14,6 +14,8 @@ use orna_repository_v1::{
 use tempfile::TempDir;
 
 const INTERNAL_REF: &str = "refs/orna/ids/0123456789abcdef";
+const FETCH_CHILD_LOCAL: &str = "ORNA_FETCH_ROUTING_LOCAL";
+const FETCH_CHILD_OTHER: &str = "ORNA_FETCH_ROUTING_OTHER";
 
 fn git(directory: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
@@ -182,6 +184,54 @@ fn request(
     continuity: impl IntoIterator<Item = RequiredInternalRef>,
 ) -> FetchRequest {
     FetchRequest::new("origin", ordinary, continuity).unwrap()
+}
+
+#[test]
+fn fetch_preconditions_ignore_inherited_git_routing_child() {
+    let Ok(local) = std::env::var(FETCH_CHILD_LOCAL) else {
+        return;
+    };
+    let repository = Repository::discover(local).unwrap();
+    let report = repository
+        .fetch(&request([RequestedRef::branch("main").unwrap()], []))
+        .unwrap();
+    assert!(report.ordinary()[0].updated());
+}
+
+#[test]
+fn fetch_preconditions_ignore_inherited_git_routing() {
+    let fixture = Fixture::new();
+    let next = fixture.advance_branch_only();
+    let other = fixture.root.path().join("other");
+    git(
+        fixture.root.path(),
+        &[
+            "clone",
+            fixture.remote.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+
+    let repository = fixture.repository();
+    let head_before = repository.head().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "fetch_preconditions_ignore_inherited_git_routing_child",
+            "--nocapture",
+        ])
+        .env(FETCH_CHILD_LOCAL, fixture.local.to_str().unwrap())
+        .env(FETCH_CHILD_OTHER, other.to_str().unwrap())
+        .env("GIT_DIR", other.join(".git").to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child fetch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]), next);
+    assert_eq!(repository.head().unwrap(), head_before);
 }
 
 #[test]
