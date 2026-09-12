@@ -3529,7 +3529,20 @@ impl RuntimeState {
         self.require_owner(&self.connection, writer)
             .await
             .map_err(StreamStepError::Runtime)?;
-        let poll = match source.next(&checkpoint).await {
+        let next = source.next(&checkpoint);
+        let poll = match tokio::select! {
+            _ = control.cancellation_wait() => {
+                self.complete_stream_observation(
+                    writer,
+                    key,
+                    StreamObservationStatus::Cancelled,
+                )
+                .await
+                .map_err(StreamStepError::Runtime)?;
+                return Ok(StreamStep::Cancelled { checkpoint });
+            }
+            result = next => result,
+        } {
             Ok(poll) => poll,
             Err(diagnostic) => {
                 if control.cancelled() || is_cancellation_diagnostic(diagnostic) {
@@ -10869,6 +10882,7 @@ mod tests {
         future::{Ready, ready},
         path::Path,
         process::Command,
+        sync::atomic::{AtomicBool, Ordering},
     };
     use tempfile::TempDir;
 
@@ -11606,6 +11620,118 @@ mod tests {
             self.wait_started.notify_one();
             Box::pin(std::future::pending())
         }
+    }
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    struct BlockingNextSource {
+        key: CheckpointKey,
+        next_started: Arc<Notify>,
+        next_dropped: Arc<AtomicBool>,
+        polls: usize,
+        waits: usize,
+    }
+
+    impl StreamSource for BlockingNextSource {
+        type NextFuture<'a>
+            = Pin<Box<dyn Future<Output = Result<StreamSourcePoll, SafeDiagnostic>> + 'a>>
+        where
+            Self: 'a;
+        type WaitFuture<'a>
+            = Ready<Result<(), SafeDiagnostic>>
+        where
+            Self: 'a;
+
+        fn descriptor(&self) -> StreamSourceDescriptor {
+            StreamSourceDescriptor {
+                kind: StreamSourceKind::Unbounded,
+                replayable: true,
+            }
+        }
+
+        fn checkpoint_key(&self) -> CheckpointKey {
+            self.key.clone()
+        }
+
+        fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
+            self.polls += 1;
+            let next_started = self.next_started.clone();
+            let drop_flag = DropFlag(self.next_dropped.clone());
+            Box::pin(async move {
+                let _drop_flag = drop_flag;
+                next_started.notify_one();
+                std::future::pending::<Result<StreamSourcePoll, SafeDiagnostic>>().await
+            })
+        }
+
+        fn wait<'a>(&'a mut self, _: &'a dyn StreamRunControl) -> Self::WaitFuture<'a> {
+            self.waits += 1;
+            ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_next_cancellation_interrupts_provider_at_current_checkpoint() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("next-cancel", "next-cancel-next");
+        let key = delivery.checkpoint_key();
+        let next_started = Arc::new(Notify::new());
+        let next_dropped = Arc::new(AtomicBool::new(false));
+        let mut source = BlockingNextSource {
+            key: key.clone(),
+            next_started: next_started.clone(),
+            next_dropped: next_dropped.clone(),
+            polls: 0,
+            waits: 0,
+        };
+        let mut handler = CommitHandler { calls: 0 };
+        let gate = StreamRunGate::new();
+        let mut run = Box::pin(state.run_stream(writer, &key, &mut source, &mut handler, &gate));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                _ = next_started.notified() => {}
+                outcome = &mut run => panic!("stream completed before provider next: {outcome:?}"),
+            }
+        })
+        .await
+        .expect("provider next must begin before cancellation");
+        assert!(gate.cancel());
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), &mut run)
+                .await
+                .expect("cancellation must interrupt a pending provider next")
+                .unwrap(),
+            StreamRunOutcome::Cancelled {
+                delivered: 0,
+                checkpoint: StreamCheckpoint {
+                    version: 0,
+                    committed: None,
+                    ..
+                }
+            }
+        ));
+        assert!(next_dropped.load(Ordering::Acquire));
+        drop(run);
+        assert_eq!(source.polls, 1);
+        assert_eq!(source.waits, 0);
+        assert_eq!(handler.calls, 0);
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+        assert!(
+            state
+                .stream_backend(writer)
+                .provider_failure_async(&key)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
