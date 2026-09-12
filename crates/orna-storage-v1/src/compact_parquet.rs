@@ -1177,6 +1177,263 @@ mod tests {
         bytes
     }
 
+    fn verified_string_fixture(profile: &CompactOvbProfile) -> Vec<u8> {
+        let strings = [b"alpha".to_vec(), b"beta".to_vec()];
+        let mut original =
+            mixed_parquet(profile, &[KEY_A], &[TestColumn::Str(&strings)], false, None);
+        let footer_start = original.len()
+            - 8
+            - u32::from_le_bytes(
+                original[original.len() - 8..original.len() - 4]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+        assert_eq!(&original[footer_start..footer_start + 2], &[0x15, 0x04]);
+        original[footer_start + 1] = 0x02;
+        let reader = SerializedFileReader::new(Bytes::from(original.clone())).unwrap();
+        let file = reader.metadata().file_metadata();
+        let metadata = parquet::file::metadata::FileMetaData::new(
+            1,
+            file.num_rows(),
+            file.created_by().map(str::to_owned),
+            Some(vec![
+                KeyValue::new("orna.profile".into(), Some(COMPACT_STORAGE_PROFILE.into())),
+                KeyValue::new("orna.table".into(), Some(TABLE.to_string())),
+                KeyValue::new(
+                    "orna.schema.sha256".into(),
+                    Some(hex_digest(profile.schema_fingerprint())),
+                ),
+                KeyValue::new(
+                    "orna.schema.ovb".into(),
+                    Some(BASE64.encode(profile.schema().encode().unwrap())),
+                ),
+                KeyValue::new(
+                    "orna.columns.ovb".into(),
+                    Some(
+                        BASE64.encode(
+                            CanonicalValue::new(OvbRaw::Array(vec![descriptor_with_encoding(
+                                KEY_A,
+                                str_type(),
+                                "utf8",
+                            )]))
+                            .unwrap()
+                            .encode()
+                            .unwrap(),
+                        ),
+                    ),
+                ),
+                KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
+            ]),
+            file.schema_descr_ptr(),
+            file.column_orders().cloned(),
+        );
+        let rewritten = parquet::file::metadata::ParquetMetaData::new(
+            metadata,
+            reader.metadata().row_groups().to_vec(),
+        );
+        let mut footer = Vec::new();
+        parquet::file::metadata::ParquetMetaDataWriter::new(&mut footer, &rewritten)
+            .finish()
+            .unwrap();
+        let mut bytes = original[..footer_start].to_vec();
+        bytes.extend(footer);
+        let bytes = with_page_checksums(bytes);
+        bytes
+    }
+
+    struct TestPageHeader {
+        encoded_len: usize,
+        compressed_len: usize,
+        checksum_predecessor: u8,
+        next_field_offset: Option<usize>,
+        next_field_id: Option<u8>,
+        stop_offset: usize,
+    }
+
+    fn page_header(bytes: &[u8]) -> TestPageHeader {
+        let mut cursor = 0;
+        let mut previous = 0_u8;
+        let mut compressed_len = None;
+        let mut next_field_offset = None;
+        let mut next_field_id = None;
+        let mut checksum_predecessor = None;
+        loop {
+            let field_offset = cursor;
+            let tag = compact_byte(bytes, &mut cursor);
+            let kind = tag & 0x0f;
+            if kind == 0 {
+                return TestPageHeader {
+                    encoded_len: cursor,
+                    compressed_len: compressed_len.unwrap(),
+                    checksum_predecessor: checksum_predecessor.unwrap_or(previous),
+                    next_field_offset,
+                    next_field_id,
+                    stop_offset: field_offset,
+                };
+            }
+            let delta = tag >> 4;
+            let field = if delta == 0 {
+                compact_i16(bytes, &mut cursor) as u8
+            } else {
+                previous.checked_add(delta).unwrap()
+            };
+            if field > 4 && next_field_offset.is_none() {
+                next_field_offset = Some(field_offset);
+                next_field_id = Some(field);
+                checksum_predecessor = Some(previous);
+            }
+            if field == 3 && kind == 5 {
+                compressed_len = Some(compact_i32(bytes, &mut cursor) as usize);
+            } else {
+                compact_skip(bytes, &mut cursor, kind);
+            }
+            previous = field;
+        }
+    }
+
+    fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
+        let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+        let metadata = reader.metadata().clone();
+        let column = metadata.row_group(0).column(0);
+        let start = column.data_page_offset() as usize;
+        let length = column.compressed_size() as usize;
+        let header = page_header(&bytes[start..start + length]);
+        let body_start = start + header.encoded_len;
+        let body_end = body_start + header.compressed_len;
+        let checksum = crc32(&bytes[body_start..body_end]);
+        let checksum_delta = 4_u8.checked_sub(header.checksum_predecessor).unwrap();
+        let mut checksum_field = vec![(checksum_delta << 4) | 5];
+        compact_varint(
+            ((i64::from(checksum as i32) << 1) ^ (i64::from(checksum as i32) >> 31)) as u64,
+            &mut checksum_field,
+        );
+        let footer = footer_start(&bytes);
+        let mut data = bytes[..footer].to_vec();
+        let insertion = start + header.next_field_offset.unwrap_or(header.stop_offset);
+        data.splice(insertion..insertion, checksum_field.iter().copied());
+        if let Some(next) = header.next_field_offset {
+            let position = start + next + checksum_field.len();
+            let delta = header.next_field_id.unwrap().checked_sub(4).unwrap();
+            data[position] = (data[position] & 0x0f) | (delta << 4);
+        }
+
+        let mut metadata = metadata.into_builder();
+        let mut row_groups = metadata.take_row_groups();
+        let row_group = row_groups.pop().unwrap();
+        let mut row_group = row_group.into_builder();
+        let mut columns = row_group.take_columns();
+        let column = columns.pop().unwrap();
+        let compressed_size = column.compressed_size();
+        columns.push(
+            column
+                .into_builder()
+                .set_total_compressed_size(
+                    compressed_size + i64::try_from(data.len() - footer).unwrap(),
+                )
+                .build()
+                .unwrap(),
+        );
+        let row_group = row_group.set_column_metadata(columns).build().unwrap();
+        let metadata = metadata.add_row_group(row_group).build();
+        let mut new_footer = Vec::new();
+        parquet::file::metadata::ParquetMetaDataWriter::new(&mut new_footer, &metadata)
+            .finish()
+            .unwrap();
+        data.extend(new_footer);
+        data
+    }
+
+    fn footer_start(bytes: &[u8]) -> usize {
+        let length =
+            u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap());
+        bytes.len() - 8 - length as usize
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut value = !0_u32;
+        for byte in bytes {
+            value ^= u32::from(*byte);
+            for _ in 0..8 {
+                let mask = 0_u32.wrapping_sub(value & 1);
+                value = (value >> 1) ^ (0xedb8_8320 & mask);
+            }
+        }
+        !value
+    }
+
+    fn compact_byte(bytes: &[u8], cursor: &mut usize) -> u8 {
+        let value = bytes[*cursor];
+        *cursor += 1;
+        value
+    }
+
+    fn compact_varint(mut value: u64, output: &mut Vec<u8>) {
+        while value >= 0x80 {
+            output.push((value as u8 & 0x7f) | 0x80);
+            value >>= 7;
+        }
+        output.push(value as u8);
+    }
+
+    fn compact_read_varint(bytes: &[u8], cursor: &mut usize) -> u64 {
+        let mut value = 0_u64;
+        for shift in (0..64).step_by(7) {
+            let byte = compact_byte(bytes, cursor);
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return value;
+            }
+        }
+        panic!("invalid compact fixture varint");
+    }
+
+    fn compact_i16(bytes: &[u8], cursor: &mut usize) -> i16 {
+        let value = compact_read_varint(bytes, cursor) as i64;
+        ((value >> 1) ^ -(value & 1)).try_into().unwrap()
+    }
+
+    fn compact_i32(bytes: &[u8], cursor: &mut usize) -> i32 {
+        let value = compact_read_varint(bytes, cursor) as i64;
+        ((value >> 1) ^ -(value & 1)).try_into().unwrap()
+    }
+
+    fn compact_skip(bytes: &[u8], cursor: &mut usize, kind: u8) {
+        match kind {
+            1 | 2 => {}
+            3 => *cursor += 1,
+            4..=6 => {
+                let _ = compact_read_varint(bytes, cursor);
+            }
+            7 => *cursor += 8,
+            8 => {
+                let length = compact_read_varint(bytes, cursor) as usize;
+                *cursor += length;
+            }
+            9 | 10 => {
+                let size_and_kind = compact_byte(bytes, cursor);
+                let size = if size_and_kind >> 4 == 15 {
+                    compact_read_varint(bytes, cursor) as usize
+                } else {
+                    usize::from(size_and_kind >> 4)
+                };
+                for _ in 0..size {
+                    compact_skip(bytes, cursor, size_and_kind & 0x0f);
+                }
+            }
+            12 => loop {
+                let tag = compact_byte(bytes, cursor);
+                if tag & 0x0f == 0 {
+                    break;
+                }
+                if tag >> 4 == 0 {
+                    let _ = compact_i16(bytes, cursor);
+                }
+                compact_skip(bytes, cursor, tag & 0x0f);
+            },
+            _ => panic!("unsupported compact fixture field"),
+        }
+    }
+
     #[test]
     fn repository_backed_source_reads_verified_manifest_and_rejects_drift() {
         let profile = profile(&[KEY_A]);
@@ -1267,6 +1524,75 @@ mod tests {
             ),
             Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
         ));
+        drop(temp);
+    }
+
+    #[test]
+    fn repository_backed_string_source_reads_verified_manifest_bytes() {
+        let profile = profile_with_types(&[KEY_A], &[str_type()]);
+        let bytes = verified_string_fixture(&profile);
+        let (temp, repository) = repository();
+        let segment_path = ManagedPath::new(format!(
+            ".orna/storage/{TABLE}/data/{}/{SEGMENT_ID}.parquet",
+            &SEGMENT_ID.to_string()[..2]
+        ))
+        .unwrap();
+        // Bounds use canonical OVB byte order: the length prefix puts beta
+        // before alpha even though their textual order is the reverse.
+        let min_key = expected_text("beta");
+        let max_key = expected_text("alpha");
+        let columns = CanonicalValue::new(OvbRaw::Array(vec![descriptor_with_encoding(
+            KEY_A,
+            str_type(),
+            "utf8",
+        )]))
+        .unwrap()
+        .encode()
+        .unwrap();
+        let segment = CompactSegment::new(
+            SEGMENT_ID,
+            CompactSegmentRole::Data,
+            profile.schema_fingerprint(),
+            "test-encoder-v1",
+            segment_path,
+            bytes,
+            min_key,
+            max_key,
+            2,
+            columns,
+            true,
+            false,
+        )
+        .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let plan = repository
+            .prepare_compact_publication(
+                &head,
+                repository.index_generation().unwrap(),
+                CompactManifest::empty(TABLE, profile.schema_fingerprint()),
+                [7; 16],
+                [8; 32],
+                &[segment],
+                "compact string physical reader fixture",
+            )
+            .unwrap();
+        let manifest = plan.manifest().clone();
+        let pending = repository
+            .publish_compact_repository_boundary(plan)
+            .unwrap();
+        let source = CompactParquetKeySource::from_verified_manifest(
+            &repository,
+            pending.commit(),
+            &manifest,
+            profile,
+        )
+        .unwrap();
+        let keys = source
+            .exact_keys(&manifest.entries()[0])
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(keys, vec![expected_text("alpha"), expected_text("beta")]);
         drop(temp);
     }
 
