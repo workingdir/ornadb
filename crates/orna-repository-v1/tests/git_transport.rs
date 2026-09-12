@@ -31,6 +31,50 @@ fn git(directory: &Path, arguments: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
+fn git_no_lazy(directory: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(directory)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn promised_inventory(directory: &Path) -> Vec<String> {
+    let mut inventory = git_no_lazy(
+        directory,
+        &[
+            "rev-list",
+            "--objects",
+            "--missing=print",
+            "--no-object-names",
+            "--all",
+        ],
+    )
+    .lines()
+    .filter_map(|line| line.strip_prefix('?'))
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    inventory.sort();
+    inventory
+}
+
+fn git_path_bytes(directory: &Path, name: &str) -> Option<Vec<u8>> {
+    let path = PathBuf::from(git(directory, &["rev-parse", "--git-path", name]));
+    let path = if path.is_absolute() {
+        path
+    } else {
+        directory.join(path)
+    };
+    fs::read(path).ok()
+}
+
 fn git_status(directory: &Path, arguments: &[&str]) -> bool {
     Command::new("git")
         .current_dir(directory)
@@ -699,4 +743,160 @@ fn fetch_preserves_materialized_promised_and_unavailable_object_states() {
     ];
     assert_eq!(after, before);
     drop(fixture);
+}
+
+#[test]
+fn hydrate_materializes_only_the_requested_promised_object() {
+    let Some((fixture, clone, promised)) = filtered_clone() else {
+        panic!("the release gate requires a real filtered-clone hydration fixture");
+    };
+    let repository = Repository::discover(&clone).unwrap();
+    let other_promised = git(
+        &fixture.path().join("seed"),
+        &["rev-parse", "HEAD:visible.txt"],
+    );
+    let head_before = repository.head().unwrap();
+    let head_identity_before = git(&clone, &["rev-parse", "HEAD^{object}"]);
+    let head_attachment_before = git(&clone, &["symbolic-ref", "--quiet", "HEAD"]);
+    let head_bytes_before = git_path_bytes(&clone, "HEAD");
+    let fetch_head_before = git_path_bytes(&clone, "FETCH_HEAD");
+    let index_before = repository.index_generation().unwrap();
+    let worktree_before = repository.worktree_state().unwrap();
+    let refs_before = git(
+        &clone,
+        &["for-each-ref", "--format=%(refname)=%(objectname)"],
+    );
+    let promised_before = promised_inventory(&clone);
+    assert_eq!(
+        repository.observe_git_object(&promised).unwrap(),
+        GitObjectState::Promised
+    );
+    assert_eq!(
+        repository.observe_git_object(&other_promised).unwrap(),
+        GitObjectState::Promised
+    );
+    assert!(promised_before.iter().any(|id| id == &promised));
+    assert!(promised_before.iter().any(|id| id == &other_promised));
+
+    repository.hydrate_promised_object(&promised).unwrap();
+
+    let promised_after = promised_inventory(&clone);
+    let expected_promised_after = promised_before
+        .iter()
+        .filter(|id| *id != &promised)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(promised_after, expected_promised_after);
+
+    assert!(matches!(
+        repository.observe_git_object(&promised).unwrap(),
+        GitObjectState::Materialized {
+            kind: GitObjectKind::Blob,
+            ..
+        }
+    ));
+    assert_eq!(
+        repository.observe_git_object(&other_promised).unwrap(),
+        GitObjectState::Promised
+    );
+    assert_eq!(repository.head().unwrap(), head_before);
+    assert_eq!(
+        git(&clone, &["rev-parse", "HEAD^{object}"]),
+        head_identity_before
+    );
+    assert_eq!(
+        git(&clone, &["symbolic-ref", "--quiet", "HEAD"]),
+        head_attachment_before
+    );
+    assert_eq!(git_path_bytes(&clone, "HEAD"), head_bytes_before);
+    assert_eq!(git_path_bytes(&clone, "FETCH_HEAD"), fetch_head_before);
+    assert_eq!(repository.index_generation().unwrap(), index_before);
+    assert_eq!(repository.worktree_state().unwrap(), worktree_before);
+    assert_eq!(
+        git(
+            &clone,
+            &["for-each-ref", "--format=%(refname)=%(objectname)"],
+        ),
+        refs_before
+    );
+    drop(fixture);
+}
+
+#[test]
+fn hydrate_fails_closed_with_an_unusable_promisor_without_changing_promises() {
+    let Some((fixture, clone, promised)) = filtered_clone() else {
+        panic!("the release gate requires a real filtered-clone hydration fixture");
+    };
+    let repository = Repository::discover(&clone).unwrap();
+    let other_promised = git(
+        &fixture.path().join("seed"),
+        &["rev-parse", "HEAD:visible.txt"],
+    );
+    let unusable_promisor = fixture.path().join("unusable-promisor.git");
+    git(
+        &clone,
+        &[
+            "config",
+            "remote.origin.url",
+            unusable_promisor.to_str().unwrap(),
+        ],
+    );
+
+    let promised_before = promised_inventory(&clone);
+    let head_identity_before = git(&clone, &["rev-parse", "HEAD^{object}"]);
+    let head_attachment_before = git(&clone, &["symbolic-ref", "--quiet", "HEAD"]);
+    let head_bytes_before = git_path_bytes(&clone, "HEAD");
+    let fetch_head_before = git_path_bytes(&clone, "FETCH_HEAD");
+    assert_eq!(
+        repository.observe_git_object(&promised).unwrap(),
+        GitObjectState::Promised
+    );
+    assert_eq!(
+        repository.observe_git_object(&other_promised).unwrap(),
+        GitObjectState::Promised
+    );
+
+    assert!(matches!(
+        repository.hydrate_promised_object(&promised),
+        Err(FetchError::ObjectUnavailable)
+    ));
+
+    assert_eq!(promised_inventory(&clone), promised_before);
+    assert_eq!(
+        repository.observe_git_object(&promised).unwrap(),
+        GitObjectState::Promised
+    );
+    assert_eq!(
+        repository.observe_git_object(&other_promised).unwrap(),
+        GitObjectState::Promised
+    );
+    assert_eq!(
+        git(&clone, &["rev-parse", "HEAD^{object}"]),
+        head_identity_before
+    );
+    assert_eq!(
+        git(&clone, &["symbolic-ref", "--quiet", "HEAD"]),
+        head_attachment_before
+    );
+    assert_eq!(git_path_bytes(&clone, "HEAD"), head_bytes_before);
+    assert_eq!(git_path_bytes(&clone, "FETCH_HEAD"), fetch_head_before);
+    drop(fixture);
+}
+
+#[test]
+fn hydrate_rejects_unpromised_or_malformed_objects_before_fetch() {
+    let fixture = Fixture::new();
+    let repository = fixture.repository();
+    let materialized = fixture.initial_head();
+    let unavailable = "0".repeat(materialized.len());
+
+    assert!(matches!(
+        repository.hydrate_promised_object(&unavailable),
+        Err(FetchError::ObjectNotPromised)
+    ));
+    assert!(matches!(
+        repository.hydrate_promised_object("not-an-object-id"),
+        Err(FetchError::InvalidObjectId)
+    ));
+    assert!(repository.observe_git_object(&materialized).is_ok());
 }

@@ -2,9 +2,11 @@
 //!
 //! This module deliberately stops at fetch.  It downloads the objects named
 //! by ordinary requested refs and continuity-approved `refs/orna/*` refs, then
-//! installs only compare-and-set-safe local refs.  It does not change HEAD,
-//! the index, the worktree, or Orna's runtime files, and it does not claim to
-//! implement clone, pull, or push.
+//! installs only compare-and-set-safe local refs.  Its exact-object hydration
+//! boundary materializes one already-proven promised object without installing
+//! refs. Neither operation changes HEAD, the index, the worktree, or Orna's
+//! runtime files, and this module does not claim to implement clone, pull, or
+//! push.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -144,6 +146,10 @@ pub enum FetchError {
     RemoteChanged,
     RefConflict,
     ObjectUnavailable,
+    InvalidObjectId,
+    ObjectNotPromised,
+    PromisorUnavailable,
+    HydrationFailed,
 }
 
 impl fmt::Display for FetchError {
@@ -161,6 +167,10 @@ impl fmt::Display for FetchError {
             Self::RemoteChanged => "remote Git refs changed during fetch",
             Self::RefConflict => "local Git ref changed or would overwrite newer state",
             Self::ObjectUnavailable => "fetched Git object is unavailable locally",
+            Self::InvalidObjectId => "invalid native Git object ID",
+            Self::ObjectNotPromised => "Git object is not a proven promised object",
+            Self::PromisorUnavailable => "no usable Git promisor remote is configured",
+            Self::HydrationFailed => "Git promised-object hydration failed",
         })
     }
 }
@@ -242,6 +252,83 @@ struct RefPlan {
 }
 
 impl Repository {
+    /// Materializes one exact object that the local partial-clone walk has
+    /// already proven to be promised. The fetch has an empty destination, so
+    /// it may add object bytes but cannot update refs or `FETCH_HEAD`; the
+    /// postcondition verifies that the requested ID is locally materialized.
+    /// A materialized object is an idempotent success. Unavailable, malformed,
+    /// or unproven IDs fail closed before a remote is contacted.
+    pub fn hydrate_promised_object(&self, object_id: &str) -> Result<(), FetchError> {
+        let object_id =
+            NativeObjectId::new(object_id.to_owned()).map_err(|_| FetchError::InvalidObjectId)?;
+        let state = self.observe_git_object(object_id.as_str())?;
+        if matches!(state, super::GitObjectState::Materialized { .. }) {
+            return Ok(());
+        }
+        if !matches!(state, super::GitObjectState::Promised) {
+            return Err(match state {
+                super::GitObjectState::Malformed => FetchError::InvalidObjectId,
+                super::GitObjectState::Unavailable => FetchError::ObjectNotPromised,
+                super::GitObjectState::Materialized { .. } | super::GitObjectState::Promised => {
+                    unreachable!()
+                }
+            });
+        }
+
+        let _lock = self.acquire_coordination_lock()?;
+        let capabilities = self.observe_git_capabilities()?;
+        if capabilities.mode == super::GitRepositoryMode::Malformed
+            || capabilities.promisor_remotes().is_empty()
+        {
+            return Err(FetchError::PromisorUnavailable);
+        }
+
+        // Revalidate the promise under the repository lock so a concurrent
+        // fetch or maintenance operation cannot turn a stale observation into
+        // an unconstrained object request.
+        let state = self.observe_git_object(object_id.as_str())?;
+        if matches!(state, super::GitObjectState::Materialized { .. }) {
+            return Ok(());
+        }
+        if !matches!(state, super::GitObjectState::Promised) {
+            return Err(match state {
+                super::GitObjectState::Malformed => FetchError::InvalidObjectId,
+                super::GitObjectState::Unavailable => FetchError::ObjectNotPromised,
+                super::GitObjectState::Materialized { .. } | super::GitObjectState::Promised => {
+                    unreachable!()
+                }
+            });
+        }
+
+        for remote in capabilities.promisor_remotes() {
+            let mut command = self.observer_command();
+            command
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .args([
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "--refmap=",
+                    remote,
+                ])
+                .arg(format!("{}:", object_id.as_str()))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let Ok(status) = command.status() else {
+                continue;
+            };
+            if !status.success() {
+                continue;
+            }
+            match self.observe_git_object(object_id.as_str())? {
+                super::GitObjectState::Materialized { .. } => return Ok(()),
+                super::GitObjectState::Promised | super::GitObjectState::Unavailable => {}
+                super::GitObjectState::Malformed => return Err(FetchError::HydrationFailed),
+            }
+        }
+        Err(FetchError::ObjectUnavailable)
+    }
+
     /// Fetches requested ordinary refs and continuity-approved `refs/orna/*`
     /// refs without changing HEAD, the index, the worktree, or runtime files.
     /// Local ref installation is one compare-and-set transaction; a newer or
