@@ -15,7 +15,7 @@ use std::{
 
 use super::{
     NativeObjectId, RemoteContinuity, Repository, RepositoryError,
-    RequiredInternalRef, scrub_git_routing_environment, valid_branch_name, valid_remote_name,
+    RequiredInternalRef, scrub_git_routing_environment, trim_output, valid_branch_name, valid_remote_name,
 };
 
 const MAX_FETCH_REFS: usize = 4096;
@@ -511,16 +511,23 @@ fn continuity_state(
 }
 
 fn local_ref_oid(repository: &Repository, reference: &str) -> Result<Option<String>, FetchError> {
-    let mut command = repository.command();
+    let mut command = repository.observer_command();
     command
         .args(["show-ref", "--verify", "--quiet", "--"])
         .arg(reference);
-    let output = command.output().map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
+    let output = command
+        .output()
+        .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
     if output.status.success() {
-        return repository
-            .git(["rev-parse", "--verify", "--quiet", reference])
-            .map(|oid| Some(oid.to_ascii_lowercase()))
-            .map_err(FetchError::from);
+        let mut command = repository.observer_command();
+        command.args(["rev-parse", "--verify", "--quiet", reference]);
+        let output = command
+            .output()
+            .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
+        if !output.status.success() {
+            return Err(FetchError::Repository(RepositoryError::GitOperationFailed));
+        }
+        return Ok(Some(trim_output(&output.stdout).to_ascii_lowercase()));
     }
     if output.status.code() == Some(1) && output.stderr.is_empty() {
         Ok(None)
@@ -530,7 +537,7 @@ fn local_ref_oid(repository: &Repository, reference: &str) -> Result<Option<Stri
 }
 
 fn is_fast_forward(repository: &Repository, old: &str, new: &str) -> Result<bool, FetchError> {
-    let mut command = repository.command();
+    let mut command = repository.observer_command();
     command.args(["merge-base", "--is-ancestor", old, new]);
     let output = command
         .output()
