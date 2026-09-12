@@ -9,7 +9,10 @@ use std::{future::Future, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use tokio_tungstenite::{
     WebSocketStream,
-    tungstenite::{Message, protocol::Role},
+    tungstenite::{
+        Message,
+        protocol::{Role, WebSocketConfig},
+    },
 };
 
 fn config(endpoint: &str, policy: TlsPolicy) -> LiveClientConfig {
@@ -165,6 +168,58 @@ fn local_fake_wire_handles_text_control_masking_and_bounds() {
     block_on(fragment_server_io.write_all(&[0x02, 0x01, 1, 0x80, 0x01, 2])).unwrap();
     assert_eq!(
         block_on(fragment_transport.receive_binary(Limits::default().max_message_bytes)).unwrap(),
+        vec![1, 2]
+    );
+}
+
+#[test]
+fn raw_fragmented_binary_message_is_rejected_during_reassembly() {
+    let mut small = Limits::default();
+    small.max_message_bytes = 1;
+    let (client_io, mut server_io) = duplex(4096);
+    let client = block_on(WebSocketStream::from_raw_socket(
+        client_io,
+        Role::Client,
+        Some(
+            WebSocketConfig::default()
+                .max_message_size(Some(small.max_message_bytes))
+                .max_frame_size(Some(small.max_message_bytes)),
+        ),
+    ));
+    let mut transport =
+        AuthenticatedWebSocketTransport::from_authenticated_socket(client, small).unwrap();
+
+    block_on(server_io.write_all(&[0x02, 0x01, 1, 0x80, 0x01, 2])).unwrap();
+    assert!(matches!(
+        block_on(transport.receive_binary(small.max_message_bytes)),
+        Err(LiveTransportError::WebSocket(
+            tokio_tungstenite::tungstenite::Error::Capacity(
+                tokio_tungstenite::tungstenite::error::CapacityError::MessageTooLong {
+                    size: 2,
+                    max_size: 1
+                }
+            )
+        ))
+    ));
+
+    let mut in_limit = Limits::default();
+    in_limit.max_message_bytes = 2;
+    let (client_io, mut server_io) = duplex(4096);
+    let client = block_on(WebSocketStream::from_raw_socket(
+        client_io,
+        Role::Client,
+        Some(
+            WebSocketConfig::default()
+                .max_message_size(Some(in_limit.max_message_bytes))
+                .max_frame_size(Some(in_limit.max_message_bytes)),
+        ),
+    ));
+    let mut transport =
+        AuthenticatedWebSocketTransport::from_authenticated_socket(client, in_limit).unwrap();
+
+    block_on(server_io.write_all(&[0x02, 0x01, 1, 0x80, 0x01, 2])).unwrap();
+    assert_eq!(
+        block_on(transport.receive_binary(in_limit.max_message_bytes)).unwrap(),
         vec![1, 2]
     );
 }
