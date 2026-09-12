@@ -7,10 +7,13 @@ license = "Apache-2.0"
 description = "Bounded loose-row projection and PUB-1 recovery model for Orna 1.0"
 
 [dependencies]
+base64 = "0.22.1"
+bytes = "1.10.1"
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-repository-v1 = { path = "../orna-repository-v1" }
 orna-runtime-v1 = { path = "../orna-runtime-v1" }
 orna-value-v1 = { path = "../orna-value-v1" }
+parquet = { version = "59.3.0", default-features = false, features = ["crc", "zstd"] }
 sha2 = "0.10.9"
 
 [dev-dependencies]
