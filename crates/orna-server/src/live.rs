@@ -2620,44 +2620,53 @@ where
     await_socket_io(writer.flush(), cancellation).await
 }
 
-async fn serve_websocket_bytes<C>(
+async fn serve_websocket_bytes<C, W>(
     actor: &futures::channel::mpsc::UnboundedSender<ActorCommand>,
     socket: &mut WebSocketState,
     bytes: &[u8],
-    writer: &mut TokioWriter,
+    writer: &mut W,
     cancellation: &mut C,
 ) -> Result<bool, ()>
 where
     C: Future<Output = ()> + Unpin,
+    W: futures::io::AsyncWrite + Unpin,
 {
-    let (sender, receiver) = futures::channel::oneshot::channel();
-    actor
-        .unbounded_send(ActorCommand::Receive {
-            socket: std::mem::replace(socket, WebSocketState::new([0; 16])),
-            bytes: bytes.to_vec(),
-            now: system_milliseconds(),
-            reply: sender,
-        })
-        .map_err(|_| ())?;
-    let (returned, outputs) = await_actor_response(receiver, cancellation)
-        .await?
-        .map_err(|_| ())?;
-    *socket = returned;
-    for output in outputs {
-        let closing = matches!(output, WebSocketOutput::Close { .. });
-        let Some(frame) =
-            encode_websocket_output(&output, TransportLimits::default()).map_err(|_| ())?
-        else {
-            continue;
-        };
-        await_socket_io(writer.write_all(&frame), cancellation).await?;
-        await_socket_io(writer.flush(), cancellation).await?;
-        if closing {
-            await_socket_io(writer.close(), cancellation).await?;
-            return Ok(true);
+    let mut input = Some(bytes);
+    loop {
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        actor
+            .unbounded_send(ActorCommand::Receive {
+                socket: std::mem::replace(socket, WebSocketState::new([0; 16])),
+                bytes: input.take().unwrap_or_default().to_vec(),
+                now: system_milliseconds(),
+                reply: sender,
+            })
+            .map_err(|_| ())?;
+        let (returned, outputs) = await_actor_response(receiver, cancellation)
+            .await?
+            .map_err(|_| ())?;
+        *socket = returned;
+        for output in outputs {
+            let closing = matches!(output, WebSocketOutput::Close { .. });
+            let Some(frame) =
+                encode_websocket_output(&output, TransportLimits::default()).map_err(|_| ())?
+            else {
+                continue;
+            };
+            await_socket_io(writer.write_all(&frame), cancellation).await?;
+            await_socket_io(writer.flush(), cancellation).await?;
+            if closing {
+                await_socket_io(writer.close(), cancellation).await?;
+                return Ok(true);
+            }
+        }
+        if !socket
+            .has_complete_frame(TransportLimits::default().max_frame_bytes)
+            .map_err(|_| ())?
+        {
+            return Ok(false);
         }
     }
-    Ok(false)
 }
 
 async fn close_worker_attachment(
@@ -3081,7 +3090,8 @@ mod tests {
     };
     use orna_project_v1::ProjectLoader;
     use orna_protocol_v1::{
-        DatabaseContext, Envelope, Message, PresentationContext, canonical_request_fingerprint,
+        DatabaseContext, Envelope, Limits as ProtocolLimits, Message, PresentationContext,
+        canonical_request_fingerprint,
     };
     use orna_repository_v1::{initialize_repository, inspect_metadata};
     use orna_runtime_v1::RuntimeState;
@@ -3700,6 +3710,175 @@ mod tests {
                 .encode(orna_protocol_v1::Limits::default())
                 .unwrap(),
         )
+    }
+
+    fn worker_unsubscribe_frame(request: [u8; 16], watch: [u8; 16]) -> Vec<u8> {
+        Envelope {
+            request: Some(request),
+            watch: Some(watch),
+            message: Message::Unsubscribe,
+            extensions: BTreeMap::new(),
+        }
+        .encode(ProtocolLimits::default())
+        .expect("static unsubscribe payload")
+    }
+
+    fn masked_websocket_frame(fin: bool, opcode: u8, payload: &[u8]) -> Vec<u8> {
+        assert!(payload.len() < 126, "test payload is short");
+        let mask = [1, 2, 3, 4];
+        let mut frame = vec![u8::from(fin) << 7 | opcode, 128 | payload.len() as u8];
+        frame.extend_from_slice(&mask);
+        frame.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ mask[index % mask.len()]),
+        );
+        frame
+    }
+
+    fn server_binary_requests(bytes: &[u8]) -> Vec<[u8; 16]> {
+        let mut bytes = bytes;
+        let mut requests = Vec::new();
+        while !bytes.is_empty() {
+            assert!(bytes.len() >= 2, "server frame header is complete");
+            assert_eq!(bytes[0], 0x82, "server response is a final binary frame");
+            let length = match bytes[1] {
+                length @ 0..=125 => usize::from(length),
+                126 => {
+                    assert!(bytes.len() >= 4, "extended server frame header is complete");
+                    usize::from(u16::from_be_bytes([bytes[2], bytes[3]]))
+                }
+                _ => panic!("test response unexpectedly uses a 64-bit length"),
+            };
+            let header = if bytes[1] <= 125 { 2 } else { 4 };
+            assert!(
+                bytes.len() >= header + length,
+                "server response payload is complete"
+            );
+            let envelope =
+                Envelope::decode(&bytes[header..header + length], ProtocolLimits::default())
+                    .expect("server response is canonical");
+            assert!(matches!(envelope.message, Message::Result { .. }));
+            requests.push(envelope.request.expect("result is correlated"));
+            bytes = &bytes[header + length..];
+        }
+        requests
+    }
+
+    #[test]
+    fn actor_drains_coalesced_fragmented_messages_in_order() {
+        let repository = worker_repository();
+        super::shutdown_tests::run_local(async move {
+            let session = [41; 16];
+            let attachment = [42; 16];
+            let now = super::system_milliseconds();
+            let origin = Origin::parse("https://app.example").unwrap();
+            let mut host = LiveHost::new(
+                Limits::default(),
+                SessionBoundary::new(OriginPolicy::new([origin.clone()], []), 60_000),
+                Serving::new(orna_serving_v1::Limits::default()).unwrap(),
+            )
+            .unwrap();
+            let mut issuer = SystemCredentialIssuer::default();
+            let credential = host
+                .create(
+                    CreateRequest {
+                        id: session,
+                        origin: origin.clone(),
+                        expires_at: now.saturating_add(60_000),
+                        now,
+                        subscribe: &subscribe_payload(),
+                    },
+                    &mut issuer,
+                )
+                .await
+                .unwrap();
+            host.resume(ResumeRequest {
+                id: session,
+                origin: &origin,
+                credential: &credential,
+                attachment,
+                now,
+            })
+            .await
+            .unwrap();
+            let transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+            let application_work = transport.application_work_supervisor();
+            let application_workers = ApplicationWorkerRegistry::new(repository.recipe.clone());
+            let expiries = Rc::new(RefCell::new(BTreeMap::from([(
+                SessionId::new(session),
+                now.saturating_add(60_000),
+            )])));
+            let deletion = HostDeletion {
+                expiries: Rc::clone(&expiries),
+                deleted_leases: Rc::new(RefCell::new(BTreeMap::new())),
+                application: Rc::new(RefCell::new(None)),
+                application_workers: Some(application_workers.clone()),
+            };
+            let registry = Rc::new(RefCell::new(super::WorkerRegistry::default()));
+            let (actor_sender, actor_receiver) = futures::channel::mpsc::unbounded();
+            let (_retirement_acknowledgements, retirement_acknowledgement_receiver) =
+                futures::channel::mpsc::unbounded();
+            let (retirement_gate_sender, _retirement_gates) = futures::channel::mpsc::unbounded();
+            let actor = tokio::task::spawn_local(super::run_host_actor(
+                actor_receiver,
+                actor_sender.clone(),
+                super::ConcurrentHostState {
+                    transport,
+                    authority: super::HostAuthority {
+                        database_id: repository.recipe.database_id,
+                        runtime_id: [43; 16],
+                        expiries,
+                    },
+                    issuer: SystemCredentialIssuer::default(),
+                    deletion,
+                    application_workers,
+                    application_work,
+                    delivering_upgrades: BTreeMap::new(),
+                },
+                registry,
+                retirement_acknowledgement_receiver,
+                retirement_gate_sender,
+            ));
+
+            let first_request = [44; 16];
+            let second_request = [45; 16];
+            let first = worker_unsubscribe_frame(first_request, [46; 16]);
+            let second = worker_unsubscribe_frame(second_request, [47; 16]);
+            let split = second.len() / 2;
+            let mut input = masked_websocket_frame(true, 2, &first);
+            input.extend(masked_websocket_frame(false, 2, &second[..split]));
+            input.extend(masked_websocket_frame(true, 0, &second[split..]));
+
+            let mut socket = WebSocketState::new(attachment);
+            let mut writer = futures::io::Cursor::new(Vec::new());
+            let mut cancellation = futures::future::pending();
+            assert!(
+                !super::serve_websocket_bytes(
+                    &actor_sender,
+                    &mut socket,
+                    &input,
+                    &mut writer,
+                    &mut cancellation,
+                )
+                .await
+                .unwrap()
+            );
+            assert_eq!(
+                server_binary_requests(writer.get_ref()),
+                vec![first_request, second_request],
+                "the actor must admit each buffered message once and in wire order"
+            );
+            assert!(
+                !socket
+                    .has_complete_frame(TransportLimits::default().max_frame_bytes)
+                    .unwrap()
+            );
+
+            actor_sender.unbounded_send(ActorCommand::Shutdown).unwrap();
+            actor.await.unwrap();
+        });
     }
 
     #[test]
