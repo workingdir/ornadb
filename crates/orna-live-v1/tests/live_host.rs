@@ -3848,7 +3848,14 @@ fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
     }
     drop(runtime);
 
-    let mut host = durable_host_with_owner(open_durable_state(&repository), [92; 16]);
+    let mut host = durable_host_after_takeover(
+        open_durable_state(&repository),
+        [92; 16],
+        RequestOwner {
+            owner_id: [91; 16],
+            epoch: 1,
+        },
+    );
     let mut issuer = Issuer(1, None);
     let credential = create(&mut host, &mut issuer);
     block_on(host.resume(ResumeRequest {
@@ -3883,6 +3890,11 @@ fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
             &mut application,
         ))
         .unwrap();
+        let expected_state = if state == orna_protocol_v1::RequestState::Running {
+            orna_protocol_v1::RequestState::Orphaned
+        } else {
+            state
+        };
         assert!(matches!(
             outcome.response.unwrap().message,
             Message::RequestStatusResult {
@@ -3891,9 +3903,9 @@ fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
                 fingerprint: Some(returned_fingerprint),
                 result,
             } if returned_target == target
-                && returned_state == state
+                && returned_state == expected_state
                 && returned_fingerprint == fingerprint
-                && result.is_some() == (state == orna_protocol_v1::RequestState::Orphaned)
+                && result.is_some() == (expected_state == orna_protocol_v1::RequestState::Orphaned)
         ));
     }
     let mismatch = Envelope {
@@ -4013,7 +4025,11 @@ fn durable_runtime_recovery_does_not_cancel_or_replay_a_running_request() {
     block_on(runtime.recover_abandoned(old.owner_id, [72; 16])).unwrap();
     drop(runtime);
 
-    let mut host = durable_host_with_owner(open_durable_state(&repository), [72; 16]);
+    let mut host = durable_host_after_takeover(
+        open_durable_state(&repository),
+        [72; 16],
+        RequestOwner::from(old),
+    );
     let mut issuer = Issuer(1, None);
     let credential = create(&mut host, &mut issuer);
     block_on(host.resume(ResumeRequest {
