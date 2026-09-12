@@ -30,9 +30,21 @@ use tokio_tungstenite::{
 const SESSION: &str = "00000000-0000-0000-0000-000000000001";
 const DATABASE: &str = "00000000-0000-0000-0000-000000000002";
 const RUNTIME: &str = "00000000-0000-0000-0000-000000000003";
+const ROTATED_RUNTIME: &str = "00000000-0000-0000-0000-000000000004";
 const FIRST_TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const SECOND_TOKEN: &str = "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE";
 const THIRD_TOKEN: &str = "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII";
+
+#[derive(Clone, Copy)]
+enum ReplacementResponse {
+    Resubscribe,
+    ExistingAutomatic,
+    WrongWatch,
+    Correlated,
+    RuntimeChanged,
+    LimitsChanged,
+    TransportFailure,
+}
 
 #[derive(Default)]
 struct Renderer {
@@ -101,9 +113,20 @@ fn subscribe() -> Envelope {
     }
 }
 
-fn snapshot(watch: [u8; 16], revision: u8, text: &str) -> Vec<u8> {
-    let mut bytes = vec![0xa5, 0x00, 0x01, 0x01, 16, 0x02, 0x50];
-    bytes.extend([1; 16]);
+fn snapshot_with_request(
+    watch: [u8; 16],
+    revision: u8,
+    text: &str,
+    request: Option<[u8; 16]>,
+) -> Vec<u8> {
+    let mut bytes = vec![0xa5, 0x00, 0x01, 0x01, 16, 0x02];
+    match request {
+        Some(request) => {
+            bytes.push(0x50);
+            bytes.extend(request);
+        }
+        None => bytes.push(0xf6),
+    }
     bytes.extend([0x03, 0x50]);
     bytes.extend(watch);
     bytes.extend([0x04, 0xa3, 0x00, revision, 0x01]);
@@ -125,10 +148,26 @@ fn snapshot(watch: [u8; 16], revision: u8, text: &str) -> Vec<u8> {
         .unwrap()
 }
 
-fn session_body(token: &str) -> String {
+fn snapshot(watch: [u8; 16], revision: u8, text: &str) -> Vec<u8> {
+    snapshot_with_request(watch, revision, text, Some([1; 16]))
+}
+
+fn automatic_snapshot(watch: [u8; 16], revision: u8, text: &str) -> Vec<u8> {
+    snapshot_with_request(watch, revision, text, None)
+}
+
+fn session_body(token: &str, runtime: &str, limits: &str) -> String {
     format!(
-        r#"{{"session":"{SESSION}","database":"{DATABASE}","runtime":"{RUNTIME}","resume_token":"{token}","websocket_path":"/orna/live/{SESSION}","lease_ms":30000,"limits":{{"max_message_bytes":16777216,"max_depth":64,"max_nodes":100000,"max_collection_items":100000,"max_outgoing_bytes":16777216,"request_retention_ms":30000}}}}"#,
+        r#"{{"session":"{SESSION}","database":"{DATABASE}","runtime":"{runtime}","resume_token":"{token}","websocket_path":"/orna/live/{SESSION}","lease_ms":30000,"limits":{limits}}}"#,
     )
+}
+
+fn default_limits() -> &'static str {
+    r#"{"max_message_bytes":16777216,"max_depth":64,"max_nodes":100000,"max_collection_items":100000,"max_outgoing_bytes":16777216,"request_retention_ms":30000}"#
+}
+
+fn changed_limits() -> &'static str {
+    r#"{"max_message_bytes":16777216,"max_depth":64,"max_nodes":100000,"max_collection_items":99999,"max_outgoing_bytes":16777216,"request_retention_ms":30000}"#
 }
 
 async fn read_http(stream: &mut TcpStream) -> Vec<u8> {
@@ -154,8 +193,8 @@ async fn read_http(stream: &mut TcpStream) -> Vec<u8> {
     bytes
 }
 
-async fn respond(stream: &mut TcpStream, status: &str, token: &str) {
-    let body = session_body(token);
+async fn respond(stream: &mut TcpStream, status: &str, token: &str, runtime: &str, limits: &str) {
+    let body = session_body(token, runtime, limits);
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nSet-Cookie: orna_session=opaque-{token}; Path=/orna/live/{SESSION}; HttpOnly; SameSite=Strict\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -165,11 +204,10 @@ async fn respond(stream: &mut TcpStream, status: &str, token: &str) {
 
 async fn websocket_snapshot(
     stream: TcpStream,
-    watch: [u8; 16],
-    revision: u8,
-    text: &str,
+    response: ReplacementResponse,
     token: &str,
-) {
+    watch: [u8; 16],
+) -> Option<tokio_tungstenite::WebSocketStream<TcpStream>> {
     let expected_path = format!("/orna/live/{SESSION}");
     let expected_cookie = format!("orna_session=opaque-{token}");
     let mut socket = accept_hdr_async(
@@ -200,28 +238,50 @@ async fn websocket_snapshot(
     )
     .await
     .unwrap();
-    let Some(Ok(WebSocketMessage::Binary(request))) = socket.next().await else {
-        panic!("expected subscribe binary frame");
-    };
-    assert!(matches!(
-        Envelope::decode(&request, Limits::default())
-            .unwrap()
-            .message,
-        Message::Subscribe { .. }
-    ));
-    socket
-        .send(WebSocketMessage::Binary(
-            snapshot(watch, revision, text).into(),
-        ))
-        .await
-        .unwrap();
-    socket
-        .send(WebSocketMessage::Binary(vec![0xff].into()))
-        .await
-        .unwrap();
+    if matches!(response, ReplacementResponse::Resubscribe) {
+        let Some(Ok(WebSocketMessage::Binary(request))) = socket.next().await else {
+            panic!("expected subscribe binary frame");
+        };
+        assert_eq!(
+            Envelope::decode(&request, Limits::default()).unwrap(),
+            subscribe()
+        );
+        let revision = if token == FIRST_TOKEN { 0 } else { 1 };
+        let text = if token == FIRST_TOKEN { "old" } else { "new" };
+        socket
+            .send(WebSocketMessage::Binary(
+                snapshot(watch, revision, text).into(),
+            ))
+            .await
+            .unwrap();
+    } else {
+        let frame = match response {
+            ReplacementResponse::ExistingAutomatic => automatic_snapshot([7; 16], 1, "new"),
+            ReplacementResponse::WrongWatch => automatic_snapshot([8; 16], 1, "wrong-watch"),
+            ReplacementResponse::Correlated => snapshot([7; 16], 1, "correlated"),
+            ReplacementResponse::RuntimeChanged
+            | ReplacementResponse::LimitsChanged
+            | ReplacementResponse::TransportFailure
+            | ReplacementResponse::Resubscribe => unreachable!(),
+        };
+        socket
+            .send(WebSocketMessage::Binary(frame.into()))
+            .await
+            .unwrap();
+        if let Ok(Some(Ok(WebSocketMessage::Binary(_)))) =
+            tokio::time::timeout(Duration::from_millis(100), socket.next()).await
+        {
+            panic!("existing-watch resume must not receive a Subscribe frame");
+        }
+    }
+    (token == FIRST_TOKEN).then_some(socket)
 }
 
-async fn spawn_server(replacement_succeeds: bool) -> (Url, JoinHandle<()>) {
+async fn spawn_server(
+    response: ReplacementResponse,
+    runtime: &'static str,
+    limits: &'static str,
+) -> (Url, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let task = tokio::spawn(async move {
@@ -231,25 +291,53 @@ async fn spawn_server(replacement_succeeds: bool) -> (Url, JoinHandle<()>) {
                 .unwrap()
                 .starts_with("POST /orna/session ")
         );
-        respond(&mut create, "201 Created", FIRST_TOKEN).await;
+        respond(
+            &mut create,
+            "201 Created",
+            FIRST_TOKEN,
+            RUNTIME,
+            default_limits(),
+        )
+        .await;
 
         let (old_socket, _) = listener.accept().await.unwrap();
-        websocket_snapshot(old_socket, [7; 16], 0, "old", FIRST_TOKEN).await;
+        let old_socket = websocket_snapshot(
+            old_socket,
+            ReplacementResponse::Resubscribe,
+            FIRST_TOKEN,
+            [7; 16],
+        )
+        .await
+        .expect("initial attachment socket");
 
         let (mut resume, _) = listener.accept().await.unwrap();
         let resume_request = String::from_utf8(read_http(&mut resume).await).unwrap();
         assert!(resume_request.contains(FIRST_TOKEN));
-        respond(&mut resume, "200 OK", SECOND_TOKEN).await;
+        respond(&mut resume, "200 OK", SECOND_TOKEN, runtime, limits).await;
+        drop(old_socket);
+
+        if matches!(
+            response,
+            ReplacementResponse::RuntimeChanged | ReplacementResponse::LimitsChanged
+        ) {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(250), listener.accept())
+                    .await
+                    .is_err(),
+                "mismatched resume must not open a replacement attachment"
+            );
+            return;
+        }
 
         let (replacement, _) = listener.accept().await.unwrap();
-        if replacement_succeeds {
-            websocket_snapshot(replacement, [8; 16], 1, "new", SECOND_TOKEN).await;
-        } else {
+        if matches!(response, ReplacementResponse::TransportFailure) {
             drop(replacement);
             let (mut retry, _) = listener.accept().await.unwrap();
             let retry_request = String::from_utf8(read_http(&mut retry).await).unwrap();
             assert!(retry_request.contains(SECOND_TOKEN));
-            respond(&mut retry, "200 OK", THIRD_TOKEN).await;
+            respond(&mut retry, "200 OK", THIRD_TOKEN, runtime, limits).await;
+        } else {
+            let _ = websocket_snapshot(replacement, response, SECOND_TOKEN, [8; 16]).await;
         }
     });
     (Url::parse(&format!("http://{address}")).unwrap(), task)
@@ -281,9 +369,192 @@ async fn initial_driver(client: &LiveClient) -> (orna_client::LiveSession, Drive
 }
 
 #[test]
+fn reconnect_resubscribes_with_a_new_watch() {
+    run(async {
+        let (endpoint, server) =
+            spawn_server(ReplacementResponse::Resubscribe, RUNTIME, default_limits()).await;
+        let client = client(endpoint);
+        let (session, mut driver) = initial_driver(&client).await;
+        assert!(matches!(
+            driver.receive_once().await,
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
+        let rotated = match client
+            .reconnect_driver(&session, &mut driver, subscribe())
+            .await
+        {
+            Ok(session) => session,
+            Err(_) => panic!("resubscribe reconnect unexpectedly failed"),
+        };
+        assert_eq!(rotated.session_id(), session.session_id());
+        assert_eq!(driver.watch(), [8; 16]);
+        assert!(matches!(
+            driver.receive_once().await,
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 1 })
+        ));
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn resume_existing_watch_uses_automatic_snapshot_without_subscribe() {
+    run(async {
+        let (endpoint, server) = spawn_server(
+            ReplacementResponse::ExistingAutomatic,
+            RUNTIME,
+            default_limits(),
+        )
+        .await;
+        let client = client(endpoint);
+        let (session, mut driver) = initial_driver(&client).await;
+        assert!(matches!(
+            driver.receive_once().await,
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
+        let rotated = match client.resume_driver(&session, &mut driver).await {
+            Ok(session) => session,
+            Err(_) => panic!("existing-watch resume unexpectedly failed"),
+        };
+        assert_eq!(rotated.session_id(), session.session_id());
+        assert_eq!(driver.watch(), [7; 16]);
+        assert!(driver.presentation().awaiting_snapshot());
+        assert_eq!(driver.presentation().published().unwrap().revision(), 0);
+        assert!(matches!(
+            driver.receive_once().await,
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 1 })
+        ));
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn existing_watch_resume_rejects_wrong_watch_without_mutation() {
+    run(async {
+        let (endpoint, server) =
+            spawn_server(ReplacementResponse::WrongWatch, RUNTIME, default_limits()).await;
+        let client = client(endpoint);
+        let (session, mut driver) = initial_driver(&client).await;
+        assert!(matches!(
+            driver.receive_once().await,
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
+        assert!(matches!(
+            client.resume_driver(&session, &mut driver).await,
+            Err(LiveReconnectError::AfterResume(_))
+        ));
+        assert_eq!(driver.watch(), [7; 16]);
+        assert_eq!(driver.presentation().published().unwrap().revision(), 0);
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn existing_watch_resume_rejects_correlated_snapshot_without_mutation() {
+    run(async {
+        let (endpoint, server) =
+            spawn_server(ReplacementResponse::Correlated, RUNTIME, default_limits()).await;
+        let client = client(endpoint);
+        let (session, mut driver) = initial_driver(&client).await;
+        assert!(matches!(
+            driver.receive_once().await,
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
+        assert!(matches!(
+            client.resume_driver(&session, &mut driver).await,
+            Err(LiveReconnectError::AfterResume(_))
+        ));
+        assert_eq!(driver.watch(), [7; 16]);
+        assert_eq!(driver.presentation().published().unwrap().revision(), 0);
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn existing_watch_resume_rejects_runtime_generation_change_before_socket() {
+    run(async {
+        let (endpoint, server) = spawn_server(
+            ReplacementResponse::RuntimeChanged,
+            ROTATED_RUNTIME,
+            default_limits(),
+        )
+        .await;
+        let client = client(endpoint);
+        let (session, mut driver) = initial_driver(&client).await;
+        assert!(matches!(
+            driver.receive_once().await,
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
+        assert!(matches!(
+            client.resume_driver(&session, &mut driver).await,
+            Err(LiveReconnectError::AfterResume(_))
+        ));
+        assert_eq!(driver.watch(), [7; 16]);
+        assert_eq!(driver.presentation().published().unwrap().revision(), 0);
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn existing_watch_resume_rejects_limit_change_before_socket() {
+    run(async {
+        let (endpoint, server) = spawn_server(
+            ReplacementResponse::LimitsChanged,
+            RUNTIME,
+            changed_limits(),
+        )
+        .await;
+        let client = client(endpoint);
+        let (session, mut driver) = initial_driver(&client).await;
+        assert!(matches!(
+            driver.receive_once().await,
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
+        assert!(matches!(
+            client.resume_driver(&session, &mut driver).await,
+            Err(LiveReconnectError::AfterResume(_))
+        ));
+        assert_eq!(driver.watch(), [7; 16]);
+        assert_eq!(driver.presentation().published().unwrap().revision(), 0);
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn reconnect_resubscribe_rejects_runtime_generation_change_before_socket() {
+    run(async {
+        let (endpoint, server) = spawn_server(
+            ReplacementResponse::RuntimeChanged,
+            ROTATED_RUNTIME,
+            default_limits(),
+        )
+        .await;
+        let client = client(endpoint);
+        let (session, mut driver) = initial_driver(&client).await;
+        assert!(matches!(
+            driver.receive_once().await,
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
+        assert!(matches!(
+            client
+                .reconnect_driver(&session, &mut driver, subscribe())
+                .await,
+            Err(LiveReconnectError::AfterResume(_))
+        ));
+        assert_eq!(driver.watch(), [7; 16]);
+        assert_eq!(driver.presentation().published().unwrap().revision(), 0);
+        server.await.unwrap();
+    });
+}
+
+#[test]
 fn reconnect_failure_returns_rotated_retry_session_without_mutating_visible_driver() {
     run(async {
-        let (endpoint, server) = spawn_server(false).await;
+        let (endpoint, server) = spawn_server(
+            ReplacementResponse::TransportFailure,
+            RUNTIME,
+            default_limits(),
+        )
+        .await;
         let client = client(endpoint);
         let (session, mut driver) = initial_driver(&client).await;
         assert!(matches!(
@@ -307,38 +578,6 @@ fn reconnect_failure_returns_rotated_retry_session_without_mutating_visible_driv
         assert_eq!(driver.presentation().published().unwrap().revision(), 0);
         let rotated_again = client.resume_session(&retry).await.unwrap();
         assert_eq!(rotated_again.session_id(), session.session_id());
-        server.await.unwrap();
-    });
-}
-
-#[test]
-fn reconnect_success_drops_old_queued_frame_and_publishes_fresh_snapshot_atomically() {
-    run(async {
-        let (endpoint, server) = spawn_server(true).await;
-        let client = client(endpoint);
-        let (session, mut driver) = initial_driver(&client).await;
-        assert!(matches!(
-            driver.receive_once().await,
-            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
-        ));
-        let rotated = match client
-            .reconnect_driver(&session, &mut driver, subscribe())
-            .await
-        {
-            Ok(session) => session,
-            Err(_) => panic!("replacement connection unexpectedly failed"),
-        };
-        assert_eq!(rotated.session_id(), session.session_id());
-        assert_eq!(driver.watch(), [8; 16]);
-        assert!(
-            driver.presentation().published().is_none(),
-            "fresh watch state remains empty until its complete snapshot arrives"
-        );
-        assert!(matches!(
-            driver.receive_once().await,
-            Ok(LiveSessionEvent::SnapshotPublished { revision: 1 })
-        ));
-        assert_eq!(driver.presentation().published().unwrap().revision(), 1);
         server.await.unwrap();
     });
 }

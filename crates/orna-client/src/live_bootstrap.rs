@@ -176,6 +176,35 @@ where
         })
     }
 
+    /// Admits the complete automatic snapshot sent for a session-owned watch
+    /// after session resumption. This path deliberately sends no client frame
+    /// and accepts only a null request identity for the existing watch.
+    pub async fn resume_existing_watch(
+        mut io: I,
+        watch: [u8; 16],
+        limits: Limits,
+    ) -> Result<Self, LiveBootstrapError<I::Error>> {
+        let first = io
+            .receive_binary(limits.max_message_bytes)
+            .await
+            .map_err(LiveBootstrapError::Io)?;
+        if first.len() > limits.max_message_bytes {
+            return Err(LiveBootstrapError::Protocol(ProtocolError::Limit));
+        }
+        let response = Envelope::decode(&first, limits).map_err(LiveBootstrapError::Protocol)?;
+        if response.request.is_some()
+            || response.watch != Some(watch)
+            || !matches!(response.message, Message::Snapshot { .. })
+        {
+            return Err(LiveBootstrapError::UnexpectedResponse);
+        }
+        Ok(Self {
+            transport: PrefetchedBinaryTransport::new(io, first),
+            watch,
+            limits,
+        })
+    }
+
     pub const fn watch(&self) -> [u8; 16] {
         self.watch
     }
@@ -221,11 +250,30 @@ where
             .replace_authenticated_attachment_with_watch(self.transport, self.watch)
             .map_err(|_| LiveBootstrapError::WatchIdentity)
     }
+
+    pub fn replace_existing_watch<R, A>(
+        self,
+        driver: &mut LiveSessionDriver<PrefetchedBinaryTransport<I>, R, A>,
+    ) -> Result<(), LiveBootstrapError<I::Error>>
+    where
+        R: PresentRenderer,
+        A: RequestIdAllocator,
+    {
+        if self.watch != driver.watch() {
+            return Err(LiveBootstrapError::WatchIdentity);
+        }
+        if self.limits != driver.limits() {
+            return Err(LiveBootstrapError::UnexpectedResponse);
+        }
+        driver.replace_authenticated_attachment(self.transport);
+        Ok(())
+    }
 }
 
 impl LiveClient {
-    /// Resumes the HTTP session, opens a new authenticated WebSocket, admits a
-    /// fresh subscription, and only then replaces the existing driver.
+    /// Resumes the HTTP session, opens a new authenticated WebSocket, and
+    /// resubscribes with `request`, receiving a complete snapshot for a new
+    /// watch before replacing the driver.
     pub async fn reconnect_driver<R, A>(
         &self,
         session: &LiveSession,
@@ -247,6 +295,14 @@ impl LiveClient {
                 .await
                 .map_err(LiveReconnectError::Resume)?,
         );
+        if replacement.as_ref().unwrap().runtime_id() != session.runtime_id() {
+            return Err(LiveReconnectError::AfterResume(LiveReconnectFailure {
+                session: replacement.take().unwrap(),
+                cause: LiveReconnectCause::Transport(LiveTransportError::Response(
+                    "resume response changed runtime identity",
+                )),
+            }));
+        }
         if replacement.as_ref().unwrap().limits() != driver.limits() {
             return Err(LiveReconnectError::AfterResume(LiveReconnectFailure {
                 session: replacement.take().unwrap(),
@@ -274,6 +330,81 @@ impl LiveClient {
                 }
             };
         if let Err(error) = attachment.replace_driver(driver) {
+            let cause = match error {
+                LiveBootstrapError::WatchIdentity => LiveReconnectCause::WatchIdentity,
+                other => LiveReconnectCause::Bootstrap(other),
+            };
+            return Err(LiveReconnectError::AfterResume(LiveReconnectFailure {
+                session: replacement.take().unwrap(),
+                cause,
+            }));
+        }
+        Ok(replacement.take().unwrap())
+    }
+
+    /// Resumes the HTTP session and reattaches the existing session-owned
+    /// watch. The host sends a null-request automatic snapshot; no client
+    /// request is written to the replacement WebSocket.
+    pub async fn resume_driver<R, A>(
+        &self,
+        session: &LiveSession,
+        driver: &mut LiveSessionDriver<
+            PrefetchedBinaryTransport<
+                crate::live_transport::AuthenticatedWebSocketTransport<MaybeTlsStream<TcpStream>>,
+            >,
+            R,
+            A,
+        >,
+    ) -> Result<LiveSession, LiveReconnectError>
+    where
+        R: PresentRenderer,
+        A: RequestIdAllocator,
+    {
+        let mut replacement = Some(
+            self.resume_session(session)
+                .await
+                .map_err(LiveReconnectError::Resume)?,
+        );
+        if replacement.as_ref().unwrap().runtime_id() != session.runtime_id() {
+            return Err(LiveReconnectError::AfterResume(LiveReconnectFailure {
+                session: replacement.take().unwrap(),
+                cause: LiveReconnectCause::Transport(LiveTransportError::Response(
+                    "resume response changed runtime identity",
+                )),
+            }));
+        }
+        if replacement.as_ref().unwrap().limits() != driver.limits() {
+            return Err(LiveReconnectError::AfterResume(LiveReconnectFailure {
+                session: replacement.take().unwrap(),
+                cause: LiveReconnectCause::LimitsChanged,
+            }));
+        }
+        let replacement_limits = replacement.as_ref().unwrap().limits();
+        let transport = match self.connect(replacement.as_ref().unwrap()).await {
+            Ok(transport) => transport,
+            Err(error) => {
+                return Err(LiveReconnectError::AfterResume(LiveReconnectFailure {
+                    session: replacement.take().unwrap(),
+                    cause: LiveReconnectCause::Transport(error),
+                }));
+            }
+        };
+        let attachment = match BootstrappedLiveAttachment::resume_existing_watch(
+            transport,
+            driver.watch(),
+            replacement_limits,
+        )
+        .await
+        {
+            Ok(attachment) => attachment,
+            Err(error) => {
+                return Err(LiveReconnectError::AfterResume(LiveReconnectFailure {
+                    session: replacement.take().unwrap(),
+                    cause: LiveReconnectCause::Bootstrap(error),
+                }));
+            }
+        };
+        if let Err(error) = attachment.replace_existing_watch(driver) {
             let cause = match error {
                 LiveBootstrapError::WatchIdentity => LiveReconnectCause::WatchIdentity,
                 other => LiveReconnectCause::Bootstrap(other),
