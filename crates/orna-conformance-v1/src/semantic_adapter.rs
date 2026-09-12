@@ -1911,6 +1911,16 @@ impl Default for DurableTransactionalEvaluator {
 }
 
 impl DurableTransactionalEvaluator {
+    /// Admits the bounded finite-list stream shape without opening runtime
+    /// state or beginning delivery. Callers must use an explicit execution
+    /// entry point to acquire a lease, poll the source, and invoke callbacks.
+    pub fn admit_list_stream_source(&self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
+        match admit_list_stream_source(unit, self.limits, &self.entry) {
+            Ok(_) => StageOutcome::Passed,
+            Err(outcome) => *outcome,
+        }
+    }
+
     /// Runs the deliberately narrow declarative finite-list bridge through the
     /// durable stream runner. It admits one literal `Stream.from_list`, one
     /// explicitly keyed table, and one `for_each` insert body; it does not
