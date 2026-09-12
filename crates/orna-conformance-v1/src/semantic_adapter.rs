@@ -23,7 +23,8 @@ use orna_runtime_v1::{
     FaultInjector, ListStreamSource, NoFault, RequestIdentity, RequestStatus,
     RunObservationRegistration, RunningTableRequestContinuation, RuntimeError, RuntimeIdentity,
     RuntimeState, StreamHandler, StreamHandlerResult, StreamItem, StreamRunOutcome,
-    StreamTableMutationBatch, TableMutation, TerminalOutcome, WriterLease,
+    StreamTableCandidateValidator, StreamTableMutationBatch, StreamValidatedTableMutationBatch,
+    TableMutation, TerminalOutcome, WriterLease,
 };
 use orna_semantic_v1::{
     Catalogue, EffectSummary, ModuleInput, Namespace, StandardDependencyProfile,
@@ -31,9 +32,12 @@ use orna_semantic_v1::{
 };
 use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
 use orna_stream_v1::{
-    CheckpointKey, Component, ConsumerIdentity, DiagnosticClass, DiagnosticCode, SafeDiagnostic,
+    AssertionOwnerKind, CheckpointKey, Component, ConsumerIdentity, DiagnosticClass,
+    DiagnosticCode, SafeDiagnostic,
 };
-use orna_syntax_v1::{Declaration, Expr, Pattern, Statement, parse_expression, parse_module};
+use orna_syntax_v1::{
+    Declaration, Expr, Pattern, Statement, SyntaxSpan, parse_expression, parse_module,
+};
 use orna_sys_v1::{
     AdmissionError, AdmissionRequest, ExecutionBoundary, FunctionDescriptor, InvocationExecutor,
     InvocationHandle, InvocationResult, InvocationState, RuntimeSupervisor, TypedValue,
@@ -1034,7 +1038,7 @@ impl TransactionalEvaluator {
         float_fields: &TableFloatFields,
         table_fields: &TableFields,
         table_assertions: &TableAssertions,
-        module_assertions: &[Expr],
+        module_assertions: &ModuleAssertions,
     ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
         self.execute_admitted_with_arguments(
             functions,
@@ -1054,7 +1058,7 @@ impl TransactionalEvaluator {
         float_fields: &TableFloatFields,
         table_fields: &TableFields,
         table_assertions: &TableAssertions,
-        module_assertions: &[Expr],
+        module_assertions: &ModuleAssertions,
         arguments: &Environment,
     ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
         let entry = self.entry.clone();
@@ -1640,7 +1644,7 @@ impl DurableTransactionalEvaluator {
         let writer = state.acquire_lease(owner_id).await?;
         let key = bridge.checkpoint_key()?;
         let mut source = ListStreamSource::new(key.clone(), std::mem::take(&mut bridge.payloads));
-        let mut handler = ListTableHandler::new(bridge);
+        let mut handler = ListTableHandler::new(bridge, self.limits);
         match state
             .run_stream(
                 writer,
@@ -1652,6 +1656,9 @@ impl DurableTransactionalEvaluator {
             .await
         {
             Ok(StreamRunOutcome::Exhausted { .. }) => Ok(StageOutcome::Passed),
+            Ok(StreamRunOutcome::Failed { .. }) => {
+                Ok(StageOutcome::Failed(stream_delivery_failure_diagnostic()))
+            }
             Ok(_) => Ok(StageOutcome::Skipped {
                 reason: "project literal list stream did not exhaust".into(),
             }),
@@ -1941,7 +1948,7 @@ impl DurableTransactionalEvaluator {
         let writer = state.acquire_lease(owner_id).await?;
         let key = bridge.checkpoint_key()?;
         let mut source = ListStreamSource::new(key.clone(), std::mem::take(&mut bridge.payloads));
-        let mut handler = ListTableHandler::new(bridge);
+        let mut handler = ListTableHandler::new(bridge, self.limits);
         match state
             .run_stream(
                 writer,
@@ -1953,6 +1960,9 @@ impl DurableTransactionalEvaluator {
             .await
         {
             Ok(StreamRunOutcome::Exhausted { .. }) => Ok(StageOutcome::Passed),
+            Ok(StreamRunOutcome::Failed { .. }) => {
+                Ok(StageOutcome::Failed(stream_delivery_failure_diagnostic()))
+            }
             Ok(_) => Ok(StageOutcome::Skipped {
                 reason: "literal list stream did not exhaust".into(),
             }),
@@ -1972,6 +1982,8 @@ struct ListStreamBridge {
     key_fields: Vec<String>,
     parameter: String,
     insert_row: Expr,
+    table_assertions: Vec<AdmittedAssertion>,
+    assertion_functions: Functions,
     payloads: Vec<Vec<u8>>,
 }
 
@@ -1998,14 +2010,85 @@ impl ListStreamBridge {
 
 struct ListTableHandler {
     bridge: ListStreamBridge,
+    limits: EvaluatorLimits,
     next_mutation: u64,
     digest: [u8; 32],
 }
 
+struct ListTableCandidateValidator {
+    table: String,
+    assertions: Vec<AdmittedAssertion>,
+    functions: Functions,
+    limits: EvaluatorLimits,
+    tables: Vec<String>,
+}
+
+impl ListTableCandidateValidator {
+    fn new(bridge: &ListStreamBridge, limits: EvaluatorLimits) -> Self {
+        Self {
+            table: bridge.table.clone(),
+            assertions: bridge.table_assertions.clone(),
+            functions: bridge.assertion_functions.clone(),
+            limits,
+            tables: vec![bridge.table.clone()],
+        }
+    }
+}
+
+impl StreamTableCandidateValidator for ListTableCandidateValidator {
+    fn tables(&self) -> &[String] {
+        &self.tables
+    }
+
+    fn validate(&mut self, rows: &orna_runtime_v1::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+        let rows = rows
+            .get(&self.table)
+            .ok_or_else(stream_handler_diagnostic)?;
+        let mut budget = StepBudget::new(self.limits.max_steps);
+        for assertion in &self.assertions {
+            let (kind, binding, predicate) = table_assertion_predicate(&assertion.expression)
+                .map_err(|_| stream_handler_diagnostic())?;
+            let mut projections = BTreeSet::new();
+            let mut candidate_rows = 0usize;
+            for (_, encoded) in rows {
+                debit_host_step(&mut budget).map_err(|_| stream_handler_diagnostic())?;
+                candidate_rows = candidate_rows
+                    .checked_add(1)
+                    .ok_or_else(stream_handler_diagnostic)?;
+                self.limits
+                    .check_items(candidate_rows)
+                    .map_err(|_| stream_handler_diagnostic())?;
+                let row = Value::decode(encoded).map_err(|_| stream_handler_diagnostic())?;
+                let environment = Environment::from([(binding.to_owned(), row)]);
+                let value = evaluate_with_functions_and_budget(
+                    predicate,
+                    &environment,
+                    &self.functions,
+                    self.limits,
+                    &mut budget,
+                )
+                .map_err(|_| stream_handler_diagnostic())?;
+                match kind {
+                    TableAssertionKind::Every if matches!(value.raw(), OvbRaw::Bool(true)) => {}
+                    TableAssertionKind::Every => return Err(stream_handler_diagnostic()),
+                    TableAssertionKind::AllUnique => {
+                        let projection = value.encode().map_err(|_| stream_handler_diagnostic())?;
+                        if !projections.insert(projection) {
+                            return Err(stream_handler_diagnostic());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl ListTableHandler {
-    fn new(bridge: ListStreamBridge) -> Self {
+    fn new(bridge: ListStreamBridge, limits: EvaluatorLimits) -> Self {
         Self {
             bridge,
+            limits,
             next_mutation: 0,
             digest: [9; 32],
         }
@@ -2048,10 +2131,18 @@ impl StreamHandler for ListTableHandler {
         digest.update(self.digest);
         digest.update(mutation.id());
         self.digest = digest.finalize().into();
-        StreamHandlerResult::CommitTable(StreamTableMutationBatch {
-            mutations: vec![mutation],
-            next_digest: self.digest,
-        })
+        if self.bridge.table_assertions.is_empty() {
+            StreamHandlerResult::CommitTable(StreamTableMutationBatch {
+                mutations: vec![mutation],
+                next_digest: self.digest,
+            })
+        } else {
+            StreamHandlerResult::CommitValidatedTable(StreamValidatedTableMutationBatch {
+                mutations: vec![mutation],
+                next_digest: self.digest,
+                validator: Box::new(ListTableCandidateValidator::new(&self.bridge, self.limits)),
+            })
+        }
     }
 }
 
@@ -2073,12 +2164,35 @@ fn stream_error_diagnostic(error: orna_runtime_v1::StreamStepError) -> Diagnosti
     .redacted()
 }
 
+fn stream_delivery_failure_diagnostic() -> Diagnostic {
+    Diagnostic::new(
+        SafeText::new("ORNA-LIST-STREAM-DELIVERY").expect("static code"),
+        DiagnosticSeverity::Error,
+        SafeText::new("literal list stream delivery was retained after activation rollback")
+            .expect("static message"),
+    )
+    .expect("valid diagnostic")
+    .redacted()
+}
+
 fn admit_list_stream_source(
     unit: &SourceUnit,
     limits: EvaluatorLimits,
     entry: &str,
 ) -> Result<ListStreamBridge, AdmissionFailure> {
-    let (_, key_fields, _, _, _, _) = admit_transaction_source(unit, limits, entry)?;
+    let (
+        functions,
+        key_fields,
+        float_fields,
+        table_fields,
+        mut table_assertions,
+        module_assertions,
+    ) = admit_transaction_source(unit, limits, entry)?;
+    if !module_assertions.is_empty() {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "literal list stream bridge does not yet evaluate module assertions at the delivery boundary".into(),
+        }));
+    }
     if key_fields.len() != 1 {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "literal list stream bridge requires one explicit-key table".into(),
@@ -2113,6 +2227,13 @@ fn admit_list_stream_source(
             reason: "literal list stream insert must target the declared table".into(),
         }));
     }
+    let assertion_functions = lower_relation_bindings(
+        &functions,
+        &BTreeMap::from([(table_name.clone(), key_fields.clone())]),
+        &float_fields,
+        &table_fields,
+    );
+    let table_assertions = table_assertions.remove(&table_name).unwrap_or_default();
     let payloads: Vec<Vec<u8>> = values
         .iter()
         .map(literal_value)
@@ -2139,6 +2260,8 @@ fn admit_list_stream_source(
         key_fields,
         parameter,
         insert_row: insert_row.clone(),
+        table_assertions,
+        assertion_functions,
         payloads,
     })
 }
@@ -2153,7 +2276,19 @@ fn admit_project_list_stream(
     root_entry: &str,
     identity: RuntimeIdentity,
 ) -> Result<ListStreamBridge, AdmissionFailure> {
-    let (functions, key_fields, _, _, _, _) = admitted;
+    let (
+        functions,
+        key_fields,
+        float_fields,
+        table_fields,
+        mut table_assertions,
+        module_assertions,
+    ) = admitted;
+    if !module_assertions.is_empty() {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "project list stream bridge does not yet evaluate module assertions at the delivery boundary".into(),
+        }));
+    }
     let root = functions.get(root_entry).ok_or_else(|| {
         Box::new(StageOutcome::Skipped {
             reason: "configured qualified project stream root is not present".into(),
@@ -2245,6 +2380,9 @@ fn admit_project_list_stream(
             reason: "project list stream insert target must have an explicit table key".into(),
         }));
     }
+    let assertion_functions =
+        lower_relation_bindings(&functions, &key_fields, &float_fields, &table_fields);
+    let table_assertions = table_assertions.remove(&table).unwrap_or_default();
     let payloads = canonical_list_payloads(values)?;
     let database = identity
         .database_id
@@ -2262,6 +2400,8 @@ fn admit_project_list_stream(
         key_fields: keys.clone(),
         parameter,
         insert_row: insert_row.clone(),
+        table_assertions,
+        assertion_functions,
         payloads,
     })
 }
@@ -3167,8 +3307,17 @@ impl TableEffectHandler<'_, '_> {
     }
 }
 
-type TableAssertions = BTreeMap<String, Vec<Expr>>;
-type ModuleAssertions = Vec<Expr>;
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AdmittedAssertion {
+    expression: Expr,
+    declaration_span: SyntaxSpan,
+    owner_kind: AssertionOwnerKind,
+    owner_name: String,
+    source_order: usize,
+}
+
+type TableAssertions = BTreeMap<String, Vec<AdmittedAssertion>>;
+type ModuleAssertions = Vec<AdmittedAssertion>;
 type TableKeys = BTreeMap<String, Vec<String>>;
 type TableFloatFields = BTreeMap<String, BTreeSet<String>>;
 type TableFields = BTreeMap<String, BTreeSet<String>>;
@@ -3263,7 +3412,7 @@ fn admit_transaction_source(
         )));
     }
     let (functions, key_fields, float_fields, table_fields, table_assertions, module_assertions) =
-        admitted_transaction_module(&parsed.value.items, None)
+        admitted_transaction_module(&parsed.value.items, None, Some(&unit.source_id))
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
     if let Err(error) = limits.check_items(functions.len()) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
@@ -3347,7 +3496,7 @@ fn admit_transaction_project(
             module_table_fields,
             module_assertions_by_table,
             module_assertions_only,
-        ) = admitted_transaction_module(&parsed.value.items, Some(&namespace))
+        ) = admitted_transaction_module(&parsed.value.items, Some(&namespace), Some(&namespace))
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
         if let Err(error) = limits.check_items(module_functions.len()) {
             return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
@@ -3479,6 +3628,7 @@ fn durable_activation_digest(previous: [u8; 32], mutations: &[TableMutation]) ->
 fn admitted_transaction_module(
     items: &[orna_syntax_v1::Item],
     namespace: Option<&str>,
+    module_owner_name: Option<&str>,
 ) -> Result<AdmittedTransaction, String> {
     let mut functions = Functions::new();
     let mut key_fields = BTreeMap::new();
@@ -3486,7 +3636,7 @@ fn admitted_transaction_module(
     let mut table_fields = TableFields::new();
     let mut assertions = TableAssertions::new();
     let mut module_assertions = ModuleAssertions::new();
-    for item in items {
+    for (source_order, item) in items.iter().enumerate() {
         match &item.declaration {
             Declaration::Function { signature, body } => {
                 let name = namespace.map_or_else(
@@ -3544,8 +3694,17 @@ fn admitted_transaction_module(
                 );
                 let expressions = members
                     .iter()
-                    .filter_map(|member| match member {
-                        orna_syntax_v1::TableMember::Assertion { value, .. } => Some(value.clone()),
+                    .enumerate()
+                    .filter_map(|(source_order, member)| match member {
+                        orna_syntax_v1::TableMember::Assertion { value, span } => {
+                            Some(AdmittedAssertion {
+                                expression: value.clone(),
+                                declaration_span: span.clone(),
+                                owner_kind: AssertionOwnerKind::Table,
+                                owner_name: name.clone(),
+                                source_order,
+                            })
+                        }
                         _ => None,
                     })
                     .collect::<Vec<_>>();
@@ -3553,7 +3712,16 @@ fn admitted_transaction_module(
                     assertions.insert(name.clone(), expressions);
                 }
             }
-            Declaration::Assertion { value } => module_assertions.push(value.clone()),
+            Declaration::Assertion { value } => module_assertions.push(AdmittedAssertion {
+                expression: value.clone(),
+                // The syntax AST does not retain a separate declaration span
+                // for module assertions; retain the parser expression span
+                // until a pinned source document is available.
+                declaration_span: value.span(),
+                owner_kind: AssertionOwnerKind::Module,
+                owner_name: module_owner_name.unwrap_or_default().to_owned(),
+                source_order,
+            }),
             // Import declarations were resolved against the complete project
             // graph before this per-module retention pass. Qualified calls are
             // resolved by the evaluator against the retained function map.
@@ -4342,12 +4510,7 @@ fn relation_window(
     shadowed: &BTreeSet<String>,
 ) -> Option<Expr> {
     relation_window_operation(
-        expression,
-        table_keys,
-        functions,
-        namespace,
-        shadowed,
-        "window",
+        expression, table_keys, functions, namespace, shadowed, "window",
     )
 }
 
@@ -4843,7 +5006,7 @@ fn validate_table_assertions(
 ) -> Result<(), EvaluationError> {
     for (table, assertions) in assertions {
         for assertion in assertions {
-            let (kind, binding, predicate) = table_assertion_predicate(assertion)?;
+            let (kind, binding, predicate) = table_assertion_predicate(&assertion.expression)?;
             let mut projections = BTreeSet::new();
             let mut candidate_rows = 0usize;
             for (_, row) in activation
@@ -4894,7 +5057,7 @@ fn validate_table_assertions(
 /// does not materialize a general relation value or expose query operators.
 fn validate_module_assertions(
     activation: &TransactionActivation<'_>,
-    assertions: &[Expr],
+    assertions: &ModuleAssertions,
     functions: &Functions,
     limits: EvaluatorLimits,
     budget: &mut StepBudget,
@@ -4902,7 +5065,7 @@ fn validate_module_assertions(
     for assertion in assertions {
         let value = evaluate_module_assertion(
             activation,
-            assertion,
+            &assertion.expression,
             &Environment::new(),
             functions,
             limits,
@@ -5944,7 +6107,7 @@ mod durable_tests {
         RequestState, RunObservationRegistration, RunObservationStatus, RuntimeError,
         RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome, WriterLease,
     };
-    use orna_stream_v1::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
+    use orna_stream_v1::{AssertionOwnerKind, DiagnosticClass, DiagnosticCode, SafeDiagnostic};
     use orna_syntax_v1::{Expr, parse_expression, parse_module};
     use std::{path::Path, process::Command};
     use tempfile::TempDir;
@@ -6971,53 +7134,61 @@ mod durable_tests {
             r#"Stock | filter(stock => stock.location == "north" && stock.sku == "pencil") | one()"#,
         );
         assert!(ordered.is_ok());
-        assert!(super::relation_lookup(
-            &ordered.value,
-            &keys,
-            &Functions::new(),
-            None,
-            &std::collections::BTreeSet::new(),
-        )
-        .is_some());
+        assert!(
+            super::relation_lookup(
+                &ordered.value,
+                &keys,
+                &Functions::new(),
+                None,
+                &std::collections::BTreeSet::new(),
+            )
+            .is_some()
+        );
 
         let reordered = orna_syntax_v1::parse_expression(
             r#"Stock | filter(stock => stock.sku == "pencil" && stock.location == "north") | one()"#,
         );
         assert!(reordered.is_ok());
-        assert!(super::relation_lookup(
-            &reordered.value,
-            &keys,
-            &Functions::new(),
-            None,
-            &std::collections::BTreeSet::new(),
-        )
-        .is_none());
+        assert!(
+            super::relation_lookup(
+                &reordered.value,
+                &keys,
+                &Functions::new(),
+                None,
+                &std::collections::BTreeSet::new(),
+            )
+            .is_none()
+        );
 
         let non_key = orna_syntax_v1::parse_expression(
             r#"Stock | filter(stock => stock.location == "north" && stock.quantity == 12) | one()"#,
         );
         assert!(non_key.is_ok());
-        assert!(super::relation_lookup(
-            &non_key.value,
-            &keys,
-            &Functions::new(),
-            None,
-            &std::collections::BTreeSet::new(),
-        )
-        .is_none());
+        assert!(
+            super::relation_lookup(
+                &non_key.value,
+                &keys,
+                &Functions::new(),
+                None,
+                &std::collections::BTreeSet::new(),
+            )
+            .is_none()
+        );
 
         let duplicate_key = orna_syntax_v1::parse_expression(
             r#"Stock | filter(stock => stock.location == "north" && stock.location == "south") | one()"#,
         );
         assert!(duplicate_key.is_ok());
-        assert!(super::relation_lookup(
-            &duplicate_key.value,
-            &keys,
-            &Functions::new(),
-            None,
-            &std::collections::BTreeSet::new(),
-        )
-        .is_none());
+        assert!(
+            super::relation_lookup(
+                &duplicate_key.value,
+                &keys,
+                &Functions::new(),
+                None,
+                &std::collections::BTreeSet::new(),
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -7083,7 +7254,7 @@ mod durable_tests {
             let parsed = parse_module(&source);
             assert!(parsed.is_ok(), "{operation}: {:?}", parsed.diagnostics);
             let (functions, keys, float_fields, table_fields, _, _) =
-                admitted_transaction_module(&parsed.value.items, None).expect("valid source");
+                admitted_transaction_module(&parsed.value.items, None, None).expect("valid source");
             let lowered = lower_relation_bindings(&functions, &keys, &float_fields, &table_fields);
 
             assert!(
@@ -7121,7 +7292,7 @@ mod durable_tests {
             let parsed = parse_module(source);
             assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
             let (functions, keys, float_fields, table_fields, _, _) =
-                admitted_transaction_module(&parsed.value.items, None).expect("valid source");
+                admitted_transaction_module(&parsed.value.items, None, None).expect("valid source");
             let lowered = lower_relation_bindings(&functions, &keys, &float_fields, &table_fields);
             for name in [
                 "lookup_case",
@@ -7137,6 +7308,39 @@ mod durable_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn admitted_assertions_retain_parser_metadata_until_validation() {
+        let source = r#"
+            pub table Note(id: Int) {
+                text: Str,
+                assert every(note => note.text != "");
+            }
+            assert every(Note, note => note.id == note.id);
+        "#;
+        let parsed = parse_module(source);
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+
+        let (_, _, _, _, table_assertions, module_assertions) =
+            admitted_transaction_module(&parsed.value.items, Some("notes"), Some("notes"))
+                .expect("valid assertions");
+        let table_assertion = &table_assertions["Note"][0];
+        let table_expression_span = table_assertion.expression.span();
+        assert_eq!(table_assertion.owner_kind, AssertionOwnerKind::Table);
+        assert_eq!(table_assertion.owner_name, "Note");
+        assert_eq!(table_assertion.source_order, 1);
+        assert!(table_assertion.declaration_span.start <= table_expression_span.start);
+        assert!(table_assertion.declaration_span.end >= table_expression_span.end);
+
+        let module_assertion = &module_assertions[0];
+        assert_eq!(module_assertion.owner_kind, AssertionOwnerKind::Module);
+        assert_eq!(module_assertion.owner_name, "notes");
+        assert_eq!(module_assertion.source_order, 1);
+        assert_eq!(
+            module_assertion.declaration_span,
+            module_assertion.expression.span()
+        );
     }
 
     #[test]
@@ -7207,7 +7411,10 @@ mod list_stream_tests {
         ListStreamSource, RuntimeIdentity, RuntimeState, StreamHandler, StreamHandlerResult,
         StreamItem,
     };
-    use orna_stream_v1::{AsyncCheckpointBackend, CheckpointKey, Component, ConsumerIdentity};
+    use orna_stream_v1::{
+        AsyncCheckpointBackend, CheckpointKey, Component, ConsumerIdentity, DeliveryIdentity,
+        FailureIdentity, Position,
+    };
     use std::{path::Path, process::Command};
     use tempfile::TempDir;
 
@@ -7254,6 +7461,136 @@ mod list_stream_tests {
 
     fn source() -> SourceUnit {
         source_with_values("1, 2")
+    }
+
+    fn asserted_project() -> ProjectUnit {
+        ProjectUnit {
+            fixture_id: "stream-table-assertion".into(),
+            project_id: "stream-table-assertion".into(),
+            environment_id: None,
+            modules: vec![SourceUnit {
+                fixture_id: "stream-table-assertion".into(),
+                source_id: "main.orna".into(),
+                parse_as: "module_unit".into(),
+                source: r#"
+                    pub table Reading(id: Int) {
+                        value: Int,
+                        assert every(reading => reading.value < 2);
+                    }
+                    pub fn input() = Stream.from_list([1, 2], source_identity: "fixture:assertion");
+                    pub fn ingest() { input() | for_each(value => {
+                        Reading.insert({ id: value, value: value });
+                    }); }
+                "#
+                .into(),
+            }],
+            loose_rows: Vec::new(),
+            expectations: ProjectExpectations {
+                environment: ProjectEnvironment {
+                    network: false,
+                    credentials: false,
+                    intrinsics: "Orna 1.0.0 core".into(),
+                    stdlib: None,
+                    initial_tables: "empty".into(),
+                },
+                steps: Vec::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn project_stream_assertion_rolls_back_invalid_delivery_and_checkpoint() {
+        let (_temp, repository) = repository();
+        let project = asserted_project();
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+
+        let outcome = evaluator
+            .execute_project_stream(
+                &repository,
+                identity(),
+                [23; 16],
+                [24; 32],
+                &project,
+                "main.ingest",
+            )
+            .await;
+        assert!(
+            matches!(outcome, Ok(StageOutcome::Failed(ref diagnostic)) if diagnostic.code() == "ORNA-LIST-STREAM-DELIVERY"),
+            "invalid delivery must be retained as a stream failure: {outcome:?}"
+        );
+
+        let bridge = admit_project_list_stream(
+            &project,
+            admit_transaction_project(&project, Limits::default(), "main.ingest")
+                .expect("project admission"),
+            "main.ingest",
+            identity(),
+        )
+        .expect("stream bridge admission");
+        let state = RuntimeState::open(&repository, identity(), [24; 32])
+            .await
+            .expect("runtime state");
+        let one = Value::int(1.into()).encode().expect("canonical first key");
+        let two = Value::int(2.into()).encode().expect("canonical second key");
+        assert!(
+            state
+                .committed_table_row("Reading", &one)
+                .await
+                .expect("first row")
+                .is_some(),
+            "the accepted first delivery must remain committed"
+        );
+        assert!(
+            state
+                .committed_table_row("Reading", &two)
+                .await
+                .expect("second row")
+                .is_none(),
+            "the rejected second delivery must not publish a row"
+        );
+        let writer = state.acquire_lease([23; 16]).await.expect("writer lease");
+        let checkpoint_key = bridge.checkpoint_key().expect("checkpoint key");
+        let checkpoint = state
+            .stream_backend(writer)
+            .checkpoint_async(&checkpoint_key)
+            .await
+            .expect("checkpoint");
+        assert_eq!(
+            checkpoint
+                .committed
+                .as_ref()
+                .map(|position| position.token.as_str()),
+            Some("1"),
+            "the failed second delivery must not advance the checkpoint"
+        );
+        let failure = FailureIdentity(DeliveryIdentity {
+            consumer: checkpoint_key.consumer.clone(),
+            source_format: checkpoint_key.source_format.clone(),
+            source: checkpoint_key.source.clone(),
+            partition_format: checkpoint_key.partition_format.clone(),
+            partition: checkpoint_key.partition.clone(),
+            position_format: checkpoint_key.position_format.clone(),
+            position: Position {
+                token: Component::new("1").expect("canonical second position"),
+            },
+            successor: Position {
+                token: Component::new("2").expect("canonical successor position"),
+            },
+        });
+        let stream = state.stream_backend(writer);
+        let failure = stream
+            .failure_async(&failure)
+            .await
+            .expect("failure lookup")
+            .expect("failed delivery record");
+        assert_eq!(failure.attempts, 1);
+        let payload = stream
+            .failure_payload_metadata_async(&failure.identity)
+            .await
+            .expect("failure payload metadata")
+            .expect("replay payload metadata");
+        assert!(payload.redacted);
+        assert!(payload.plaintext_bytes.is_some());
     }
 
     fn authoritative_sensor_project() -> ProjectUnit {
