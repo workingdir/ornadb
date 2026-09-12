@@ -6,7 +6,7 @@
 //! logical generation index. It does not decode arbitrary rows or infer a
 //! logical type from a Parquet sample.
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{cmp::Ordering, collections::BTreeMap, error::Error, fmt};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use bytes::Bytes;
@@ -37,6 +37,7 @@ pub enum CompactParquetError {
     DuplicateFieldColumn([u8; 16]),
     NullKey,
     RowCountMismatch { expected: u64, observed: u64 },
+    UnorderedPrimaryKeys,
     Key(CompactKeyError),
     SegmentUnavailable(Uuid),
 }
@@ -59,6 +60,9 @@ impl fmt::Display for CompactParquetError {
                     f,
                     "compact row count mismatch: expected {expected}, observed {observed}"
                 )
+            }
+            Self::UnorderedPrimaryKeys => {
+                f.write_str("compact primary keys are not in canonical order")
             }
             Self::Key(error) => error.fmt(f),
             Self::SegmentUnavailable(id) => write!(f, "compact segment is unavailable: {id}"),
@@ -186,12 +190,19 @@ impl CompactParquetKeySource {
         let rows =
             usize::try_from(expected_row_count).map_err(|_| CompactParquetError::InvalidParquet)?;
         let mut encoded = Vec::with_capacity(rows);
+        let mut previous: Option<Vec<OvbRaw>> = None;
         for row in 0..rows {
             let components = key_columns
                 .iter()
                 .enumerate()
                 .map(|(column, _)| values[column][row].clone())
                 .collect::<Vec<_>>();
+            if let Some(previous) = &previous {
+                if compare_key_components(previous, &components)? == Ordering::Greater {
+                    return Err(CompactParquetError::UnorderedPrimaryKeys);
+                }
+            }
+            previous = Some(components.clone());
             let raw = match components.as_slice() {
                 [value] => value.clone(),
                 [] => return Err(CompactParquetError::UnsupportedKeyMapping),
@@ -219,6 +230,27 @@ impl CompactParquetKeySource {
             .ok_or_else(|| CompactParquetError::SegmentUnavailable(entry.segment_id()))?;
         Self::decode_verified_bytes(&self.profile, self.table, bytes, entry.row_count())
     }
+}
+
+fn compare_key_components(
+    left: &[OvbRaw],
+    right: &[OvbRaw],
+) -> Result<Ordering, CompactParquetError> {
+    if left.len() != right.len() {
+        return Err(CompactParquetError::InvalidMetadata);
+    }
+    for (left, right) in left.iter().zip(right) {
+        let ordering = match (left, right) {
+            (OvbRaw::Int(left), OvbRaw::Int(right)) => left.cmp(right),
+            (OvbRaw::Bool(left), OvbRaw::Bool(right)) => left.cmp(right),
+            (OvbRaw::Text(left), OvbRaw::Text(right)) => left.cmp(right),
+            _ => return Err(CompactParquetError::InvalidMetadata),
+        };
+        if ordering != Ordering::Equal {
+            return Ok(ordering);
+        }
+    }
+    Ok(Ordering::Equal)
 }
 
 impl CompactExactKeySource for CompactParquetKeySource {
@@ -1133,10 +1165,7 @@ mod tests {
         verified_fixture_with_schema_ovb(profile, &schema_ovb)
     }
 
-    fn verified_fixture_with_schema_ovb(
-        profile: &CompactOvbProfile,
-        schema_ovb: &[u8],
-    ) -> Vec<u8> {
+    fn verified_fixture_with_schema_ovb(profile: &CompactOvbProfile, schema_ovb: &[u8]) -> Vec<u8> {
         let original = BASE64.decode(VERIFIED_PARQUET).unwrap();
         let reader = SerializedFileReader::new(Bytes::from(original.clone())).unwrap();
         let file = reader.metadata().file_metadata();
@@ -1693,18 +1722,91 @@ mod tests {
     }
 
     #[test]
-    fn reads_real_scalar_bool_as_canonical_ovb_bool() {
-        let profile = profile_with_types(&[KEY_A], &[bool_type()]);
-        let bytes = mixed_parquet(
-            &profile,
+    fn rejects_decreasing_scalar_primary_keys_without_reordering() {
+        let profile = profile(&[KEY_A]);
+        let bytes = parquet(&profile, &[KEY_A], &[vec![42, 7]], false, None);
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 2),
+            Err(CompactParquetError::UnorderedPrimaryKeys)
+        ));
+    }
+
+    #[test]
+    fn rejects_decreasing_bool_and_string_primary_keys() {
+        let bool_profile = profile_with_types(&[KEY_A], &[bool_type()]);
+        let bool_bytes = mixed_parquet(
+            &bool_profile,
             &[KEY_A],
             &[TestColumn::Bool(&[true, false])],
             false,
             None,
         );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&bool_profile, TABLE, &bool_bytes, 2),
+            Err(CompactParquetError::UnorderedPrimaryKeys)
+        ));
+
+        let string_profile = profile_with_types(&[KEY_A], &[str_type()]);
+        let string_values = [b"beta".to_vec(), b"alpha".to_vec()];
+        let string_bytes = mixed_parquet(
+            &string_profile,
+            &[KEY_A],
+            &[TestColumn::Str(&string_values)],
+            false,
+            None,
+        );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(
+                &string_profile,
+                TABLE,
+                &string_bytes,
+                2
+            ),
+            Err(CompactParquetError::UnorderedPrimaryKeys)
+        ));
+    }
+
+    #[test]
+    fn rejects_decreasing_composite_keys_in_declared_primary_key_order() {
+        // The physical leaf order is A then B, but the declared primary key is
+        // B then A.  B decreases even as A increases, so this must fail.
+        let profile = profile_with_types(&[KEY_B, KEY_A], &[int_type(), int_type()]);
+        let bytes = mixed_parquet(
+            &profile,
+            &[KEY_A, KEY_B],
+            &[TestColumn::Int(&[1, 2]), TestColumn::Int(&[42, 7])],
+            false,
+            None,
+        );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 2),
+            Err(CompactParquetError::UnorderedPrimaryKeys)
+        ));
+    }
+
+    #[test]
+    fn preserves_equal_keys_for_logical_duplicate_detection() {
+        let profile = profile(&[KEY_A]);
+        let bytes = parquet(&profile, &[KEY_A], &[vec![7, 7]], false, None);
         assert_eq!(
             CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 2).unwrap(),
-            vec![expected_bool(true), expected_bool(false)]
+            vec![expected_scalar(7), expected_scalar(7)]
+        );
+    }
+
+    #[test]
+    fn reads_real_scalar_bool_as_canonical_ovb_bool() {
+        let profile = profile_with_types(&[KEY_A], &[bool_type()]);
+        let bytes = mixed_parquet(
+            &profile,
+            &[KEY_A],
+            &[TestColumn::Bool(&[false, true])],
+            false,
+            None,
+        );
+        assert_eq!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 2).unwrap(),
+            vec![expected_bool(false), expected_bool(true)]
         );
     }
 
@@ -1742,7 +1844,7 @@ mod tests {
             vec![expected_text("alpha"), expected_text("beta")]
         );
 
-        let dictionary_strings = [b"same".to_vec(), b"same".to_vec(), b"other".to_vec()];
+        let dictionary_strings = [b"other".to_vec(), b"same".to_vec(), b"same".to_vec()];
         let dictionary = mixed_parquet_with_dictionary(
             &profile,
             &[KEY_A],
@@ -1762,9 +1864,9 @@ mod tests {
             CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &dictionary, 3)
                 .unwrap(),
             vec![
+                expected_text("other"),
                 expected_text("same"),
-                expected_text("same"),
-                expected_text("other")
+                expected_text("same")
             ]
         );
     }
