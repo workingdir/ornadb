@@ -2415,6 +2415,24 @@ fn authoritative_ranges_fixture_accepts_numeric_membership_and_integer_list_slic
 }
 
 #[test]
+fn immutable_ranges_fixture_exposes_the_published_take_signature_conflict() {
+    let result = analyze(&[ModuleInput::new(
+        "ranges.orna",
+        r#"
+            pub fn inside(value: Int) = value in 1..=5;
+            pub fn first_ten(values: [Int]) = values | take(0..10);
+        "#,
+    )]);
+
+    let diagnostic = result
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .expect("range fixture must expose its signature conflict");
+    assert_eq!(diagnostic.message(), "take requires an integer count");
+}
+
+#[test]
 fn finite_list_distinct_and_union_preserve_types_and_reject_invalid_inputs() {
     let valid = analyze(&[ModuleInput::new(
         "collections.orna",
