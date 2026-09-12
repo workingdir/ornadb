@@ -57,6 +57,13 @@ pub(crate) struct TypeDescriptor {
 pub(crate) struct RelationDescriptor {
     pub name: String,
     pub grouped_handle: String,
+    pub writable: bool,
+    pub kind: String,
+    pub availability: String,
+    pub key: String,
+    pub purpose: String,
+    pub key_fields: Vec<String>,
+    pub invariants: Vec<String>,
     pub fields: BTreeMap<String, SystemType>,
     pub reference_type: SystemType,
 }
@@ -127,6 +134,7 @@ pub(crate) enum SystemApiError {
     WritableRelation,
     InvalidRelationAlias,
     InvalidRemovedName,
+    InvalidRelationMetadata,
 }
 
 impl SystemApi {
@@ -238,15 +246,52 @@ impl SystemApi {
             }
         }
 
+        let parsed_relation_fields = raw
+            .relations
+            .iter()
+            .map(|relation| {
+                Ok((
+                    relation.name.clone(),
+                    fields(relation.fields.clone(), &type_arities, &BTreeSet::new())?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, SystemApiError>>()?;
+
         let mut relations = BTreeMap::new();
         let mut grouped_relations = BTreeMap::new();
         for relation in raw.relations {
+            let fields = parsed_relation_fields
+                .get(&relation.name)
+                .expect("relation fields were parsed before descriptor retention");
+            if relation.kind != "relation"
+                || !matches!(
+                    relation.availability.as_str(),
+                    "catalogue" | "derived" | "durable-observation" | "live" | "local-durable"
+                )
+                || relation.key.trim().is_empty()
+                || relation.purpose.trim().is_empty()
+                || relation.key_fields.is_empty()
+                || relation
+                    .key_fields
+                    .iter()
+                    .any(|field| field.trim().is_empty())
+                || relation.key_fields.iter().collect::<BTreeSet<_>>().len()
+                    != relation.key_fields.len()
+                || relation
+                    .invariants
+                    .iter()
+                    .any(|invariant| invariant.trim().is_empty())
+                || relation.key_fields.iter().any(|path| {
+                    !relation_key_path_exists(path, fields, &parsed_relation_fields, &types)
+                })
+            {
+                return Err(SystemApiError::InvalidRelationMetadata);
+            }
             if relation.writable {
                 return Err(SystemApiError::WritableRelation);
             }
             validate_path(&relation.name)?;
             validate_path(&relation.grouped_handle)?;
-            let fields = fields(relation.fields, &type_arities, &BTreeSet::new())?;
             let reference_type =
                 parse_and_validate_type(&relation.reference_type, &type_arities, &BTreeSet::new())?;
             if relation_aliases.get(&relation.reference_type) != Some(&relation.name) {
@@ -264,7 +309,14 @@ impl SystemApi {
                 RelationDescriptor {
                     name: relation.name,
                     grouped_handle: relation.grouped_handle,
-                    fields,
+                    writable: relation.writable,
+                    kind: relation.kind,
+                    availability: relation.availability,
+                    key: relation.key,
+                    purpose: relation.purpose,
+                    key_fields: relation.key_fields,
+                    invariants: relation.invariants,
+                    fields: fields.clone(),
                     reference_type,
                 },
             )?;
@@ -534,6 +586,44 @@ fn fields(
         }
     }
     Ok(result)
+}
+
+fn relation_key_path_exists(
+    path: &str,
+    root_fields: &BTreeMap<String, SystemType>,
+    relation_fields: &BTreeMap<String, BTreeMap<String, SystemType>>,
+    types: &BTreeMap<String, TypeDescriptor>,
+) -> bool {
+    let mut current_fields = root_fields;
+    let mut components = path.split('.').peekable();
+    while let Some(component) = components.next() {
+        let Some(ty) = current_fields.get(component) else {
+            return false;
+        };
+        if components.peek().is_none() {
+            return true;
+        }
+        current_fields = match nested_fields(ty, relation_fields, types) {
+            Some(fields) => fields,
+            None => return false,
+        };
+    }
+    false
+}
+
+fn nested_fields<'a>(
+    ty: &'a SystemType,
+    relation_fields: &'a BTreeMap<String, BTreeMap<String, SystemType>>,
+    types: &'a BTreeMap<String, TypeDescriptor>,
+) -> Option<&'a BTreeMap<String, SystemType>> {
+    match ty {
+        SystemType::Named(name) | SystemType::Applied { base: name, .. } => types
+            .get(name)
+            .map(|descriptor| &descriptor.fields)
+            .or_else(|| relation_fields.get(name)),
+        SystemType::Optional(inner) => nested_fields(inner, relation_fields, types),
+        SystemType::List(_) => None,
+    }
 }
 
 fn insert_type_arity(
@@ -1179,11 +1269,18 @@ struct RawValueType {
 struct RawRelation {
     name: String,
     grouped_handle: String,
+    kind: String,
+    availability: String,
+    key: String,
+    purpose: String,
+    key_fields: Vec<String>,
+    invariants: Vec<String>,
     fields: Vec<RawField>,
     writable: bool,
     reference_type: String,
 }
 
+#[derive(Clone)]
 struct RawField {
     name: String,
     ty: String,
@@ -1475,6 +1572,12 @@ fn raw_relation(value: &serde_json::Value) -> Result<RawRelation, SystemApiError
     Ok(RawRelation {
         name: text(value_at(value, "name")?)?.to_owned(),
         grouped_handle: text(value_at(value, "grouped_handle")?)?.to_owned(),
+        kind: text(value_at(value, "kind")?)?.to_owned(),
+        availability: text(value_at(value, "availability")?)?.to_owned(),
+        key: text(value_at(value, "key")?)?.to_owned(),
+        purpose: text(value_at(value, "purpose")?)?.to_owned(),
+        key_fields: strings(value_at(value, "key_fields")?)?,
+        invariants: optional_strings(value.get("invariants"))?,
         fields: values(value_at(value, "fields")?)?
             .iter()
             .map(raw_field)
@@ -1771,6 +1874,12 @@ mod tests {
                 .expect("every raw relation is retained");
             assert_eq!(retained.name, relation.name);
             assert_eq!(retained.grouped_handle, relation.grouped_handle);
+            assert_eq!(retained.kind, relation.kind);
+            assert_eq!(retained.availability, relation.availability);
+            assert_eq!(retained.key, relation.key);
+            assert_eq!(retained.purpose, relation.purpose);
+            assert_eq!(retained.key_fields, relation.key_fields);
+            assert_eq!(retained.invariants, relation.invariants);
             assert_eq!(retained.fields.len(), relation.fields.len());
             assert_eq!(
                 retained.reference_type,
@@ -1789,6 +1898,93 @@ mod tests {
             assert_eq!(
                 api.grouped_relations.get(&relation.grouped_handle),
                 Some(&relation.name)
+            );
+        }
+
+        let document = document();
+        let relations = document["relations"]
+            .as_array()
+            .expect("relations must be an array");
+        assert_eq!(relations.len(), api.inventory.relations);
+        for relation in relations {
+            let name = relation["name"].as_str().expect("relation name string");
+            let retained = api
+                .relations
+                .get(name)
+                .expect("every JSON relation has a retained descriptor");
+            assert_eq!(retained.name, name);
+            assert_eq!(
+                retained.grouped_handle,
+                relation["grouped_handle"]
+                    .as_str()
+                    .expect("relation grouped handle string")
+            );
+            assert_eq!(
+                retained.kind,
+                relation["kind"].as_str().expect("relation kind string")
+            );
+            assert_eq!(
+                retained.availability,
+                relation["availability"]
+                    .as_str()
+                    .expect("relation availability string")
+            );
+            assert_eq!(
+                retained.key,
+                relation["key"].as_str().expect("relation key string")
+            );
+            assert_eq!(
+                retained.purpose,
+                relation["purpose"]
+                    .as_str()
+                    .expect("relation purpose string")
+            );
+            assert_eq!(
+                retained.key_fields,
+                relation["key_fields"]
+                    .as_array()
+                    .expect("relation key fields array")
+                    .iter()
+                    .map(|field| field
+                        .as_str()
+                        .expect("relation key field string")
+                        .to_owned())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                retained.writable,
+                relation["writable"]
+                    .as_bool()
+                    .expect("relation writable boolean")
+            );
+            assert_eq!(
+                retained.reference_type,
+                parse_and_validate_type(
+                    relation["reference_type"]
+                        .as_str()
+                        .expect("relation reference type string"),
+                    &type_arities,
+                    &BTreeSet::new(),
+                )
+                .unwrap()
+            );
+            assert_eq!(
+                retained.invariants,
+                relation
+                    .get("invariants")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|invariants| {
+                        invariants
+                            .iter()
+                            .map(|invariant| {
+                                invariant
+                                    .as_str()
+                                    .expect("relation invariant string")
+                                    .to_owned()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
             );
         }
 
@@ -1843,12 +2039,69 @@ mod tests {
             assert_eq!(retained.diagnostic, removed.diagnostic);
         }
 
-        // Relation availability, kind, natural key/key_fields and purpose are
-        // not retained by SystemApi, so this test cannot prove those parts of
-        // the descriptor. Failure-code membership is likewise validated while
-        // loading but not retained: this proves only its count and fail-closed
-        // loader validation. Neither limitation is evidence of complete
+        // Failure-code membership is likewise validated while loading but not
+        // retained: this proves only its count and fail-closed loader
+        // validation. Neither limitation is evidence of complete
         // system/runtime conformance.
+    }
+
+    #[test]
+    fn malformed_relation_metadata_fails_closed() {
+        for (member, value) in [
+            ("kind", serde_json::json!("table")),
+            ("availability", serde_json::json!("unknown")),
+            ("key", serde_json::json!("")),
+            ("purpose", serde_json::json!("")),
+            ("key_fields", serde_json::json!([])),
+            ("invariants", serde_json::json!([""])),
+        ] {
+            let mut document = document();
+            document["relations"][0][member] = value;
+            let source = serde_json::to_string(&document).unwrap();
+            assert_eq!(
+                SystemApi::from_json(&source),
+                Err(SystemApiError::InvalidRelationMetadata),
+                "relation member {member} must be rejected"
+            );
+        }
+
+        let mut invalid_key_path = document();
+        let raw = raw_document(EMBEDDED_SYSTEM_API).unwrap();
+        let (relation_index, dotted_path) = raw
+            .relations
+            .iter()
+            .enumerate()
+            .find_map(|(index, relation)| {
+                relation
+                    .key_fields
+                    .iter()
+                    .find(|path| path.contains('.'))
+                    .map(|path| (index, path.clone()))
+            })
+            .expect("the current descriptor has a dotted relation key path");
+        invalid_key_path["relations"][relation_index]["key_fields"] =
+            serde_json::json!([format!("{dotted_path}.missing")]);
+        let source = serde_json::to_string(&invalid_key_path).unwrap();
+        assert_eq!(
+            SystemApi::from_json(&source),
+            Err(SystemApiError::InvalidRelationMetadata)
+        );
+
+        let mut non_string_invariant = document();
+        non_string_invariant["relations"][0]["invariants"] = serde_json::json!([42]);
+        let source = serde_json::to_string(&non_string_invariant).unwrap();
+        assert_eq!(
+            SystemApi::from_json(&source),
+            Err(SystemApiError::InvalidJson)
+        );
+
+        let mut duplicate_key_fields = document();
+        duplicate_key_fields["relations"][0]["key_fields"] = serde_json::json!(["id", "id"]);
+        let source = serde_json::to_string(&duplicate_key_fields).unwrap();
+        assert_eq!(
+            SystemApi::from_json(&source),
+            Err(SystemApiError::InvalidRelationMetadata)
+        );
     }
 
     #[test]
