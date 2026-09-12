@@ -1064,6 +1064,11 @@ impl Diagnostic {
         self
     }
     pub fn redacted(mut self) -> Self {
+        self.message = SafeText::redacted();
+        self.notes
+            .iter_mut()
+            .for_each(|note| *note = SafeText::redacted());
+        self.causes = self.causes.into_iter().map(Diagnostic::redacted).collect();
         self.redacted = true;
         self
     }
