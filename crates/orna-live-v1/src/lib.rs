@@ -4548,9 +4548,9 @@ impl LiveTransport {
             )),
             SocketEvent::Pong => Ok(WebSocketApplicationPreparation::Pending),
             SocketEvent::Close => {
-                let outcome = self.host.close_attachment(socket.attachment, now).await?;
+                self.host.close_attachment(socket.attachment, now).await?;
                 Ok(WebSocketApplicationPreparation::Output(
-                    WebSocketOutput::Accepted(outcome),
+                    WebSocketOutput::Close { code: None },
                 ))
             }
             SocketEvent::Text => {
