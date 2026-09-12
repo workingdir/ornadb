@@ -901,6 +901,27 @@ fn checkout_preflight_classifies_a_commit_as_detached_and_rejects_ambiguity() {
 }
 
 #[test]
+fn checkout_rejects_a_full_commit_id_branch_name_without_mutating_state() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = git(root.path(), &["rev-parse", "HEAD"]);
+    git(root.path(), &["branch", &head]);
+    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("local.txt"), "unstaged local\n").unwrap();
+    let runtime = RuntimeGeneration::new(181);
+    let before = git_state(&repo, root.path());
+    let before_cwd = repo.cwd_generation(runtime).unwrap();
+
+    assert!(matches!(
+        repo.plan_checkout(&head, runtime),
+        Err(orna_repository_v1::RepositoryError::InvalidSelector)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert_eq!(repo.cwd_generation(runtime).unwrap(), before_cwd);
+}
+
+#[test]
 fn checkout_preflight_invalid_selector_is_strictly_non_mutating() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
