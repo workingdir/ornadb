@@ -3283,7 +3283,7 @@ impl Repository {
         path: &ManagedPath,
         expected: Option<&[u8]>,
         next: Option<&[u8]>,
-        mut before_delete: Option<&mut dyn FnMut()>,
+        mut before_install: Option<&mut dyn FnMut()>,
     ) -> Result<(), RepositoryError> {
         self.ensure_atomic_worktree_install_supported()?;
         let _lock = self.acquire_coordination_lock()?;
@@ -3319,8 +3319,45 @@ impl Repository {
                 if self.read_managed_file(&target)?.as_deref() != expected {
                     return Err(RepositoryError::ManagedContentConflict);
                 }
-                fs::rename(&candidate, &target)
-                    .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                if let Some(hook) = before_install.as_mut() {
+                    hook();
+                }
+                let quarantine = if expected.is_some() {
+                    let quarantine = self.new_managed_quarantine(parent)?;
+                    match fs::rename(&target, &quarantine) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            let _ = fs::remove_file(&quarantine);
+                            return Err(RepositoryError::ManagedContentConflict);
+                        }
+                        Err(_) => {
+                            let _ = fs::remove_file(&quarantine);
+                            return Err(RepositoryError::LocalStateUnavailable);
+                        }
+                    }
+                    if self.read_managed_file(&quarantine)?.as_deref() != expected {
+                        return match self.restore_managed_quarantine(&quarantine, &target) {
+                            Ok(()) | Err(RepositoryError::ManagedContentConflict) => {
+                                Err(RepositoryError::ManagedContentConflict)
+                            }
+                            Err(error) => Err(error),
+                        };
+                    }
+                    Some(quarantine)
+                } else {
+                    None
+                };
+                if let Err(error) = self.install_managed_candidate(&candidate, &target) {
+                    if let Some(quarantine) = quarantine {
+                        fs::remove_file(quarantine)
+                            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                    }
+                    return Err(error);
+                }
+                if let Some(quarantine) = quarantine {
+                    fs::remove_file(quarantine)
+                        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                }
                 fs::File::open(parent)
                     .and_then(|directory| directory.sync_all())
                     .map_err(|_| RepositoryError::LocalStateUnavailable)
@@ -3337,20 +3374,106 @@ impl Repository {
                 {
                     return Err(RepositoryError::UnsafeManagedPath);
                 }
-                if let Some(hook) = before_delete.as_mut() {
+                if let Some(hook) = before_install.as_mut() {
                     hook();
                 }
                 if self.read_managed_file(&target)?.as_deref() != expected {
                     return Err(RepositoryError::ManagedContentConflict);
                 }
-                fs::remove_file(&target).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-                if let Some(parent) = target.parent() {
-                    fs::File::open(parent)
-                        .and_then(|directory| directory.sync_all())
-                        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                if let Some(hook) = before_install.as_mut() {
+                    hook();
                 }
+                let parent = target
+                    .parent()
+                    .ok_or(RepositoryError::LocalStateUnavailable)?;
+                let quarantine = self.new_managed_quarantine(parent)?;
+                match fs::rename(&target, &quarantine) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        let _ = fs::remove_file(&quarantine);
+                        return Err(RepositoryError::ManagedContentConflict);
+                    }
+                    Err(_) => {
+                        let _ = fs::remove_file(&quarantine);
+                        return Err(RepositoryError::LocalStateUnavailable);
+                    }
+                }
+                if self.read_managed_file(&quarantine)?.as_deref() != expected {
+                    return match self.restore_managed_quarantine(&quarantine, &target) {
+                        Ok(()) | Err(RepositoryError::ManagedContentConflict) => {
+                            Err(RepositoryError::ManagedContentConflict)
+                        }
+                        Err(error) => Err(error),
+                    };
+                }
+                if fs::symlink_metadata(&target).is_ok() {
+                    fs::remove_file(&quarantine)
+                        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                    return Err(RepositoryError::ManagedContentConflict);
+                }
+                fs::remove_file(&quarantine).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                fs::File::open(parent)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|_| RepositoryError::LocalStateUnavailable)?;
             }
             Ok(())
+        }
+    }
+
+    fn new_managed_quarantine(&self, parent: &Path) -> Result<PathBuf, RepositoryError> {
+        for _ in 0..8 {
+            let quarantine = parent.join(format!(
+                ".orna-quarantine-{}-{}",
+                std::process::id(),
+                Uuid::new_v4()
+            ));
+            match fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&quarantine)
+            {
+                Ok(file) => {
+                    if file.sync_all().is_err() {
+                        drop(file);
+                        let _ = fs::remove_file(&quarantine);
+                        return Err(RepositoryError::LocalStateUnavailable);
+                    }
+                    return Ok(quarantine);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+            }
+        }
+        Err(RepositoryError::LocalStateUnavailable)
+    }
+
+    fn restore_managed_quarantine(
+        &self,
+        quarantine: &Path,
+        target: &Path,
+    ) -> Result<(), RepositoryError> {
+        match fs::symlink_metadata(target) {
+            Ok(_) => Err(RepositoryError::ManagedContentConflict),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::rename(quarantine, target).map_err(|_| RepositoryError::LocalStateUnavailable)
+            }
+            Err(_) => Err(RepositoryError::LocalStateUnavailable),
+        }
+    }
+
+    fn install_managed_candidate(
+        &self,
+        candidate: &Path,
+        target: &Path,
+    ) -> Result<(), RepositoryError> {
+        match fs::hard_link(candidate, target) {
+            Ok(()) => {
+                fs::remove_file(candidate).map_err(|_| RepositoryError::LocalStateUnavailable)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(RepositoryError::ManagedContentConflict)
+            }
+            Err(_) => Err(RepositoryError::LocalStateUnavailable),
         }
     }
 
@@ -5082,6 +5205,58 @@ mod tests {
     }
 
     #[test]
+    fn replacement_preserves_editor_race_after_final_check() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        git(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(root.path(), &["config", "user.name", "Repository test"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let path = super::ManagedPath::new("generated/row.orna").unwrap();
+        repository
+            .materialize_managed_file(&path, None, Some(b"first"))
+            .unwrap();
+        let target = root.path().join(path.as_path());
+        let mut editor_race = || {
+            fs::write(&target, b"editor").unwrap();
+        };
+
+        assert!(matches!(
+            repository.materialize_managed_file_impl(
+                &path,
+                Some(b"first"),
+                Some(b"second"),
+                Some(&mut editor_race),
+            ),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(fs::read(&target).unwrap(), b"editor");
+        assert_eq!(
+            fs::read_dir(target.parent().unwrap())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".orna-quarantine-")
+                })
+                .count(),
+            0
+        );
+        repository
+            .materialize_managed_file(&path, Some(b"editor"), Some(b"second"))
+            .unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"second");
+    }
+
+    #[test]
     fn deletion_revalidates_editor_race_and_retries_idempotently() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
@@ -5125,6 +5300,50 @@ mod tests {
             .unwrap();
         repository
             .materialize_managed_file(&path, None, None)
+            .unwrap();
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn deletion_preserves_editor_race_after_final_check() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        git(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(root.path(), &["config", "user.name", "Repository test"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let path = super::ManagedPath::new("generated/row.orna").unwrap();
+        repository
+            .materialize_managed_file(&path, None, Some(b"first"))
+            .unwrap();
+        let target = root.path().join(path.as_path());
+        let mut calls = 0;
+        let mut editor_race = || {
+            calls += 1;
+            if calls == 2 {
+                fs::write(&target, b"editor").unwrap();
+            }
+        };
+
+        assert!(matches!(
+            repository.materialize_managed_file_impl(
+                &path,
+                Some(b"first"),
+                None,
+                Some(&mut editor_race),
+            ),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(calls, 2);
+        assert_eq!(fs::read(&target).unwrap(), b"editor");
+        repository
+            .materialize_managed_file(&path, Some(b"editor"), None)
             .unwrap();
         assert!(!target.exists());
     }
