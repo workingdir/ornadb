@@ -15314,6 +15314,38 @@ mod tests {
                 .unwrap(),
             checkpoint
         );
+        assert!(matches!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Pause { key: key.clone() })
+                .await
+                .unwrap(),
+            CommitResult::StreamStatusChanged {
+                state: StreamState {
+                    status: StreamStatus::Paused,
+                    ..
+                },
+                changed: true,
+            }
+        ));
+        let reset_position = Position {
+            token: Component::new("replay-reset").unwrap(),
+        };
+        let reset = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Reset {
+                key: key.clone(),
+                expected: (&checkpoint).into(),
+                to: reset_position.clone(),
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::CheckpointReset { checkpoint } => checkpoint,
+            other => panic!("unexpected replay reset result: {other:?}"),
+        };
+        assert_eq!(reset.committed, Some(reset_position));
+        assert_eq!(reset.version, checkpoint.version + 1);
         assert_eq!(
             state
                 .stream_backend(writer)
