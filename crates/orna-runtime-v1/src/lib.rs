@@ -21,26 +21,28 @@ use std::{
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use libsql::{Builder, Connection, TransactionBehavior, params};
-use num_bigint::BigInt;
+use num_bigint::{BigInt, Sign};
 use orna_foundation_v1::{
-    CanonicalSnapshot, CheckpointRef, CwdCapture, FailureRef, InvocationRef, OvbRaw, RowRef,
-    RunRef, SYS_RUN_TABLE_ID, SYS_STREAM_TABLE_ID, Snapshot, SnapshotRef, StreamRef, Value,
-    checkpoint_reference, failure_reference, invocation_reference, snapshot_reference,
-    validate_checkpoint_reference, validate_failure_reference, validate_invocation_reference,
-    validate_run_reference, validate_stream_reference,
+    AssertionRef, CanonicalSnapshot, CheckpointRef, CwdCapture, ExpressionRef, FailureRef,
+    InvocationRef, ObjectRef, OvbRaw, RowRef, RunRef, SYS_RUN_TABLE_ID, SYS_STREAM_TABLE_ID,
+    SafeText, Snapshot, SnapshotRef, SourceSpan, StreamRef, Value, checkpoint_reference,
+    failure_reference, invocation_reference, snapshot_reference, validate_checkpoint_reference,
+    validate_failure_reference, validate_invocation_reference, validate_run_reference,
+    validate_stream_reference,
 };
 #[cfg(test)]
 use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
 use orna_repository_v1::{CompactPublicationPending, CompactRuntimeReceipt, Repository};
-pub use orna_stream_v1::{
-    AsyncCheckpointBackend, Checkpoint as StreamCheckpoint, CheckpointKey, Component,
-    ConsumerIdentity, StreamFailurePayload,
-};
 use orna_stream_v1::{
+    AssertionDiagnosticCode, AssertionDiagnosticDetail, AssertionOwnerKind,
     AsyncFailurePayloadBackend, CancellationClassification, CheckpointPrecondition, CommitIntent,
     CommitResult, DeliveryIdentity, DeliveryLease, DiagnosticClass, DiagnosticCode,
     FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, Position, RejectReason,
-    ReplayGrant, SafeDiagnostic, StreamState, StreamStatus,
+    ReplayGrant, SafeAssertionWitness, SafeDiagnostic, StreamState, StreamStatus,
+};
+pub use orna_stream_v1::{
+    AsyncCheckpointBackend, Checkpoint as StreamCheckpoint, CheckpointKey, Component,
+    ConsumerIdentity, StreamFailurePayload,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
@@ -188,7 +190,7 @@ CREATE TABLE IF NOT EXISTS stream_failure (
     version INTEGER NOT NULL CHECK (version >= 0),
     attempts INTEGER NOT NULL CHECK (attempts >= 0),
     status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 7),
-    diagnostic_code INTEGER NOT NULL CHECK (diagnostic_code BETWEEN 1 AND 5),
+    diagnostic_code INTEGER NOT NULL CHECK (diagnostic_code BETWEEN 1 AND 6),
     diagnostic_class INTEGER NOT NULL CHECK (diagnostic_class BETWEEN 1 AND 3)
 );
 CREATE TABLE IF NOT EXISTS stream_failure_payload (
@@ -213,6 +215,26 @@ CREATE TABLE IF NOT EXISTS stream_failure_payload (
             AND payload_digest IS NOT NULL
         )
     )
+);
+-- Assertion detail is deliberately isolated from generic provider failures.
+-- It retains only typed coordinates, numeric span data, and optional safe
+-- witness text; no source excerpt, row value, or arbitrary value encoding is
+-- admitted at this boundary. Legacy failures simply have no companion row.
+CREATE TABLE IF NOT EXISTS stream_failure_assertion_detail (
+    identity_id TEXT PRIMARY KEY REFERENCES stream_failure(identity_id),
+    code TEXT NOT NULL CHECK (code = 'ORNA-A091-009'),
+    assertion_ref BLOB NOT NULL,
+    owner_ref BLOB NOT NULL,
+    owner_kind INTEGER NOT NULL CHECK (owner_kind BETWEEN 1 AND 4),
+    predicate_ref BLOB NOT NULL,
+    source_file_ref BLOB NOT NULL,
+    start_byte BLOB NOT NULL,
+    end_byte BLOB NOT NULL,
+    start_line BLOB NOT NULL,
+    start_column BLOB NOT NULL,
+    end_line BLOB NOT NULL,
+    end_column BLOB NOT NULL,
+    safe_witness TEXT
 );
 CREATE TABLE IF NOT EXISTS stream_failure_payload_legacy (
     identity_id TEXT PRIMARY KEY CHECK (length(identity_id) > 0)
@@ -1274,6 +1296,12 @@ impl fmt::Display for RuntimeError {
 }
 impl std::error::Error for RuntimeError {}
 
+#[derive(Debug)]
+pub enum StreamTableDeliveryError {
+    Runtime(RuntimeError),
+    ValidationFailed(SafeDiagnostic),
+}
+
 pub struct RuntimeState {
     connection: Connection,
     compact_receipt_signing_key: SigningKey,
@@ -1400,6 +1428,19 @@ pub struct StreamTableDeliveryCommit<'a> {
     pub faults: &'a dyn FaultInjector,
 }
 
+/// A stream-table delivery that validates the exact uncommitted table
+/// candidate before its writes and checkpoint become visible.
+pub struct StreamValidatedTableDeliveryCommit<'a> {
+    pub writer: WriterLease,
+    pub expected_capture: &'a CwdCapture,
+    pub mutations: &'a [TableMutation],
+    pub next_digest: [u8; 32],
+    pub delivery: DeliveryLease,
+    pub expected_stream: CheckpointPrecondition,
+    pub validator: &'a mut dyn StreamTableCandidateValidator,
+    pub faults: &'a dyn FaultInjector,
+}
+
 struct StreamDeliveryParts<'a> {
     writer: WriterLease,
     expected_capture: &'a CwdCapture,
@@ -1418,6 +1459,16 @@ pub struct StreamReplayCommit<'a> {
     pub table_mutations: &'a [TableMutation],
     pub next_digest: [u8; 32],
     pub grant: ReplayGrant,
+    pub faults: &'a dyn FaultInjector,
+}
+
+pub struct StreamValidatedTableReplayCommit<'a> {
+    pub writer: WriterLease,
+    pub expected_capture: &'a CwdCapture,
+    pub mutations: &'a [TableMutation],
+    pub next_digest: [u8; 32],
+    pub grant: ReplayGrant,
+    pub validator: &'a mut dyn StreamTableCandidateValidator,
     pub faults: &'a dyn FaultInjector,
 }
 
@@ -1482,9 +1533,28 @@ pub struct StreamTableMutationBatch {
     pub next_digest: [u8; 32],
 }
 
+/// Validates one table-local candidate relation selected by the durable
+/// stream transaction. Implementations must treat supplied rows as
+/// read-only: the runtime is responsible for the durable mutation and
+/// checkpoint commit.
+pub trait StreamTableCandidateValidator {
+    /// Table relations required to validate this delivery.
+    fn tables(&self) -> &[String];
+
+    /// Returns a safe failure diagnostic when the candidate cannot commit.
+    fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic>;
+}
+
+pub struct StreamValidatedTableMutationBatch {
+    pub mutations: Vec<TableMutation>,
+    pub next_digest: [u8; 32],
+    pub validator: Box<dyn StreamTableCandidateValidator>,
+}
+
 pub enum StreamHandlerResult {
     Commit(StreamMutationBatch),
     CommitTable(StreamTableMutationBatch),
+    CommitValidatedTable(StreamValidatedTableMutationBatch),
     Fail(SafeDiagnostic),
     Cancelled,
 }
@@ -1958,6 +2028,7 @@ impl RuntimeState {
         state.migrate_stream_observation_failure_identity().await?;
         state.migrate_request_recovery_evidence().await?;
         state.migrate_stream_failure_payloads().await?;
+        state.migrate_stream_failure_assertion_details().await?;
         state.migrate_nullable_stream_partitions().await?;
         state.migrate_catalogue_identity_schema().await?;
         state.validate_recovery().await?;
@@ -3397,7 +3468,7 @@ impl RuntimeState {
         diagnostic: SafeDiagnostic,
         payload: StreamFailurePayload,
     ) -> Result<CommitResult, RuntimeError> {
-        self.fail_stream_delivery_with_faults(writer, lease, diagnostic, payload, &NoFault)
+        self.fail_stream_delivery_with_faults(writer, lease, diagnostic, None, payload, &NoFault)
             .await
     }
 
@@ -3406,6 +3477,7 @@ impl RuntimeState {
         writer: WriterLease,
         lease: DeliveryLease,
         diagnostic: SafeDiagnostic,
+        assertion_detail: Option<&AssertionDiagnosticDetail>,
         payload: StreamFailurePayload,
         faults: &dyn FaultInjector,
     ) -> Result<CommitResult, RuntimeError> {
@@ -3427,8 +3499,23 @@ impl RuntimeState {
                 (None, Some(reference), Some(digest.to_vec()), 2_i64)
             }
         };
-        let result =
-            apply_stream_intent_tx(&transaction, CommitIntent::Fail { lease, diagnostic }).await?;
+        let result = match assertion_detail {
+            Some(detail) => {
+                apply_stream_intent_tx(
+                    &transaction,
+                    CommitIntent::FailWithAssertion {
+                        lease,
+                        diagnostic,
+                        detail: detail.clone(),
+                    },
+                )
+                .await?
+            }
+            None => {
+                apply_stream_intent_tx(&transaction, CommitIntent::Fail { lease, diagnostic })
+                    .await?
+            }
+        };
         if let CommitResult::Failed { failure } = &result {
             sync_stream_observation_tx(&transaction, &result).await?;
             faults.check(FaultPoint::AfterFailureRecord)?;
@@ -3688,6 +3775,52 @@ impl RuntimeState {
                         Ok(StreamStep::Rejected(reason))
                     }
                     _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                }
+            }
+            StreamHandlerResult::CommitValidatedTable(mut batch) => {
+                let capture = self.capture().await.map_err(StreamStepError::Runtime)?;
+                let faults = NoFault;
+                let lease_for_cleanup = lease.clone();
+                let result = self
+                    .commit_stream_validated_table_delivery(StreamValidatedTableDeliveryCommit {
+                        writer,
+                        expected_capture: &capture,
+                        mutations: &batch.mutations,
+                        next_digest: batch.next_digest,
+                        delivery: lease_for_cleanup.clone(),
+                        expected_stream: expected,
+                        validator: batch.validator.as_mut(),
+                        faults: &faults,
+                    })
+                    .await;
+                match result {
+                    Ok((_, CommitResult::CheckpointAdvanced { checkpoint })) => {
+                        Ok(StreamStep::Committed { checkpoint })
+                    }
+                    Ok((_, CommitResult::Rejected(reason))) => {
+                        self.release_stream_lease(writer, lease_for_cleanup).await?;
+                        Ok(StreamStep::Rejected(reason))
+                    }
+                    Ok(_) => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                    Err(StreamTableDeliveryError::ValidationFailed(diagnostic)) => {
+                        self.require_owner(&self.connection, writer)
+                            .await
+                            .map_err(StreamStepError::Runtime)?;
+                        let failure_payload = source.failure_payload(&item);
+                        let mut stream = self.stream_backend(writer);
+                        match stream
+                            .fail_with_payload_async(lease, diagnostic, failure_payload)
+                            .await
+                            .map_err(StreamStepError::Runtime)?
+                        {
+                            CommitResult::Failed { failure } => Ok(StreamStep::Failed { failure }),
+                            CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
+                            _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                        }
+                    }
+                    Err(StreamTableDeliveryError::Runtime(error)) => {
+                        Err(StreamStepError::Runtime(error))
+                    }
                 }
             }
             StreamHandlerResult::Fail(diagnostic) => {
@@ -3971,6 +4104,21 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)
     }
 
+    /// Marks the additive assertion-detail relation as available. Existing
+    /// code/class-only failure rows deliberately remain readable with no
+    /// companion detail row.
+    async fn migrate_stream_failure_assertion_details(&self) -> Result<(), RuntimeError> {
+        self.connection
+            .execute(
+                "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                 VALUES ('stream-failure-assertion-detail-v1')",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(())
+    }
+
     /// Upgrades the private stream identity store so its partition component
     /// has the same nullable semantics as the public checkpoint and stream
     /// natural keys. Existing non-null rows retain their byte-for-byte key
@@ -3985,7 +4133,12 @@ impl RuntimeState {
             stream_partition_required(&transaction, "stream_checkpoint").await?;
         let failure_partition_required =
             stream_partition_required(&transaction, "stream_failure").await?;
-        if checkpoint_partition_required || failure_partition_required {
+        let failure_code_requires_upgrade =
+            stream_failure_code_requires_upgrade(&transaction).await?;
+        if checkpoint_partition_required
+            || failure_partition_required
+            || failure_code_requires_upgrade
+        {
             transaction
                 .execute_batch(
                     "CREATE TABLE stream_checkpoint_nullable_partition (
@@ -4020,7 +4173,7 @@ impl RuntimeState {
                         version INTEGER NOT NULL CHECK (version >= 0),
                         attempts INTEGER NOT NULL CHECK (attempts >= 0),
                         status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 7),
-                        diagnostic_code INTEGER NOT NULL CHECK (diagnostic_code BETWEEN 1 AND 5),
+                        diagnostic_code INTEGER NOT NULL CHECK (diagnostic_code BETWEEN 1 AND 6),
                         diagnostic_class INTEGER NOT NULL CHECK (diagnostic_class BETWEEN 1 AND 3)
                     );
                     INSERT INTO stream_checkpoint_nullable_partition
@@ -4763,6 +4916,89 @@ impl RuntimeState {
         .await
     }
 
+    /// Commits typed table mutations and a stream checkpoint only after a
+    /// caller validates the rows selected by this transaction after applying
+    /// those mutations. A rejected candidate leaves table rows, checkpoint,
+    /// capture, and delivery completion uncommitted.
+    pub async fn commit_stream_validated_table_delivery(
+        &self,
+        request: StreamValidatedTableDeliveryCommit<'_>,
+    ) -> Result<(CwdCapture, CommitResult), StreamTableDeliveryError> {
+        let StreamValidatedTableDeliveryCommit {
+            writer,
+            expected_capture,
+            mutations,
+            next_digest,
+            delivery,
+            expected_stream,
+            validator,
+            faults,
+        } = request;
+        let encoded = mutations
+            .iter()
+            .map(TableMutation::runtime_mutation)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        validate_id(writer.owner_id).map_err(StreamTableDeliveryError::Runtime)?;
+        validate_stream_mutations(&encoded, next_digest)
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        let current = self
+            .capture()
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        if &current != expected_capture {
+            return Err(StreamTableDeliveryError::Runtime(
+                RuntimeError::StaleCapture {
+                    current: Box::new(current),
+                },
+            ));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| StreamTableDeliveryError::Runtime(RuntimeError::StorageUnavailable))?;
+        self.require_owner(&tx, writer)
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        let result = apply_stream_intent_tx(
+            &tx,
+            CommitIntent::Complete {
+                lease: delivery,
+                expected: expected_stream,
+            },
+        )
+        .await
+        .map_err(StreamTableDeliveryError::Runtime)?;
+        sync_stream_observation_tx(&tx, &result)
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        if matches!(result, CommitResult::Rejected(_)) {
+            let current = capture_tx(&tx)
+                .await
+                .map_err(StreamTableDeliveryError::Runtime)?;
+            return Ok((current, result));
+        }
+        for mutation in mutations {
+            apply_table_mutation_tx(&tx, mutation)
+                .await
+                .map_err(StreamTableDeliveryError::Runtime)?;
+        }
+        let rows = table_rows_tx(&tx, validator.tables())
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        validator
+            .validate(&rows)
+            .map_err(StreamTableDeliveryError::ValidationFailed)?;
+        let next = append_mutations_tx(&tx, expected_capture, &encoded, next_digest, faults)
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        tx.commit()
+            .await
+            .map_err(|_| StreamTableDeliveryError::Runtime(RuntimeError::StorageUnavailable))?;
+        Ok((next, result))
+    }
+
     async fn commit_stream_delivery_inner(
         &self,
         parts: StreamDeliveryParts<'_>,
@@ -4885,6 +5121,84 @@ impl RuntimeState {
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok((next, result))
+    }
+
+    async fn commit_stream_validated_table_replay(
+        &self,
+        request: StreamValidatedTableReplayCommit<'_>,
+    ) -> Result<(CwdCapture, CommitResult), StreamTableDeliveryError> {
+        let StreamValidatedTableReplayCommit {
+            writer,
+            expected_capture,
+            mutations,
+            next_digest,
+            grant,
+            validator,
+            faults,
+        } = request;
+        let encoded = mutations
+            .iter()
+            .map(TableMutation::runtime_mutation)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        validate_id(writer.owner_id).map_err(StreamTableDeliveryError::Runtime)?;
+        validate_stream_mutations(&encoded, next_digest)
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        let current = self
+            .capture()
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        if &current != expected_capture {
+            return Err(StreamTableDeliveryError::Runtime(
+                RuntimeError::StaleCapture {
+                    current: Box::new(current),
+                },
+            ));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| StreamTableDeliveryError::Runtime(RuntimeError::StorageUnavailable))?;
+        self.require_owner(&tx, writer)
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        let result = apply_stream_intent_tx(
+            &tx,
+            CommitIntent::ReplayComplete {
+                failure: grant.failure,
+                expected_version: grant.version,
+            },
+        )
+        .await
+        .map_err(StreamTableDeliveryError::Runtime)?;
+        sync_stream_observation_tx(&tx, &result)
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        if matches!(result, CommitResult::Rejected(_)) {
+            let current = capture_tx(&tx)
+                .await
+                .map_err(StreamTableDeliveryError::Runtime)?;
+            return Ok((current, result));
+        }
+        for mutation in mutations {
+            apply_table_mutation_tx(&tx, mutation)
+                .await
+                .map_err(StreamTableDeliveryError::Runtime)?;
+        }
+        let rows = table_rows_tx(&tx, validator.tables())
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        validator
+            .validate(&rows)
+            .map_err(StreamTableDeliveryError::ValidationFailed)?;
+        let next = append_mutations_tx(&tx, expected_capture, &encoded, next_digest, faults)
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        tx.commit()
+            .await
+            .map_err(|_| StreamTableDeliveryError::Runtime(RuntimeError::StorageUnavailable))?;
         Ok((next, result))
     }
 
@@ -5170,6 +5484,29 @@ impl RuntimeState {
                 .await
                 .map(|(_, result)| result)
                 .map_err(StreamStepError::Runtime)
+            }
+            StreamHandlerResult::CommitValidatedTable(mut batch) => {
+                match self
+                    .commit_stream_validated_table_replay(StreamValidatedTableReplayCommit {
+                        writer,
+                        expected_capture: &expected_capture,
+                        mutations: &batch.mutations,
+                        next_digest: batch.next_digest,
+                        grant: grant.clone(),
+                        validator: batch.validator.as_mut(),
+                        faults: &NoFault,
+                    })
+                    .await
+                {
+                    Ok((_, result)) => Ok(result),
+                    Err(StreamTableDeliveryError::ValidationFailed(diagnostic)) => self
+                        .fail_stream_replay(writer, &grant, diagnostic)
+                        .await
+                        .map_err(StreamStepError::Runtime),
+                    Err(StreamTableDeliveryError::Runtime(error)) => {
+                        Err(StreamStepError::Runtime(error))
+                    }
+                }
             }
             StreamHandlerResult::Fail(diagnostic) => self
                 .fail_stream_replay(writer, &grant, diagnostic)
@@ -7434,6 +7771,27 @@ impl RuntimeState {
     }
 }
 
+async fn stream_failure_code_requires_upgrade(
+    connection: &Connection,
+) -> Result<bool, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'stream_failure'",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Err(RuntimeError::RecoveryInvalid);
+    };
+    let sql: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    Ok(!sql.contains("diagnostic_code BETWEEN 1 AND 6"))
+}
+
 impl RuntimeStreamBackend<'_> {
     /// Records a handler failure and its connector-selected retention record
     /// in one writer-fenced metadata transaction.
@@ -7445,6 +7803,27 @@ impl RuntimeStreamBackend<'_> {
     ) -> Result<CommitResult, RuntimeError> {
         self.state
             .fail_stream_delivery(self.lease, lease, diagnostic, payload)
+            .await
+    }
+
+    /// Records a handler failure with optional assertion provenance in the
+    /// same writer-fenced transaction as failure payload retention.
+    pub async fn fail_with_assertion_detail_async(
+        &self,
+        lease: DeliveryLease,
+        diagnostic: SafeDiagnostic,
+        detail: AssertionDiagnosticDetail,
+        payload: StreamFailurePayload,
+    ) -> Result<CommitResult, RuntimeError> {
+        self.state
+            .fail_stream_delivery_with_faults(
+                self.lease,
+                lease,
+                diagnostic,
+                Some(&detail),
+                payload,
+                &NoFault,
+            )
             .await
     }
 
@@ -7538,6 +7917,27 @@ impl AsyncFailurePayloadBackend for RuntimeStreamBackend<'_> {
         Box::pin(async move {
             self.state
                 .fail_stream_delivery(self.lease, lease, diagnostic, payload)
+                .await
+        })
+    }
+
+    fn fail_with_assertion_detail_and_payload_async<'a>(
+        &'a mut self,
+        lease: DeliveryLease,
+        diagnostic: SafeDiagnostic,
+        detail: AssertionDiagnosticDetail,
+        payload: StreamFailurePayload,
+    ) -> Pin<Box<dyn Future<Output = Result<CommitResult, RuntimeError>> + 'a>> {
+        Box::pin(async move {
+            self.state
+                .fail_stream_delivery_with_faults(
+                    self.lease,
+                    lease,
+                    diagnostic,
+                    Some(&detail),
+                    payload,
+                    &NoFault,
+                )
                 .await
         })
     }
@@ -8460,6 +8860,7 @@ fn encode_code(code: DiagnosticCode) -> i64 {
         DiagnosticCode::ExecutionRejected => 3,
         DiagnosticCode::Cancelled => 4,
         DiagnosticCode::Internal => 5,
+        DiagnosticCode::TableAssertionFalse => 6,
     }
 }
 
@@ -8470,6 +8871,7 @@ fn decode_code(value: i64) -> Result<DiagnosticCode, RuntimeError> {
         3 => Ok(DiagnosticCode::ExecutionRejected),
         4 => Ok(DiagnosticCode::Cancelled),
         5 => Ok(DiagnosticCode::Internal),
+        6 => Ok(DiagnosticCode::TableAssertionFalse),
         _ => Err(RuntimeError::RecoveryInvalid),
     }
 }
@@ -8944,7 +9346,207 @@ async fn load_stream_failure(
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         )?,
         diagnostic: decode_diagnostic(&row, 14)?,
+        assertion_detail: load_stream_failure_assertion_detail(connection, identity).await?,
     }))
+}
+
+async fn load_stream_failure_assertion_detail(
+    connection: &Connection,
+    identity: &FailureIdentity,
+) -> Result<Option<AssertionDiagnosticDetail>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT code, assertion_ref, owner_ref, owner_kind, predicate_ref,
+                    source_file_ref, start_byte, end_byte, start_line,
+                    start_column, end_line, end_column, safe_witness
+             FROM stream_failure_assertion_detail WHERE identity_id = ?1",
+            params![stream_identity_id(identity)],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    if row_text(&row, 0)? != orna_stream_v1::ORNA_A091_009 {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    let assertion = AssertionRef::from_row_ref(decode_row_ref(
+        row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?);
+    let owner = ObjectRef::from_row_ref(decode_row_ref(
+        row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?);
+    let owner_kind = decode_assertion_owner_kind(
+        row.get::<i64>(3)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?;
+    let predicate = ExpressionRef::from_row_ref(decode_row_ref(
+        row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?);
+    let file = orna_foundation_v1::FileRef::from_row_ref(decode_row_ref(
+        row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?);
+    let source_span = SourceSpan::new(
+        file,
+        decode_nonnegative_bigint(row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        decode_nonnegative_bigint(row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        decode_positive_bigint(row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        decode_positive_bigint(row.get(9).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        decode_positive_bigint(row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        decode_positive_bigint(row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+    )
+    .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let witness = row
+        .get::<Option<String>>(12)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?
+        .map(SafeText::new)
+        .transpose()
+        .map_err(|_| RuntimeError::RecoveryInvalid)?
+        .map(SafeAssertionWitness::from_safe_presentation);
+    Ok(Some(AssertionDiagnosticDetail {
+        code: AssertionDiagnosticCode::TableOrCrossTableFalse,
+        assertion,
+        owner,
+        owner_kind,
+        predicate,
+        source_span,
+        witness,
+    }))
+}
+
+fn encode_row_ref(reference: &RowRef) -> Result<Vec<u8>, RuntimeError> {
+    reference
+        .encode()
+        .map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn decode_row_ref(bytes: Vec<u8>) -> Result<RowRef, RuntimeError> {
+    let value = Value::decode(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let OvbRaw::Tag(60010, payload) = value.raw() else {
+        return Err(RuntimeError::RecoveryInvalid);
+    };
+    let OvbRaw::Array(parts) = payload.as_ref() else {
+        return Err(RuntimeError::RecoveryInvalid);
+    };
+    let [
+        OvbRaw::Tag(37, database),
+        OvbRaw::Tag(37, table),
+        key,
+        snapshot,
+    ] = parts.as_slice()
+    else {
+        return Err(RuntimeError::RecoveryInvalid);
+    };
+    let (OvbRaw::Bytes(database), OvbRaw::Bytes(table)) = (database.as_ref(), table.as_ref())
+    else {
+        return Err(RuntimeError::RecoveryInvalid);
+    };
+    RowRef::new(
+        fixed(database.clone())?,
+        fixed(table.clone())?,
+        key.clone(),
+        Snapshot::decode(snapshot).map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )
+    .map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn encode_nonnegative_bigint(value: &BigInt) -> Result<Vec<u8>, RuntimeError> {
+    if value.sign() == Sign::Minus {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Value::int(value.clone())
+        .encode()
+        .map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn decode_nonnegative_bigint(bytes: Vec<u8>) -> Result<BigInt, RuntimeError> {
+    let value = Value::decode(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let OvbRaw::Int(value) = value.raw() else {
+        return Err(RuntimeError::RecoveryInvalid);
+    };
+    if value.sign() == Sign::Minus {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok(value.clone())
+}
+
+fn decode_positive_bigint(bytes: Vec<u8>) -> Result<BigInt, RuntimeError> {
+    let value = decode_nonnegative_bigint(bytes)?;
+    if value == BigInt::from(0) {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok(value)
+}
+
+fn encode_assertion_owner_kind(kind: AssertionOwnerKind) -> i64 {
+    match kind {
+        AssertionOwnerKind::Executable => 1,
+        AssertionOwnerKind::RefinedType => 2,
+        AssertionOwnerKind::Table => 3,
+        AssertionOwnerKind::Module => 4,
+    }
+}
+
+fn decode_assertion_owner_kind(value: i64) -> Result<AssertionOwnerKind, RuntimeError> {
+    match value {
+        1 => Ok(AssertionOwnerKind::Executable),
+        2 => Ok(AssertionOwnerKind::RefinedType),
+        3 => Ok(AssertionOwnerKind::Table),
+        4 => Ok(AssertionOwnerKind::Module),
+        _ => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
+async fn store_stream_failure_assertion_detail(
+    connection: &Connection,
+    identity: &FailureIdentity,
+    detail: &AssertionDiagnosticDetail,
+) -> Result<(), RuntimeError> {
+    if detail.code != AssertionDiagnosticCode::TableOrCrossTableFalse {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    connection
+        .execute(
+            "INSERT INTO stream_failure_assertion_detail (
+                identity_id, code, assertion_ref, owner_ref, owner_kind,
+                predicate_ref, source_file_ref, start_byte, end_byte,
+                start_line, start_column, end_line, end_column, safe_witness
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             ON CONFLICT(identity_id) DO UPDATE SET
+                code = excluded.code, assertion_ref = excluded.assertion_ref,
+                owner_ref = excluded.owner_ref, owner_kind = excluded.owner_kind,
+                predicate_ref = excluded.predicate_ref, source_file_ref = excluded.source_file_ref,
+                start_byte = excluded.start_byte, end_byte = excluded.end_byte,
+                start_line = excluded.start_line, start_column = excluded.start_column,
+                end_line = excluded.end_line, end_column = excluded.end_column,
+                safe_witness = excluded.safe_witness",
+            params![
+                stream_identity_id(identity),
+                detail.code.as_str(),
+                encode_row_ref(detail.assertion.as_row_ref())?,
+                encode_row_ref(detail.owner.as_row_ref())?,
+                encode_assertion_owner_kind(detail.owner_kind),
+                encode_row_ref(detail.predicate.as_row_ref())?,
+                encode_row_ref(detail.source_span.file.as_row_ref())?,
+                encode_nonnegative_bigint(&detail.source_span.start_byte)?,
+                encode_nonnegative_bigint(&detail.source_span.end_byte)?,
+                encode_nonnegative_bigint(&detail.source_span.start_line)?,
+                encode_nonnegative_bigint(&detail.source_span.start_column)?,
+                encode_nonnegative_bigint(&detail.source_span.end_line)?,
+                encode_nonnegative_bigint(&detail.source_span.end_column)?,
+                detail
+                    .witness
+                    .as_ref()
+                    .map(|value| value.as_safe_presentation().as_str().to_owned()),
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
 }
 
 async fn load_stream_replay_claim(
@@ -9138,7 +9740,10 @@ async fn apply_stream_intent(
             });
         }
     }
-    if matches!(intent, CommitIntent::Fail { .. }) {
+    if matches!(
+        intent,
+        CommitIntent::Fail { .. } | CommitIntent::FailWithAssertion { .. }
+    ) {
         return Err(RuntimeError::RecoveryInvalid);
     }
     let result = apply_stream_intent_tx(&transaction, intent).await;
@@ -9436,7 +10041,7 @@ async fn apply_stream_intent_tx(
                         diagnostic_code = ?15,
                         diagnostic_class = ?16",
                     params![
-                        identity_id,
+                        identity_id.clone(),
                         key_id,
                         delivery.consumer.principal.as_str().to_owned(),
                         delivery.consumer.root.as_str().to_owned(),
@@ -9460,12 +10065,44 @@ async fn apply_stream_intent_tx(
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
+            connection
+                .execute(
+                    "DELETE FROM stream_failure_assertion_detail WHERE identity_id = ?1",
+                    params![identity_id],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
             publish_pending_stream_pause(connection, &key).await?;
             Ok(CommitResult::Failed {
                 failure: load_stream_failure(connection, &identity)
                     .await?
                     .ok_or(RuntimeError::RecoveryInvalid)?,
             })
+        }
+        CommitIntent::FailWithAssertion {
+            lease,
+            diagnostic: supplied_diagnostic,
+            detail,
+        } => {
+            let diagnostic = SafeDiagnostic {
+                code: DiagnosticCode::TableAssertionFalse,
+                class: supplied_diagnostic.class,
+            };
+            let result = Box::pin(apply_stream_intent_tx(
+                connection,
+                CommitIntent::Fail { lease, diagnostic },
+            ))
+            .await?;
+            if let CommitResult::Failed { failure } = &result {
+                store_stream_failure_assertion_detail(connection, &failure.identity, &detail)
+                    .await?;
+                return Ok(CommitResult::Failed {
+                    failure: load_stream_failure(connection, &failure.identity)
+                        .await?
+                        .ok_or(RuntimeError::RecoveryInvalid)?,
+                });
+            }
+            Ok(result)
         }
         CommitIntent::Retry {
             failure,
@@ -9786,6 +10423,13 @@ async fn apply_stream_intent_tx(
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
+            connection
+                .execute(
+                    "DELETE FROM stream_failure_assertion_detail WHERE identity_id = ?1",
+                    params![stream_identity_id(&failure)],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
             if replay_claim.is_some() {
                 let deleted = connection
                     .execute(
@@ -9808,6 +10452,35 @@ async fn apply_stream_intent_tx(
                     .await?
                     .ok_or(RuntimeError::RecoveryInvalid)?,
             })
+        }
+        CommitIntent::ReplayFailWithAssertion {
+            failure,
+            expected_version,
+            diagnostic: supplied_diagnostic,
+            detail,
+        } => {
+            let diagnostic = SafeDiagnostic {
+                code: DiagnosticCode::TableAssertionFalse,
+                class: supplied_diagnostic.class,
+            };
+            let result = Box::pin(apply_stream_intent_tx(
+                connection,
+                CommitIntent::ReplayFail {
+                    failure: failure.clone(),
+                    expected_version,
+                    diagnostic,
+                },
+            ))
+            .await?;
+            if let CommitResult::ReplayFailed { .. } = result {
+                store_stream_failure_assertion_detail(connection, &failure, &detail).await?;
+                return Ok(CommitResult::ReplayFailed {
+                    failure: load_stream_failure(connection, &failure)
+                        .await?
+                        .ok_or(RuntimeError::RecoveryInvalid)?,
+                });
+            }
+            Ok(result)
         }
         CommitIntent::ReplayCancel {
             failure,
@@ -10490,6 +11163,40 @@ async fn apply_table_mutation_tx(
         }
     }
     Ok(())
+}
+
+async fn table_rows_tx(
+    connection: &Connection,
+    tables: &[String],
+) -> Result<RuntimeTableRows, RuntimeError> {
+    let mut result = BTreeMap::new();
+    for table in tables {
+        validate_table_name(table)?;
+        if result.contains_key(table) {
+            continue;
+        }
+        let mut query = connection
+            .query(
+                "SELECT row_key, row_value FROM table_row
+                 WHERE table_id = ?1 ORDER BY row_key",
+                params![table.clone()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut rows = Vec::new();
+        while let Some(row) = query
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            rows.push((
+                row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            ));
+        }
+        result.insert(table.clone(), rows);
+    }
+    Ok(result)
 }
 
 async fn append_mutations_tx(
@@ -11281,6 +11988,326 @@ mod tests {
                 token: Component::new(successor).unwrap(),
             },
         }
+    }
+
+    fn assertion_detail(snapshot: Snapshot) -> AssertionDiagnosticDetail {
+        let reference = |key: &str| {
+            RowRef::new(id(1), id(9), OvbRaw::Text(key.into()), snapshot.clone()).unwrap()
+        };
+        let file = orna_foundation_v1::FileRef::from_row_ref(reference("file"));
+        AssertionDiagnosticDetail::table_or_cross_table_false(
+            AssertionRef::from_row_ref(reference("assertion")),
+            ObjectRef::from_row_ref(reference("owner")),
+            AssertionOwnerKind::Table,
+            ExpressionRef::from_row_ref(reference("predicate")),
+            SourceSpan::new(
+                file,
+                4.into(),
+                9.into(),
+                1.into(),
+                5.into(),
+                1.into(),
+                10.into(),
+            )
+            .unwrap(),
+            Some(SafeAssertionWitness::from_safe_presentation(
+                SafeText::new("stable-safe-witness").unwrap(),
+            )),
+        )
+    }
+
+    #[tokio::test]
+    async fn assertion_failure_detail_survives_retry_and_reopen() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(24)).await.unwrap();
+        let delivery = stream_delivery("assertion-detail", "after-assertion-detail");
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let detail = assertion_detail(state.capture().await.unwrap().snapshot().clone());
+        let failed = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected acquire result: {other:?}"),
+            };
+            match stream
+                .fail_with_assertion_detail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    detail.clone(),
+                    StreamFailurePayload::Plaintext(vec![7]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected failure result: {other:?}"),
+            }
+        };
+        assert_eq!(failed.assertion_detail, Some(detail.clone()));
+        {
+            let mut stream = state.stream_backend(writer);
+            assert!(matches!(
+                stream
+                    .apply_async(CommitIntent::Retry {
+                        failure: failed.identity.clone(),
+                        expected_version: failed.version,
+                        expected,
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::RetryScheduled { ref failure }
+                    if failure.assertion_detail == Some(detail.clone())
+            ));
+        }
+        drop(state);
+        let reopened = open_state(&repo).await;
+        let stream = reopened.stream_backend(writer);
+        let loaded = stream
+            .failure_async(&failed.identity)
+            .await
+            .unwrap()
+            .expect("durable assertion failure");
+        assert_eq!(loaded.assertion_detail, Some(detail));
+        assert_eq!(loaded.attempts, 2);
+    }
+
+    #[tokio::test]
+    async fn assertion_replay_failure_preserves_identity_and_detail_until_ordinary_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(25)).await.unwrap();
+        let delivery = stream_delivery("replay-assertion", "after-replay-assertion");
+        let initial = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let detail = assertion_detail(state.capture().await.unwrap().snapshot().clone());
+        let failed = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: initial.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected acquire result: {other:?}"),
+            };
+            match stream
+                .fail_with_assertion_detail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    detail.clone(),
+                    StreamFailurePayload::Plaintext(vec![8]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected failure result: {other:?}"),
+            }
+        };
+        let (skipped, checkpoint_before_replay) = {
+            let mut stream = state.stream_backend(writer);
+            let skip_lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: initial.clone(),
+                    purpose: LeasePurpose::Skip,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected skip lease: {other:?}"),
+            };
+            assert!(matches!(
+                stream
+                    .apply_async(CommitIntent::Skip {
+                        lease: skip_lease,
+                        expected: initial,
+                        expected_failure_version: failed.version,
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::CheckpointAdvanced { .. }
+            ));
+            let skipped = stream
+                .failure_async(&failed.identity)
+                .await
+                .unwrap()
+                .expect("skipped failure");
+            let checkpoint = stream
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap();
+            (skipped, checkpoint)
+        };
+        let replay_failed = {
+            let mut stream = state.stream_backend(writer);
+            let grant = match stream
+                .apply_async(CommitIntent::Replay {
+                    failure: skipped.identity.clone(),
+                    expected_version: skipped.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::ReplayGranted { grant } => grant,
+                other => panic!("unexpected replay grant: {other:?}"),
+            };
+            match stream
+                .apply_async(CommitIntent::ReplayFailWithAssertion {
+                    failure: grant.failure,
+                    expected_version: grant.version,
+                    diagnostic: SafeDiagnostic {
+                        code: DiagnosticCode::DecodeRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    detail: detail.clone(),
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::ReplayFailed { failure } => failure,
+                other => panic!("unexpected replay failure result: {other:?}"),
+            }
+        };
+        assert_eq!(replay_failed.identity, failed.identity);
+        assert_eq!(
+            replay_failed.diagnostic.code,
+            DiagnosticCode::TableAssertionFalse
+        );
+        assert_eq!(replay_failed.assertion_detail, Some(detail.clone()));
+        let stream = state.stream_backend(writer);
+        assert_eq!(
+            stream
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint_before_replay
+        );
+        drop(stream);
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let mut stream = reopened.stream_backend(writer);
+        let loaded = stream
+            .failure_async(&failed.identity)
+            .await
+            .unwrap()
+            .expect("replayed assertion failure");
+        assert_eq!(loaded.identity, failed.identity);
+        assert_eq!(loaded.assertion_detail, Some(detail));
+        let grant = match stream
+            .apply_async(CommitIntent::Replay {
+                failure: loaded.identity.clone(),
+                expected_version: loaded.version,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::ReplayGranted { grant } => grant,
+            other => panic!("unexpected second replay grant: {other:?}"),
+        };
+        let ordinary = match stream
+            .apply_async(CommitIntent::ReplayFail {
+                failure: grant.failure,
+                expected_version: grant.version,
+                diagnostic: SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::ReplayFailed { failure } => failure,
+            other => panic!("unexpected ordinary replay failure result: {other:?}"),
+        };
+        assert_eq!(ordinary.identity, failed.identity);
+        assert_eq!(ordinary.assertion_detail, None);
+        assert_eq!(
+            stream
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint_before_replay
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_code_class_failure_reopens_without_assertion_detail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(26)).await.unwrap();
+        let delivery = stream_delivery("legacy-failure", "after-legacy-failure");
+        let failure = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: CheckpointPrecondition {
+                        version: 0,
+                        committed: None,
+                    },
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected acquire result: {other:?}"),
+            };
+            match stream
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(vec![9]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected legacy failure result: {other:?}"),
+            }
+        };
+        assert_eq!(failure.assertion_detail, None);
+        drop(state);
+        let reopened = open_state(&repo).await;
+        let stream = reopened.stream_backend(writer);
+        let loaded = stream
+            .failure_async(&failure.identity)
+            .await
+            .unwrap()
+            .expect("legacy failure");
+        assert_eq!(loaded.assertion_detail, None);
+        assert_eq!(loaded.diagnostic.code, DiagnosticCode::ExecutionRejected);
+        assert_eq!(loaded.diagnostic.class, DiagnosticClass::Permanent);
     }
 
     async fn protected_replay_fixture(
@@ -14729,6 +15756,7 @@ mod tests {
                     attempts: skipped_failure.attempts + 1,
                     status: FailureStatus::Replaying,
                     diagnostic: skipped_failure.diagnostic,
+                    assertion_detail: skipped_failure.assertion_detail.clone(),
                 }
             );
             assert_eq!(
@@ -17210,6 +18238,7 @@ mod tests {
                         code: DiagnosticCode::DecodeRejected,
                         class: DiagnosticClass::Permanent,
                     },
+                    None,
                     StreamFailurePayload::Plaintext(vec![value]),
                     &Fail(point),
                 )
