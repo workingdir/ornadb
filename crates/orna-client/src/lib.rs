@@ -184,7 +184,8 @@ pub use inspect_session::{
     ClientInspectLifecycleCompletion, ClientInspectLifecycleRequest, ClientInspectLifecycleSession,
 };
 pub use live_bootstrap::{
-    BootstrappedLiveAttachment, LiveBootstrapError, PrefetchedBinaryTransport,
+    BootstrappedLiveAttachment, LiveBootstrapError, LiveReconnectCause, LiveReconnectError,
+    LiveReconnectFailure, PrefetchedBinaryTransport,
 };
 pub use live_presentation::{
     LivePresentationError, LivePresentationUpdate, PublishedPresentation, ResyncRequest,
