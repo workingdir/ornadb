@@ -230,8 +230,9 @@ impl LiveClient {
             .ok_or(LiveTransportError::Response(
                 "session response omitted cookie",
             ))?;
-        let body = response.bytes().await.map_err(LiveTransportError::Http)?;
-        reject_duplicate_json_members(&body)?;
+        let body =
+            read_bounded_response_body(response, self.config.limits.max_message_bytes).await?;
+        reject_duplicate_json_members(&body, self.config.limits.max_depth)?;
         let value: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|_| LiveTransportError::Response("invalid session JSON"))?;
         let mut session = parse_session(
@@ -319,6 +320,39 @@ impl LiveClient {
 
 fn endpoint_origin(endpoint: &Url) -> String {
     endpoint.origin().ascii_serialization()
+}
+
+async fn read_bounded_response_body(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, LiveTransportError> {
+    let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes_u64)
+    {
+        return Err(LiveTransportError::Response(
+            "session response exceeds configured message limit",
+        ));
+    }
+    let mut body = Vec::new();
+    let mut chunks = response.bytes_stream();
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.map_err(LiveTransportError::Http)?;
+        let next_len = body
+            .len()
+            .checked_add(chunk.len())
+            .ok_or(LiveTransportError::Response(
+                "session response exceeds configured message limit",
+            ))?;
+        if next_len > max_bytes {
+            return Err(LiveTransportError::Response(
+                "session response exceeds configured message limit",
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn parse_session(
@@ -566,7 +600,7 @@ fn json_whitespace(byte: u8) -> bool {
     matches!(byte, b' ' | b'\n' | b'\r' | b'\t')
 }
 
-fn reject_duplicate_json_members(input: &[u8]) -> Result<(), LiveTransportError> {
+fn reject_duplicate_json_members(input: &[u8], max_depth: usize) -> Result<(), LiveTransportError> {
     fn string_end(input: &[u8], mut index: usize) -> Option<usize> {
         if input.get(index)? != &b'"' {
             return None;
@@ -582,13 +616,23 @@ fn reject_duplicate_json_members(input: &[u8]) -> Result<(), LiveTransportError>
         }
         None
     }
-    fn value(input: &[u8], mut index: usize) -> Option<usize> {
+    fn value(input: &[u8], mut index: usize, depth: usize, max_depth: usize) -> Option<usize> {
         while input.get(index).is_some_and(|byte| json_whitespace(*byte)) {
             index += 1;
         }
         match input.get(index)? {
-            b'{' => object(input, index + 1),
+            b'{' => {
+                let next_depth = depth.checked_add(1)?;
+                if next_depth > max_depth {
+                    return None;
+                }
+                object(input, index + 1, next_depth, max_depth)
+            }
             b'[' => {
+                let next_depth = depth.checked_add(1)?;
+                if next_depth > max_depth {
+                    return None;
+                }
                 index += 1;
                 while input.get(index).is_some_and(|byte| json_whitespace(*byte)) {
                     index += 1;
@@ -597,7 +641,7 @@ fn reject_duplicate_json_members(input: &[u8]) -> Result<(), LiveTransportError>
                     return Some(index + 1);
                 }
                 loop {
-                    index = value(input, index)?;
+                    index = value(input, index, next_depth, max_depth)?;
                     while input.get(index).is_some_and(|byte| json_whitespace(*byte)) {
                         index += 1;
                     }
@@ -619,7 +663,7 @@ fn reject_duplicate_json_members(input: &[u8]) -> Result<(), LiveTransportError>
             }
         }
     }
-    fn object(input: &[u8], mut index: usize) -> Option<usize> {
+    fn object(input: &[u8], mut index: usize, depth: usize, max_depth: usize) -> Option<usize> {
         let mut keys = HashSet::new();
         while input.get(index).is_some_and(|byte| json_whitespace(*byte)) {
             index += 1;
@@ -643,7 +687,7 @@ fn reject_duplicate_json_members(input: &[u8]) -> Result<(), LiveTransportError>
             if input.get(index)? != &b':' {
                 return None;
             }
-            index = value(input, index + 1)?;
+            index = value(input, index + 1, depth, max_depth)?;
             while input.get(index).is_some_and(|byte| json_whitespace(*byte)) {
                 index += 1;
             }
@@ -654,7 +698,7 @@ fn reject_duplicate_json_members(input: &[u8]) -> Result<(), LiveTransportError>
             }
         }
     }
-    let end = value(input, 0).ok_or(LiveTransportError::Response(
+    let end = value(input, 0, 0, max_depth).ok_or(LiveTransportError::Response(
         "duplicate or malformed session JSON",
     ))?;
     let mut index = end;
@@ -934,7 +978,20 @@ mod tests {
 
     #[test]
     fn session_response_requires_exact_schema_and_rotatable_opaque_credentials() {
-        assert!(reject_duplicate_json_members(br#"{"session":1,"session":2}"#).is_err());
+        assert!(
+            reject_duplicate_json_members(
+                br#"{"session":1,"session":2}"#,
+                Limits::default().max_depth,
+            )
+            .is_err()
+        );
+        let max_depth = Limits::default().max_depth;
+        let nested = format!(
+            "{}0{}",
+            "[".repeat(max_depth + 1),
+            "]".repeat(max_depth + 1)
+        );
+        assert!(reject_duplicate_json_members(nested.as_bytes(), max_depth).is_err());
         let mut unknown = valid_response();
         unknown["unexpected"] = serde_json::Value::Bool(true);
         assert!(parse_session(unknown, &valid_cookie(), Limits::default(), true).is_err());
