@@ -3299,6 +3299,9 @@ impl RuntimeState {
                 RuntimeError::StreamIdentityMismatch,
             ));
         }
+        self.require_owner(&self.connection, writer)
+            .await
+            .map_err(StreamStepError::Runtime)?;
         let checkpoint = self
             .stream_backend(writer)
             .checkpoint_async(key)
@@ -3311,6 +3314,9 @@ impl RuntimeState {
         {
             return Ok(StreamStep::Paused { checkpoint });
         }
+        self.require_owner(&self.connection, writer)
+            .await
+            .map_err(StreamStepError::Runtime)?;
         let poll = match source.next(&checkpoint).await {
             Ok(poll) => poll,
             Err(diagnostic) => {
