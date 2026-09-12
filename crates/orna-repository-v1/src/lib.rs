@@ -19,6 +19,7 @@ pub use uuid::Uuid;
 
 mod compact;
 mod init;
+mod transport;
 
 pub use compact::{
     COMPACT_MANIFEST_SHARD_LIMIT, CompactManifest, CompactManifestEntry, CompactManifestWitness,
@@ -28,6 +29,9 @@ pub use compact::{
 pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
     initialize_repository, inspect_metadata,
+};
+pub use transport::{
+    FetchError, FetchReport, FetchRequest, FetchedRef, RequestedRef,
 };
 
 /// A verified native Git commit ID. It is intentionally Git-local: the
