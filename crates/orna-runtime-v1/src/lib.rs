@@ -4610,6 +4610,18 @@ impl RuntimeState {
         self.require_owner(&self.connection, writer)
             .await
             .map_err(StreamStepError::Runtime)?;
+        let Some(record) = load_stream_failure(&self.connection, &grant.failure)
+            .await
+            .map_err(StreamStepError::Runtime)?
+        else {
+            return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
+        };
+        if record.version != grant.version {
+            return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
+        }
+        if record.status != FailureStatus::Replaying {
+            return Ok(CommitResult::Rejected(RejectReason::RetryNotAllowed));
+        }
         let payload = match load_stored_stream_failure_payload(&self.connection, &grant.failure)
             .await
             .map_err(StreamStepError::Runtime)?
@@ -8954,9 +8966,12 @@ async fn apply_stream_intent_tx(
             if record.status != FailureStatus::Skipped {
                 return Ok(CommitResult::Rejected(RejectReason::RetryNotAllowed));
             }
+            if record.attempts == u32::MAX {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
             connection
                 .execute(
-                    "UPDATE stream_failure SET version = version + 1, status = ?2
+                    "UPDATE stream_failure SET version = version + 1, attempts = attempts + 1, status = ?2
                      WHERE identity_id = ?1",
                     params![
                         stream_identity_id(&failure),
@@ -9023,7 +9038,7 @@ async fn apply_stream_intent_tx(
             connection
                 .execute(
                     "UPDATE stream_failure
-                     SET version = version + 1, attempts = attempts + 1,
+                     SET version = version + 1,
                          status = ?2, diagnostic_code = ?3, diagnostic_class = ?4
                      WHERE identity_id = ?1",
                     params![
@@ -9059,8 +9074,7 @@ async fn apply_stream_intent_tx(
             connection
                 .execute(
                     "UPDATE stream_failure
-                     SET version = version + 1, attempts = attempts + 1,
-                         status = ?2
+                     SET version = version + 1, status = ?2
                      WHERE identity_id = ?1",
                     params![
                         stream_identity_id(&failure),
