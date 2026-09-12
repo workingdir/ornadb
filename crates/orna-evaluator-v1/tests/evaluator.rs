@@ -4,7 +4,7 @@ use orna_evaluator_v1::{
     EffectHandler, Environment, EvaluationError, Limits, StepBudget, evaluate_expression,
     evaluate_function, evaluate_parsed, evaluate_repl, invoke_named, invoke_named_with_effects,
 };
-use orna_syntax_v1::{Expr, Pattern, RecordField, Statement, SyntaxSpan};
+use orna_syntax_v1::{Expr, Pattern, RecordField, Statement, SyntaxSpan, TokenKind, lex};
 use orna_value_v1::{CANONICAL_NAN_BITS, Raw, Value};
 
 fn evaluate(source: &str) -> Value {
@@ -2959,6 +2959,81 @@ fn evaluates_literals_collections_bindings_and_math() {
 }
 
 #[test]
+fn evaluates_canonical_date_literals_at_boundaries_and_leap_days() {
+    for (source, expected) in [
+        ("0001-01-01", "0001-01-01"),
+        ("2000-02-29", "2000-02-29"),
+        ("2024-02-29", "2024-02-29"),
+        ("9999-12-31", "9999-12-31"),
+    ] {
+        assert_eq!(
+            evaluate(source).raw(),
+            &Raw::Tag(60001, Box::new(Raw::Text(expected.into()))),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn date_literals_preserve_the_canonical_value_inside_collections_and_records() {
+    assert_eq!(
+        evaluate("[2024-02-29, {day: 9999-12-31}]").raw(),
+        &Raw::Array(vec![
+            Raw::Tag(60001, Box::new(Raw::Text("2024-02-29".into()))),
+            Raw::Map(vec![(
+                Raw::Text("day".into()),
+                Raw::Tag(60001, Box::new(Raw::Text("9999-12-31".into()))),
+            )]),
+        ])
+    );
+    assert_eq!(
+        evaluate("2024-02-29 == 2024-02-29"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+}
+
+#[test]
+fn malformed_date_is_rejected_lexically_before_evaluator_execution() {
+    for source in ["0000-01-01", "2024-02-30", "2023-02-29", "2024-13-01"] {
+        let errors = lex(source).expect_err("calendar-invalid input must fail lexing");
+        assert!(
+            errors.iter().any(|error| error.code == "ORNA-LEX-007"),
+            "expected date diagnostic for {source}, got {errors:?}"
+        );
+        assert_eq!(
+            code(evaluate_expression(
+                source,
+                &Environment::new(),
+                Limits::default()
+            )),
+            "ORNA-EVAL-PARSE"
+        );
+    }
+
+    let malformed_ast = Expr::Literal {
+        text: "0000-01-01".into(),
+        kind: orna_syntax_v1::LiteralKind::Date,
+        span: SyntaxSpan::new(0, 10),
+    };
+    assert_eq!(
+        code(evaluate_parsed(
+            &malformed_ast,
+            &Environment::new(),
+            Limits::default()
+        )),
+        "ORNA-EVAL-VALUE"
+    );
+}
+
+#[test]
+fn date_token_class_is_disjoint_from_decimal_and_float_tokens() {
+    let tokens = lex("2024-02-29 1.0 1.0f").unwrap();
+    assert_eq!(tokens[0].kind, TokenKind::Date);
+    assert_eq!(tokens[1].kind, TokenKind::Decimal);
+    assert_eq!(tokens[2].kind, TokenKind::Float);
+}
+
+#[test]
 fn uses_environment_and_short_circuiting_deterministically() {
     let mut environment = BTreeMap::new();
     environment.insert("count".into(), Value::int(41.into()));
@@ -3394,7 +3469,6 @@ fn rejects_fail_closed_cases_with_redacted_stable_diagnostics() {
         ("(value => value)", "ORNA-EVAL-UNSUPPORTED"),
         ("{ let x = 1; x = 2; x }", "ORNA-EVAL-PARSE"),
         ("fn x() = 1", "ORNA-EVAL-PARSE"),
-        ("2026-09-05", "ORNA-EVAL-UNSUPPORTED"),
     ] {
         let failure =
             evaluate_expression(source, &Environment::new(), Limits::default()).unwrap_err();
