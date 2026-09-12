@@ -13799,7 +13799,7 @@ mod tests {
                 FailureRecord {
                     identity: replay.failure.clone(),
                     version: replay.version,
-                    attempts: skipped_failure.attempts,
+                    attempts: skipped_failure.attempts + 1,
                     status: FailureStatus::Replaying,
                     diagnostic: skipped_failure.diagnostic,
                 }
@@ -13846,6 +13846,7 @@ mod tests {
                 CommitResult::ReplayCompleted { failure } => failure,
                 other => panic!("unexpected replay completion result: {other:?}"),
             };
+            assert_eq!(replayed.attempts, replay_failed.attempts + 1);
             let resolved = match stream
                 .apply_async(CommitIntent::Resolve {
                     failure: replayed.identity.clone(),
