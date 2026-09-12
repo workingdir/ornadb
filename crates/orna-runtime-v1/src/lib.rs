@@ -135,6 +135,16 @@ CREATE TABLE IF NOT EXISTS request_ledger (
     CHECK (owner_id IS NULL OR length(owner_id) = 16),
     CHECK (owner_epoch IS NULL OR owner_epoch > 0)
 );
+CREATE TABLE IF NOT EXISTS request_admission (
+    session_id BLOB NOT NULL CHECK (length(session_id) = 16),
+    request_id BLOB NOT NULL CHECK (length(request_id) = 16),
+    fingerprint BLOB NOT NULL CHECK (length(fingerprint) = 32),
+    capability_digest BLOB NOT NULL CHECK (length(capability_digest) = 32),
+    owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
+    owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    PRIMARY KEY (session_id, request_id)
+);
 CREATE TABLE IF NOT EXISTS session_deletion (
     session_id BLOB PRIMARY KEY CHECK (length(session_id) = 16),
     owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
@@ -659,6 +669,31 @@ pub struct RequestStatus {
     pub fingerprint: [u8; 32],
     pub state: RequestState,
     pub terminal_outcome: Option<TerminalOutcome>,
+}
+
+/// An opaque, single-use bearer capability for starting one fresh request
+/// reservation. The raw token is returned only to the caller that inserted
+/// the Reserved row; durable state retains only its digest and bindings.
+///
+/// The capability is intentionally not serializable or constructible by
+/// callers. It is invalid after one successful owner-start, or whenever its
+/// request, fingerprint, owner/epoch, or admission generation differs.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RequestAdmissionCapability([u8; 32]);
+
+impl fmt::Debug for RequestAdmissionCapability {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RequestAdmissionCapability(REDACTED)")
+    }
+}
+
+impl RequestAdmissionCapability {
+    fn new() -> Self {
+        let mut token = [0_u8; 32];
+        token[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+        token[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+        Self(token)
+    }
 }
 
 /// Runtime-owned identity for one durable `sys.Run` observation.
@@ -2037,6 +2072,174 @@ impl RuntimeState {
         )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let run = self
+            .run_observation(id)
+            .await?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        Ok(ObservedRequestStart {
+            request: RequestStatus {
+                identity: registration.request,
+                fingerprint,
+                state: RequestState::Running,
+                terminal_outcome: None,
+            },
+            run: Some(run),
+            admitted: true,
+        })
+    }
+
+    /// Atomically consumes a fresh request admission capability, starts the
+    /// owner-fenced ledger row, and creates its `sys.Run` observation. This is
+    /// the live durable admission boundary: splitting these operations would
+    /// let a capability start succeed while the existing observation API
+    /// rejects the already-Running request.
+    pub async fn begin_observed_request_with_admission(
+        &self,
+        registration: RunObservationRegistration,
+        fingerprint: [u8; 32],
+        owner: WriterLease,
+        capability: RequestAdmissionCapability,
+    ) -> Result<ObservedRequestStart, RuntimeError> {
+        validate_request_identity(registration.request)?;
+        validate_id(registration.invocation_id)?;
+        validate_writer_lease(owner)?;
+        validate_observation_text(&registration.function)?;
+        if let Some(source) = &registration.source_identity {
+            validate_observation_text(source)?;
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ensure_session_admission_open(&tx, registration.request.session_id).await?;
+        self.require_owner(&tx, owner).await?;
+        let current = request_status_tx(&tx, registration.request)
+            .await?
+            .ok_or(RuntimeError::RequestUnknown)?;
+        require_fingerprint(&current, fingerprint)?;
+        if current.state != RequestState::Reserved {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        if tx
+            .query(
+                "SELECT 1 FROM sys_run_observation
+                 WHERE session_id = ?1 AND request_id = ?2",
+                params![
+                    registration.request.session_id.to_vec(),
+                    registration.request.request_id.to_vec()
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let capture = capture_tx(&tx).await?;
+        let generation = bigint_to_i64(capture.generation())?;
+        let token_digest = admission_capability_digest(&capability);
+        let mut admissions = tx
+            .query(
+                "SELECT fingerprint, capability_digest, owner_id, owner_epoch,
+                        generation
+                 FROM request_admission
+                 WHERE session_id = ?1 AND request_id = ?2",
+                params![
+                    registration.request.session_id.to_vec(),
+                    registration.request.request_id.to_vec()
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let Some(row) = admissions
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        else {
+            return Err(RuntimeError::RequestStateConflict);
+        };
+        let admitted_fingerprint = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let admitted_digest = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let admitted_owner = RequestOwner {
+            owner_id: fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+            epoch: u64::try_from(
+                row.get::<i64>(3)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        };
+        let admitted_generation: i64 = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if admitted_fingerprint != fingerprint {
+            return Err(RuntimeError::RequestFingerprintMismatch);
+        }
+        if admitted_owner != RequestOwner::from(owner) {
+            return Err(RuntimeError::RequestOwnerConflict);
+        }
+        if admitted_generation != generation || admitted_digest != token_digest {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let changed = tx
+            .execute(
+                "UPDATE request_ledger
+                 SET state = ?1, owner_id = ?2, owner_epoch = ?3,
+                     effect_evidence = 0, recovery_disposition = 0,
+                     controlled_transaction_proof = NULL,
+                     controlled_rollback_proof = NULL
+                 WHERE session_id = ?4 AND request_id = ?5
+                   AND fingerprint = ?6 AND state = ?7",
+                params![
+                    RequestState::Running.code(),
+                    owner.owner_id.to_vec(),
+                    i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    registration.request.session_id.to_vec(),
+                    registration.request.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    RequestState::Reserved.code(),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let consumed = tx
+            .execute(
+                "DELETE FROM request_admission
+                 WHERE session_id = ?1 AND request_id = ?2 AND fingerprint = ?3
+                   AND capability_digest = ?4 AND owner_id = ?5
+                   AND owner_epoch = ?6 AND generation = ?7",
+                params![
+                    registration.request.session_id.to_vec(),
+                    registration.request.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    token_digest.to_vec(),
+                    owner.owner_id.to_vec(),
+                    i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    generation,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if consumed != 1 {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let id = RunObservationId(*Uuid::new_v4().as_bytes());
+        tx.execute(
+            "INSERT INTO sys_run_observation (run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?12, ?13, 0, NULL, NULL)",
+            params![
+                id.0.to_vec(), registration.request.session_id.to_vec(), registration.request.request_id.to_vec(),
+                registration.consumer_identity.canonical(), registration.function, registration.source_identity,
+                registration.invocation_id.to_vec(), encode_capture(&capture)?, capture.generation_digest().to_vec(), capture.runtime_id().to_vec(),
+                bigint_to_i64(capture.generation())?, now_ms()?, run_status_code(RunObservationStatus::Running),
+            ],
+        ).await.map_err(|_| RuntimeError::StorageUnavailable)?;
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -5274,19 +5477,30 @@ impl RuntimeState {
         identity: RequestIdentity,
         fingerprint: [u8; 32],
     ) -> Result<RequestStatus, RuntimeError> {
-        self.reserve_request_with_admission(identity, fingerprint)
+        self.reserve_request_inner(identity, fingerprint, false)
             .await
             .map(|(status, _)| status)
     }
 
     /// Atomically reserves a REQUEST-1 identity and reports whether this call
-    /// inserted the reservation. The boolean prevents a caller from treating
-    /// an existing `Reserved` row as permission to execute after a restart.
+    /// inserted the reservation. A newly inserted row also returns an opaque
+    /// bearer capability when a current writer owner is available; an
+    /// existing row never reissues its capability.
     pub async fn reserve_request_with_admission(
         &self,
         identity: RequestIdentity,
         fingerprint: [u8; 32],
-    ) -> Result<(RequestStatus, bool), RuntimeError> {
+    ) -> Result<(RequestStatus, Option<RequestAdmissionCapability>), RuntimeError> {
+        self.reserve_request_inner(identity, fingerprint, true)
+            .await
+    }
+
+    async fn reserve_request_inner(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        issue_capability: bool,
+    ) -> Result<(RequestStatus, Option<RequestAdmissionCapability>), RuntimeError> {
         validate_request_identity(identity)?;
         let tx = self
             .connection
@@ -5299,8 +5513,24 @@ impl RuntimeState {
             tx.commit()
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
-            return Ok((status, false));
+            return Ok((status, None));
         }
+        let admission = if issue_capability {
+            current_writer_lease_tx(&tx).await?
+        } else {
+            None
+        };
+        let (capability, owner, generation) = if let Some(owner) = admission {
+            let capture = capture_tx(&tx).await?;
+            let capability = RequestAdmissionCapability::new();
+            (
+                Some(capability.clone()),
+                Some(owner),
+                Some(bigint_to_i64(capture.generation())?),
+            )
+        } else {
+            (None, None, None)
+        };
         tx.execute(
             "INSERT INTO request_ledger (session_id, request_id, fingerprint, state, terminal_outcome) VALUES (?1, ?2, ?3, ?4, NULL)",
             params![
@@ -5312,6 +5542,26 @@ impl RuntimeState {
         )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if let (Some(capability), Some(owner), Some(generation)) = (&capability, owner, generation)
+        {
+            tx.execute(
+                "INSERT INTO request_admission
+                 (session_id, request_id, fingerprint, capability_digest,
+                  owner_id, owner_epoch, generation)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    identity.session_id.to_vec(),
+                    identity.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    admission_capability_digest(capability).to_vec(),
+                    owner.owner_id.to_vec(),
+                    i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    generation,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -5322,7 +5572,7 @@ impl RuntimeState {
                 state: RequestState::Reserved,
                 terminal_outcome: None,
             },
-            true,
+            capability,
         ))
     }
 
@@ -5374,6 +5624,9 @@ impl RuntimeState {
         if current.state != RequestState::Reserved {
             return Err(RuntimeError::RequestStateConflict);
         }
+        if request_admission_exists_tx(&tx, identity).await? {
+            return Err(RuntimeError::RequestStateConflict);
+        }
         let changed = tx
             .execute(
                 "UPDATE request_ledger
@@ -5395,6 +5648,129 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         if changed != 1 {
             return Err(RuntimeError::RecoveryInvalid);
+        }
+        sync_run_request_state_tx(&tx, identity, RunObservationStatus::Running).await?;
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(RequestStatus {
+            identity,
+            fingerprint,
+            state: RequestState::Running,
+            terminal_outcome: None,
+        })
+    }
+
+    /// Starts a newly admitted request with the exact capability issued by
+    /// [`Self::reserve_request_with_admission`]. The capability, request
+    /// identity, fingerprint, writer lease, and current runtime generation
+    /// are checked and consumed in the same immediate transaction.
+    pub async fn start_request_with_owner_and_admission(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        owner: WriterLease,
+        capability: RequestAdmissionCapability,
+    ) -> Result<RequestStatus, RuntimeError> {
+        validate_request_identity(identity)?;
+        validate_writer_lease(owner)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, owner).await?;
+        let current = request_status_tx(&tx, identity)
+            .await?
+            .ok_or(RuntimeError::RequestUnknown)?;
+        require_fingerprint(&current, fingerprint)?;
+        if current.state != RequestState::Reserved {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let capture = capture_tx(&tx).await?;
+        let generation = bigint_to_i64(capture.generation())?;
+        let token_digest = admission_capability_digest(&capability);
+        let mut admissions = tx
+            .query(
+                "SELECT fingerprint, capability_digest, owner_id, owner_epoch,
+                        generation
+                 FROM request_admission
+                 WHERE session_id = ?1 AND request_id = ?2",
+                params![identity.session_id.to_vec(), identity.request_id.to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let Some(row) = admissions
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        else {
+            return Err(RuntimeError::RequestStateConflict);
+        };
+        let admitted_fingerprint = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let admitted_digest = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let admitted_owner = RequestOwner {
+            owner_id: fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+            epoch: u64::try_from(
+                row.get::<i64>(3)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        };
+        let admitted_generation: i64 = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if admitted_fingerprint != fingerprint {
+            return Err(RuntimeError::RequestFingerprintMismatch);
+        }
+        if admitted_owner != RequestOwner::from(owner) {
+            return Err(RuntimeError::RequestOwnerConflict);
+        }
+        if admitted_generation != generation || admitted_digest != token_digest {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let changed = tx
+            .execute(
+                "UPDATE request_ledger
+                 SET state = ?1, owner_id = ?2, owner_epoch = ?3,
+                     effect_evidence = 0, recovery_disposition = 0,
+                     controlled_transaction_proof = NULL,
+                     controlled_rollback_proof = NULL
+                 WHERE session_id = ?4 AND request_id = ?5
+                   AND fingerprint = ?6 AND state = ?7",
+                params![
+                    RequestState::Running.code(),
+                    owner.owner_id.to_vec(),
+                    i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    identity.session_id.to_vec(),
+                    identity.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    RequestState::Reserved.code(),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let consumed = tx
+            .execute(
+                "DELETE FROM request_admission
+                 WHERE session_id = ?1 AND request_id = ?2 AND fingerprint = ?3
+                   AND capability_digest = ?4 AND owner_id = ?5
+                   AND owner_epoch = ?6 AND generation = ?7",
+                params![
+                    identity.session_id.to_vec(),
+                    identity.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    token_digest.to_vec(),
+                    owner.owner_id.to_vec(),
+                    i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    generation,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if consumed != 1 {
+            return Err(RuntimeError::RequestStateConflict);
         }
         sync_run_request_state_tx(&tx, identity, RunObservationStatus::Running).await?;
         tx.commit()
@@ -6143,6 +6519,9 @@ impl RuntimeState {
             }
         }
         if !allowed.contains(&current.state) || current.state.is_terminal() {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        if next == RequestState::Running && request_admission_exists_tx(&tx, identity).await? {
             return Err(RuntimeError::RequestStateConflict);
         }
         if next == RequestState::Running
@@ -9744,6 +10123,53 @@ async fn capture_tx(connection: &Connection) -> Result<CwdCapture, RuntimeError>
     .map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
+async fn current_writer_lease_tx(
+    connection: &Connection,
+) -> Result<Option<WriterLease>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let owner_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let epoch = u64::try_from(
+        row.get::<i64>(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )
+    .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let lease = WriterLease { owner_id, epoch };
+    validate_writer_lease(lease)?;
+    Ok(Some(lease))
+}
+
+async fn request_admission_exists_tx(
+    connection: &Connection,
+    identity: RequestIdentity,
+) -> Result<bool, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT 1 FROM request_admission
+             WHERE session_id = ?1 AND request_id = ?2",
+            params![identity.session_id.to_vec(), identity.request_id.to_vec()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some())
+}
+
 fn validate_mutations(mutations: &[Mutation], next_digest: [u8; 32]) -> Result<(), RuntimeError> {
     if mutations.is_empty() {
         return Err(RuntimeError::EmptyMutationBatch);
@@ -10193,6 +10619,14 @@ fn validate_writer_lease(value: WriterLease) -> Result<(), RuntimeError> {
     }
     Ok(())
 }
+
+fn admission_capability_digest(capability: &RequestAdmissionCapability) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"orna.runtime.request-admission.v1");
+    digest.update(capability.0);
+    digest.finalize().into()
+}
+
 fn controlled_transaction_marker(
     identity: RequestIdentity,
     fingerprint: [u8; 32],
@@ -16895,18 +17329,19 @@ mod tests {
     async fn duplicate_request_reservation_is_idempotent() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
+        state.acquire_lease(id(7)).await.unwrap();
         let identity = request(4, 5);
-        let (first, inserted) = state
+        let (first, first_capability) = state
             .reserve_request_with_admission(identity, digest(6))
             .await
             .unwrap();
-        assert!(inserted);
+        assert!(first_capability.is_some());
 
-        let (second, inserted) = state
+        let (second, second_capability) = state
             .reserve_request_with_admission(identity, digest(6))
             .await
             .unwrap();
-        assert!(!inserted);
+        assert!(second_capability.is_none());
         assert_eq!(second, first);
         assert_eq!(
             state.request_status(identity, digest(6)).await.unwrap(),
@@ -16915,6 +17350,178 @@ mod tests {
         assert_eq!(
             state.request_status_for_identity(identity).await.unwrap(),
             Some(first)
+        );
+    }
+
+    #[tokio::test]
+    async fn admission_capability_is_single_use_and_owner_generation_fenced() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(7)).await.unwrap();
+        let identity = request(8, 9);
+        let fingerprint = digest(10);
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
+        let replay = capability.clone();
+        assert_eq!(
+            state
+                .start_request_with_owner_and_admission(identity, fingerprint, owner, capability,)
+                .await
+                .unwrap()
+                .state,
+            RequestState::Running
+        );
+        assert_eq!(
+            state
+                .start_request_with_owner_and_admission(identity, fingerprint, owner, replay)
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_begin_observed_admits_ledger_and_run_atomically() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(27)).await.unwrap();
+        let registration = RunObservationRegistration {
+            request: request(28, 29),
+            consumer_identity: stream_delivery("capability", "begin").consumer,
+            function: "pkg.capability_begin".into(),
+            source_identity: Some("source capability begin".into()),
+            invocation_id: id(30),
+        };
+        let fingerprint = digest(31);
+        let (_, capability) = state
+            .reserve_request_with_admission(registration.request, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
+        assert_eq!(
+            state
+                .start_request_with_owner(registration.request, fingerprint, owner)
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+        let started = state
+            .begin_observed_request_with_admission(
+                registration.clone(),
+                fingerprint,
+                owner,
+                capability.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(started.admitted);
+        assert!(started.run.is_some());
+        assert_eq!(started.request.state, RequestState::Running);
+        assert_eq!(
+            state.register_run_observation(registration).await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+        assert_eq!(
+            state
+                .begin_observed_request_with_admission(
+                    RunObservationRegistration {
+                        request: request(28, 29),
+                        consumer_identity: stream_delivery("capability", "begin").consumer,
+                        function: "pkg.capability_begin".into(),
+                        source_identity: Some("source capability begin".into()),
+                        invocation_id: id(30),
+                    },
+                    fingerprint,
+                    owner,
+                    capability,
+                )
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+    }
+
+    #[tokio::test]
+    async fn admission_capability_rejects_mismatches_and_preexisting_reserved_rows() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(11)).await.unwrap();
+        let identity = request(12, 13);
+        let fingerprint = digest(14);
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
+        assert_eq!(
+            state
+                .start_request_with_owner_and_admission(
+                    identity,
+                    digest(15),
+                    owner,
+                    capability.clone(),
+                )
+                .await,
+            Err(RuntimeError::RequestFingerprintMismatch)
+        );
+        let replacement = state.takeover_lease(owner, id(16)).await.unwrap();
+        assert_eq!(
+            state
+                .start_request_with_owner_and_admission(
+                    identity,
+                    fingerprint,
+                    replacement,
+                    capability,
+                )
+                .await,
+            Err(RuntimeError::RequestOwnerConflict)
+        );
+
+        let preexisting = request(17, 18);
+        let preexisting_fingerprint = digest(19);
+        state
+            .reserve_request(preexisting, preexisting_fingerprint)
+            .await
+            .unwrap();
+        let (_, unrelated_capability) = state
+            .reserve_request_with_admission(request(20, 21), digest(22))
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .start_request_with_owner_and_admission(
+                    preexisting,
+                    preexisting_fingerprint,
+                    replacement,
+                    unrelated_capability.expect("unrelated capability"),
+                )
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+    }
+
+    #[tokio::test]
+    async fn admission_capability_rejects_a_new_runtime_generation() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(23)).await.unwrap();
+        let identity = request(24, 25);
+        let fingerprint = digest(26);
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
+        state
+            .connection
+            .execute("UPDATE runtime_meta SET generation = generation + 1", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .start_request_with_owner_and_admission(identity, fingerprint, owner, capability)
+                .await,
+            Err(RuntimeError::RequestStateConflict)
         );
     }
 
