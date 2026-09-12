@@ -582,7 +582,7 @@ impl InMemoryCheckpointBackend {
             &failure.identity.0.checkpoint_key() == key
                 && matches!(
                     failure.status,
-                    FailureStatus::Failed | FailureStatus::Retrying | FailureStatus::Replaying
+                    FailureStatus::Failed | FailureStatus::Retrying
                 )
         })
     }
@@ -1465,6 +1465,47 @@ mod tests {
         ));
         assert_eq!(
             backend.failure(&replay.failure).unwrap().status,
+            FailureStatus::Replaying
+        );
+    }
+
+    #[test]
+    fn admitted_replay_does_not_block_stream_resume() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let item = delivery("receipt:resume", "resume:one");
+        let failed = acquire_and_fail(&mut backend, item.clone());
+        let skip_lease = acquire_skip(&mut backend, item.clone());
+        assert!(matches!(
+            backend.apply(CommitIntent::Skip {
+                lease: skip_lease,
+                expected: expected(&backend, &item),
+                expected_failure_version: failed.version,
+            }),
+            CommitResult::CheckpointAdvanced { .. }
+        ));
+        let skipped = backend.failure(&failed.identity).unwrap().clone();
+        assert!(matches!(
+            backend.apply(CommitIntent::Replay {
+                failure: failed.identity,
+                expected_version: skipped.version,
+            }),
+            CommitResult::ReplayGranted { .. }
+        ));
+
+        assert!(matches!(
+            backend.apply(CommitIntent::Pause {
+                key: item.checkpoint_key(),
+            }),
+            CommitResult::StreamStatusChanged { changed: true, .. }
+        ));
+        assert!(matches!(
+            backend.apply(CommitIntent::Resume {
+                key: item.checkpoint_key(),
+            }),
+            CommitResult::StreamStatusChanged { changed: true, .. }
+        ));
+        assert_eq!(
+            backend.failure(&skipped.identity).unwrap().status,
             FailureStatus::Replaying
         );
     }
