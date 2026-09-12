@@ -638,6 +638,7 @@ enum Value {
     Float(u64),
     String(String),
     Date(String),
+    Error(EvaluationError),
     Range {
         lower: Option<BigInt>,
         upper: Option<BigInt>,
@@ -793,6 +794,9 @@ impl Value {
         Ok(match self {
             Self::Function(_) | Self::Closure(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
             Self::Relation(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+            // Error values are only available to the handling side of `|?`.
+            // They must not cross the successful canonical-value boundary.
+            Self::Error(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
             Self::Null => Raw::Null,
             Self::Unit => Raw::Tag(60014, Box::new(Raw::Array(vec![]))),
             Self::Bool(value) => Raw::Bool(value),
@@ -1616,6 +1620,26 @@ impl Context<'_, '_> {
                 };
                 self.call(callee, arguments, Some(input), scope, depth)
             }
+            "|?" => match self.evaluate(lhs, scope, depth + 1) {
+                Ok(value) => Ok(value),
+                Err(failure) => {
+                    // Cancellation is a separate abrupt completion, not an
+                    // Error delivered to a recovery handler.
+                    if self
+                        .cancellation
+                        .is_some_and(CancellationToken::is_requested)
+                    {
+                        return Err(failure);
+                    }
+                    let (callee, arguments) = match rhs {
+                        Expr::Call {
+                            callee, arguments, ..
+                        } => (callee.as_ref(), arguments.as_slice()),
+                        _ => (rhs, &[][..]),
+                    };
+                    self.call(callee, arguments, Some(Value::Error(failure)), scope, depth)
+                }
+            },
             "??" => match self.evaluate(lhs, scope, depth + 1)? {
                 _ if self.transfer.is_some() => Ok(Value::Null),
                 Value::Option(Some(value)) => Ok(*value),
@@ -4066,6 +4090,150 @@ fn unescape_string_body(body: &str) -> Result<String, EvaluationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn evaluate_recovery(source: &str) -> CanonicalValue {
+        evaluate_expression(source, &Environment::new(), Limits::default())
+            .unwrap_or_else(|error| panic!("{source}: {}", error.code()))
+    }
+
+    fn integer(value: i64) -> CanonicalValue {
+        CanonicalValue::new(Raw::Int(value.into())).expect("integer is canonical")
+    }
+
+    #[test]
+    fn recovery_pipelines_handle_ordinary_failures_and_skip_successes() {
+        assert_eq!(
+            evaluate_recovery("(1 / 0) |? (failure => if failure == failure { 42 } else { 0 })"),
+            integer(42),
+        );
+        assert_eq!(evaluate_recovery("7 |? missing"), integer(7),);
+        assert_eq!(
+            evaluate_recovery("((1 / 0) |? (failure => 41)) | std.math.increment"),
+            integer(42),
+        );
+    }
+
+    #[test]
+    fn recovery_pipelines_propagate_handler_failures_to_the_next_boundary() {
+        assert_eq!(
+            evaluate_expression(
+                "(1 / 0) |? (failure => missing)",
+                &Environment::new(),
+                Limits::default(),
+            )
+            .unwrap_err()
+            .code(),
+            "ORNA-EVAL-NAME",
+        );
+        assert_eq!(
+            evaluate_recovery("(1 / 0) |? (failure => 2 / 0) |? (failure => 7)"),
+            integer(7),
+        );
+    }
+
+    struct RecoveryEffects {
+        cancellation: Option<CancellationToken>,
+        recovery_calls: usize,
+    }
+
+    impl EffectHandler for RecoveryEffects {
+        fn handle(
+            &mut self,
+            callee: &Expr,
+            _: &[CanonicalValue],
+        ) -> Result<Option<CanonicalValue>, EvaluationError> {
+            match function_name(callee).as_deref() {
+                Some("probe.cancel") => {
+                    self.cancellation
+                        .as_ref()
+                        .expect("cancellation probe has a token")
+                        .request();
+                    Ok(Some(integer(1)))
+                }
+                Some("probe.count") => {
+                    self.recovery_calls += 1;
+                    Ok(Some(integer(7)))
+                }
+                _ => Ok(None),
+            }
+        }
+    }
+
+    fn evaluate_with_recovery_effects(
+        source: &str,
+        cancellation: Option<&CancellationToken>,
+        effects: &mut RecoveryEffects,
+    ) -> Result<Value, EvaluationError> {
+        let parsed = parse_expression(source);
+        assert!(parsed.is_ok(), "{source} should parse");
+        let functions = Functions::new();
+        let mut context = Context {
+            limits: Limits::default(),
+            steps: 0,
+            functions: &functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: false,
+            restrict_function_names: false,
+            reject_unhandled_field_calls: false,
+            effects: Some(effects),
+            namespace: None,
+            transfer: None,
+            cancellation,
+        };
+        let mut scope = Scope(BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
+        context.evaluate(&parsed.value, &mut scope, 0)
+    }
+
+    #[test]
+    fn recovery_does_not_deliver_cancellation_to_handler() {
+        let cancellation = CancellationToken::new();
+        let mut effects = RecoveryEffects {
+            cancellation: Some(cancellation.clone()),
+            recovery_calls: 0,
+        };
+        let result = evaluate_with_recovery_effects(
+            "(probe.cancel() / 0) |? (failure => probe.count())",
+            Some(&cancellation),
+            &mut effects,
+        );
+
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-CANCELLED");
+        assert_eq!(effects.recovery_calls, 0);
+    }
+
+    #[test]
+    fn recovery_internal_error_cannot_cross_canonical_boundary() {
+        let error = evaluate_expression(
+            "(1 / 0) |? (failure => failure)",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "ORNA-EVAL-UNSUPPORTED");
+        assert_eq!(error.diagnostic().message(), "<redacted>");
+    }
+
+    #[test]
+    fn recovery_handler_is_invoked_once_for_one_ordinary_failure() {
+        let mut effects = RecoveryEffects {
+            cancellation: None,
+            recovery_calls: 0,
+        };
+        let result = evaluate_with_recovery_effects(
+            "(1 / 0) |? (failure => probe.count())",
+            None,
+            &mut effects,
+        )
+        .expect("ordinary failure should be recovered");
+
+        assert_eq!(
+            result.canonical().expect("probe result is canonical"),
+            integer(7)
+        );
+        assert_eq!(effects.recovery_calls, 1);
+    }
 
     struct RelationEffects {
         calls: usize,
