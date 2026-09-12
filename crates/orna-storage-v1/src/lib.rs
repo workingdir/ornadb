@@ -598,15 +598,21 @@ impl RuntimePublicationCoordinator {
         if batch.watermark != freeze.checkpoint.mutation_sequence {
             return Err(Error::IncompleteStaging);
         }
+        let paths = batch
+            .mutations
+            .iter()
+            .map(|mutation| mutation.path.as_managed_path().clone())
+            .collect::<Vec<_>>();
+        let captured = repository
+            .capture_managed_publication_state(expected_head, &expected_index, &paths)
+            .map_err(map_publication_repository_error)?;
         let candidate =
             build_private_publication_candidate(repository, expected_head, &batch, message)?;
         let entries = batch
             .mutations
             .iter()
-            .map(|mutation| {
-                let expected = repository
-                    .managed_file_bytes(mutation.path.as_managed_path())
-                    .map_err(|_| Error::RepositoryUnavailable)?;
+            .zip(captured)
+            .map(|(mutation, expected)| {
                 let actual = expected.as_deref().map(RowHash::of);
                 if actual != mutation.expected {
                     return Err(Error::ExternalConflict {
@@ -1856,6 +1862,118 @@ mod tests {
                 |_path| Ok(None),
             ),
             Err(Error::PathCollision)
+        );
+    }
+
+    #[test]
+    fn coordinator_rejects_preexisting_managed_edits_at_capture() {
+        let (temp, repository) = repository();
+        let path = LoosePath::for_key("Contact", &["Alice".into()]).unwrap();
+        let target = temp.path().join(path.as_managed_path().as_path());
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"committed\n").unwrap();
+        git(temp.path(), &["add", "Contact/Alice.orna"]);
+        git(temp.path(), &["commit", "-m", "add managed row"]);
+
+        let head = repository.head().unwrap().unwrap();
+        fs::write(&target, b"staged\n").unwrap();
+        git(temp.path(), &["add", "Contact/Alice.orna"]);
+        let staged_index = repository.index_generation().unwrap();
+        fs::write(&target, b"unstaged\n").unwrap();
+
+        let staged_batch = FrozenBatch::new(
+            id("staged-batch"),
+            vec![LooseMutation {
+                id: id("staged-mutation"),
+                path: path.clone(),
+                expected: Some(RowHash::of(b"unstaged\n")),
+                next: Some(row("runtime")),
+            }],
+            1,
+        )
+        .unwrap();
+        let freeze = PublicationFreeze {
+            intent_id: [81; 16],
+            checkpoint: orna_runtime_v1::Checkpoint {
+                generation: 1,
+                digest: [82; 32],
+                mutation_sequence: 1,
+            },
+        };
+        assert_eq!(
+            RuntimePublicationCoordinator::prepare(
+                &repository,
+                &head,
+                staged_index,
+                &freeze,
+                staged_batch,
+                "orna: reject managed edit",
+            ),
+            Err(Error::ManagedWorktreeConflict)
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"unstaged\n");
+        assert!(
+            git_output(
+                temp.path(),
+                &[
+                    "diff",
+                    "--cached",
+                    "--name-only",
+                    "--",
+                    "Contact/Alice.orna",
+                ],
+            )
+            .contains("Contact/Alice.orna")
+        );
+
+        git(
+            temp.path(),
+            &["restore", "--staged", "--", "Contact/Alice.orna"],
+        );
+        let unstaged_index = repository.index_generation().unwrap();
+        let unstaged_batch = FrozenBatch::new(
+            id("unstaged-batch"),
+            vec![LooseMutation {
+                id: id("unstaged-mutation"),
+                path: path.clone(),
+                expected: Some(RowHash::of(b"unstaged\n")),
+                next: Some(row("runtime")),
+            }],
+            1,
+        )
+        .unwrap();
+        let freeze = PublicationFreeze {
+            intent_id: [83; 16],
+            checkpoint: orna_runtime_v1::Checkpoint {
+                generation: 1,
+                digest: [84; 32],
+                mutation_sequence: 1,
+            },
+        };
+        assert_eq!(
+            RuntimePublicationCoordinator::prepare(
+                &repository,
+                &head,
+                unstaged_index,
+                &freeze,
+                unstaged_batch,
+                "orna: reject managed edit",
+            ),
+            Err(Error::ManagedWorktreeConflict)
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"unstaged\n");
+        assert!(
+            git_output(
+                temp.path(),
+                &[
+                    "diff",
+                    "--cached",
+                    "--name-only",
+                    "--",
+                    "Contact/Alice.orna",
+                ],
+            )
+            .is_empty()
         );
     }
 

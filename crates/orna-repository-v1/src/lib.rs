@@ -1997,6 +1997,50 @@ impl Repository {
         Ok(())
     }
 
+    /// Captures the affected managed worktree bytes only when the selected
+    /// HEAD and ordinary index still match the caller's generation and every
+    /// affected path agrees with the committed base. This is the PUB-1
+    /// capture gate: staged or unstaged human edits on managed paths are a
+    /// conflict, while unrelated Git state remains outside this check.
+    pub fn capture_managed_publication_state(
+        &self,
+        expected_head: &GitCommitRef,
+        expected_index: &IndexGeneration,
+        paths: &[ManagedPath],
+    ) -> Result<Vec<Option<Vec<u8>>>, RepositoryError> {
+        if paths.is_empty() {
+            return Err(RepositoryError::NoManagedPaths);
+        }
+        let _lock = self.acquire_coordination_lock()?;
+        self.ensure_no_git_index_lock()?;
+        let actual_head = self.head()?;
+        if actual_head.as_ref() != Some(expected_head) {
+            return Err(RepositoryError::StaleHead);
+        }
+        let actual_index = self.index_generation_while_locked()?;
+        if &actual_index != expected_index {
+            return Err(RepositoryError::StaleIndex {
+                expected: expected_index.clone(),
+                actual: actual_index,
+            });
+        }
+
+        let mut captured = Vec::with_capacity(paths.len());
+        for path in paths {
+            let target = self.managed_target(path)?;
+            if !self.managed_index_matches_head(expected_head, path)? {
+                return Err(RepositoryError::ManagedContentConflict);
+            }
+            let committed = self.committed_managed_file_bytes(expected_head, path)?;
+            let actual = self.read_managed_file(&target)?;
+            if actual != committed {
+                return Err(RepositoryError::ManagedContentConflict);
+            }
+            captured.push(actual);
+        }
+        Ok(captured)
+    }
+
     /// Observes the ordinary Git index without modifying it.
     pub fn index_generation(&self) -> Result<IndexGeneration, RepositoryError> {
         self.ensure_no_git_index_lock()?;
@@ -3841,6 +3885,75 @@ impl Repository {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(_) => Err(RepositoryError::LocalStateUnavailable),
         }
+    }
+
+    fn managed_index_matches_head(
+        &self,
+        expected_head: &GitCommitRef,
+        path: &ManagedPath,
+    ) -> Result<bool, RepositoryError> {
+        let mut command = self.command();
+        scrub_git_routing_environment(&mut command);
+        command
+            .args([
+                "diff",
+                "--cached",
+                "--quiet",
+                "--exit-code",
+                expected_head.as_str(),
+                "--",
+            ])
+            .arg(path.as_path());
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(RepositoryError::GitOperationFailed),
+        }
+    }
+
+    fn committed_managed_file_bytes(
+        &self,
+        expected_head: &GitCommitRef,
+        path: &ManagedPath,
+    ) -> Result<Option<Vec<u8>>, RepositoryError> {
+        let mut command = self.command();
+        scrub_git_routing_environment(&mut command);
+        command
+            .args(["ls-tree", "-z", "--full-tree", expected_head.as_str(), "--"])
+            .arg(path.as_path());
+        let output = self.run(command)?.stdout;
+        let Some(entry) = output.split(|byte| *byte == 0).next() else {
+            return Ok(None);
+        };
+        if entry.is_empty() {
+            return Ok(None);
+        }
+        let tab = entry
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let metadata = &entry[..tab];
+        let encoded_path = &entry[tab + 1..];
+        if encoded_path != path.as_path().as_os_str().as_encoded_bytes() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let mut fields = metadata.split(|byte| *byte == b' ');
+        let mode = fields.next().unwrap_or_default();
+        let kind = fields.next().unwrap_or_default();
+        let object = String::from_utf8(fields.next().unwrap_or_default().to_vec())
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        if fields.next().is_some() || kind != b"blob" || !matches!(mode, b"100644" | b"100755") {
+            return Err(RepositoryError::ManagedContentConflict);
+        }
+        GitCommitRef::from_verified_commit(object.clone(), self.native_object_id_length()?)?;
+
+        let mut command = self.command();
+        scrub_git_routing_environment(&mut command);
+        command.args(["cat-file", "blob", &object]);
+        Ok(Some(self.run(command)?.stdout))
     }
 
     fn validate_managed_parent(&self, parent: &Path) -> Result<(), RepositoryError> {
