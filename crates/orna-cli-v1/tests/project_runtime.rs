@@ -390,6 +390,34 @@ fn binary_run_without_a_target_executes_root_main() {
 }
 
 #[test]
+fn binary_run_without_a_target_reports_a_missing_root_main() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        "pub fn helper(): Int = 42;",
+    )
+    .expect("root source");
+    initialize_project(directory.path());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+        ])
+        .output()
+        .expect("CLI process");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"error[E2000]: durable project invocation is not available\nhelp: use a supported table transaction; stream roots require the explicit stream runtime\n"
+    );
+}
+
+#[test]
 fn binary_run_rejects_private_function_targets_before_runtime_admission() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
@@ -400,6 +428,32 @@ fn binary_run_rejects_private_function_targets_before_runtime_admission() {
     initialize_project(directory.path());
 
     let output = invoke(directory.path(), "run", "main.hidden");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"error[E2000]: durable project invocation is not available\nhelp: use a supported table transaction; stream roots require the explicit stream runtime\n"
+    );
+}
+
+#[test]
+fn binary_run_treats_a_path_like_target_as_an_ordinary_function_name() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::create_dir(directory.path().join("ingest")).expect("ingest directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        "pub fn main(): Int = 42;",
+    )
+    .expect("root source");
+    std::fs::write(
+        directory.path().join("ingest/main.orna"),
+        "pub fn main(): Int = 99;",
+    )
+    .expect("nested source");
+    initialize_project(directory.path());
+
+    let output = invoke(directory.path(), "run", "ingest/main.orna");
 
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
