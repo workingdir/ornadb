@@ -884,9 +884,16 @@ impl RuntimeState {
             None
         };
         let already_admitted = catalogue_admission_exists_tx(&transaction, &capture).await?;
-        if !already_admitted {
-            clear_catalogue_snapshot_tx(&transaction, &capture).await?;
+        if already_admitted {
+            let result =
+                replay_catalogue_tx(&transaction, &capture, predecessor, &admission).await?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            return Ok(result);
         }
+        clear_catalogue_snapshot_tx(&transaction, &capture).await?;
 
         let mut names = std::collections::BTreeMap::new();
         let mut type_ids = std::collections::BTreeMap::new();
@@ -1101,6 +1108,169 @@ impl RuntimeState {
     }
 }
 
+async fn replay_catalogue_tx(
+    transaction: &Transaction,
+    capture: &orna_foundation_v1::CwdCapture,
+    predecessor: Option<&orna_foundation_v1::CwdCapture>,
+    admission: &CatalogueAdmission,
+) -> Result<CatalogueAdmissionResult, RuntimeError> {
+    let mut names = std::collections::BTreeMap::new();
+    let mut type_ids = std::collections::BTreeMap::new();
+    for declaration in &admission.types {
+        if declaration.declaration.kind != CatalogueObjectKind::Type {
+            return Err(RuntimeError::CatalogueKindMismatch);
+        }
+        validate_type_spec(&declaration.form)?;
+        if names
+            .insert(
+                declaration.declaration.qualified_name.clone(),
+                CatalogueObjectKind::Type,
+            )
+            .is_some()
+        {
+            return Err(RuntimeError::CatalogueNameConflict);
+        }
+        let object_id = lookup_snapshot_object_id(
+            transaction,
+            &capture_bytes(capture)?,
+            &declaration.declaration.qualified_name,
+        )
+        .await?
+        .ok_or(RuntimeError::CatalogueRevisionConflict)?;
+        if object_kind_tx(transaction, object_id).await? != CatalogueObjectKind::Type {
+            return Err(RuntimeError::CatalogueKindMismatch);
+        }
+        validate_replay_rename_tx(
+            transaction,
+            predecessor,
+            declaration.declaration.rename_from.as_deref(),
+            object_id,
+        )
+        .await?;
+        ensure_revision_row_tx(transaction, capture, object_id, &declaration.declaration).await?;
+        type_ids.insert(declaration.declaration.qualified_name.clone(), object_id);
+    }
+    for declaration in &admission.types {
+        let object_id = type_ids[&declaration.declaration.qualified_name];
+        let expected = resolve_type_spec(&declaration.form, &type_ids)?;
+        let actual = load_type_form_tx(transaction, capture, object_id).await?;
+        if actual != expected {
+            return Err(RuntimeError::CatalogueTypeMismatch);
+        }
+    }
+    validate_type_references_tx(transaction, capture).await?;
+
+    let mut function_ids = Vec::with_capacity(admission.functions.len());
+    for declaration in &admission.functions {
+        if declaration.declaration.kind != CatalogueObjectKind::Function {
+            return Err(RuntimeError::CatalogueKindMismatch);
+        }
+        validate_function_shape(declaration)?;
+        if names
+            .insert(
+                declaration.declaration.qualified_name.clone(),
+                CatalogueObjectKind::Function,
+            )
+            .is_some()
+        {
+            return Err(RuntimeError::CatalogueNameConflict);
+        }
+        let object_id = lookup_snapshot_object_id(
+            transaction,
+            &capture_bytes(capture)?,
+            &declaration.declaration.qualified_name,
+        )
+        .await?
+        .ok_or(RuntimeError::CatalogueRevisionConflict)?;
+        if object_kind_tx(transaction, object_id).await? != CatalogueObjectKind::Function {
+            return Err(RuntimeError::CatalogueKindMismatch);
+        }
+        validate_replay_rename_tx(
+            transaction,
+            predecessor,
+            declaration.declaration.rename_from.as_deref(),
+            object_id,
+        )
+        .await?;
+        ensure_revision_row_tx(transaction, capture, object_id, &declaration.declaration).await?;
+        let result_type = *type_ids
+            .get(&declaration.result_type_name)
+            .ok_or(RuntimeError::CatalogueTypeMissing)?;
+        if load_result_type_id_tx(transaction, capture, object_id).await? != result_type {
+            return Err(RuntimeError::CatalogueRevisionConflict);
+        }
+        let parameter_types = declaration
+            .parameters
+            .iter()
+            .map(|parameter| {
+                type_ids
+                    .get(&parameter.type_name)
+                    .copied()
+                    .ok_or(RuntimeError::CatalogueTypeMissing)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let actual = load_parameters_tx(transaction, capture, object_id).await?;
+        if actual.len() != declaration.parameters.len()
+            || actual
+                .iter()
+                .zip(&declaration.parameters)
+                .zip(&parameter_types)
+                .any(|((actual, expected), type_id)| {
+                    actual.name != expected.name
+                        || actual.position != expected.position
+                        || actual.type_object.object_id != *type_id
+                })
+        {
+            return Err(RuntimeError::CatalogueRevisionConflict);
+        }
+        function_ids.push(object_id);
+    }
+
+    validate_complete_batch_tx(transaction, capture, &names).await?;
+    let mut types = Vec::with_capacity(admission.types.len());
+    for declaration in &admission.types {
+        types.push(
+            load_type_handle_tx(
+                transaction,
+                capture,
+                type_ids[&declaration.declaration.qualified_name],
+            )
+            .await?,
+        );
+    }
+    let mut functions = Vec::with_capacity(function_ids.len());
+    for object_id in function_ids {
+        functions.push(load_function_tx(transaction, capture, object_id).await?);
+    }
+    Ok(CatalogueAdmissionResult {
+        capture: capture.clone(),
+        types,
+        functions,
+    })
+}
+
+async fn validate_replay_rename_tx(
+    transaction: &Transaction,
+    predecessor: Option<&orna_foundation_v1::CwdCapture>,
+    rename_from: Option<&str>,
+    object_id: [u8; 16],
+) -> Result<(), RuntimeError> {
+    let Some(rename_from) = rename_from else {
+        return Ok(());
+    };
+    let Some(predecessor) = predecessor else {
+        return Err(RuntimeError::CataloguePredecessorRequired);
+    };
+    let predecessor_snapshot = capture_bytes(predecessor)?;
+    let source = lookup_snapshot_object_id(transaction, &predecessor_snapshot, rename_from)
+        .await?
+        .ok_or(RuntimeError::CatalogueRenameSourceMissing)?;
+    if source != object_id {
+        return Err(RuntimeError::CatalogueNameConflict);
+    }
+    Ok(())
+}
+
 async fn admit_object_tx(
     transaction: &Transaction,
     capture: &orna_foundation_v1::CwdCapture,
@@ -1197,6 +1367,7 @@ async fn admit_object_tx(
     if object_kind_tx(transaction, object_id).await? != declaration.kind {
         return Err(RuntimeError::CatalogueKindMismatch);
     }
+    validate_revision_identity_tx(transaction, object_id, declaration).await?;
     transaction
         .execute(
             "INSERT INTO runtime_catalogue_revision
@@ -1214,6 +1385,39 @@ async fn admit_object_tx(
         .await
         .map_err(|_| RuntimeError::CatalogueNameConflict)?;
     Ok(object_id)
+}
+
+async fn validate_revision_identity_tx(
+    transaction: &Transaction,
+    object_id: [u8; 16],
+    declaration: &CatalogueDeclaration,
+) -> Result<(), RuntimeError> {
+    let mut rows = transaction
+        .query(
+            "SELECT object_id, kind, semantic_hash
+             FROM runtime_catalogue_revision WHERE revision_id = ?1",
+            params![declaration.revision_id.to_vec()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let existing_object_id = fixed(row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?)?;
+        let existing_kind = CatalogueObjectKind::from_code(
+            row.get(1).map_err(|_| RuntimeError::CatalogueCorrupt)?,
+        )?;
+        let existing_hash = fixed(row.get(2).map_err(|_| RuntimeError::CatalogueCorrupt)?)?;
+        if existing_object_id != object_id
+            || existing_kind != declaration.kind
+            || existing_hash != declaration.semantic_hash
+        {
+            return Err(RuntimeError::CatalogueRevisionConflict);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn persist_capture_tx(
