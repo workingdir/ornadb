@@ -1601,6 +1601,257 @@ mod tests {
     }
 
     #[test]
+    fn parsed_descriptor_retains_declared_members() {
+        let api = SystemApi::embedded().unwrap();
+        let raw = raw_document(EMBEDDED_SYSTEM_API).unwrap();
+
+        // This deliberately derives every expected member from the same raw
+        // descriptor that the loader consumes. It checks retained-loader
+        // inclusion and consistency only; it is not a second copy of the
+        // schema or evidence that the portable system surface is executable.
+        let mut type_arities = language_type_arities();
+        for name in &raw.opaque_identifiers {
+            type_arities.insert(name.clone(), 0);
+        }
+        for alias in &raw.reference_aliases {
+            type_arities.insert(plain_type_name(&alias.name).unwrap(), 0);
+        }
+        for value in &raw.value_types {
+            let (name, parameters) =
+                value_type_declaration(&value.name, &value.type_parameters).unwrap();
+            type_arities.insert(name, parameters.len());
+        }
+        for name in raw.enums.keys() {
+            type_arities.insert(name.clone(), 0);
+        }
+        for relation in &raw.relations {
+            type_arities.insert(relation.name.clone(), 0);
+        }
+        assert_eq!(api.inventory.singletons, raw.singletons.len());
+        assert_eq!(
+            api.inventory.opaque_identifiers,
+            raw.opaque_identifiers.len()
+        );
+        assert_eq!(api.inventory.reference_aliases, raw.reference_aliases.len());
+        assert_eq!(api.inventory.value_types, raw.value_types.len());
+        assert_eq!(api.inventory.enums, raw.enums.len());
+        assert_eq!(api.inventory.relations, raw.relations.len());
+        assert_eq!(
+            api.functions.values().map(Vec::len).sum::<usize>(),
+            raw.functions.len()
+        );
+        assert_eq!(api.inventory.failure_codes, raw.failure_codes.len());
+        assert_eq!(
+            api.singletons.keys().cloned().collect::<BTreeSet<_>>(),
+            raw.singletons
+                .iter()
+                .map(|singleton| singleton.name.clone())
+                .collect()
+        );
+        assert_eq!(
+            api.types.keys().cloned().collect::<BTreeSet<_>>(),
+            raw.opaque_identifiers
+                .iter()
+                .cloned()
+                .chain(
+                    raw.reference_aliases
+                        .iter()
+                        .map(|alias| plain_type_name(&alias.name).unwrap()),
+                )
+                .chain(raw.value_types.iter().map(|value| {
+                    value_type_declaration(&value.name, &value.type_parameters)
+                        .unwrap()
+                        .0
+                }))
+                .collect()
+        );
+        assert_eq!(
+            api.enums.keys().cloned().collect::<BTreeSet<_>>(),
+            raw.enums.keys().cloned().collect()
+        );
+        assert_eq!(
+            api.relations.keys().cloned().collect::<BTreeSet<_>>(),
+            raw.relations
+                .iter()
+                .map(|relation| relation.name.clone())
+                .collect()
+        );
+        assert_eq!(
+            &api.grouped_relations,
+            &raw.relations
+                .iter()
+                .map(|relation| (relation.grouped_handle.clone(), relation.name.clone()))
+                .collect()
+        );
+        assert_eq!(
+            api.removed.keys().cloned().collect::<BTreeSet<_>>(),
+            raw.removed_names.keys().cloned().collect()
+        );
+
+        for singleton in &raw.singletons {
+            let retained = api
+                .singletons
+                .get(&singleton.name)
+                .expect("every raw singleton is retained");
+            assert_eq!(retained.name, singleton.name);
+            assert_eq!(retained.availability, singleton.availability);
+            assert_eq!(
+                retained.ty,
+                parse_and_validate_type(&singleton.ty, &type_arities, &BTreeSet::new()).unwrap()
+            );
+        }
+
+        for opaque in &raw.opaque_identifiers {
+            let retained = api
+                .types
+                .get(opaque)
+                .expect("every opaque identifier is retained");
+            assert_eq!(retained.name, *opaque);
+            assert!(retained.type_parameters.is_empty());
+            assert!(retained.fields.is_empty());
+        }
+
+        for alias in &raw.reference_aliases {
+            let alias_name = plain_type_name(&alias.name).unwrap();
+            let retained = api.types.get(&alias_name).expect("every alias is retained");
+            assert_eq!(retained.name, alias_name);
+            assert!(retained.type_parameters.is_empty());
+            assert!(retained.fields.is_empty());
+            let relation = api
+                .relations
+                .get(&alias.target)
+                .expect("every alias target is retained as a relation");
+            assert_eq!(
+                relation.reference_type,
+                SystemType::Named(alias_name.clone())
+            );
+            assert_eq!(
+                parse_and_validate_type(&alias.definition, &type_arities, &BTreeSet::new())
+                    .unwrap(),
+                SystemType::Applied {
+                    base: "sys.RowRef".into(),
+                    arguments: vec![SystemType::Named(alias.target.clone())],
+                }
+            );
+        }
+
+        for value in &raw.value_types {
+            let (name, parameters) =
+                value_type_declaration(&value.name, &value.type_parameters).unwrap();
+            let retained = api.types.get(&name).expect("every value type is retained");
+            assert_eq!(retained.name, name);
+            assert_eq!(retained.type_parameters, parameters);
+            assert_eq!(retained.fields.len(), value.fields.len());
+            for field in &value.fields {
+                assert_eq!(
+                    retained.fields.get(&field.name),
+                    Some(
+                        &parse_and_validate_type(
+                            &field.ty,
+                            &type_arities,
+                            &retained.type_parameters.iter().cloned().collect(),
+                        )
+                        .unwrap()
+                    )
+                );
+            }
+        }
+
+        for (name, variants) in &raw.enums {
+            assert_eq!(
+                api.enums.get(name),
+                Some(&variants.iter().cloned().collect())
+            );
+        }
+
+        for relation in &raw.relations {
+            let retained = api
+                .relations
+                .get(&relation.name)
+                .expect("every raw relation is retained");
+            assert_eq!(retained.name, relation.name);
+            assert_eq!(retained.grouped_handle, relation.grouped_handle);
+            assert_eq!(retained.fields.len(), relation.fields.len());
+            assert_eq!(
+                retained.reference_type,
+                parse_and_validate_type(&relation.reference_type, &type_arities, &BTreeSet::new())
+                    .unwrap()
+            );
+            for field in &relation.fields {
+                assert_eq!(
+                    retained.fields.get(&field.name),
+                    Some(
+                        &parse_and_validate_type(&field.ty, &type_arities, &BTreeSet::new(),)
+                            .unwrap()
+                    )
+                );
+            }
+            assert_eq!(
+                api.grouped_relations.get(&relation.grouped_handle),
+                Some(&relation.name)
+            );
+        }
+
+        let expected_function_names = raw
+            .functions
+            .iter()
+            .map(|function| {
+                parse_function(
+                    &function.signature,
+                    function.effect.clone(),
+                    &type_arities,
+                    &api.singletons,
+                    &api.types,
+                    &api.enums,
+                )
+                .unwrap()
+                .name
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            api.functions.keys().cloned().collect::<BTreeSet<_>>(),
+            expected_function_names
+        );
+        for function in &raw.functions {
+            let parsed = parse_function(
+                &function.signature,
+                function.effect.clone(),
+                &type_arities,
+                &api.singletons,
+                &api.types,
+                &api.enums,
+            )
+            .unwrap();
+            assert!(
+                api.function(&parsed.name)
+                    .is_some_and(|overloads| overloads.contains(&parsed)),
+                "raw function label {} must resolve to its parsed descriptor",
+                function.name
+            );
+            assert!(matches!(
+                parsed.effect,
+                SystemEffect::Read | SystemEffect::Invoke | SystemEffect::Admin
+            ));
+        }
+
+        for (name, removed) in &raw.removed_names {
+            let retained = api
+                .removed
+                .get(name)
+                .expect("every removed name is retained");
+            assert_eq!(retained.replacement, removed.replacement);
+            assert_eq!(retained.diagnostic, removed.diagnostic);
+        }
+
+        // Relation availability, kind, natural key/key_fields and purpose are
+        // not retained by SystemApi, so this test cannot prove those parts of
+        // the descriptor. Failure-code membership is likewise validated while
+        // loading but not retained: this proves only its count and fail-closed
+        // loader validation. Neither limitation is evidence of complete
+        // system/runtime conformance.
+    }
+
+    #[test]
     fn names_are_exact_case_sensitive_and_removed_names_remain_rejected() {
         let api = SystemApi::embedded().unwrap();
         assert!(matches!(
