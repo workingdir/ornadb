@@ -2031,7 +2031,63 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(1, "one"), (2, "updated"), (4, "four")]
         );
+
+        assert_eq!(
+            activation
+                .candidate_relation(&"notes")
+                .unwrap()
+                .filter(|(_, row)| *row != "four")
+                .map(|(key, row)| (key, row.to_ascii_uppercase()))
+                .collect::<Vec<_>>(),
+            vec![(1, "ONE".into()), (2, "UPDATED".into()), (5, "FIVE".into())]
+        );
+        assert_eq!(
+            activation
+                .candidate_relation(&"notes")
+                .unwrap()
+                .sort_by_key(|(_, row)| *row)
+                .collect::<Vec<_>>(),
+            vec![(5, "five"), (4, "four"), (1, "one"), (2, "updated")]
+        );
+        assert_eq!(
+            activation
+                .candidate_relation(&"notes")
+                .unwrap()
+                .map(|(_, row)| row.chars().next().expect("nonempty row"))
+                .distinct()
+                .collect::<Vec<_>>(),
+            vec!['o', 'u', 'f']
+        );
+        assert_eq!(
+            activation
+                .candidate_relation(&"notes")
+                .unwrap()
+                .group_by(|(_, row)| row.chars().next().expect("nonempty row"))
+                .collect::<Vec<_>>(),
+            vec![
+                ('f', vec![(4, "four"), (5, "five")]),
+                ('o', vec![(1, "one")]),
+                ('u', vec![(2, "updated")]),
+            ]
+        );
+        assert_eq!(
+            activation
+                .candidate_relation(&"notes")
+                .unwrap()
+                .join(
+                    activation.candidate_relation(&"notes").unwrap(),
+                    |(_, row)| row.chars().next().expect("nonempty row"),
+                    |(_, row)| row.chars().next().expect("nonempty row"),
+                )
+                .map(|((left_key, _), (right_key, _))| (left_key, right_key))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (2, 2), (4, 4), (4, 5), (5, 4), (5, 5)]
+        );
         activation.rollback();
+        assert_eq!(
+            database.relation(&"notes").collect::<Vec<_>>(),
+            vec![(1, "one"), (2, "two"), (3, "three"), (4, "four")]
+        );
     }
 
     #[test]
