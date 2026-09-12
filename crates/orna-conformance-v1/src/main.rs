@@ -1,15 +1,15 @@
 use futures::executor::block_on;
 use orna_conformance_v1::{
-    AdmittedReplSession, BoundedEvaluator, Corpus, DurableTransactionalEvaluator, Harness,
-    ImplementationClaim, RuntimeAdapter, RuntimeEvaluator, Scenario, SourceUnit, StageOutcome,
-    TransactionalEvaluator,
+    AdmittedReplSession, BoundedEvaluator, Corpus, DurableTransactionalEvaluator, EvidenceStatus,
+    Harness, ImplementationClaim, RuntimeAdapter, RuntimeEvaluator, Scenario, SourceUnit,
+    StageOutcome, TransactionalEvaluator,
 };
 use orna_evaluator_v1::Limits as EvaluatorLimits;
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText, Value};
 use orna_protocol_v1::{Envelope, Message, PresentationContext};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
-use orna_semantic_v1::{ModuleInput, analyze};
+use orna_semantic_v1::{analyze, ModuleInput};
 use orna_serving_v1::{Credential, Limits as ServingLimits, Origin, Patch, RetainedPin, Serving};
 use std::collections::BTreeMap;
 use std::{
@@ -776,15 +776,48 @@ fn main() {
         "{}",
         serde_json::to_string_pretty(&report).expect("report serializes")
     );
+    let exit_code = report_exit_code(&report);
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+}
+
+fn report_exit_code(report: &orna_conformance_v1::RunReport) -> i32 {
+    let fixture_failed = report.fixtures.iter().any(|fixture| !fixture.passed);
+    let scenario_failed = report
+        .scenarios
+        .iter()
+        .any(|scenario| scenario.status == EvidenceStatus::Failed);
+    if fixture_failed || scenario_failed {
+        1
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
+        report_exit_code, run_live_fallback_scenario, run_live_keyed_update_scenario,
+        run_live_resync_scenario, run_live_unkeyed_update_scenario, run_sys_rt_rename_scenario,
         CompositeEvaluator, Corpus, Harness, RuntimeAdapter, Scenario, StageOutcome,
-        run_live_fallback_scenario, run_live_keyed_update_scenario, run_live_resync_scenario,
-        run_live_unkeyed_update_scenario, run_sys_rt_rename_scenario,
     };
+    use orna_conformance_v1::EvidenceStatus;
+
+    #[test]
+    fn report_exit_code_distinguishes_unsatisfied_evidence_from_skips() {
+        let corpus = Corpus::load_default().expect("reference corpus loads");
+        let mut adapter = RuntimeAdapter::new(CompositeEvaluator::default());
+        let mut report = Harness::new(corpus).run(&mut adapter);
+        assert!(report.fixtures.iter().any(|fixture| !fixture.passed));
+        assert_eq!(report_exit_code(&report), 1);
+
+        report.fixtures.clear();
+        report
+            .scenarios
+            .retain(|scenario| scenario.status != EvidenceStatus::Failed);
+        assert_eq!(report_exit_code(&report), 0);
+    }
 
     #[test]
     fn unsafe_row_key_repeat_fails_at_the_required_row_validation_stage() {
