@@ -1129,6 +1129,14 @@ mod tests {
     }
 
     fn verified_fixture(profile: &CompactOvbProfile) -> Vec<u8> {
+        let schema_ovb = profile.schema().encode().unwrap();
+        verified_fixture_with_schema_ovb(profile, &schema_ovb)
+    }
+
+    fn verified_fixture_with_schema_ovb(
+        profile: &CompactOvbProfile,
+        schema_ovb: &[u8],
+    ) -> Vec<u8> {
         let original = BASE64.decode(VERIFIED_PARQUET).unwrap();
         let reader = SerializedFileReader::new(Bytes::from(original.clone())).unwrap();
         let file = reader.metadata().file_metadata();
@@ -1147,10 +1155,7 @@ mod tests {
                     "orna.schema.sha256".into(),
                     Some(hex_digest(profile.schema_fingerprint())),
                 ),
-                KeyValue::new(
-                    "orna.schema.ovb".into(),
-                    Some(BASE64.encode(profile.schema().encode().unwrap())),
-                ),
+                KeyValue::new("orna.schema.ovb".into(), Some(BASE64.encode(schema_ovb))),
                 KeyValue::new("orna.columns.ovb".into(), Some(BASE64.encode(columns))),
                 KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
             ]),
@@ -1521,6 +1526,87 @@ mod tests {
                 &changed_object.commit().clone(),
                 TABLE,
                 entry
+            ),
+            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
+        ));
+        drop(temp);
+    }
+
+    #[test]
+    fn repository_rejects_unrelated_valid_schema_descriptor_before_logical_use() {
+        let expected_profile = profile(&[KEY_A]);
+        let unrelated = profile(&[KEY_B]);
+        assert_ne!(
+            expected_profile.schema_fingerprint(),
+            unrelated.schema_fingerprint()
+        );
+        let valid = verified_fixture(&expected_profile);
+        let unrelated_ovb = unrelated.schema().encode().unwrap();
+        let mismatched = verified_fixture_with_schema_ovb(&expected_profile, &unrelated_ovb);
+        let path = ManagedPath::new(format!(
+            ".orna/storage/{TABLE}/data/{}/{SEGMENT_ID}.parquet",
+            &SEGMENT_ID.to_string()[..2]
+        ))
+        .unwrap();
+        let key = expected_scalar(1);
+        let columns = CanonicalValue::new(OvbRaw::Array(vec![descriptor(KEY_A, int_type())]))
+            .unwrap()
+            .encode()
+            .unwrap();
+
+        let valid = CompactSegment::new(
+            SEGMENT_ID,
+            CompactSegmentRole::Data,
+            expected_profile.schema_fingerprint(),
+            "test-encoder-v1",
+            path.clone(),
+            valid,
+            key.clone(),
+            key.clone(),
+            1,
+            columns.clone(),
+            true,
+            false,
+        )
+        .unwrap();
+        let mismatched = CompactSegment::new(
+            SEGMENT_ID,
+            CompactSegmentRole::Data,
+            expected_profile.schema_fingerprint(),
+            "test-encoder-v1",
+            path,
+            mismatched,
+            key.clone(),
+            key,
+            1,
+            columns,
+            true,
+            false,
+        )
+        .unwrap();
+        let (temp, repository) = repository();
+        let head = repository.head().unwrap().unwrap();
+        let generation = repository.index_generation().unwrap();
+        assert!(repository
+            .prepare_compact_publication(
+                &head,
+                generation.clone(),
+                CompactManifest::empty(TABLE, expected_profile.schema_fingerprint()),
+                [9; 16],
+                [8; 32],
+                &[valid],
+                "valid schema descriptor fixture",
+            )
+            .is_ok());
+        assert!(matches!(
+            repository.prepare_compact_publication(
+                &head,
+                generation,
+                CompactManifest::empty(TABLE, expected_profile.schema_fingerprint()),
+                [9; 16],
+                [8; 32],
+                &[mismatched],
+                "mismatched schema descriptor fixture",
             ),
             Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
         ));
