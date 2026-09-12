@@ -3034,6 +3034,160 @@ fn date_token_class_is_disjoint_from_decimal_and_float_tokens() {
 }
 
 #[test]
+fn instant_literals_normalize_offsets_and_emit_canonical_utc_components() {
+    for (source, seconds, nanosecond) in [
+        ("2024-02-29T00:00:00Z", 1_709_164_800, 0),
+        ("2024-02-29T00:00:00.1+05:30", 1_709_145_000, 100_000_000),
+        ("2024-02-28T18:30:00-05:30", 1_709_164_800, 0),
+        ("1969-12-31T23:59:59.1Z", -1, 100_000_000),
+    ] {
+        assert_eq!(
+            evaluate(source).raw(),
+            &Raw::Tag(
+                60002,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(seconds.into()),
+                    Raw::Int(nanosecond.into()),
+                ])),
+            ),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn instant_literals_compare_by_normalized_utc_second_and_nanosecond() {
+    assert_eq!(
+        evaluate("2024-02-29T00:00:00Z == 2024-02-29T05:30:00+05:30"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate("1970-01-01T00:00:00.000000001Z < 1970-01-01T00:00:01Z"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate("1970-01-01T00:00:00.123456789Z > 1970-01-01T00:00:00.123456788Z"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+}
+
+#[test]
+fn instant_literals_preserve_precision_nesting_and_canonical_environment_values() {
+    assert_eq!(
+        evaluate("[1970-01-01T00:00:00Z, {instant: 1970-01-01T00:00:00.123456789Z}]").raw(),
+        &Raw::Array(vec![
+            Raw::Tag(
+                60002,
+                Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Int(0.into())])),
+            ),
+            Raw::Map(vec![(
+                Raw::Text("instant".into()),
+                Raw::Tag(
+                    60002,
+                    Box::new(Raw::Array(vec![
+                        Raw::Int(0.into()),
+                        Raw::Int(123_456_789.into()),
+                    ])),
+                ),
+            )]),
+        ])
+    );
+
+    let environment = Environment::from([(
+        "instant".into(),
+        Value::new(Raw::Tag(
+            60002,
+            Box::new(Raw::Array(vec![Raw::Int((-1).into()), Raw::Int(1.into())])),
+        ))
+        .unwrap(),
+    )]);
+    assert_eq!(
+        evaluate_expression("instant", &environment, Limits::default())
+            .unwrap()
+            .raw(),
+        &Raw::Tag(
+            60002,
+            Box::new(Raw::Array(vec![Raw::Int((-1).into()), Raw::Int(1.into())])),
+        )
+    );
+}
+
+#[test]
+fn malformed_instant_literals_and_canonical_components_fail_closed() {
+    for source in [
+        "2024-02-29T24:00:00Z",
+        "2024-02-29T12:60:00Z",
+        "2024-02-29T12:00:60Z",
+        "2024-02-29T12:00:00.1234567890Z",
+        "2024-02-29T12:00:00+24:00",
+    ] {
+        let errors = lex(source).expect_err("malformed instant must fail lexing");
+        assert!(
+            errors.iter().any(|error| error.code == "ORNA-LEX-008"),
+            "expected instant diagnostic for {source}, got {errors:?}"
+        );
+        assert_eq!(
+            code(evaluate_expression(
+                source,
+                &Environment::new(),
+                Limits::default()
+            )),
+            "ORNA-EVAL-PARSE"
+        );
+    }
+
+    let malformed_ast = Expr::Literal {
+        text: "2024-02-29T12:00:60Z".into(),
+        kind: orna_syntax_v1::LiteralKind::Instant,
+        span: SyntaxSpan::new(0, 20),
+    };
+    assert_eq!(
+        code(evaluate_parsed(
+            &malformed_ast,
+            &Environment::new(),
+            Limits::default()
+        )),
+        "ORNA-EVAL-VALUE"
+    );
+
+    for raw in [
+        Raw::Tag(60002, Box::new(Raw::Array(vec![Raw::Int(0.into())]))),
+        Raw::Tag(
+            60002,
+            Box::new(Raw::Array(vec![
+                Raw::Int(0.into()),
+                Raw::Int(1_000_000_000.into()),
+            ])),
+        ),
+    ] {
+        assert!(
+            Value::new(raw).is_err(),
+            "invalid Instant tag must fail closed"
+        );
+    }
+
+    let environment = Environment::from([(
+        "instant".into(),
+        Value::new(Raw::Tag(
+            60002,
+            Box::new(Raw::Array(vec![
+                Raw::Int("9223372036854775808".parse().unwrap()),
+                Raw::Int(0.into()),
+            ])),
+        ))
+        .unwrap(),
+    )]);
+    assert_eq!(
+        code(evaluate_expression(
+            "instant",
+            &environment,
+            Limits::default()
+        )),
+        "ORNA-EVAL-VALUE"
+    );
+}
+
+#[test]
 fn uses_environment_and_short_circuiting_deterministically() {
     let mut environment = BTreeMap::new();
     environment.insert("count".into(), Value::int(41.into()));
