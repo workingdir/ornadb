@@ -16,7 +16,7 @@ use std::{
 
 use bytes::Bytes;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use orna_foundation_v1::{CanonicalValue, OvbRaw};
+use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use parquet::{
     basic::{Compression, PageType, Type},
@@ -352,11 +352,16 @@ fn verify_physical_metadata(
     if required
         .iter()
         .any(|(key, value)| found.get(key.as_str()) != Some(&value.as_str()))
-        || found
-            .get("orna.schema.ovb")
-            .and_then(|value| decode_base64(value).ok())
-            .is_none_or(|value| value.is_empty())
     {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let schema_ovb = found
+        .get("orna.schema.ovb")
+        .ok_or(RepositoryError::InvalidCompactManifest)
+        .and_then(|value| decode_base64(value))?;
+    let descriptor = SchemaDescriptor::decode(&schema_ovb)
+        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    if schema_descriptor_fingerprint(&descriptor)? != schema {
         return Err(RepositoryError::InvalidCompactManifest);
     }
     verify_physical_columns(columns, metadata.schema_descr())?;
@@ -747,6 +752,21 @@ fn required_physical_metadata(
         ("orna.columns.ovb".to_owned(), base64(columns)),
         ("orna.encoder".to_owned(), encoder_version.to_owned()),
     ])
+}
+
+/// Computes the fixed Format §29 storage-schema identity from a closed,
+/// canonical descriptor.  The descriptor API both rejects malformed OVB and
+/// guarantees that the bytes fed to the established domain digest are exact.
+fn schema_descriptor_fingerprint(
+    descriptor: &SchemaDescriptor,
+) -> Result<[u8; 32], RepositoryError> {
+    let bytes = descriptor
+        .encode()
+        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let mut digest = Sha256::new();
+    digest.update(b"orna.schema.v1\0");
+    digest.update(bytes);
+    Ok(digest.finalize().into())
 }
 
 /// A complete canonical compact manifest for one table snapshot.
@@ -2924,6 +2944,35 @@ mod tests {
         .unwrap()
     }
 
+    fn bool_schema(table: Uuid, field: Uuid) -> SchemaDescriptor {
+        SchemaDescriptor::new(OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (
+                OvbRaw::Int(1.into()),
+                OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(table.as_bytes().to_vec()))),
+            ),
+            (
+                OvbRaw::Int(2.into()),
+                OvbRaw::Array(vec![OvbRaw::Tag(
+                    37,
+                    Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
+                )]),
+            ),
+            (
+                OvbRaw::Int(3.into()),
+                OvbRaw::Array(vec![OvbRaw::Array(vec![
+                    OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(field.as_bytes().to_vec()))),
+                    OvbRaw::Text(format!("f_{}", field.simple())),
+                    OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Bool".to_owned())]),
+                    OvbRaw::Int(0.into()),
+                    OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                ])]),
+            ),
+            (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+        ]))
+        .unwrap()
+    }
+
     fn test_repository() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
         test_git(temp.path(), &["init", "-b", "main"]);
@@ -2955,7 +3004,7 @@ mod tests {
         );
     }
 
-    fn bool_parquet(table: Uuid, schema: [u8; 32], columns: &[u8]) -> Vec<u8> {
+    fn bool_parquet(table: Uuid, schema: &SchemaDescriptor, columns: &[u8]) -> Vec<u8> {
         let physical_name = format!("f_{}", BOOL_FIELD.simple());
         let schema_descriptor = Arc::new(
             parse_message_type(&format!(
@@ -2966,8 +3015,14 @@ mod tests {
         let metadata = vec![
             KeyValue::new("orna.profile".to_owned(), Some(COMPACT_PROFILE.to_owned())),
             KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
-            KeyValue::new("orna.schema.sha256".to_owned(), Some(hex(&schema))),
-            KeyValue::new("orna.schema.ovb".to_owned(), Some("AA==".to_owned())),
+            KeyValue::new(
+                "orna.schema.sha256".to_owned(),
+                Some(hex(&schema_descriptor_fingerprint(schema).unwrap())),
+            ),
+            KeyValue::new(
+                "orna.schema.ovb".to_owned(),
+                Some(base64(&schema.encode().unwrap())),
+            ),
             KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
             KeyValue::new(
                 "orna.encoder".to_owned(),
@@ -3179,9 +3234,10 @@ mod tests {
 
     #[test]
     fn publishes_and_reads_verified_bool_segment_for_bool_decoder() {
-        let schema = [0x42; 32];
+        let descriptor = bool_schema(BOOL_TABLE, BOOL_FIELD);
+        let schema = schema_descriptor_fingerprint(&descriptor).unwrap();
         let columns = bool_columns(BOOL_FIELD);
-        let bytes = bool_parquet(BOOL_TABLE, schema, &columns);
+        let bytes = bool_parquet(BOOL_TABLE, &descriptor, &columns);
         let (root, repository) = test_repository();
         let path = ManagedPath::new(format!(
             ".orna/storage/{BOOL_TABLE}/data/{}/{BOOL_SEGMENT}.parquet",
