@@ -6081,6 +6081,7 @@ fn host_error(error: Error) -> WireResponse {
         Error::Closed => (410, "live.expired"),
         Error::Denied => (403, "live.denied"),
         Error::ApplicationDeferred => (503, "live.application_deferred"),
+        Error::RuntimeUnavailable => (503, "live.runtime_unavailable"),
         _ => (400, "live.malformed_request"),
     };
     wire_error(status, code)
@@ -7095,6 +7096,7 @@ mod tests {
         );
         assert_eq!(HttpResponse::error(Error::ApplicationDeferred).status, 503);
         assert_eq!(host_error(Error::ApplicationDeferred).status, 503);
+        assert_eq!(host_error(Error::RuntimeUnavailable).status, 503);
 
         drop(host);
         fs::remove_dir_all(root).unwrap();
