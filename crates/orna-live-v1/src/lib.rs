@@ -7,6 +7,7 @@
 //! are decoded canonically.
 
 use futures::{
+    channel::oneshot,
     executor::block_on,
     io::{AllowStdIo, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
 };
@@ -17,7 +18,11 @@ use std::{
     io,
     net::{Ipv4Addr, SocketAddr, TcpListener},
     pin::Pin,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    task::Waker,
 };
 
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
@@ -147,6 +152,386 @@ pub struct DispatchOutcome {
     pub response: Option<Envelope>,
 }
 
+/// Shared ownership state for application work admitted by a live session.
+///
+/// A synchronous callback holds a lease until it returns. An asynchronous
+/// adapter may retain the lease, poll its cancellation receiver, and register
+/// descendants with [`LiveApplicationWorkLease::spawn_child`]. Session
+/// deletion changes admission before requesting cancellation, then waits until
+/// every root and descendant lease has been dropped.
+#[derive(Clone)]
+pub struct LiveApplicationWorkSupervisor {
+    state: Arc<Mutex<ApplicationWorkState>>,
+}
+
+struct ApplicationWorkState {
+    next_id: u64,
+    sessions: BTreeMap<[u8; 16], ApplicationSessionWork>,
+}
+
+struct ApplicationSessionWork {
+    phase: ApplicationWorkPhase,
+    work: BTreeMap<u64, ApplicationWorkEntry>,
+    failed: bool,
+    waiters: Vec<Waker>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ApplicationWorkPhase {
+    Open,
+    Draining,
+    Deleted,
+}
+
+struct ApplicationWorkEntry {
+    parent: Option<u64>,
+    cancellation: Option<oneshot::Sender<()>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+const MAX_APPLICATION_SESSIONS: usize = 4096;
+const MAX_APPLICATION_WORK_PER_SESSION: usize = 4096;
+const MAX_APPLICATION_JOIN_WAITERS: usize = 8;
+
+/// A lease held by one admitted application callback or descendant.
+pub struct LiveApplicationWorkLease {
+    supervisor: LiveApplicationWorkSupervisor,
+    session: [u8; 16],
+    id: u64,
+    cancellation: oneshot::Receiver<()>,
+    cancelled: Arc<AtomicBool>,
+    completed: bool,
+}
+
+impl LiveApplicationWorkSupervisor {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ApplicationWorkState {
+                next_id: 0,
+                sessions: BTreeMap::new(),
+            })),
+        }
+    }
+
+    /// Admits a root application callback for a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] after deletion admission has stopped new
+    /// application work.
+    pub fn admit(&self, session: [u8; 16], _: [u8; 16]) -> Result<LiveApplicationWorkLease> {
+        self.admit_with_parent(session, None)
+    }
+
+    fn admit_with_parent(
+        &self,
+        session: [u8; 16],
+        parent: Option<u64>,
+    ) -> Result<LiveApplicationWorkLease> {
+        let mut state = self.state.lock().expect("application work state poisoned");
+        if !state.sessions.contains_key(&session)
+            && state.sessions.len() >= MAX_APPLICATION_SESSIONS
+        {
+            return Err(Error::Limit);
+        }
+        let id = state.next_id;
+        state.next_id = state.next_id.checked_add(1).ok_or(Error::Limit)?;
+        let session_work =
+            state
+                .sessions
+                .entry(session)
+                .or_insert_with(|| ApplicationSessionWork {
+                    phase: ApplicationWorkPhase::Open,
+                    work: BTreeMap::new(),
+                    failed: false,
+                    waiters: Vec::new(),
+                });
+        if session_work.phase != ApplicationWorkPhase::Open
+            || parent.is_some_and(|parent| !session_work.work.contains_key(&parent))
+        {
+            return Err(Error::Closed);
+        }
+        if session_work.work.len() >= MAX_APPLICATION_WORK_PER_SESSION {
+            return Err(Error::Limit);
+        }
+        let (sender, cancellation) = oneshot::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        session_work.work.insert(
+            id,
+            ApplicationWorkEntry {
+                parent,
+                cancellation: Some(sender),
+                cancelled: Arc::clone(&cancelled),
+            },
+        );
+        Ok(LiveApplicationWorkLease {
+            supervisor: self.clone(),
+            session,
+            id,
+            cancellation,
+            cancelled,
+            completed: false,
+        })
+    }
+
+    /// Prevents new work, recursively requests cancellation, and joins every
+    /// root and descendant currently owned by the session.
+    pub fn cancel_and_join(&self, session: [u8; 16]) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+        let result = self.begin_draining(session);
+        let state = Arc::clone(&self.state);
+        Box::pin(async move {
+            result?;
+            futures::future::poll_fn(move |context| {
+                let mut state = state.lock().expect("application work state poisoned");
+                let session_work = state.sessions.get_mut(&session).ok_or(Error::Closed)?;
+                if session_work.work.is_empty() {
+                    return std::task::Poll::Ready(
+                        (!session_work.failed)
+                            .then_some(())
+                            .ok_or(Error::DeletionFailed),
+                    );
+                }
+                if !session_work
+                    .waiters
+                    .iter()
+                    .any(|waiter| waiter.will_wake(context.waker()))
+                {
+                    if session_work.waiters.len() >= MAX_APPLICATION_JOIN_WAITERS {
+                        return std::task::Poll::Ready(Err(Error::Limit));
+                    }
+                    session_work.waiters.push(context.waker().clone());
+                }
+                std::task::Poll::Pending
+            })
+            .await
+        })
+    }
+
+    fn begin_draining(&self, session: [u8; 16]) -> Result<()> {
+        let mut state = self.state.lock().expect("application work state poisoned");
+        if !state.sessions.contains_key(&session)
+            && state.sessions.len() >= MAX_APPLICATION_SESSIONS
+        {
+            return Err(Error::Limit);
+        }
+        let session_work =
+            state
+                .sessions
+                .entry(session)
+                .or_insert_with(|| ApplicationSessionWork {
+                    phase: ApplicationWorkPhase::Open,
+                    work: BTreeMap::new(),
+                    failed: false,
+                    waiters: Vec::new(),
+                });
+        if session_work.phase == ApplicationWorkPhase::Deleted {
+            return Ok(());
+        }
+        session_work.phase = ApplicationWorkPhase::Draining;
+        let roots = session_work
+            .work
+            .iter()
+            .filter_map(|(id, entry)| entry.parent.is_none().then_some(*id))
+            .collect::<Vec<_>>();
+        let mut visited = BTreeSet::new();
+        let mut pending = roots;
+        // A malformed external adapter cannot strand a retained descendant.
+        pending.extend(session_work.work.keys().copied());
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            if let Some(entry) = session_work.work.get_mut(&id) {
+                entry.cancelled.store(true, Ordering::Release);
+                if let Some(cancellation) = entry.cancellation.take() {
+                    let _ = cancellation.send(());
+                }
+            }
+            pending.extend(
+                session_work
+                    .work
+                    .iter()
+                    .filter_map(|(child, entry)| (entry.parent == Some(id)).then_some(*child)),
+            );
+        }
+        Ok(())
+    }
+
+    /// Marks a successfully joined session permanently closed to new work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ApplicationDrainRequired`] if a lease remains.
+    pub fn retire(&self, session: [u8; 16]) -> Result<()> {
+        let mut state = self.state.lock().expect("application work state poisoned");
+        if !state.sessions.contains_key(&session)
+            && state.sessions.len() >= MAX_APPLICATION_SESSIONS
+        {
+            return Err(Error::Limit);
+        }
+        let session_work =
+            state
+                .sessions
+                .entry(session)
+                .or_insert_with(|| ApplicationSessionWork {
+                    phase: ApplicationWorkPhase::Open,
+                    work: BTreeMap::new(),
+                    failed: false,
+                    waiters: Vec::new(),
+                });
+        if session_work.work.is_empty() && !session_work.failed {
+            session_work.phase = ApplicationWorkPhase::Deleted;
+            Ok(())
+        } else {
+            Err(Error::ApplicationDrainRequired)
+        }
+    }
+
+    /// Releases the deletion tombstone after the transport has durably
+    /// completed session deletion. A failed deletion retains the tombstone
+    /// so a retry cannot reopen application admission.
+    pub fn forget(&self, session: [u8; 16]) {
+        let mut state = self.state.lock().expect("application work state poisoned");
+        if state.sessions.get(&session).is_some_and(|session_work| {
+            session_work.phase == ApplicationWorkPhase::Deleted && session_work.work.is_empty()
+        }) {
+            state.sessions.remove(&session);
+        }
+    }
+
+    /// Cancels and joins every session still owned by an executable actor.
+    /// The actor uses this only after it stops accepting commands, leaving
+    /// its task join set as the final owner of application futures.
+    pub fn cancel_and_join_all(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+        let sessions = self
+            .state
+            .lock()
+            .expect("application work state poisoned")
+            .sessions
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let supervisor = self.clone();
+        Box::pin(async move {
+            for session in sessions {
+                supervisor.cancel_and_join(session).await?;
+            }
+            Ok(())
+        })
+    }
+
+    #[must_use]
+    pub fn is_draining_or_active(&self, session: [u8; 16]) -> bool {
+        self.state
+            .lock()
+            .expect("application work state poisoned")
+            .sessions
+            .get(&session)
+            .is_some_and(|session_work| {
+                session_work.phase != ApplicationWorkPhase::Open || !session_work.work.is_empty()
+            })
+    }
+
+    fn release(&self, session: [u8; 16], id: u64) {
+        let mut state = self.state.lock().expect("application work state poisoned");
+        if let Some(session_work) = state.sessions.get_mut(&session) {
+            session_work.work.remove(&id);
+            let waiters = std::mem::take(&mut session_work.waiters);
+            drop(state);
+            for waiter in waiters {
+                waiter.wake();
+            }
+        }
+    }
+
+    fn complete(&self, session: [u8; 16], id: u64) {
+        self.release(session, id);
+    }
+}
+
+impl Drop for LiveApplicationWorkLease {
+    fn drop(&mut self) {
+        if !self.completed {
+            let mut state = self
+                .supervisor
+                .state
+                .lock()
+                .expect("application work state poisoned");
+            if let Some(session_work) = state.sessions.get_mut(&self.session) {
+                session_work.failed = true;
+            }
+        }
+        self.supervisor.release(self.session, self.id);
+    }
+}
+
+impl LiveApplicationWorkLease {
+    /// Returns whether cancellation has been requested for this lease or its
+    /// session has entered deletion.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+            || self
+                .supervisor
+                .state
+                .lock()
+                .expect("application work state poisoned")
+                .sessions
+                .get(&self.session)
+                .is_none_or(|session_work| session_work.phase != ApplicationWorkPhase::Open)
+    }
+
+    /// Fences a callback's next state-changing boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] after cancellation or deletion admission.
+    pub fn check_active(&self) -> Result<()> {
+        (!self.is_cancelled()).then_some(()).ok_or(Error::Closed)
+    }
+
+    /// Returns the lock-free cancellation flag for a worker thread that owns
+    /// this lease. The flag is set before the compatibility future is woken.
+    #[must_use]
+    pub fn cancellation_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
+
+    /// Poll this receiver in an async application adapter to observe the
+    /// supervisor's cancellation request.
+    pub fn cancellation(&mut self) -> &mut oneshot::Receiver<()> {
+        &mut self.cancellation
+    }
+
+    /// Acknowledges that the application operation has reached its terminal
+    /// boundary. A dropped lease without this acknowledgement fails a
+    /// deletion join closed rather than being mistaken for successful work.
+    pub fn complete(&mut self) {
+        if !self.completed {
+            self.completed = true;
+            self.supervisor.complete(self.session, self.id);
+        }
+    }
+
+    /// Registers a recursively owned child under this lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] when the parent or session is no longer
+    /// admitted.
+    pub fn spawn_child(&self) -> Result<LiveApplicationWorkLease> {
+        self.supervisor
+            .admit_with_parent(self.session, Some(self.id))
+    }
+}
+
+impl Default for LiveApplicationWorkSupervisor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Narrow seam for application-owned source execution. The adapter owns wire
 /// admission and response identity; implementations must return a canonical
 /// host response rather than an untyped success flag.
@@ -215,6 +600,159 @@ pub trait LiveApplication {
     /// Returns a stable redacted error when the cancellation cannot be applied.
     fn cancel(&mut self, _: [u8; 16], _: [u8; 16], _: [u8; 32], _: &Message) -> Result<Envelope> {
         Err(Error::UnsupportedOperation)
+    }
+
+    /// Dispatches an admitted application operation under its ownership
+    /// lease. Existing synchronous implementations inherit this compatibility
+    /// path; cooperative adapters may override it and await
+    /// [`LiveApplicationWorkLease::cancellation`] at bounded checkpoints.
+    fn dispatch_with_work<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        watch: Option<[u8; 16]>,
+        fingerprint: [u8; 32],
+        work: &'a mut LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<Envelope>> + 'a>> {
+        Box::pin(async move {
+            work.check_active()?;
+            let response = match message {
+                Message::Subscribe { .. } => self.subscribe(session, request, message),
+                Message::Resync => self.resync(
+                    session,
+                    request,
+                    watch.ok_or(Error::InvalidMessage)?,
+                    message,
+                ),
+                Message::Unsubscribe => self.unsubscribe(session, request, fingerprint, message),
+                Message::Event { .. } => self.event(session, request, message),
+                Message::Eval { .. } => self.eval(session, request, message),
+                Message::Watch { .. } => self.watch(session, request, message),
+                Message::Cancel { .. } => self.cancel(session, request, fingerprint, message),
+                _ => Err(Error::InvalidMessage),
+            };
+            work.complete();
+            let response = response?;
+            work.check_active()?;
+            Ok(response)
+        })
+    }
+}
+
+impl LiveSessionChildren for LiveApplicationWorkSupervisor {
+    fn cancel_and_join_session<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        requests: &'a [RequestIdentity],
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        if requests.iter().any(|request| request.session_id != session) {
+            return Box::pin(async { Err(Error::ApplicationDrainRequired) });
+        }
+        Box::pin(self.cancel_and_join(session))
+    }
+}
+
+/// Work admitted by the transport before application execution. The ticket
+/// owns the application lease and is therefore not complete until the
+/// application task explicitly acknowledges its terminal boundary.
+pub struct LiveApplicationTicket {
+    session: [u8; 16],
+    request: [u8; 16],
+    message: Message,
+    watch: Option<[u8; 16]>,
+    fingerprint: [u8; 32],
+    work: LiveApplicationWorkLease,
+    invoke_callback: bool,
+    resync_revisions: usize,
+    cancel_target: Option<([u8; 16], TargetKind, bool, bool)>,
+}
+
+/// Result returned by the application task to the transport actor.
+pub struct LiveApplicationCompletion {
+    ticket: LiveApplicationTicket,
+    response: Result<Envelope>,
+}
+
+pub enum ApplicationPreparation {
+    Work(LiveApplicationTicket),
+    Completed(DispatchOutcome),
+}
+
+pub enum WebSocketApplicationPreparation {
+    Pending,
+    Output(WebSocketOutput),
+    Work(LiveApplicationTicket),
+}
+
+impl LiveApplicationTicket {
+    #[must_use]
+    pub fn session(&self) -> [u8; 16] {
+        self.session
+    }
+
+    #[must_use]
+    pub fn request(&self) -> [u8; 16] {
+        self.request
+    }
+
+    /// Reports cancellation without borrowing the supervisor state. This is
+    /// the worker-thread admission check used before dequeuing application
+    /// work after a session begins draining.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.work.is_cancelled()
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &Message {
+        &self.message
+    }
+
+    /// Polls cancellation while an executable scheduler is waiting to hand
+    /// the ticket an evaluator owner.
+    pub fn cancellation(&mut self) -> &mut oneshot::Receiver<()> {
+        self.work.cancellation()
+    }
+
+    /// Converts an admitted ticket into a terminal application failure when
+    /// an executable scheduler cannot start it (for example, after its
+    /// bounded queue is full). The lease is explicitly completed so dropping
+    /// a scheduler-owned ticket cannot masquerade as an unjoined child.
+    pub fn reject(mut self, error: Error) -> LiveApplicationCompletion {
+        self.work.complete();
+        LiveApplicationCompletion {
+            ticket: self,
+            response: Err(error),
+        }
+    }
+
+    /// Executes the application callback without borrowing the transport.
+    /// The returned completion owns the ticket until the actor accepts or
+    /// rejects its fenced result.
+    pub async fn execute(
+        mut self,
+        application: &mut impl LiveApplication,
+    ) -> LiveApplicationCompletion {
+        let response = if self.invoke_callback {
+            application
+                .dispatch_with_work(
+                    self.session,
+                    self.request,
+                    &self.message,
+                    self.watch,
+                    self.fingerprint,
+                    &mut self.work,
+                )
+                .await
+        } else {
+            Ok(unit_result_response(self.request, self.fingerprint))
+        };
+        self.work.complete();
+        LiveApplicationCompletion {
+            ticket: self,
+            response,
+        }
     }
 }
 
@@ -351,6 +889,7 @@ pub struct LiveHost {
     writer_lease: Option<WriterLease>,
     recovered_owner: Option<RequestOwner>,
     takeover_recovery_complete: bool,
+    application_work: LiveApplicationWorkSupervisor,
 }
 
 enum DurableAdmission {
@@ -481,7 +1020,16 @@ impl LiveHost {
             writer_lease: None,
             recovered_owner,
             takeover_recovery_complete: false,
+            application_work: LiveApplicationWorkSupervisor::new(),
         })
+    }
+
+    /// Returns the shared application-work boundary used by this host. The
+    /// executable owner passes a clone to its deletion supervisor so callback
+    /// admission and deletion join observe one state machine.
+    #[must_use]
+    pub fn application_work_supervisor(&self) -> LiveApplicationWorkSupervisor {
+        self.application_work.clone()
     }
 
     /// Selects the required live-protocol WebSocket subprotocol.
@@ -836,7 +1384,8 @@ impl LiveHost {
     }
 
     async fn session_requires_child_drain(&self, session: [u8; 16]) -> Result<bool> {
-        if self.application_sessions.contains(&session)
+        if self.application_work.is_draining_or_active(session)
+            || self.application_sessions.contains(&session)
             || self
                 .requests
                 .iter()
@@ -916,6 +1465,8 @@ impl LiveHost {
         {
             return Err(Error::ApplicationDrainRequired);
         }
+
+        self.application_work.retire(session)?;
 
         let watches = self
             .watches
@@ -999,6 +1550,7 @@ impl LiveHost {
             .map_err(|_| Error::DeletionFailed)?;
         if deleted {
             self.application_sessions.remove(&request.id);
+            self.application_work.forget(request.id);
             self.deleted_sessions.insert(
                 request.id,
                 DeletedSession {
@@ -1094,6 +1646,342 @@ impl LiveHost {
             .dispatch_frame(attachment, now, Frame::Close, &mut application)
             .await?
             .outcome)
+    }
+
+    /// Performs protocol admission and returns an owned application ticket.
+    /// The transport borrow ends before the application task runs, allowing a
+    /// concurrent actor to process DELETE and other lifecycle commands.
+    pub async fn prepare_application_frame(
+        &mut self,
+        attachment: [u8; 16],
+        now: u64,
+        frame: Frame,
+    ) -> Result<ApplicationPreparation> {
+        let session = *self.attachments.get(&attachment).ok_or(Error::Closed)?;
+        self.security
+            .validate_active_attachment(session_id(session), attachment_id(attachment), now)
+            .map_err(map_boundary)?;
+        let Frame::Binary(bytes) = frame else {
+            return Err(Error::InvalidFrame);
+        };
+        let envelope = self.decode(&bytes)?;
+        let request = envelope.request.ok_or(Error::InvalidMessage)?;
+        if matches!(
+            envelope.message,
+            Message::Snapshot { .. }
+                | Message::Delta { .. }
+                | Message::Result { .. }
+                | Message::Diagnostic { .. }
+                | Message::RequestStatusResult { .. }
+                | Message::RequestStatus { .. }
+        ) {
+            return Err(Error::InvalidMessage);
+        }
+        let fingerprint = canonical_request_fingerprint(session, &envelope, self.limits.protocol)
+            .map_err(|_| Error::InvalidMessage)?;
+        if let Message::Event {
+            fingerprint: sent, ..
+        }
+        | Message::Eval {
+            fingerprint: sent, ..
+        } = &envelope.message
+            && *sent != fingerprint
+        {
+            return Err(Error::RequestMismatch);
+        }
+        if matches!(envelope.message, Message::Event { .. } | Message::Resync) {
+            let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
+            if !self.watches.contains(&(session, watch)) {
+                return Err(Error::Denied);
+            }
+        }
+        if self.runtime.is_some() {
+            match self
+                .admit_durable_request(session, request, fingerprint, &envelope)
+                .await?
+            {
+                DurableAdmission::Active => {
+                    self.requests.insert(
+                        (session, request),
+                        RequestRecord {
+                            fingerprint,
+                            terminal: None,
+                        },
+                    );
+                    return Ok(ApplicationPreparation::Completed(DispatchOutcome {
+                        outcome: FrameOutcome::Accepted,
+                        response: None,
+                    }));
+                }
+                DurableAdmission::Replay(outcome) => {
+                    self.requests.insert(
+                        (session, request),
+                        RequestRecord {
+                            fingerprint,
+                            terminal: Some((*outcome).clone()),
+                        },
+                    );
+                    return Ok(ApplicationPreparation::Completed(*outcome));
+                }
+                DurableAdmission::Execute => {}
+            }
+        } else if let Some(record) = self.requests.get(&(session, request)) {
+            if record.fingerprint != fingerprint {
+                return Err(Error::RequestMismatch);
+            }
+            return Ok(ApplicationPreparation::Completed(
+                record.terminal.clone().unwrap_or(DispatchOutcome {
+                    outcome: FrameOutcome::Accepted,
+                    response: None,
+                }),
+            ));
+        }
+
+        let mut cancel_target = None;
+        let mut invoke_callback = true;
+        if let Message::Cancel {
+            target_kind,
+            target,
+        } = &envelope.message
+        {
+            let target_active = match target_kind {
+                TargetKind::Request => self.request_target_active(session, *target).await?,
+                TargetKind::Watch => self.watches.contains(&(session, *target)),
+            };
+            let durable_request = *target_kind == TargetKind::Request && self.runtime.is_some();
+            let target_cancelled = if target_active && durable_request {
+                self.cancel_target_request(session, *target).await?
+            } else {
+                false
+            };
+            invoke_callback = target_active
+                && (*target_kind == TargetKind::Watch
+                    || if durable_request {
+                        target_cancelled
+                    } else {
+                        true
+                    });
+            cancel_target = Some((*target, *target_kind, target_active, durable_request));
+        } else if let Message::Unsubscribe = &envelope.message {
+            let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
+            invoke_callback = self.watches.contains(&(session, watch));
+        }
+
+        let resync_revisions = if matches!(envelope.message, Message::Resync) {
+            self.serving.resync(session, 0).map_err(map_serving)?.len()
+        } else {
+            0
+        };
+        let mut work = self.application_work.admit(session, request)?;
+        if let Err(error) = self.reserve_and_start(session, request, fingerprint) {
+            work.complete();
+            self.retain_failure(session, request, fingerprint).await?;
+            return Err(error);
+        }
+        self.application_sessions.insert(session);
+        Ok(ApplicationPreparation::Work(LiveApplicationTicket {
+            session,
+            request,
+            message: envelope.message,
+            watch: envelope.watch,
+            fingerprint,
+            work,
+            invoke_callback,
+            resync_revisions,
+            cancel_target,
+        }))
+    }
+
+    /// Validates and publishes a completed application ticket after the actor
+    /// has reacquired its transport state. A stale completion is rejected by
+    /// the durable terminal claim and the session/application fence.
+    pub async fn complete_application(
+        &mut self,
+        completion: LiveApplicationCompletion,
+    ) -> Result<DispatchOutcome> {
+        let LiveApplicationCompletion { ticket, response } = completion;
+        let LiveApplicationTicket {
+            session,
+            request,
+            message,
+            watch,
+            fingerprint,
+            work,
+            resync_revisions,
+            cancel_target,
+            ..
+        } = ticket;
+        let mut work = work;
+        work.complete();
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                if !matches!(error, Error::ApplicationDeferred)
+                    && !self.deleted_sessions.contains_key(&session)
+                {
+                    self.retain_failure(session, request, fingerprint).await?;
+                }
+                return Err(error);
+            }
+        };
+        // This check is intentionally before response validation can mutate a
+        // watch or serving state. A completion which arrives after DELETE's
+        // terminal claim is stale, even if its payload is otherwise valid.
+        self.validate_application_completion_parts(session, request, fingerprint)
+            .await?;
+        let envelope = Envelope {
+            request: Some(request),
+            watch,
+            message: message.clone(),
+            extensions: BTreeMap::new(),
+        };
+        let mut open_watch = None;
+        let mut close_watch = None;
+        let mut cancel_request = None;
+        let outcome = match &message {
+            Message::Subscribe { .. } => {
+                let outcome =
+                    validate_snapshot_response(request, None, response, self.limits.protocol)?;
+                let watch = outcome
+                    .response
+                    .as_ref()
+                    .and_then(|response| response.watch)
+                    .ok_or(Error::ApplicationRejected)?;
+                open_watch = Some(watch);
+                outcome
+            }
+            Message::Resync => {
+                let watch = watch.ok_or(Error::InvalidMessage)?;
+                let outcome =
+                    validate_watch_response(request, Some(watch), response, self.limits.protocol)?;
+                DispatchOutcome {
+                    outcome: FrameOutcome::Resync {
+                        revisions: resync_revisions,
+                    },
+                    response: outcome.response,
+                }
+            }
+            Message::Unsubscribe => {
+                let watch = watch.ok_or(Error::InvalidMessage)?;
+                let outcome = validate_control_response(
+                    request,
+                    fingerprint,
+                    response,
+                    self.limits.protocol,
+                )?;
+                close_watch = Some(watch);
+                outcome
+            }
+            Message::Event { .. } | Message::Eval { .. } => {
+                validate_result_response(request, fingerprint, response, self.limits.protocol)?
+            }
+            Message::Watch { .. } => {
+                let outcome =
+                    validate_watch_response(request, None, response, self.limits.protocol)?;
+                if matches!(
+                    outcome.response.as_ref().map(|response| &response.message),
+                    Some(Message::Snapshot { .. })
+                ) {
+                    let watch = outcome
+                        .response
+                        .as_ref()
+                        .and_then(|response| response.watch)
+                        .ok_or(Error::ApplicationRejected)?;
+                    open_watch = Some(watch);
+                }
+                outcome
+            }
+            Message::Cancel {
+                target_kind,
+                target,
+            } => {
+                let outcome = validate_control_response(
+                    request,
+                    fingerprint,
+                    response,
+                    self.limits.protocol,
+                )?;
+                if let Some((_, _, target_active, _)) = cancel_target
+                    && target_active
+                    && *target_kind == TargetKind::Watch
+                {
+                    close_watch = Some(*target);
+                }
+                if let Some((_, TargetKind::Request, target_active, durable_request)) =
+                    cancel_target
+                    && target_active
+                    && !durable_request
+                {
+                    cancel_request = Some(*target);
+                }
+                DispatchOutcome {
+                    outcome: FrameOutcome::Cancelled,
+                    response: outcome.response,
+                }
+            }
+            _ => return Err(Error::InvalidMessage),
+        };
+        let outcome = self.complete(session, request, &envelope, outcome).await?;
+        let cancelled_winner = matches!(
+            outcome.response.as_ref().map(|response| &response.message),
+            Some(Message::Result {
+                status: ResultStatus::Cancellation,
+                ..
+            })
+        );
+        if !cancelled_winner {
+            if let Some(watch) = open_watch {
+                self.open_watch(session, watch, &outcome)?;
+            }
+            if let Some(watch) = close_watch {
+                self.serving
+                    .close_watch(session, watch)
+                    .map_err(map_serving)?;
+                self.watches.remove(&(ticket.session, watch));
+            }
+            if let Some(request) = cancel_request {
+                self.cancel_target_request(session, request).await?;
+            }
+        }
+        Ok(outcome)
+    }
+
+    async fn validate_application_completion_parts(
+        &self,
+        session: [u8; 16],
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+    ) -> Result<()> {
+        if self.deleted_sessions.contains_key(&session) {
+            return Err(Error::Closed);
+        }
+        let record = self
+            .requests
+            .get(&(session, request))
+            .ok_or(Error::Closed)?;
+        if record.fingerprint != fingerprint {
+            return Err(Error::RequestMismatch);
+        }
+        if record.terminal.is_some() {
+            return Err(Error::Closed);
+        }
+        if let Some(runtime) = &self.runtime {
+            let status = runtime
+                .request_status_for_identity(RequestIdentity {
+                    session_id: session,
+                    request_id: request,
+                })
+                .await
+                .map_err(|error| map_runtime(&error))?
+                .ok_or(Error::Closed)?;
+            if status.fingerprint != fingerprint {
+                return Err(Error::RequestMismatch);
+            }
+            if status.state.is_terminal() {
+                return Err(Error::Closed);
+            }
+        }
+        Ok(())
     }
 
     /// Dispatches one complete client frame through the full client registry.
@@ -1237,18 +2125,21 @@ impl LiveHost {
                         | Message::Watch { .. }
                         | Message::Cancel { .. }
                 ) {
-                    // The application trait is synchronous, so the live host
-                    // cannot infer whether the callback retained a child. A
-                    // later DELETE therefore requires the explicit child
-                    // supervisor instead of treating callback return as a
-                    // join proof.
                     self.application_sessions.insert(session);
                 }
                 let dispatched: Result<DispatchOutcome> = async {
                     match &envelope.message {
                         Message::Subscribe { .. } => {
-                            let response =
-                                application.subscribe(session, request, &envelope.message)?;
+                            let response = self
+                                .application_call(
+                                    application,
+                                    session,
+                                    request,
+                                    &envelope.message,
+                                    None,
+                                    fingerprint,
+                                )
+                                .await?;
                             let outcome = validate_snapshot_response(
                                 request,
                                 None,
@@ -1267,8 +2158,16 @@ impl LiveHost {
                             let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
                             let revisions =
                                 self.serving.resync(session, 0).map_err(map_serving)?.len();
-                            let response =
-                                application.resync(session, request, watch, &envelope.message)?;
+                            let response = self
+                                .application_call(
+                                    application,
+                                    session,
+                                    request,
+                                    &envelope.message,
+                                    Some(watch),
+                                    fingerprint,
+                                )
+                                .await?;
                             let outcome = validate_watch_response(
                                 request,
                                 Some(watch),
@@ -1289,12 +2188,15 @@ impl LiveHost {
                         Message::Unsubscribe => {
                             let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
                             let response = if self.watches.contains(&(session, watch)) {
-                                application.unsubscribe(
+                                self.application_call(
+                                    application,
                                     session,
                                     request,
-                                    fingerprint,
                                     &envelope.message,
-                                )?
+                                    Some(watch),
+                                    fingerprint,
+                                )
+                                .await?
                             } else {
                                 unit_result_response(request, fingerprint)
                             };
@@ -1311,8 +2213,16 @@ impl LiveHost {
                             self.complete(session, request, &envelope, outcome).await
                         }
                         Message::Event { .. } => {
-                            let response =
-                                application.event(session, request, &envelope.message)?;
+                            let response = self
+                                .application_call(
+                                    application,
+                                    session,
+                                    request,
+                                    &envelope.message,
+                                    envelope.watch,
+                                    fingerprint,
+                                )
+                                .await?;
                             let outcome = validate_result_response(
                                 request,
                                 fingerprint,
@@ -1322,7 +2232,16 @@ impl LiveHost {
                             self.complete(session, request, &envelope, outcome).await
                         }
                         Message::Eval { .. } => {
-                            let response = application.eval(session, request, &envelope.message)?;
+                            let response = self
+                                .application_call(
+                                    application,
+                                    session,
+                                    request,
+                                    &envelope.message,
+                                    envelope.watch,
+                                    fingerprint,
+                                )
+                                .await?;
                             let outcome = validate_result_response(
                                 request,
                                 fingerprint,
@@ -1332,8 +2251,16 @@ impl LiveHost {
                             self.complete(session, request, &envelope, outcome).await
                         }
                         Message::Watch { .. } => {
-                            let response =
-                                application.watch(session, request, &envelope.message)?;
+                            let response = self
+                                .application_call(
+                                    application,
+                                    session,
+                                    request,
+                                    &envelope.message,
+                                    envelope.watch,
+                                    fingerprint,
+                                )
+                                .await?;
                             let outcome = validate_watch_response(
                                 request,
                                 None,
@@ -1378,12 +2305,16 @@ impl LiveHost {
                                         true
                                     });
                             let response = if callback_allowed {
-                                let response = application.cancel(
-                                    session,
-                                    request,
-                                    fingerprint,
-                                    &envelope.message,
-                                )?;
+                                let response = self
+                                    .application_call(
+                                        application,
+                                        session,
+                                        request,
+                                        &envelope.message,
+                                        envelope.watch,
+                                        fingerprint,
+                                    )
+                                    .await?;
                                 if *target_kind == TargetKind::Watch {
                                     self.serving
                                         .close_watch(session, *target)
@@ -1525,6 +2456,26 @@ impl LiveHost {
                 dispatched
             }
         }
+    }
+
+    async fn application_call(
+        &mut self,
+        application: &mut impl LiveApplication,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &Message,
+        watch: Option<[u8; 16]>,
+        fingerprint: [u8; 32],
+    ) -> Result<Envelope> {
+        let mut work = self.application_work.admit(session, request)?;
+        let result = application
+            .dispatch_with_work(session, request, message, watch, fingerprint, &mut work)
+            .await;
+        // The default compatibility hook acknowledges the callback itself.
+        // This second call is idempotent and gives custom hooks a convenient
+        // way to use a child lease without having to retain the root.
+        work.complete();
+        result
     }
 
     async fn admit_durable_request(
@@ -3341,6 +4292,13 @@ pub struct LiveTransport {
 }
 
 impl LiveTransport {
+    /// Returns the shared application-work ownership boundary used by the
+    /// executable actor for admission and session deletion.
+    #[must_use]
+    pub fn application_work_supervisor(&self) -> LiveApplicationWorkSupervisor {
+        self.host.application_work_supervisor()
+    }
+
     /// Binds the default live listener to IPv4 loopback only.
     ///
     /// # Errors
@@ -3544,6 +4502,62 @@ impl LiveTransport {
             }
         }
         failure.map_or(Ok(()), Err)
+    }
+
+    /// Reassembles one WebSocket input and performs only transport admission
+    /// for a complete application envelope. The returned work ticket owns all
+    /// application state needed after this method returns.
+    pub async fn prepare_websocket_application(
+        &mut self,
+        socket: &mut WebSocketState,
+        now: u64,
+        bytes: &[u8],
+    ) -> Result<WebSocketApplicationPreparation> {
+        let event = socket.push_one(bytes, self.limits.max_frame_bytes)?;
+        let Some(event) = event else {
+            return Ok(WebSocketApplicationPreparation::Pending);
+        };
+        match event {
+            SocketEvent::Binary(message) => match self
+                .host
+                .prepare_application_frame(socket.attachment, now, Frame::Binary(message))
+                .await?
+            {
+                ApplicationPreparation::Work(ticket) => {
+                    Ok(WebSocketApplicationPreparation::Work(ticket))
+                }
+                ApplicationPreparation::Completed(outcome) => Ok(
+                    WebSocketApplicationPreparation::Output(self.websocket_output(outcome)?),
+                ),
+            },
+            SocketEvent::Ping(payload) => Ok(WebSocketApplicationPreparation::Output(
+                WebSocketOutput::Pong(payload),
+            )),
+            SocketEvent::Pong => Ok(WebSocketApplicationPreparation::Pending),
+            SocketEvent::Close => {
+                let outcome = self.host.close_attachment(socket.attachment, now).await?;
+                Ok(WebSocketApplicationPreparation::Output(
+                    WebSocketOutput::Accepted(outcome),
+                ))
+            }
+            SocketEvent::Text => {
+                let _ = self.host.close_attachment(socket.attachment, now).await;
+                Ok(WebSocketApplicationPreparation::Output(
+                    WebSocketOutput::Close { code: Some(1003) },
+                ))
+            }
+        }
+    }
+
+    /// Publishes a prepared application result after the actor has reacquired
+    /// transport state. Durable/runtime fencing decides whether a late result
+    /// is a replay of cancellation or a valid terminal response.
+    pub async fn complete_application(
+        &mut self,
+        completion: LiveApplicationCompletion,
+    ) -> Result<WebSocketOutput> {
+        let outcome = self.host.complete_application(completion).await?;
+        self.websocket_output(outcome)
     }
 
     /// Idempotently closes one attachment through the transport-owned host
@@ -5375,6 +6389,7 @@ mod tests {
     use std::{
         fs,
         process::Command,
+        task::Poll,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -5416,6 +6431,138 @@ mod tests {
         fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
             Err(Error::UnsupportedOperation)
         }
+    }
+
+    struct CancellationAwareApplication;
+
+    impl LiveApplication for CancellationAwareApplication {
+        fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+
+        fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+
+        fn dispatch_with_work<'a>(
+            &'a mut self,
+            _: [u8; 16],
+            _: [u8; 16],
+            _: &'a Message,
+            _: Option<[u8; 16]>,
+            _: [u8; 32],
+            work: &'a mut LiveApplicationWorkLease,
+        ) -> Pin<Box<dyn Future<Output = Result<Envelope>> + 'a>> {
+            Box::pin(async move {
+                work.cancellation().await.map_err(|_| Error::Closed)?;
+                Err(Error::Closed)
+            })
+        }
+    }
+
+    #[test]
+    fn delete_waits_for_application_ticket_and_fences_late_completion() {
+        let session = [1; 16];
+        let origin = Origin::parse("https://app.example").unwrap();
+        let credential = SessionCredential {
+            security: OpaqueCredential::from_bytes([7; 32]),
+            serving: ServingCredential::new([7; 32]),
+        };
+        let mut host = subscribed_host(None);
+        let ticket = match futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            1,
+            Frame::Binary(eval_frame([5; 16])),
+        ))
+        .unwrap()
+        {
+            ApplicationPreparation::Work(ticket) => ticket,
+            ApplicationPreparation::Completed(_) => panic!("application work was not admitted"),
+        };
+        let supervisor = host.application_work_supervisor();
+        let run = async move {
+            let mut application = CancellationAwareApplication;
+            let execute = ticket.execute(&mut application);
+            let join = supervisor.cancel_and_join(session);
+            futures::join!(execute, join)
+        };
+        let (completion, joined) = futures::executor::block_on(run);
+        assert_eq!(joined, Ok(()));
+
+        let mut deletion = ExpiryDeletion::default();
+        let mut children = host.application_work_supervisor();
+        assert_eq!(
+            futures::executor::block_on(host.delete_with_children(
+                DeleteRequest {
+                    id: session,
+                    origin: &origin,
+                    credential: &credential,
+                    now: 2,
+                },
+                &mut deletion,
+                &mut children,
+            )),
+            Ok(())
+        );
+        assert_eq!(deletion.calls, 1);
+        assert_eq!(
+            futures::executor::block_on(host.complete_application(completion)),
+            Err(Error::Closed)
+        );
+    }
+
+    #[test]
+    fn application_work_join_cancels_recursive_children_and_waits_for_ack() {
+        let session = [41; 16];
+        let supervisor = LiveApplicationWorkSupervisor::new();
+        let mut root = supervisor.admit(session, [1; 16]).unwrap();
+        let mut child = root.spawn_child().unwrap();
+        let join_supervisor = supervisor.clone();
+        let execution = async move {
+            let child_cancelled = child.cancellation().await.is_ok();
+            child.complete();
+            let root_cancelled = root.cancellation().await.is_ok();
+            root.complete();
+            (child_cancelled, root_cancelled)
+        };
+        let joined = async move {
+            let join = join_supervisor.cancel_and_join(session);
+            let ((child_cancelled, root_cancelled), result) = futures::join!(execution, join);
+            assert!(child_cancelled);
+            assert!(root_cancelled);
+            assert_eq!(result, Ok(()));
+        };
+        futures::executor::block_on(joined);
+        assert!(matches!(
+            supervisor.admit(session, [2; 16]),
+            Err(Error::Closed)
+        ));
+    }
+
+    #[test]
+    fn application_work_fences_late_publication_before_join() {
+        let session = [42; 16];
+        let supervisor = LiveApplicationWorkSupervisor::new();
+        let mut lease = supervisor.admit(session, [1; 16]).unwrap();
+        let join_supervisor = supervisor.clone();
+        let check = async move {
+            let mut join = join_supervisor.cancel_and_join(session);
+            futures::future::poll_fn(|context| match Pin::new(&mut join).poll(context) {
+                Poll::Pending => Poll::Ready(()),
+                Poll::Ready(result) => {
+                    panic!("join completed before lease acknowledgement: {result:?}")
+                }
+            })
+            .await;
+            assert!(lease.is_cancelled());
+            assert_eq!(lease.check_active(), Err(Error::Closed));
+            lease.complete();
+        };
+        futures::executor::block_on(check);
+        assert!(matches!(
+            supervisor.admit(session, [2; 16]),
+            Err(Error::Closed)
+        ));
     }
 
     #[derive(Default)]
