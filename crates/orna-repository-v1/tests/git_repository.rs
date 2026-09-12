@@ -6,7 +6,7 @@ use std::{
 
 use ed25519_dalek::{Signer, SigningKey};
 use fs2::FileExt;
-use orna_foundation_v1::{CanonicalValue, OvbRaw};
+use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
     CheckoutExecutionError, CheckoutTarget, CompactManifest, CompactRuntimeReceipt, CompactSegment,
     CompactSegmentRole, GitDeclaredObjectSetState, GitObjectKind, GitObjectState,
@@ -14,7 +14,7 @@ use orna_repository_v1::{
     RemoteContinuity, Repository, RequiredInternalRef, RuntimeGeneration, WorktreeState,
 };
 use parquet::{
-    basic::{Compression, PageType},
+    basic::{Compression, Encoding, PageType},
     data_type::Int64Type,
     file::{
         metadata::{KeyValue, ParquetMetaDataWriter},
@@ -141,7 +141,7 @@ fn compact_segment_with_manifest_columns(
     CompactSegment::new(
         segment_id,
         CompactSegmentRole::Data,
-        [7; 32],
+        compact_schema_fingerprint(table),
         "test-encoder-v1",
         path,
         bytes,
@@ -171,9 +171,12 @@ fn compact_parquet(table: Uuid, ordinal: u64, columns: &[u8], payload: Vec<u8>) 
         KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
         KeyValue::new(
             "orna.schema.sha256".to_owned(),
-            Some("0707070707070707070707070707070707070707070707070707070707070707".to_owned()),
+            Some(hex_digest(&compact_schema_fingerprint(table))),
         ),
-        KeyValue::new("orna.schema.ovb".to_owned(), Some("AA==".to_owned())),
+        KeyValue::new(
+            "orna.schema.ovb".to_owned(),
+            Some(base64(&compact_schema(table).encode().unwrap())),
+        ),
         KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
         KeyValue::new(
             "orna.encoder".to_owned(),
@@ -188,6 +191,7 @@ fn compact_parquet(table: Uuid, ordinal: u64, columns: &[u8], payload: Vec<u8>) 
         WriterProperties::builder()
             .set_compression(Compression::ZSTD(Default::default()))
             .set_dictionary_enabled(false)
+            .set_encoding(Encoding::PLAIN)
             .set_writer_version(WriterVersion::PARQUET_2_0)
             .set_key_value_metadata(Some(metadata))
             .build(),
@@ -220,6 +224,43 @@ fn compact_columns() -> Vec<u8> {
 
 fn compact_field_id() -> Uuid {
     Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001)
+}
+
+fn compact_schema(table: Uuid) -> SchemaDescriptor {
+    let field = compact_field_id();
+    SchemaDescriptor::new(OvbRaw::Map(vec![
+        (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+        (
+            OvbRaw::Int(1.into()),
+            OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(table.as_bytes().to_vec()))),
+        ),
+        (
+            OvbRaw::Int(2.into()),
+            OvbRaw::Array(vec![OvbRaw::Tag(
+                37,
+                Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
+            )]),
+        ),
+        (
+            OvbRaw::Int(3.into()),
+            OvbRaw::Array(vec![OvbRaw::Array(vec![
+                OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(field.as_bytes().to_vec()))),
+                OvbRaw::Text(format!("f_{}", field.simple())),
+                OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]),
+                OvbRaw::Int(0.into()),
+                OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+            ])]),
+        ),
+        (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+    ]))
+    .unwrap()
+}
+
+fn compact_schema_fingerprint(table: Uuid) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"orna.schema.v1\0");
+    digest.update(compact_schema(table).encode().unwrap());
+    digest.finalize().into()
 }
 
 fn compact_columns_for_field(field_id: Uuid) -> Vec<u8> {
@@ -488,7 +529,7 @@ fn compact_plan(
     let base = repository
         .read_compact_manifest(&head, table)
         .unwrap()
-        .unwrap_or_else(|| CompactManifest::empty(table, [7; 32]));
+        .unwrap_or_else(|| CompactManifest::empty(table, compact_schema_fingerprint(table)));
     repository
         .prepare_compact_publication(
             &head,
@@ -2406,7 +2447,7 @@ fn empty_compact_manifest_is_a_valid_committed_snapshot() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
     let table = Uuid::new_v4();
-    let schema = [7; 32];
+    let schema = compact_schema_fingerprint(table);
     let manifest_path = ManagedPath::new(format!(".orna/storage/{table}/manifest.orna")).unwrap();
     let manifest = format!(
         "{{profile: \"compact-storage-v1\", table: \"{table}\", schema: \"{}\", next_generation: 1, shards: []}}\n",
@@ -3352,7 +3393,7 @@ fn compact_publication_rejects_a_descriptor_that_does_not_match_parquet_leaves()
         repo.prepare_compact_publication(
             &head,
             repo.index_generation().unwrap(),
-            CompactManifest::empty(table, [7; 32]),
+            CompactManifest::empty(table, compact_schema_fingerprint(table)),
             [39; 16],
             [39; 32],
             &[segment],
@@ -3861,7 +3902,7 @@ fn compact_publication_rebuilds_from_the_current_manifest_after_a_stale_head() {
     let rebuilt = repo
         .rebuild_compact_publication_with_watermark(
             table,
-            [7; 32],
+            compact_schema_fingerprint(table),
             [45; 16],
             [45; 32],
             &[stale_segment],
