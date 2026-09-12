@@ -259,45 +259,115 @@ fn binary_repl_recovers_from_malformed_terminal_input() {
 }
 
 #[test]
-fn binary_managed_local_repl_executes_a_project_standard_import() {
-    let directory = tempfile::tempdir().expect("REPL working directory");
+fn binary_check_accepts_a_core_only_project_without_std() {
+    let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        "use std.math; pub fn run(): Int = std.math.increment(41);",
+        "pub fn main(): Int = 42;",
     )
     .expect("project source");
-    assert!(
-        Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .expect("git")
-            .success()
-    );
+    initialize_project(directory.path());
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .current_dir(directory.path())
-        .args(["repl"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "check",
+        ])
+        .output()
         .expect("CLI process");
-    child
-        .stdin
-        .take()
-        .expect("CLI stdin")
-        .write_all(b"use std.math;\nstd.math.clamp(99, 20, 22)\n:quit\n")
-        .expect("REPL input");
-    let output = child.wait_with_output().expect("CLI process output");
 
-    assert!(output.status.success());
-    assert_eq!(
-        output.stdout, b"> > 22 : Int\n> ",
-        "managed-local REPL must return the typed bridge result"
-    );
+    assert!(output.status.success(), "check stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"project valid\n");
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_check_and_run_reject_an_uncaptured_standard_import() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        "use std.math; pub fn main(): Int = std.math.increment(41);",
+    )
+    .expect("project source");
+    initialize_project(directory.path());
+
+    let check = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "check",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(!check.status.success());
+    assert!(check.stdout.is_empty());
+    assert_eq!(
+        check.stderr,
+        b"error[E2101]: standard library imports are unsupported by this CLI\nhelp: remove standard-library imports; this CLI currently admits core-only projects\n"
+    );
+
+    let run = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(!run.status.success());
+    assert!(run.stdout.is_empty());
+    assert_eq!(
+        run.stderr,
+        b"error[E2101]: standard library imports are unsupported by this CLI\nhelp: remove standard-library imports; this CLI currently admits core-only projects\n"
+    );
+
+    let invoke = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "invoke",
+            "main",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(!invoke.status.success());
+    assert!(invoke.stdout.is_empty());
+    assert_eq!(invoke.stderr, check.stderr);
+
+    let stream = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+            "sensors.ingest",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(!stream.status.success());
+    assert!(stream.stdout.is_empty());
+    assert_eq!(stream.stderr, check.stderr);
+
+    let repl = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "repl",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(!repl.status.success());
+    assert!(repl.stdout.is_empty());
+    assert_eq!(
+        repl.stderr,
+        b"error[E2101]: standard library imports are unsupported by this CLI\nhelp: remove standard-library imports; this CLI currently admits core-only projects\n"
+    );
 }
 
 #[test]

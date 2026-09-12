@@ -20,21 +20,6 @@ use orna_foundation_v1::{OvbRaw, Value};
 use orna_runtime_v1::RuntimeIdentity;
 
 const SENSOR_SOURCE_IDENTITY: &str = "example:sensors:v1";
-const STD_MATH_LOGICAL_PATH: &str = "std/math.orna";
-const STD_MATH_SOURCE: &str = include_str!("stdlib/std/math.orna");
-
-fn standard_sources() -> [(String, String); 1] {
-    [(STD_MATH_LOGICAL_PATH.into(), STD_MATH_SOURCE.into())]
-}
-
-fn standard_profile() -> orna_semantic_v1::StandardDependencyProfile {
-    orna_semantic_v1::StandardDependencyProfile::from_sources(
-        "orna.std/v1-pure-math",
-        standard_sources(),
-    )
-    .expect("built-in standard source profile is valid")
-}
-
 #[allow(
     dead_code,
     reason = "The bounded CLI records the complete specified exit-status space."
@@ -627,47 +612,39 @@ fn load_project(endpoint: &Endpoint) -> Result<orna_project_v1::LoadedProject, D
             "run the command inside a Git worktree or provide a local project path",
         )
     })?;
-    orna_project_v1::ProjectLoader::default()
-        .load_with_standard_profile(&repository, Some(standard_profile()))
+    let project = orna_project_v1::ProjectLoader::default()
+        .load(&repository)
         .map_err(|_| {
             Diagnostic::target(
                 "E2100",
                 "project source could not be loaded",
                 "fix the project module graph and source boundaries, then run check again",
             )
-        })
+        })?;
+    reject_uncaptured_standard_modules(&project)?;
+    Ok(project)
 }
 
-fn semantic_catalogue(
+fn reject_uncaptured_standard_modules(
     project: &orna_project_v1::LoadedProject,
-) -> Result<orna_semantic_v1::Catalogue, Diagnostic> {
-    let Some(profile) = project.standard_profile() else {
-        return Ok(orna_semantic_v1::Catalogue::authoritative_core());
-    };
-    if project
-        .standard_modules()
-        .iter()
-        .any(|module| !profile.module_digests().contains_key(module))
-    {
-        return Err(Diagnostic::target(
-            "E2101",
-            "standard module is outside the pinned bundle",
-            "use a standard module from the selected Orna standard profile",
-        ));
+) -> Result<(), Diagnostic> {
+    if project.standard_modules().is_empty() {
+        return Ok(());
     }
+    Err(Diagnostic::target(
+        "E2101",
+        "standard library imports are unsupported by this CLI",
+        "remove standard-library imports; this CLI currently admits core-only projects",
+    ))
+}
+
+fn semantic_catalogue() -> orna_semantic_v1::Catalogue {
     orna_semantic_v1::Catalogue::authoritative_core()
-        .with_standard_sources(profile, standard_sources())
-        .map_err(|_| {
-            Diagnostic::unavailable(
-                "pinned standard source bundle was rejected",
-                "use the standard source bundle selected by the Orna runtime",
-            )
-        })
 }
 
 fn check_project(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue(&project)?;
+    let catalogue = semantic_catalogue();
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if analysis.is_ok() {
         println!("project valid");
@@ -682,7 +659,7 @@ fn check_project(endpoint: &Endpoint) -> Result<(), Diagnostic> {
 }
 
 fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
-    let mut modules: Vec<SourceUnit> = project
+    let modules: Vec<SourceUnit> = project
         .modules()
         .iter()
         .zip(project.identities())
@@ -693,14 +670,6 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
             source: module.source.clone(),
         })
         .collect();
-    if project.has_standard_imports() {
-        modules.push(SourceUnit {
-            fixture_id: "cli-standard".into(),
-            source_id: STD_MATH_LOGICAL_PATH.into(),
-            parse_as: "module_unit".into(),
-            source: STD_MATH_SOURCE.into(),
-        });
-    }
     ProjectUnit {
         fixture_id: "cli-project".into(),
         project_id: "cli-project".into(),
@@ -796,7 +765,7 @@ fn public_project_function(analysis: &orna_semantic_v1::Analysis, target: &str) 
 
 fn run_public_project_function(endpoint: &Endpoint, target: &str) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue(&project)?;
+    let catalogue = semantic_catalogue();
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -828,7 +797,7 @@ fn run_project_invocation_with_arguments(
             )
         })?;
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue(&project)?;
+    let catalogue = semantic_catalogue();
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -895,7 +864,7 @@ fn run_project_stream_invocation(endpoint: &Endpoint, root_entry: &str) -> Resul
             )
         })?;
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue(&project)?;
+    let catalogue = semantic_catalogue();
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -953,7 +922,7 @@ fn run_project_stream_invocation(endpoint: &Endpoint, root_entry: &str) -> Resul
 
 fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue(&project)?;
+    let catalogue = semantic_catalogue();
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -994,7 +963,7 @@ fn repl_session(endpoint: &Endpoint) -> Result<AdmittedReplSession, Diagnostic> 
         let project = load_project(endpoint)?;
         return AdmittedReplSession::from_loaded_project(
             &project,
-            standard_sources(),
+            std::iter::empty(),
             Limits::default(),
         )
         .map_err(|error| repl_session_error(&error));
@@ -1345,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn project_repl_executes_an_ordinary_pinned_standard_import() {
+    fn project_repl_rejects_an_uncaptured_standard_import() {
         let directory = tempfile::tempdir().expect("temporary project");
         std::fs::write(
             directory.path().join("main.orna"),
@@ -1362,13 +1331,11 @@ mod tests {
         );
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let mut session = repl_session(&endpoint).expect("project session");
-        let mut input = b"use std.math;\nstd.math.clamp(99, 20, 22)\n:quit\n".as_slice();
-        let mut output = Vec::new();
-        repl::run(&mut input, &mut output, &mut session).expect("scripted session");
         assert_eq!(
-            String::from_utf8(output).expect("UTF-8"),
-            "> > 22 : Int\n> "
+            repl_session(&endpoint)
+                .expect_err("uncaptured standard module")
+                .code,
+            "E2101"
         );
     }
 
@@ -1585,7 +1552,7 @@ mod tests {
     }
 
     #[test]
-    fn check_accepts_the_pinned_pure_math_standard_bundle() {
+    fn check_rejects_an_uncaptured_standard_module() {
         let directory = tempfile::tempdir().expect("temporary project");
         std::fs::write(
             directory.path().join("main.orna"),
@@ -1602,15 +1569,16 @@ mod tests {
         );
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        assert_eq!(check_project(&endpoint), Ok(()));
+        let error = check_project(&endpoint).expect_err("uncaptured standard module");
+        assert_eq!((error.code, error.exit), ("E2101", Exit::Target));
     }
 
     #[test]
-    fn check_rejects_a_standard_module_outside_the_pinned_bundle() {
+    fn check_rejects_each_uncaptured_standard_module() {
         let directory = tempfile::tempdir().expect("temporary project");
         std::fs::write(
             directory.path().join("main.orna"),
-            "use std.cli; pub fn run() {}",
+            "use std.math; use std.text; use std.json; use std.prelude as _; pub fn run() {}",
         )
         .expect("main source");
         assert!(
@@ -1624,11 +1592,20 @@ mod tests {
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
         let error = check_project(&endpoint).expect_err("unbundled standard module");
-        assert_eq!((error.code, error.exit), ("E2101", Exit::Target));
+        assert_eq!(error.code, "E2101");
+        assert_eq!(error.exit, Exit::Target);
+        assert_eq!(
+            error.title,
+            "standard library imports are unsupported by this CLI"
+        );
+        assert_eq!(
+            error.help,
+            "remove standard-library imports; this CLI currently admits core-only projects"
+        );
     }
 
     #[test]
-    fn invoke_executes_a_pinned_standard_function() {
+    fn invoke_rejects_an_uncaptured_standard_function() {
         let directory = tempfile::tempdir().expect("temporary project");
         std::fs::write(
             directory.path().join("main.orna"),
@@ -1647,11 +1624,12 @@ mod tests {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Invoke("seed".into()),
         };
-        assert_eq!(execute(&parsed), Ok(()));
+        let error = execute(&parsed).expect_err("uncaptured standard module");
+        assert_eq!((error.code, error.exit), ("E2101", Exit::Target));
     }
 
     #[test]
-    fn invoke_executes_composed_source_defined_standard_math() {
+    fn invoke_rejects_composed_uncaptured_standard_math() {
         let directory = tempfile::tempdir().expect("temporary project");
         std::fs::write(
             directory.path().join("main.orna"),
@@ -1670,7 +1648,8 @@ mod tests {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Invoke("seed".into()),
         };
-        assert_eq!(execute(&parsed), Ok(()));
+        let error = execute(&parsed).expect_err("uncaptured standard module");
+        assert_eq!((error.code, error.exit), ("E2101", Exit::Target));
     }
 
     #[test]
