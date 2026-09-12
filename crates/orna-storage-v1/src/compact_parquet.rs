@@ -15,7 +15,7 @@ use orna_repository_v1::{
     CompactManifest, CompactManifestEntry, GitCommitRef, Repository, RepositoryError, Uuid,
 };
 use parquet::{
-    basic::Type,
+    basic::{Encoding, Type},
     column::reader::ColumnReader,
     file::reader::{FileReader, SerializedFileReader},
 };
@@ -33,6 +33,7 @@ pub enum CompactParquetError {
     InvalidMetadata,
     InvalidUtf8,
     UnsupportedKeyMapping,
+    UnsupportedValueEncoding,
     MissingKeyColumn([u8; 16]),
     DuplicateFieldColumn([u8; 16]),
     NullKey,
@@ -50,6 +51,9 @@ impl fmt::Display for CompactParquetError {
             Self::InvalidMetadata => f.write_str("invalid compact Parquet metadata"),
             Self::InvalidUtf8 => f.write_str("compact string key is not valid UTF-8"),
             Self::UnsupportedKeyMapping => f.write_str("unsupported compact key mapping"),
+            Self::UnsupportedValueEncoding => {
+                f.write_str("unsupported compact key value-page encoding")
+            }
             Self::MissingKeyColumn(id) => write!(f, "compact key column is missing: {id:?}"),
             Self::DuplicateFieldColumn(id) => {
                 write!(f, "compact field column is duplicated: {id:?}")
@@ -155,6 +159,7 @@ impl CompactParquetKeySource {
             let rows = usize::try_from(rows).map_err(|_| CompactParquetError::InvalidParquet)?;
             let mut group_values: Vec<Vec<OvbRaw>> = Vec::with_capacity(key_columns.len());
             for column in &key_columns {
+                validate_key_column(&*row_group, column.index, rows)?;
                 let column_values = match column.kind {
                     KeyColumnKind::Int => read_int64_column(&*row_group, column.index, rows)?
                         .into_iter()
@@ -234,6 +239,49 @@ impl CompactParquetKeySource {
             .ok_or_else(|| CompactParquetError::SegmentUnavailable(entry.segment_id()))?;
         Self::decode_verified_bytes(&self.profile, self.table, bytes, entry.row_count())
     }
+}
+
+fn validate_key_column(
+    row_group: &dyn parquet::file::reader::RowGroupReader,
+    index: usize,
+    expected_rows: usize,
+) -> Result<(), CompactParquetError> {
+    let metadata = row_group.metadata().column(index);
+    let observed =
+        u64::try_from(metadata.num_values()).map_err(|_| CompactParquetError::InvalidParquet)?;
+    let expected = u64::try_from(expected_rows).map_err(|_| CompactParquetError::InvalidParquet)?;
+    if observed > expected {
+        return Err(CompactParquetError::RowCountMismatch { expected, observed });
+    }
+    if metadata.encodings().any(|encoding| {
+        !matches!(
+            encoding,
+            Encoding::PLAIN | Encoding::RLE | Encoding::RLE_DICTIONARY
+        )
+    }) {
+        return Err(CompactParquetError::UnsupportedValueEncoding);
+    }
+
+    let mut pages = row_group
+        .get_column_page_reader(index)
+        .map_err(|_| CompactParquetError::InvalidParquet)?;
+    while let Some(page) = pages
+        .get_next_page()
+        .map_err(|_| CompactParquetError::InvalidParquet)?
+    {
+        let encoding = page.encoding();
+        let supported = if page.is_dictionary_page() {
+            encoding == Encoding::PLAIN
+        } else if page.is_data_page() {
+            matches!(encoding, Encoding::PLAIN | Encoding::RLE_DICTIONARY)
+        } else {
+            false
+        };
+        if !supported {
+            return Err(CompactParquetError::UnsupportedValueEncoding);
+        }
+    }
+    Ok(())
 }
 
 fn compare_key_components(
@@ -849,7 +897,7 @@ mod tests {
         CompactManifest, CompactSegment, CompactSegmentRole, ManagedFileChange, ManagedPath,
     };
     use parquet::{
-        basic::Compression,
+        basic::{Compression, Encoding},
         data_type::{BoolType, ByteArray, ByteArrayType, Int32Type, Int64Type},
         file::{
             metadata::KeyValue,
@@ -868,7 +916,6 @@ mod tests {
     ];
     const KEY_B: [u8; 16] = [0x21; 16];
     const SEGMENT_ID: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
-    const VERIFIED_PARQUET: &str = "UEFSMRUGFQoVChXq3ovdBUwVAhUAFQIVChUAFQASAACAAgQBAhkSAhkYCAEAAAAAAAAAGRgIAQAAAAAAAAAVAhkWAAAZHBYIFTYWAAAAFQIZLEgGc2NoZW1hFQIAFQQlABgiZl8wMThmMDAwMDAwMDA3MDAwODAwMDAwMDAwMDAwMDAwMQAWAhkcGRwmABwVBBklBgoZGCJmXzAxOGYwMDAwMDAwMDcwMDA4MDAwMDAwMDAwMDAwMDAxFQwWAhY2FkImCDw2ACgIAQAAAAAAAAAYCAEAAAAAAAAAEREAABZ8FRQWPhU+ABY2FgImCBZCFAAAGXwYDG9ybmEucHJvZmlsZRgSY29tcGFjdC1zdG9yYWdlLXYxABgKb3JuYS50YWJsZRgkMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxABgSb3JuYS5zY2hlbWEuc2hhMjU2GEAwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3ABgPb3JuYS5zY2hlbWEub3ZiGARBQT09ABgQb3JuYS5jb2x1bW5zLm92YhhgZ1lXQjJDVlFBWThBQUFBQWNBQ0FBQUFBQUFBQUFZRjRJbVpmTURFNFpqQXdNREF3TURBd056QXdNRGd3TURBd01EQXdNREF3TURBd01ER0NBR05KYm5SbGFXNTBOalNBABgMb3JuYS5lbmNvZGVyGA90ZXN0LWVuY29kZXItdjEAGBFvcm5hLnRlc3QucGF5bG9hZBgOY29tcGFjdCBvYmplY3QAGBlwYXJxdWV0LXJzIHZlcnNpb24gNTkuMy4wGRwcAAAARgIAAFBBUjE=";
 
     fn uuid_raw(id: [u8; 16]) -> OvbRaw {
         OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(id.to_vec())))
@@ -1000,6 +1047,7 @@ mod tests {
             WriterProperties::builder()
                 .set_compression(Compression::ZSTD(Default::default()))
                 .set_dictionary_enabled(false)
+                .set_encoding(Encoding::PLAIN)
                 .set_writer_version(WriterVersion::PARQUET_2_0)
                 .set_key_value_metadata(Some(metadata))
                 .build(),
@@ -1061,6 +1109,26 @@ mod tests {
         descriptor_types: Option<Vec<OvbRaw>>,
         dictionary_enabled: bool,
     ) -> Vec<u8> {
+        mixed_parquet_with_encoding(
+            profile,
+            ids,
+            values,
+            optional_first,
+            descriptor_types,
+            dictionary_enabled,
+            Encoding::PLAIN,
+        )
+    }
+
+    fn mixed_parquet_with_encoding(
+        profile: &CompactOvbProfile,
+        ids: &[[u8; 16]],
+        values: &[TestColumn<'_>],
+        optional_first: bool,
+        descriptor_types: Option<Vec<OvbRaw>>,
+        dictionary_enabled: bool,
+        value_encoding: Encoding,
+    ) -> Vec<u8> {
         assert_eq!(ids.len(), values.len());
         let mut message = String::from("message schema {");
         for (index, id) in ids.iter().enumerate() {
@@ -1119,6 +1187,7 @@ mod tests {
             WriterProperties::builder()
                 .set_compression(Compression::ZSTD(Default::default()))
                 .set_dictionary_enabled(dictionary_enabled)
+                .set_encoding(value_encoding)
                 .set_writer_version(WriterVersion::PARQUET_2_0)
                 .set_key_value_metadata(Some(metadata))
                 .build(),
@@ -1373,7 +1442,7 @@ mod tests {
     }
 
     fn verified_fixture_with_schema_ovb(profile: &CompactOvbProfile, schema_ovb: &[u8]) -> Vec<u8> {
-        let original = BASE64.decode(VERIFIED_PARQUET).unwrap();
+        let original = with_page_checksums(parquet(profile, &[KEY_A], &[vec![1]], false, None));
         let reader = SerializedFileReader::new(Bytes::from(original.clone())).unwrap();
         let file = reader.metadata().file_metadata();
         let columns = CanonicalValue::new(OvbRaw::Array(vec![descriptor(KEY_A, int_type())]))
@@ -1381,7 +1450,7 @@ mod tests {
             .encode()
             .unwrap();
         let metadata = parquet::file::metadata::FileMetaData::new(
-            file.version(),
+            1,
             file.num_rows(),
             file.created_by().map(str::to_owned),
             Some(vec![
@@ -1580,6 +1649,33 @@ mod tests {
         parquet::file::metadata::ParquetMetaDataWriter::new(&mut new_footer, &metadata)
             .finish()
             .unwrap();
+        data.extend(new_footer);
+        data
+    }
+
+    fn with_column_num_values(bytes: Vec<u8>, num_values: i64) -> Vec<u8> {
+        let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+        let footer = footer_start(&bytes);
+        let mut metadata = reader.metadata().clone().into_builder();
+        let mut row_groups = metadata.take_row_groups();
+        let row_group = row_groups.pop().unwrap();
+        let mut row_group = row_group.into_builder();
+        let mut columns = row_group.take_columns();
+        let column = columns.pop().unwrap();
+        columns.push(
+            column
+                .into_builder()
+                .set_num_values(num_values)
+                .build()
+                .unwrap(),
+        );
+        let row_group = row_group.set_column_metadata(columns).build().unwrap();
+        let metadata = metadata.add_row_group(row_group).build();
+        let mut new_footer = Vec::new();
+        parquet::file::metadata::ParquetMetaDataWriter::new(&mut new_footer, &metadata)
+            .finish()
+            .unwrap();
+        let mut data = bytes[..footer].to_vec();
         data.extend(new_footer);
         data
     }
@@ -1952,6 +2048,23 @@ mod tests {
     fn reads_date_from_plain_and_rle_dictionary_pages_and_requires_date_annotation() {
         let profile = profile_with_types(&[KEY_A], &[date_type()]);
         let dates = [0_i32, 1_i32, 1_i32];
+        let plain = mixed_parquet(&profile, &[KEY_A], &[TestColumn::Date(&dates)], false, None);
+        let reader = SerializedFileReader::new(Bytes::copy_from_slice(&plain)).unwrap();
+        assert!(reader
+            .metadata()
+            .row_group(0)
+            .column(0)
+            .encodings()
+            .any(|encoding| encoding == Encoding::PLAIN));
+        assert_eq!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &plain, 3).unwrap(),
+            vec![
+                expected_date("1970-01-01"),
+                expected_date("1970-01-02"),
+                expected_date("1970-01-02"),
+            ]
+        );
+
         let dictionary = mixed_parquet_with_dictionary(
             &profile,
             &[KEY_A],
@@ -2297,6 +2410,13 @@ mod tests {
             false,
             None,
         );
+        let reader = SerializedFileReader::new(Bytes::copy_from_slice(&plain)).unwrap();
+        assert!(reader
+            .metadata()
+            .row_group(0)
+            .column(0)
+            .encodings()
+            .any(|encoding| encoding == Encoding::PLAIN));
         assert_eq!(
             CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &plain, 2).unwrap(),
             vec![expected_text("alpha"), expected_text("beta")]
@@ -2406,6 +2526,38 @@ mod tests {
                 expected: 2,
                 observed: 1
             })
+        ));
+    }
+
+    #[test]
+    fn rejects_surplus_physical_key_values_before_decoding() {
+        let profile = profile(&[KEY_A]);
+        let bytes =
+            with_column_num_values(parquet(&profile, &[KEY_A], &[vec![7, 42]], false, None), 3);
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 2),
+            Err(CompactParquetError::RowCountMismatch {
+                expected: 2,
+                observed: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_value_page_encoding() {
+        let profile = profile(&[KEY_A]);
+        let bytes = mixed_parquet_with_encoding(
+            &profile,
+            &[KEY_A],
+            &[TestColumn::Int(&[7, 42])],
+            false,
+            None,
+            false,
+            Encoding::DELTA_BINARY_PACKED,
+        );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 2),
+            Err(CompactParquetError::UnsupportedValueEncoding)
         ));
     }
 
