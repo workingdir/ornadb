@@ -145,8 +145,10 @@ pub mod connection;
 pub mod endpoint;
 pub mod inspect_lifecycle;
 pub mod inspect_session;
+pub mod live_bootstrap;
 pub mod live_presentation;
 pub mod live_session;
+pub mod live_transport;
 pub mod runtime_adapter;
 pub mod runtime_loader;
 pub mod session;
@@ -181,6 +183,9 @@ pub use inspect_lifecycle::{
 pub use inspect_session::{
     ClientInspectLifecycleCompletion, ClientInspectLifecycleRequest, ClientInspectLifecycleSession,
 };
+pub use live_bootstrap::{
+    BootstrappedLiveAttachment, LiveBootstrapError, PrefetchedBinaryTransport,
+};
 pub use live_presentation::{
     LivePresentationError, LivePresentationUpdate, PublishedPresentation, ResyncRequest,
     WatchPresentation,
@@ -188,6 +193,10 @@ pub use live_presentation::{
 pub use live_session::{
     AuthenticatedLiveTransport, LiveByteDriver, LiveSessionDriver, LiveSessionError,
     LiveSessionEvent, PresentRenderer, RequestIdAllocator,
+};
+pub use live_transport::{
+    AuthenticatedWebSocketTransport, LiveClient, LiveClientConfig, LiveSession, LiveTransportError,
+    TlsPolicy,
 };
 
 /// The active revision, function revision, and root invocation selected for
