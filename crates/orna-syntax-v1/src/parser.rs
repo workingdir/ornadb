@@ -1511,6 +1511,22 @@ fn annotate_diagnostics(items: &mut [Diagnostic], source: &str, file: &str) {
 const MAX_PARSE_NESTING: usize = 64;
 const MAX_AST_DEPTH: usize = 64;
 
+#[derive(Clone, Copy)]
+enum NominalBraceMode {
+    Ordinary,
+    ControlRoot,
+    ControlNested,
+}
+
+impl NominalBraceMode {
+    fn nested(self) -> Self {
+        match self {
+            Self::Ordinary => Self::Ordinary,
+            Self::ControlRoot | Self::ControlNested => Self::ControlNested,
+        }
+    }
+}
+
 struct Parser {
     tokens: Vec<Token>,
     at: usize,
@@ -1752,7 +1768,14 @@ impl Parser {
                     "ORNA091-E-BOUND-COLON",
                     "protocol bounds use `<T impl Protocol>`",
                 ))
-            } else if matches!(token.kind, TokenKind::Punct("||")) {
+            } else if matches!(token.kind, TokenKind::Punct("||"))
+                && matches!(
+                    tokens
+                        .get(i.saturating_sub(1))
+                        .map(|previous| &previous.kind),
+                    Some(TokenKind::Punct("="))
+                )
+            {
                 Some(("E1012", "`||` is logical OR, not an anonymous function"))
             } else if matches!(token.kind, TokenKind::Punct("-"))
                 && matches!(next.map(|t| &t.kind), Some(TokenKind::Punct(">")))
@@ -1811,58 +1834,6 @@ impl Parser {
                         tokens[i + 2].span.clone(),
                     ));
                 }
-            }
-        }
-        // A comparison is deliberately non-associative. The shape below is
-        // evaluated only in expression position (after an equals sign), so
-        // generic parameter brackets remain type syntax.
-        let mut expression_position = false;
-        for i in 0..tokens.len().saturating_sub(2) {
-            if matches!(tokens[i].kind, TokenKind::Punct("=" | "=>")) {
-                expression_position = true;
-                continue;
-            }
-            if matches!(tokens[i].kind, TokenKind::Punct(";" | "{" | "}")) {
-                expression_position = false;
-                continue;
-            }
-            if expression_position
-                && matches!(
-                    tokens[i].kind,
-                    TokenKind::Punct("<" | "<=" | ">" | ">=" | "==" | "!=")
-                )
-                && matches!(
-                    tokens[i + 1].kind,
-                    TokenKind::Identifier { .. }
-                        | TokenKind::Integer
-                        | TokenKind::Decimal
-                        | TokenKind::Float
-                )
-                && matches!(
-                    tokens[i + 2].kind,
-                    TokenKind::Punct("<" | "<=" | ">" | ">=" | "==" | "!=")
-                )
-                && !matches!(
-                    (
-                        tokens.get(i).map(|token| &token.kind),
-                        tokens.get(i + 1).map(|token| &token.kind),
-                        tokens.get(i + 2).map(|token| &token.kind),
-                        tokens.get(i + 3).map(|token| &token.kind),
-                    ),
-                    (
-                        Some(TokenKind::Punct("<")),
-                        Some(TokenKind::Identifier { .. }),
-                        Some(TokenKind::Punct(">")),
-                        Some(TokenKind::Punct("(")),
-                    )
-                )
-            {
-                self.errors.push(Diagnostic::error(
-                    "E1302",
-                    "comparison operators do not chain; write an explicit conjunction",
-                    tokens[i + 2].span.clone(),
-                ));
-                break;
             }
         }
         for i in 0..tokens.len().saturating_sub(1) {
@@ -3391,7 +3362,18 @@ impl Parser {
         Some(ty)
     }
     fn expr(&mut self) -> Option<Expr> {
-        let expr = self.recurse(|parser| parser.pratt(0))?;
+        self.expr_with_nominal_braces(NominalBraceMode::Ordinary)
+    }
+
+    fn control_condition(&mut self) -> Option<Expr> {
+        if self.is_punct("{") {
+            self.error_here("ORNA-PARSE-001", "record conditions must be parenthesized");
+        }
+        self.expr_with_nominal_braces(NominalBraceMode::ControlRoot)
+    }
+
+    fn expr_with_nominal_braces(&mut self, mode: NominalBraceMode) -> Option<Expr> {
+        let expr = self.recurse(|parser| parser.pratt(0, mode))?;
         self.within_depth(expr_depth(&expr)).then_some(expr)
     }
 
@@ -3443,9 +3425,26 @@ impl Parser {
         Some(format!("{base}<{}>", arguments.join(",")))
     }
 
-    fn pratt(&mut self, min: u8) -> Option<Expr> {
-        let mut lhs = self.prefix()?;
+    fn pratt(&mut self, min: u8, mode: NominalBraceMode) -> Option<Expr> {
+        let mut lhs = self.prefix(mode)?;
         loop {
+            let nominal_braces = match mode {
+                NominalBraceMode::Ordinary => true,
+                NominalBraceMode::ControlRoot => false,
+                NominalBraceMode::ControlNested => self.nominal_brace_is_expression_continuation(),
+            };
+            if nominal_braces && self.is_punct("{") {
+                if let Some(path) = nominal_path(&lhs) {
+                    let start = lhs.span().start;
+                    let fields = self.parse_record();
+                    lhs = Expr::Nominal {
+                        path,
+                        fields,
+                        span: SourceSpan::new(start, self.previous().span.end),
+                    };
+                    continue;
+                }
+            }
             if self.is_punct("[") {
                 let start = lhs.span().start;
                 self.bump();
@@ -3513,6 +3512,13 @@ impl Parser {
                 break;
             }
             let op = self.current().text.clone();
+            if is_comparison_operator(&op) && is_ungrouped_comparison(&lhs) {
+                self.errors.push(Diagnostic::error(
+                    "E1302",
+                    "comparison operators do not chain; write an explicit conjunction",
+                    self.current().span.clone(),
+                ));
+            }
             self.bump();
             if matches!(op.as_str(), ".." | "..=") {
                 if matches!(lhs, Expr::Range { .. }) {
@@ -3523,12 +3529,12 @@ impl Parser {
                         span,
                     ));
                     if self.can_start_expression() {
-                        let _ = self.recurse(|parser| parser.pratt(prec + 1));
+                        let _ = self.recurse(|parser| parser.pratt(prec + 1, mode.nested()));
                     }
                     break;
                 }
                 let rhs = if self.can_start_expression() {
-                    self.recurse(|parser| parser.pratt(prec + 1))
+                    self.recurse(|parser| parser.pratt(prec + 1, mode.nested()))
                 } else {
                     None
                 };
@@ -3562,7 +3568,8 @@ impl Parser {
                 );
                 break;
             }
-            let rhs = self.recurse(|parser| parser.pratt(if right { prec } else { prec + 1 }));
+            let rhs = self
+                .recurse(|parser| parser.pratt(if right { prec } else { prec + 1 }, mode.nested()));
             let Some(rhs) = rhs else { break };
             if !self.within_depth(expr_depth(&lhs).max(expr_depth(&rhs)) + 1) {
                 return Some(lhs);
@@ -3577,7 +3584,7 @@ impl Parser {
         }
         Some(lhs)
     }
-    fn prefix(&mut self) -> Option<Expr> {
+    fn prefix(&mut self, mode: NominalBraceMode) -> Option<Expr> {
         let t = self.current().clone();
         if matches!(t.kind, TokenKind::Punct(".." | "..=")) {
             self.bump();
@@ -3590,7 +3597,7 @@ impl Parser {
                     span: t.span,
                 });
             }
-            let upper = self.recurse(|parser| parser.pratt(7))?;
+            let upper = self.recurse(|parser| parser.pratt(7, mode.nested()))?;
             let span = t.span.join(upper.span());
             return Some(Expr::Range {
                 lower: None,
@@ -3607,7 +3614,7 @@ impl Parser {
             // Unary operators bind below the complete postfix spine. This
             // keeps `-value.field`, `-value.call()`, and `-value[index]`
             // equivalent to applying the operator to the selected value.
-            let rhs = self.recurse(|parser| parser.pratt(10))?;
+            let rhs = self.recurse(|parser| parser.pratt(10, mode.nested()))?;
             if !self.within_depth(expr_depth(&rhs) + 1) {
                 return None;
             }
@@ -3635,17 +3642,6 @@ impl Parser {
                     });
                 }
                 let generic_name = self.parse_generic_callee_name(&t.text);
-                if generic_name.is_none() && self.is_punct("{") && self.is_direct_record_body() {
-                    let fields = self.parse_record();
-                    return Some(Expr::Nominal {
-                        path: vec![NameSegment {
-                            text: t.text,
-                            span: t.span.clone(),
-                        }],
-                        fields,
-                        span: t.span.join(self.previous().span.clone()),
-                    });
-                }
                 let text = generic_name.unwrap_or_else(|| t.text.clone());
                 Some(Expr::Name {
                     text,
@@ -3861,7 +3857,7 @@ impl Parser {
                     .map(Box::new)
             }
             Some(Keyword::If) => {
-                condition = self.expr().map(Box::new);
+                condition = self.control_condition().map(Box::new);
                 body = self.parse_required_block("expected if block").map(Box::new);
                 if self.keyword() == Some(Keyword::Else) {
                     self.bump();
@@ -3875,7 +3871,7 @@ impl Parser {
                 }
             }
             Some(Keyword::While) => {
-                condition = self.expr().map(Box::new);
+                condition = self.control_condition().map(Box::new);
                 body = self
                     .parse_required_block("expected while block")
                     .map(Box::new);
@@ -3888,7 +3884,7 @@ impl Parser {
                 } else {
                     self.bump()
                 }
-                condition = self.expr().map(Box::new);
+                condition = self.control_condition().map(Box::new);
                 body = self
                     .parse_required_block("expected for block")
                     .map(Box::new);
@@ -3902,7 +3898,7 @@ impl Parser {
                 }
             }
             Some(Keyword::Case) => {
-                condition = self.expr().map(Box::new);
+                condition = self.control_condition().map(Box::new);
                 if !self.is_punct("{") {
                     self.error_here("ORNA-PARSE-001", "expected case arms")
                 } else {
@@ -4052,6 +4048,57 @@ impl Parser {
                 self.tokens.get(self.at + 2).map(|t| &t.kind),
                 Some(TokenKind::Punct(":"))
             )
+    }
+    fn nominal_brace_is_expression_continuation(&self) -> bool {
+        if !self.is_punct("{") {
+            return false;
+        }
+        let mut depth = 0usize;
+        for index in self.at..self.tokens.len() {
+            match self.tokens[index].kind {
+                TokenKind::Punct("{") => depth += 1,
+                TokenKind::Punct("}") if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(
+                            self.tokens.get(index + 1).map(|token| &token.kind),
+                            Some(TokenKind::Keyword(Keyword::In))
+                                | Some(TokenKind::Punct(
+                                    "{" | "("
+                                        | ")"
+                                        | "["
+                                        | "]"
+                                        | "."
+                                        | ","
+                                        | "?"
+                                        | "||"
+                                        | "&&"
+                                        | "=="
+                                        | "!="
+                                        | "<"
+                                        | "<="
+                                        | ">"
+                                        | ">="
+                                        | "in"
+                                        | "??"
+                                        | "|"
+                                        | "|?"
+                                        | ".."
+                                        | "..="
+                                        | "+"
+                                        | "-"
+                                        | "*"
+                                        | "/"
+                                        | "%"
+                                        | "^"
+                                ))
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
     fn parse_list(&mut self) -> Vec<Expr> {
         let mut elements = Vec::new();
@@ -4358,6 +4405,33 @@ impl Parser {
         ))
     }
 }
+
+fn nominal_path(expr: &Expr) -> Option<Vec<NameSegment>> {
+    match expr {
+        Expr::Name { text, span } => Some(vec![NameSegment {
+            text: text.clone(),
+            span: span.clone(),
+        }]),
+        Expr::Field { base, name, span } => {
+            let mut path = nominal_path(base)?;
+            path.push(NameSegment {
+                text: name.clone(),
+                span: SourceSpan::new(span.end - name.len(), span.end),
+            });
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+fn is_comparison_operator(operator: &str) -> bool {
+    matches!(operator, "==" | "!=" | "<" | "<=" | ">" | ">=" | "in")
+}
+
+fn is_ungrouped_comparison(expr: &Expr) -> bool {
+    matches!(expr, Expr::Binary { op, .. } if is_comparison_operator(op))
+}
+
 fn from_lex(e: LexError) -> Diagnostic {
     Diagnostic::error(e.code, e.message, e.span)
 }

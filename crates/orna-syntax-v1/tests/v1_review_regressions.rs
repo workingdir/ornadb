@@ -1,9 +1,9 @@
 //! Parse-only audit regressions for ornadb-gov5.17.11 / GitHub #781.
 //!
-//! Requirements below refer to immutable reference/Orna-1.0.0. Ignored tests
-//! assert normative behavior and are expected to FAIL when explicitly run
-//! against the reviewed parser. An ignored result is not a conformance pass.
-//! Inputs stay in memory; no filesystem fixtures or temporary files are used.
+//! Requirements below refer to immutable reference/Orna-1.0.0. These focused
+//! regressions close the confirmed parser findings without broadening legacy
+//! syntax. Inputs stay in memory; no filesystem fixtures or temporary files
+//! are used.
 
 use orna_syntax_v1::{Declaration, Expr, LiteralKind, parse_module};
 
@@ -55,7 +55,12 @@ fn nominal_body(source: &str, expected_path: &[&str], expected_fields: &[&str]) 
     );
 }
 
-fn date_range_body(source: &str, expected_operator: &str) {
+fn calendar_range_body(
+    source: &str,
+    expected_operator: &str,
+    expected_kind: LiteralKind,
+    expected_endpoints: [&str; 2],
+) {
     let body = accepted_body(source);
     let Expr::Range {
         lower,
@@ -68,13 +73,13 @@ fn date_range_body(source: &str, expected_operator: &str) {
     };
     assert_eq!(operator, expected_operator);
     for (endpoint, expected_text) in [
-        (lower.as_deref(), "2026-09-01"),
-        (upper.as_deref(), "2026-09-02"),
+        (lower.as_deref(), expected_endpoints[0]),
+        (upper.as_deref(), expected_endpoints[1]),
     ] {
         assert!(
-            matches!(endpoint, Some(Expr::Literal { kind: LiteralKind::Date, text, .. })
-                if text == expected_text),
-            "expected Date endpoint {expected_text}, got {endpoint:?}"
+            matches!(endpoint, Some(Expr::Literal { kind, text, .. })
+                if *kind == expected_kind && text == expected_text),
+            "expected {expected_kind:?} endpoint {expected_text}, got {endpoint:?}"
         );
     }
 }
@@ -82,7 +87,6 @@ fn date_range_body(source: &str, expected_operator: &str) {
 // grammar/orna.ebnf: logical_or_expression; source/06-expressions.md:
 // ORNA-LAMBDA-004 and ORNA-OP-001 admit infix OR, but not a pipe closure.
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #781; run explicitly for review"]
 fn logical_or_is_accepted() {
     let body = accepted_body("fn f() = true || false;");
     assert!(matches!(body, Expr::Binary { op, .. } if op == "||"));
@@ -95,6 +99,114 @@ fn logical_and_is_accepted() {
 }
 
 #[test]
+fn control_condition_binary_rhs_leaves_body_brace_for_control() {
+    let body = accepted_body("fn f() = if ready && done { 1 };");
+    let Expr::Control {
+        condition: Some(condition),
+        body: Some(body),
+        ..
+    } = body
+    else {
+        panic!("expected if control expression");
+    };
+    assert!(matches!(*condition, Expr::Binary { op, .. } if op == "&&"));
+    assert!(matches!(*body, Expr::Block { .. }));
+}
+
+fn assert_nested_nominal_condition(source: &str, expected_path: &[&str]) {
+    let body = accepted_body(source);
+    let Expr::Control {
+        condition: Some(condition),
+        body: Some(body),
+        ..
+    } = body
+    else {
+        panic!("expected a braced control expression");
+    };
+    let Expr::Binary { rhs, .. } = *condition else {
+        panic!("expected a compound control condition");
+    };
+    let Expr::Nominal { path, .. } = *rhs else {
+        panic!("expected a nominal constructor in the condition");
+    };
+    assert_eq!(
+        path.iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>(),
+        expected_path
+    );
+    assert!(matches!(*body, Expr::Block { .. }));
+}
+
+#[test]
+fn compound_control_conditions_allow_nested_nominal_constructors() {
+    assert_nested_nominal_condition(
+        "fn f() = if ready && Status { value: raw } { 1 };",
+        &["Status"],
+    );
+    assert_nested_nominal_condition("fn f() = while ready && Status {} { 1 };", &["Status"]);
+    assert_nested_nominal_condition(
+        "fn f() = for item in ready && Model.Status { value: raw } { 1 };",
+        &["Model", "Status"],
+    );
+}
+
+#[test]
+fn compound_case_conditions_allow_nested_nominal_constructors() {
+    let body = accepted_body("fn f() = case ready && Status {} { true: 1 };");
+    let Expr::Control {
+        condition: Some(condition),
+        arms,
+        ..
+    } = body
+    else {
+        panic!("expected a case expression");
+    };
+    assert!(matches!(*condition, Expr::Binary { op, .. } if op == "&&"));
+    assert_eq!(arms.len(), 1);
+}
+
+#[test]
+fn immediate_nominal_constructor_still_reserves_control_body_brace() {
+    rejected("type Status { value: Int } fn f() = if Status { value: raw } { 1 };");
+}
+
+#[test]
+fn immediate_record_control_condition_requires_parentheses() {
+    for source in [
+        "fn f() = if { value: 1 } { 1 };",
+        "fn f() = while { value: 1 } { 1 };",
+        "fn f() = for item in { value: 1 } { 1 };",
+        "fn f() = case { value: 1 } { true: 1 };",
+    ] {
+        let parsed = parse_module(source);
+        assert!(
+            parsed.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "ORNA-PARSE-001"
+                    && diagnostic.message == "record conditions must be parenthesized"
+            }),
+            "expected ORNA-RECORD-004 parser diagnostic for {source:?}: {:?}",
+            parsed.diagnostics
+        );
+    }
+
+    let body = accepted_body("fn f() = if ({ value: 1 }) { 1 };");
+    let Expr::Control {
+        condition: Some(condition),
+        body: Some(body),
+        ..
+    } = body
+    else {
+        panic!("expected a parenthesized-record if expression");
+    };
+    assert!(matches!(
+        *condition,
+        Expr::Group { inner, .. } if matches!(*inner, Expr::Record { .. })
+    ));
+    assert!(matches!(*body, Expr::Block { .. }));
+}
+
+#[test]
 fn legacy_empty_pipe_closure_is_rejected() {
     rejected("fn f() = || true;");
 }
@@ -103,7 +215,6 @@ fn legacy_empty_pipe_closure_is_rejected() {
 // source/04-lexical.md: Contextual names and construction;
 // source/06-expressions.md: ORNA-ENUM-003 requires explicit payload fields.
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #781; run explicitly for review"]
 fn qualified_nominal_construction_is_accepted() {
     nominal_body(
         "enum E { v { x: Int } } fn f() = E.v { x: 1 };",
@@ -113,7 +224,6 @@ fn qualified_nominal_construction_is_accepted() {
 }
 
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #781; run explicitly for review"]
 fn empty_nominal_construction_is_accepted() {
     nominal_body("type T {} fn f() = T {};", &["T"], &[]);
 }
@@ -134,31 +244,26 @@ fn nominal_construction_punning_is_rejected() {
 // Grouping an operand does not group the first comparison; grouping a whole
 // comparison explicitly does permit its use as the next comparison's operand.
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #781; run explicitly for review"]
 fn comparison_chain_with_grouped_operand_is_rejected() {
     rejected("fn f() = 1 < (2) < 3;");
 }
 
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #781; run explicitly for review"]
 fn comparison_chain_with_additive_operand_is_rejected() {
     rejected("fn f() = 1 < 2 + 3 < 6;");
 }
 
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #781; run explicitly for review"]
 fn boolean_comparison_chain_is_rejected() {
     rejected("fn f() = true == false == true;");
 }
 
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #781; run explicitly for review"]
 fn membership_comparison_chain_is_rejected() {
     rejected("fn f() = 1 in [1] == true;");
 }
 
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #781; run explicitly for review"]
 fn block_tail_comparison_chain_is_rejected() {
     rejected("fn f() { 1 < 2 < 3 }");
 }
@@ -182,21 +287,67 @@ fn explicitly_grouped_comparison_is_accepted() {
 // source/04-lexical.md: ORNA-LEX-009, ORNA-LIT-005 and ORNA-LIT-006.
 // Module AST endpoints must retain the Date class across adjacent punctuation.
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #781; run explicitly for review"]
 fn adjacent_exclusive_date_range_is_accepted() {
-    date_range_body("fn f() = 2026-09-01..2026-09-02;", "..");
+    calendar_range_body(
+        "fn f() = 2026-09-01..2026-09-02;",
+        "..",
+        LiteralKind::Date,
+        ["2026-09-01", "2026-09-02"],
+    );
 }
 
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #781; run explicitly for review"]
 fn adjacent_inclusive_date_range_is_accepted() {
-    date_range_body("fn f() = 2026-09-01..=2026-09-02;", "..=");
+    calendar_range_body(
+        "fn f() = 2026-09-01..=2026-09-02;",
+        "..=",
+        LiteralKind::Date,
+        ["2026-09-01", "2026-09-02"],
+    );
+}
+
+#[test]
+fn adjacent_instant_range_is_accepted() {
+    calendar_range_body(
+        "fn f() = 2026-09-01T14:30:00Z..2026-09-02T14:30:00Z;",
+        "..",
+        LiteralKind::Instant,
+        ["2026-09-01T14:30:00Z", "2026-09-02T14:30:00Z"],
+    );
+}
+
+#[test]
+fn adjacent_date_range_does_not_rewrite_quoted_text() {
+    let body = accepted_body("fn f() = 2026-09-01..2026-09-02 || \"2026-09-01..2026-09-02\";");
+    let Expr::Binary { lhs, op, rhs, .. } = body else {
+        panic!("expected range/string logical-or expression");
+    };
+    assert_eq!(op, "||");
+    assert!(matches!(*lhs, Expr::Range { operator, .. } if operator == ".."));
+    assert!(matches!(
+        *rhs,
+        Expr::Literal {
+            kind: LiteralKind::String,
+            text,
+            ..
+        } if text == "\"2026-09-01..2026-09-02\""
+    ));
 }
 
 #[test]
 fn spaced_date_ranges_are_accepted() {
-    date_range_body("fn f() = 2026-09-01 .. 2026-09-02;", "..");
-    date_range_body("fn f() = 2026-09-01 ..= 2026-09-02;", "..=");
+    calendar_range_body(
+        "fn f() = 2026-09-01 .. 2026-09-02;",
+        "..",
+        LiteralKind::Date,
+        ["2026-09-01", "2026-09-02"],
+    );
+    calendar_range_body(
+        "fn f() = 2026-09-01 ..= 2026-09-02;",
+        "..=",
+        LiteralKind::Date,
+        ["2026-09-01", "2026-09-02"],
+    );
 }
 
 // source/04-lexical.md: Numeric and string token boundaries, ORNA-SYNTAX-002:
