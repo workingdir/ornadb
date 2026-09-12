@@ -9,8 +9,8 @@ use orna_syntax_v1::{
 use orna_value_v1::Raw;
 
 use crate::{
-    Context, Environment, EvaluationError, Functions, Limits, PureFunction, Scope, bind, error,
-    pattern_names, validate_limits,
+    CancellationToken, Context, Environment, EvaluationError, Functions, Limits, PureFunction,
+    Scope, bind, error, pattern_names, validate_limits,
 };
 
 /// A bounded ephemeral module for one interactive Orna session.
@@ -116,7 +116,23 @@ impl ReplSession {
         input: &ReplInput,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         let mut candidate = self.clone();
-        let result = candidate.submit_checked(input)?;
+        let result = candidate.submit_checked(input, None)?;
+        *self = candidate;
+        Ok(result)
+    }
+
+    /// Executes one already-admitted input with an explicit operation token.
+    /// The candidate is published only after evaluation and the final
+    /// cancellation fence both succeed.
+    pub fn submit_admitted_with_cancellation(
+        &mut self,
+        input: &ReplInput,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        cancellation.check()?;
+        let mut candidate = self.clone();
+        let result = candidate.submit_checked(input, Some(cancellation))?;
+        cancellation.check()?;
         *self = candidate;
         Ok(result)
     }
@@ -133,7 +149,7 @@ impl ReplSession {
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         match parsed {
             ReplInput::Expression(expression) => {
-                let value = self.evaluate(&expression)?;
+                let value = self.evaluate(&expression, None)?;
                 self.last_success = Some(value.clone());
                 Ok(Some(value))
             }
@@ -149,15 +165,19 @@ impl ReplSession {
     fn submit_checked(
         &mut self,
         input: &ReplInput,
+        cancellation: Option<&CancellationToken>,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
         match input {
             ReplInput::Expression(expression) => {
-                let value = self.evaluate(expression)?;
+                let value = self.evaluate(expression, cancellation)?;
                 self.last_success = Some(value.clone());
                 Ok(Some(value))
             }
             ReplInput::Item(item) => {
-                self.declare_admitted(&item.declaration)?;
+                self.declare_admitted(&item.declaration, cancellation)?;
                 Ok(None)
             }
         }
@@ -169,10 +189,14 @@ impl ReplSession {
         let ReplInput::Expression(expression) = parsed else {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         };
-        self.evaluate(&expression)
+        self.evaluate(&expression, None)
     }
 
-    fn evaluate(&self, expression: &Expr) -> Result<CanonicalValue, EvaluationError> {
+    fn evaluate(
+        &self,
+        expression: &Expr,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<CanonicalValue, EvaluationError> {
         self.reject_ambiguous_expression(expression)?;
         let mut environment = self.environment.clone();
         if let Some(value) = &self.last_success {
@@ -196,6 +220,7 @@ impl ReplSession {
             effects: None,
             namespace: None,
             transfer: None,
+            cancellation,
         };
         context.items(self.functions.len())?;
         let mut scope = Scope::from_environment(&environment, &mut context)?;
@@ -228,10 +253,17 @@ impl ReplSession {
             Declaration::Use { .. } => {}
             _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
-        self.declare_admitted(&declaration)
+        self.declare_admitted(&declaration, None)
     }
 
-    fn declare_admitted(&mut self, declaration: &Declaration) -> Result<(), EvaluationError> {
+    fn declare_admitted(
+        &mut self,
+        declaration: &Declaration,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), EvaluationError> {
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
         match declaration {
             Declaration::Use { path, tail } => self.import(
                 &path
@@ -241,7 +273,9 @@ impl ReplSession {
                     .join("."),
                 tail.clone(),
             ),
-            Declaration::Let { pattern, value, .. } => self.let_binding(pattern, value),
+            Declaration::Let { pattern, value, .. } => {
+                self.let_binding(pattern, value, cancellation)
+            }
             Declaration::Function { signature, body } => {
                 // Generic execution has no bounded runtime implementation.
                 // Keep it explicit rather than silently dropping its type
@@ -276,13 +310,22 @@ impl ReplSession {
                 );
                 self.aliases.insert(name.clone(), name);
                 self.session_functions.insert(signature.name.clone());
-                self.check_retained()
+                self.check_retained()?;
+                if let Some(cancellation) = cancellation {
+                    cancellation.check()?;
+                }
+                Ok(())
             }
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
 
-    fn let_binding(&mut self, pattern: &Pattern, expression: &Expr) -> Result<(), EvaluationError> {
+    fn let_binding(
+        &mut self,
+        pattern: &Pattern,
+        expression: &Expr,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), EvaluationError> {
         self.reject_ambiguous_expression(expression)?;
         let mut environment = self.environment.clone();
         if let Some(value) = &self.last_success {
@@ -300,6 +343,7 @@ impl ReplSession {
             effects: None,
             namespace: None,
             transfer: None,
+            cancellation,
         };
         let mut scope = Scope::from_environment(&environment, &mut context)?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
@@ -323,7 +367,11 @@ impl ReplSession {
             .into_iter()
             .map(|(name, value)| value.canonical().map(|value| (name, value)))
             .collect::<Result<_, _>>()?;
-        self.check_retained()
+        self.check_retained()?;
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
+        Ok(())
     }
 
     fn import(&mut self, path: &str, tail: UseTail) -> Result<(), EvaluationError> {
