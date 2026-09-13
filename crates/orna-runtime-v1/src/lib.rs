@@ -7954,7 +7954,7 @@ impl AsyncFailurePayloadBackend for RuntimeStreamBackend<'_> {
 const STREAM_CHECKPOINT_SELECT: &str =
     "SELECT version, committed_position, next_fence FROM stream_checkpoint WHERE key_id = ?1";
 const STREAM_FAILURE_SELECT: &str = "SELECT \
-    consumer_principal, consumer_root, consumer_function, consumer_binding, \
+    key_id, consumer_principal, consumer_root, consumer_function, consumer_binding, \
     source_format, source, partition_format, partition, position_format, \
     delivery_position, successor_position, version, attempts, status, \
     diagnostic_code, diagnostic_class \
@@ -9324,36 +9324,42 @@ async fn load_stream_failure(
     };
     let delivery = DeliveryIdentity {
         consumer: ConsumerIdentity {
-            principal: decode_component(row_text(&row, 0)?)?,
-            root: decode_component(row_text(&row, 1)?)?,
-            function: decode_component(row_text(&row, 2)?)?,
-            binding: decode_component(row_text(&row, 3)?)?,
+            principal: decode_component(row_text(&row, 1)?)?,
+            root: decode_component(row_text(&row, 2)?)?,
+            function: decode_component(row_text(&row, 3)?)?,
+            binding: decode_component(row_text(&row, 4)?)?,
         },
-        source_format: decode_component(row_text(&row, 4)?)?,
-        source: decode_component(row_text(&row, 5)?)?,
-        partition_format: decode_component(row_text(&row, 6)?)?,
+        source_format: decode_component(row_text(&row, 5)?)?,
+        source: decode_component(row_text(&row, 6)?)?,
+        partition_format: decode_component(row_text(&row, 7)?)?,
         partition: decode_optional_component(
-            row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?,
         )?,
-        position_format: decode_component(row_text(&row, 8)?)?,
-        position: decode_position(row_text(&row, 9)?)?,
-        successor: decode_position(row_text(&row, 10)?)?,
+        position_format: decode_component(row_text(&row, 9)?)?,
+        position: decode_position(row_text(&row, 10)?)?,
+        successor: decode_position(row_text(&row, 11)?)?,
     };
+    let reconstructed = FailureIdentity(delivery);
+    if reconstructed != *identity
+        || row_text(&row, 0)? != stream_key_id(&reconstructed.0.checkpoint_key())
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
     Ok(Some(FailureRecord {
-        identity: FailureIdentity(delivery),
+        identity: reconstructed,
         version: decode_u64(
-            row.get::<i64>(11)
-                .map_err(|_| RuntimeError::RecoveryInvalid)?,
-        )?,
-        attempts: decode_u32(
             row.get::<i64>(12)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         )?,
-        status: decode_status(
+        attempts: decode_u32(
             row.get::<i64>(13)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         )?,
-        diagnostic: decode_diagnostic(&row, 14)?,
+        status: decode_status(
+            row.get::<i64>(14)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
+        diagnostic: decode_diagnostic(&row, 15)?,
         assertion_detail: load_stream_failure_assertion_detail(connection, identity).await?,
     }))
 }
@@ -12341,6 +12347,152 @@ mod tests {
         assert_eq!(loaded.assertion_detail, None);
         assert_eq!(loaded.diagnostic.code, DiagnosticCode::ExecutionRejected);
         assert_eq!(loaded.diagnostic.class, DiagnosticClass::Permanent);
+    }
+
+    #[tokio::test]
+    async fn direct_failure_recovery_rejects_corrupt_identity_or_checkpoint_key() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(27)).await.unwrap();
+        let delivery = stream_delivery("failure-integrity", "failure-integrity-next");
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let failure = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected acquire result: {other:?}"),
+            };
+            match stream
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(vec![27]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected failure result: {other:?}"),
+            }
+        };
+        let key = delivery.checkpoint_key();
+        let identity_id = stream_identity_id(&failure.identity);
+        let key_id = stream_key_id(&key);
+        let checkpoint_before = load_stream_checkpoint_state(&state.connection, &key)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_async(&failure.identity)
+                .await
+                .unwrap(),
+            Some(failure.clone())
+        );
+
+        state
+            .connection
+            .execute(
+                "UPDATE stream_failure SET key_id = 'corrupt-checkpoint-key'
+                 WHERE identity_id = ?1",
+                params![identity_id.clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_async(&failure.identity)
+                .await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Retry {
+                    failure: failure.identity.clone(),
+                    expected_version: failure.version,
+                    expected: expected.clone(),
+                })
+                .await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        assert_eq!(
+            load_stream_checkpoint_state(&state.connection, &key)
+                .await
+                .unwrap(),
+            checkpoint_before
+        );
+
+        state
+            .connection
+            .execute(
+                "UPDATE stream_failure SET key_id = ?2 WHERE identity_id = ?1",
+                params![identity_id.clone(), key_id],
+            )
+            .await
+            .unwrap();
+        let mut corrupt_identity = failure.identity.clone();
+        corrupt_identity.0.position = Position {
+            token: Component::new("corrupt-position").unwrap(),
+        };
+        let corrupt_identity_id = stream_identity_id(&corrupt_identity);
+        state
+            .connection
+            .execute(
+                "UPDATE stream_failure SET identity_id = ?2 WHERE identity_id = ?1",
+                params![identity_id.clone(), corrupt_identity_id.clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_async(&corrupt_identity)
+                .await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Retry {
+                    failure: corrupt_identity,
+                    expected_version: failure.version,
+                    expected,
+                })
+                .await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        assert_eq!(
+            load_stream_checkpoint_state(&state.connection, &key)
+                .await
+                .unwrap(),
+            checkpoint_before
+        );
+
+        state
+            .connection
+            .execute(
+                "UPDATE stream_failure SET identity_id = ?2 WHERE identity_id = ?1",
+                params![corrupt_identity_id, identity_id],
+            )
+            .await
+            .unwrap();
     }
 
     async fn protected_replay_fixture(
