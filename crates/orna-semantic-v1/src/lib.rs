@@ -6364,6 +6364,35 @@ fn infer_success_pipeline(
             callee, arguments, ..
         } = rhs
         && let Expr::Name { text, .. } = callee.as_ref()
+        && matches!(text.as_str(), "every" | "exists")
+        && root_collection_intrinsic_is_unshadowed(text, scope, local)
+        && let [argument] = arguments.as_slice()
+        && (argument.name.is_none() || argument.name.as_deref() == Some("predicate"))
+    {
+        let callback = infer_relation_callback(
+            &argument.value,
+            element.as_ref().clone(),
+            Type::Bool,
+            scope,
+            local,
+            diagnostics,
+        );
+        let mut effects = input.effects;
+        effects.join(&callback.effects);
+        return Inferred {
+            ty: if callback.ty == Type::Bool {
+                Type::Bool
+            } else {
+                Type::Error
+            },
+            effects,
+        };
+    }
+    if let Type::Relation(element) = &input.ty
+        && let Expr::Call {
+            callee, arguments, ..
+        } = rhs
+        && let Expr::Name { text, .. } = callee.as_ref()
         && text == "window"
         && root_collection_intrinsic_is_unshadowed("window", scope, local)
     {
