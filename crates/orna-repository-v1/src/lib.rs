@@ -6,7 +6,7 @@
 //! only the supplied worktree-relative paths.
 
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt, fs,
     io::Write,
     path::{Component, Path, PathBuf},
@@ -973,6 +973,45 @@ fn sorted_paths(paths: HashSet<ManagedPath>) -> Vec<ManagedPath> {
     paths
 }
 
+fn is_loose_path_components(components: &[Vec<u8>]) -> bool {
+    components.len() >= 2
+        && !components[0].starts_with(b".")
+        && components
+            .last()
+            .is_some_and(|component| component.ends_with(b".orna"))
+}
+
+fn record_case_folded_path_components(
+    prefixes: &mut BTreeMap<Vec<Vec<u8>>, BTreeSet<Vec<u8>>>,
+    components: &[Vec<u8>],
+) {
+    let mut prefix = Vec::new();
+    for component in components {
+        prefix.push(component.to_ascii_lowercase());
+        prefixes
+            .entry(prefix.clone())
+            .or_default()
+            .insert(component.clone());
+    }
+}
+
+fn case_folded_path_collides(
+    prefixes: &BTreeMap<Vec<Vec<u8>>, BTreeSet<Vec<u8>>>,
+    components: &[Vec<u8>],
+) -> bool {
+    let mut prefix = Vec::new();
+    for component in components {
+        prefix.push(component.to_ascii_lowercase());
+        if prefixes
+            .get(&prefix)
+            .is_some_and(|siblings| siblings.iter().any(|sibling| sibling != component))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Git-resolved local paths for one worktree's private Orna runtime area.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimePaths {
@@ -1302,6 +1341,7 @@ impl Repository {
                 return Err(RepositoryError::UnsafeManagedPath);
             }
         }
+        self.reject_final_loose_path_collisions(expected_head, changes)?;
 
         self.runtime.ensure_exists()?;
         fs::create_dir_all(self.runtime.locks())
@@ -2033,6 +2073,7 @@ impl Repository {
                 actual: actual_index,
             });
         }
+        self.reject_loose_path_collisions(expected_head, paths)?;
 
         let mut captured = Vec::with_capacity(paths.len());
         for path in paths {
@@ -2048,6 +2089,122 @@ impl Repository {
             captured.push(actual);
         }
         Ok(captured)
+    }
+
+    fn tracked_loose_path_components(
+        &self,
+        expected_head: &GitCommitRef,
+    ) -> Result<Vec<Vec<Vec<u8>>>, RepositoryError> {
+        let tracked = self.git_bytes([
+            "ls-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            "--full-tree",
+            expected_head.as_str(),
+            "--",
+        ])?;
+        let mut tracked_paths = Vec::new();
+        for path in tracked
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            let components = path
+                .split(|byte| *byte == b'/')
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            if !is_loose_path_components(&components) {
+                continue;
+            }
+            tracked_paths.push(components);
+        }
+        Ok(tracked_paths)
+    }
+
+    fn reject_loose_path_collisions(
+        &self,
+        expected_head: &GitCommitRef,
+        paths: &[ManagedPath],
+    ) -> Result<(), RepositoryError> {
+        let tracked_paths = self.tracked_loose_path_components(expected_head)?;
+        let tracked_set = tracked_paths.iter().cloned().collect::<BTreeSet<_>>();
+        let planned_paths = paths
+            .iter()
+            .map(|path| {
+                path.as_path()
+                    .iter()
+                    .map(|component| component.as_encoded_bytes().to_vec())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|components| is_loose_path_components(components))
+            .collect::<Vec<_>>();
+        let planned_set = planned_paths.iter().cloned().collect::<BTreeSet<_>>();
+        let mut known_components = BTreeMap::<Vec<Vec<u8>>, BTreeSet<Vec<u8>>>::new();
+        for components in &tracked_paths {
+            if !planned_set.contains(components) {
+                record_case_folded_path_components(&mut known_components, components);
+            }
+        }
+
+        for components in planned_paths {
+            if tracked_set.contains(&components) {
+                continue;
+            }
+            if case_folded_path_collides(&known_components, &components) {
+                return Err(RepositoryError::ManagedContentConflict);
+            }
+            record_case_folded_path_components(&mut known_components, &components);
+        }
+        Ok(())
+    }
+
+    fn reject_final_loose_path_collisions(
+        &self,
+        expected_head: &GitCommitRef,
+        changes: &[ManagedFileChange],
+    ) -> Result<(), RepositoryError> {
+        let planned = changes
+            .iter()
+            .filter(|change| change.bytes().is_some())
+            .map(|change| {
+                change
+                    .path()
+                    .as_path()
+                    .iter()
+                    .map(|component| component.as_encoded_bytes().to_vec())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|components| is_loose_path_components(components))
+            .collect::<Vec<_>>();
+        if planned.is_empty() {
+            return Ok(());
+        }
+        let deleted = changes
+            .iter()
+            .filter(|change| change.bytes().is_none())
+            .map(|change| {
+                change
+                    .path()
+                    .as_path()
+                    .iter()
+                    .map(|component| component.as_encoded_bytes().to_vec())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|components| is_loose_path_components(components))
+            .collect::<BTreeSet<_>>();
+        let mut known_components = BTreeMap::<Vec<Vec<u8>>, BTreeSet<Vec<u8>>>::new();
+        for components in self.tracked_loose_path_components(expected_head)? {
+            if !deleted.contains(&components) {
+                record_case_folded_path_components(&mut known_components, &components);
+            }
+        }
+        for components in planned {
+            if case_folded_path_collides(&known_components, &components) {
+                return Err(RepositoryError::ManagedContentConflict);
+            }
+            record_case_folded_path_components(&mut known_components, &components);
+        }
+        Ok(())
     }
 
     /// Observes the ordinary Git index without modifying it.
