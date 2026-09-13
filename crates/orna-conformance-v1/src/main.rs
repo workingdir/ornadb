@@ -6,14 +6,18 @@ use orna_conformance_v1::{
 };
 use orna_evaluator_v1::Limits as EvaluatorLimits;
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText, Value};
-use orna_protocol_v1::{Envelope, Message, PresentationContext};
+use orna_protocol_v1::{
+    DatabaseContext, Envelope, Limits as ProtocolLimits, Message, PresentationContext,
+    canonical_request_fingerprint,
+};
 use orna_repository_v1::Repository;
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
-use orna_semantic_v1::{analyze, ModuleInput};
+use orna_runtime_v1::{RequestIdentity, RequestState, RuntimeError, RuntimeIdentity, RuntimeState};
+use orna_semantic_v1::{ModuleInput, analyze};
 use orna_serving_v1::{Credential, Limits as ServingLimits, Origin, Patch, RetainedPin, Serving};
 use std::collections::BTreeMap;
 use std::{
     fs,
+    path::Path,
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -97,6 +101,9 @@ impl RuntimeEvaluator for CompositeEvaluator {
         if sys_rt_rename_contract(scenario) {
             return run_sys_rt_rename_scenario(scenario);
         }
+        if durable_eval_contract(scenario) {
+            return run_durable_eval_scenario(scenario);
+        }
         if remote_eval_contract(scenario) {
             return StageOutcome::Skipped {
                 reason: "production remote Eval admits pure source but rejects table mutations, so it cannot satisfy ORNA-EVAL-003's required served-CWD activation transaction".into(),
@@ -179,6 +186,182 @@ fn remote_eval_contract(scenario: &Scenario) -> bool {
         && scenario.requirements == ["ORNA-EVAL-001", "ORNA-EVAL-002", "ORNA-EVAL-003"]
 }
 
+fn canonical_eval_fingerprint(
+    unit: &SourceUnit,
+    request: RequestIdentity,
+    database: [u8; 16],
+) -> [u8; 32] {
+    canonical_request_fingerprint(
+        request.session_id,
+        &Envelope {
+            request: Some(request.request_id),
+            watch: None,
+            message: Message::Eval {
+                source: unit.source.clone(),
+                database: DatabaseContext {
+                    database,
+                    snapshot: None,
+                },
+                presentation: PresentationContext {
+                    locale: "en-GB".into(),
+                    timezone: None,
+                    width: None,
+                    theme: "terminal/default".into(),
+                    supported_kinds: vec!["text".into()],
+                },
+                fingerprint: [0; 32],
+            },
+            extensions: BTreeMap::new(),
+        },
+        ProtocolLimits::default(),
+    )
+    .expect("canonical eval envelope is valid")
+}
+
+fn conformance_scratch_root(label: &str) -> std::path::PathBuf {
+    Path::new("/var/tmp").join(format!(
+        "{label}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos())
+    ))
+}
+
+fn durable_eval_contract(scenario: &Scenario) -> bool {
+    scenario.id == "EVAL-003"
+        && scenario.title == "Lost mutating-eval response does not repeat database writes"
+        && scenario.given == ["a mutating eval request with a stable request identity"]
+        && scenario.when
+            == ["the activation commits but the reply is lost and the request is repeated"]
+        && scenario.then
+            == [
+                "the recorded outcome is returned",
+                "the database mutation is not executed twice",
+                "a reused identity with a different fingerprint is rejected",
+            ]
+        && scenario.requirements
+            == [
+                "ORNA-EVAL-007",
+                "ORNA-EVAL-008",
+                "ORNA-EVAL-009",
+                "ORNA-EVAL-010",
+                "ORNA-EVAL-011",
+            ]
+}
+
+fn run_durable_eval_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
+    let root = conformance_scratch_root("orna-conformance-eval");
+    if fs::create_dir(&root).is_err() {
+        return durable_eval_scenario_failure();
+    }
+    let result = (|| {
+        let status = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .ok()?;
+        if !status.success() {
+            return None;
+        }
+        let repository = Repository::discover(&root).ok()?;
+        let source = SourceUnit {
+            fixture_id: scenario.id.clone(),
+            source_id: "eval-003.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "pub table Note(id: Int) { text: Str, } fn main() { Note.insert({ id: 7, text: \"once\" }); }".into(),
+        };
+        let changed_source = SourceUnit {
+            source: "pub table Note(id: Int) { text: Str, } fn main() { Note.insert({ id: 8, text: \"twice\" }); }".into(),
+            ..source.clone()
+        };
+        let identity = RuntimeIdentity {
+            database_id: [71; 16],
+            repository_id: [72; 16],
+        };
+        let request = RequestIdentity {
+            session_id: [73; 16],
+            request_id: [74; 16],
+        };
+        let fingerprint = canonical_eval_fingerprint(&source, request, identity.database_id);
+        let changed_fingerprint =
+            canonical_eval_fingerprint(&changed_source, request, identity.database_id);
+        let owner_id = [76; 16];
+        let digest = [77; 32];
+
+        // Model an uncertain response by intentionally discarding the first reply.
+        let evaluator = DurableTransactionalEvaluator::new("main", Default::default());
+        let first = block_on(evaluator.execute_source_request(
+            &repository,
+            identity,
+            owner_id,
+            digest,
+            request,
+            fingerprint,
+            &source,
+        ))
+        .ok()?;
+        if !matches!(first, StageOutcome::Passed) {
+            return None;
+        }
+        drop(evaluator);
+        let evaluator = DurableTransactionalEvaluator::new("main", Default::default());
+        let replay = block_on(evaluator.execute_source_request(
+            &repository,
+            identity,
+            [78; 16],
+            digest,
+            request,
+            fingerprint,
+            &source,
+        ))
+        .ok()?;
+        let changed_request = matches!(
+            block_on(evaluator.execute_source_request(
+                &repository,
+                identity,
+                [79; 16],
+                digest,
+                request,
+                changed_fingerprint,
+                &changed_source,
+            )),
+            Err(RuntimeError::RequestFingerprintMismatch)
+        );
+        let state = block_on(RuntimeState::open(&repository, identity, digest)).ok()?;
+        let status = block_on(state.request_status(request, fingerprint)).ok()??;
+        let rows = block_on(state.committed_table_rows("Note")).ok()?;
+        let pending = block_on(state.pending()).ok()?;
+        let original_key = Value::int(7.into()).encode().ok()?;
+        let changed_key = Value::int(8.into()).encode().ok()?;
+        (matches!(replay, StageOutcome::Passed)
+            && status.state == RequestState::Completed
+            && status.terminal_outcome.is_some()
+            && rows.len() == 1
+            && rows[0].0 == original_key
+            && rows.iter().all(|(key, _)| key != &changed_key)
+            && pending.len() == 1
+            && changed_request)
+            .then_some(StageOutcome::Passed)
+    })();
+    let _ = fs::remove_dir_all(&root);
+    result.unwrap_or_else(durable_eval_scenario_failure)
+}
+
+fn durable_eval_scenario_failure() -> StageOutcome<Diagnostic> {
+    StageOutcome::Failed(
+        Diagnostic::new(
+            SafeText::new("ORNA-CONFORMANCE-EVAL-003").expect("static code"),
+            DiagnosticSeverity::Error,
+            SafeText::new("durable mutating-eval scenario did not satisfy its exact contract")
+                .expect("static message"),
+        )
+        .expect("valid diagnostic"),
+    )
+}
+
 fn repl_preview_contract(scenario: &Scenario) -> bool {
     scenario.id == "REPL-001"
         && scenario.title == "Typed safe preview"
@@ -225,13 +408,7 @@ fn transaction_contract(scenario: &Scenario) -> bool {
 }
 
 fn run_durable_transaction_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
-    let root = std::env::temp_dir().join(format!(
-        "orna-conformance-transaction-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos())
-    ));
+    let root = conformance_scratch_root("orna-conformance-transaction");
     if fs::create_dir(&root).is_err() {
         return durable_scenario_failure();
     }
@@ -840,7 +1017,7 @@ fn run_profile(corpus: Corpus, profile: RunnerProfile) -> orna_conformance_v1::R
                         ),
                         (
                             "runtime-stages".into(),
-                            "pure row/expression units, the authoritative duplicate-key fixture, SYS-RT-RENAME-100 system-name resolution, and the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, and LIVE-004 universal subtree-replacement contracts execute; other behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
+                            "pure row/expression units, the authoritative duplicate-key fixture, SYS-RT-RENAME-100 system-name resolution, the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, LIVE-004 universal subtree replacement, and EVAL-003 durable request replay contracts execute through bounded runtime witnesses; these scenario results remain implementation-scenario evidence and are not Orna-engine execution".into(),
                         ),
                     ]
                     .into_iter()
@@ -854,6 +1031,7 @@ fn run_profile(corpus: Corpus, profile: RunnerProfile) -> orna_conformance_v1::R
                         "LIVE-003".into(),
                         "LIVE-004".into(),
                         "SYS-RT-RENAME-100".into(),
+                        "EVAL-003".into(),
                     ],
                 })
                 .run(&mut adapter)
@@ -908,10 +1086,10 @@ fn report_exit_code(report: &orna_conformance_v1::RunReport) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_runner_command, report_exit_code, run_live_fallback_scenario,
+        CompositeEvaluator, Corpus, Harness, RunnerCommand, RunnerProfile, RuntimeAdapter,
+        Scenario, StageOutcome, parse_runner_command, report_exit_code, run_live_fallback_scenario,
         run_live_keyed_update_scenario, run_live_resync_scenario, run_live_unkeyed_update_scenario,
-        run_profile, run_sys_rt_rename_scenario, CompositeEvaluator, Corpus, Harness,
-        RunnerCommand, RunnerProfile, RuntimeAdapter, Scenario, StageOutcome,
+        run_profile, run_sys_rt_rename_scenario,
     };
     use orna_conformance_v1::EvidenceStatus;
 
@@ -954,13 +1132,15 @@ mod tests {
     fn runner_profile_selection_rejects_unknown_or_duplicate_arguments() {
         assert!(parse_runner_command(vec!["--profile".into(), "unknown".into()]).is_err());
         assert!(parse_runner_command(vec!["--unknown".into()]).is_err());
-        assert!(parse_runner_command(vec![
-            "--profile".into(),
-            "syntax-parse".into(),
-            "--profile".into(),
-            "syntax-parse".into(),
-        ])
-        .is_err());
+        assert!(
+            parse_runner_command(vec![
+                "--profile".into(),
+                "syntax-parse".into(),
+                "--profile".into(),
+                "syntax-parse".into(),
+            ])
+            .is_err()
+        );
         assert!(parse_runner_command(vec!["--profile".into()]).is_err());
     }
 
@@ -976,10 +1156,12 @@ mod tests {
             "orna-conformance --profile syntax-parse"
         );
         assert!(report.fixtures.iter().any(|fixture| !fixture.passed));
-        assert!(report
-            .scenarios
-            .iter()
-            .all(|scenario| scenario.status != EvidenceStatus::Failed));
+        assert!(
+            report
+                .scenarios
+                .iter()
+                .all(|scenario| scenario.status != EvidenceStatus::Failed)
+        );
         assert_eq!(report_exit_code(&report), 1);
     }
 
