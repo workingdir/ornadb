@@ -5980,21 +5980,12 @@ fn infer_relation_terminal_call(
         "every" | "exists" => 2..=2,
         _ => unreachable!("relation terminal operation was checked above"),
     };
-    let mut effects = EffectSummary::default();
-    let values = arguments
-        .iter()
-        .map(|argument| {
-            let value = infer(&argument.value, scope, local, diagnostics);
-            effects.join(&value.effects);
-            value
-        })
-        .collect::<Vec<_>>();
     let mut malformed = !expected.contains(&arguments.len());
     let mut positional = 0usize;
     let mut named_started = false;
     let mut slots = vec![None; 3];
     let callback_name = match operation {
-        "one" | "every" | "exists" => Some("predicate"),
+        "every" | "exists" => Some("predicate"),
         "take" | "drop" => Some("count"),
         "window" => Some("size"),
         _ => None,
@@ -6044,15 +6035,64 @@ fn infer_relation_terminal_call(
     if slots[0] != Some(row_index) {
         malformed = true;
     }
-    if let Some(callback_name) = callback_name
-        && matches!(operation, "one" | "every" | "exists")
-        && slots[1].is_none()
-    {
+    let missing_callback = callback_name
+        .filter(|_| slots[1].is_none())
+        .map(str::to_owned);
+    let mut relation_element = if slots[1].is_some_and(|index| index < row_index) {
+        arguments.get(row_index).and_then(|argument| {
+            let mut probe_diagnostics = Vec::new();
+            match infer(&argument.value, scope, local, &mut probe_diagnostics).ty {
+                Type::Relation(element) => Some(*element),
+                _ => None,
+            }
+        })
+    } else {
+        None
+    };
+    let mut effects = EffectSummary::default();
+    let mut values = Vec::with_capacity(arguments.len());
+    for (index, argument) in arguments.iter().enumerate() {
+        let value = if slots[1] == Some(index) && matches!(operation, "one" | "every" | "exists") {
+            // Infer a relation callback at its source position. The silent
+            // row probe supplies context for named/reordered arguments when
+            // the row argument has not appeared yet.
+            if let Some(element) = relation_element.clone() {
+                infer_relation_callback(
+                    &argument.value,
+                    element,
+                    Type::Bool,
+                    scope,
+                    local,
+                    diagnostics,
+                )
+            } else {
+                infer(&argument.value, scope, local, diagnostics)
+            }
+        } else {
+            infer(&argument.value, scope, local, diagnostics)
+        };
+        if index == row_index
+            && let Type::Relation(element) = &value.ty
+        {
+            relation_element = Some(element.as_ref().clone());
+        }
+        effects.join(&value.effects);
+        values.push(value);
+    }
+    if let Some(callback_name) = missing_callback.as_deref() {
+        // Preserve left-to-right argument inference before reporting the
+        // relation shape error for a malformed direct call.
         diagnostics.push(diag(
             DIAG_TYPE,
             format!("relation {operation} requires rows and {callback_name}"),
         ));
         malformed = true;
+    }
+    if malformed && missing_callback.is_none() {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("relation {operation} arguments do not match its static signature"),
+        ));
     }
     let Type::Relation(element) = values[row_index].ty.clone() else {
         return Inferred {
@@ -6064,16 +6104,7 @@ fn infer_relation_terminal_call(
     if matches!(operation, "one" | "every" | "exists")
         && let Some(index) = slots[1]
     {
-        let callback = infer_relation_callback(
-            &arguments[index].value,
-            element.as_ref().clone(),
-            Type::Bool,
-            scope,
-            local,
-            diagnostics,
-        );
-        effects.join(&callback.effects);
-        valid &= callback.ty == Type::Bool;
+        valid &= values[index].ty == Type::Bool;
     }
     for slot in 1..3 {
         if let Some(index) = slots[slot] {
@@ -6112,7 +6143,12 @@ fn infer_relation_terminal_call(
         "every" | "exists" => Type::Bool,
         "count" => Type::Int,
         "first" => Type::Optional(element.clone()),
-        "one" => element.as_ref().clone(),
+        "one" => {
+            // Cardinality failure is part of the ordinary failure channel,
+            // including when the relation overload is selected directly.
+            effects.may_fail = true;
+            element.as_ref().clone()
+        }
         "take" | "drop" => Type::Relation(element.clone()),
         "window" => Type::Relation(Box::new(Type::List(Box::new(element.as_ref().clone())))),
         "sum" | "min" | "max" if matches!(element.as_ref(), Type::Int | Type::Float) => {
@@ -6801,9 +6837,7 @@ fn infer_success_pipeline(
             (element.clone(), Some(Type::Bool))
         }
         ("last", false, []) => (Type::Optional(Box::new(element.clone())), None),
-        ("count", false, [])
-            if root_collection_intrinsic_is_unshadowed("count", scope, local) =>
-        {
+        ("count", false, []) if root_collection_intrinsic_is_unshadowed("count", scope, local) => {
             (Type::Int, None)
         }
         ("pairs", false, []) => (
