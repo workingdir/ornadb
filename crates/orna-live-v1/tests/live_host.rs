@@ -5649,6 +5649,89 @@ fn live_http_routes_are_exact_origin_checked_and_rotate_scoped_tokens() {
 }
 
 #[test]
+fn malformed_create_json_is_rejected_before_session_admission() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut authority = CountingAuthority {
+        calls: 0,
+        times: Vec::new(),
+    };
+    let mut issuer = Issuer(1, None);
+    let mut deletion = Delete(true);
+
+    let response = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1",}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+
+    assert_eq!(response.status, 400);
+    assert_eq!(authority.calls, 0);
+    assert_eq!(issuer.1, None);
+}
+
+#[test]
+fn malformed_resume_json_is_rejected_before_attachment_replacement() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut authority = Authority;
+    let mut issuer = Issuer(1, None);
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(created.status, 201);
+    let original = token(&created);
+
+    let response = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session/01010101-0101-0101-0101-010101010101/resume",
+            &format!(r#"{{"resume_token":"{original}","protocol":"orna.present.v1",}}"#),
+        ),
+        1,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+
+    assert_eq!(response.status, 400);
+    assert_eq!(issuer.1, Some([1; 32]));
+
+    let resumed = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session/01010101-0101-0101-0101-010101010101/resume",
+            &format!(r#"{{"resume_token":"{original}","protocol":"orna.present.v1"}}"#),
+        ),
+        2,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(resumed.status, 200);
+    assert_ne!(token(&resumed), original);
+}
+
+#[test]
 fn websocket_upgrade_fragmentation_and_controls_are_checked_and_forwarded() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
