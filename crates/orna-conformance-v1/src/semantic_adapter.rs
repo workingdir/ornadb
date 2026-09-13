@@ -23,8 +23,8 @@ use orna_runtime_v1::{
     FaultInjector, ListStreamSource, NoFault, RequestIdentity, RequestStatus,
     RunObservationRegistration, RunningTableRequestContinuation, RuntimeError, RuntimeIdentity,
     RuntimeState, StreamHandler, StreamHandlerResult, StreamItem, StreamRunOutcome,
-    StreamTableCandidateValidator, StreamTableMutationBatch, StreamValidatedTableMutationBatch,
-    TableMutation, TerminalOutcome, WriterLease,
+    StreamTableCandidateValidator, StreamValidatedTableMutationBatch, TableMutation,
+    TerminalOutcome, WriterLease,
 };
 use orna_semantic_v1::{
     Catalogue, EffectSummary, ModuleInput, Namespace, StandardDependencyProfile,
@@ -2131,18 +2131,13 @@ impl StreamHandler for ListTableHandler {
         digest.update(self.digest);
         digest.update(mutation.id());
         self.digest = digest.finalize().into();
-        if self.bridge.table_assertions.is_empty() {
-            StreamHandlerResult::CommitTable(StreamTableMutationBatch {
-                mutations: vec![mutation],
-                next_digest: self.digest,
-            })
-        } else {
-            StreamHandlerResult::CommitValidatedTable(StreamValidatedTableMutationBatch {
-                mutations: vec![mutation],
-                next_digest: self.digest,
-                validator: Box::new(ListTableCandidateValidator::new(&self.bridge, self.limits)),
-            })
-        }
+        StreamHandlerResult::CommitValidatedTable(StreamValidatedTableMutationBatch {
+            mutations: vec![mutation],
+            next_digest: self.digest,
+            // Even a table with no declared assertions crosses the durable
+            // boundary through an explicit no-op validator.
+            validator: Box::new(ListTableCandidateValidator::new(&self.bridge, self.limits)),
+        })
     }
 }
 
