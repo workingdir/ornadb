@@ -51,9 +51,9 @@ use uuid::Uuid;
 mod catalogue;
 pub use catalogue::{
     CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
-    CatalogueFunction, CatalogueFunctionDeclaration, CatalogueObject, CatalogueObjectKind,
-    CatalogueParameterDeclaration, CatalogueParameterHandle, CatalogueTypeDeclaration,
-    CatalogueTypeForm, CatalogueTypeHandle, CatalogueTypeSpec,
+    CatalogueFunction, CatalogueFunctionDeclaration, CatalogueModule, CatalogueModuleDeclaration,
+    CatalogueObject, CatalogueObjectKind, CatalogueParameterDeclaration, CatalogueParameterHandle,
+    CatalogueTypeDeclaration, CatalogueTypeForm, CatalogueTypeHandle, CatalogueTypeSpec,
 };
 
 const SCHEMA: &str = r#"
@@ -298,7 +298,7 @@ CREATE TABLE IF NOT EXISTS sys_run_observation (
 );
 CREATE TABLE IF NOT EXISTS runtime_catalogue_identity (
     object_id BLOB PRIMARY KEY CHECK (length(object_id) = 16),
-    kind INTEGER NOT NULL CHECK (kind IN (1, 2)),
+    kind INTEGER NOT NULL CHECK (kind IN (1, 2, 3)),
     created_ms INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS runtime_catalogue_capture (
@@ -315,12 +315,17 @@ CREATE TABLE IF NOT EXISTS runtime_catalogue_admission (
 CREATE TABLE IF NOT EXISTS runtime_catalogue_revision (
     object_id BLOB NOT NULL REFERENCES runtime_catalogue_identity(object_id),
     snapshot BLOB NOT NULL CHECK (length(snapshot) > 0),
-    kind INTEGER NOT NULL CHECK (kind IN (1, 2)),
+    kind INTEGER NOT NULL CHECK (kind IN (1, 2, 3)),
     qualified_name TEXT NOT NULL CHECK (length(qualified_name) > 0),
     revision_id BLOB NOT NULL CHECK (length(revision_id) = 32),
     semantic_hash BLOB NOT NULL CHECK (length(semantic_hash) = 32),
     PRIMARY KEY (object_id, snapshot),
     UNIQUE (snapshot, qualified_name)
+);
+CREATE TABLE IF NOT EXISTS runtime_catalogue_module_admission (
+    object_id BLOB NOT NULL REFERENCES runtime_catalogue_identity(object_id),
+    snapshot BLOB NOT NULL REFERENCES runtime_catalogue_capture(snapshot),
+    PRIMARY KEY (object_id, snapshot)
 );
 CREATE TABLE IF NOT EXISTS runtime_catalogue_type (
     object_id BLOB NOT NULL,
@@ -4245,19 +4250,177 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)
     }
 
-    /// Records the additive runtime catalogue identity layer. The tables are
-    /// created by `SCHEMA` for new stores; the marker makes the upgrade
-    /// explicit for existing stores and keeps this prerequisite independently
-    /// observable by later invocation projection migrations.
+    /// Upgrades the runtime catalogue kind domain to include committed module
+    /// identities. The dependency graph is rebuilt inside one transaction
+    /// with foreign keys enabled; all old rows are copied before the old
+    /// tables are replaced, and both pre- and post-rebuild FK checks must be
+    /// clean before the migration marker can commit.
     async fn migrate_catalogue_identity_schema(&self) -> Result<(), RuntimeError> {
-        self.connection
-            .execute(
-                "INSERT OR IGNORE INTO runtime_schema_migration (migration)
-                 VALUES ('runtime-catalogue-identity-v1')",
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut pragma = transaction
+            .query("PRAGMA foreign_keys", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let foreign_keys = pragma
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?
+            .get::<i64>(0)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        drop(pragma);
+        if foreign_keys != 1 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let mut rows = transaction
+            .query(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'runtime_catalogue_identity'",
                 (),
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let identity_sql: Option<String> = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .map(|row| row.get(0))
+            .transpose()
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        drop(rows);
+        if identity_sql.is_some_and(|sql| sql.contains("IN (1, 2, 3)")) {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                     VALUES ('runtime-catalogue-identity-v2')",
+                    (),
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            return transaction
+                .commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable);
+        }
+
+        Self::assert_catalogue_foreign_keys_tx(&transaction).await?;
+        transaction
+            .execute_batch(
+                "CREATE TABLE runtime_catalogue_identity_v2 (
+                     object_id BLOB PRIMARY KEY CHECK (length(object_id) = 16),
+                     kind INTEGER NOT NULL CHECK (kind IN (1, 2, 3)),
+                     created_ms INTEGER NOT NULL
+                 );
+                 CREATE TABLE runtime_catalogue_revision_v2 (
+                     object_id BLOB NOT NULL REFERENCES runtime_catalogue_identity_v2(object_id),
+                     snapshot BLOB NOT NULL CHECK (length(snapshot) > 0),
+                     kind INTEGER NOT NULL CHECK (kind IN (1, 2, 3)),
+                     qualified_name TEXT NOT NULL CHECK (length(qualified_name) > 0),
+                     revision_id BLOB NOT NULL CHECK (length(revision_id) = 32),
+                     semantic_hash BLOB NOT NULL CHECK (length(semantic_hash) = 32),
+                     PRIMARY KEY (object_id, snapshot),
+                     UNIQUE (snapshot, qualified_name)
+                 );
+                 CREATE TABLE runtime_catalogue_module_admission_v2 (
+                     object_id BLOB NOT NULL REFERENCES runtime_catalogue_identity_v2(object_id),
+                     snapshot BLOB NOT NULL REFERENCES runtime_catalogue_capture(snapshot),
+                     PRIMARY KEY (object_id, snapshot)
+                 );
+                 CREATE TABLE runtime_catalogue_type_v2 (
+                     object_id BLOB NOT NULL,
+                     snapshot BLOB NOT NULL,
+                     form TEXT NOT NULL CHECK (form IN ('named', 'value', 'reference')),
+                     target_object_id BLOB,
+                     PRIMARY KEY (object_id, snapshot),
+                     FOREIGN KEY (object_id, snapshot)
+                         REFERENCES runtime_catalogue_revision_v2(object_id, snapshot),
+                     CHECK ((form = 'reference') = (target_object_id IS NOT NULL)),
+                     CHECK (target_object_id IS NULL OR length(target_object_id) = 16)
+                 );
+                 CREATE TABLE runtime_catalogue_function_v2 (
+                     object_id BLOB NOT NULL,
+                     snapshot BLOB NOT NULL,
+                     result_type_object_id BLOB NOT NULL CHECK (length(result_type_object_id) = 16),
+                     PRIMARY KEY (object_id, snapshot),
+                     FOREIGN KEY (object_id, snapshot)
+                         REFERENCES runtime_catalogue_revision_v2(object_id, snapshot)
+                 );
+                 CREATE TABLE runtime_catalogue_parameter_v2 (
+                     object_id BLOB NOT NULL,
+                     snapshot BLOB NOT NULL,
+                     position INTEGER NOT NULL CHECK (position >= 0),
+                     name TEXT NOT NULL CHECK (length(name) > 0),
+                     type_object_id BLOB NOT NULL CHECK (length(type_object_id) = 16),
+                     PRIMARY KEY (object_id, snapshot, position),
+                     FOREIGN KEY (object_id, snapshot)
+                         REFERENCES runtime_catalogue_function_v2(object_id, snapshot)
+                 );
+                 INSERT INTO runtime_catalogue_identity_v2
+                     SELECT object_id, kind, created_ms FROM runtime_catalogue_identity;
+                 INSERT INTO runtime_catalogue_revision_v2
+                     SELECT object_id, snapshot, kind, qualified_name, revision_id, semantic_hash
+                     FROM runtime_catalogue_revision;
+                 INSERT INTO runtime_catalogue_module_admission_v2
+                     SELECT object_id, snapshot FROM runtime_catalogue_module_admission;
+                 INSERT INTO runtime_catalogue_type_v2
+                     SELECT object_id, snapshot, form, target_object_id
+                     FROM runtime_catalogue_type;
+                 INSERT INTO runtime_catalogue_function_v2
+                     SELECT object_id, snapshot, result_type_object_id
+                     FROM runtime_catalogue_function;
+                 INSERT INTO runtime_catalogue_parameter_v2
+                     SELECT object_id, snapshot, position, name, type_object_id
+                     FROM runtime_catalogue_parameter;
+                 DROP TABLE runtime_catalogue_module_admission;
+                 DROP TABLE runtime_catalogue_parameter;
+                 DROP TABLE runtime_catalogue_function;
+                 DROP TABLE runtime_catalogue_type;
+                 DROP TABLE runtime_catalogue_revision;
+                 DROP TABLE runtime_catalogue_identity;
+                 ALTER TABLE runtime_catalogue_identity_v2 RENAME TO runtime_catalogue_identity;
+                 ALTER TABLE runtime_catalogue_revision_v2 RENAME TO runtime_catalogue_revision;
+                 ALTER TABLE runtime_catalogue_module_admission_v2
+                     RENAME TO runtime_catalogue_module_admission;
+                 ALTER TABLE runtime_catalogue_type_v2 RENAME TO runtime_catalogue_type;
+                 ALTER TABLE runtime_catalogue_function_v2 RENAME TO runtime_catalogue_function;
+                 ALTER TABLE runtime_catalogue_parameter_v2 RENAME TO runtime_catalogue_parameter;",
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Self::assert_catalogue_foreign_keys_tx(&transaction).await?;
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                 VALUES ('runtime-catalogue-identity-v2')",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    async fn assert_catalogue_foreign_keys_tx(
+        transaction: &libsql::Transaction,
+    ) -> Result<(), RuntimeError> {
+        let mut rows = transaction
+            .query("PRAGMA foreign_key_check", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
         Ok(())
     }
 
@@ -20537,6 +20700,186 @@ mod tests {
         let reopened = open_state(&repo).await;
         assert_eq!(reopened.stream_checkpoint(&key).await.unwrap().key, key);
         reopened.migrate_nullable_stream_partitions().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn populated_legacy_catalogue_kind_domain_migrates_without_losing_rows() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(184)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        let admitted = state
+            .admit_catalogue_at(
+                writer,
+                &capture,
+                CatalogueAdmission {
+                    predecessor_capture: None,
+                    types: vec![CatalogueTypeDeclaration {
+                        declaration: CatalogueDeclaration {
+                            qualified_name: "pkg.LegacyType".into(),
+                            kind: CatalogueObjectKind::Type,
+                            revision_id: digest(185),
+                            semantic_hash: digest(186),
+                            rename_from: None,
+                        },
+                        form: CatalogueTypeSpec::Named,
+                    }],
+                    functions: vec![CatalogueFunctionDeclaration {
+                        declaration: CatalogueDeclaration {
+                            qualified_name: "pkg.LegacyFunction".into(),
+                            kind: CatalogueObjectKind::Function,
+                            revision_id: digest(187),
+                            semantic_hash: digest(188),
+                            rename_from: None,
+                        },
+                        parameters: vec![CatalogueParameterDeclaration {
+                            name: "value".into(),
+                            position: 0,
+                            type_name: "pkg.LegacyType".into(),
+                        }],
+                        result_type_name: "pkg.LegacyType".into(),
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        let type_id = admitted.types[0].object_id();
+        let function_id = admitted.functions[0].object.object_id;
+
+        state
+            .connection
+            .execute("PRAGMA foreign_keys = OFF", ())
+            .await
+            .unwrap();
+        state
+            .connection
+            .execute_batch(
+                "CREATE TABLE runtime_catalogue_identity_legacy (
+                     object_id BLOB PRIMARY KEY CHECK (length(object_id) = 16),
+                     kind INTEGER NOT NULL CHECK (kind IN (1, 2)),
+                     created_ms INTEGER NOT NULL
+                 );
+                 INSERT INTO runtime_catalogue_identity_legacy
+                     SELECT object_id, kind, created_ms FROM runtime_catalogue_identity;
+                 CREATE TABLE runtime_catalogue_revision_legacy (
+                     object_id BLOB NOT NULL REFERENCES runtime_catalogue_identity(object_id),
+                     snapshot BLOB NOT NULL CHECK (length(snapshot) > 0),
+                     kind INTEGER NOT NULL CHECK (kind IN (1, 2)),
+                     qualified_name TEXT NOT NULL CHECK (length(qualified_name) > 0),
+                     revision_id BLOB NOT NULL CHECK (length(revision_id) = 32),
+                     semantic_hash BLOB NOT NULL CHECK (length(semantic_hash) = 32),
+                     PRIMARY KEY (object_id, snapshot),
+                     UNIQUE (snapshot, qualified_name)
+                 );
+                 INSERT INTO runtime_catalogue_revision_legacy
+                     SELECT object_id, snapshot, kind, qualified_name, revision_id, semantic_hash
+                     FROM runtime_catalogue_revision;
+                 DROP TABLE runtime_catalogue_revision;
+                 DROP TABLE runtime_catalogue_identity;
+                 ALTER TABLE runtime_catalogue_identity_legacy
+                     RENAME TO runtime_catalogue_identity;
+                 ALTER TABLE runtime_catalogue_revision_legacy
+                     RENAME TO runtime_catalogue_revision;",
+            )
+            .await
+            .unwrap();
+        state
+            .connection
+            .execute("PRAGMA foreign_keys = ON", ())
+            .await
+            .unwrap();
+
+        state.migrate_catalogue_identity_schema().await.unwrap();
+
+        let mut schema = state
+            .connection
+            .query(
+                "SELECT name, sql FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name IN (
+                       'runtime_catalogue_identity',
+                       'runtime_catalogue_revision',
+                       'runtime_catalogue_type',
+                       'runtime_catalogue_function',
+                       'runtime_catalogue_module_admission'
+                   )
+                 ORDER BY name",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut table_sql = BTreeMap::new();
+        while let Some(row) = schema.next().await.unwrap() {
+            table_sql.insert(row.get::<String>(0).unwrap(), row.get::<String>(1).unwrap());
+        }
+        assert_eq!(table_sql.len(), 5);
+        assert!(table_sql["runtime_catalogue_identity"].contains("IN (1, 2, 3)"));
+        assert!(table_sql["runtime_catalogue_revision"].contains("IN (1, 2, 3)"));
+
+        let mut rows = state
+            .connection
+            .query(
+                "SELECT object_id, kind, qualified_name, revision_id, semantic_hash
+                 FROM runtime_catalogue_revision
+                 WHERE qualified_name IN ('pkg.LegacyType', 'pkg.LegacyFunction')
+                 ORDER BY qualified_name",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut retained = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            retained.push((
+                row.get::<Vec<u8>>(0).unwrap(),
+                row.get::<i64>(1).unwrap(),
+                row.get::<String>(2).unwrap(),
+                row.get::<Vec<u8>>(3).unwrap(),
+                row.get::<Vec<u8>>(4).unwrap(),
+            ));
+        }
+        assert_eq!(
+            retained,
+            vec![
+                (
+                    function_id.to_vec(),
+                    1,
+                    "pkg.LegacyFunction".into(),
+                    digest(187).to_vec(),
+                    digest(188).to_vec(),
+                ),
+                (
+                    type_id.to_vec(),
+                    2,
+                    "pkg.LegacyType".into(),
+                    digest(185).to_vec(),
+                    digest(186).to_vec(),
+                ),
+            ]
+        );
+
+        let module = state
+            .admit_catalogue_module_at(
+                writer,
+                &capture,
+                None,
+                CatalogueModuleDeclaration {
+                    qualified_name: "pkg.LegacyModule".into(),
+                    revision_id: digest(189),
+                    semantic_hash: digest(190),
+                    rename_from: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(module.object.kind, CatalogueObjectKind::Module);
+        assert_eq!(module.object.qualified_name, "pkg.LegacyModule");
+
+        let mut foreign_keys = state
+            .connection
+            .query("PRAGMA foreign_key_check", ())
+            .await
+            .unwrap();
+        assert!(foreign_keys.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
