@@ -1,4 +1,6 @@
-use orna_semantic_v1::{ModuleInput, analyze};
+use orna_semantic_v1::{
+    Catalogue, DIAG_TYPE, DIAG_UNRESOLVED, ModuleInput, Type, analyze, analyze_with_catalogue,
+};
 
 fn has_message(result: &orna_semantic_v1::Analysis, expected: &str) -> bool {
     result
@@ -56,4 +58,152 @@ fn declared_relation_helper_shadows_the_core_filter_name() {
         "#,
     )]);
     assert!(result.is_ok(), "{:#?}", result.diagnostics);
+}
+
+#[test]
+fn relational_callbacks_preserve_effects_and_failure_before_planning() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "relation-callback-effects.orna",
+            r#"
+                pub table Note(id: Int) { value: Int, }
+                pub fn pure(rows: Relation<Note>) = rows | filter(note => note.value > 0);
+                pub fn database(rows: Relation<Note>) = rows | filter(note => Note.count() > 0);
+                pub fn external(rows: Relation<Note>) = rows | filter(note => std.net.http.get("https://example.com") == "ok");
+                pub fn direct_one(rows: Relation<Note>) = one(rows);
+                pub fn predicate_one(rows: Relation<Note>) = one(rows, note => note.value > 0);
+                pub fn failed(rows: Relation<Note>) = one(rows, note => Note.one().value > 0);
+            "#,
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(result.is_ok(), "{:#?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .next()
+        .expect("relation callback module");
+
+    assert!(module.symbols["pure"].effects.effects.is_empty());
+    assert!(!module.symbols["pure"].effects.may_fail);
+    assert!(
+        module.symbols["database"]
+            .effects
+            .effects
+            .contains("database read")
+    );
+    assert!(module.symbols["database"].effects.may_fail);
+    assert!(
+        module.symbols["external"]
+            .effects
+            .effects
+            .contains("network")
+    );
+    assert!(module.symbols["external"].effects.may_fail);
+    assert!(module.symbols["direct_one"].effects.may_fail);
+    assert!(module.symbols["predicate_one"].effects.may_fail);
+    assert!(module.symbols["failed"].effects.may_fail);
+    for name in ["direct_one", "predicate_one"] {
+        assert!(matches!(
+            &module.symbols[name].ty,
+            Type::Function { result, .. } if result.as_ref() == &Type::Named("Note".into())
+        ));
+    }
+}
+
+#[test]
+fn relational_callbacks_keep_existing_shape_diagnostics() {
+    let result = analyze(&[ModuleInput::new(
+        "relation-callback-shape.orna",
+        r#"
+            pub table Note(id: Int) { value: Int, }
+            pub fn invalid(rows: Relation<Note>) = rows | filter(note => note.value);
+        "#,
+    )]);
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:#?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn malformed_direct_relation_shape_preserves_later_argument_diagnostic() {
+    let result = analyze(&[ModuleInput::new(
+        "relation-callback-order.orna",
+        r#"
+            pub table Note(id: Int) { value: Int, }
+            pub fn invalid(rows: Relation<Note>) = every(rows, unexpected: missing);
+        "#,
+    )]);
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_UNRESOLVED),
+        "later argument unresolved diagnostic: {:#?}",
+        result.diagnostics
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message() == "relation every requires rows and predicate"),
+        "relation shape diagnostic: {:#?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn relation_callback_and_later_argument_diagnostics_are_both_preserved() {
+    let result = analyze(&[ModuleInput::new(
+        "relation-callback-order.orna",
+        r#"
+            pub table Note(id: Int) { value: Int, }
+            pub fn invalid(rows: Relation<Note>) = every(rows, value => value, unexpected: later_missing);
+        "#,
+    )]);
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "callback type diagnostic: {:#?}",
+        result.diagnostics
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_UNRESOLVED),
+        "later argument unresolved diagnostic: {:#?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn malformed_direct_one_calls_report_the_static_signature_diagnostic() {
+    for body in [
+        "one(rows, unexpected: 1)",
+        "one(rows, 1, 2)",
+        "one(rows: rows, rows: rows)",
+    ] {
+        let result = analyze(&[ModuleInput::new(
+            "malformed-direct-one.orna",
+            format!(
+                "pub table Note(id: Int) {{ value: Int, }} pub fn invalid(rows: Relation<Note>) = {body};"
+            ),
+        )]);
+        assert!(
+            has_message(
+                &result,
+                "relation one arguments do not match its static signature"
+            ),
+            "{body}: {:#?}",
+            result.diagnostics
+        );
+    }
 }
