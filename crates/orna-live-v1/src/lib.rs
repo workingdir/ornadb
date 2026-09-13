@@ -25,7 +25,9 @@ use std::{
     task::Waker,
 };
 
-use orna_foundation_v1::{CanonicalValue, OvbRaw};
+use orna_foundation_v1::{
+    CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value,
+};
 use orna_protocol_v1::{
     Envelope, Limits as ProtocolLimits, Message, RequestState, ResultBody, ResultStatus,
     TargetKind, canonical_request_fingerprint,
@@ -1744,7 +1746,6 @@ impl LiveHost {
                 | Message::Result { .. }
                 | Message::Diagnostic { .. }
                 | Message::RequestStatusResult { .. }
-                | Message::RequestStatus { .. }
         ) {
             return Err(Error::InvalidMessage);
         }
@@ -1769,9 +1770,9 @@ impl LiveHost {
         if self.runtime.is_some() {
             match self
                 .admit_durable_request(session, request, fingerprint, &envelope)
-                .await?
+                .await
             {
-                DurableAdmission::Active => {
+                Ok(DurableAdmission::Active) => {
                     self.requests.insert(
                         (session, request),
                         RequestRecord {
@@ -1784,7 +1785,7 @@ impl LiveHost {
                         response: None,
                     }));
                 }
-                DurableAdmission::Replay(outcome) => {
+                Ok(DurableAdmission::Replay(outcome)) => {
                     self.requests.insert(
                         (session, request),
                         RequestRecord {
@@ -1794,10 +1795,23 @@ impl LiveHost {
                     );
                     return Ok(ApplicationPreparation::Completed(*outcome));
                 }
-                DurableAdmission::Execute => {}
+                Ok(DurableAdmission::Execute) => {}
+                Err(Error::RequestMismatch)
+                    if matches!(envelope.message, Message::RequestStatus { .. }) =>
+                {
+                    return Ok(ApplicationPreparation::Completed(request_mismatch_outcome(
+                        request,
+                    )?));
+                }
+                Err(error) => return Err(error),
             }
         } else if let Some(record) = self.requests.get(&(session, request)) {
             if record.fingerprint != fingerprint {
+                if matches!(envelope.message, Message::RequestStatus { .. }) {
+                    return Ok(ApplicationPreparation::Completed(request_mismatch_outcome(
+                        request,
+                    )?));
+                }
                 return Err(Error::RequestMismatch);
             }
             return Ok(ApplicationPreparation::Completed(
@@ -1806,6 +1820,35 @@ impl LiveHost {
                     response: None,
                 }),
             ));
+        }
+
+        if let Message::RequestStatus {
+            target,
+            fingerprint: expected,
+        } = &envelope.message
+        {
+            if let Err(error) = self.reserve_and_start(session, request, fingerprint) {
+                self.retain_failure(session, request, fingerprint).await?;
+                return Err(error);
+            }
+            let dispatched: Result<DispatchOutcome> = async {
+                let outcome = self
+                    .request_status_outcome(session, request, *target, *expected)
+                    .await?;
+                self.complete(session, request, &envelope, outcome).await
+            }
+            .await;
+            return match dispatched {
+                Ok(outcome) => Ok(ApplicationPreparation::Completed(outcome)),
+                Err(Error::RequestMismatch) => Ok(ApplicationPreparation::Completed(
+                    self.retain_request_mismatch(session, request, fingerprint)
+                        .await?,
+                )),
+                Err(error) => {
+                    self.retain_failure(session, request, fingerprint).await?;
+                    Err(error)
+                }
+            };
         }
 
         let mut cancel_target = None;
@@ -2062,6 +2105,44 @@ impl LiveHost {
     /// # Errors
     ///
     /// Returns stable bounded-frame, identity, or application errors.
+    async fn retain_request_mismatch(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+    ) -> Result<DispatchOutcome> {
+        let mismatch = request_mismatch_outcome(request)?;
+        if self.runtime.is_some() {
+            let lease = self.writer_lease().await?;
+            let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
+            runtime
+                .fail_observed_request_with_owner(
+                    RequestIdentity {
+                        session_id: session,
+                        request_id: request,
+                    },
+                    fingerprint,
+                    lease,
+                    self.terminal_outcome(&mismatch)?,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                )
+                .await
+                .map_err(|error| map_runtime(&error))?;
+        }
+        if self.serving.complete_request(session, request).is_ok()
+            && let Some(record) = self.requests.get_mut(&(session, request))
+        {
+            record.terminal = Some(mismatch.clone());
+        } else {
+            let _ = self.serving.cancel_request(session, request);
+            self.requests.remove(&(session, request));
+        }
+        Ok(mismatch)
+    }
+
     #[allow(clippy::too_many_lines)]
     pub async fn dispatch_frame(
         &mut self,
@@ -2158,10 +2239,10 @@ impl LiveHost {
                 if self.runtime.is_some() {
                     match self
                         .admit_durable_request(session, request, fingerprint, &envelope)
-                        .await?
+                        .await
                     {
-                        DurableAdmission::Execute => {}
-                        DurableAdmission::Active => {
+                        Ok(DurableAdmission::Execute) => {}
+                        Ok(DurableAdmission::Active) => {
                             self.requests.insert(
                                 (session, request),
                                 RequestRecord {
@@ -2174,7 +2255,7 @@ impl LiveHost {
                                 response: None,
                             });
                         }
-                        DurableAdmission::Replay(outcome) => {
+                        Ok(DurableAdmission::Replay(outcome)) => {
                             self.requests.insert(
                                 (session, request),
                                 RequestRecord {
@@ -2184,9 +2265,18 @@ impl LiveHost {
                             );
                             return Ok(*outcome);
                         }
+                        Err(Error::RequestMismatch)
+                            if matches!(envelope.message, Message::RequestStatus { .. }) =>
+                        {
+                            return Ok(request_mismatch_outcome(request)?);
+                        }
+                        Err(error) => return Err(error),
                     }
                 } else if let Some(record) = self.requests.get(&(session, request)) {
                     if record.fingerprint != fingerprint {
+                        if matches!(envelope.message, Message::RequestStatus { .. }) {
+                            return Ok(request_mismatch_outcome(request)?);
+                        }
                         return Err(Error::RequestMismatch);
                     }
                     return Ok(record.terminal.clone().unwrap_or(DispatchOutcome {
@@ -2434,97 +2524,19 @@ impl LiveHost {
                         Message::RequestStatus {
                             target,
                             fingerprint: expected,
-                        } => {
-                            let retained = self.requests.get(&(session, *target));
-                            if retained.is_some_and(|record| record.fingerprint != *expected) {
-                                return Err(Error::RequestMismatch);
+                        } => match self
+                            .request_status_outcome(session, request, *target, *expected)
+                            .await
+                        {
+                            Err(Error::RequestMismatch) => {
+                                self.retain_request_mismatch(session, request, fingerprint)
+                                    .await
                             }
-                            let (state, fingerprint, result) =
-                                match self.serving.request_state(session, *target) {
-                                    Ok(orna_serving_v1::RequestState::Reserved) => (
-                                        RequestState::Reserved,
-                                        retained.map(|record| record.fingerprint),
-                                        None,
-                                    ),
-                                    Ok(orna_serving_v1::RequestState::Running) => (
-                                        RequestState::Running,
-                                        retained.map(|record| record.fingerprint),
-                                        None,
-                                    ),
-                                    Ok(
-                                        orna_serving_v1::RequestState::Cancelled
-                                        | orna_serving_v1::RequestState::Completed,
-                                    ) => (
-                                        RequestState::Terminal,
-                                        retained.map(|record| record.fingerprint),
-                                        retained.and_then(|record| {
-                                            retained_result_body(
-                                                *target,
-                                                *expected,
-                                                record.terminal.as_ref(),
-                                                self.limits.protocol,
-                                            )
-                                        }),
-                                    ),
-                                    Err(ServingError::RequestUnknown) => match &self.runtime {
-                                        Some(runtime) => {
-                                            let status = runtime
-                                                .request_status(
-                                                    RequestIdentity {
-                                                        session_id: session,
-                                                        request_id: *target,
-                                                    },
-                                                    *expected,
-                                                )
-                                                .await
-                                                .map_err(|error| map_runtime(&error))?;
-                                            match status {
-                                                Some(status) => {
-                                                    let state = match status.state {
-                                                        DurableRequestState::Reserved => {
-                                                            RequestState::Reserved
-                                                        }
-                                                        DurableRequestState::Running => {
-                                                            RequestState::Running
-                                                        }
-                                                        DurableRequestState::Completed
-                                                        | DurableRequestState::Cancelled => {
-                                                            RequestState::Terminal
-                                                        }
-                                                        DurableRequestState::Orphaned => {
-                                                            RequestState::Orphaned
-                                                        }
-                                                    };
-                                                    let result = self
-                                                        .durable_result_body(
-                                                            *target, *expected, &status,
-                                                        )
-                                                        .await?;
-                                                    (state, Some(status.fingerprint), result)
-                                                }
-                                                None => (RequestState::Unknown, None, None),
-                                            }
-                                        }
-                                        None => (RequestState::Unknown, None, None),
-                                    },
-                                    Err(error) => return Err(map_serving(error)),
-                                };
-                            let outcome = DispatchOutcome {
-                                outcome: FrameOutcome::Accepted,
-                                response: Some(Envelope {
-                                    request: Some(request),
-                                    watch: None,
-                                    message: Message::RequestStatusResult {
-                                        target: *target,
-                                        state,
-                                        fingerprint,
-                                        result,
-                                    },
-                                    extensions: BTreeMap::new(),
-                                }),
-                            };
-                            self.complete(session, request, &envelope, outcome).await
-                        }
+                            Ok(outcome) => {
+                                self.complete(session, request, &envelope, outcome).await
+                            }
+                            Err(error) => Err(error),
+                        },
                         Message::Snapshot { .. }
                         | Message::Delta { .. }
                         | Message::Result { .. }
@@ -2889,6 +2901,91 @@ impl LiveHost {
         durable_result_body(request, fingerprint, status, self.limits.protocol)
     }
 
+    async fn request_status_outcome(
+        &self,
+        session: [u8; 16],
+        request: [u8; 16],
+        target: [u8; 16],
+        expected: [u8; 32],
+    ) -> Result<DispatchOutcome> {
+        let retained = self.requests.get(&(session, target));
+        if retained.is_some_and(|record| record.fingerprint != expected) {
+            return Err(Error::RequestMismatch);
+        }
+        let (state, fingerprint, result) = match self.serving.request_state(session, target) {
+            Ok(orna_serving_v1::RequestState::Reserved) => (
+                RequestState::Reserved,
+                retained.map(|record| record.fingerprint),
+                None,
+            ),
+            Ok(orna_serving_v1::RequestState::Running) => (
+                RequestState::Running,
+                retained.map(|record| record.fingerprint),
+                None,
+            ),
+            Ok(
+                orna_serving_v1::RequestState::Cancelled | orna_serving_v1::RequestState::Completed,
+            ) => (
+                RequestState::Terminal,
+                retained.map(|record| record.fingerprint),
+                retained.and_then(|record| {
+                    retained_result_body(
+                        target,
+                        expected,
+                        record.terminal.as_ref(),
+                        self.limits.protocol,
+                    )
+                }),
+            ),
+            Err(ServingError::RequestUnknown) => match &self.runtime {
+                Some(runtime) => {
+                    let status = runtime
+                        .request_status(
+                            RequestIdentity {
+                                session_id: session,
+                                request_id: target,
+                            },
+                            expected,
+                        )
+                        .await
+                        .map_err(|error| map_runtime(&error))?;
+                    match status {
+                        Some(status) => {
+                            let state = match status.state {
+                                DurableRequestState::Reserved => RequestState::Reserved,
+                                DurableRequestState::Running => RequestState::Running,
+                                DurableRequestState::Completed | DurableRequestState::Cancelled => {
+                                    RequestState::Terminal
+                                }
+                                DurableRequestState::Orphaned => RequestState::Orphaned,
+                            };
+                            let result =
+                                self.durable_result_body(target, expected, &status).await?;
+                            (state, Some(status.fingerprint), result)
+                        }
+                        None => (RequestState::Unknown, None, None),
+                    }
+                }
+                None => (RequestState::Unknown, None, None),
+            },
+            Err(error) => return Err(map_serving(error)),
+        };
+        Ok(DispatchOutcome {
+            outcome: FrameOutcome::Accepted,
+            response: Some(Envelope {
+                request: Some(request),
+                watch: None,
+                message: Message::RequestStatusResult {
+                    target,
+                    state,
+                    fingerprint,
+                    result,
+                },
+                extensions: BTreeMap::new(),
+            }),
+        })
+    }
+
     /// An orphaned request has one of two persisted meanings. Do not replay a
     /// malformed ledger row as an apparent result: uncertainty must remain
     /// visibly distinct from a runtime-proven rollback.
@@ -2950,6 +3047,8 @@ impl LiveHost {
             .is_ok(),
             Message::RequestStatus { target, .. } => {
                 validate_status_response(request, *target, response, self.limits.protocol).is_ok()
+                    || validate_request_mismatch_response(request, response, self.limits.protocol)
+                        .is_ok()
             }
             Message::Snapshot { .. }
             | Message::Delta { .. }
@@ -3364,6 +3463,46 @@ fn redacted_failure_outcome(request: [u8; 16], fingerprint: [u8; 32]) -> Dispatc
     }
 }
 
+fn request_mismatch_diagnostic(request: [u8; 16]) -> Result<Envelope> {
+    let diagnostic = FoundationDiagnostic::new(
+        SafeText::new(Error::RequestMismatch.code()).map_err(|_| Error::ApplicationRejected)?,
+        DiagnosticSeverity::Error,
+        SafeText::redacted(),
+    )
+    .map_err(|_| Error::ApplicationRejected)?
+    .redacted()
+    .with_reference(request);
+    let diagnostic = Value::decode(
+        &diagnostic
+            .encode_ovb()
+            .map_err(|_| Error::ApplicationRejected)?,
+    )
+    .map_err(|_| Error::ApplicationRejected)?
+    .raw()
+    .clone();
+    let bytes = Value::new(OvbRaw::Map(vec![
+        (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+        (OvbRaw::Int(1.into()), OvbRaw::Int(19.into())),
+        (OvbRaw::Int(2.into()), OvbRaw::Bytes(request.to_vec())),
+        (OvbRaw::Int(3.into()), OvbRaw::Null),
+        (
+            OvbRaw::Int(4.into()),
+            OvbRaw::Map(vec![(OvbRaw::Int(0.into()), diagnostic)]),
+        ),
+    ]))
+    .map_err(|_| Error::ApplicationRejected)?
+    .encode()
+    .map_err(|_| Error::ApplicationRejected)?;
+    Envelope::decode(&bytes, ProtocolLimits::default()).map_err(|_| Error::ApplicationRejected)
+}
+
+fn request_mismatch_outcome(request: [u8; 16]) -> Result<DispatchOutcome> {
+    Ok(DispatchOutcome {
+        outcome: FrameOutcome::Accepted,
+        response: Some(request_mismatch_diagnostic(request)?),
+    })
+}
+
 fn retained_result_body(
     request: [u8; 16],
     fingerprint: [u8; 32],
@@ -3579,6 +3718,21 @@ fn validate_status_response(
             target: returned, ..
         } if *returned == target => Ok(()),
         _ => Err(Error::ApplicationRejected),
+    }
+}
+
+fn validate_request_mismatch_response(
+    request: [u8; 16],
+    response: &Envelope,
+    limits: ProtocolLimits,
+) -> Result<()> {
+    response
+        .encode(limits)
+        .map_err(|_| Error::ApplicationRejected)?;
+    if response == &request_mismatch_diagnostic(request)? {
+        Ok(())
+    } else {
+        Err(Error::ApplicationRejected)
     }
 }
 
@@ -5971,6 +6125,13 @@ impl LiveTransport {
         };
         match event {
             SocketEvent::Binary(message) => {
+                let request_status_request = Envelope::decode(&message, self.host.limits.protocol)
+                    .ok()
+                    .and_then(|envelope| {
+                        matches!(envelope.message, Message::RequestStatus { .. })
+                            .then_some(envelope.request)
+                    })
+                    .flatten();
                 let dispatched = match self
                     .host
                     .dispatch_frame(socket.attachment, now, Frame::Binary(message), application)
@@ -5986,6 +6147,14 @@ impl LiveTransport {
                         return Ok(Some(
                             self.close_socket(socket, now, 1002, application).await,
                         ));
+                    }
+                    Err(Error::RequestMismatch) if request_status_request.is_some() => {
+                        return Ok(Some(self.websocket_output(DispatchOutcome {
+                            outcome: FrameOutcome::Accepted,
+                            response: Some(request_mismatch_diagnostic(
+                                request_status_request.expect("checked above"),
+                            )?),
+                        })?));
                     }
                     Err(error) => return Err(error),
                 };
@@ -7085,6 +7254,20 @@ mod tests {
         envelope.encode(Limits::default().protocol).unwrap()
     }
 
+    fn request_status_frame(request: [u8; 16], target: [u8; 16], fingerprint: [u8; 32]) -> Vec<u8> {
+        Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::RequestStatus {
+                target,
+                fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap()
+    }
+
     fn result(request: u8, fingerprint: u8) -> Envelope {
         Envelope {
             request: Some([request; 16]),
@@ -7215,6 +7398,283 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn retained_request_status_replays_only_canonical_mismatch_diagnostic() {
+        let host = subscribed_host(None);
+        let request = [7; 16];
+        let envelope = Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::RequestStatus {
+                target: [8; 16],
+                fingerprint: [9; 32],
+            },
+            extensions: BTreeMap::new(),
+        };
+
+        assert!(
+            host.validate_retained_response(
+                [10; 32],
+                &envelope,
+                &request_mismatch_diagnostic(request).unwrap(),
+            )
+            .is_ok()
+        );
+        assert!(
+            host.validate_retained_response(
+                [10; 32],
+                &envelope,
+                &watch_diagnostic_response(request, None),
+            )
+            .is_err()
+        );
+        assert!(
+            host.validate_retained_response(
+                [10; 32],
+                &envelope,
+                &request_mismatch_diagnostic([11; 16]).unwrap(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn prepare_request_status_unknown_target_is_completed_without_application_work() {
+        let mut host = subscribed_host(None);
+        let request = [12; 16];
+        let target = [13; 16];
+        let preparation = futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            2,
+            Frame::Binary(request_status_frame(request, target, [14; 32])),
+        ))
+        .unwrap();
+        let outcome = match preparation {
+            ApplicationPreparation::Completed(outcome) => outcome,
+            ApplicationPreparation::Work(_) => panic!("status query admitted application work"),
+        };
+        assert!(matches!(
+            outcome.response.unwrap().message,
+            Message::RequestStatusResult {
+                target: returned_target,
+                state: RequestState::Unknown,
+                fingerprint: None,
+                result: None,
+            } if returned_target == target
+        ));
+        assert_eq!(
+            host.serving.request_state([1; 16], target),
+            Err(ServingError::RequestUnknown)
+        );
+        assert!(
+            host.requests
+                .get(&([1; 16], request))
+                .is_some_and(|record| record.terminal.is_some())
+        );
+    }
+
+    #[test]
+    fn prepare_request_status_reused_id_mismatch_returns_correlated_diagnostic() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("target"));
+        fs::create_dir_all(&target).unwrap();
+        let root = target.join(format!("orna-live-status-mismatch-{nonce}"));
+        fs::create_dir(&root).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(&root).unwrap();
+        let runtime = futures::executor::block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [15; 16],
+                repository_id: [16; 16],
+            },
+            [17; 32],
+        ))
+        .unwrap();
+        let mut host = subscribed_host(Some(runtime));
+        let request = [18; 16];
+        let first = futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            2,
+            Frame::Binary(request_status_frame(request, [19; 16], [20; 32])),
+        ))
+        .unwrap();
+        assert!(matches!(first, ApplicationPreparation::Completed(_)));
+
+        let mismatch = futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            2,
+            Frame::Binary(request_status_frame(request, [21; 16], [22; 32])),
+        ))
+        .unwrap();
+        assert_eq!(
+            match mismatch {
+                ApplicationPreparation::Completed(outcome) => outcome.response,
+                ApplicationPreparation::Work(_) => panic!("status mismatch admitted work"),
+            },
+            Some(request_mismatch_diagnostic(request).unwrap())
+        );
+
+        let usable = futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            2,
+            Frame::Binary(request_status_frame([23; 16], [24; 16], [25; 32])),
+        ))
+        .unwrap();
+        assert!(matches!(
+            usable,
+            ApplicationPreparation::Completed(DispatchOutcome {
+                response: Some(Envelope {
+                    message: Message::RequestStatusResult {
+                        state: RequestState::Unknown,
+                        ..
+                    },
+                    ..
+                }),
+                ..
+            })
+        ));
+        drop(host);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn direct_dispatch_request_status_mismatch_preserves_original_record() {
+        let request = [26; 16];
+        let mut application = RejectApplication;
+        let mut host = subscribed_host(None);
+        futures::executor::block_on(host.dispatch_frame(
+            [4; 16],
+            2,
+            Frame::Binary(request_status_frame(request, [27; 16], [28; 32])),
+            &mut application,
+        ))
+        .unwrap();
+        let original = host.requests[&([1; 16], request)].clone();
+
+        assert_eq!(
+            futures::executor::block_on(host.dispatch_frame(
+                [4; 16],
+                2,
+                Frame::Binary(request_status_frame(request, [29; 16], [30; 32])),
+                &mut application,
+            )),
+            Ok(DispatchOutcome {
+                outcome: FrameOutcome::Accepted,
+                response: Some(request_mismatch_diagnostic(request).unwrap()),
+            })
+        );
+        assert_eq!(
+            host.requests[&([1; 16], request)].fingerprint,
+            original.fingerprint
+        );
+        assert_eq!(
+            host.requests[&([1; 16], request)].terminal,
+            original.terminal
+        );
+        assert_eq!(
+            host.serving.request_state([1; 16], request),
+            Ok(orna_serving_v1::RequestState::Completed)
+        );
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("target"));
+        fs::create_dir_all(&target).unwrap();
+        let root = target.join(format!("orna-live-direct-status-mismatch-{nonce}"));
+        fs::create_dir(&root).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(&root).unwrap();
+        let runtime = futures::executor::block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [31; 16],
+                repository_id: [32; 16],
+            },
+            [33; 32],
+        ))
+        .unwrap();
+        let mut host = subscribed_host(Some(runtime));
+        let request = [34; 16];
+        futures::executor::block_on(host.dispatch_frame(
+            [4; 16],
+            2,
+            Frame::Binary(request_status_frame(request, [35; 16], [36; 32])),
+            &mut application,
+        ))
+        .unwrap();
+        let original = host.requests[&([1; 16], request)].clone();
+        let identity = RequestIdentity {
+            session_id: [1; 16],
+            request_id: request,
+        };
+        let original_status = futures::executor::block_on(
+            host.runtime
+                .as_ref()
+                .unwrap()
+                .request_status_for_identity(identity),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            futures::executor::block_on(host.dispatch_frame(
+                [4; 16],
+                2,
+                Frame::Binary(request_status_frame(request, [37; 16], [38; 32])),
+                &mut application,
+            )),
+            Ok(DispatchOutcome {
+                outcome: FrameOutcome::Accepted,
+                response: Some(request_mismatch_diagnostic(request).unwrap()),
+            })
+        );
+        assert_eq!(
+            host.requests[&([1; 16], request)].fingerprint,
+            original.fingerprint
+        );
+        assert_eq!(
+            host.requests[&([1; 16], request)].terminal,
+            original.terminal
+        );
+        let status = futures::executor::block_on(
+            host.runtime
+                .as_ref()
+                .unwrap()
+                .request_status_for_identity(identity),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(status.fingerprint, original_status.fingerprint);
+        assert_eq!(status.state, original_status.state);
+        assert_eq!(status.terminal_outcome, original_status.terminal_outcome);
+        drop(host);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
