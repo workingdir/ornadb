@@ -2550,6 +2550,93 @@ fn std_collection_sort_by_accepts_all_call_forms_and_preserves_stable_ties() {
 }
 
 #[test]
+fn std_collection_sort_by_orders_dates_and_preserves_equal_key_source_order() {
+    let result = evaluate(
+        "sort_by([{key: 2024-02-29, label: \"later\"}, {key: 2024-01-01, label: \"first\"}, {key: 2024-01-01, label: \"second\"}], row => row.key)",
+    );
+    assert_eq!(
+        result,
+        Value::new(Raw::Array(vec![
+            Raw::Map(vec![
+                (
+                    Raw::Text("key".into()),
+                    Raw::Tag(60001, Box::new(Raw::Text("2024-01-01".into())))
+                ),
+                (Raw::Text("label".into()), Raw::Text("first".into())),
+            ]),
+            Raw::Map(vec![
+                (
+                    Raw::Text("key".into()),
+                    Raw::Tag(60001, Box::new(Raw::Text("2024-01-01".into())))
+                ),
+                (Raw::Text("label".into()), Raw::Text("second".into())),
+            ]),
+            Raw::Map(vec![
+                (
+                    Raw::Text("key".into()),
+                    Raw::Tag(60001, Box::new(Raw::Text("2024-02-29".into())))
+                ),
+                (Raw::Text("label".into()), Raw::Text("later".into())),
+            ]),
+        ]))
+        .unwrap()
+    );
+}
+
+#[test]
+fn std_collection_sort_by_orders_normalized_instants_and_nanoseconds_stably() {
+    let result = evaluate(
+        "sort_by([{key: 1970-01-01T00:00:00.000000002Z, label: \"nano\"}, {key: 1970-01-01T05:30:00+05:30, label: \"offset-first\"}, {key: 1970-01-01T00:00:00Z, label: \"epoch-first\"}, {key: 1970-01-01T05:30:00+05:30, label: \"offset-second\"}], row => row.key)",
+    );
+    assert_eq!(
+        result,
+        Value::new(Raw::Array(vec![
+            Raw::Map(vec![
+                (
+                    Raw::Text("key".into()),
+                    Raw::Tag(
+                        60002,
+                        Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Int(0.into())])),
+                    ),
+                ),
+                (Raw::Text("label".into()), Raw::Text("offset-first".into())),
+            ]),
+            Raw::Map(vec![
+                (
+                    Raw::Text("key".into()),
+                    Raw::Tag(
+                        60002,
+                        Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Int(0.into())])),
+                    ),
+                ),
+                (Raw::Text("label".into()), Raw::Text("epoch-first".into())),
+            ]),
+            Raw::Map(vec![
+                (
+                    Raw::Text("key".into()),
+                    Raw::Tag(
+                        60002,
+                        Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Int(0.into())])),
+                    ),
+                ),
+                (Raw::Text("label".into()), Raw::Text("offset-second".into())),
+            ]),
+            Raw::Map(vec![
+                (
+                    Raw::Text("key".into()),
+                    Raw::Tag(
+                        60002,
+                        Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Int(2.into())])),
+                    ),
+                ),
+                (Raw::Text("label".into()), Raw::Text("nano".into())),
+            ]),
+        ]))
+        .unwrap()
+    );
+}
+
+#[test]
 fn std_collection_sort_by_uses_float_total_order() {
     let rows = float_rows(&[
         0x7ff8_0000_0000_0000,
