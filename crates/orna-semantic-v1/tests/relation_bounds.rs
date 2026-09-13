@@ -216,6 +216,56 @@ fn relation_flat_map_rejects_mutations_and_external_effects_in_both_call_forms()
 }
 
 #[test]
+fn relation_every_exists_pipeline_callbacks_are_read_only_in_all_call_forms() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "relation-every-exists-effect-rejection.orna",
+            r#"
+                pub table Note(id: Int) { value: Int, }
+                pub fn pure_every(rows: Relation<Note>) = rows | every(note => note.value > 0);
+                pub fn pure_exists(rows: Relation<Note>) = rows | exists(predicate: note => note.value > 0);
+                pub fn piped_every(rows: Relation<Note>) = rows | every(note => {
+                    Note.insert({ id: note.id, value: note.value });
+                    true
+                });
+                pub fn piped_exists(rows: Relation<Note>) = rows | exists(predicate: note => std.net.http.get("https://example.com") == "ok");
+                pub fn direct_every(rows: Relation<Note>) = every(rows: rows, predicate: note => {
+                    Note.insert({ id: note.id, value: note.value });
+                    true
+                });
+                pub fn direct_exists(rows: Relation<Note>) = exists(predicate: note => std.net.http.get("https://example.com") == "ok", rows: rows);
+            "#,
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    let read_only = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.code() == DIAG_TYPE
+                && diagnostic.message() == "relation query callback must be read-only"
+        })
+        .count();
+    assert_eq!(read_only, 4, "{:#?}", result.diagnostics);
+    assert!(
+        !result.is_ok(),
+        "effectful relation callbacks were accepted"
+    );
+
+    let module = result
+        .modules
+        .values()
+        .next()
+        .expect("relation every/exists module");
+    for name in ["pure_every", "pure_exists"] {
+        assert!(matches!(
+            &module.symbols[name].ty,
+            Type::Function { result, .. } if result.as_ref() == &Type::Bool
+        ));
+    }
+}
+
+#[test]
 fn relational_callbacks_keep_existing_shape_diagnostics() {
     let result = analyze(&[ModuleInput::new(
         "relation-callback-shape.orna",
