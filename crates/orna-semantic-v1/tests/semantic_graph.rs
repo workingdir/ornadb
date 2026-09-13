@@ -1781,9 +1781,9 @@ fn authoritative_core_exposes_implicit_encoding_and_duration_members() {
         &[ModuleInput::new(
             "standard.orna",
             r#"
-                pub fn json(value: Contact) = std.encoding.json.encode(value);
-                pub fn canonical(value: Contact) = std.encoding.orna.encode(value);
-                pub fn read(value: ByteStream) = std.encoding.json.decode(value, as: Contact);
+                pub fn json(value: JsonValue) = std.encoding.json.encode(value);
+                pub fn canonical(value: JsonValue) = std.encoding.orna.encode(value);
+                pub fn read(value: ByteStream) = std.encoding.json.decode(value, as: JsonValue);
                 pub fn formats(duration: Duration) = {
                     compact: std.time.duration.compact.format(duration),
                     clock: std.time.duration.clock.format(duration),
