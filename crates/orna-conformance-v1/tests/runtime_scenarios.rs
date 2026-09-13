@@ -3,8 +3,13 @@ use orna_conformance_v1::{
     Harness, RuntimeAdapter, RuntimeEvaluator, Scenario, SourceUnit, StageOutcome,
 };
 use orna_evaluator_v1::Limits;
+use orna_foundation_v1::Value;
+use orna_protocol_v1::{
+    DatabaseContext, Envelope, Limits as ProtocolLimits, Message, PresentationContext,
+    canonical_request_fingerprint,
+};
 use orna_repository_v1::Repository;
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::{RequestIdentity, RequestState, RuntimeError, RuntimeIdentity, RuntimeState};
 use orna_storage_v1::LoosePath;
 use std::process::Command;
 use std::{fs, path::Path, process::Command as ProcessCommand};
@@ -36,7 +41,7 @@ fn git(path: &Path, args: &[&str]) {
 }
 
 fn durable_repository() -> (TempDir, Repository) {
-    let temp = TempDir::new().expect("temporary repository");
+    let temp = TempDir::new_in("/var/tmp").expect("temporary repository");
     git(temp.path(), &["init", "--quiet"]);
     git(
         temp.path(),
@@ -58,6 +63,38 @@ fn durable_source(fixture_id: &str, source: &str) -> SourceUnit {
         parse_as: "module_unit".into(),
         source: source.into(),
     }
+}
+
+fn canonical_eval_fingerprint(
+    unit: &SourceUnit,
+    request: RequestIdentity,
+    database: [u8; 16],
+) -> [u8; 32] {
+    canonical_request_fingerprint(
+        request.session_id,
+        &Envelope {
+            request: Some(request.request_id),
+            watch: None,
+            message: Message::Eval {
+                source: unit.source.clone(),
+                database: DatabaseContext {
+                    database,
+                    snapshot: None,
+                },
+                presentation: PresentationContext {
+                    locale: "en-GB".into(),
+                    timezone: None,
+                    width: None,
+                    theme: "terminal/default".into(),
+                    supported_kinds: vec!["text".into()],
+                },
+                fingerprint: [0; 32],
+            },
+            extensions: std::collections::BTreeMap::new(),
+        },
+        ProtocolLimits::default(),
+    )
+    .expect("canonical eval envelope is valid")
 }
 
 #[test]
@@ -250,6 +287,106 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
 }
 
 #[tokio::test]
+async fn eval_003_replays_the_terminal_outcome_without_a_second_row() {
+    let eval = scenario("EVAL-003");
+    assert_eq!(
+        eval.requirements,
+        [
+            "ORNA-EVAL-007",
+            "ORNA-EVAL-008",
+            "ORNA-EVAL-009",
+            "ORNA-EVAL-010",
+            "ORNA-EVAL-011"
+        ]
+    );
+    assert_eq!(
+        eval.evidence_level,
+        "implementation scenario, not executed by an Orna engine"
+    );
+
+    let (_temp, repository) = durable_repository();
+    let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+    let identity = RuntimeIdentity {
+        database_id: [71; 16],
+        repository_id: [72; 16],
+    };
+    let request = RequestIdentity {
+        session_id: [73; 16],
+        request_id: [74; 16],
+    };
+    let source = durable_source(
+        "EVAL-003",
+        "pub table Note(id: Int) { text: Str, } fn main() { Note.insert({ id: 7, text: \"once\" }); }",
+    );
+    let changed_source = durable_source(
+        "EVAL-003",
+        "pub table Note(id: Int) { text: Str, } fn main() { Note.insert({ id: 8, text: \"twice\" }); }",
+    );
+    let fingerprint = canonical_eval_fingerprint(&source, request, [71; 16]);
+    let changed_fingerprint = canonical_eval_fingerprint(&changed_source, request, [71; 16]);
+    let first = evaluator
+        .execute_source_request(
+            &repository,
+            identity,
+            [76; 16],
+            [77; 32],
+            request,
+            fingerprint,
+            &source,
+        )
+        .await
+        .expect("first durable evaluation");
+    assert!(matches!(first, StageOutcome::Passed));
+
+    drop(evaluator);
+    let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+    let replay = evaluator
+        .execute_source_request(
+            &repository,
+            identity,
+            [78; 16],
+            [77; 32],
+            request,
+            fingerprint,
+            &source,
+        )
+        .await
+        .expect("matching replay");
+    assert!(matches!(replay, StageOutcome::Passed));
+
+    assert!(matches!(
+        evaluator
+            .execute_source_request(
+                &repository,
+                identity,
+                [79; 16],
+                [77; 32],
+                request,
+                changed_fingerprint,
+                &changed_source,
+            )
+            .await,
+        Err(RuntimeError::RequestFingerprintMismatch)
+    ));
+
+    let state = RuntimeState::open(&repository, identity, [77; 32])
+        .await
+        .expect("reopen durable runtime");
+    let status = state
+        .request_status(request, fingerprint)
+        .await
+        .expect("request status")
+        .expect("completed request");
+    assert_eq!(status.state, RequestState::Completed);
+    assert!(status.terminal_outcome.is_some());
+    let rows = state.committed_table_rows("Note").await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, Value::int(7.into()).encode().unwrap());
+    assert_ne!(rows[0].0, Value::int(8.into()).encode().unwrap());
+    assert_eq!(state.pending().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn durable_source_publication_projects_the_frozen_prefix_into_git() {
     let (_temp, repository) = durable_repository();
     let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
@@ -339,7 +476,8 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
             "LIVE-002",
             "LIVE-003",
             "LIVE-004",
-            "SYS-RT-RENAME-100"
+            "SYS-RT-RENAME-100",
+            "EVAL-003"
         ]
     );
     let scenarios = report["scenarios"]
@@ -358,6 +496,7 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
                     | "LIVE-003"
                     | "LIVE-004"
                     | "SYS-RT-RENAME-100"
+                    | "EVAL-003"
             )
         ) {
             assert_eq!(result["status"], "passed", "declared scenario must execute");
@@ -434,6 +573,26 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
         serde_json::json!(["ORNA-SYS-005", "ORNA-SYS-105"])
     );
     assert_eq!(runtime_root["status"], "passed");
+
+    let durable_eval = scenarios
+        .iter()
+        .find(|result| result["scenario"] == "EVAL-003")
+        .expect("EVAL-003 result is present");
+    assert_eq!(
+        durable_eval["requirements"],
+        serde_json::json!([
+            "ORNA-EVAL-007",
+            "ORNA-EVAL-008",
+            "ORNA-EVAL-009",
+            "ORNA-EVAL-010",
+            "ORNA-EVAL-011"
+        ])
+    );
+    assert_eq!(durable_eval["status"], "passed");
+    assert_eq!(
+        report["implementation_claim"]["environment"]["runtime-stages"],
+        "pure row/expression units, the authoritative duplicate-key fixture, SYS-RT-RENAME-100 system-name resolution, the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, LIVE-004 universal subtree replacement, and EVAL-003 durable request replay contracts execute through bounded runtime witnesses; these scenario results remain implementation-scenario evidence and are not Orna-engine execution"
+    );
 }
 
 #[test]
