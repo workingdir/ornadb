@@ -27,8 +27,8 @@ use orna_runtime_v1::{
     TerminalOutcome, WriterLease,
 };
 use orna_semantic_v1::{
-    Catalogue, EffectSummary, ModuleInput, Namespace, StandardDependencyProfile,
-    analyze_with_catalogue,
+    AssertionOwner, AssertionPlan, Catalogue, EffectSummary, ModuleInput, Namespace,
+    StandardDependencyProfile, analyze_with_catalogue,
 };
 use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
 use orna_stream_v1::{
@@ -1983,6 +1983,7 @@ struct ListStreamBridge {
     parameter: String,
     insert_row: Expr,
     table_assertions: Vec<AdmittedAssertion>,
+    module_assertions: Vec<AdmittedAssertion>,
     assertion_functions: Functions,
     payloads: Vec<Vec<u8>>,
 }
@@ -2018,20 +2019,28 @@ struct ListTableHandler {
 struct ListTableCandidateValidator {
     table: String,
     assertions: Vec<AdmittedAssertion>,
+    module_assertions: Vec<AdmittedAssertion>,
     functions: Functions,
     limits: EvaluatorLimits,
     tables: Vec<String>,
 }
 
 impl ListTableCandidateValidator {
-    fn new(bridge: &ListStreamBridge, limits: EvaluatorLimits) -> Self {
-        Self {
+    fn new(bridge: &ListStreamBridge, limits: EvaluatorLimits) -> Result<Self, String> {
+        let module_assertions =
+            applicable_module_assertions(&bridge.table, &bridge.module_assertions)?;
+        let mut tables = BTreeSet::from([bridge.table.clone()]);
+        for assertion in &module_assertions {
+            tables.extend(assertion.dependencies.iter().cloned());
+        }
+        Ok(Self {
             table: bridge.table.clone(),
             assertions: bridge.table_assertions.clone(),
+            module_assertions,
             functions: bridge.assertion_functions.clone(),
             limits,
-            tables: vec![bridge.table.clone()],
-        }
+            tables: tables.into_iter().collect(),
+        })
     }
 }
 
@@ -2041,16 +2050,16 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
     }
 
     fn validate(&mut self, rows: &orna_runtime_v1::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
-        let rows = rows
-            .get(&self.table)
-            .ok_or_else(stream_handler_diagnostic)?;
         let mut budget = StepBudget::new(self.limits.max_steps);
         for assertion in &self.assertions {
             let (kind, binding, predicate) = table_assertion_predicate(&assertion.expression)
                 .map_err(|_| stream_handler_diagnostic())?;
             let mut projections = BTreeSet::new();
             let mut candidate_rows = 0usize;
-            for (_, encoded) in rows {
+            for (_, encoded) in rows
+                .get(&self.table)
+                .ok_or_else(stream_handler_diagnostic)?
+            {
                 debit_host_step(&mut budget).map_err(|_| stream_handler_diagnostic())?;
                 candidate_rows = candidate_rows
                     .checked_add(1)
@@ -2078,6 +2087,20 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
                         }
                     }
                 }
+            }
+        }
+        for assertion in &self.module_assertions {
+            let value = evaluate_module_assertion_rows(
+                rows,
+                &assertion.expression,
+                &Environment::new(),
+                &self.functions,
+                self.limits,
+                &mut budget,
+            )
+            .map_err(|_| stream_handler_diagnostic())?;
+            if !matches!(value.raw(), OvbRaw::Bool(true)) {
+                return Err(stream_handler_diagnostic());
             }
         }
         Ok(())
@@ -2136,7 +2159,12 @@ impl StreamHandler for ListTableHandler {
             next_digest: self.digest,
             // Even a table with no declared assertions crosses the durable
             // boundary through an explicit no-op validator.
-            validator: Box::new(ListTableCandidateValidator::new(&self.bridge, self.limits)),
+            validator: Box::new(
+                match ListTableCandidateValidator::new(&self.bridge, self.limits) {
+                    Ok(validator) => validator,
+                    Err(_) => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
+                },
+            ),
         })
     }
 }
@@ -2183,11 +2211,6 @@ fn admit_list_stream_source(
         mut table_assertions,
         module_assertions,
     ) = admit_transaction_source(unit, limits, entry)?;
-    if !module_assertions.is_empty() {
-        return Err(Box::new(StageOutcome::Skipped {
-            reason: "literal list stream bridge does not yet evaluate module assertions at the delivery boundary".into(),
-        }));
-    }
     if key_fields.len() != 1 {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "literal list stream bridge requires one explicit-key table".into(),
@@ -2212,6 +2235,8 @@ fn admit_list_stream_source(
             reason: "literal list stream bridge requires Stream.from_list piped to one for_each insert body".into(),
         }))?;
     let (table_name, key_fields) = key_fields.into_iter().next().expect("one table checked");
+    applicable_module_assertions(&table_name, &module_assertions)
+        .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
     if key_fields.is_empty() {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "literal list stream bridge requires an explicit table key".into(),
@@ -2256,6 +2281,7 @@ fn admit_list_stream_source(
         parameter,
         insert_row: insert_row.clone(),
         table_assertions,
+        module_assertions,
         assertion_functions,
         payloads,
     })
@@ -2279,11 +2305,6 @@ fn admit_project_list_stream(
         mut table_assertions,
         module_assertions,
     ) = admitted;
-    if !module_assertions.is_empty() {
-        return Err(Box::new(StageOutcome::Skipped {
-            reason: "project list stream bridge does not yet evaluate module assertions at the delivery boundary".into(),
-        }));
-    }
     let root = functions.get(root_entry).ok_or_else(|| {
         Box::new(StageOutcome::Skipped {
             reason: "configured qualified project stream root is not present".into(),
@@ -2370,6 +2391,8 @@ fn admit_project_list_stream(
             reason: "project list stream insert must target a declared keyed table".into(),
         })
     })?;
+    applicable_module_assertions(&table, &module_assertions)
+        .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
     if keys.is_empty() {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "project list stream insert target must have an explicit table key".into(),
@@ -2396,6 +2419,7 @@ fn admit_project_list_stream(
         parameter,
         insert_row: insert_row.clone(),
         table_assertions,
+        module_assertions,
         assertion_functions,
         payloads,
     })
@@ -3309,6 +3333,7 @@ struct AdmittedAssertion {
     owner_kind: AssertionOwnerKind,
     owner_name: String,
     source_order: usize,
+    dependencies: BTreeSet<String>,
 }
 
 type TableAssertions = BTreeMap<String, Vec<AdmittedAssertion>>;
@@ -3406,9 +3431,19 @@ fn admit_transaction_source(
             diagnostic.clone().redacted(),
         )));
     }
-    let (functions, key_fields, float_fields, table_fields, table_assertions, module_assertions) =
+    let mut admitted =
         admitted_transaction_module(&parsed.value.items, None, Some(&unit.source_id))
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+    let plans = analysis
+        .assertions
+        .values()
+        .next()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    attach_assertion_dependencies(&mut admitted.4, &mut admitted.5, plans)
+        .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+    let (functions, key_fields, float_fields, table_fields, table_assertions, module_assertions) =
+        admitted;
     if let Err(error) = limits.check_items(functions.len()) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
     }
@@ -3489,10 +3524,29 @@ fn admit_transaction_project(
             module_keys,
             module_float_fields,
             module_table_fields,
-            module_assertions_by_table,
-            module_assertions_only,
+            mut module_assertions_by_table,
+            mut module_assertions_only,
         ) = admitted_transaction_module(&parsed.value.items, Some(&namespace), Some(&namespace))
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+        let semantic_namespace = project_semantic_namespace(project, unit).ok_or_else(|| {
+            Box::new(StageOutcome::Skipped {
+                reason: "project transaction module has no semantic namespace".into(),
+            })
+        })?;
+        let plans = analysis
+            .assertions
+            .get(&semantic_namespace)
+            .ok_or_else(|| {
+                Box::new(StageOutcome::Skipped {
+                    reason: "project transaction assertion metadata is incomplete".into(),
+                })
+            })?;
+        attach_assertion_dependencies(
+            &mut module_assertions_by_table,
+            &mut module_assertions_only,
+            plans,
+        )
+        .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
         if let Err(error) = limits.check_items(module_functions.len()) {
             return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
         }
@@ -3698,6 +3752,7 @@ fn admitted_transaction_module(
                                 owner_kind: AssertionOwnerKind::Table,
                                 owner_name: name.clone(),
                                 source_order,
+                                dependencies: BTreeSet::from([name.clone()]),
                             })
                         }
                         _ => None,
@@ -3716,6 +3771,7 @@ fn admitted_transaction_module(
                 owner_kind: AssertionOwnerKind::Module,
                 owner_name: module_owner_name.unwrap_or_default().to_owned(),
                 source_order,
+                dependencies: BTreeSet::new(),
             }),
             // Import declarations were resolved against the complete project
             // graph before this per-module retention pass. Qualified calls are
@@ -3744,6 +3800,54 @@ fn admitted_transaction_module(
         assertions,
         module_assertions,
     ))
+}
+
+fn attach_assertion_dependencies(
+    table_assertions: &mut TableAssertions,
+    module_assertions: &mut ModuleAssertions,
+    plans: &[AssertionPlan],
+) -> Result<(), String> {
+    let mut used = BTreeSet::new();
+    for assertions in table_assertions.values_mut() {
+        for assertion in assertions {
+            let owner = AssertionOwner::Table(assertion.owner_name.clone());
+            let (index, plan) = plans
+                .iter()
+                .enumerate()
+                .find(|(index, plan)| !used.contains(index) && plan.owner == owner)
+                .ok_or_else(|| "transactional assertion metadata is incomplete".to_owned())?;
+            used.insert(index);
+            assertion.dependencies = plan.dependencies.clone();
+            assertion.dependencies.insert(assertion.owner_name.clone());
+        }
+    }
+    for assertion in module_assertions {
+        let (index, plan) = plans
+            .iter()
+            .enumerate()
+            .find(|(index, plan)| !used.contains(index) && plan.owner == AssertionOwner::Module)
+            .ok_or_else(|| "transactional assertion metadata is incomplete".to_owned())?;
+        used.insert(index);
+        assertion.dependencies = plan.dependencies.clone();
+    }
+    Ok(())
+}
+
+fn applicable_module_assertions(
+    table: &str,
+    assertions: &[AdmittedAssertion],
+) -> Result<Vec<AdmittedAssertion>, String> {
+    let applicable = assertions
+        .iter()
+        .filter(|assertion| assertion.dependencies.contains(table))
+        .cloned()
+        .collect::<Vec<_>>();
+    if applicable.len() > 1 {
+        return Err(
+            "stream admission requires one applicable module assertion until committed module identities are available".into(),
+        );
+    }
+    Ok(applicable)
 }
 
 /// Materializes the narrow relation forms admitted by the durable transaction
@@ -5117,6 +5221,70 @@ fn evaluate_module_assertion(
                 local.insert(binding.to_owned(), row);
                 if matches!(
                     evaluate_module_assertion(activation, body, &local, functions, limits, budget)?
+                        .raw(),
+                    OvbRaw::Bool(true)
+                ) {
+                    return canonical_bool(true);
+                }
+            }
+            canonical_bool(false)
+        }
+    }
+}
+
+fn evaluate_module_assertion_rows(
+    rows: &orna_runtime_v1::RuntimeTableRows,
+    expression: &Expr,
+    environment: &Environment,
+    functions: &Functions,
+    limits: EvaluatorLimits,
+    budget: &mut StepBudget,
+) -> Result<Value, EvaluationError> {
+    let Some((kind, table, binding, body)) = module_assertion_quantifier(expression) else {
+        return evaluate_with_functions_and_budget(
+            expression,
+            environment,
+            functions,
+            limits,
+            budget,
+        );
+    };
+    let relation = rows
+        .get(table)
+        .ok_or_else(|| transaction_error("ORNA-EVAL-MODULE-ASSERT"))?;
+    match kind {
+        ModuleAssertionKind::Every => {
+            for (index, (_, encoded)) in relation.iter().enumerate() {
+                debit_host_step(budget)?;
+                limits
+                    .check_items(index.saturating_add(1))
+                    .map_err(|_| transaction_error("ORNA-EVAL-LIMIT"))?;
+                let row = Value::decode(encoded)
+                    .map_err(|_| transaction_error("ORNA-EVAL-MODULE-ASSERT"))?;
+                let mut local = environment.clone();
+                local.insert(binding.to_owned(), row);
+                if !matches!(
+                    evaluate_module_assertion_rows(rows, body, &local, functions, limits, budget)?
+                        .raw(),
+                    OvbRaw::Bool(true)
+                ) {
+                    return canonical_bool(false);
+                }
+            }
+            canonical_bool(true)
+        }
+        ModuleAssertionKind::Exists => {
+            for (index, (_, encoded)) in relation.iter().enumerate() {
+                debit_host_step(budget)?;
+                limits
+                    .check_items(index.saturating_add(1))
+                    .map_err(|_| transaction_error("ORNA-EVAL-LIMIT"))?;
+                let row = Value::decode(encoded)
+                    .map_err(|_| transaction_error("ORNA-EVAL-MODULE-ASSERT"))?;
+                let mut local = environment.clone();
+                local.insert(binding.to_owned(), row);
+                if matches!(
+                    evaluate_module_assertion_rows(rows, body, &local, functions, limits, budget)?
                         .raw(),
                     OvbRaw::Bool(true)
                 ) {
