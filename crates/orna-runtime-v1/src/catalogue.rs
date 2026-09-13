@@ -604,6 +604,228 @@ mod batch_tests {
     }
 }
 
+#[cfg(test)]
+mod module_tests {
+    use super::*;
+    use crate::{NoFault, RuntimeIdentity, TableMutation};
+    use orna_foundation_v1::CwdCapture;
+    use tempfile::tempdir;
+
+    fn digest(value: u8) -> [u8; 32] {
+        [value; 32]
+    }
+
+    fn declaration(
+        name: &str,
+        revision: u8,
+        semantic: u8,
+        rename_from: Option<&str>,
+    ) -> CatalogueModuleDeclaration {
+        CatalogueModuleDeclaration {
+            qualified_name: name.into(),
+            revision_id: digest(revision),
+            semantic_hash: digest(semantic),
+            rename_from: rename_from.map(str::to_owned),
+        }
+    }
+
+    async fn state() -> (tempfile::TempDir, RuntimeState) {
+        let directory = tempdir().unwrap();
+        let state = RuntimeState::open_path(
+            &directory.path().join("state.db"),
+            RuntimeIdentity {
+                database_id: [1; 16],
+                repository_id: [2; 16],
+            },
+            digest(3),
+            None,
+        )
+        .await
+        .unwrap();
+        (directory, state)
+    }
+
+    async fn admit(
+        state: &RuntimeState,
+        writer: crate::WriterLease,
+        predecessor: Option<CwdCapture>,
+        declaration: CatalogueModuleDeclaration,
+    ) -> Result<CatalogueModule, CatalogueError> {
+        let capture = capture_tx(&state.connection).await?;
+        state
+            .admit_catalogue_module_at(writer, &capture, predecessor, declaration)
+            .await
+    }
+
+    async fn advance(state: &RuntimeState, lease: crate::WriterLease, value: u8) -> CwdCapture {
+        let context = state.begin_activation().await.unwrap();
+        let mutation = TableMutation::new(
+            [value; 16],
+            "module-catalogue-test",
+            vec![value],
+            Some(vec![value]),
+        )
+        .unwrap();
+        state
+            .commit_table_activation(lease, &context, &[mutation], digest(value), &NoFault)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn module_initial_admission_is_authoritative() {
+        let (_directory, state) = state().await;
+        let lease = state.acquire_lease([4; 16]).await.unwrap();
+        let module = admit(&state, lease, None, declaration("pkg.main", 4, 5, None))
+            .await
+            .unwrap();
+        assert_eq!(module.object.kind, CatalogueObjectKind::Module);
+        assert_eq!(module.object.qualified_name, "pkg.main");
+        assert_eq!(
+            state.catalogue_module("pkg.main").await.unwrap(),
+            Some(module)
+        );
+    }
+
+    #[tokio::test]
+    async fn module_same_capture_replay_is_idempotent() {
+        let (_directory, state) = state().await;
+        let lease = state.acquire_lease([5; 16]).await.unwrap();
+        let first = admit(&state, lease, None, declaration("pkg.main", 6, 7, None))
+            .await
+            .unwrap();
+        let replay = admit(&state, lease, None, declaration("pkg.main", 6, 7, None))
+            .await
+            .unwrap();
+        assert_eq!(first, replay);
+    }
+
+    #[tokio::test]
+    async fn module_same_capture_conflict_rolls_back_without_replacement() {
+        let (_directory, state) = state().await;
+        let lease = state.acquire_lease([6; 16]).await.unwrap();
+        let first = admit(&state, lease, None, declaration("pkg.main", 8, 9, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            admit(&state, lease, None, declaration("pkg.main", 10, 11, None)).await,
+            Err(CatalogueError::CatalogueRevisionConflict)
+        );
+        let current = state.catalogue_module("pkg.main").await.unwrap().unwrap();
+        assert_eq!(current, first);
+        let mut rows = state
+            .connection
+            .query(
+                "SELECT COUNT(*) FROM runtime_catalogue_revision
+                 WHERE object_id = ?1",
+                params![first.object_id().to_vec()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn module_edit_supersedes_only_a_carried_forward_row() {
+        let (_directory, state) = state().await;
+        let lease = state.acquire_lease([7; 16]).await.unwrap();
+        let first_capture = capture_tx(&state.connection).await.unwrap();
+        let first = admit(&state, lease, None, declaration("pkg.main", 12, 13, None))
+            .await
+            .unwrap();
+        let current_capture = advance(&state, lease, 14).await;
+        let edited = admit(
+            &state,
+            lease,
+            Some(first_capture.clone()),
+            declaration("pkg.main", 15, 16, None),
+        )
+        .await
+        .unwrap();
+        assert_eq!(edited.object_id(), first.object_id());
+        assert_eq!(edited.object.revision_id, digest(15));
+        assert_eq!(edited.snapshot(), current_capture.snapshot());
+        let mut rows = state
+            .connection
+            .query(
+                "SELECT revision_id FROM runtime_catalogue_revision
+                 WHERE object_id = ?1 AND snapshot = ?2",
+                params![
+                    first.object_id().to_vec(),
+                    capture_bytes(&first_capture).unwrap()
+                ],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<Vec<u8>>(0).unwrap(), digest(12).to_vec());
+    }
+
+    #[tokio::test]
+    async fn module_explicit_rename_preserves_identity_and_predecessor() {
+        let (_directory, state) = state().await;
+        let lease = state.acquire_lease([8; 16]).await.unwrap();
+        let first_capture = capture_tx(&state.connection).await.unwrap();
+        let first = admit(&state, lease, None, declaration("pkg.old", 17, 18, None))
+            .await
+            .unwrap();
+        advance(&state, lease, 19).await;
+        let renamed = admit(
+            &state,
+            lease,
+            Some(first_capture),
+            declaration("pkg.new", 20, 21, Some("pkg.old")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(renamed.object_id(), first.object_id());
+        assert_eq!(state.catalogue_module("pkg.old").await.unwrap(), None);
+        assert_eq!(
+            state
+                .catalogue_module("pkg.new")
+                .await
+                .unwrap()
+                .unwrap()
+                .object_id(),
+            first.object_id()
+        );
+    }
+
+    #[tokio::test]
+    async fn module_reopen_reads_the_retained_identity() {
+        let (directory, state) = state().await;
+        let lease = state.acquire_lease([9; 16]).await.unwrap();
+        let first = admit(&state, lease, None, declaration("pkg.reopen", 22, 23, None))
+            .await
+            .unwrap();
+        let object_id = first.object_id();
+        drop(state);
+        let reopened = RuntimeState::open_path(
+            &directory.path().join("state.db"),
+            RuntimeIdentity {
+                database_id: [1; 16],
+                repository_id: [2; 16],
+            },
+            digest(3),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reopened
+                .catalogue_module("pkg.reopen")
+                .await
+                .unwrap()
+                .unwrap()
+                .object_id(),
+            object_id
+        );
+    }
+}
+
 impl std::fmt::Display for CatalogueError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -633,12 +855,13 @@ impl std::error::Error for CatalogueError {}
 // shared runtime consumers continue to see the unchanged RuntimeError enum.
 use self::CatalogueError as RuntimeError;
 
-/// The two catalogue object kinds currently admitted by the v1 invocation
-/// path.  Other sys.Object kinds remain outside this bounded prerequisite.
+/// The catalogue object kinds currently admitted by the v1 runtime catalogue
+/// authority. Other sys.Object kinds remain outside this bounded prerequisite.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogueObjectKind {
     Function,
     Type,
+    Module,
 }
 
 impl CatalogueObjectKind {
@@ -646,6 +869,7 @@ impl CatalogueObjectKind {
         match self {
             Self::Function => 1,
             Self::Type => 2,
+            Self::Module => 3,
         }
     }
 
@@ -653,6 +877,7 @@ impl CatalogueObjectKind {
         match code {
             1 => Ok(Self::Function),
             2 => Ok(Self::Type),
+            3 => Ok(Self::Module),
             _ => Err(RuntimeError::CatalogueCorrupt),
         }
     }
@@ -747,6 +972,29 @@ pub struct CatalogueAdmissionResult {
     pub functions: Vec<CatalogueFunction>,
 }
 
+/// The committed identity and immutable revision facts for one resolved
+/// source module. The runtime allocates the ObjectId; callers may only provide
+/// the resolved name, revision, semantic hash, and an explicit rename witness.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogueModuleDeclaration {
+    pub qualified_name: String,
+    pub revision_id: [u8; 32],
+    pub semantic_hash: [u8; 32],
+    pub rename_from: Option<String>,
+}
+
+impl CatalogueModuleDeclaration {
+    fn as_catalogue_declaration(&self) -> CatalogueDeclaration {
+        CatalogueDeclaration {
+            qualified_name: self.qualified_name.clone(),
+            kind: CatalogueObjectKind::Module,
+            revision_id: self.revision_id,
+            semantic_hash: self.semantic_hash,
+            rename_from: self.rename_from.clone(),
+        }
+    }
+}
+
 /// A checked handle to an admitted type row. Its fields are public only as
 /// read-only facts; the runtime rechecks the handle's row and snapshot before
 /// accepting it into a function signature.
@@ -795,6 +1043,26 @@ pub struct CatalogueFunction {
     pub object: CatalogueObject,
     pub parameters: Vec<CatalogueParameterHandle>,
     pub result_type: CatalogueTypeHandle,
+}
+
+/// A checked handle to a committed module identity at one pinned capture.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogueModule {
+    pub object: CatalogueObject,
+}
+
+impl CatalogueModule {
+    pub fn object_id(&self) -> [u8; 16] {
+        self.object.object_id
+    }
+
+    pub fn reference(&self) -> &ObjectRef {
+        &self.object.reference
+    }
+
+    pub fn snapshot(&self) -> &orna_foundation_v1::CanonicalSnapshot {
+        &self.object.reference.as_row_ref().snapshot
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -848,6 +1116,7 @@ impl RuntimeState {
             }
             None
         };
+        reject_separate_module_rows_tx(&transaction, &capture).await?;
         let already_admitted = catalogue_admission_exists_tx(&transaction, &capture).await?;
         if already_admitted {
             let result =
@@ -979,6 +1248,49 @@ impl RuntimeState {
         })
     }
 
+    /// Atomically admits or replays one resolved module identity at the
+    /// caller's pinned CWD capture. A changed declaration must be associated
+    /// with the immediately preceding retained capture; an explicit rename
+    /// reuses the predecessor's identity only when that witness resolves to
+    /// the same committed module object.
+    ///
+    /// This is deliberately only the runtime identity primitive. It does not
+    /// claim to be the complete source-catalogue or activation bridge.
+    pub async fn admit_catalogue_module_at(
+        &self,
+        writer: crate::WriterLease,
+        expected_capture: &orna_foundation_v1::CwdCapture,
+        predecessor_capture: Option<orna_foundation_v1::CwdCapture>,
+        declaration: CatalogueModuleDeclaration,
+    ) -> Result<CatalogueModule, RuntimeError> {
+        let transaction = self.catalogue_transaction().await?;
+        self.require_owner(&transaction, writer).await?;
+        let capture = capture_tx(&transaction).await?;
+        if &capture != expected_capture {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(capture),
+            });
+        }
+        persist_capture_tx(&transaction, &capture).await?;
+        let predecessor = if let Some(predecessor) = predecessor_capture.as_ref() {
+            validate_predecessor_capture_tx(&transaction, predecessor, &capture).await?;
+            Some(predecessor)
+        } else if capture.generation() == &num_bigint::BigInt::from(0) {
+            None
+        } else {
+            return Err(RuntimeError::CataloguePredecessorRequired);
+        };
+        let object_id =
+            admit_module_object_tx(&transaction, &capture, predecessor, &declaration).await?;
+        mark_module_admission_tx(&transaction, &capture, object_id).await?;
+        let module = load_module_tx(&transaction, &capture, object_id).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(module)
+    }
+
     /// Looks up a current-runtime type by exact name and form.  The returned
     /// reference is built only after the persisted Object row and Type row are
     /// both found and validated.
@@ -1056,6 +1368,36 @@ impl RuntimeState {
             parameters,
             result_type,
         }))
+    }
+
+    /// Reads the module identity retained by the current runtime capture.
+    pub async fn catalogue_module(
+        &self,
+        qualified_name: &str,
+    ) -> Result<Option<CatalogueModule>, RuntimeError> {
+        validate_observation_text(qualified_name)?;
+        let transaction = self.catalogue_transaction_read().await?;
+        let capture = capture_tx(&transaction).await?;
+        let Some(id) = lookup_object_id(
+            &transaction,
+            &capture,
+            qualified_name,
+            CatalogueObjectKind::Module,
+        )
+        .await?
+        else {
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            return Ok(None);
+        };
+        let module = load_module_tx(&transaction, &capture, id).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(Some(module))
     }
 
     async fn catalogue_transaction(&self) -> Result<Transaction, RuntimeError> {
@@ -1903,6 +2245,226 @@ async fn load_function_tx(
         parameters,
         result_type,
     })
+}
+
+async fn load_module_tx(
+    transaction: &Transaction,
+    capture: &orna_foundation_v1::CwdCapture,
+    id: [u8; 16],
+) -> Result<CatalogueModule, RuntimeError> {
+    let object = load_object_tx(transaction, capture, id).await?;
+    if object.kind != CatalogueObjectKind::Module {
+        return Err(RuntimeError::CatalogueKindMismatch);
+    }
+    Ok(CatalogueModule { object })
+}
+
+async fn admit_module_object_tx(
+    transaction: &Transaction,
+    capture: &orna_foundation_v1::CwdCapture,
+    predecessor: Option<&orna_foundation_v1::CwdCapture>,
+    declaration: &CatalogueModuleDeclaration,
+) -> Result<[u8; 16], RuntimeError> {
+    let declaration = declaration.as_catalogue_declaration();
+    validate_observation_text(&declaration.qualified_name)?;
+    if let Some(rename_from) = declaration.rename_from.as_deref() {
+        validate_observation_text(rename_from)?;
+    }
+    let snapshot = capture_bytes(capture)?;
+    if let Some(current_id) =
+        lookup_snapshot_object_id(transaction, &snapshot, &declaration.qualified_name).await?
+    {
+        if object_kind_tx(transaction, current_id).await? != CatalogueObjectKind::Module {
+            return Err(RuntimeError::CatalogueKindMismatch);
+        }
+        validate_replay_rename_tx(
+            transaction,
+            predecessor,
+            declaration.rename_from.as_deref(),
+            current_id,
+        )
+        .await?;
+        match ensure_revision_row_tx(transaction, capture, current_id, &declaration).await {
+            Ok(()) => return Ok(current_id),
+            Err(RuntimeError::CatalogueRevisionConflict)
+                if !module_admission_exists_tx(transaction, capture, current_id).await?
+                    && is_carried_forward_module_tx(
+                        transaction,
+                        capture,
+                        predecessor,
+                        current_id,
+                        &declaration.qualified_name,
+                    )
+                    .await? =>
+            {
+                clear_module_revision_tx(transaction, capture, current_id).await?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    if let Some(rename_from) = declaration.rename_from.as_deref() {
+        let Some(predecessor) = predecessor else {
+            return Err(RuntimeError::CataloguePredecessorRequired);
+        };
+        let predecessor_snapshot = capture_bytes(predecessor)?;
+        let old_id = lookup_snapshot_object_id(transaction, &predecessor_snapshot, rename_from)
+            .await?
+            .ok_or(RuntimeError::CatalogueRenameSourceMissing)?;
+        if object_kind_tx(transaction, old_id).await? != CatalogueObjectKind::Module {
+            return Err(RuntimeError::CatalogueKindMismatch);
+        }
+        if lookup_snapshot_object_id(transaction, &snapshot, rename_from)
+            .await?
+            .is_some()
+        {
+            if module_admission_exists_tx(transaction, capture, old_id).await?
+                || !is_carried_forward_module_tx(
+                    transaction,
+                    capture,
+                    Some(predecessor),
+                    old_id,
+                    rename_from,
+                )
+                .await?
+            {
+                return Err(RuntimeError::CatalogueRevisionConflict);
+            }
+            clear_module_revision_tx(transaction, capture, old_id).await?;
+        }
+    }
+    admit_object_tx(transaction, capture, predecessor, &declaration).await
+}
+
+async fn module_admission_exists_tx(
+    transaction: &Transaction,
+    capture: &orna_foundation_v1::CwdCapture,
+    object_id: [u8; 16],
+) -> Result<bool, RuntimeError> {
+    let mut rows = transaction
+        .query(
+            "SELECT 1 FROM runtime_catalogue_module_admission
+             WHERE object_id = ?1 AND snapshot = ?2",
+            params![object_id.to_vec(), capture_bytes(capture)?],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some())
+}
+
+async fn mark_module_admission_tx(
+    transaction: &Transaction,
+    capture: &orna_foundation_v1::CwdCapture,
+    object_id: [u8; 16],
+) -> Result<(), RuntimeError> {
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO runtime_catalogue_module_admission
+             (object_id, snapshot) VALUES (?1, ?2)",
+            params![object_id.to_vec(), capture_bytes(capture)?],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
+}
+
+async fn is_carried_forward_module_tx(
+    transaction: &Transaction,
+    capture: &orna_foundation_v1::CwdCapture,
+    predecessor: Option<&orna_foundation_v1::CwdCapture>,
+    object_id: [u8; 16],
+    qualified_name: &str,
+) -> Result<bool, RuntimeError> {
+    let Some(predecessor) = predecessor else {
+        return Ok(false);
+    };
+    let predecessor_snapshot = capture_bytes(predecessor)?;
+    if lookup_snapshot_object_id(transaction, &predecessor_snapshot, qualified_name).await?
+        != Some(object_id)
+    {
+        return Ok(false);
+    }
+    Ok(
+        module_revision_facts_tx(transaction, capture, object_id).await?
+            == module_revision_facts_tx(transaction, predecessor, object_id).await?,
+    )
+}
+
+async fn module_revision_facts_tx(
+    transaction: &Transaction,
+    capture: &orna_foundation_v1::CwdCapture,
+    object_id: [u8; 16],
+) -> Result<Option<([u8; 32], [u8; 32])>, RuntimeError> {
+    let mut rows = transaction
+        .query(
+            "SELECT revision_id, semantic_hash FROM runtime_catalogue_revision
+             WHERE object_id = ?1 AND snapshot = ?2 AND kind = ?3",
+            params![
+                object_id.to_vec(),
+                capture_bytes(capture)?,
+                CatalogueObjectKind::Module.code()
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((
+        fixed(row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?)?,
+        fixed(row.get(1).map_err(|_| RuntimeError::CatalogueCorrupt)?)?,
+    )))
+}
+
+async fn reject_separate_module_rows_tx(
+    transaction: &Transaction,
+    capture: &orna_foundation_v1::CwdCapture,
+) -> Result<(), RuntimeError> {
+    let mut rows = transaction
+        .query(
+            "SELECT 1 FROM runtime_catalogue_revision
+             WHERE snapshot = ?1 AND kind = ?2 LIMIT 1",
+            params![capture_bytes(capture)?, CatalogueObjectKind::Module.code()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some()
+    {
+        return Err(RuntimeError::CatalogueKindMismatch);
+    }
+    Ok(())
+}
+
+async fn clear_module_revision_tx(
+    transaction: &Transaction,
+    capture: &orna_foundation_v1::CwdCapture,
+    object_id: [u8; 16],
+) -> Result<(), RuntimeError> {
+    transaction
+        .execute(
+            "DELETE FROM runtime_catalogue_revision
+             WHERE object_id = ?1 AND snapshot = ?2 AND kind = ?3",
+            params![
+                object_id.to_vec(),
+                capture_bytes(capture)?,
+                CatalogueObjectKind::Module.code()
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
 }
 
 async fn allocate_object_id_tx(
