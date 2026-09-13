@@ -977,13 +977,7 @@ impl DiagnosticSpan {
         end_byte: BigInt,
     ) -> Result<Self, FoundationError> {
         let file_path = file_path.into();
-        if file_path.is_empty()
-            || (file_path != "<redacted>"
-                && (!file_path.is_ascii()
-                    || file_path.starts_with('/')
-                    || file_path
-                        .split('/')
-                        .any(|x| x.is_empty() || matches!(x, "." | ".."))))
+        if !is_safe_diagnostic_path(&file_path)
             || start_byte.sign() == Sign::Minus
             || end_byte < start_byte
         {
@@ -1016,6 +1010,26 @@ impl DiagnosticSpan {
             integer(&values[3])?,
         )
     }
+}
+
+fn is_safe_diagnostic_path(file_path: &str) -> bool {
+    if file_path == "<redacted>" {
+        return true;
+    }
+
+    let bytes = file_path.as_bytes();
+    if bytes.is_empty()
+        || bytes[0] == b'/'
+        || bytes.contains(&b'\\')
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        || file_path.chars().any(char::is_control)
+    {
+        return false;
+    }
+
+    !file_path
+        .split('/')
+        .any(|component| component.is_empty() || matches!(component, "." | ".."))
 }
 /// Live-protocol `Diagnostic`: tag 60011 around exact integer-key map
 /// `{0: code, 1: severity, 2: message, 3: spans, 4: notes, 5: causes,
