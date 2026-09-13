@@ -6221,37 +6221,149 @@ fn cookie(headers: &[(String, String)], name: &str) -> Option<String> {
     found.map(str::to_owned)
 }
 fn parse_json_pair(bytes: &[u8], first: &str, second: &str) -> Option<(String, String)> {
-    let text = core::str::from_utf8(bytes).ok()?;
-    let mut input = text.trim();
-    input = input.strip_prefix('{')?.trim_start();
+    let mut parser = JsonObjectParser::new(bytes);
+    parser.consume_whitespace();
+    parser.expect(b'{')?;
+    parser.consume_whitespace();
     let mut values = BTreeMap::new();
-    while !input.starts_with('}') {
-        let (key, rest) = json_string(input)?;
-        input = rest.trim_start();
-        input = input.strip_prefix(':')?.trim_start();
-        let (value, rest) = json_string(input)?;
+    if parser.next() == Some(b'}') {
+        return None;
+    }
+    loop {
+        let key = parser.string()?;
+        parser.consume_whitespace();
+        parser.expect(b':')?;
+        parser.consume_whitespace();
+        let value = parser.string()?;
         if values.insert(key, value).is_some() {
             return None;
         }
-        input = rest.trim_start();
-        if input.starts_with(',') {
-            input = input[1..].trim_start();
-        } else {
-            break;
+        parser.consume_whitespace();
+        match parser.next()? {
+            b',' => {
+                parser.advance();
+                parser.consume_whitespace();
+                if parser.next() == Some(b'}') {
+                    return None;
+                }
+            }
+            b'}' => {
+                parser.advance();
+                break;
+            }
+            _ => return None,
         }
     }
-    if input.strip_prefix('}')?.trim().is_empty() && values.len() == 2 {
+    parser.consume_whitespace();
+    if parser.is_finished() && values.len() == 2 {
         Some((values.remove(first)?, values.remove(second)?))
     } else {
         None
     }
 }
-fn json_string(input: &str) -> Option<(String, &str)> {
-    let input = input.strip_prefix('"')?;
-    let end = input.find('"')?;
-    let value = &input[..end];
-    (!value.contains(['\\', '\n', '\r']) && value.chars().all(|ch| ch >= ' '))
-        .then(|| (value.to_owned(), &input[end + 1..]))
+
+struct JsonObjectParser<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> JsonObjectParser<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, position: 0 }
+    }
+
+    fn next(&self) -> Option<u8> {
+        self.bytes.get(self.position).copied()
+    }
+
+    fn advance(&mut self) {
+        self.position += 1;
+    }
+
+    fn expect(&mut self, expected: u8) -> Option<()> {
+        (self.next()? == expected).then(|| self.advance())
+    }
+
+    fn is_finished(&self) -> bool {
+        self.position == self.bytes.len()
+    }
+
+    fn consume_whitespace(&mut self) {
+        while matches!(self.next(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+            self.advance();
+        }
+    }
+
+    fn string(&mut self) -> Option<String> {
+        self.expect(b'"')?;
+        let mut value = String::new();
+        loop {
+            let byte = self.next()?;
+            match byte {
+                b'"' => {
+                    self.advance();
+                    return Some(value);
+                }
+                b'\\' => {
+                    self.advance();
+                    self.escape(&mut value)?;
+                }
+                0..=0x1f => return None,
+                _ => {
+                    let text = core::str::from_utf8(self.bytes.get(self.position..)?).ok()?;
+                    let character = text.chars().next()?;
+                    value.push(character);
+                    self.position += character.len_utf8();
+                }
+            }
+        }
+    }
+
+    fn escape(&mut self, value: &mut String) -> Option<()> {
+        let escaped = self.next()?;
+        self.advance();
+        match escaped {
+            b'"' => value.push('"'),
+            b'\\' => value.push('\\'),
+            b'/' => value.push('/'),
+            b'b' => value.push('\u{8}'),
+            b'f' => value.push('\u{c}'),
+            b'n' => value.push('\n'),
+            b'r' => value.push('\r'),
+            b't' => value.push('\t'),
+            b'u' => {
+                let high = self.hex_quad()?;
+                if (0xd800..=0xdbff).contains(&high) {
+                    self.expect(b'\\')?;
+                    self.expect(b'u')?;
+                    let low = self.hex_quad()?;
+                    if !(0xdc00..=0xdfff).contains(&low) {
+                        return None;
+                    }
+                    let codepoint =
+                        0x1_0000 + (((u32::from(high) - 0xd800) << 10) | (u32::from(low) - 0xdc00));
+                    value.push(char::from_u32(codepoint)?);
+                } else if (0xdc00..=0xdfff).contains(&high) {
+                    return None;
+                } else {
+                    value.push(char::from_u32(u32::from(high))?);
+                }
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    fn hex_quad(&mut self) -> Option<u16> {
+        let mut value = 0_u16;
+        for _ in 0..4 {
+            value = value
+                .checked_mul(16)?
+                .checked_add(u16::from(hex(self.next()?)?))?;
+            self.advance();
+        }
+        Some(value)
+    }
 }
 fn wire_error(status: u16, code: &'static str) -> WireResponse {
     WireResponse {
