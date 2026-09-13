@@ -2634,7 +2634,22 @@ impl Repository {
         &self,
         discard: &ValidatedCheckoutDiscard,
     ) -> Result<(), RepositoryError> {
-        self.execute_validated_force_checkout_impl(discard, None)
+        self.execute_validated_force_checkout_impl(discard, None, None)
+    }
+
+    /// Test-only interruption seam for the durable discard boundary.
+    ///
+    /// Production callers must use [`Self::execute_validated_force_checkout`].
+    /// The hook runs after the scoped discard generation is durably journalled,
+    /// but before Git selects the recorded target. Recovery must resume that
+    /// recorded transition without resetting unrelated local state.
+    #[doc(hidden)]
+    pub fn execute_validated_force_checkout_after_discard_with_test_hook(
+        &self,
+        discard: &ValidatedCheckoutDiscard,
+        hook: &mut dyn FnMut() -> Result<(), RepositoryError>,
+    ) -> Result<(), RepositoryError> {
+        self.execute_validated_force_checkout_impl(discard, Some(hook), None)
     }
 
     /// Test-only interruption seam for the post-selection journal boundary.
@@ -2649,12 +2664,13 @@ impl Repository {
         discard: &ValidatedCheckoutDiscard,
         hook: &mut dyn FnMut() -> Result<(), RepositoryError>,
     ) -> Result<(), RepositoryError> {
-        self.execute_validated_force_checkout_impl(discard, Some(hook))
+        self.execute_validated_force_checkout_impl(discard, None, Some(hook))
     }
 
     fn execute_validated_force_checkout_impl(
         &self,
         discard: &ValidatedCheckoutDiscard,
+        mut after_discard: Option<&mut dyn FnMut() -> Result<(), RepositoryError>>,
         mut after_applied: Option<&mut dyn FnMut() -> Result<(), RepositoryError>>,
     ) -> Result<(), RepositoryError> {
         let _lock = self.acquire_coordination_lock()?;
@@ -2675,6 +2691,9 @@ impl Repository {
         self.restore_checkout_discard_paths(discard)?;
         journal.record_discarded(self.cwd_generation_locked(discard.preflight.cwd.runtime)?)?;
         self.write_checkout_recovery_journal_locked(&journal)?;
+        if let Some(hook) = after_discard.as_mut() {
+            hook()?;
+        }
 
         self.switch_checkout_target(discard.preflight.target())?;
         let after = self.cwd_generation_locked(discard.preflight.cwd.runtime)?;
