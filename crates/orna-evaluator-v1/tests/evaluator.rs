@@ -3366,6 +3366,48 @@ fn executes_function_and_finite_for_control_transfers() {
 }
 
 #[test]
+fn finite_for_break_values_stop_iteration_and_preserve_loop_boundaries() {
+    assert_eq!(
+        evaluate(
+            "if true { let total = 0; let result = for value in [1, 2, 3] { if value == 2 { break value * 10; }; total += value; }; [result, total] }"
+        ),
+        Value::new(Raw::Array(vec![Raw::Int(20.into()), Raw::Int(1.into())])).unwrap()
+    );
+    assert_eq!(
+        evaluate(
+            "if true { let total = 0; for outer in [1, 2] { let inner = for value in [1, 2] { if value == 2 { break outer * 10; }; total += 1; }; total += inner; }; total }"
+        ),
+        Value::int(32.into())
+    );
+    assert_eq!(
+        evaluate("if true { let result = for value in [1, 2, 3] { value; }; result }"),
+        Value::unit()
+    );
+    assert_eq!(
+        evaluate(
+            "if true { let result = for value in [1, 2, 3] { if value == 2 { break; }; }; result }"
+        ),
+        Value::unit()
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "if true { break 1; }",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "if true { while true { break 1; } }",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
+}
+
+#[test]
 fn transfer_boundaries_reject_loop_transfers_from_a_called_lambda() {
     assert_eq!(
         code(call_module(
@@ -3378,14 +3420,6 @@ fn transfer_boundaries_reject_loop_transfers_from_a_called_lambda() {
     assert_eq!(
         code(evaluate_expression(
             "if true { return 1; 0 }",
-            &Environment::new(),
-            Limits::default(),
-        )),
-        "ORNA-EVAL-UNSUPPORTED"
-    );
-    assert_eq!(
-        code(evaluate_expression(
-            "if true { for value in [1] { break 1; }; 0 }",
             &Environment::new(),
             Limits::default(),
         )),

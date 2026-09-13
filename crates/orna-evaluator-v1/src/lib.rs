@@ -1463,9 +1463,6 @@ impl Context<'_, '_> {
                     match self.transfer.take() {
                         Some(Transfer::Continue) => {}
                         Some(Transfer::Break(value)) => {
-                            if !matches!(value, Value::Null) {
-                                return Err(error("ORNA-EVAL-UNSUPPORTED"));
-                            }
                             for name in &outer_names {
                                 if bound_names.contains(name) {
                                     continue;
@@ -1474,7 +1471,7 @@ impl Context<'_, '_> {
                                     scope.0.insert(name.clone(), value);
                                 }
                             }
-                            return Ok(Value::Null);
+                            return Ok(value);
                         }
                         Some(transfer @ Transfer::Return(_)) => {
                             self.transfer = Some(transfer);
@@ -1491,7 +1488,7 @@ impl Context<'_, '_> {
                         }
                     }
                 }
-                Ok(Value::Null)
+                Ok(Value::Unit)
             }
             Expr::ReplBinding { text, .. } if self.repl_bindings => scope
                 .0
@@ -1651,7 +1648,7 @@ impl Context<'_, '_> {
                     }
                 }
                 Statement::Break { value, .. } => {
-                    let value = value.as_ref().map_or(Ok(Value::Null), |value| {
+                    let value = value.as_ref().map_or(Ok(Value::Unit), |value| {
                         self.evaluate(value, &mut local, depth + 1)
                     })?;
                     if self.transfer.is_none() {
