@@ -1029,6 +1029,7 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
                 return Err(Error::InvalidTag);
             }
             uuid_array(&a[0])?;
+            uuid_array(&a[1])?;
         }
         60023 => {
             let a = array(v)?;
@@ -1893,6 +1894,26 @@ mod tests {
         ] {
             assert!(Value::decode(&h(x)).is_err(), "{x}")
         }
+    }
+    #[test]
+    fn invocation_handle_requires_canonical_runtime_uuid() {
+        let handle = |runtime| {
+            Value::new(tag(
+                60022,
+                Raw::Array(vec![
+                    uuid_raw([1; 16]),
+                    runtime,
+                    Raw::Null,
+                    Raw::Bool(false),
+                ]),
+            ))
+        };
+
+        assert!(handle(uuid_raw([2; 16])).is_ok());
+        assert!(handle(Raw::Text("runtime".into())).is_err());
+        assert!(handle(Raw::Int(2.into())).is_err());
+        assert!(handle(uuid_raw([0; 16])).is_ok());
+        assert!(handle(tag(37, Raw::Bytes(vec![2; 15]))).is_err());
     }
     #[test]
     fn float_vectors() {
