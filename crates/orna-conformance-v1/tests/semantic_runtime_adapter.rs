@@ -5,9 +5,12 @@ use orna_conformance_v1::{
 };
 use orna_evaluator_v1::Limits;
 use orna_foundation_v1::{Diagnostic, OvbRaw, Value};
+use orna_repository_v1::Repository;
+use orna_runtime_v1::{NoFault, RuntimeIdentity, RuntimeState, TableMutation};
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 use sha2::Digest;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, process::Command};
+use tempfile::TempDir;
 
 #[test]
 fn transactional_fixture_preserves_order_reference_types_without_runtime_claims() {
@@ -108,6 +111,298 @@ fn semantic_project_resolution_uses_project_relative_module_names() {
         adapter.resolve_project(&project),
         StageOutcome::Passed
     ));
+}
+
+#[tokio::test]
+async fn project_stream_ignores_unrelated_false_module_assertion() {
+    let temp = TempDir::new().expect("temporary repository");
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "test@example.invalid"][..],
+        &["config", "user.name", "conformance test"][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(arguments)
+                .current_dir(temp.path())
+                .status()
+                .expect("git command")
+                .success()
+        );
+    }
+    let repository = Repository::discover(temp.path()).expect("repository");
+    let project = ProjectUnit {
+        fixture_id: "stream-assertion-scope".into(),
+        project_id: "stream-assertion-scope".into(),
+        environment_id: None,
+        modules: vec![
+            SourceUnit {
+                fixture_id: "stream-assertion-scope".into(),
+                source_id: "stream-assertion-scope/library.orna".into(),
+                parse_as: "module_unit".into(),
+                source: r#"
+                    pub table Book(id: Str) { title: Str, }
+                    pub table Loan(book_id: Str) { borrower: Str, }
+                    assert every(Loan, loan => exists(Book, book => book.id == loan.book_id));
+                "#
+                .into(),
+            },
+            SourceUnit {
+                fixture_id: "stream-assertion-scope".into(),
+                source_id: "stream-assertion-scope/sensors.orna".into(),
+                parse_as: "module_unit".into(),
+                source: r#"
+                    pub type Sample { pub sensor: Str, pub sequence: Int, pub value: Decimal, }
+                    pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }
+                    pub fn input() = Stream.from_list([
+                        Sample { sensor: "greenhouse", sequence: 0, value: 18.25 },
+                        Sample { sensor: "greenhouse", sequence: 1, value: 18.50 },
+                    ], source_identity: "example:sensors:v1");
+                    pub fn ingest() { input() | for_each(sample => {
+                        Reading.insert({ sensor: sample.sensor, sequence: sample.sequence, value: sample.value });
+                    }); }
+                "#
+                .into(),
+            },
+        ],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+        },
+    };
+    let identity = RuntimeIdentity {
+        database_id: [81; 16],
+        repository_id: [82; 16],
+    };
+    let evaluator =
+        orna_conformance_v1::DurableTransactionalEvaluator::new("main", Limits::default());
+    let state = RuntimeState::open(&repository, identity, [84; 32])
+        .await
+        .expect("runtime state");
+    let lease = state.acquire_lease([83; 16]).await.expect("writer lease");
+    let snapshot = state
+        .begin_table_activation(&["Loan"])
+        .await
+        .expect("initial Loan snapshot");
+    let key = Value::int(1.into()).encode().expect("Loan key");
+    let row = Value::new(OvbRaw::Map(vec![
+        (
+            OvbRaw::Text("book_id".into()),
+            OvbRaw::Text("missing".into()),
+        ),
+        (
+            OvbRaw::Text("borrower".into()),
+            OvbRaw::Text("reader".into()),
+        ),
+    ]))
+    .expect("canonical Loan row")
+    .encode()
+    .expect("encoded Loan row");
+    let mutation = TableMutation::new([86; 16], "Loan", key, Some(row)).expect("Loan mutation");
+    state
+        .commit_table_activation(lease, &snapshot.context(), &[mutation], [87; 32], &NoFault)
+        .await
+        .expect("seed unrelated Loan row");
+
+    let outcome = evaluator
+        .execute_project_stream(
+            &repository,
+            identity,
+            [83; 16],
+            [84; 32],
+            &project,
+            "sensors.ingest",
+        )
+        .await;
+    assert!(matches!(outcome, Ok(StageOutcome::Passed)), "{outcome:?}");
+
+    let state = RuntimeState::open(&repository, identity, [84; 32])
+        .await
+        .expect("runtime state");
+    assert_eq!(state.committed_table_rows("Loan").await.unwrap().len(), 1);
+    assert_eq!(
+        state.committed_table_rows("Reading").await.unwrap().len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn project_stream_rolls_back_when_affected_module_assertion_fails() {
+    let temp = TempDir::new().expect("temporary repository");
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "test@example.invalid"][..],
+        &["config", "user.name", "conformance test"][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(arguments)
+                .current_dir(temp.path())
+                .status()
+                .expect("git command")
+                .success()
+        );
+    }
+    let repository = Repository::discover(temp.path()).expect("repository");
+    let project = ProjectUnit {
+        fixture_id: "stream-assertion-failure".into(),
+        project_id: "stream-assertion-failure".into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: "stream-assertion-failure".into(),
+            source_id: "stream-assertion-failure/sensors.orna".into(),
+            parse_as: "module_unit".into(),
+            source: r#"
+                pub type Sample { pub sensor: Str, pub sequence: Int, pub value: Decimal, }
+                pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }
+                pub table Marker(id: Int) { note: Str, }
+                assert every(Reading, reading =>
+                    exists(Marker, marker => marker.id == reading.sequence)
+                );
+                pub fn input() = Stream.from_list([
+                    Sample { sensor: "greenhouse", sequence: 0, value: 18.25 },
+                ], source_identity: "example:sensors:assertion-failure");
+                pub fn ingest() { input() | for_each(sample => {
+                    Reading.insert({ sensor: sample.sensor, sequence: sample.sequence, value: sample.value });
+                }); }
+            "#
+            .into(),
+        }],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+        },
+    };
+    let identity = RuntimeIdentity {
+        database_id: [91; 16],
+        repository_id: [92; 16],
+    };
+    let evaluator =
+        orna_conformance_v1::DurableTransactionalEvaluator::new("main", Limits::default());
+
+    let outcome = evaluator
+        .execute_project_stream(
+            &repository,
+            identity,
+            [93; 16],
+            [94; 32],
+            &project,
+            "sensors.ingest",
+        )
+        .await;
+    assert!(
+        matches!(outcome, Ok(StageOutcome::Failed(ref diagnostic)) if diagnostic.code() == "ORNA-LIST-STREAM-DELIVERY"),
+        "affected assertion failure must be retained: {outcome:?}"
+    );
+
+    let state = RuntimeState::open(&repository, identity, [94; 32])
+        .await
+        .expect("runtime state");
+    assert!(
+        state
+            .committed_table_rows("Reading")
+            .await
+            .expect("Reading rows")
+            .is_empty(),
+        "failed affected assertion must roll back the delivered row"
+    );
+    assert!(
+        state
+            .latest_checkpoint()
+            .await
+            .expect("latest checkpoint")
+            .is_none(),
+        "failed affected assertion must not advance the durable checkpoint"
+    );
+}
+
+#[tokio::test]
+async fn project_stream_admission_rejects_multiple_applicable_module_assertions() {
+    let temp = TempDir::new().expect("temporary repository");
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "test@example.invalid"][..],
+        &["config", "user.name", "conformance test"][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(arguments)
+                .current_dir(temp.path())
+                .status()
+                .expect("git command")
+                .success()
+        );
+    }
+    let repository = Repository::discover(temp.path()).expect("repository");
+    let project = ProjectUnit {
+        fixture_id: "stream-assertion-ordering".into(),
+        project_id: "stream-assertion-ordering".into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: "stream-assertion-ordering".into(),
+            source_id: "stream-assertion-ordering/sensors.orna".into(),
+            parse_as: "module_unit".into(),
+            source: r#"
+                pub table Reading(id: Int) { value: Int, }
+                pub table Marker(id: Int) { note: Str, }
+                assert every(Reading, reading =>
+                    exists(Marker, marker => marker.id == reading.id)
+                );
+                assert every(Reading, reading =>
+                    exists(Marker, marker => marker.id != reading.id)
+                );
+                pub fn input() = Stream.from_list([1], source_identity: "example:ordering");
+                pub fn ingest() { input() | for_each(value => {
+                    Reading.insert({ id: value, value: value });
+                }); }
+            "#
+            .into(),
+        }],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+        },
+    };
+
+    let outcome = orna_conformance_v1::DurableTransactionalEvaluator::default()
+        .execute_project_stream(
+            &repository,
+            RuntimeIdentity {
+                database_id: [95; 16],
+                repository_id: [96; 16],
+            },
+            [97; 16],
+            [98; 32],
+            &project,
+            "sensors.ingest",
+        )
+        .await
+        .expect("stream admission result");
+    assert!(
+        matches!(outcome, StageOutcome::Skipped { ref reason } if reason.contains("one applicable module assertion")),
+        "multiple applicable module assertions must fail admission closed: {outcome:?}"
+    );
 }
 
 #[test]
