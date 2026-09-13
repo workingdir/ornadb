@@ -1,5 +1,7 @@
 use super::*;
-use orna_foundation_v1::{CwdCapture, Value as CanonicalValue};
+use orna_foundation_v1::{
+    CwdCapture, Value as CanonicalValue, function_reference, object_reference, type_reference,
+};
 
 /// Runtime admission evidence bound to one sealed invocation.
 ///
@@ -878,6 +880,7 @@ struct SealedInvocationArgumentMetadata {
     type_kind: &'static str,
     scalar_type: Option<&'static str>,
     target_type_id: Option<Vec<u8>>,
+    type_reference: Option<Vec<u8>>,
     value_digest: Vec<u8>,
 }
 
@@ -952,6 +955,7 @@ fn sealed_invocation_argument_metadata(
             type_kind,
             scalar_type,
             target_type_id,
+            type_reference: None,
             value_digest: Sha256::digest(encoded).to_vec(),
         });
     }
@@ -967,6 +971,169 @@ fn sealed_invocation_argument_metadata(
         });
     }
     Ok(metadata)
+}
+
+async fn authoritative_catalogue_object(
+    transaction: &Transaction<'_>,
+    catalogue: CatalogueRevisionId,
+    object_id: [u8; 16],
+    object_kind: &'static str,
+    type_form: Option<&'static str>,
+) -> Result<bool, PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT object_id, object_kind, type_form
+               FROM _orna_kernel.catalogue_objects
+              WHERE catalogue_revision_id = $1
+                AND object_id = $2
+                AND object_kind = $3
+                AND ($4::text IS NULL OR type_form = $4)",
+            &[
+                &catalogue.to_bytes().to_vec(),
+                &object_id.to_vec(),
+                &object_kind,
+                &type_form,
+            ],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    match rows.as_slice() {
+        [] => Ok(false),
+        [row] => {
+            let persisted_id: Vec<u8> = row
+                .try_get("object_id")
+                .map_err(PostgresKernelError::Database)?;
+            let persisted_kind: String = row
+                .try_get("object_kind")
+                .map_err(PostgresKernelError::Database)?;
+            let persisted_type_form: Option<String> = row
+                .try_get("type_form")
+                .map_err(PostgresKernelError::Database)?;
+            if persisted_id.as_slice() != object_id
+                || persisted_kind != object_kind
+                || persisted_type_form.as_deref() != type_form
+            {
+                return Err(PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.catalogue_objects",
+                    record: format!("catalogue={} object={object_id:?}", catalogue.canonical()),
+                    rule: "catalogue object projection must preserve the requested identity and kind",
+                });
+            }
+            Ok(true)
+        }
+        _ => Err(PostgresKernelError::DurableInvariant {
+            relation: "_orna_kernel.catalogue_objects",
+            record: format!("catalogue={} object={object_id:?}", catalogue.canonical()),
+            rule: "catalogue object projection must not duplicate one object identity",
+        }),
+    }
+}
+
+async fn authoritative_catalogue_function_reference(
+    transaction: &Transaction<'_>,
+    capture: &CwdCapture,
+    catalogue: CatalogueRevisionId,
+    function: FunctionId,
+) -> Result<Option<Vec<u8>>, PostgresKernelError> {
+    if !authoritative_catalogue_object(
+        transaction,
+        catalogue,
+        function.to_bytes(),
+        "function",
+        None,
+    )
+    .await?
+    {
+        return Ok(None);
+    }
+    let object = object_reference(
+        capture.database_id(),
+        function.to_bytes(),
+        capture.snapshot().clone(),
+    )
+    .map_err(|_| PostgresKernelError::DurableInvariant {
+        relation: "_orna_kernel.sealed_invocation_lifecycle",
+        record: function.canonical(),
+        rule: "admitted function witness coordinates must be valid",
+    })?;
+    function_reference(object)
+        .map_err(|_| PostgresKernelError::DurableInvariant {
+            relation: "_orna_kernel.sealed_invocation_lifecycle",
+            record: function.canonical(),
+            rule: "authoritative function object must form a valid FunctionRef",
+        })?
+        .as_row_ref()
+        .encode()
+        .map(Some)
+        .map_err(|_| PostgresKernelError::DurableInvariant {
+            relation: "_orna_kernel.sealed_invocation_lifecycle",
+            record: function.canonical(),
+            rule: "authoritative function witness must have a canonical encoding",
+        })
+}
+
+async fn authoritative_catalogue_named_type_reference(
+    transaction: &Transaction<'_>,
+    capture: &CwdCapture,
+    catalogue: CatalogueRevisionId,
+    type_id: orna_core::TypeId,
+) -> Result<Option<Vec<u8>>, PostgresKernelError> {
+    if !authoritative_catalogue_object(
+        transaction,
+        catalogue,
+        type_id.to_bytes(),
+        "type",
+        Some("named"),
+    )
+    .await?
+    {
+        return Ok(None);
+    }
+    let object = object_reference(
+        capture.database_id(),
+        type_id.to_bytes(),
+        capture.snapshot().clone(),
+    )
+    .map_err(|_| PostgresKernelError::DurableInvariant {
+        relation: "_orna_kernel.sealed_invocation_argument_metadata",
+        record: type_id.canonical(),
+        rule: "admitted type witness coordinates must be valid",
+    })?;
+    type_reference(object)
+        .map_err(|_| PostgresKernelError::DurableInvariant {
+            relation: "_orna_kernel.sealed_invocation_argument_metadata",
+            record: type_id.canonical(),
+            rule: "authoritative named type object must form a valid TypeRef",
+        })?
+        .as_row_ref()
+        .encode()
+        .map(Some)
+        .map_err(|_| PostgresKernelError::DurableInvariant {
+            relation: "_orna_kernel.sealed_invocation_argument_metadata",
+            record: type_id.canonical(),
+            rule: "authoritative named type witness must have a canonical encoding",
+        })
+}
+
+fn function_return_named_type(function: &FunctionDefinition) -> Option<orna_core::TypeId> {
+    match function.return_type() {
+        FunctionReturn::Single(orna_core::types::ResolvedType::Named(type_id)) => Some(*type_id),
+        FunctionReturn::Single(_) | FunctionReturn::Rows(_) | FunctionReturn::Stream(_) => None,
+    }
+}
+
+fn outcome_function_definition(
+    outcome: &SealedInvocationPreparedOutcome,
+) -> Option<&FunctionDefinition> {
+    match outcome {
+        SealedInvocationPreparedOutcome::Allowed { target, .. }
+        | SealedInvocationPreparedOutcome::BindFailure { target, .. } => match target {
+            PreparedSealedTarget::Application { definition }
+            | PreparedSealedTarget::VerifiedStandard { definition, .. } => Some(definition),
+            PreparedSealedTarget::System { .. } => None,
+        },
+        SealedInvocationPreparedOutcome::TargetDenied { .. } => None,
+    }
 }
 
 #[derive(Clone)]
@@ -1336,15 +1503,50 @@ impl SealedInvocationOperation {
         definition: &FunctionDefinition,
     ) -> Result<(), PostgresKernelError> {
         let invocation = self.invocation.to_bytes().to_vec();
-        for argument in
+        let capture = self
+            .admission_context
+            .as_ref()
+            .map(SealedInvocationAdmissionContext::capture);
+        for mut argument in
             sealed_invocation_argument_metadata(&self.active, definition, self.decoded.arguments())?
         {
+            if argument.type_kind == "named" {
+                let capture = capture.ok_or_else(|| PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.sealed_invocation_argument_metadata",
+                    record: self.invocation.canonical(),
+                    rule: "named argument type witness requires trusted admission capture",
+                })?;
+                let type_id = argument
+                    .target_type_id
+                    .as_deref()
+                    .and_then(|id| <[u8; 16]>::try_from(id).ok())
+                    .map(orna_core::TypeId::from_bytes)
+                    .ok_or_else(|| PostgresKernelError::DurableInvariant {
+                        relation: "_orna_kernel.sealed_invocation_argument_metadata",
+                        record: self.invocation.canonical(),
+                        rule: "named argument type metadata must retain an exact TypeId",
+                    })?;
+                argument.type_reference = Some(
+                    authoritative_catalogue_named_type_reference(
+                        transaction,
+                        capture,
+                        self.active.pair().catalogue(),
+                        type_id,
+                    )
+                    .await?
+                    .ok_or_else(|| PostgresKernelError::DurableInvariant {
+                        relation: "_orna_kernel.catalogue_objects",
+                        record: type_id.canonical(),
+                        rule: "named argument type must have an authoritative catalogue object row",
+                    })?,
+                );
+            }
             transaction
                 .execute(
                     "INSERT INTO _orna_kernel.sealed_invocation_argument_metadata (\
                         invocation_id, position, parameter_id, name, type_kind, scalar_type, \
-                        target_type_id, value_digest, redacted\
-                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)",
+                        target_type_id, type_reference, value_digest, redacted\
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)",
                     &[
                         &invocation,
                         &argument.position,
@@ -1353,6 +1555,7 @@ impl SealedInvocationOperation {
                         &argument.type_kind,
                         &argument.scalar_type,
                         &argument.target_type_id,
+                        &argument.type_reference,
                         &argument.value_digest,
                     ],
                 )
@@ -1404,6 +1607,54 @@ impl SealedInvocationOperation {
             admission_writer_lease_owner,
             admission_writer_lease_epoch,
         ) = self.admission_evidence_for_lifecycle(target.is_some())?;
+        let (function_reference, result_type_reference) = match (
+            target,
+            self.admission_context
+                .as_ref()
+                .map(SealedInvocationAdmissionContext::capture),
+            outcome_function_definition(&self.outcome),
+        ) {
+            (Some(target), Some(capture), Some(definition)) => {
+                if definition.id() != target.function() {
+                    return Err(PostgresKernelError::DurableInvariant {
+                        relation: "_orna_kernel.sealed_invocation_lifecycle",
+                        record: self.invocation.canonical(),
+                        rule: "sealed admission definition must match its pinned function identity",
+                    });
+                }
+                let function = authoritative_catalogue_function_reference(
+                    transaction,
+                    capture,
+                    target.revision().catalogue(),
+                    target.function(),
+                )
+                .await?
+                .ok_or_else(|| PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.catalogue_objects",
+                    record: target.function().canonical(),
+                    rule: "admitted application or standard function must have an authoritative catalogue object row",
+                })?;
+                let result_type = match function_return_named_type(definition) {
+                    Some(type_id) => Some(
+                        authoritative_catalogue_named_type_reference(
+                            transaction,
+                            capture,
+                            target.revision().catalogue(),
+                            type_id,
+                        )
+                        .await?
+                        .ok_or_else(|| PostgresKernelError::DurableInvariant {
+                            relation: "_orna_kernel.catalogue_objects",
+                            record: type_id.canonical(),
+                            rule: "named function result type must have an authoritative catalogue object row",
+                        })?,
+                    ),
+                    None => None,
+                };
+                (Some(function), result_type)
+            }
+            _ => (None, None),
+        };
         let owner = self.authenticated_session.principal().to_bytes().to_vec();
         transaction
             .execute(
@@ -1412,8 +1663,8 @@ impl SealedInvocationOperation {
                     owner_principal_id, status, admission_snapshot, \
                     admission_generation_digest, admission_runtime_id, \
                     admission_runtime_generation, admission_writer_lease_owner, \
-                    admission_writer_lease_epoch\
-                 ) VALUES ($1, $2, $3, $4, $5, 'running', $6, $7, $8, $9, $10, $11)",
+                    admission_writer_lease_epoch, function_reference, result_type_reference\
+                 ) VALUES ($1, $2, $3, $4, $5, 'running', $6, $7, $8, $9, $10, $11, $12, $13)",
                 &[
                     &invocation,
                     &source,
@@ -1426,6 +1677,8 @@ impl SealedInvocationOperation {
                     &admission_runtime_generation,
                     &admission_writer_lease_owner,
                     &admission_writer_lease_epoch,
+                    &function_reference,
+                    &result_type_reference,
                 ],
             )
             .await
