@@ -704,6 +704,15 @@ impl Runtime {
     }
     pub fn expire<T>(&mut self, handle: &InvocationHandle<T>) -> Result<(), AdmissionError> {
         self.check_handle(handle)?;
+        if self
+            .invocations
+            .get(&handle.invocation)
+            .expect("checked")
+            .terminal
+            .is_none()
+        {
+            return Ok(());
+        }
         self.invocations.remove(&handle.invocation);
         self.idempotency
             .retain(|_, entry| entry.invocation != handle.invocation);
@@ -1725,6 +1734,11 @@ mod tests {
             ),
             Err(AdmissionError::ForeignRuntime)
         );
+        left.retain_terminal(
+            &handle,
+            InvocationResult::OrdinaryFailure(diagnostic("failed")),
+        )
+        .unwrap();
         left.expire(&handle).unwrap();
         assert_eq!(
             left.check_handle(&handle),
@@ -1816,7 +1830,7 @@ mod tests {
     }
 
     #[test]
-    fn expiration_releases_idempotency_key_with_its_invocation() {
+    fn active_expiration_retains_idempotency_key_with_its_invocation() {
         let mut runtime = Runtime::new(RuntimeId::new("r"));
         let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
         request.idempotency_key = Some("key".into());
@@ -1828,11 +1842,32 @@ mod tests {
         runtime.expire(&first).unwrap();
 
         let second = match runtime.admit(request).unwrap() {
-            Admission::New { handle, .. } => handle,
-            _ => panic!("expired work must not replay as active or terminal"),
+            Admission::Active { handle } => handle,
+            _ => panic!("active expiry must retain the original operation"),
         };
-        assert_ne!(second.invocation(), first.invocation());
+        assert_eq!(second.invocation(), first.invocation());
+        assert_eq!(runtime.check_handle(&first), Ok(()));
         assert_eq!(runtime.check_handle(&second), Ok(()));
+    }
+
+    #[test]
+    fn active_expiration_rejects_mismatched_idempotency_reuse() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.idempotency_key = Some("key".into());
+        let first = match runtime.admit(request.clone()).unwrap() {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+
+        runtime.expire(&first).unwrap();
+
+        let mut mismatched = request;
+        mismatched.context.locale = Some("en-GB".into());
+        assert!(matches!(
+            runtime.admit(mismatched),
+            Err(AdmissionError::IdempotencyMismatch)
+        ));
     }
     #[test]
     fn cancellation_is_not_ordinary_failure() {
