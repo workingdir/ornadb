@@ -1392,6 +1392,36 @@ fn nominal_targets_reject_overlapping_protocol_implementations() {
 }
 
 #[test]
+fn table_rows_reject_overlapping_protocol_implementations() {
+    let distinct = analyze(&[ModuleInput::new(
+        "distinct-table-conversions.orna",
+        r#"
+            table EmailAddress {
+                value: Str,
+                impl From<Str> { fn from(value) = { value: value }; }
+                impl From<Int> { fn from(value) = { value: "converted" }; }
+            }
+        "#,
+    )]);
+    assert!(distinct.is_ok(), "{:#?}", distinct.diagnostics);
+
+    let overlapping = analyze(&[ModuleInput::new(
+        "overlapping-table-conversions.orna",
+        r#"
+            table EmailAddress {
+                value: Str,
+                impl From<Str> { fn from(value) = { value: value }; }
+                impl From<Str> { fn from(value) = { value: value }; }
+            }
+        "#,
+    )]);
+    assert!(overlapping.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code() == DIAG_TYPE
+            && diagnostic.message() == "overlapping protocol implementations are invalid"
+    }));
+}
+
+#[test]
 fn secret_values_reject_display_after_authoritative_open() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
