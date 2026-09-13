@@ -69,7 +69,6 @@ fn relational_callbacks_preserve_effects_and_failure_before_planning() {
                 pub table Note(id: Int) { value: Int, }
                 pub fn pure(rows: Relation<Note>) = rows | filter(note => note.value > 0);
                 pub fn database(rows: Relation<Note>) = rows | filter(note => Note.count() > 0);
-                pub fn external(rows: Relation<Note>) = rows | filter(note => std.net.http.get("https://example.com") == "ok");
                 pub fn direct_one(rows: Relation<Note>) = one(rows);
                 pub fn predicate_one(rows: Relation<Note>) = one(rows, note => note.value > 0);
                 pub fn failed(rows: Relation<Note>) = one(rows, note => Note.one().value > 0);
@@ -93,13 +92,6 @@ fn relational_callbacks_preserve_effects_and_failure_before_planning() {
             .contains("database read")
     );
     assert!(module.symbols["database"].effects.may_fail);
-    assert!(
-        module.symbols["external"]
-            .effects
-            .effects
-            .contains("network")
-    );
-    assert!(module.symbols["external"].effects.may_fail);
     assert!(module.symbols["direct_one"].effects.may_fail);
     assert!(module.symbols["predicate_one"].effects.may_fail);
     assert!(module.symbols["failed"].effects.may_fail);
@@ -109,6 +101,44 @@ fn relational_callbacks_preserve_effects_and_failure_before_planning() {
             Type::Function { result, .. } if result.as_ref() == &Type::Named("Note".into())
         ));
     }
+}
+
+#[test]
+fn relational_callbacks_reject_mutations_and_external_effects() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "relation-callback-effect-rejection.orna",
+            r#"
+                pub table Note(id: Int) { value: Int, }
+                pub fn mutating(rows: Relation<Note>) = rows | filter(note => {
+                    Note.insert({ id: note.id, value: note.value });
+                    true
+                });
+                pub fn external(rows: Relation<Note>) = rows | filter(note => std.net.http.get("https://example.com") == "ok");
+            "#,
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    let rejections = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.code() == DIAG_TYPE
+                && diagnostic.message() == "relation query callback must be read-only"
+        })
+        .count();
+    assert_eq!(rejections, 2, "{:#?}", result.diagnostics);
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.message() != "relation query callback must be read-only"
+                    || diagnostic.code() == DIAG_TYPE,
+            ),
+        "relation callback effect diagnostic: {:#?}",
+        result.diagnostics
+    );
 }
 
 #[test]
