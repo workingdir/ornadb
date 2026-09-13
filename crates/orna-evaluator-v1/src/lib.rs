@@ -4133,9 +4133,13 @@ fn compare_values(left: &Value, right: &Value) -> Result<std::cmp::Ordering, Eva
 }
 fn lawful_sort_key(value: &Value) -> Result<(), EvaluationError> {
     match value {
-        Value::Bool(_) | Value::Int(_) | Value::Decimal(_) | Value::Float(_) | Value::String(_) => {
-            Ok(())
-        }
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Decimal(_)
+        | Value::Float(_)
+        | Value::String(_)
+        | Value::Date(_)
+        | Value::Instant { .. } => Ok(()),
         Value::Range { .. } => Ok(()),
         Value::Tuple(values) => values.iter().try_for_each(lawful_sort_key),
         _ => Err(error("ORNA-EVAL-TYPE")),
@@ -4145,6 +4149,19 @@ fn compare_sort_keys(left: &Value, right: &Value) -> Result<std::cmp::Ordering, 
     match (left, right) {
         (Value::Bool(left), Value::Bool(right)) => Ok(left.cmp(right)),
         (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
+        (Value::Date(left), Value::Date(right)) => Ok(left.cmp(right)),
+        (
+            Value::Instant {
+                unix_seconds: left_seconds,
+                nanosecond: left_nanosecond,
+            },
+            Value::Instant {
+                unix_seconds: right_seconds,
+                nanosecond: right_nanosecond,
+            },
+        ) => Ok(left_seconds
+            .cmp(right_seconds)
+            .then(left_nanosecond.cmp(right_nanosecond))),
         (Value::Float(left), Value::Float(right)) => Ok(float_total_cmp(*left, *right)),
         (Value::Tuple(left), Value::Tuple(right)) => {
             for (left, right) in left.iter().zip(right) {
