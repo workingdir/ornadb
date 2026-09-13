@@ -8714,11 +8714,17 @@ fn infer_recovery_pipeline(
     insert_local_binding(name, Type::Error, &mut callback_locals, diagnostics);
     let recovered = infer(body, scope, &callback_locals, diagnostics);
     let mut effects = input.effects;
-    effects.join(&recovered.effects);
-    Inferred {
-        ty: recovered.ty,
-        effects,
-    }
+    effects
+        .effects
+        .extend(recovered.effects.effects.iter().cloned());
+    effects.may_fail = recovered.effects.may_fail;
+    let ty = if types_match(&input.ty, &recovered.ty) {
+        recovered.ty
+    } else {
+        require_same(&input.ty, &recovered.ty, diagnostics);
+        Type::Error
+    };
+    Inferred { ty, effects }
 }
 
 fn pipeline_lambda(expression: &Expr) -> Option<&Expr> {

@@ -2008,6 +2008,79 @@ fn parenthesized_pipeline_lambdas_receive_the_input_type_context() {
 }
 
 #[test]
+fn recovery_pipeline_unifies_success_type_before_later_stages() {
+    let matching = analyze(&[ModuleInput::new(
+        "recovery-matching.orna",
+        r#"
+            fn increment(value: Int): Int = value + 1;
+            pub fn recovered(value: Int) =
+                value |? (failure => 0) | increment;
+        "#,
+    )]);
+    assert!(matching.is_ok(), "{:?}", matching.diagnostics);
+    let module = matching
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "recovery-matching")
+        .expect("matching recovery module");
+    assert!(matches!(
+        &module.symbols["recovered"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Int
+    ));
+
+    let mismatched = analyze(&[ModuleInput::new(
+        "recovery-mismatched.orna",
+        "pub fn recovered(value: Int) = value |? (failure => \"fallback\");",
+    )]);
+    assert!(has(&mismatched, DIAG_TYPE), "{:?}", mismatched.diagnostics);
+    assert!(mismatched.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code() == DIAG_TYPE && diagnostic.message() == "static types are incompatible"
+    }));
+    let module = mismatched
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "recovery-mismatched")
+        .expect("mismatched recovery module");
+    assert!(matches!(
+        &module.symbols["recovered"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Error
+    ));
+}
+
+#[test]
+fn recovery_pipeline_replaces_handled_failure_effect() {
+    let result = analyze(&[ModuleInput::new(
+        "recovery-effects.orna",
+        r#"
+            pub table Note(id: Int) { value: Int, }
+            fn value(note: Note): Int = note.value;
+            pub fn recovered() = Note | one() | value |? (failure => 0);
+            pub fn still_fails() = Note | one() | value |? (failure => Note | one() | value);
+        "#,
+    )]);
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "recovery-effects")
+        .expect("recovery effects module");
+    assert!(
+        module.symbols["recovered"]
+            .effects
+            .effects
+            .contains("database read")
+    );
+    assert!(!module.symbols["recovered"].effects.may_fail);
+    assert!(
+        module.symbols["still_fails"]
+            .effects
+            .effects
+            .contains("database read")
+    );
+    assert!(module.symbols["still_fails"].effects.may_fail);
+}
+
+#[test]
 fn root_relation_and_stream_intrinsics_cover_reference_pipelines_without_execution() {
     let source = r#"
             pub table Book(id: Int) { title: Str, }
