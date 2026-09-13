@@ -4,9 +4,11 @@ use std::{collections::BTreeSet, time::SystemTime};
 
 use orna_core::{CatalogueRevisionId, FunctionId, InvocationId, SourceRevisionId};
 use orna_foundation_v1::{
-    CwdCapture, InvocationArgumentRef, InvocationRef, InvocationStatus, Snapshot, SnapshotRef,
-    Value, invocation_argument_reference, invocation_reference, snapshot_reference,
+    CwdCapture, FunctionRef, InvocationArgumentRef, InvocationRef, InvocationStatus, OvbRaw,
+    RowRef, Snapshot, SnapshotRef, TypeRef, Value, invocation_argument_reference,
+    invocation_reference, snapshot_reference, validate_function_reference,
     validate_invocation_argument_reference, validate_invocation_reference,
+    validate_object_reference_for_id, validate_type_reference,
 };
 use tokio_postgres::{IsolationLevel, Row, types::FromSqlOwned};
 
@@ -38,6 +40,11 @@ pub struct SealedInvocationObservation {
     pub catalogue_revision: CatalogueRevisionId,
     /// Pinned resolved target identity selected at protected admission.
     pub function: FunctionId,
+    /// Checked catalogue function witness, when the trusted owner resolved
+    /// the corresponding row in the pinned catalogue object projection.
+    pub function_reference: Option<FunctionRef>,
+    /// Checked result type witness, when available at admission.
+    pub result_type_reference: Option<TypeRef>,
     /// Closed lifecycle status, with no diagnostic detail.
     pub status: SealedInvocationObservationStatus,
     /// Durable admission time recorded by the sealed lifecycle relation.
@@ -63,6 +70,8 @@ pub struct SealedInvocationArgumentObservation {
     pub name: String,
     /// Closed resolved-type family.
     pub type_kind: SealedInvocationArgumentTypeKind,
+    /// Checked `sys.TypeRef` witness, when trusted admission retained one.
+    pub type_reference: Option<TypeRef>,
     /// SHA-256 of the canonical typed value encoding; no value bytes are
     /// retained by this observation.
     pub value_digest: [u8; 32],
@@ -95,11 +104,8 @@ pub enum SealedInvocationObservationStatus {
 /// `sys.Invocation` row.
 ///
 /// This is intentionally not a claim that the whole specification relation is
-/// available.  The sealed lifecycle retains checked invocation and argument
-/// references plus an exact closed status, but it does not yet retain physical
-/// `sys.FunctionRef` or `sys.TypeRef` coordinates. Those fields, and every
-/// unsupported optional field, are consequently absent from this DTO instead
-/// of being reconstructed from implementation identifiers.
+/// available. Unsupported or unavailable fields remain absent instead of
+/// being reconstructed from implementation identifiers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableSysInvocationObservation {
     /// `sys.Invocation.reference`.
@@ -118,6 +124,12 @@ pub struct DurableSysInvocationObservation {
     pub ended: Option<SystemTime>,
     /// `sys.Invocation.status`, using the exact 1.0.0 closed vocabulary.
     pub status: InvocationStatus,
+    /// `sys.Invocation.function`, when its catalogue ObjectRef witness was
+    /// retained and revalidated.
+    pub function: Option<FunctionRef>,
+    /// `sys.Invocation.result_type`, when its TypeRef witness was retained and
+    /// revalidated.
+    pub result_type: Option<TypeRef>,
 }
 
 /// The currently supportable, durable subset of one public
@@ -137,6 +149,9 @@ pub struct DurableSysInvocationArgumentObservation {
     pub name: String,
     /// `sys.InvocationArgument.position`.
     pub position: u64,
+    /// `sys.InvocationArgument.type`, when a checked type witness was
+    /// retained. Missing evidence remains unavailable.
+    pub type_reference: Option<TypeRef>,
     /// `sys.InvocationArgument.digest`; sealed metadata always has this
     /// redaction-safe digest.
     pub digest: [u8; 32],
@@ -188,6 +203,25 @@ impl SealedInvocationObservation {
         validate_argument_order(&self.arguments, &record)?;
         validate_argument_parameter_identity(&self.arguments, &record)?;
         validate_argument_public_metadata(&self.arguments, &record)?;
+        let function = self
+            .function_reference
+            .as_ref()
+            .map(|reference| {
+                validate_catalogue_function_reference(
+                    reference,
+                    &self.admission_capture,
+                    self.function,
+                    &record,
+                )
+            })
+            .transpose()?;
+        let result_type = self
+            .result_type_reference
+            .as_ref()
+            .map(|reference| {
+                validate_catalogue_type_reference(reference, &self.admission_capture, None, &record)
+            })
+            .transpose()?;
         for argument in &self.arguments {
             let expected = invocation_argument_observation_reference(
                 &self.admission_capture,
@@ -200,6 +234,20 @@ impl SealedInvocationObservation {
                     &record,
                     "argument reference disagrees with persisted admission capture",
                 ));
+            }
+            if let Some(type_reference) = &argument.type_reference {
+                let expected_type = match &argument.type_kind {
+                    SealedInvocationArgumentTypeKind::Named(id) => Some(id.to_bytes()),
+                    SealedInvocationArgumentTypeKind::Reference(_)
+                    | SealedInvocationArgumentTypeKind::Value(_)
+                    | SealedInvocationArgumentTypeKind::Scalar(_) => None,
+                };
+                validate_catalogue_type_reference(
+                    type_reference,
+                    &self.admission_capture,
+                    expected_type,
+                    &record,
+                )?;
             }
         }
         Ok(DurableSysInvocationObservation {
@@ -214,6 +262,7 @@ impl SealedInvocationObservation {
                     invocation: self.reference.clone(),
                     name: argument.name.clone(),
                     position: argument.position,
+                    type_reference: argument.type_reference.clone(),
                     digest: argument.value_digest,
                     redacted: argument.redacted,
                 })
@@ -221,6 +270,8 @@ impl SealedInvocationObservation {
             started: Some(self.started),
             ended: self.ended,
             status: self.status.into(),
+            function,
+            result_type,
         })
     }
 }
@@ -561,7 +612,8 @@ async fn load_observation_by_id(
                     started_at, ended_at, admission_snapshot, \
                     admission_generation_digest, admission_runtime_id, \
                     admission_runtime_generation, admission_writer_lease_owner, \
-                    admission_writer_lease_epoch \
+                    admission_writer_lease_epoch, function_reference, \
+                    result_type_reference \
              FROM _orna_kernel.sealed_invocation_lifecycle \
              WHERE invocation_id = $1 \
                AND source_revision_id IS NOT NULL \
@@ -587,6 +639,18 @@ async fn load_observation_by_id(
     let catalogue_revision =
         CatalogueRevisionId::from_bytes(observation_id(&row, &record, "catalogue_revision_id")?);
     let function = FunctionId::from_bytes(observation_id(&row, &record, "function_id")?);
+    let function_reference = decode_catalogue_function_reference(
+        observation_optional_bytes(&row, &record, "function_reference")?,
+        &capture,
+        function,
+        &record,
+    )?;
+    let result_type_reference = decode_catalogue_type_reference(
+        observation_optional_bytes(&row, &record, "result_type_reference")?,
+        &capture,
+        None,
+        &record,
+    )?;
     let status = SealedInvocationObservationStatus::decode(
         observation_column(&row, &record, "status")?,
         &record,
@@ -598,6 +662,7 @@ async fn load_observation_by_id(
         .query(
             "SELECT metadata.position, metadata.parameter_id, metadata.name, \
                     metadata.type_kind, metadata.scalar_type, metadata.target_type_id, \
+                    metadata.type_reference, \
                     metadata.value_digest, metadata.redacted, \
                     declared.parameter_id AS declared_parameter_id \
              FROM _orna_kernel.sealed_invocation_argument_metadata AS metadata \
@@ -638,6 +703,8 @@ async fn load_observation_by_id(
         source_revision,
         catalogue_revision,
         function,
+        function_reference,
+        result_type_reference,
         status,
         started,
         ended,
@@ -810,6 +877,17 @@ fn decode_argument_observation(
         observation_optional_id(row, record, "target_type_id")?,
         record,
     )?;
+    let type_reference = decode_catalogue_type_reference(
+        observation_optional_bytes(row, record, "type_reference")?,
+        capture,
+        match &type_kind {
+            SealedInvocationArgumentTypeKind::Named(type_id) => Some(type_id.to_bytes()),
+            SealedInvocationArgumentTypeKind::Reference(_)
+            | SealedInvocationArgumentTypeKind::Value(_)
+            | SealedInvocationArgumentTypeKind::Scalar(_) => None,
+        },
+        record,
+    )?;
     let digest: Vec<u8> = observation_column(row, record, "value_digest")?;
     let value_digest: [u8; 32] = digest
         .try_into()
@@ -822,6 +900,7 @@ fn decode_argument_observation(
         parameter,
         name,
         type_kind,
+        type_reference,
         value_digest,
         redacted,
     })
@@ -879,6 +958,161 @@ fn decode_argument_type_kind(
             "argument type metadata has an invalid shape",
         )),
     }
+}
+
+fn decode_catalogue_function_reference(
+    encoded: Option<Vec<u8>>,
+    capture: &CwdCapture,
+    expected_function: FunctionId,
+    record: &str,
+) -> Result<Option<FunctionRef>, PostgresKernelError> {
+    encoded
+        .map(|encoded| {
+            let row = decode_row_reference(&encoded, record)?;
+            let reference = validate_function_reference(row.clone(), capture).map_err(|_| {
+                observation_invariant(record, "function witness has invalid capture or relation")
+            })?;
+            let object = decode_row_reference_raw(&row.key, record)?;
+            validate_object_reference_for_id(object, capture, expected_function.to_bytes())
+                .map_err(|_| {
+                    observation_invariant(record, "function witness has the wrong object identity")
+                })?;
+            Ok(reference)
+        })
+        .transpose()
+}
+
+fn validate_catalogue_function_reference(
+    reference: &FunctionRef,
+    capture: &CwdCapture,
+    expected_function: FunctionId,
+    record: &str,
+) -> Result<FunctionRef, PostgresKernelError> {
+    let row = reference.as_row_ref().clone();
+    let reference = validate_function_reference(row.clone(), capture).map_err(|_| {
+        observation_invariant(record, "function witness has invalid capture or relation")
+    })?;
+    let object = decode_row_reference_raw(&row.key, record)?;
+    validate_object_reference_for_id(object, capture, expected_function.to_bytes()).map_err(
+        |_| observation_invariant(record, "function witness has the wrong object identity"),
+    )?;
+    Ok(reference)
+}
+
+fn decode_catalogue_type_reference(
+    encoded: Option<Vec<u8>>,
+    capture: &CwdCapture,
+    expected_type: Option<[u8; 16]>,
+    record: &str,
+) -> Result<Option<TypeRef>, PostgresKernelError> {
+    encoded
+        .map(|encoded| {
+            let row = decode_row_reference(&encoded, record)?;
+            let reference = validate_type_reference(row.clone(), capture).map_err(|_| {
+                observation_invariant(record, "type witness has invalid capture or relation")
+            })?;
+            let object = decode_row_reference_raw(&row.key, record)?;
+            let object_id = object_id_from_object_reference(&object, record)?;
+            validate_object_reference_for_id(object, capture, expected_type.unwrap_or(object_id))
+                .map_err(|_| {
+                observation_invariant(record, "type witness has the wrong object identity")
+            })?;
+            Ok(reference)
+        })
+        .transpose()
+}
+
+fn validate_catalogue_type_reference(
+    reference: &TypeRef,
+    capture: &CwdCapture,
+    expected_type: Option<[u8; 16]>,
+    record: &str,
+) -> Result<TypeRef, PostgresKernelError> {
+    let row = reference.as_row_ref().clone();
+    let reference = validate_type_reference(row.clone(), capture).map_err(|_| {
+        observation_invariant(record, "type witness has invalid capture or relation")
+    })?;
+    let object = decode_row_reference_raw(&row.key, record)?;
+    let object_id = object_id_from_object_reference(&object, record)?;
+    validate_object_reference_for_id(object, capture, expected_type.unwrap_or(object_id))
+        .map_err(|_| observation_invariant(record, "type witness has the wrong object identity"))?;
+    Ok(reference)
+}
+
+fn decode_row_reference(encoded: &[u8], record: &str) -> Result<RowRef, PostgresKernelError> {
+    let value = Value::decode(encoded)
+        .map_err(|_| observation_invariant(record, "witness is not canonical OVB"))?;
+    let canonical = value
+        .encode()
+        .map_err(|_| observation_invariant(record, "witness cannot be canonically encoded"))?;
+    if canonical != encoded {
+        return Err(observation_invariant(
+            record,
+            "witness encoding is not canonical",
+        ));
+    }
+    decode_row_reference_raw(value.raw(), record)
+}
+
+fn decode_row_reference_raw(raw: &OvbRaw, record: &str) -> Result<RowRef, PostgresKernelError> {
+    let OvbRaw::Tag(60010, body) = raw else {
+        return Err(observation_invariant(record, "witness is not a sys.RowRef"));
+    };
+    let OvbRaw::Array(fields) = body.as_ref() else {
+        return Err(observation_invariant(
+            record,
+            "witness RowRef body is malformed",
+        ));
+    };
+    let [database, table, key, snapshot] = fields.as_slice() else {
+        return Err(observation_invariant(
+            record,
+            "witness RowRef has the wrong arity",
+        ));
+    };
+    RowRef::new(
+        reference_uuid(database, record)?,
+        reference_uuid(table, record)?,
+        key.clone(),
+        Snapshot::decode(snapshot)
+            .map_err(|_| observation_invariant(record, "witness snapshot is malformed"))?,
+    )
+    .map_err(|_| observation_invariant(record, "witness RowRef is not canonical"))
+}
+
+fn reference_uuid(raw: &OvbRaw, record: &str) -> Result<[u8; 16], PostgresKernelError> {
+    let OvbRaw::Tag(37, bytes) = raw else {
+        return Err(observation_invariant(record, "witness UUID is malformed"));
+    };
+    let OvbRaw::Bytes(bytes) = bytes.as_ref() else {
+        return Err(observation_invariant(record, "witness UUID is malformed"));
+    };
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| observation_invariant(record, "witness UUID must be 16 bytes"))
+}
+
+fn object_id_from_object_reference(
+    object: &RowRef,
+    record: &str,
+) -> Result<[u8; 16], PostgresKernelError> {
+    let OvbRaw::Tag(37, bytes) = &object.key else {
+        return Err(observation_invariant(
+            record,
+            "witness object key is malformed",
+        ));
+    };
+    let OvbRaw::Bytes(bytes) = bytes.as_ref() else {
+        return Err(observation_invariant(
+            record,
+            "witness object key is malformed",
+        ));
+    };
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| observation_invariant(record, "witness object identity must be 16 bytes"))
 }
 
 fn sealed_scalar_type_is_closed(scalar: &str) -> bool {
@@ -1003,6 +1237,16 @@ fn observation_optional_id(
         .transpose()
 }
 
+fn observation_optional_bytes(
+    row: &Row,
+    record: &str,
+    column: &str,
+) -> Result<Option<Vec<u8>>, PostgresKernelError> {
+    row.try_get(column).map_err(|_| {
+        observation_invariant(record, "observation relation has an invalid witness layout")
+    })
+}
+
 fn observation_column<T: FromSqlOwned>(
     row: &Row,
     record: &str,
@@ -1096,6 +1340,7 @@ mod tests {
             parameter: orna_core::ParameterId::from_bytes([1; 16]),
             name: "value".to_owned(),
             type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
+            type_reference: None,
             value_digest: [0; 32],
             redacted: true,
         };
@@ -1188,6 +1433,8 @@ mod tests {
             source_revision: SourceRevisionId::from_bytes([3; 16]),
             catalogue_revision: CatalogueRevisionId::from_bytes([4; 16]),
             function: FunctionId::from_bytes([5; 16]),
+            function_reference: None,
+            result_type_reference: None,
             status,
             started: SystemTime::UNIX_EPOCH,
             ended: status.is_terminal().then_some(SystemTime::UNIX_EPOCH),
@@ -1200,6 +1447,7 @@ mod tests {
                 parameter: orna_core::ParameterId::from_bytes([6; 16]),
                 name: "value".to_owned(),
                 type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
+                type_reference: None,
                 value_digest: [7; 32],
                 redacted: true,
             }],
@@ -1265,6 +1513,8 @@ mod tests {
             started: _,
             ended: _,
             status: _,
+            function: _,
+            result_type: _,
         } = projection;
         let DurableSysInvocationArgumentObservation {
             reference: _,
@@ -1273,6 +1523,7 @@ mod tests {
             position: _,
             digest: _,
             redacted: _,
+            type_reference: _,
         } = &arguments[0];
     }
 
@@ -1327,6 +1578,7 @@ mod tests {
             parameter: orna_core::ParameterId::from_bytes([8; 16]),
             name: "next".to_owned(),
             type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
+            type_reference: None,
             value_digest: [9; 32],
             redacted: true,
         });
@@ -1512,6 +1764,7 @@ mod tests {
                 parameter: orna_core::ParameterId::from_bytes([3; 16]),
                 name: "later".to_owned(),
                 type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
+                type_reference: None,
                 value_digest: [3; 32],
                 redacted: true,
             });
@@ -1539,6 +1792,7 @@ mod tests {
                 parameter: first.parameter,
                 name: "same-parameter".to_owned(),
                 type_kind: first.type_kind,
+                type_reference: None,
                 value_digest: [3; 32],
                 redacted: true,
             });
