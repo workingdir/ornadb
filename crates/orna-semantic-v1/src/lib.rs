@@ -1396,7 +1396,8 @@ fn collect_header(
             .insert(
                 name,
                 Symbol {
-                    table_schema: declared_table_schema(item),
+                    table_schema: declared_table_schema(item)
+                        .or_else(|| declared_nominal_schema(item)),
                     kind,
                     ty,
                     public,
@@ -1564,6 +1565,98 @@ fn type_of(ty: &TypeExpr) -> Type {
         }
     }
 }
+
+fn resolved_type_of(ty: &TypeExpr, scope: &Scope) -> Type {
+    let mut resolving = BTreeSet::new();
+    resolve_type_aliases(&type_of(ty), &scope.type_aliases, &mut resolving)
+}
+
+fn resolve_type_aliases(
+    ty: &Type,
+    aliases: &BTreeMap<String, Type>,
+    resolving: &mut BTreeSet<String>,
+) -> Type {
+    match ty {
+        Type::Named(name) => {
+            let Some(alias) = aliases.get(name) else {
+                return ty.clone();
+            };
+            if !resolving.insert(name.clone()) {
+                return Type::Error;
+            }
+            let resolved = resolve_type_aliases(alias, aliases, resolving);
+            resolving.remove(name);
+            resolved
+        }
+        Type::List(inner) => Type::List(Box::new(resolve_type_aliases(inner, aliases, resolving))),
+        Type::Range(inner) => {
+            Type::Range(Box::new(resolve_type_aliases(inner, aliases, resolving)))
+        }
+        Type::Relation(inner) => {
+            Type::Relation(Box::new(resolve_type_aliases(inner, aliases, resolving)))
+        }
+        Type::Stream(inner) => {
+            Type::Stream(Box::new(resolve_type_aliases(inner, aliases, resolving)))
+        }
+        Type::Record(fields) => Type::Record(
+            fields
+                .iter()
+                .map(|(name, field)| {
+                    (
+                        name.clone(),
+                        resolve_type_aliases(field, aliases, resolving),
+                    )
+                })
+                .collect(),
+        ),
+        Type::Tuple(elements) => Type::Tuple(
+            elements
+                .iter()
+                .map(|element| resolve_type_aliases(element, aliases, resolving))
+                .collect(),
+        ),
+        Type::Optional(inner) => {
+            Type::Optional(Box::new(resolve_type_aliases(inner, aliases, resolving)))
+        }
+        Type::Applied { base, arguments } => Type::Applied {
+            // Generic aliases require substitution, which this closed map
+            // does not provide. Resolve their arguments but preserve the
+            // applied constructor identity.
+            base: base.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| resolve_type_aliases(argument, aliases, resolving))
+                .collect(),
+        },
+        Type::MoneyPerUnit { currency, unit } => Type::MoneyPerUnit {
+            currency: Box::new(resolve_type_aliases(currency, aliases, resolving)),
+            unit: Box::new(resolve_type_aliases(unit, aliases, resolving)),
+        },
+        Type::Function {
+            parameters,
+            parameter_names,
+            default_parameters,
+            result,
+        } => Type::Function {
+            parameters: parameters
+                .iter()
+                .map(|parameter| resolve_type_aliases(parameter, aliases, resolving))
+                .collect(),
+            parameter_names: parameter_names.clone(),
+            default_parameters: default_parameters.clone(),
+            result: Box::new(resolve_type_aliases(result, aliases, resolving)),
+        },
+        Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Error => ty.clone(),
+    }
+}
 fn primitive(name: &str) -> Option<Type> {
     Some(match name {
         "Int" => Type::Int,
@@ -1601,6 +1694,7 @@ fn primitive(name: &str) -> Option<Type> {
 struct Scope {
     names: BTreeMap<String, Symbol>,
     ambiguous: BTreeSet<String>,
+    current_namespace: Option<Namespace>,
     /// Direct `use module [as alias]` bindings. These are deliberately kept
     /// apart from ordinary values so only explicitly imported module roots can
     /// begin qualified module-member lookup.
@@ -1627,6 +1721,15 @@ struct Scope {
     currency_types: BTreeSet<String>,
     /// Local enum payloads retained for closed constructor-pattern checking.
     enum_variants: BTreeMap<String, BTreeMap<String, BTreeMap<String, Type>>>,
+    /// Local transparent aliases. Refined and nominal type declarations are
+    /// deliberately excluded so alias resolution cannot erase identity.
+    type_aliases: BTreeMap<String, Type>,
+    /// Local protocols with type parameters. Their substitution is outside
+    /// this validator and therefore fails closed at implementation sites.
+    generic_protocols: BTreeSet<String>,
+    /// Locally declared protocol member surfaces used to check non-generic
+    /// nested implementation members without inventing generic dispatch.
+    local_protocols: BTreeMap<String, Vec<ProtocolMember>>,
 }
 fn resolve_imports(
     namespace: &Namespace,
@@ -1639,6 +1742,7 @@ fn resolve_imports(
     let mut scope = Scope {
         names: header.symbols.clone(),
         ambiguous: BTreeSet::new(),
+        current_namespace: Some(namespace.clone()),
         modules: BTreeMap::new(),
         available_modules: modules.clone(),
         table_rows: tree
@@ -1677,6 +1781,58 @@ fn resolve_imports(
             .collect(),
         currency_types: currency_types(tree),
         enum_variants: enum_variant_types(tree, diagnostics),
+        type_aliases: tree
+            .items
+            .iter()
+            .filter_map(|item| match &item.declaration {
+                Declaration::Type {
+                    name,
+                    generics,
+                    representation: TypeRepresentation::Alias { ty, refinements },
+                } if generics.is_empty() && refinements.is_empty() => {
+                    Some((name.clone(), type_of(ty)))
+                }
+                _ => None,
+            })
+            .collect(),
+        generic_protocols: tree
+            .items
+            .iter()
+            .filter_map(|item| match &item.declaration {
+                Declaration::Protocol { name, generics, .. } if !generics.is_empty() => {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect(),
+        local_protocols: tree
+            .items
+            .iter()
+            .filter_map(|item| match &item.declaration {
+                Declaration::Protocol {
+                    name,
+                    generics,
+                    members,
+                } if generics.is_empty() => {
+                    // Keep the checkable surface of a mixed protocol. Only a
+                    // genuinely generic member is omitted; treating the
+                    // whole protocol as generic would skip its static and
+                    // non-generic members as well.
+                    let members = members
+                        .iter()
+                        .filter(|member| match member {
+                            ProtocolMember::Function { signature, .. } => {
+                                signature.generics.is_empty()
+                            }
+                            ProtocolMember::Static { .. } => true,
+                        })
+                        .cloned()
+                        .collect();
+                    Some((name.clone(), members))
+                }
+                _ => None,
+            })
+            .collect(),
     };
     for (name, symbol) in attached_symbols {
         scope
@@ -1710,6 +1866,22 @@ fn resolve_imports(
                 .table_rows
                 .entry(table_name)
                 .or_insert_with(|| Type::Record(row.clone()));
+        }
+        for (name, symbol) in &module.exports {
+            if symbol.kind != SymbolKind::Type {
+                continue;
+            }
+            let Some(fields) = symbol.table_fields() else {
+                continue;
+            };
+            // Exported nominal metadata contains public fields only. Local
+            // rows were installed above and therefore retain their complete
+            // private representation; imported rows remain an admission
+            // surface, never a way to recover private fields.
+            scope
+                .nominal_rows
+                .entry(name.clone())
+                .or_insert_with(|| Type::Record(fields.clone()));
         }
     }
     if modules.contains_key(&Namespace(vec!["std".into()])) {
@@ -1958,6 +2130,7 @@ fn check_item(
                 }
             }
             let row = table_row_type(item);
+            let target = Type::Named(name.clone());
             let row_locals = match &row {
                 Type::Record(fields) => fields
                     .iter()
@@ -1983,8 +2156,22 @@ fn check_item(
                     }
                     _ => None,
                 }),
+                scope,
                 diagnostics,
             );
+            for member in members {
+                if let orna_syntax_v1::TableMember::Implementation { implementation, .. } = member {
+                    validate_nested_implementation_members(
+                        implementation,
+                        &scope.local_protocols,
+                        scope,
+                        &target,
+                        Some(&row),
+                        diagnostics,
+                    );
+                    validate_implementation_restrictions(implementation, scope, diagnostics);
+                }
+            }
             for member in members {
                 match member {
                     orna_syntax_v1::TableMember::Assertion { value, .. } => {
@@ -2029,56 +2216,78 @@ fn check_item(
             representation: TypeRepresentation::Alias { ty, refinements },
             ..
         } => {
-            let base = type_of(ty);
+            // A refined alias keeps its own nominal identity, but its
+            // representation shape follows the transparent base alias.
+            let base = resolved_type_of(ty, scope);
+            let target = Type::Named(name.clone());
+            let target_shape = matches!(&base, Type::Record(_)).then_some(&base);
+            validate_non_overlapping_implementations(
+                refinements.iter().filter_map(|member| match member {
+                    TypeMember::Implementation { implementation, .. } => Some(implementation),
+                    _ => None,
+                }),
+                scope,
+                diagnostics,
+            );
             for member in refinements {
-                if let TypeMember::Assertion { value, .. } = member {
-                    let inferred = infer_refined_assertion(value, &base, scope, diagnostics);
-                    assertion(
-                        AssertionOwner::RefinedType(name.clone()),
-                        value,
-                        inferred,
-                        None,
-                        plans,
-                        diagnostics,
-                    );
+                match member {
+                    TypeMember::Assertion { value, .. } => {
+                        let inferred = infer_refined_assertion(value, &base, scope, diagnostics);
+                        assertion(
+                            AssertionOwner::RefinedType(name.clone()),
+                            value,
+                            inferred,
+                            None,
+                            plans,
+                            diagnostics,
+                        );
+                    }
+                    TypeMember::Implementation { implementation, .. } => {
+                        validate_nested_implementation_members(
+                            implementation,
+                            &scope.local_protocols,
+                            scope,
+                            &target,
+                            target_shape,
+                            diagnostics,
+                        );
+                        validate_implementation_restrictions(implementation, scope, diagnostics);
+                    }
+                    _ => {}
                 }
             }
         }
         Declaration::Type {
+            name,
             representation: TypeRepresentation::Nominal { members },
             ..
         } => {
+            let target = Type::Named(name.clone());
+            let target_shape = scope
+                .nominal_rows
+                .get(name)
+                .or_else(|| scope.table_rows.get(name));
             validate_non_overlapping_implementations(
                 members.iter().filter_map(|member| match member {
                     TypeMember::Implementation { implementation, .. } => Some(implementation),
                     _ => None,
                 }),
+                scope,
                 diagnostics,
             );
             for member in members {
                 let TypeMember::Implementation { implementation, .. } = member else {
                     continue;
                 };
-                match &implementation.protocol {
-                    TypeExpr::Name {
-                        path, arguments, ..
-                    } if path.as_slice() == ["TryFrom"] && arguments.len() == 1 => {
-                        diagnostics.push(diag(
-                            DIAG_LEGACY_TRYFROM,
-                            "use From<Source>; From may fail in Orna",
-                        ));
-                    }
-                    TypeExpr::Name { path, .. }
-                        if matches!(path.as_slice(), [protocol] if protocol == "Display" || protocol == "Present")
-                            && implementation_has_write(implementation) =>
-                    {
-                        diagnostics.push(diag(
-                            DIAG_TYPE,
-                            "Display and Present implementations must be read-only",
-                        ));
-                    }
-                    _ => {}
-                }
+                validate_nested_implementation_members(
+                    implementation,
+                    &scope.local_protocols,
+                    scope,
+                    &target,
+                    target_shape,
+                    diagnostics,
+                );
+                validate_implementation_restrictions(implementation, scope, diagnostics);
             }
         }
         _ => {}
@@ -2086,17 +2295,1212 @@ fn check_item(
     None
 }
 
+/// These presentation protocol names are part of the frozen builtin surface,
+/// but their member AST is not carried in this local semantic scope. They are
+/// therefore retained as the only missing-identity residual.
+fn is_builtin_protocol_without_local_surface(name: &str) -> bool {
+    matches!(name, "Display" | "Present")
+}
+
+/// Resolve a transparent local type alias to a locally declared, non-generic
+/// protocol.  This intentionally does not cross imported module boundaries
+/// or substitute generic protocol parameters: those identities remain the
+/// documented residuals of this validator.
+fn resolve_local_protocol_name(name: &str, scope: &Scope) -> Option<String> {
+    let mut current = name.to_owned();
+    let mut resolving = BTreeSet::new();
+    loop {
+        if scope.local_protocols.contains_key(&current) {
+            return Some(current);
+        }
+        let Type::Named(next) = scope.type_aliases.get(&current)? else {
+            return None;
+        };
+        if !resolving.insert(current) {
+            return None;
+        }
+        current = next.clone();
+    }
+}
+
+/// Check the member surface, signature/default contracts, and the available
+/// contextual body shape of a nested implementation when its local protocol
+/// identity is directly available. Custom generic substitution and bounds,
+/// imported-member conformance, complete callable semantics, and full runtime
+/// conversion dispatch remain outside this validator. Unsupported generic,
+/// qualified, imported, unresolved, and non-protocol identities fail closed.
+/// Only the builtin Display/Present names retain a missing-member-surface
+/// residual. Mixed protocols still check every non-generic member; only generic
+/// members are omitted. `From<Source>` checks the closed source/member shape
+/// below, but does not implement conversion selection or runtime dispatch.
+/// Default compatibility uses the conservative proof described below for
+/// expression behaviour; arbitrary semantic default equivalence is residual.
+fn validate_nested_implementation_members(
+    implementation: &orna_syntax_v1::Implementation,
+    local_protocols: &BTreeMap<String, Vec<ProtocolMember>>,
+    scope: &Scope,
+    target: &Type,
+    target_shape: Option<&Type>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let TypeExpr::Name {
+        path, arguments, ..
+    } = &implementation.protocol
+    else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "protocol implementation identity cannot be resolved",
+        ));
+        return;
+    };
+    if path.as_slice() == ["From"] {
+        let Some(source) = arguments
+            .first()
+            .filter(|_| arguments.len() == 1)
+            .and_then(|source| valid_static_type(source, scope))
+        else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "From implementation source type is not a valid static type",
+            ));
+            return;
+        };
+        if let Some(from) = implementation.members.as_slice().first()
+            && implementation.members.len() == 1
+        {
+            let orna_syntax_v1::ImplMember::Function {
+                signature, body, ..
+            } = from
+            else {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "From implementation requires exactly one `fn from(value)` member",
+                ));
+                return;
+            };
+            if signature.name != "from"
+                || !signature.generics.is_empty()
+                || signature.parameters.len() != 1
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "From implementation requires exactly one `fn from(value)` member",
+                ));
+                return;
+            }
+            let parameter = &signature.parameters[0];
+            if parameter
+                .annotation
+                .as_ref()
+                .is_some_and(|annotation| resolved_type_of(annotation, scope) != source)
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "From implementation source parameter is incompatible",
+                ));
+                return;
+            }
+            if signature
+                .result
+                .as_ref()
+                .is_some_and(|result| resolved_type_of(result, scope) != *target)
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "From implementation result is incompatible with its target",
+                ));
+                return;
+            }
+            let mut local = BTreeMap::new();
+            let source_binding = match &source {
+                Type::Named(name) => scope
+                    .nominal_rows
+                    .get(name)
+                    .or_else(|| scope.table_rows.get(name))
+                    .cloned()
+                    .unwrap_or_else(|| source.clone()),
+                _ => source.clone(),
+            };
+            bind_pattern(&parameter.pattern, source_binding, &mut local, diagnostics);
+            if matches!(target, Type::Named(name) if scope.nominal_rows.contains_key(name)) {
+                let inferred = infer_from_nominal_target(
+                    body,
+                    target,
+                    target_shape,
+                    scope,
+                    &local,
+                    diagnostics,
+                );
+                require_same(target, &inferred.ty, diagnostics);
+            } else {
+                let expected_body = target_shape.unwrap_or(target);
+                let inferred = infer_contextual(body, expected_body, scope, &local, diagnostics);
+                require_same(expected_body, &inferred.ty, diagnostics);
+            }
+            return;
+        }
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "From implementation requires exactly one `fn from(value)` member",
+        ));
+        return;
+    }
+    if !arguments.is_empty() {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "generic protocol instantiation cannot be validated",
+        ));
+        return;
+    }
+    if path.len() != 1 {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "qualified protocol identity cannot be resolved",
+        ));
+        return;
+    }
+    if scope.generic_protocols.contains(&path[0]) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "generic protocol substitution cannot be validated",
+        ));
+        return;
+    }
+    let Some(protocol_name) = resolve_local_protocol_name(&path[0], scope) else {
+        match scope.names.get(&path[0]) {
+            Some(symbol) if symbol.kind == SymbolKind::Protocol => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "imported protocol identity cannot be resolved",
+                ));
+            }
+            Some(_) => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "protocol implementation identity is not a protocol",
+                ));
+            }
+            None if is_builtin_protocol_without_local_surface(&path[0]) => {
+                // Display and Present are the two presentation protocol names
+                // supplied by the frozen surface without a local member AST.
+            }
+            None => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "unresolved protocol implementation identity",
+                ));
+            }
+        }
+        return;
+    };
+    let Some(required_members) = local_protocols.get(&protocol_name) else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "protocol implementation identity cannot be resolved",
+        ));
+        return;
+    };
+
+    let mut implemented_names = BTreeSet::new();
+    for member in &implementation.members {
+        // A generic implementation member belongs to the same unresolved
+        // substitution surface as a generic protocol member. Do not let the
+        // checkable non-generic subset reject it as "unknown".
+        if matches!(
+            member,
+            orna_syntax_v1::ImplMember::Function { signature, .. }
+                if !signature.generics.is_empty()
+        ) {
+            continue;
+        }
+        let name = match member {
+            orna_syntax_v1::ImplMember::Function { signature, .. } => &signature.name,
+            orna_syntax_v1::ImplMember::Static { name, .. } => name,
+        };
+        if !implemented_names.insert(name.clone()) {
+            diagnostics.push(diag(DIAG_TYPE, "duplicate protocol implementation member"));
+        }
+
+        let required = required_members
+            .iter()
+            .find(|required| match (required, member) {
+                (
+                    ProtocolMember::Function { signature, .. },
+                    orna_syntax_v1::ImplMember::Function {
+                        signature: implementation_signature,
+                        ..
+                    },
+                ) => signature.name == implementation_signature.name,
+                (
+                    ProtocolMember::Static { name, .. },
+                    orna_syntax_v1::ImplMember::Static {
+                        name: implementation_name,
+                        ..
+                    },
+                ) => name == implementation_name,
+                _ => false,
+            });
+        let Some(required) = required else {
+            diagnostics.push(diag(DIAG_TYPE, "unknown protocol implementation member"));
+            continue;
+        };
+
+        match (required, member) {
+            (
+                ProtocolMember::Function { signature, .. },
+                orna_syntax_v1::ImplMember::Function {
+                    signature: implementation_signature,
+                    body,
+                    ..
+                },
+            ) => {
+                if !compatible_protocol_function_signature(
+                    signature,
+                    implementation_signature,
+                    scope,
+                ) {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "protocol implementation function signature is incompatible",
+                    ));
+                } else {
+                    validate_nested_implementation_function(
+                        signature,
+                        implementation_signature,
+                        body,
+                        scope,
+                        target,
+                        target_shape,
+                        diagnostics,
+                    );
+                }
+            }
+            (
+                ProtocolMember::Static { ty, .. },
+                orna_syntax_v1::ImplMember::Static {
+                    ty: implementation_ty,
+                    value,
+                    ..
+                },
+            ) => {
+                let expected = resolved_type_of(ty, scope);
+                if implementation_ty.as_ref().is_some_and(|implementation_ty| {
+                    resolved_type_of(implementation_ty, scope) != expected
+                }) {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "protocol implementation static property type is incompatible",
+                    ));
+                }
+                let inferred =
+                    infer_contextual(value, &expected, scope, &BTreeMap::new(), diagnostics);
+                require_same(&expected, &inferred.ty, diagnostics);
+            }
+            _ => {}
+        }
+    }
+
+    for required in required_members {
+        let implemented = implementation.members.iter().any(|member| {
+            if matches!(
+                member,
+                orna_syntax_v1::ImplMember::Function { signature, .. }
+                    if !signature.generics.is_empty()
+            ) {
+                return false;
+            }
+            match (required, member) {
+                (
+                    ProtocolMember::Function { signature, .. },
+                    orna_syntax_v1::ImplMember::Function {
+                        signature: implementation_signature,
+                        ..
+                    },
+                ) => signature.name == implementation_signature.name,
+                (
+                    ProtocolMember::Static { name, .. },
+                    orna_syntax_v1::ImplMember::Static {
+                        name: implementation_name,
+                        ..
+                    },
+                ) => name == implementation_name,
+                _ => false,
+            }
+        });
+        if !implemented {
+            diagnostics.push(diag(DIAG_TYPE, "missing protocol implementation member"));
+        }
+    }
+}
+
+/// Contextualize a nominal `From` result with its private representation row,
+/// while retaining the target's nominal identity at the result boundary.
+/// `infer_nominal` intentionally exposes a row shape to ordinary inference so
+/// private field access remains usable; that structural view must not admit a
+/// raw record as a conversion result.
+fn infer_from_nominal_target(
+    body: &orna_syntax_v1::Expr,
+    target: &Type,
+    target_shape: Option<&Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let expected_shape = target_shape.unwrap_or(target);
+    let inferred = infer_contextual(body, expected_shape, scope, local, diagnostics);
+    let Type::Named(target_name) = target else {
+        return inferred;
+    };
+    if !expr_constructs_nominal_target(body, target_name) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "From implementation result must construct its nominal target",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: inferred.effects,
+        };
+    }
+    Inferred {
+        ty: target.clone(),
+        effects: inferred.effects,
+    }
+}
+
+/// Return whether the expression's result is visibly produced by the target's
+/// nominal constructor. Blocks and branch expressions preserve the supported
+/// source forms without inferring nominal identity from a same-shaped record.
+fn expr_constructs_nominal_target(expression: &Expr, target_name: &str) -> bool {
+    match expression {
+        Expr::Group { inner, .. } => expr_constructs_nominal_target(inner, target_name),
+        Expr::Nominal { path, .. } => path.len() == 1 && path[0].text == target_name,
+        Expr::Block {
+            tail: Some(tail), ..
+        } => expr_constructs_nominal_target(tail, target_name),
+        Expr::Control {
+            kind: ControlKind::If,
+            body,
+            arms,
+            alternate,
+            ..
+        } => {
+            body.as_deref()
+                .is_some_and(|body| expr_constructs_nominal_target(body, target_name))
+                && alternate
+                    .as_deref()
+                    .is_some_and(|alternate| expr_constructs_nominal_target(alternate, target_name))
+                && arms.is_empty()
+        }
+        _ => false,
+    }
+}
+
+/// Resolve only the static type shapes this closed semantic scope can prove.
+/// Unknown nominal names are not accepted merely because `type_of` preserves
+/// them as `Type::Named`; imported/generic type details unavailable to this
+/// scope therefore fail closed.
+fn valid_static_type(type_expr: &TypeExpr, scope: &Scope) -> Option<Type> {
+    let ty = resolved_type_of(type_expr, scope);
+    if static_type_is_known(&ty, scope) {
+        Some(ty)
+    } else {
+        None
+    }
+}
+
+fn static_type_is_known(ty: &Type, scope: &Scope) -> bool {
+    match ty {
+        Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null => true,
+        Type::Named(name) => {
+            matches!(
+                name.as_str(),
+                "std.DURATION"
+                    | "std.UUID"
+                    | "std.TIME"
+                    | "std.BINARY_LARGE_OBJECT"
+                    | "std.Action"
+                    | "std.Rows"
+                    | "std.JsonValue"
+                    | "std.Document"
+                    | "std.ByteStream"
+                    | "std.UI"
+            ) || scope.names.get(name).is_some_and(|symbol| {
+                matches!(
+                    symbol.kind,
+                    SymbolKind::Type | SymbolKind::Enum | SymbolKind::Table
+                )
+            })
+        }
+        Type::List(inner)
+        | Type::Range(inner)
+        | Type::Relation(inner)
+        | Type::Stream(inner)
+        | Type::Optional(inner) => static_type_is_known(inner, scope),
+        Type::Record(fields) => fields
+            .values()
+            .all(|field| static_type_is_known(field, scope)),
+        Type::Tuple(elements) => elements
+            .iter()
+            .all(|element| static_type_is_known(element, scope)),
+        Type::Applied { base, arguments } => {
+            matches!(
+                base.as_str(),
+                "List" | "Range" | "Relation" | "Stream" | "Money" | "Float" | "Decimal"
+            ) && arguments
+                .iter()
+                .all(|argument| static_type_is_known(argument, scope))
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            static_type_is_known(currency, scope) && static_type_is_known(unit, scope)
+        }
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .all(|parameter| static_type_is_known(parameter, scope))
+                && static_type_is_known(result, scope)
+        }
+        Type::Error => false,
+    }
+}
+
+fn validate_nested_implementation_function(
+    required: &orna_syntax_v1::FunctionSignature,
+    implementation: &orna_syntax_v1::FunctionSignature,
+    body: &orna_syntax_v1::Expr,
+    scope: &Scope,
+    target: &Type,
+    target_shape: Option<&Type>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let target_shape = target_shape.or_else(|| match target {
+        Type::Named(name) => scope
+            .nominal_rows
+            .get(name)
+            .or_else(|| scope.table_rows.get(name)),
+        _ => None,
+    });
+    let mut local = BTreeMap::new();
+    for (required, implementation) in required.parameters.iter().zip(&implementation.parameters) {
+        let effective_type = required
+            .annotation
+            .as_ref()
+            .map(|annotation| resolved_type_of(annotation, scope))
+            .or_else(|| {
+                implementation
+                    .annotation
+                    .as_ref()
+                    .map(|annotation| resolved_type_of(annotation, scope))
+            });
+        let protocol_default_type = required.default.as_ref().and_then(|default| {
+            validate_default_expression(
+                default,
+                effective_type.as_ref(),
+                scope,
+                &local,
+                diagnostics,
+            )
+        });
+        let implementation_default_type = implementation.default.as_ref().and_then(|default| {
+            validate_default_expression(
+                default,
+                effective_type.as_ref().or(protocol_default_type.as_ref()),
+                scope,
+                &local,
+                diagnostics,
+            )
+        });
+        if !is_self_pattern(&implementation.pattern)
+            && required.annotation.is_none()
+            && implementation.annotation.is_none()
+            && required.default.is_none()
+            && implementation.default.is_none()
+        {
+            // An unconstrained non-self parameter cannot be admitted merely
+            // because a later annotated body happens to type-check. This is
+            // the unresolved-variable case covered by ORNA-INFER-001/-007.
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "nested implementation parameter is underconstrained",
+            ));
+        }
+        let parameter_type = effective_type
+            .or(implementation_default_type)
+            .or(protocol_default_type)
+            .or_else(|| {
+                is_self_pattern(&implementation.pattern).then(|| {
+                    target_shape
+                        .filter(|shape| matches!(shape, Type::Record(_)))
+                        .unwrap_or(target)
+                        .clone()
+                })
+            })
+            .unwrap_or(Type::Error);
+        bind_pattern(
+            &implementation.pattern,
+            parameter_type,
+            &mut local,
+            diagnostics,
+        );
+    }
+
+    let effective_result = required
+        .result
+        .as_ref()
+        .map(|result| resolved_type_of(result, scope))
+        .or_else(|| {
+            implementation
+                .result
+                .as_ref()
+                .map(|result| resolved_type_of(result, scope))
+        });
+    if let Some(expected) = effective_result {
+        let before = diagnostics.len();
+        let inferred = infer_contextual(body, &expected, scope, &local, diagnostics);
+        if diagnostics.len() == before {
+            require_same(&expected, &inferred.ty, diagnostics);
+        }
+    } else if local.values().any(|symbol| symbol.ty != Type::Error) {
+        infer(body, scope, &local, diagnostics);
+    }
+}
+
+fn validate_default_expression(
+    expression: &orna_syntax_v1::Expr,
+    expected: Option<&Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    if let Some(expected) = expected {
+        let before = diagnostics.len();
+        let inferred = infer_contextual(expression, expected, scope, local, diagnostics);
+        if diagnostics.len() == before {
+            require_same(expected, &inferred.ty, diagnostics);
+        }
+        Some(expected.clone())
+    } else {
+        let inferred = infer(expression, scope, local, diagnostics);
+        (inferred.ty != Type::Error).then_some(inferred.ty)
+    }
+}
+
+fn is_self_pattern(pattern: &orna_syntax_v1::Pattern) -> bool {
+    matches!(pattern, orna_syntax_v1::Pattern::Name(name, _) if name == "self")
+}
+
+fn compatible_protocol_function_signature(
+    required: &orna_syntax_v1::FunctionSignature,
+    implementation: &orna_syntax_v1::FunctionSignature,
+    scope: &Scope,
+) -> bool {
+    if !implementation.generics.is_empty()
+        || required.parameters.len() != implementation.parameters.len()
+        || !compatible_protocol_type_annotation(
+            required.result.as_ref(),
+            implementation.result.as_ref(),
+            scope,
+        )
+    {
+        return false;
+    }
+    required
+        .parameters
+        .iter()
+        .zip(&implementation.parameters)
+        .all(|(required, implementation)| {
+            compatible_parameter_pattern(&required.pattern, &implementation.pattern)
+                && compatible_protocol_type_annotation(
+                    required.annotation.as_ref(),
+                    implementation.annotation.as_ref(),
+                    scope,
+                )
+                && compatible_protocol_defaults(
+                    required.default.as_ref(),
+                    implementation.default.as_ref(),
+                )
+        })
+}
+
+/// A default expression is part of the callable behaviour of a protocol
+/// member. Defaults are accepted only when their ASTs have the same structure
+/// and values after source spans are ignored. This is a conservative proof of
+/// identical source-level behaviour, not a claim of arbitrary expression
+/// equivalence; semantically equal but differently written expressions remain
+/// rejected.
+fn compatible_protocol_defaults(
+    required: Option<&orna_syntax_v1::Expr>,
+    implementation: Option<&orna_syntax_v1::Expr>,
+) -> bool {
+    match (required, implementation) {
+        (None, None) => true,
+        (Some(required), Some(implementation)) => same_default_expression(required, implementation),
+        _ => false,
+    }
+}
+
+fn same_default_expression(left: &Expr, right: &Expr) -> bool {
+    match (left, right) {
+        (Expr::Name { text: left, .. }, Expr::Name { text: right, .. })
+        | (Expr::ReplBinding { text: left, .. }, Expr::ReplBinding { text: right, .. }) => {
+            left == right
+        }
+        (
+            Expr::Literal {
+                text: left_text,
+                kind: left_kind,
+                ..
+            },
+            Expr::Literal {
+                text: right_text,
+                kind: right_kind,
+                ..
+            },
+        ) => left_text == right_text && left_kind == right_kind,
+        (
+            Expr::InterpolatedString { segments: left, .. },
+            Expr::InterpolatedString {
+                segments: right, ..
+            },
+        ) => same_default_string_segments(left, right),
+        (
+            Expr::Unary {
+                op: left_op,
+                rhs: left_rhs,
+                ..
+            },
+            Expr::Unary {
+                op: right_op,
+                rhs: right_rhs,
+                ..
+            },
+        ) => left_op == right_op && same_default_expression(left_rhs, right_rhs),
+        (
+            Expr::Binary {
+                lhs: left_lhs,
+                op: left_op,
+                rhs: left_rhs,
+                ..
+            },
+            Expr::Binary {
+                lhs: right_lhs,
+                op: right_op,
+                rhs: right_rhs,
+                ..
+            },
+        ) => {
+            left_op == right_op
+                && same_default_expression(left_lhs, right_lhs)
+                && same_default_expression(left_rhs, right_rhs)
+        }
+        (
+            Expr::Range {
+                lower: left_lower,
+                operator: left_operator,
+                upper: left_upper,
+                ..
+            },
+            Expr::Range {
+                lower: right_lower,
+                operator: right_operator,
+                upper: right_upper,
+                ..
+            },
+        ) => {
+            left_operator == right_operator
+                && same_default_expression_options(left_lower.as_deref(), right_lower.as_deref())
+                && same_default_expression_options(left_upper.as_deref(), right_upper.as_deref())
+        }
+        (
+            Expr::Call {
+                callee: left_callee,
+                arguments: left_arguments,
+                ..
+            },
+            Expr::Call {
+                callee: right_callee,
+                arguments: right_arguments,
+                ..
+            },
+        ) => {
+            same_default_expression(left_callee, right_callee)
+                && same_default_arguments(left_arguments, right_arguments)
+        }
+        (
+            Expr::Index {
+                base: left_base,
+                index: left_index,
+                ..
+            },
+            Expr::Index {
+                base: right_base,
+                index: right_index,
+                ..
+            },
+        ) => {
+            same_default_expression(left_base, right_base)
+                && same_default_expression(left_index, right_index)
+        }
+        (
+            Expr::Field {
+                base: left_base,
+                name: left_name,
+                ..
+            },
+            Expr::Field {
+                base: right_base,
+                name: right_name,
+                ..
+            },
+        ) => left_name == right_name && same_default_expression(left_base, right_base),
+        (Expr::Group { inner: left, .. }, Expr::Group { inner: right, .. }) => {
+            same_default_expression(left, right)
+        }
+        (
+            Expr::Tuple { elements: left, .. },
+            Expr::Tuple {
+                elements: right, ..
+            },
+        )
+        | (
+            Expr::List { elements: left, .. },
+            Expr::List {
+                elements: right, ..
+            },
+        ) => same_default_expressions(left, right),
+        (Expr::Record { fields: left, .. }, Expr::Record { fields: right, .. }) => {
+            same_default_record_fields(left, right)
+        }
+        (
+            Expr::Nominal {
+                path: left_path,
+                fields: left_fields,
+                ..
+            },
+            Expr::Nominal {
+                path: right_path,
+                fields: right_fields,
+                ..
+            },
+        ) => {
+            left_path.len() == right_path.len()
+                && left_path
+                    .iter()
+                    .zip(right_path)
+                    .all(|(left, right)| left.text == right.text)
+                && same_default_record_fields(left_fields, right_fields)
+        }
+        (
+            Expr::Lambda {
+                parameters: left_parameters,
+                body: left_body,
+                ..
+            },
+            Expr::Lambda {
+                parameters: right_parameters,
+                body: right_body,
+                ..
+            },
+        ) => {
+            left_parameters.len() == right_parameters.len()
+                && left_parameters
+                    .iter()
+                    .zip(right_parameters)
+                    .all(|(left, right)| same_default_lambda_parameter(left, right))
+                && same_default_expression(left_body, right_body)
+        }
+        (
+            Expr::Block {
+                statements: left_statements,
+                tail: left_tail,
+                ..
+            },
+            Expr::Block {
+                statements: right_statements,
+                tail: right_tail,
+                ..
+            },
+        ) => {
+            left_statements.len() == right_statements.len()
+                && left_statements
+                    .iter()
+                    .zip(right_statements)
+                    .all(|(left, right)| same_default_statement(left, right))
+                && same_default_expression_options(left_tail.as_deref(), right_tail.as_deref())
+        }
+        (
+            Expr::Control {
+                kind: left_kind,
+                binding: left_binding,
+                condition: left_condition,
+                body: left_body,
+                arms: left_arms,
+                alternate: left_alternate,
+                ..
+            },
+            Expr::Control {
+                kind: right_kind,
+                binding: right_binding,
+                condition: right_condition,
+                body: right_body,
+                arms: right_arms,
+                alternate: right_alternate,
+                ..
+            },
+        ) => {
+            left_kind == right_kind
+                && same_default_pattern_options(left_binding.as_ref(), right_binding.as_ref())
+                && same_default_expression_options(
+                    left_condition.as_deref(),
+                    right_condition.as_deref(),
+                )
+                && same_default_expression_options(left_body.as_deref(), right_body.as_deref())
+                && left_arms.len() == right_arms.len()
+                && left_arms
+                    .iter()
+                    .zip(right_arms)
+                    .all(|(left, right)| same_default_case_arm(left, right))
+                && same_default_expression_options(
+                    left_alternate.as_deref(),
+                    right_alternate.as_deref(),
+                )
+        }
+        _ => false,
+    }
+}
+
+fn same_default_expression_options(left: Option<&Expr>, right: Option<&Expr>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => same_default_expression(left, right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn same_default_expressions(left: &[Expr], right: &[Expr]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| same_default_expression(left, right))
+}
+
+fn same_default_string_segments(left: &[StringSegment], right: &[StringSegment]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| match (left, right) {
+                (
+                    StringSegment::Text { text: left, .. },
+                    StringSegment::Text { text: right, .. },
+                ) => left == right,
+                (
+                    StringSegment::Expression { value: left, .. },
+                    StringSegment::Expression { value: right, .. },
+                ) => same_default_expression(left, right),
+                _ => false,
+            })
+}
+
+fn same_default_arguments(
+    left: &[orna_syntax_v1::Argument],
+    right: &[orna_syntax_v1::Argument],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.name == right.name && same_default_expression(&left.value, &right.value)
+        })
+}
+
+fn same_default_record_fields(
+    left: &[orna_syntax_v1::RecordField],
+    right: &[orna_syntax_v1::RecordField],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.name == right.name && same_default_expression(&left.value, &right.value)
+        })
+}
+
+fn same_default_lambda_parameter(left: &LambdaParameter, right: &LambdaParameter) -> bool {
+    same_default_pattern(&left.pattern, &right.pattern)
+        && same_default_type_options(left.annotation.as_ref(), right.annotation.as_ref())
+}
+
+fn same_default_type_options(left: Option<&TypeExpr>, right: Option<&TypeExpr>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => type_of(left) == type_of(right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn same_default_pattern_options(left: Option<&Pattern>, right: Option<&Pattern>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => same_default_pattern(left, right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn same_default_pattern(left: &Pattern, right: &Pattern) -> bool {
+    match (left, right) {
+        (Pattern::Name(left, _), Pattern::Name(right, _)) => left == right,
+        (Pattern::Wildcard(_), Pattern::Wildcard(_)) => true,
+        (
+            Pattern::Literal {
+                text: left_text,
+                kind: left_kind,
+                ..
+            },
+            Pattern::Literal {
+                text: right_text,
+                kind: right_kind,
+                ..
+            },
+        ) => left_text == right_text && left_kind == right_kind,
+        (
+            Pattern::Tuple { elements: left, .. },
+            Pattern::Tuple {
+                elements: right, ..
+            },
+        )
+        | (
+            Pattern::List { elements: left, .. },
+            Pattern::List {
+                elements: right, ..
+            },
+        ) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| same_default_pattern(left, right))
+        }
+        (Pattern::Record { fields: left, .. }, Pattern::Record { fields: right, .. }) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|((left_name, left, _), (right_name, right, _))| {
+                        left_name == right_name
+                            && same_default_pattern_options(left.as_ref(), right.as_ref())
+                    })
+        }
+        (
+            Pattern::Constructor {
+                path: left_path,
+                arguments: left_arguments,
+                fields: left_fields,
+                ..
+            },
+            Pattern::Constructor {
+                path: right_path,
+                arguments: right_arguments,
+                fields: right_fields,
+                ..
+            },
+        ) => {
+            left_path.len() == right_path.len()
+                && left_path
+                    .iter()
+                    .zip(right_path)
+                    .all(|(left, right)| left.text == right.text)
+                && left_arguments.len() == right_arguments.len()
+                && left_arguments
+                    .iter()
+                    .zip(right_arguments)
+                    .all(|(left, right)| same_default_pattern(left, right))
+                && left_fields.len() == right_fields.len()
+                && left_fields.iter().zip(right_fields).all(|(left, right)| {
+                    left.name == right.name
+                        && same_default_pattern_options(
+                            left.pattern.as_ref(),
+                            right.pattern.as_ref(),
+                        )
+                })
+        }
+        _ => false,
+    }
+}
+
+fn same_default_case_arm(left: &orna_syntax_v1::CaseArm, right: &orna_syntax_v1::CaseArm) -> bool {
+    same_default_pattern(&left.pattern, &right.pattern)
+        && same_default_expression_options(left.guard.as_ref(), right.guard.as_ref())
+        && same_default_expression(&left.body, &right.body)
+}
+
+fn same_default_statement(left: &Statement, right: &Statement) -> bool {
+    match (left, right) {
+        (
+            Statement::Let {
+                pattern: left_pattern,
+                annotation: left_annotation,
+                value: left_value,
+                ..
+            },
+            Statement::Let {
+                pattern: right_pattern,
+                annotation: right_annotation,
+                value: right_value,
+                ..
+            },
+        ) => {
+            same_default_pattern(left_pattern, right_pattern)
+                && same_default_type_options(left_annotation.as_ref(), right_annotation.as_ref())
+                && same_default_expression(left_value, right_value)
+        }
+        (Statement::Assert { value: left, .. }, Statement::Assert { value: right, .. })
+        | (Statement::Expression { value: left, .. }, Statement::Expression { value: right, .. })
+        | (Statement::Control { value: left, .. }, Statement::Control { value: right, .. }) => {
+            same_default_expression(left, right)
+        }
+        (Statement::Return { value: left, .. }, Statement::Return { value: right, .. })
+        | (Statement::Break { value: left, .. }, Statement::Break { value: right, .. }) => {
+            same_default_expression_options(left.as_ref(), right.as_ref())
+        }
+        (Statement::Continue { .. }, Statement::Continue { .. }) => true,
+        (
+            Statement::Assignment {
+                target: left_target,
+                operator: left_operator,
+                value: left_value,
+                ..
+            },
+            Statement::Assignment {
+                target: right_target,
+                operator: right_operator,
+                value: right_value,
+                ..
+            },
+        ) => {
+            left_operator == right_operator
+                && same_default_assignment_target(left_target, right_target)
+                && same_default_expression(left_value, right_value)
+        }
+        _ => false,
+    }
+}
+
+fn same_default_assignment_target(left: &AssignmentTarget, right: &AssignmentTarget) -> bool {
+    match (left, right) {
+        (AssignmentTarget::Name { name: left, .. }, AssignmentTarget::Name { name: right, .. }) => {
+            left == right
+        }
+        (
+            AssignmentTarget::Field {
+                base: left_base,
+                name: left_name,
+                ..
+            },
+            AssignmentTarget::Field {
+                base: right_base,
+                name: right_name,
+                ..
+            },
+        ) => left_name == right_name && same_default_assignment_target(left_base, right_base),
+        (
+            AssignmentTarget::Index {
+                base: left_base,
+                index: left_index,
+                ..
+            },
+            AssignmentTarget::Index {
+                base: right_base,
+                index: right_index,
+                ..
+            },
+        ) => {
+            same_default_assignment_target(left_base, right_base)
+                && same_default_expression(left_index, right_index)
+        }
+        _ => false,
+    }
+}
+
+fn compatible_protocol_type_annotation(
+    required: Option<&TypeExpr>,
+    implementation: Option<&TypeExpr>,
+    scope: &Scope,
+) -> bool {
+    match (required, implementation) {
+        (Some(required), Some(implementation)) => {
+            let required = resolved_type_of(required, scope);
+            let implementation = resolved_type_of(implementation, scope);
+            required != Type::Error && implementation != Type::Error && required == implementation
+        }
+        (Some(required), None) => resolved_type_of(required, scope) != Type::Error,
+        (None, Some(implementation)) => resolved_type_of(implementation, scope) != Type::Error,
+        (None, None) => true,
+    }
+}
+
+fn validate_implementation_restrictions(
+    implementation: &orna_syntax_v1::Implementation,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match &implementation.protocol {
+        TypeExpr::Name {
+            path, arguments, ..
+        } if path.as_slice() == ["TryFrom"] && arguments.len() == 1 => {
+            diagnostics.push(diag(
+                DIAG_LEGACY_TRYFROM,
+                "use From<Source>; From may fail in Orna",
+            ));
+        }
+        TypeExpr::Name { path, .. }
+            if matches!(path.as_slice(), [protocol] if protocol == "Display" || protocol == "Present")
+                && implementation_has_write(implementation, scope) =>
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "Display and Present implementations must be read-only",
+            ));
+        }
+        _ => {}
+    }
+}
+
+fn compatible_parameter_pattern(
+    required: &orna_syntax_v1::Pattern,
+    implementation: &orna_syntax_v1::Pattern,
+) -> bool {
+    match (required, implementation) {
+        (
+            orna_syntax_v1::Pattern::Name(required, _),
+            orna_syntax_v1::Pattern::Name(implementation, _),
+        ) => required == implementation,
+        (orna_syntax_v1::Pattern::Wildcard(_), orna_syntax_v1::Pattern::Wildcard(_)) => true,
+        _ => false,
+    }
+}
+
 /// Rejects duplicate protocol identities on one target.  Exact
 /// protocol identity is the portion of overlap that this closed semantic
 /// catalogue can prove without inventing generic dispatch or specialization.
 fn validate_non_overlapping_implementations<'a>(
     implementations: impl IntoIterator<Item = &'a orna_syntax_v1::Implementation>,
+    scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let mut seen = Vec::new();
     for implementation in implementations {
-        let protocol = type_of(&implementation.protocol);
+        let protocol = resolved_type_of(&implementation.protocol, scope);
         if protocol == Type::Error {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "protocol implementation identity cannot be resolved",
+            ));
             continue;
         }
         if seen.iter().any(|candidate| candidate == &protocol) {
@@ -2110,48 +3514,134 @@ fn validate_non_overlapping_implementations<'a>(
     }
 }
 
-fn implementation_has_write(implementation: &orna_syntax_v1::Implementation) -> bool {
+fn implementation_has_write(
+    implementation: &orna_syntax_v1::Implementation,
+    scope: &Scope,
+) -> bool {
     implementation.members.iter().any(|member| match member {
-        orna_syntax_v1::ImplMember::Function { body, .. }
-        | orna_syntax_v1::ImplMember::Static { value: body, .. } => expr_has_write(body),
+        orna_syntax_v1::ImplMember::Function {
+            signature, body, ..
+        } => {
+            let local = signature
+                .parameters
+                .iter()
+                .filter_map(|parameter| match &parameter.pattern {
+                    orna_syntax_v1::Pattern::Name(name, _) => Some((
+                        name.clone(),
+                        Symbol {
+                            table_schema: None,
+                            kind: SymbolKind::Let,
+                            ty: Type::Error,
+                            public: false,
+                            effects: EffectSummary::default(),
+                        },
+                    )),
+                    _ => None,
+                })
+                .collect();
+            expr_has_write(body, scope, &local)
+        }
+        orna_syntax_v1::ImplMember::Static { value: body, .. } => {
+            expr_has_write(body, scope, &BTreeMap::new())
+        }
     })
 }
 
-fn expr_has_write(expr: &Expr) -> bool {
+fn resolved_callable_symbol<'a>(
+    callee: &Expr,
+    scope: &'a Scope,
+    local: &'a BTreeMap<String, Symbol>,
+) -> Option<&'a Symbol> {
+    if let Expr::Name { text, .. } = callee {
+        return local.get(text).or_else(|| scope.names.get(text));
+    }
+    let path = qualified_path(callee)?;
+    if path.len() < 2 || local.contains_key(path[0]) {
+        return None;
+    }
+    let root = scope.modules.get(path[0])?;
+    let namespace = Namespace(
+        root.0
+            .iter()
+            .cloned()
+            .chain(
+                path[1..path.len() - 1]
+                    .iter()
+                    .map(|part| (*part).to_owned()),
+            )
+            .collect(),
+    );
+    scope
+        .available_modules
+        .get(&namespace)
+        .and_then(|module| module.exports.get(path[path.len() - 1]))
+}
+
+fn call_may_write(callee: &Expr, scope: &Scope, local: &BTreeMap<String, Symbol>) -> bool {
+    if let Expr::Field { base, name, .. } = callee
+        && table_symbol(base, scope, local).is_some()
+        && matches!(
+            name.as_str(),
+            "insert" | "upsert" | "update" | "delete" | "rekey"
+        )
+    {
+        return true;
+    }
+    if let Some(symbol) = resolved_callable_symbol(callee, scope, local) {
+        return symbol.kind != SymbolKind::Function || !symbol.effects.effects.is_empty();
+    }
+    // A callable that is not represented by a resolved, effect-free function
+    // summary is not proven pure. This intentionally rejects unknown indirect
+    // calls, while the resolved-symbol path avoids spelling-based rejection of
+    // a pure local function named `insert`.
+    true
+}
+
+fn expr_has_write(expr: &Expr, scope: &Scope, local: &BTreeMap<String, Symbol>) -> bool {
     match expr {
         Expr::Call {
             callee, arguments, ..
         } => {
-            qualified_path(callee)
-                .and_then(|path| path.last().copied())
-                .is_some_and(|name| {
-                    matches!(name, "insert" | "upsert" | "update" | "delete" | "rekey")
-                })
-                || expr_has_write(callee)
+            call_may_write(callee, scope, local)
+                || expr_has_write(callee, scope, local)
                 || arguments
                     .iter()
-                    .any(|argument| expr_has_write(&argument.value))
+                    .any(|argument| expr_has_write(&argument.value, scope, local))
         }
-        Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => expr_has_write(rhs),
-        Expr::Binary { lhs, rhs, .. } => expr_has_write(lhs) || expr_has_write(rhs),
+        Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
+            expr_has_write(rhs, scope, local)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_has_write(lhs, scope, local) || expr_has_write(rhs, scope, local)
+        }
         Expr::Range { lower, upper, .. } => {
-            lower.as_deref().is_some_and(expr_has_write)
-                || upper.as_deref().is_some_and(expr_has_write)
+            lower
+                .as_deref()
+                .is_some_and(|lower| expr_has_write(lower, scope, local))
+                || upper
+                    .as_deref()
+                    .is_some_and(|upper| expr_has_write(upper, scope, local))
         }
-        Expr::Index { base, index, .. } => expr_has_write(base) || expr_has_write(index),
-        Expr::Field { base, .. } => expr_has_write(base),
-        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
-            elements.iter().any(expr_has_write)
+        Expr::Index { base, index, .. } => {
+            expr_has_write(base, scope, local) || expr_has_write(index, scope, local)
         }
-        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
-            fields.iter().any(|field| expr_has_write(&field.value))
-        }
-        Expr::Lambda { body, .. } => expr_has_write(body),
+        Expr::Field { base, .. } => expr_has_write(base, scope, local),
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => elements
+            .iter()
+            .any(|element| expr_has_write(element, scope, local)),
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => fields
+            .iter()
+            .any(|field| expr_has_write(&field.value, scope, local)),
+        Expr::Lambda { body, .. } => expr_has_write(body, scope, local),
         Expr::Block {
             statements, tail, ..
         } => {
-            statements.iter().any(statement_has_write)
-                || tail.as_deref().is_some_and(expr_has_write)
+            statements
+                .iter()
+                .any(|statement| statement_has_write(statement, scope, local))
+                || tail
+                    .as_deref()
+                    .is_some_and(|tail| expr_has_write(tail, scope, local))
         }
         Expr::Control {
             condition,
@@ -2160,28 +3650,181 @@ fn expr_has_write(expr: &Expr) -> bool {
             alternate,
             ..
         } => {
-            condition.as_deref().is_some_and(expr_has_write)
-                || body.as_deref().is_some_and(expr_has_write)
+            condition
+                .as_deref()
+                .is_some_and(|condition| expr_has_write(condition, scope, local))
+                || body
+                    .as_deref()
+                    .is_some_and(|body| expr_has_write(body, scope, local))
                 || arms.iter().any(|arm| {
-                    arm.guard.as_ref().is_some_and(expr_has_write) || expr_has_write(&arm.body)
+                    arm.guard
+                        .as_ref()
+                        .is_some_and(|guard| expr_has_write(guard, scope, local))
+                        || expr_has_write(&arm.body, scope, local)
                 })
-                || alternate.as_deref().is_some_and(expr_has_write)
+                || alternate
+                    .as_deref()
+                    .is_some_and(|alternate| expr_has_write(alternate, scope, local))
         }
         _ => false,
     }
 }
 
-fn statement_has_write(statement: &Statement) -> bool {
+fn statement_has_write(
+    statement: &Statement,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> bool {
     match statement {
         Statement::Let { value, .. }
         | Statement::Assert { value, .. }
         | Statement::Expression { value, .. }
         | Statement::Control { value, .. }
-        | Statement::Assignment { value, .. } => expr_has_write(value),
-        Statement::Return { value, .. } | Statement::Break { value, .. } => {
-            value.as_ref().is_some_and(expr_has_write)
-        }
+        | Statement::Assignment { value, .. } => expr_has_write(value, scope, local),
+        Statement::Return { value, .. } | Statement::Break { value, .. } => value
+            .as_ref()
+            .is_some_and(|value| expr_has_write(value, scope, local)),
         Statement::Continue { .. } => false,
+    }
+}
+
+fn validate_function_signature_annotations(
+    signature: &orna_syntax_v1::FunctionSignature,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let generic_names = signature
+        .generics
+        .iter()
+        .map(|generic| generic.name.clone())
+        .collect::<BTreeSet<_>>();
+    for generic in &signature.generics {
+        for bound in &generic.bounds {
+            validate_type_annotation(bound, scope, &generic_names, diagnostics);
+        }
+    }
+    for parameter in &signature.parameters {
+        if let Some(annotation) = &parameter.annotation {
+            validate_type_annotation(annotation, scope, &generic_names, diagnostics);
+        }
+    }
+    if let Some(result) = &signature.result {
+        validate_type_annotation(result, scope, &generic_names, diagnostics);
+    }
+}
+
+/// Check type names at declaration boundaries instead of treating every
+/// syntactic name as a valid nominal type. Unknown names must remain an
+/// unresolved diagnostic; accepting them would let a public signature export
+/// an unusable type and would make later inference appear to succeed.
+fn validate_type_annotation(
+    type_expr: &TypeExpr,
+    scope: &Scope,
+    generic_names: &BTreeSet<String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match type_expr {
+        TypeExpr::Name {
+            path, arguments, ..
+        } => {
+            // Applied and qualified names include dimension/unit and
+            // catalogue identities whose declarations are intentionally not
+            // reconstructed by this validator. The closed unresolved-name
+            // proof applies to an unqualified, non-applied declaration name.
+            if path.len() == 1
+                && arguments.is_empty()
+                && !generic_names.contains(&path[0])
+                && !primitive(&path[0]).is_some()
+                && !scope.names.get(&path[0]).is_some_and(|symbol| {
+                    matches!(
+                        symbol.kind,
+                        SymbolKind::Type
+                            | SymbolKind::Enum
+                            | SymbolKind::Table
+                            | SymbolKind::Protocol
+                            | SymbolKind::Dimension
+                            | SymbolKind::Unit
+                    )
+                })
+                && !scope_contains_named_type(scope, &path[0])
+            {
+                diagnostics.push(diag(DIAG_UNRESOLVED, "type name cannot be resolved"));
+            }
+        }
+        TypeExpr::Optional { inner, .. } | TypeExpr::List { inner, .. } => {
+            validate_type_annotation(inner, scope, generic_names, diagnostics);
+        }
+        // Products are also used for dimensional/unit identities whose
+        // qualified declarations are deliberately opaque in this scope.
+        TypeExpr::Product { .. } => {}
+        TypeExpr::Record { fields, .. } => {
+            for (_, field, _) in fields {
+                validate_type_annotation(field, scope, generic_names, diagnostics);
+            }
+        }
+        TypeExpr::Tuple { elements, .. } => {
+            for element in elements {
+                validate_type_annotation(element, scope, generic_names, diagnostics);
+            }
+        }
+        TypeExpr::Function {
+            parameters, result, ..
+        } => {
+            for parameter in parameters {
+                validate_type_annotation(parameter, scope, generic_names, diagnostics);
+            }
+            validate_type_annotation(result, scope, generic_names, diagnostics);
+        }
+    }
+}
+
+fn scope_contains_named_type(scope: &Scope, name: &str) -> bool {
+    scope
+        .available_modules
+        .iter()
+        .filter(|(namespace, _)| scope.current_namespace.as_ref() != Some(namespace))
+        .map(|(_, module)| module)
+        .flat_map(|module| module.exports.values())
+        .any(|symbol| type_contains_named(&symbol.ty, name))
+}
+
+fn type_contains_named(ty: &Type, name: &str) -> bool {
+    match ty {
+        Type::Named(candidate) => candidate == name,
+        Type::List(inner)
+        | Type::Range(inner)
+        | Type::Relation(inner)
+        | Type::Stream(inner)
+        | Type::Optional(inner) => type_contains_named(inner, name),
+        Type::Record(fields) => fields
+            .values()
+            .any(|field| type_contains_named(field, name)),
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(|element| type_contains_named(element, name)),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(|argument| type_contains_named(argument, name)),
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_named(currency, name) || type_contains_named(unit, name)
+        }
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(|parameter| type_contains_named(parameter, name))
+                || type_contains_named(result, name)
+        }
+        Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Error => false,
     }
 }
 
@@ -2194,6 +3837,7 @@ fn check_function(
     let Declaration::Function { signature, body } = &item.declaration else {
         unreachable!("function checker called for a non-function declaration");
     };
+    validate_function_signature_annotations(signature, scope, diagnostics);
     let mut local = BTreeMap::new();
     let mut default_effects = EffectSummary::default();
     for parameter in &signature.parameters {
@@ -2950,6 +4594,7 @@ fn infer(
                 Type::Named(table) => scope
                     .table_rows
                     .get(table)
+                    .or_else(|| scope.nominal_rows.get(table))
                     .and_then(|row| match row {
                         Type::Record(fields) => fields.get(name).cloned(),
                         _ => None,
@@ -3434,9 +5079,22 @@ fn infer(
                         value,
                         ..
                     } => {
-                        let x = infer(value, scope, &locals, diagnostics);
+                        let x = if let Some(annotation) = annotation {
+                            validate_type_annotation(
+                                annotation,
+                                scope,
+                                &BTreeSet::new(),
+                                diagnostics,
+                            );
+                            let expected = type_of(annotation);
+                            let x = infer_contextual(value, &expected, scope, &locals, diagnostics);
+                            require_same(&expected, &x.ty, diagnostics);
+                            x
+                        } else {
+                            infer(value, scope, &locals, diagnostics)
+                        };
                         effects.join(&x.effects);
-                        let ty = annotation.as_ref().map(type_of).unwrap_or(x.ty);
+                        let ty = x.ty;
                         bind_pattern(pattern, ty, &mut locals, diagnostics);
                     }
                     Statement::Assert { value, .. } => {
@@ -4601,7 +6259,11 @@ fn infer_nominal(
         }
     }
     Inferred {
-        ty: Type::Record(expected.clone()),
+        // A nominal constructor carries its declared identity. The private
+        // row is used only to validate constructor fields; returning it here
+        // would make an inferred factory result structurally accessible from
+        // unrelated modules.
+        ty: Type::Named(name.text.clone()),
         effects,
     }
 }
@@ -8655,6 +10317,34 @@ fn infer_module_relation(
         },
         effects: inferred.effects,
     }
+}
+
+fn declared_nominal_schema(item: &Item) -> Option<TableSchema> {
+    let Declaration::Type {
+        representation: TypeRepresentation::Nominal { members },
+        ..
+    } = &item.declaration
+    else {
+        return None;
+    };
+    let fields = members
+        .iter()
+        .filter_map(|member| match member {
+            TypeMember::Field {
+                visibility: true,
+                name,
+                ty,
+                ..
+            } => Some((name.clone(), type_of(ty))),
+            TypeMember::Field { .. }
+            | TypeMember::Assertion { .. }
+            | TypeMember::Implementation { .. } => None,
+        })
+        .collect();
+    Some(TableSchema {
+        fields,
+        admission: None,
+    })
 }
 
 fn declared_table_schema(item: &Item) -> Option<TableSchema> {
