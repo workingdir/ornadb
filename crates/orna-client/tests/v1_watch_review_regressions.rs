@@ -328,14 +328,12 @@ fn fresh_watch_transition(old_revision: u8, replacement_text: &str) {
 }
 
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #790; run explicitly for review"]
 fn fresh_watch_a_rev5_to_b_rev0_accepts_snapshot_and_delta() {
     // Keep the tree and pin equal so only the watch-local revision reset varies.
     fresh_watch_transition(5, "before");
 }
 
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #790; run explicitly for review"]
 fn fresh_watch_a0_to_changed_b0_accepts_snapshot_and_delta() {
     // Keep the revisions and pin equal so only the fresh watch's tree varies.
     fresh_watch_transition(0, "replacement");
