@@ -43,6 +43,7 @@ fn parses_bounded_and_optional_ranges_without_placeholder_endpoints() {
         ("1..", true, false, ".."),
         ("..5", false, true, ".."),
         ("1..=5", true, true, "..="),
+        ("..=5", false, true, "..="),
     ] {
         let parsed = parse_expression(source);
         assert!(parsed.is_ok(), "{source:?}: {:?}", parsed.diagnostics);
@@ -79,6 +80,32 @@ fn rejects_non_associative_range_chaining() {
         Expr::Range { lower, upper, .. } => {
             assert!(matches!(lower.as_deref(), Some(Expr::Literal { text, .. }) if text == "1"));
             assert!(matches!(upper.as_deref(), Some(Expr::Literal { text, .. }) if text == "2"));
+        }
+        other => panic!("expected the first range to remain as the recovered value, got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_prefix_range_as_unparenthesized_endpoint() {
+    let parsed = parse_expression("1.. ..2");
+
+    assert!(!parsed.is_ok());
+    assert_eq!(parsed.diagnostics.len(), 1);
+    assert_eq!(parsed.diagnostics[0].code, "ORNA-PARSE-001");
+    assert_eq!(
+        parsed.diagnostics[0].message,
+        "range expressions are non-associative"
+    );
+    assert_eq!(parsed.diagnostics[0].span.start, 4);
+    assert_eq!(parsed.diagnostics[0].span.end, 6);
+    match parsed.value {
+        Expr::Range {
+            lower, upper, span, ..
+        } => {
+            assert!(matches!(lower.as_deref(), Some(Expr::Literal { text, .. }) if text == "1"));
+            assert!(upper.is_none());
+            assert_eq!(span.start, 0);
+            assert_eq!(span.end, 3);
         }
         other => panic!("expected the first range to remain as the recovered value, got {other:?}"),
     }
