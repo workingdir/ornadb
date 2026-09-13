@@ -491,10 +491,14 @@ fn verify_physical_columns(
             && encoding == "utf8"
             && column.physical_type() == Type::BYTE_ARRAY
             && column.logical_type_ref() == Some(&parquet::basic::LogicalType::String);
+        let date_mapping = type_name == "Date"
+            && encoding == "date"
+            && column.physical_type() == Type::INT32
+            && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Date);
         if type_code.to_string() != "0"
-            || !(int_mapping || bool_mapping || string_mapping)
+            || !(int_mapping || bool_mapping || string_mapping || date_mapping)
             || !matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty())
-            || (!string_mapping && column.logical_type_ref().is_some())
+            || (!(string_mapping || date_mapping) && column.logical_type_ref().is_some())
             || column.max_rep_level() != 0
         {
             return Err(RepositoryError::InvalidCompactManifest);

@@ -15,7 +15,8 @@ use orna_repository_v1::{
 };
 use parquet::{
     basic::{Compression, Encoding, PageType},
-    data_type::Int64Type,
+    column::reader::ColumnReader,
+    data_type::{Int32Type, Int64Type},
     file::{
         metadata::{KeyValue, ParquetMetaDataWriter},
         properties::{WriterProperties, WriterVersion},
@@ -218,6 +219,91 @@ fn compact_parquet(table: Uuid, ordinal: u64, columns: &[u8], payload: Vec<u8>) 
     with_page_checksums(bytes)
 }
 
+fn date_segment(table: Uuid, ordinal: u64, days: &[i32]) -> CompactSegment {
+    let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, ordinal | 0x8000_0000_0000_0000);
+    let path = ManagedPath::new(format!(
+        ".orna/storage/{table}/data/{}/{segment_id}.parquet",
+        &segment_id.to_string()[..2]
+    ))
+    .unwrap();
+    let schema = date_schema(table);
+    let columns = date_columns();
+    let bytes = date_parquet(table, &schema, &columns, days);
+    let bound = ordinal.to_be_bytes().to_vec();
+    CompactSegment::new(
+        segment_id,
+        CompactSegmentRole::Data,
+        date_schema_fingerprint(table),
+        "test-encoder-v1",
+        path,
+        bytes,
+        bound.clone(),
+        bound,
+        u64::try_from(days.len()).unwrap(),
+        columns,
+        true,
+        false,
+    )
+    .unwrap()
+}
+
+fn date_parquet(table: Uuid, schema: &SchemaDescriptor, columns: &[u8], days: &[i32]) -> Vec<u8> {
+    let schema_descriptor = Arc::new(
+        parse_message_type(&format!(
+            "message schema {{ REQUIRED INT32 f_{} (DATE); }}",
+            date_field_id().simple()
+        ))
+        .unwrap(),
+    );
+    let metadata = vec![
+        KeyValue::new(
+            "orna.profile".to_owned(),
+            Some("compact-storage-v1".to_owned()),
+        ),
+        KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
+        KeyValue::new(
+            "orna.schema.sha256".to_owned(),
+            Some(hex_digest(&schema_fingerprint(schema))),
+        ),
+        KeyValue::new(
+            "orna.schema.ovb".to_owned(),
+            Some(base64(&schema.encode().unwrap())),
+        ),
+        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
+        KeyValue::new(
+            "orna.encoder".to_owned(),
+            Some("test-encoder-v1".to_owned()),
+        ),
+    ];
+    let properties = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::ZSTD(Default::default()))
+            .set_dictionary_enabled(false)
+            .set_encoding(Encoding::PLAIN)
+            .set_writer_version(WriterVersion::PARQUET_2_0)
+            .set_key_value_metadata(Some(metadata))
+            .build(),
+    );
+    let mut bytes = Vec::new();
+    let mut writer = SerializedFileWriter::new(&mut bytes, schema_descriptor, properties).unwrap();
+    let mut row_group = writer.next_row_group().unwrap();
+    let mut column = row_group.next_column().unwrap().unwrap();
+    column
+        .typed::<Int32Type>()
+        .write_batch(days, None, None)
+        .unwrap();
+    column.close().unwrap();
+    row_group.close().unwrap();
+    writer.close().unwrap();
+
+    let footer_length =
+        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
+    let footer = bytes.len() - 8 - footer_length;
+    assert_eq!(&bytes[footer..footer + 2], &[0x15, 0x04]);
+    bytes[footer + 1] = 0x02;
+    with_page_checksums(bytes)
+}
+
 fn compact_columns() -> Vec<u8> {
     compact_columns_for_field(compact_field_id())
 }
@@ -226,8 +312,19 @@ fn compact_field_id() -> Uuid {
     Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001)
 }
 
+fn date_field_id() -> Uuid {
+    Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0002)
+}
+
 fn compact_schema(table: Uuid) -> SchemaDescriptor {
-    let field = compact_field_id();
+    compact_schema_for_type(table, compact_field_id(), "Int")
+}
+
+fn date_schema(table: Uuid) -> SchemaDescriptor {
+    compact_schema_for_type(table, date_field_id(), "Date")
+}
+
+fn compact_schema_for_type(table: Uuid, field: Uuid, type_name: &str) -> SchemaDescriptor {
     SchemaDescriptor::new(OvbRaw::Map(vec![
         (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
         (
@@ -246,7 +343,10 @@ fn compact_schema(table: Uuid) -> SchemaDescriptor {
             OvbRaw::Array(vec![OvbRaw::Array(vec![
                 OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(field.as_bytes().to_vec()))),
                 OvbRaw::Text(format!("f_{}", field.simple())),
-                OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]),
+                OvbRaw::Array(vec![
+                    OvbRaw::Int(0.into()),
+                    OvbRaw::Text(type_name.to_owned()),
+                ]),
                 OvbRaw::Int(0.into()),
                 OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
             ])]),
@@ -257,21 +357,40 @@ fn compact_schema(table: Uuid) -> SchemaDescriptor {
 }
 
 fn compact_schema_fingerprint(table: Uuid) -> [u8; 32] {
+    schema_fingerprint(&compact_schema(table))
+}
+
+fn date_schema_fingerprint(table: Uuid) -> [u8; 32] {
+    schema_fingerprint(&date_schema(table))
+}
+
+fn schema_fingerprint(schema: &SchemaDescriptor) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"orna.schema.v1\0");
-    digest.update(compact_schema(table).encode().unwrap());
+    digest.update(schema.encode().unwrap());
     digest.finalize().into()
 }
 
 fn compact_columns_for_field(field_id: Uuid) -> Vec<u8> {
+    compact_columns_for_mapping(field_id, "Int", "int64")
+}
+
+fn date_columns() -> Vec<u8> {
+    compact_columns_for_mapping(date_field_id(), "Date", "date")
+}
+
+fn compact_columns_for_mapping(field_id: Uuid, type_name: &str, encoding: &str) -> Vec<u8> {
     CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Array(vec![
         OvbRaw::Array(vec![OvbRaw::Tag(
             37,
             Box::new(OvbRaw::Bytes(field_id.as_bytes().to_vec())),
         )]),
         OvbRaw::Array(vec![OvbRaw::Text(format!("f_{}", field_id.simple()))]),
-        OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]),
-        OvbRaw::Text("int64".to_owned()),
+        OvbRaw::Array(vec![
+            OvbRaw::Int(0.into()),
+            OvbRaw::Text(type_name.to_owned()),
+        ]),
+        OvbRaw::Text(encoding.to_owned()),
         OvbRaw::Array(Vec::new()),
     ])]))
     .unwrap()
@@ -2556,6 +2675,71 @@ fn empty_compact_manifest_is_a_valid_committed_snapshot() {
             .unwrap(),
         Some(CompactManifest::empty(table, schema))
     );
+}
+
+#[test]
+fn compact_publication_accepts_a_valid_date_parquet_fixture() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::from_u128(4);
+    let days = [-1_i32, 0, 1];
+    let schema = date_schema(table);
+    let schema_digest = date_schema_fingerprint(table);
+    let segment = date_segment(table, 1, &days);
+    let head = repo.head().unwrap().unwrap();
+    let plan = repo
+        .prepare_compact_publication(
+            &head,
+            repo.index_generation().unwrap(),
+            CompactManifest::empty(table, schema_digest),
+            [68; 16],
+            [69; 32],
+            &[segment],
+            "test: publish date compact segment",
+        )
+        .unwrap();
+    let pending = repo.publish_compact_repository_boundary(plan).unwrap();
+    let manifest = repo
+        .read_compact_manifest(pending.commit(), table)
+        .unwrap()
+        .unwrap();
+    assert_eq!(manifest.schema(), schema_digest);
+    assert_eq!(manifest.entries().len(), 1);
+
+    let verified = repo
+        .read_verified_compact_segment(pending.commit(), table, &manifest.entries()[0])
+        .unwrap();
+    let reader = SerializedFileReader::new(bytes::Bytes::from(verified)).unwrap();
+    assert_eq!(reader.metadata().file_metadata().version(), 1);
+    let column = reader.metadata().row_group(0).column(0);
+    let schema_column = reader.metadata().file_metadata().schema_descr().column(0);
+    assert_eq!(schema_column.physical_type(), parquet::basic::Type::INT32);
+    assert_eq!(
+        schema_column.logical_type_ref(),
+        Some(&parquet::basic::LogicalType::Date)
+    );
+    assert!(
+        column
+            .encodings()
+            .any(|encoding| encoding == Encoding::PLAIN)
+    );
+    assert!(matches!(column.compression(), Compression::ZSTD(_)));
+
+    let group = reader.get_row_group(0).unwrap();
+    let ColumnReader::Int32ColumnReader(mut date_reader) = group.get_column_reader(0).unwrap()
+    else {
+        panic!("verified Date segment did not reach an Int32 decoder");
+    };
+    let mut values = Vec::new();
+    let (records, values_read, levels_read) = date_reader
+        .read_records(days.len(), None, None, &mut values)
+        .unwrap();
+    assert_eq!(
+        (records, values_read, levels_read),
+        (days.len(), days.len(), days.len())
+    );
+    assert_eq!(values, days);
+    assert_eq!(schema_digest, schema_fingerprint(&schema));
 }
 
 #[test]
