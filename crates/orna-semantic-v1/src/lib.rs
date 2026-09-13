@@ -5780,7 +5780,7 @@ fn infer_relation_call(
             effects,
         });
     }
-    let callback = infer_callback(
+    let callback = infer_relation_callback(
         &arguments[1].value,
         *element,
         Type::Bool,
@@ -6918,14 +6918,25 @@ fn infer_success_pipeline(
         return Inferred { ty, effects };
     }
     if let Some(result) = callback_result {
-        let callback = infer_callback(
-            &arguments[0].value,
-            element,
-            result,
-            scope,
-            local,
-            diagnostics,
-        );
+        let callback = if is_stream {
+            infer_callback(
+                &arguments[0].value,
+                element,
+                result,
+                scope,
+                local,
+                diagnostics,
+            )
+        } else {
+            infer_relation_callback(
+                &arguments[0].value,
+                element,
+                result,
+                scope,
+                local,
+                diagnostics,
+            )
+        };
         effects.join(&callback.effects);
     }
     if text == "one" {
@@ -7234,10 +7245,29 @@ fn infer_relation_callback(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
-    if matches!(expression, Expr::Lambda { .. }) {
-        return infer_callback(expression, parameter, result, scope, local, diagnostics);
+    let callback = if matches!(expression, Expr::Lambda { .. }) {
+        infer_callback(
+            expression,
+            parameter.clone(),
+            result.clone(),
+            scope,
+            local,
+            diagnostics,
+        )
+    } else {
+        infer(expression, scope, local, diagnostics)
+    };
+    if callback
+        .effects
+        .effects
+        .iter()
+        .any(|effect| effect != "database read")
+    {
+        diagnostics.push(diag(DIAG_TYPE, "relation query callback must be read-only"));
     }
-    let callback = infer(expression, scope, local, diagnostics);
+    if matches!(expression, Expr::Lambda { .. }) {
+        return callback;
+    }
     let Type::Function {
         parameters,
         result: callback_result,
