@@ -648,6 +648,144 @@ fn loopback_host_closes_an_invalid_client_direction_envelope_with_1002() {
 }
 
 #[test]
+fn loopback_host_serves_unknown_request_status_without_closing_websocket() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let database = initialized.metadata().database_id().to_string();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let request_id = [7; 16];
+    let target = [8; 16];
+    let client = std::thread::spawn(move || {
+        let mut create = TcpStream::connect(address).unwrap();
+        create
+            .write_all(request(address, &database).as_bytes())
+            .unwrap();
+        let created = read_response(&mut create);
+        let session = json_field(&created, "session");
+        let token = json_field(&created, "resume_token");
+        create.shutdown(Shutdown::Write).unwrap();
+        let mut ignored = Vec::new();
+        create.read_to_end(&mut ignored).unwrap();
+
+        let mut websocket = websocket_upgrade(address, &session, &token);
+        let status = Envelope {
+            request: Some(request_id),
+            watch: None,
+            message: Message::RequestStatus {
+                target,
+                fingerprint: [0; 32],
+            },
+            extensions: std::collections::BTreeMap::new(),
+        }
+        .encode(ProtocolLimits::default())
+        .unwrap();
+        websocket.write_all(&masked(true, 2, &status)).unwrap();
+
+        let response = websocket_frame(&mut websocket);
+        assert!(matches!(
+            response.message,
+            Message::RequestStatusResult {
+                target: returned_target,
+                state: orna_protocol_v1::RequestState::Unknown,
+                fingerprint: None,
+                result: None,
+            } if response.request == Some(request_id)
+                && response.watch.is_none()
+                && returned_target == target
+        ));
+
+        websocket.write_all(&masked(true, 9, b"ok")).unwrap();
+        let mut pong = [0; 4];
+        websocket.read_exact(&mut pong).unwrap();
+        assert_eq!(pong, [0x8a, 0x02, b'o', b'k']);
+
+        websocket.write_all(&masked(true, 8, b"")).unwrap();
+        let mut close = [0; 2];
+        websocket.read_exact(&mut close).unwrap();
+        assert_eq!(close, [0x88, 0x00]);
+        sender.send(()).unwrap();
+    });
+
+    assert_eq!(
+        host.serve_until_cancellation(receiver.map(|_| ())),
+        Err(LiveHostError::Cancelled)
+    );
+    client.join().unwrap();
+    let _released = TcpListener::bind(address).unwrap();
+}
+
+#[test]
+fn loopback_host_correlates_request_status_fingerprint_mismatch_without_closing_websocket() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let database = initialized.metadata().database_id().to_string();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let client = std::thread::spawn(move || {
+        let mut create = TcpStream::connect(address).unwrap();
+        create
+            .write_all(request(address, &database).as_bytes())
+            .unwrap();
+        let created = read_response(&mut create);
+        let session = json_field(&created, "session");
+        let token = json_field(&created, "resume_token");
+        create.shutdown(Shutdown::Write).unwrap();
+        let mut ignored = Vec::new();
+        create.read_to_end(&mut ignored).unwrap();
+
+        let target = [8; 16];
+        let result = websocket_eval(address, &session, &token, &database, target, "1 + 1");
+        assert!(matches!(result.message, Message::Result { .. }));
+
+        let request_id = [7; 16];
+        let status = Envelope {
+            request: Some(request_id),
+            watch: None,
+            message: Message::RequestStatus {
+                target,
+                fingerprint: [0; 32],
+            },
+            extensions: std::collections::BTreeMap::new(),
+        }
+        .encode(ProtocolLimits::default())
+        .unwrap();
+        let mut websocket = websocket_upgrade(address, &session, &token);
+        websocket.write_all(&masked(true, 2, &status)).unwrap();
+
+        let response = websocket_frame(&mut websocket);
+        assert!(matches!(&response.message, Message::Diagnostic { .. }));
+        assert_eq!(response.request, Some(request_id));
+        assert!(response.watch.is_none());
+
+        websocket.write_all(&masked(true, 2, &status)).unwrap();
+        let replay = websocket_frame(&mut websocket);
+        assert!(matches!(&replay.message, Message::Diagnostic { .. }));
+        assert_eq!(replay, response);
+
+        websocket.write_all(&masked(true, 9, b"ok")).unwrap();
+        let mut pong = [0; 4];
+        websocket.read_exact(&mut pong).unwrap();
+        assert_eq!(pong, [0x8a, 0x02, b'o', b'k']);
+
+        websocket.write_all(&masked(true, 8, b"")).unwrap();
+        let mut close = [0; 2];
+        websocket.read_exact(&mut close).unwrap();
+        assert_eq!(close, [0x88, 0x00]);
+        sender.send(()).unwrap();
+    });
+
+    assert_eq!(
+        host.serve_until_cancellation(receiver.map(|_| ())),
+        Err(LiveHostError::Cancelled)
+    );
+    client.join().unwrap();
+    let _released = TcpListener::bind(address).unwrap();
+}
+
+#[test]
 fn loopback_host_retires_an_open_websocket_before_resume_completes() {
     let temporary = TemporaryRepository::new();
     let initialized = initialize_repository(temporary.path()).unwrap();
