@@ -1976,6 +1976,15 @@ fn check_item(
                     .collect(),
                 _ => BTreeMap::new(),
             };
+            validate_non_overlapping_implementations(
+                members.iter().filter_map(|member| match member {
+                    orna_syntax_v1::TableMember::Implementation { implementation, .. } => {
+                        Some(implementation)
+                    }
+                    _ => None,
+                }),
+                diagnostics,
+            );
             for member in members {
                 match member {
                     orna_syntax_v1::TableMember::Assertion { value, .. } => {
@@ -2039,7 +2048,13 @@ fn check_item(
             representation: TypeRepresentation::Nominal { members },
             ..
         } => {
-            validate_non_overlapping_implementations(members, diagnostics);
+            validate_non_overlapping_implementations(
+                members.iter().filter_map(|member| match member {
+                    TypeMember::Implementation { implementation, .. } => Some(implementation),
+                    _ => None,
+                }),
+                diagnostics,
+            );
             for member in members {
                 let TypeMember::Implementation { implementation, .. } = member else {
                     continue;
@@ -2071,18 +2086,15 @@ fn check_item(
     None
 }
 
-/// Rejects duplicate protocol identities on one nominal target.  Exact
+/// Rejects duplicate protocol identities on one target.  Exact
 /// protocol identity is the portion of overlap that this closed semantic
 /// catalogue can prove without inventing generic dispatch or specialization.
-fn validate_non_overlapping_implementations(
-    members: &[TypeMember],
+fn validate_non_overlapping_implementations<'a>(
+    implementations: impl IntoIterator<Item = &'a orna_syntax_v1::Implementation>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let mut seen = Vec::new();
-    for member in members {
-        let TypeMember::Implementation { implementation, .. } = member else {
-            continue;
-        };
+    for implementation in implementations {
         let protocol = type_of(&implementation.protocol);
         if protocol == Type::Error {
             continue;
