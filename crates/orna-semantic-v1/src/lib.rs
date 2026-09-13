@@ -5813,6 +5813,7 @@ fn infer_relation_collection_call(
                 *operation,
                 "filter"
                     | "map"
+                    | "flat_map"
                     | "sort_by"
                     | "take"
                     | "drop"
@@ -5835,7 +5836,7 @@ fn infer_relation_collection_call(
     let mut callback_index = None;
     let callback_name = match operation {
         "filter" => "predicate",
-        "map" => "transform",
+        "map" | "flat_map" => "transform",
         "sort_by" => "key",
         _ => "",
     };
@@ -5885,7 +5886,7 @@ fn infer_relation_collection_call(
         return None;
     }
 
-    if !matches!(operation, "filter" | "map" | "sort_by") {
+    if !matches!(operation, "filter" | "map" | "flat_map" | "sort_by") {
         return Some(infer_relation_terminal_call(
             operation,
             arguments,
@@ -5948,6 +5949,7 @@ fn infer_relation_collection_call(
         && match operation {
             "filter" => callback.ty == Type::Bool,
             "map" => callback.ty != Type::Error,
+            "flat_map" => matches!(callback.ty, Type::List(_) | Type::Relation(_)),
             "sort_by" => is_sort_key_type(&callback.ty),
             _ => false,
         };
@@ -5955,6 +5957,10 @@ fn infer_relation_collection_call(
         ty: if valid {
             match operation {
                 "map" => Type::Relation(Box::new(callback.ty)),
+                "flat_map" => match callback.ty {
+                    Type::List(element) | Type::Relation(element) => Type::Relation(element),
+                    _ => unreachable!("valid relation flat_map callback"),
+                },
                 _ => Type::Relation(element),
             }
         } else {
@@ -6777,7 +6783,10 @@ fn infer_success_pipeline(
             effects,
         };
     }
-    if !is_stream && text == "flat_map" {
+    if !is_stream
+        && text == "flat_map"
+        && root_collection_intrinsic_is_unshadowed("flat_map", scope, local)
+    {
         let [argument] = arguments.as_slice() else {
             diagnostics.push(diag(
                 DIAG_TYPE,
@@ -6788,13 +6797,14 @@ fn infer_success_pipeline(
                 effects: input.effects,
             };
         };
-        if argument.name.is_some() && argument.name.as_deref() != Some("transform") {
+        let malformed = argument.name.is_some() && argument.name.as_deref() != Some("transform");
+        if malformed {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "relation flat_map argument name does not match its static signature",
             ));
         }
-        let callback = infer_callback(
+        let callback = infer_relation_callback(
             &argument.value,
             element,
             Type::Error,
@@ -6819,7 +6829,11 @@ fn infer_success_pipeline(
             }
         };
         return Inferred {
-            ty: Type::Relation(Box::new(output)),
+            ty: if malformed {
+                Type::Error
+            } else {
+                Type::Relation(Box::new(output))
+            },
             effects,
         };
     }
