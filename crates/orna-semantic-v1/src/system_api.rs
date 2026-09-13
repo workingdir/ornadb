@@ -297,6 +297,9 @@ impl SystemApi {
             if relation_aliases.get(&relation.reference_type) != Some(&relation.name) {
                 return Err(SystemApiError::InvalidRelationAlias);
             }
+            if fields.get("reference") != Some(&reference_type) {
+                return Err(SystemApiError::InvalidRelationAlias);
+            }
             if grouped_relations
                 .insert(relation.grouped_handle.clone(), relation.name.clone())
                 .is_some()
@@ -2337,6 +2340,29 @@ mod tests {
             serde_json::Value::String("sys.FileRef".into());
         assert_eq!(
             SystemApi::from_json(&relation_reference.to_string()),
+            Err(SystemApiError::InvalidRelationAlias)
+        );
+
+        let mut missing_reference_field = document();
+        missing_reference_field["relations"][0]["fields"] = serde_json::Value::Array(
+            missing_reference_field["relations"][0]["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|field| field["name"] != "reference")
+                .cloned()
+                .collect(),
+        );
+        assert_eq!(
+            SystemApi::from_json(&missing_reference_field.to_string()),
+            Err(SystemApiError::InvalidRelationAlias)
+        );
+
+        let mut mismatched_reference_field = document();
+        mismatched_reference_field["relations"][0]["fields"][0]["type"] =
+            serde_json::Value::String("sys.FileRef".into());
+        assert_eq!(
+            SystemApi::from_json(&mismatched_reference_field.to_string()),
             Err(SystemApiError::InvalidRelationAlias)
         );
 
