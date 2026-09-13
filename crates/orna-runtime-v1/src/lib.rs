@@ -3696,7 +3696,7 @@ impl RuntimeState {
             return Ok(StreamStep::Cancelled { checkpoint });
         }
         let expected = CheckpointPrecondition::from(&checkpoint);
-        let lease = {
+        let (lease, failure_payload) = {
             if !control.acquire_admission() {
                 self.complete_stream_observation(writer, key, StreamObservationStatus::Cancelled)
                     .await
@@ -3704,8 +3704,12 @@ impl RuntimeState {
                 return Ok(StreamStep::Cancelled { checkpoint });
             }
             let _permit = AdmissionPermit(control);
+            let failure_payload = source.failure_payload(&item);
+            if matches!(&failure_payload, StreamFailurePayload::Unavailable) {
+                return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
+            }
             let mut stream = self.stream_backend(writer);
-            match stream
+            let lease = match stream
                 .apply_async(CommitIntent::Acquire {
                     delivery: item.delivery.clone(),
                     expected: expected.clone(),
@@ -3722,7 +3726,8 @@ impl RuntimeState {
                 _ => {
                     return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
                 }
-            }
+            };
+            (lease, failure_payload)
         };
 
         let handler_result = handler.handle(&item);
@@ -3780,7 +3785,6 @@ impl RuntimeState {
                 self.require_owner(&self.connection, writer)
                     .await
                     .map_err(StreamStepError::Runtime)?;
-                let failure_payload = source.failure_payload(&item);
                 let diagnostic = SafeDiagnostic {
                     code: DiagnosticCode::ExecutionRejected,
                     class: DiagnosticClass::Permanent,
@@ -3822,10 +3826,23 @@ impl RuntimeState {
                     }
                     Ok(_) => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
                     Err(StreamTableDeliveryError::ValidationFailed(diagnostic)) => {
+                        if is_cancellation_diagnostic(diagnostic) {
+                            let result = self
+                                .stream_backend(writer)
+                                .apply_async(CommitIntent::Cancel { lease })
+                                .await
+                                .map_err(StreamStepError::Runtime)?;
+                            return match result {
+                                CommitResult::Cancelled { checkpoint, .. } => {
+                                    Ok(StreamStep::Cancelled { checkpoint })
+                                }
+                                CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
+                                _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                            };
+                        }
                         self.require_owner(&self.connection, writer)
                             .await
                             .map_err(StreamStepError::Runtime)?;
-                        let failure_payload = source.failure_payload(&item);
                         let mut stream = self.stream_backend(writer);
                         match stream
                             .fail_with_payload_async(lease, diagnostic, failure_payload)
@@ -3860,7 +3877,6 @@ impl RuntimeState {
                 self.require_owner(&self.connection, writer)
                     .await
                     .map_err(StreamStepError::Runtime)?;
-                let failure_payload = source.failure_payload(&item);
                 let lease_for_cleanup = lease.clone();
                 let mut stream = self.stream_backend(writer);
                 let result = stream
@@ -12827,6 +12843,10 @@ mod tests {
             self.key.clone()
         }
 
+        fn failure_payload(&self, item: &StreamItem) -> StreamFailurePayload {
+            StreamFailurePayload::Plaintext(item.payload.clone())
+        }
+
         fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
             self.polls += 1;
             ready(Ok(self
@@ -13233,6 +13253,25 @@ mod tests {
             Err(SafeDiagnostic {
                 code: DiagnosticCode::ExecutionRejected,
                 class: DiagnosticClass::Permanent,
+            })
+        }
+    }
+
+    struct CancellingValidator {
+        tables: Vec<String>,
+        calls: usize,
+    }
+
+    impl StreamTableCandidateValidator for CancellingValidator {
+        fn tables(&self) -> &[String] {
+            &self.tables
+        }
+
+        fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+            self.calls += 1;
+            Err(SafeDiagnostic {
+                code: DiagnosticCode::Cancelled,
+                class: DiagnosticClass::Cancellation,
             })
         }
     }
@@ -13792,6 +13831,207 @@ mod tests {
             None
         );
         assert_eq!(state.stream_checkpoint(&key).await.unwrap().version, 0);
+    }
+
+    #[tokio::test]
+    async fn unretained_unvalidated_table_delivery_fails_before_acquire_or_handler() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("unretained-raw:one", "unretained-raw:two");
+        let key = delivery.checkpoint_key();
+        let capture = state.capture().await.unwrap();
+        let checkpoint = state.stream_checkpoint(&key).await.unwrap();
+        let mut source = DefaultPayloadSource {
+            key: key.clone(),
+            item: Some(StreamItem {
+                delivery: delivery.clone(),
+                payload: vec![4, 5, 6],
+            }),
+            polls: 0,
+        };
+        let mut handler = TestHandler {
+            result: Some(StreamHandlerResult::CommitTable(StreamTableMutationBatch {
+                mutations: vec![table_mutation(6, 1, Some(9))],
+                next_digest: digest(9),
+            })),
+            calls: 0,
+        };
+
+        assert_eq!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await,
+            Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+        );
+        assert_eq!(source.polls, 1);
+        assert_eq!(handler.calls, 0);
+        assert_eq!(state.capture().await.unwrap(), capture);
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap(), checkpoint);
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert!(
+            state
+                .stream_backend(writer)
+                .failure_async(&FailureIdentity(delivery.clone()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        assert!(matches!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Acquire {
+                    delivery,
+                    expected: CheckpointPrecondition::from(&checkpoint),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Acquired { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn unretained_validated_table_delivery_fails_before_acquire_or_handler() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("unretained-validated:one", "unretained-validated:two");
+        let key = delivery.checkpoint_key();
+        let capture = state.capture().await.unwrap();
+        let checkpoint = state.stream_checkpoint(&key).await.unwrap();
+        let mut source = DefaultPayloadSource {
+            key: key.clone(),
+            item: Some(StreamItem {
+                delivery: delivery.clone(),
+                payload: vec![7, 8, 9],
+            }),
+            polls: 0,
+        };
+        let mut handler = TestHandler {
+            result: Some(StreamHandlerResult::CommitValidatedTable(
+                StreamValidatedTableMutationBatch {
+                    mutations: vec![table_mutation(7, 1, Some(10))],
+                    next_digest: digest(10),
+                    validator: Box::new(RejectingValidator {
+                        tables: vec!["books".into()],
+                        calls: 0,
+                    }),
+                },
+            )),
+            calls: 0,
+        };
+
+        assert_eq!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await,
+            Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+        );
+        assert_eq!(source.polls, 1);
+        assert_eq!(handler.calls, 0);
+        assert_eq!(state.capture().await.unwrap(), capture);
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap(), checkpoint);
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert!(
+            state
+                .stream_backend(writer)
+                .failure_async(&FailureIdentity(delivery.clone()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        assert!(matches!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Acquire {
+                    delivery,
+                    expected: CheckpointPrecondition::from(&checkpoint),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Acquired { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn validated_table_cancellation_diagnostic_cancels_without_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("validated-cancel:one", "validated-cancel:two");
+        let key = delivery.checkpoint_key();
+        let capture = state.capture().await.unwrap();
+        let checkpoint = state.stream_checkpoint(&key).await.unwrap();
+        let mut source = TestSource {
+            key: key.clone(),
+            item: Some(StreamItem {
+                delivery: delivery.clone(),
+                payload: vec![1, 2, 3],
+            }),
+            polls: 0,
+        };
+        let mut handler = TestHandler {
+            result: Some(StreamHandlerResult::CommitValidatedTable(
+                StreamValidatedTableMutationBatch {
+                    mutations: vec![table_mutation(8, 1, Some(11))],
+                    next_digest: digest(11),
+                    validator: Box::new(CancellingValidator {
+                        tables: vec!["books".into()],
+                        calls: 0,
+                    }),
+                },
+            )),
+            calls: 0,
+        };
+
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await
+                .unwrap(),
+            StreamStep::Cancelled { checkpoint: observed } if observed == checkpoint
+        ));
+        assert_eq!(handler.calls, 1);
+        assert_eq!(state.capture().await.unwrap(), capture);
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap(), checkpoint);
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert!(
+            state
+                .stream_backend(writer)
+                .failure_async(&FailureIdentity(delivery.clone()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        assert!(matches!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Acquire {
+                    delivery,
+                    expected: CheckpointPrecondition::from(&checkpoint),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Acquired { .. }
+        ));
     }
 
     #[tokio::test]
@@ -15251,6 +15491,8 @@ mod tests {
         let writer = state.acquire_lease(id(4)).await.unwrap();
         let delivery = stream_delivery("legacy:one", "legacy:two");
         let key = delivery.checkpoint_key();
+        let capture = state.capture().await.unwrap();
+        let checkpoint = state.stream_checkpoint(&key).await.unwrap();
         let mut source = DefaultPayloadSource {
             key: key.clone(),
             item: Some(StreamItem {
@@ -15272,6 +15514,15 @@ mod tests {
                 .await,
             Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
         );
+        assert_eq!(source.polls, 1);
+        assert_eq!(handler.calls, 0);
+        assert_eq!(state.capture().await.unwrap(), capture);
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap(), checkpoint);
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
         let mut stream = state.stream_backend(writer);
         assert!(
             stream
@@ -15284,10 +15535,7 @@ mod tests {
             stream
                 .apply_async(CommitIntent::Acquire {
                     delivery,
-                    expected: orna_stream_v1::CheckpointPrecondition {
-                        version: 0,
-                        committed: None,
-                    },
+                    expected: CheckpointPrecondition::from(&checkpoint),
                     purpose: LeasePurpose::Deliver,
                 })
                 .await
