@@ -38,6 +38,7 @@ const THIRD_TOKEN: &str = "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII";
 #[derive(Clone, Copy)]
 enum ReplacementResponse {
     Resubscribe,
+    FreshWatchDelta,
     ExistingAutomatic,
     WrongWatch,
     Correlated,
@@ -156,6 +157,40 @@ fn automatic_snapshot(watch: [u8; 16], revision: u8, text: &str) -> Vec<u8> {
     snapshot_with_request(watch, revision, text, None)
 }
 
+fn delta(watch: [u8; 16], base_revision: u8, new_revision: u8, text: &str) -> Vec<u8> {
+    let mut bytes = vec![0xa5, 0x00, 0x01, 0x01, 0x11, 0x02, 0xf6, 0x03, 0x50];
+    bytes.extend(watch);
+    bytes.extend([
+        0x04,
+        0xa4,
+        0x00,
+        base_revision,
+        0x01,
+        new_revision,
+        0x02,
+        0x81,
+        0x83,
+        0x02,
+        0x81,
+        0x82,
+        0x00,
+        0x64,
+    ]);
+    bytes.extend(b"text");
+    bytes.push(0x60 + text.len() as u8);
+    bytes.extend(text.as_bytes());
+    bytes.extend([0x03, 0x84, 0x01, 0xd8, 0x25, 0x50]);
+    bytes.extend([1; 16]);
+    bytes.extend([0x66]);
+    bytes.extend(b"sha256");
+    bytes.extend([0x58, 32]);
+    bytes.extend([2; 32]);
+    Envelope::decode(&bytes, Limits::default())
+        .unwrap()
+        .encode(Limits::default())
+        .unwrap()
+}
+
 fn session_body(token: &str, runtime: &str, limits: &str) -> String {
     format!(
         r#"{{"session":"{SESSION}","database":"{DATABASE}","runtime":"{runtime}","resume_token":"{token}","websocket_path":"/orna/live/{SESSION}","lease_ms":30000,"limits":{limits}}}"#,
@@ -238,7 +273,10 @@ async fn websocket_snapshot(
     )
     .await
     .unwrap();
-    if matches!(response, ReplacementResponse::Resubscribe) {
+    if matches!(
+        response,
+        ReplacementResponse::Resubscribe | ReplacementResponse::FreshWatchDelta
+    ) {
         let Some(Ok(WebSocketMessage::Binary(request))) = socket.next().await else {
             panic!("expected subscribe binary frame");
         };
@@ -246,7 +284,12 @@ async fn websocket_snapshot(
             Envelope::decode(&request, Limits::default()).unwrap(),
             subscribe()
         );
-        let revision = if token == FIRST_TOKEN { 0 } else { 1 };
+        let revision =
+            if token == FIRST_TOKEN || matches!(response, ReplacementResponse::FreshWatchDelta) {
+                0
+            } else {
+                1
+            };
         let text = if token == FIRST_TOKEN { "old" } else { "new" };
         socket
             .send(WebSocketMessage::Binary(
@@ -254,6 +297,26 @@ async fn websocket_snapshot(
             ))
             .await
             .unwrap();
+        if matches!(response, ReplacementResponse::FreshWatchDelta) {
+            if token == FIRST_TOKEN {
+                socket
+                    .send(WebSocketMessage::Binary(
+                        automatic_snapshot(watch, 5, "old").into(),
+                    ))
+                    .await
+                    .unwrap();
+            } else {
+                socket
+                    .send(WebSocketMessage::Binary(delta(watch, 0, 1, "newer").into()))
+                    .await
+                    .unwrap();
+                if let Ok(Some(Ok(WebSocketMessage::Binary(_)))) =
+                    tokio::time::timeout(Duration::from_millis(100), socket.next()).await
+                {
+                    panic!("fresh-watch delta must not cause a resync request");
+                }
+            }
+        }
     } else {
         let frame = match response {
             ReplacementResponse::ExistingAutomatic => automatic_snapshot([7; 16], 1, "new"),
@@ -262,6 +325,7 @@ async fn websocket_snapshot(
             ReplacementResponse::RuntimeChanged
             | ReplacementResponse::LimitsChanged
             | ReplacementResponse::TransportFailure
+            | ReplacementResponse::FreshWatchDelta
             | ReplacementResponse::Resubscribe => unreachable!(),
         };
         socket
@@ -301,14 +365,14 @@ async fn spawn_server(
         .await;
 
         let (old_socket, _) = listener.accept().await.unwrap();
-        let old_socket = websocket_snapshot(
-            old_socket,
-            ReplacementResponse::Resubscribe,
-            FIRST_TOKEN,
-            [7; 16],
-        )
-        .await
-        .expect("initial attachment socket");
+        let initial_response = if matches!(response, ReplacementResponse::FreshWatchDelta) {
+            response
+        } else {
+            ReplacementResponse::Resubscribe
+        };
+        let old_socket = websocket_snapshot(old_socket, initial_response, FIRST_TOKEN, [7; 16])
+            .await
+            .expect("initial attachment socket");
 
         let (mut resume, _) = listener.accept().await.unwrap();
         let resume_request = String::from_utf8(read_http(&mut resume).await).unwrap();
@@ -392,6 +456,59 @@ fn reconnect_resubscribes_with_a_new_watch() {
             driver.receive_once().await,
             Ok(LiveSessionEvent::SnapshotPublished { revision: 1 })
         ));
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn reconnect_resubscribe_accepts_fresh_watch_revision_zero_then_delta() {
+    run(async {
+        let (endpoint, server) = spawn_server(
+            ReplacementResponse::FreshWatchDelta,
+            RUNTIME,
+            default_limits(),
+        )
+        .await;
+        let client = client(endpoint);
+        let (session, mut driver) = initial_driver(&client).await;
+        assert!(matches!(
+            driver.receive_once().await,
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
+        assert!(matches!(
+            driver.receive_once().await,
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 5 })
+        ));
+
+        let rotated = match client
+            .reconnect_driver(&session, &mut driver, subscribe())
+            .await
+        {
+            Ok(session) => session,
+            Err(_) => panic!("fresh-watch reconnect unexpectedly failed"),
+        };
+        assert_eq!(rotated.session_id(), session.session_id());
+        assert_eq!(driver.watch(), [8; 16]);
+        assert!(matches!(
+            driver.receive_once().await,
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
+        assert_eq!(
+            driver.presentation().published().unwrap().revision(),
+            0,
+            "the replacement watch must establish its own revision-zero base"
+        );
+
+        assert!(matches!(
+            driver.receive_once().await,
+            Ok(LiveSessionEvent::DeltaPublished { revision: 1 })
+        ));
+        assert_eq!(
+            driver.presentation().published().unwrap().revision(),
+            1,
+            "the replacement watch's matching-base delta must apply"
+        );
+        assert!(!driver.presentation().awaiting_snapshot());
         server.await.unwrap();
     });
 }
