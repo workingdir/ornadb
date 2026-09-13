@@ -3272,6 +3272,9 @@ impl TableEffectHandler<'_, '_> {
                     .map_err(|error| transaction_error(table_error_code(error)))?
                     .cloned()
                     .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-MISSING"))?;
+                if old_key == new_key {
+                    return Err(transaction_error("ORNA-EVAL-TABLE-DUPLICATE"));
+                }
                 let new_components = table_key_components(new_key.as_slice(), key_fields.len())?;
                 if key_fields.is_empty() {
                     return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
@@ -5810,6 +5813,28 @@ mod transaction_admission_tests {
             parse_as: "module_unit".into(),
             source: format!("pub table Note(id: Int) {{ text: Str, }} fn main() {{ {body} }}"),
         }
+    }
+
+    #[test]
+    fn same_key_rekey_reports_duplicate_without_mutating_the_committed_row() {
+        let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
+        assert!(matches!(
+            evaluator.execute_source(&source(r#"Note.insert({ id: 7, text: "before" });"#)),
+            StageOutcome::Passed
+        ));
+
+        let outcome = evaluator.execute_source(&source(r#"Note.rekey(7, 7);"#));
+
+        assert!(matches!(
+            outcome,
+            StageOutcome::Failed(ref diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-DUPLICATE"
+        ));
+        assert!(
+            evaluator
+                .committed_row("Note", &Value::int(7.into()))
+                .is_some()
+        );
     }
 
     #[test]
