@@ -61,6 +61,44 @@ fn declared_relation_helper_shadows_the_core_filter_name() {
 }
 
 #[test]
+fn piped_relation_flat_map_rejects_wrong_argument_names_and_respects_shadowing() {
+    let invalid = analyze(&[ModuleInput::new(
+        "piped-flat-map-shape.orna",
+        r#"
+            pub table Note(id: Int) { value: Int, }
+            pub fn invalid(rows: Relation<Note>) = rows | flat_map(predicate: note => [note.value]);
+        "#,
+    )]);
+    assert!(
+        has_message(
+            &invalid,
+            "relation flat_map argument name does not match its static signature"
+        ),
+        "{:#?}",
+        invalid.diagnostics
+    );
+    let module = invalid
+        .modules
+        .values()
+        .next()
+        .expect("invalid flat_map module");
+    assert!(matches!(
+        &module.symbols["invalid"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Error
+    ));
+
+    let shadowed = analyze(&[ModuleInput::new(
+        "piped-flat-map-shadowing.orna",
+        r#"
+            pub table Note(id: Int) { value: Int, }
+            fn flat_map(rows: Relation<Note>): Relation<Note> = rows;
+            pub fn shadowed(rows: Relation<Note>) = rows | flat_map;
+        "#,
+    )]);
+    assert!(shadowed.is_ok(), "{:#?}", shadowed.diagnostics);
+}
+
+#[test]
 fn relational_callbacks_preserve_effects_and_failure_before_planning() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
@@ -72,6 +110,8 @@ fn relational_callbacks_preserve_effects_and_failure_before_planning() {
                 pub fn direct_one(rows: Relation<Note>) = one(rows);
                 pub fn predicate_one(rows: Relation<Note>) = one(rows, note => note.value > 0);
                 pub fn failed(rows: Relation<Note>) = one(rows, note => Note.one().value > 0);
+                pub fn direct_flat_map(rows: Relation<Note>) = flat_map(rows, note => [note.value]);
+                pub fn piped_flat_map(rows: Relation<Note>) = rows | flat_map(note => [note.value]);
             "#,
         )],
         &Catalogue::authoritative_core(),
@@ -95,6 +135,13 @@ fn relational_callbacks_preserve_effects_and_failure_before_planning() {
     assert!(module.symbols["direct_one"].effects.may_fail);
     assert!(module.symbols["predicate_one"].effects.may_fail);
     assert!(module.symbols["failed"].effects.may_fail);
+    for name in ["direct_flat_map", "piped_flat_map"] {
+        assert!(matches!(
+            &module.symbols[name].ty,
+            Type::Function { result, .. }
+                if result.as_ref() == &Type::Relation(Box::new(Type::Int))
+        ));
+    }
     for name in ["direct_one", "predicate_one"] {
         assert!(matches!(
             &module.symbols[name].ty,
@@ -139,6 +186,33 @@ fn relational_callbacks_reject_mutations_and_external_effects() {
         "relation callback effect diagnostic: {:#?}",
         result.diagnostics
     );
+}
+
+#[test]
+fn relation_flat_map_rejects_mutations_and_external_effects_in_both_call_forms() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "relation-flat-map-effect-rejection.orna",
+            r#"
+                pub table Note(id: Int) { value: Int, }
+                pub fn direct_mutating(rows: Relation<Note>) = flat_map(rows, note => {
+                    Note.insert({ id: note.id, value: note.value });
+                    [note.value]
+                });
+                pub fn piped_external(rows: Relation<Note>) = rows | flat_map(note => [std.net.http.get("https://example.com")]);
+            "#,
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    let rejections = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.code() == DIAG_TYPE
+                && diagnostic.message() == "relation query callback must be read-only"
+        })
+        .count();
+    assert_eq!(rejections, 2, "{:#?}", result.diagnostics);
 }
 
 #[test]
