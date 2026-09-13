@@ -13484,7 +13484,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_stream_source_resumes_after_a_committed_cancellation_boundary() {
+    async fn list_stream_source_rolls_back_at_a_cancellation_boundary() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(44)).await.unwrap();
@@ -13508,10 +13508,10 @@ mod tests {
         else {
             panic!("first list run must end at its cancellation boundary");
         };
-        assert_eq!(delivered, 1);
+        assert_eq!(delivered, 0);
         assert_eq!(checkpoint.key, key);
-        assert_eq!(checkpoint.version, 1);
-        assert_eq!(checkpoint.committed.unwrap().token.as_str(), "1");
+        assert_eq!(checkpoint.version, 0);
+        assert_eq!(checkpoint.committed, None);
         assert_eq!(handler.calls, 1);
         drop(state);
 
@@ -13530,11 +13530,11 @@ mod tests {
         else {
             panic!("reopened list run must exhaust after the durable successor");
         };
-        assert_eq!(delivered, 2);
+        assert_eq!(delivered, 3);
         assert_eq!(checkpoint.key, key);
         assert_eq!(checkpoint.version, 3);
         assert_eq!(checkpoint.committed.unwrap().token.as_str(), "3");
-        assert_eq!(handler.calls, 2);
+        assert_eq!(handler.calls, 3);
     }
 
     #[tokio::test]
