@@ -93,3 +93,91 @@ fn non_redacted_diagnostics_keep_their_existing_text_and_metadata() {
     assert_eq!(json["redacted"], false);
     assert_eq!(json["causes"][0]["redacted"], false);
 }
+
+#[test]
+fn diagnostic_spans_accept_utf8_repository_relative_paths_and_round_trip() {
+    let span = DiagnosticSpan::new(
+        Snapshot::Commit {
+            database: [7; 16],
+            algorithm: GitHash::Sha256,
+            oid: vec![9; 32],
+        },
+        "src/naïve/λ.orna",
+        4.into(),
+        9.into(),
+    )
+    .unwrap();
+
+    assert_eq!(span.file_path, "src/naïve/λ.orna");
+    let json = serde_json::to_value(
+        Diagnostic::new(
+            SafeText::new("ORNA-E-UTF8").unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::new("safe message").unwrap(),
+        )
+        .unwrap()
+        .with_span(span),
+    )
+    .unwrap();
+    assert_eq!(json["spans"][0]["file-path"], "src/naïve/λ.orna");
+}
+
+#[test]
+fn diagnostic_spans_reject_unsafe_repository_paths() {
+    let snapshot = Snapshot::Commit {
+        database: [7; 16],
+        algorithm: GitHash::Sha256,
+        oid: vec![9; 32],
+    };
+    for path in [
+        "",
+        "/src/main.orna",
+        "src//main.orna",
+        "./src/main.orna",
+        "src/../main.orna",
+        "src\\main.orna",
+        "..\\main.orna",
+        "C:/src/main.orna",
+        "c:src/main.orna",
+        "\\\\server\\share\\main.orna",
+        "src/\u{0}main.orna",
+        "src/\nmain.orna",
+    ] {
+        assert!(
+            DiagnosticSpan::new(snapshot.clone(), path, 0.into(), 0.into()).is_err(),
+            "unsafe diagnostic path was admitted: {path:?}"
+        );
+    }
+    assert!(DiagnosticSpan::new(snapshot, "<redacted>", 0.into(), 0.into()).is_ok());
+}
+
+#[test]
+fn diagnostic_decode_rejects_invalid_utf8_in_a_span_path() {
+    let diagnostic = Diagnostic::new(
+        SafeText::new("ORNA-E-UTF8").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new("safe message").unwrap(),
+    )
+    .unwrap()
+    .with_span(
+        DiagnosticSpan::new(
+            Snapshot::Commit {
+                database: [7; 16],
+                algorithm: GitHash::Sha256,
+                oid: vec![9; 32],
+            },
+            "src/main.orna",
+            0.into(),
+            1.into(),
+        )
+        .unwrap(),
+    );
+    let mut encoded = diagnostic.encode_ovb().unwrap();
+    let offset = encoded
+        .windows(b"src/main.orna".len())
+        .position(|window| window == b"src/main.orna")
+        .unwrap();
+    encoded[offset] = 0xff;
+
+    assert!(Diagnostic::decode_ovb(&encoded).is_err());
+}
