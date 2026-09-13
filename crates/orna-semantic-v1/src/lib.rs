@@ -1521,6 +1521,11 @@ fn type_of(ty: &TypeExpr) -> Type {
         }
         TypeExpr::Name {
             path, arguments, ..
+        } if path.as_slice() == ["Relation"] && arguments.len() == 1 => {
+            Type::Relation(Box::new(type_of(&arguments[0])))
+        }
+        TypeExpr::Name {
+            path, arguments, ..
         } => Type::Applied {
             base: path.join("."),
             arguments: arguments.iter().map(type_of).collect(),
@@ -5739,6 +5744,9 @@ fn infer_relation_call(
     if !matches!(name, "exists" | "window") {
         return None;
     }
+    if !root_collection_intrinsic_is_unshadowed(name, scope, local) {
+        return None;
+    }
     if name == "window" && !matches!(callee, Expr::Name { .. }) {
         return None;
     }
@@ -5890,7 +5898,17 @@ fn infer_relation_collection_call(
 
     let inferred = arguments
         .iter()
-        .map(|argument| infer(&argument.value, scope, local, diagnostics))
+        .enumerate()
+        .map(|(index, argument)| {
+            if Some(index) == callback_index {
+                Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                }
+            } else {
+                infer(&argument.value, scope, local, diagnostics)
+            }
+        })
         .collect::<Vec<_>>();
     let mut effects = EffectSummary::default();
     for value in &inferred {
@@ -6305,6 +6323,7 @@ fn infer_success_pipeline(
         } = rhs
         && let Expr::Name { text, .. } = callee.as_ref()
         && text == "window"
+        && root_collection_intrinsic_is_unshadowed("window", scope, local)
     {
         let window = infer_relation_window(
             arguments,
@@ -6326,6 +6345,7 @@ fn infer_success_pipeline(
         } = rhs
         && let Expr::Name { text, .. } = callee.as_ref()
         && text == "first"
+        && root_collection_intrinsic_is_unshadowed("first", scope, local)
         && arguments.is_empty()
     {
         return Inferred {
@@ -6555,7 +6575,21 @@ fn infer_success_pipeline(
         && let Expr::Name { text, .. } = callee
         && matches!(
             text.as_str(),
-            "every" | "exists" | "first" | "one" | "map" | "flat_map" | "sum" | "min" | "max"
+            "filter"
+                | "every"
+                | "exists"
+                | "first"
+                | "one"
+                | "map"
+                | "flat_map"
+                | "sort_by"
+                | "take"
+                | "drop"
+                | "count"
+                | "window"
+                | "sum"
+                | "min"
+                | "max"
         )
         && !root_collection_intrinsic_is_unshadowed(text, scope, local)
     {
@@ -6573,6 +6607,7 @@ fn infer_success_pipeline(
     if let Expr::Name { text, .. } = rhs
         && text == "count"
         && matches!(input.ty, Type::Relation(_))
+        && root_collection_intrinsic_is_unshadowed("count", scope, local)
     {
         return Inferred {
             ty: Type::Int,
@@ -6759,10 +6794,18 @@ fn infer_success_pipeline(
         {
             (Type::Relation(Box::new(element.clone())), Some(Type::Bool))
         }
-        ("one", false, []) => (element.clone(), None),
-        ("one", false, [_]) => (element.clone(), Some(Type::Bool)),
+        ("one", false, []) if root_collection_intrinsic_is_unshadowed("one", scope, local) => {
+            (element.clone(), None)
+        }
+        ("one", false, [_]) if root_collection_intrinsic_is_unshadowed("one", scope, local) => {
+            (element.clone(), Some(Type::Bool))
+        }
         ("last", false, []) => (Type::Optional(Box::new(element.clone())), None),
-        ("count", false, []) => (Type::Int, None),
+        ("count", false, [])
+            if root_collection_intrinsic_is_unshadowed("count", scope, local) =>
+        {
+            (Type::Int, None)
+        }
         ("pairs", false, []) => (
             Type::Relation(Box::new(Type::Tuple(vec![
                 element.clone(),
