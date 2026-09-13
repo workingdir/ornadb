@@ -24,10 +24,11 @@ use std::{
 
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    RuntimeError, RuntimeIdentity, RuntimeState, StreamCheckpoint, StreamFailurePayloadFuture,
-    StreamFailurePayloadProvider, StreamHandler, StreamHandlerResult, StreamItem,
-    StreamMutationBatch, StreamSource, StreamSourceDescriptor, StreamSourceKind, StreamSourcePoll,
-    StreamStepError, WriterLease,
+    RuntimeError, RuntimeIdentity, RuntimeState, RuntimeTableRows, StreamCheckpoint,
+    StreamFailurePayloadFuture, StreamFailurePayloadProvider, StreamHandler, StreamHandlerResult,
+    StreamItem, StreamMutationBatch, StreamRunGate, StreamSource, StreamSourceDescriptor,
+    StreamSourceKind, StreamSourcePoll, StreamStepError, StreamTableCandidateValidator,
+    StreamValidatedTableMutationBatch, TableMutation, WriterLease,
 };
 use orna_stream_v1::{
     AsyncCheckpointBackend, Checkpoint, CommitIntent, CommitResult, Component, ConsumerIdentity,
@@ -353,6 +354,84 @@ impl StreamHandler for CountingHandler {
     }
 }
 
+struct OneItemSource {
+    key: orna_stream_v1::CheckpointKey,
+    item: Option<StreamItem>,
+    polls: usize,
+}
+
+impl StreamSource for OneItemSource {
+    type NextFuture<'a>
+        = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
+    where
+        Self: 'a;
+    type WaitFuture<'a>
+        = Ready<Result<(), SafeDiagnostic>>
+    where
+        Self: 'a;
+
+    fn descriptor(&self) -> StreamSourceDescriptor {
+        StreamSourceDescriptor {
+            kind: StreamSourceKind::Finite,
+            replayable: true,
+        }
+    }
+
+    fn checkpoint_key(&self) -> orna_stream_v1::CheckpointKey {
+        self.key.clone()
+    }
+
+    fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
+        self.polls += 1;
+        ready(Ok(self
+            .item
+            .take()
+            .map_or(StreamSourcePoll::Exhausted, |item| {
+                StreamSourcePoll::Item(Box::new(item))
+            })))
+    }
+
+    fn wait<'a>(
+        &'a mut self,
+        _: &'a dyn orna_runtime_v1::StreamRunControl,
+    ) -> Self::WaitFuture<'a> {
+        ready(Ok(()))
+    }
+}
+
+struct CancelAfterTableCallback {
+    control: StreamRunGate,
+}
+
+impl StreamHandler for CancelAfterTableCallback {
+    fn handle(&mut self, _: &StreamItem) -> StreamHandlerResult {
+        assert!(
+            self.control.cancel(),
+            "callback must own cancellation request"
+        );
+        StreamHandlerResult::CommitValidatedTable(StreamValidatedTableMutationBatch {
+            mutations: vec![
+                TableMutation::new([31; 16], "books", vec![4], Some(vec![12])).unwrap(),
+            ],
+            next_digest: [9; 32],
+            validator: Box::new(BooksValidator),
+        })
+    }
+}
+
+struct BooksValidator;
+
+impl StreamTableCandidateValidator for BooksValidator {
+    fn tables(&self) -> &[String] {
+        static TABLES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        TABLES.get_or_init(|| vec!["books".into()])
+    }
+
+    fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct CountingProvider {
     calls: Cell<usize>,
@@ -642,6 +721,74 @@ async fn replay_cancel_counts_one_attempt_without_moving_checkpoint() {
     assert_eq!(cancelled.diagnostic, fixture.skipped.diagnostic);
     assert_eq!(fixture.state.capture().await.unwrap(), capture);
     fixture.assert_one_replay_attempt(&cancelled);
+}
+
+#[tokio::test]
+async fn cancellation_after_callback_discards_staged_table_and_checkpoint() {
+    let (directory, repository) = repository();
+    let state = RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [11; 16],
+            repository_id: [12; 16],
+        },
+        [13; 32],
+    )
+    .await
+    .expect("open callback cancellation fixture");
+    let writer = state.acquire_lease([14; 16]).await.expect("acquire writer");
+    let item_delivery = delivery();
+    let key = item_delivery.checkpoint_key();
+    let gate = StreamRunGate::new();
+    let mut source = OneItemSource {
+        key: key.clone(),
+        item: Some(StreamItem {
+            delivery: item_delivery,
+            payload: PAYLOAD.to_vec(),
+        }),
+        polls: 0,
+    };
+    let mut handler = CancelAfterTableCallback {
+        control: gate.clone(),
+    };
+
+    assert!(matches!(
+        state
+            .run_stream(writer, &key, &mut source, &mut handler, &gate)
+            .await
+            .unwrap(),
+        orna_runtime_v1::StreamRunOutcome::Cancelled {
+            delivered: 0,
+            checkpoint: StreamCheckpoint {
+                version: 0,
+                committed: None,
+                ..
+            }
+        }
+    ));
+    assert_eq!(source.polls, 1);
+    assert_eq!(
+        state.committed_table_row("books", &[4]).await.unwrap(),
+        None,
+        "ORNA-TXN-002 / ORNA-CANCEL-001: staged table mutation must not publish"
+    );
+    assert!(
+        state.pending().await.unwrap().is_empty(),
+        "ORNA-CP-005: cancelled delivery leaves no pending mutation"
+    );
+    assert_eq!(
+        state
+            .stream_backend(writer)
+            .checkpoint_async(&key)
+            .await
+            .unwrap()
+            .version,
+        0,
+        "ORNA-SYS-062 / ORNA-CANCEL-002: cancellation leaves checkpoint unchanged"
+    );
+    drop(state);
+    drop(repository);
+    drop(directory);
 }
 
 #[tokio::test]
