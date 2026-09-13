@@ -3749,31 +3749,29 @@ impl RuntimeState {
                     _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
                 }
             }
-            StreamHandlerResult::CommitTable(batch) => {
-                let capture = self.capture().await.map_err(StreamStepError::Runtime)?;
-                let faults = NoFault;
-                let lease_for_cleanup = lease.clone();
-                let result = self
-                    .commit_stream_table_delivery(StreamTableDeliveryCommit {
-                        writer,
-                        expected_capture: &capture,
-                        mutations: &batch.mutations,
-                        next_digest: batch.next_digest,
-                        delivery: lease_for_cleanup.clone(),
-                        expected_stream: expected,
-                        faults: &faults,
-                    })
+            // A typed table result without a validator cannot cross the
+            // durable boundary. Callers must use CommitValidatedTable so the
+            // candidate is checked in the same transaction as its writes.
+            StreamHandlerResult::CommitTable(_) => {
+                // Treat the missing validator as a handler failure so the
+                // acquired delivery is durably released and retryable. No
+                // table mutation, checkpoint, or capture is committed.
+                self.require_owner(&self.connection, writer)
+                    .await
+                    .map_err(StreamStepError::Runtime)?;
+                let failure_payload = source.failure_payload(&item);
+                let diagnostic = SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                };
+                match self
+                    .stream_backend(writer)
+                    .fail_with_payload_async(lease, diagnostic, failure_payload)
                     .await
                     .map_err(StreamStepError::Runtime)?
-                    .1;
-                match result {
-                    CommitResult::CheckpointAdvanced { checkpoint } => {
-                        Ok(StreamStep::Committed { checkpoint })
-                    }
-                    CommitResult::Rejected(reason) => {
-                        self.release_stream_lease(writer, lease_for_cleanup).await?;
-                        Ok(StreamStep::Rejected(reason))
-                    }
+                {
+                    CommitResult::Failed { failure } => Ok(StreamStep::Failed { failure }),
+                    CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
                     _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
                 }
             }
@@ -4883,37 +4881,19 @@ impl RuntimeState {
         .await
     }
 
-    /// Commits typed table mutations and the corresponding stream checkpoint
-    /// in one writer-fenced transaction. Rejected or faulted deliveries leave
-    /// both the table rows and stream checkpoint unchanged.
+    /// Rejects the legacy typed delivery entry point.
+    ///
+    /// Typed table mutations must use
+    /// [`RuntimeState::commit_stream_validated_table_delivery`], which checks
+    /// the candidate relation before committing rows or the stream
+    /// checkpoint.
     pub async fn commit_stream_table_delivery(
         &self,
-        request: StreamTableDeliveryCommit<'_>,
+        _request: StreamTableDeliveryCommit<'_>,
     ) -> Result<(CwdCapture, CommitResult), RuntimeError> {
-        let StreamTableDeliveryCommit {
-            writer,
-            expected_capture,
-            mutations,
-            next_digest,
-            delivery,
-            expected_stream,
-            faults,
-        } = request;
-        let encoded = mutations
-            .iter()
-            .map(TableMutation::runtime_mutation)
-            .collect::<Result<Vec<_>, _>>()?;
-        self.commit_stream_delivery_inner(StreamDeliveryParts {
-            writer,
-            expected_capture,
-            mutations: &encoded,
-            table_mutations: mutations,
-            next_digest,
-            delivery,
-            expected_stream,
-            faults,
-        })
-        .await
+        // This legacy entry point has no candidate validator. Refuse it
+        // before observing or mutating durable state.
+        Err(RuntimeError::RecoveryInvalid)
     }
 
     /// Commits typed table mutations and a stream checkpoint only after a
@@ -5077,12 +5057,10 @@ impl RuntimeState {
         } = request;
         validate_id(writer.owner_id)?;
         validate_stream_mutations(mutations, next_digest)?;
-        let encoded_table_mutations = table_mutations
-            .iter()
-            .map(TableMutation::runtime_mutation)
-            .collect::<Result<Vec<_>, _>>()?;
-        if !table_mutations.is_empty() && encoded_table_mutations.as_slice() != mutations {
-            return Err(RuntimeError::InvalidTableMutation);
+        if !table_mutations.is_empty() {
+            // Typed replay must use commit_stream_validated_table_replay so
+            // assertion validation is part of the durable transaction.
+            return Err(RuntimeError::RecoveryInvalid);
         }
         let current = self.capture().await?;
         if &current != expected_capture {
@@ -5488,26 +5466,17 @@ impl RuntimeState {
                 .await
                 .map(|(_, result)| result)
                 .map_err(StreamStepError::Runtime),
-            StreamHandlerResult::CommitTable(batch) => {
-                let mutations = batch
-                    .mutations
-                    .iter()
-                    .map(TableMutation::runtime_mutation)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(StreamStepError::Runtime)?;
-                self.commit_stream_replay(StreamReplayCommit {
+            StreamHandlerResult::CommitTable(_) => self
+                .fail_stream_replay(
                     writer,
-                    expected_capture: &expected_capture,
-                    mutations: &mutations,
-                    table_mutations: &batch.mutations,
-                    next_digest: batch.next_digest,
-                    grant,
-                    faults: &NoFault,
-                })
+                    &grant,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                )
                 .await
-                .map(|(_, result)| result)
-                .map_err(StreamStepError::Runtime)
-            }
+                .map_err(StreamStepError::Runtime),
             StreamHandlerResult::CommitValidatedTable(mut batch) => {
                 match self
                     .commit_stream_validated_table_replay(StreamValidatedTableReplayCommit {
@@ -12891,9 +12860,13 @@ mod tests {
     impl StreamHandler for TableCommitHandler {
         fn handle(&mut self, _: &StreamItem) -> StreamHandlerResult {
             self.calls += 1;
-            StreamHandlerResult::CommitTable(StreamTableMutationBatch {
+            StreamHandlerResult::CommitValidatedTable(StreamValidatedTableMutationBatch {
                 mutations: vec![table_mutation(5, 1, Some(9))],
                 next_digest: digest(9),
+                validator: Box::new(TablesOnlyValidator {
+                    tables: vec!["books".into()],
+                    calls: 0,
+                }),
             })
         }
     }
@@ -12911,6 +12884,25 @@ mod tests {
         fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
             self.calls += 1;
             Ok(())
+        }
+    }
+
+    struct RejectingValidator {
+        tables: Vec<String>,
+        calls: usize,
+    }
+
+    impl StreamTableCandidateValidator for RejectingValidator {
+        fn tables(&self) -> &[String] {
+            &self.tables
+        }
+
+        fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+            self.calls += 1;
+            Err(SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Permanent,
+            })
         }
     }
 
@@ -13417,6 +13409,58 @@ mod tests {
                 .digest,
             digest(9)
         );
+    }
+
+    #[tokio::test]
+    async fn stream_runner_rejects_unvalidated_typed_table_delivery() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("raw-typed:one", "raw-typed:two");
+        let key = delivery.checkpoint_key();
+        let capture = state.capture().await.unwrap();
+        let mut source = TestSource {
+            key: key.clone(),
+            item: Some(StreamItem {
+                delivery: delivery.clone(),
+                payload: vec![4, 5, 6],
+            }),
+            polls: 0,
+        };
+        let mut handler = TestHandler {
+            result: Some(StreamHandlerResult::CommitTable(StreamTableMutationBatch {
+                mutations: vec![table_mutation(6, 1, Some(9))],
+                next_digest: digest(9),
+            })),
+            calls: 0,
+        };
+
+        let failure = match state
+            .run_stream_once(writer, &key, &mut source, &mut handler)
+            .await
+            .unwrap()
+        {
+            StreamStep::Failed { failure } => failure,
+            other => panic!("unvalidated typed delivery must fail: {other:?}"),
+        };
+        assert_eq!(failure.identity, FailureIdentity(delivery));
+        assert_eq!(
+            failure.diagnostic,
+            SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Permanent,
+            }
+        );
+        assert_eq!(failure.attempts, 1);
+        assert_eq!(handler.calls, 1);
+        assert_eq!(source.polls, 1);
+        assert_eq!(state.capture().await.unwrap(), capture);
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap().version, 0);
     }
 
     #[tokio::test]
@@ -16780,10 +16824,16 @@ mod tests {
         };
         let mut handler = ReplayHandler {
             payload: Vec::new(),
-            result: Some(StreamHandlerResult::CommitTable(StreamTableMutationBatch {
-                mutations: vec![table_mutation(31, 4, Some(12))],
-                next_digest: digest(99),
-            })),
+            result: Some(StreamHandlerResult::CommitValidatedTable(
+                StreamValidatedTableMutationBatch {
+                    mutations: vec![table_mutation(31, 4, Some(12))],
+                    next_digest: digest(99),
+                    validator: Box::new(TablesOnlyValidator {
+                        tables: vec!["books".into()],
+                        calls: 0,
+                    }),
+                },
+            )),
         };
 
         let result = state
@@ -16876,7 +16926,10 @@ mod tests {
             protected_replay_fixture(&state, writer, "typed-replay-fault", digest(5)).await;
         let capture = state.capture().await.unwrap();
         let table = table_mutation(32, 5, Some(13));
-        let encoded = table.runtime_mutation().unwrap();
+        let mut validator = TablesOnlyValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+        };
         assert!(
             state
                 .claim_stream_replay(writer, &grant)
@@ -16885,20 +16938,22 @@ mod tests {
                 .is_ok()
         );
 
-        assert_eq!(
+        assert!(matches!(
             state
-                .commit_stream_replay(StreamReplayCommit {
+                .commit_stream_validated_table_replay(StreamValidatedTableReplayCommit {
                     writer,
                     expected_capture: &capture,
-                    mutations: std::slice::from_ref(&encoded),
-                    table_mutations: std::slice::from_ref(&table),
+                    mutations: std::slice::from_ref(&table),
                     next_digest: digest(101),
                     grant: grant.clone(),
+                    validator: &mut validator,
                     faults: &Fail(FaultPoint::AfterMutation),
                 })
                 .await,
-            Err(RuntimeError::FaultInjected(FaultPoint::AfterMutation))
-        );
+            Err(StreamTableDeliveryError::Runtime(
+                RuntimeError::FaultInjected(FaultPoint::AfterMutation)
+            ))
+        ));
         assert_eq!(
             state.committed_table_row("books", &[5]).await.unwrap(),
             None
@@ -18239,14 +18294,38 @@ mod tests {
             }
         };
 
+        let key = delivery_lease.delivery.checkpoint_key();
+        assert_eq!(
+            state
+                .commit_stream_table_delivery(StreamTableDeliveryCommit {
+                    writer,
+                    expected_capture: &capture,
+                    mutations: &[table_mutation(5, 1, Some(9))],
+                    next_digest: digest(9),
+                    delivery: delivery_lease.clone(),
+                    expected_stream: expected.clone(),
+                    faults: &NoFault,
+                })
+                .await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(state.capture().await.unwrap(), capture);
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap().version, 0);
+
+        let mut validator = TablesOnlyValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+        };
         let (next, result) = state
-            .commit_stream_table_delivery(StreamTableDeliveryCommit {
+            .commit_stream_validated_table_delivery(StreamValidatedTableDeliveryCommit {
                 writer,
                 expected_capture: &capture,
                 mutations: &[table_mutation(5, 1, Some(9))],
                 next_digest: digest(9),
                 delivery: delivery_lease,
                 expected_stream: expected,
+                validator: &mut validator,
                 faults: &NoFault,
             })
             .await
@@ -18346,6 +18425,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validated_stream_delivery_rejection_preserves_all_durable_state() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        let delivery = stream_delivery("rejecting-validator", "rejecting-validator-next");
+        let key = delivery.checkpoint_key();
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let lease = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Acquire {
+                delivery,
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected delivery lease result: {other:?}"),
+        };
+        let before_checkpoint = state.stream_checkpoint(&key).await.unwrap();
+        let before_failure = state
+            .stream_backend(writer)
+            .failure_async(&FailureIdentity(lease.delivery.clone()))
+            .await
+            .unwrap();
+        let mutation = table_mutation(6, 1, Some(10));
+        let mut validator = RejectingValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+        };
+
+        assert!(matches!(
+            state
+                .commit_stream_validated_table_delivery(StreamValidatedTableDeliveryCommit {
+                    writer,
+                    expected_capture: &capture,
+                    mutations: std::slice::from_ref(&mutation),
+                    next_digest: digest(10),
+                    delivery: lease.clone(),
+                    expected_stream: expected,
+                    validator: &mut validator,
+                    faults: &NoFault,
+                })
+                .await,
+            Err(StreamTableDeliveryError::ValidationFailed(SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Permanent,
+            }))
+        ));
+        assert_eq!(validator.calls, 1);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(state.capture().await.unwrap(), capture);
+        assert_eq!(
+            state.stream_checkpoint(&key).await.unwrap(),
+            before_checkpoint
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_async(&FailureIdentity(lease.delivery.clone()))
+                .await
+                .unwrap(),
+            before_failure
+        );
+    }
+
+    #[tokio::test]
     async fn typed_stream_delivery_rolls_back_staged_row_and_checkpoint_on_fault_or_stale_cas() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -18372,21 +18527,28 @@ mod tests {
             }
         };
         let key = delivery_lease.delivery.checkpoint_key();
+        let mut validator = TablesOnlyValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+        };
 
-        assert_eq!(
+        assert!(matches!(
             state
-                .commit_stream_table_delivery(StreamTableDeliveryCommit {
+                .commit_stream_validated_table_delivery(StreamValidatedTableDeliveryCommit {
                     writer,
                     expected_capture: &capture,
                     mutations: &[table_mutation(7, 2, Some(8))],
                     next_digest: digest(8),
                     delivery: delivery_lease.clone(),
                     expected_stream: expected.clone(),
+                    validator: &mut validator,
                     faults: &Fail(FaultPoint::AfterCheckpoint),
                 })
                 .await,
-            Err(RuntimeError::FaultInjected(FaultPoint::AfterCheckpoint))
-        );
+            Err(StreamTableDeliveryError::Runtime(
+                RuntimeError::FaultInjected(FaultPoint::AfterCheckpoint)
+            ))
+        ));
         assert_eq!(
             state.committed_table_row("books", &[2]).await.unwrap(),
             None
@@ -18395,7 +18557,7 @@ mod tests {
         assert_eq!(state.stream_checkpoint(&key).await.unwrap().committed, None);
 
         let (unchanged, result) = state
-            .commit_stream_table_delivery(StreamTableDeliveryCommit {
+            .commit_stream_validated_table_delivery(StreamValidatedTableDeliveryCommit {
                 writer,
                 expected_capture: &capture,
                 mutations: &[table_mutation(8, 3, Some(9))],
@@ -18405,6 +18567,7 @@ mod tests {
                     version: 1,
                     committed: None,
                 },
+                validator: &mut validator,
                 faults: &NoFault,
             })
             .await
