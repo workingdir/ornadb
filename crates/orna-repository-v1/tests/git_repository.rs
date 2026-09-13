@@ -3010,6 +3010,165 @@ fn private_candidate_uses_head_and_preserves_ordinary_cwd_state() {
 }
 
 #[test]
+fn capture_rejects_a_tracked_case_folded_loose_sibling_without_mutation() {
+    let root = repository();
+    fs::create_dir_all(root.path().join("Contact")).unwrap();
+    fs::write(root.path().join("Contact/Alice.orna"), b"committed row\n").unwrap();
+    git(root.path(), &["add", "Contact/Alice.orna"]);
+    git(root.path(), &["commit", "-m", "add managed row"]);
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let proposed = ManagedPath::new("Contact/alice.orna").unwrap();
+    let before = git_state(&repo, root.path());
+
+    assert!(matches!(
+        repo.capture_managed_publication_state(&head, &index, &[proposed.clone()]),
+        Err(orna_repository_v1::RepositoryError::ManagedContentConflict)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert_eq!(
+        fs::read(root.path().join("Contact/Alice.orna")).unwrap(),
+        b"committed row\n"
+    );
+    assert!(!root.path().join(proposed.as_path()).exists());
+}
+
+#[test]
+fn capture_rejects_a_case_folded_table_root_without_mutation() {
+    let root = repository();
+    fs::create_dir_all(root.path().join("Contact")).unwrap();
+    fs::write(root.path().join("Contact/Alice.orna"), b"committed row\n").unwrap();
+    git(root.path(), &["add", "Contact/Alice.orna"]);
+    git(root.path(), &["commit", "-m", "add managed row"]);
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let proposed = ManagedPath::new("contact/Alice.orna").unwrap();
+    let before = git_state(&repo, root.path());
+
+    assert!(matches!(
+        repo.capture_managed_publication_state(&head, &index, &[proposed.clone()]),
+        Err(orna_repository_v1::RepositoryError::ManagedContentConflict)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert_eq!(
+        fs::read(root.path().join("Contact/Alice.orna")).unwrap(),
+        b"committed row\n"
+    );
+    assert!(!root.path().join(proposed.as_path()).exists());
+}
+
+#[test]
+fn capture_rejects_case_folded_planned_loose_siblings_without_mutation() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let upper = ManagedPath::new("Contact/Alice.orna").unwrap();
+    let lower = ManagedPath::new("Contact/alice.orna").unwrap();
+    let before = git_state(&repo, root.path());
+
+    assert!(matches!(
+        repo.capture_managed_publication_state(&head, &index, &[upper, lower]),
+        Err(orna_repository_v1::RepositoryError::ManagedContentConflict)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert!(!root.path().join("Contact/Alice.orna").exists());
+    assert!(!root.path().join("Contact/alice.orna").exists());
+}
+
+#[test]
+fn private_candidate_accepts_a_case_only_rekey_after_deleting_the_old_path() {
+    let root = repository();
+    fs::create_dir_all(root.path().join("Contact")).unwrap();
+    fs::write(root.path().join("Contact/Alice.orna"), b"old row\n").unwrap();
+    git(root.path(), &["add", "Contact/Alice.orna"]);
+    git(root.path(), &["commit", "-m", "add managed row"]);
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let old_path = ManagedPath::new("Contact/Alice.orna").unwrap();
+    let new_path = ManagedPath::new("Contact/alice.orna").unwrap();
+    let before = git_state(&repo, root.path());
+
+    assert_eq!(
+        repo.capture_managed_publication_state(
+            &head,
+            &index,
+            &[old_path.clone(), new_path.clone()]
+        )
+        .unwrap(),
+        vec![Some(b"old row\n".to_vec()), None]
+    );
+    let candidate = repo
+        .build_private_commit(
+            &head,
+            &[
+                orna_repository_v1::ManagedFileChange::new(old_path, None),
+                orna_repository_v1::ManagedFileChange::new(
+                    new_path,
+                    Some(b"rekeyed row\n".to_vec()),
+                ),
+            ],
+            "orna: case-only re-key",
+        )
+        .unwrap();
+
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert_eq!(
+        git(
+            root.path(),
+            &[
+                "ls-tree",
+                "-r",
+                "--name-only",
+                candidate.commit().as_str(),
+                "--",
+                "Contact/alice.orna",
+            ],
+        ),
+        "Contact/alice.orna"
+    );
+    assert_eq!(
+        git(
+            root.path(),
+            &[
+                "ls-tree",
+                "-r",
+                "--name-only",
+                candidate.commit().as_str(),
+                "--",
+                "Contact/Alice.orna",
+            ],
+        ),
+        ""
+    );
+}
+
+#[test]
+fn capture_allows_an_exact_tracked_loose_path_update() {
+    let root = repository();
+    fs::create_dir_all(root.path().join("Contact")).unwrap();
+    fs::write(root.path().join("Contact/Alice.orna"), b"committed row\n").unwrap();
+    git(root.path(), &["add", "Contact/Alice.orna"]);
+    git(root.path(), &["commit", "-m", "add managed row"]);
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let path = ManagedPath::new("Contact/Alice.orna").unwrap();
+
+    assert_eq!(
+        repo.capture_managed_publication_state(&head, &index, &[path.clone(), path])
+            .unwrap(),
+        vec![
+            Some(b"committed row\n".to_vec()),
+            Some(b"committed row\n".to_vec())
+        ]
+    );
+}
+
+#[test]
 fn private_candidate_advances_current_branch_with_compare_and_set() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
