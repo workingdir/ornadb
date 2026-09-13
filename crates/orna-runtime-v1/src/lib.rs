@@ -3720,7 +3720,23 @@ impl RuntimeState {
             }
         };
 
-        match handler.handle(&item) {
+        let handler_result = handler.handle(&item);
+        if control.cancelled() {
+            let result = self
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Cancel { lease })
+                .await
+                .map_err(StreamStepError::Runtime)?;
+            return match result {
+                CommitResult::Cancelled { checkpoint, .. } => {
+                    Ok(StreamStep::Cancelled { checkpoint })
+                }
+                CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
+                _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+            };
+        }
+
+        match handler_result {
             StreamHandlerResult::Commit(batch) => {
                 let capture = self.capture().await.map_err(StreamStepError::Runtime)?;
                 let faults = NoFault;
