@@ -284,7 +284,7 @@ fn binary_check_accepts_a_core_only_project_without_std() {
 }
 
 #[test]
-fn binary_check_and_run_reject_an_uncaptured_standard_import() {
+fn binary_repl_executes_pinned_standard_math_but_other_paths_reject_it() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
@@ -353,21 +353,61 @@ fn binary_check_and_run_reject_an_uncaptured_standard_import() {
     assert!(stream.stdout.is_empty());
     assert_eq!(stream.stderr, check.stderr);
 
+    let repl_directory = tempfile::tempdir().expect("standard-free REPL project directory");
+    std::fs::write(
+        repl_directory.path().join("main.orna"),
+        "pub fn main(): Int = 42;",
+    )
+    .expect("standard-free project source");
+    initialize_project(repl_directory.path());
+
     let repl = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
-            directory.path().to_str().expect("UTF-8 path"),
+            repl_directory.path().to_str().expect("UTF-8 path"),
             "repl",
         ])
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("CLI process");
-    assert!(!repl.status.success());
-    assert!(repl.stdout.is_empty());
-    assert_eq!(
-        repl.stderr,
-        b"error[E2101]: standard library imports are unsupported by this CLI\nhelp: remove standard-library imports; this CLI currently admits core-only projects\n"
-    );
+    let mut repl = repl;
+    repl.stdin
+        .take()
+        .expect("REPL stdin")
+        .write_all(b"use std.math;\nmath.increment(41)\n:quit\n")
+        .expect("REPL input");
+    let repl = repl.wait_with_output().expect("REPL process output");
+    assert!(repl.status.success());
+    assert_eq!(repl.stdout, b"> > 42 : Int\n> ");
+    assert!(repl.stderr.is_empty());
+
+    let mut unlisted_repl = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            repl_directory.path().to_str().expect("UTF-8 path"),
+            "repl",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("unlisted CLI process");
+    unlisted_repl
+        .stdin
+        .take()
+        .expect("unlisted REPL stdin")
+        .write_all(b"use std.collection;\n:quit\n")
+        .expect("unlisted REPL input");
+    let unlisted_repl = unlisted_repl
+        .wait_with_output()
+        .expect("unlisted REPL process output");
+    assert!(unlisted_repl.status.success());
+    assert_eq!(unlisted_repl.stdout, b"> error[ORNA-S010-IMPORT]\n> ");
+    assert!(unlisted_repl.stderr.is_empty());
 }
 
 #[test]

@@ -15,7 +15,9 @@ use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
     ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
 };
-use orna_evaluator_v1::{Environment, Limits};
+use orna_evaluator_v1::{
+    Environment, Limits, reference_standard_profile, reference_standard_sources,
+};
 use orna_foundation_v1::{OvbRaw, Value};
 use orna_runtime_v1::RuntimeIdentity;
 
@@ -960,10 +962,26 @@ fn repl_session(endpoint: &Endpoint) -> Result<AdmittedReplSession, Diagnostic> 
         Endpoint::Path(_) | Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => true,
     };
     if project_context {
-        let project = load_project(endpoint)?;
+        let path = local_project_path(endpoint)?;
+        let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "project Git worktree could not be discovered",
+                "run the command inside a Git worktree or provide a local project path",
+            )
+        })?;
+        let project = orna_project_v1::ProjectLoader::default()
+            .load_with_standard_profile(&repository, Some(reference_standard_profile()))
+            .map_err(|_| {
+                Diagnostic::target(
+                    "E2100",
+                    "project source could not be loaded",
+                    "fix the project module graph and source boundaries, then start the REPL again",
+                )
+            })?;
         return AdmittedReplSession::from_loaded_project(
             &project,
-            std::iter::empty(),
+            reference_standard_sources(),
             Limits::default(),
         )
         .map_err(|error| repl_session_error(&error));
