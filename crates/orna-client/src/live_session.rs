@@ -6,7 +6,7 @@
 
 use std::{future::Future, pin::Pin};
 
-use orna_protocol_v1::{CanonicalSnapshot, Limits, PresentNode};
+use orna_protocol_v1::{CanonicalSnapshot, Envelope, Limits, Message, PresentNode};
 
 use crate::live_presentation::{
     LivePresentationError, LivePresentationUpdate, PublishedPresentation, ResyncRequest,
@@ -88,7 +88,8 @@ pub struct LiveSessionDriver<I, R, A> {
     presentation: WatchPresentation,
     renderer: R,
     request_ids: A,
-    pending_resync: Option<(ResyncRequest, Vec<u8>)>,
+    pending_resync: Option<(ResyncRequest, [u8; 16], Vec<u8>)>,
+    expected_resync_request: Option<[u8; 16]>,
     pending_publication: Option<(LivePresentationUpdate, PublishedPresentation)>,
 }
 
@@ -118,6 +119,7 @@ where
             renderer,
             request_ids,
             pending_resync: None,
+            expected_resync_request: None,
             pending_publication: None,
         })
     }
@@ -153,6 +155,7 @@ where
             .receive_binary(self.limits.max_message_bytes)
             .await
             .map_err(LiveSessionError::Io)?;
+        self.validate_resync_response(&encoded)?;
         let update = if encoded.len() > self.limits.max_message_bytes {
             // Do not pass an adapter-oversized payload to the decoder.
             self.presentation.receive_encoded(&[])
@@ -185,6 +188,7 @@ where
         self.io = io;
         self.presentation.begin_resubscription();
         self.pending_resync = None;
+        self.expected_resync_request = None;
         // A failed publication belongs to the old attachment. The retained
         // state remains available through `presentation()` but must not be
         // rendered ahead of the replacement attachment's complete snapshot.
@@ -205,6 +209,7 @@ where
         self.presentation = presentation;
         self.presentation.begin_resubscription();
         self.pending_resync = None;
+        self.expected_resync_request = None;
         self.pending_publication = None;
         Ok(())
     }
@@ -214,13 +219,14 @@ where
     ) -> Result<Option<LiveSessionEvent>, LiveSessionError<I::Error, R::Error>> {
         if self.pending_resync.is_none() {
             if let Some(request) = self.presentation.take_resync_request() {
+                let request_id = self.request_ids.next_request_id();
                 let encoded = request
-                    .encode(self.request_ids.next_request_id(), self.limits)
+                    .encode(request_id, self.limits)
                     .map_err(LiveSessionError::Protocol)?;
-                self.pending_resync = Some((request, encoded));
+                self.pending_resync = Some((request, request_id, encoded));
             }
         }
-        let Some((request, encoded)) = self.pending_resync.clone() else {
+        let Some((request, request_id, encoded)) = self.pending_resync.clone() else {
             return Ok(None);
         };
         self.io
@@ -229,7 +235,29 @@ where
             .map_err(LiveSessionError::Io)?;
         self.presentation.acknowledge_resync_request(request);
         self.pending_resync = None;
+        self.expected_resync_request = Some(request_id);
         Ok(Some(LiveSessionEvent::ResyncSent { request }))
+    }
+
+    fn validate_resync_response(
+        &mut self,
+        encoded: &[u8],
+    ) -> Result<(), LiveSessionError<I::Error, R::Error>> {
+        let Some(expected) = self.expected_resync_request else {
+            return Ok(());
+        };
+        let Ok(frame) = Envelope::decode(encoded, self.limits) else {
+            return Ok(());
+        };
+        if frame.watch == Some(self.watch) && matches!(frame.message, Message::Snapshot { .. }) {
+            if frame.request != Some(expected) {
+                return Err(LiveSessionError::Protocol(
+                    orna_protocol_v1::Error::InvalidMessage,
+                ));
+            }
+            self.expected_resync_request = None;
+        }
+        Ok(())
     }
 
     fn publish(
@@ -362,7 +390,24 @@ mod tests {
     }
 
     fn frame(code: u8, watch: [u8; 16], body: Vec<u8>) -> Vec<u8> {
-        let mut bytes = vec![0xa5, 0x00, 0x01, 0x01, code, 0x02, 0xf6, 0x03, 0x50];
+        frame_with_request(code, watch, None, body)
+    }
+
+    fn frame_with_request(
+        code: u8,
+        watch: [u8; 16],
+        request: Option<[u8; 16]>,
+        body: Vec<u8>,
+    ) -> Vec<u8> {
+        let mut bytes = vec![0xa5, 0x00, 0x01, 0x01, code, 0x02];
+        match request {
+            Some(request) => {
+                bytes.push(0x50);
+                bytes.extend(request);
+            }
+            None => bytes.push(0xf6),
+        }
+        bytes.extend([0x03, 0x50]);
         bytes.extend(watch);
         bytes.extend([0x04]);
         bytes.extend(body);
@@ -374,6 +419,10 @@ mod tests {
 
     fn snapshot(revision: u8) -> Vec<u8> {
         frame(16, [7; 16], snapshot_body(revision, "text"))
+    }
+
+    fn snapshot_with_request(revision: u8, property: &str, request: Option<[u8; 16]>) -> Vec<u8> {
+        frame_with_request(16, [7; 16], request, snapshot_body(revision, property))
     }
 
     fn snapshot_body(revision: u8, property: &str) -> Vec<u8> {
@@ -558,6 +607,74 @@ mod tests {
         assert_resync_frame(&malformed.io.sent[0]);
         assert_eq!(malformed.presentation().published().cloned(), original);
         assert_eq!(driver.io.sent.len(), sent);
+    }
+
+    #[test]
+    fn resync_snapshot_requires_correlated_request_without_extra_allocation() {
+        let mut io = MemoryIo::default();
+        io.incoming.push_back(snapshot(0));
+        io.incoming.push_back(delta(9, 10, "bad-base"));
+        let mut driver = LiveSessionDriver::new(
+            io,
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
+        let original = driver.presentation().published().cloned();
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Ok(LiveSessionEvent::ResyncSent { .. })
+        ));
+        let original_publications = driver.renderer.trees.clone();
+        let resync_request = Envelope::decode(&driver.io.sent[0], Limits::default())
+            .unwrap()
+            .request
+            .unwrap();
+
+        for response in [
+            snapshot_with_request(1, "wrong", Some([2; 16])),
+            snapshot_with_request(1, "null", None),
+        ] {
+            driver.io.incoming.push_back(response);
+            assert!(matches!(
+                block_on(driver.receive_once()),
+                Err(LiveSessionError::Protocol(
+                    orna_protocol_v1::Error::InvalidMessage
+                ))
+            ));
+            assert_eq!(driver.presentation().published().cloned(), original);
+            assert_eq!(driver.renderer.trees, original_publications);
+            assert_eq!(driver.io.sent.len(), 1);
+            assert_eq!(driver.request_ids.allocations, 1);
+        }
+
+        driver
+            .io
+            .incoming
+            .push_back(snapshot_with_request(1, "recovered", Some(resync_request)));
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 1 })
+        ));
+        assert_eq!(driver.request_ids.allocations, 1);
+        assert_eq!(driver.io.sent.len(), 1);
+        assert_eq!(driver.renderer.trees.len(), 2);
+
+        driver
+            .io
+            .incoming
+            .push_back(snapshot_with_request(2, "automatic", None));
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 2 })
+        ));
     }
 
     #[test]
