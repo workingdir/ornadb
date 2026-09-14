@@ -381,6 +381,10 @@ impl StreamSource for OneItemSource {
         self.key.clone()
     }
 
+    fn failure_payload(&self, item: &StreamItem) -> StreamFailurePayload {
+        StreamFailurePayload::Plaintext(item.payload.clone())
+    }
+
     fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
         self.polls += 1;
         ready(Ok(self
