@@ -1413,15 +1413,10 @@ impl Repository {
         } else {
             input.parent().ok_or(RepositoryError::NotAWorktree)?
         };
-        let worktree = PathBuf::from(Self::git_at(
-            directory,
-            ["rev-parse", "--show-toplevel"],
-            true,
-        )?);
+        let worktree = PathBuf::from(Self::git_at(directory, ["rev-parse", "--show-toplevel"])?);
         let runtime = PathBuf::from(Self::git_at(
             &worktree,
             ["rev-parse", "--git-path", "orna"],
-            true,
         )?);
         // Git intentionally prints a path relative to its current directory
         // for an ordinary worktree, but a linked worktree may resolve through
@@ -4330,6 +4325,7 @@ impl Repository {
     fn command(&self) -> Command {
         let mut command = Command::new("git");
         command.current_dir(&self.worktree);
+        scrub_git_routing_environment(&mut command);
         command
     }
 
@@ -4342,7 +4338,7 @@ impl Repository {
         command
     }
     fn git<const N: usize>(&self, args: [&str; N]) -> Result<String, RepositoryError> {
-        Self::git_at(&self.worktree, args, false)
+        Self::git_at(&self.worktree, args)
     }
     fn git_bytes<const N: usize>(&self, args: [&str; N]) -> Result<Vec<u8>, RepositoryError> {
         let mut command = self.command();
@@ -4503,13 +4499,10 @@ impl Repository {
     fn git_at<const N: usize>(
         directory: &Path,
         args: [&str; N],
-        scrub_routing_environment: bool,
     ) -> Result<String, RepositoryError> {
         let mut command = Command::new("git");
         command.current_dir(directory).args(args);
-        if scrub_routing_environment {
-            scrub_git_routing_environment(&mut command);
-        }
+        scrub_git_routing_environment(&mut command);
         let output = run_command(command)?;
         Ok(trim_output(&output.stdout))
     }
@@ -5923,8 +5916,32 @@ pub(crate) fn scrub_git_routing_environment(command: &mut Command) {
         "GIT_COMMON_DIR",
         "GIT_OBJECT_DIRECTORY",
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_PREFIX",
+        "GIT_NAMESPACE",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_GRAFT_FILE",
+        "GIT_SHALLOW_FILE",
     ] {
         command.env_remove(variable);
+    }
+    for (variable, _) in std::env::vars_os() {
+        if variable.as_encoded_bytes().starts_with(b"GIT_CONFIG_KEY_")
+            || variable
+                .as_encoded_bytes()
+                .starts_with(b"GIT_CONFIG_VALUE_")
+        {
+            command.env_remove(variable);
+        }
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
