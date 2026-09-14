@@ -1,8 +1,9 @@
 use futures::executor::block_on;
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, Corpus, DurableTransactionalEvaluator, EvidenceStatus,
-    Harness, ImplementationClaim, RuntimeAdapter, RuntimeEvaluator, Scenario, SourceUnit,
-    StageOutcome, SyntaxAdapter, TransactionalEvaluator,
+    Harness, ImplementationClaim, ReferenceProjectRuntimeEvidence, RuntimeAdapter,
+    RuntimeEvaluator, Scenario, SourceUnit, StageOutcome, SyntaxAdapter, TransactionalEvaluator,
+    run_reference_project_runtime_adapter,
 };
 use orna_evaluator_v1::Limits as EvaluatorLimits;
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText, Value};
@@ -913,6 +914,7 @@ fn run_sys_rt_rename_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
 enum RunnerProfile {
     SyntaxParse,
     BoundedExpressionRuntime,
+    ReferenceProjectRuntimeAdapter,
 }
 
 impl RunnerProfile {
@@ -920,6 +922,7 @@ impl RunnerProfile {
         match value {
             "syntax-parse" => Ok(Self::SyntaxParse),
             "bounded-expression-runtime" => Ok(Self::BoundedExpressionRuntime),
+            "reference-project-runtime-adapter" => Ok(Self::ReferenceProjectRuntimeAdapter),
             _ => Err(format!("unknown conformance profile: {value}")),
         }
     }
@@ -928,6 +931,7 @@ impl RunnerProfile {
         match self {
             Self::SyntaxParse => "syntax-parse",
             Self::BoundedExpressionRuntime => "bounded-expression-runtime",
+            Self::ReferenceProjectRuntimeAdapter => "reference-project-runtime-adapter",
         }
     }
 }
@@ -978,7 +982,9 @@ where
 }
 
 fn print_usage() {
-    println!("Usage: orna-conformance [--profile <syntax-parse|bounded-expression-runtime>]");
+    println!(
+        "Usage: orna-conformance [--profile <syntax-parse|bounded-expression-runtime|reference-project-runtime-adapter>]"
+    );
 }
 
 fn run_profile(corpus: Corpus, profile: RunnerProfile) -> orna_conformance_v1::RunReport {
@@ -1036,6 +1042,9 @@ fn run_profile(corpus: Corpus, profile: RunnerProfile) -> orna_conformance_v1::R
                 })
                 .run(&mut adapter)
         }
+        RunnerProfile::ReferenceProjectRuntimeAdapter => {
+            unreachable!("reference project profile emits its distinct evidence record")
+        }
     }
 }
 
@@ -1059,6 +1068,18 @@ fn main() {
     let RunnerCommand::Run(profile) = command else {
         unreachable!("help returned before corpus execution");
     };
+    if profile == RunnerProfile::ReferenceProjectRuntimeAdapter {
+        let evidence: ReferenceProjectRuntimeEvidence =
+            run_reference_project_runtime_adapter(&corpus);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&evidence).expect("reference evidence serializes")
+        );
+        if evidence.status != EvidenceStatus::Passed {
+            std::process::exit(1);
+        }
+        return;
+    }
     let report = run_profile(corpus, profile);
     println!(
         "{}",
@@ -1121,6 +1142,12 @@ mod tests {
         assert_eq!(
             parse_runner_command(vec!["--profile=bounded-expression-runtime".into()]),
             Ok(RunnerCommand::Run(RunnerProfile::BoundedExpressionRuntime))
+        );
+        assert_eq!(
+            parse_runner_command(vec!["--profile=reference-project-runtime-adapter".into()]),
+            Ok(RunnerCommand::Run(
+                RunnerProfile::ReferenceProjectRuntimeAdapter
+            ))
         );
         assert_eq!(
             parse_runner_command(vec!["--help".into()]),

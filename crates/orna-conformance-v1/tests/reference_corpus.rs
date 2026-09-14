@@ -268,6 +268,51 @@ fn project_adapter_receives_reachable_modules_rows_and_typed_expectations() {
 }
 
 #[test]
+fn reference_project_runtime_adapter_reports_exactly_separate_evidence() {
+    let corpus = Corpus::load_default().expect("reference corpus loads");
+    let evidence = run_reference_project_runtime_adapter(&corpus);
+
+    assert_eq!(evidence.classification, EvidenceClass::RuntimeAdapter);
+    assert_eq!(evidence.specification_version, "1.0.0");
+    assert_eq!(evidence.profile, "reference-project-runtime-adapter");
+    assert_eq!(evidence.implementation_execution, "not executed");
+    assert!(!evidence.compiler_artifact_execution);
+    assert!(!evidence.full_orna_engine_conformance);
+    assert_eq!(evidence.status, EvidenceStatus::Passed, "{evidence:?}");
+    assert_eq!(
+        evidence
+            .invocations
+            .iter()
+            .map(|invocation| invocation.invoke.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "main.seed",
+            "main.exercise",
+            "sensors.ingest",
+            "sensors.ingest"
+        ]
+    );
+    assert!(
+        evidence
+            .invocations
+            .iter()
+            .all(|invocation| invocation.status == EvidenceStatus::Passed
+                && !invocation.checks.is_empty())
+    );
+    assert_eq!(evidence.negative_cases.len(), 3);
+    assert!(
+        evidence
+            .negative_cases
+            .iter()
+            .all(|case| case.status == EvidenceStatus::Passed && case.rollback_verified)
+    );
+
+    // The distinct report type/classification and explicit false flags keep
+    // this adapter evidence outside the EngineWitnesses API and its claims.
+    assert_ne!(evidence.classification, EvidenceClass::Runtime);
+}
+
+#[test]
 fn engine_witnesses_require_an_exact_expectation_satisfied_fixture_stage() {
     let harness = Harness::new(Corpus::load_default().expect("reference corpus loads"));
     let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
