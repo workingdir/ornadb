@@ -4361,6 +4361,72 @@ fn compact_post_ref_recovery_preserves_unrelated_partial_staging() {
 }
 
 #[test]
+fn compact_prepared_publication_stale_head_retains_journal_and_requires_reconciliation() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    let intent = [55; 16];
+    let plan = compact_plan(
+        &repo,
+        table,
+        intent,
+        &[compact_segment(table, 1, b"compact object\n".to_vec())],
+    );
+    let candidate = plan.candidate_commit().clone();
+    let index_at_preparation = repo.index_generation().unwrap();
+
+    repo.persist_compact_publication(&plan).unwrap();
+    let prepared = repo.read_publication_journal().unwrap().unwrap();
+    let watermark = prepared.compact_manifest().unwrap().cleanup_watermark();
+    assert_eq!(prepared.runtime_intent_id(), Some(intent));
+    assert_eq!(
+        prepared.stage(),
+        orna_repository_v1::PublicationJournalStage::Prepared
+    );
+
+    git(
+        root.path(),
+        &["commit", "--allow-empty", "-m", "human branch advance"],
+    );
+    let current = repo.head().unwrap().unwrap();
+    let index_after_human_commit = repo.index_generation().unwrap();
+    assert_ne!(current, *index_at_preparation.head().unwrap());
+    assert_eq!(index_after_human_commit.tree(), index_at_preparation.tree());
+
+    assert!(matches!(
+        repo.publish_compact_repository_boundary(plan),
+        Err(orna_repository_v1::RepositoryError::StaleHead)
+    ));
+    assert_eq!(repo.head().unwrap(), Some(current.clone()));
+    assert_eq!(
+        repo.read_publication_journal().unwrap(),
+        Some(prepared.clone())
+    );
+
+    let recovery = repo
+        .recover_compact_publication_boundary()
+        .unwrap()
+        .unwrap();
+    match recovery {
+        orna_repository_v1::CompactPublicationRecovery::ReconciliationRequired(value) => {
+            assert_eq!(value.candidate(), &candidate);
+            assert_eq!(value.current_head(), &current);
+            assert_eq!(value.runtime_intent_id(), intent);
+            assert_eq!(value.cleanup_watermark(), watermark);
+            assert_eq!(
+                value.stage(),
+                orna_repository_v1::PublicationJournalStage::Prepared
+            );
+        }
+        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(_) => {
+            panic!("stale compact candidate must require explicit reconciliation")
+        }
+    }
+    assert_eq!(repo.head().unwrap(), Some(current));
+    assert_eq!(repo.read_publication_journal().unwrap(), Some(prepared));
+}
+
+#[test]
 fn compact_recovery_rejects_an_unknown_profile_without_clearing_the_receipt() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
