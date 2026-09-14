@@ -23,8 +23,8 @@ pub use prepare::{
 
 pub use orna_core::revision::EMPTY_APPLICATION_CATALOGUE_REVISION_ID;
 pub use resolved_catalogue::{
-    materialize_resolved_source_catalogue, ResolvedSourceCatalogue, ResolvedSourceCatalogueError,
-    SignatureSlot, UnsupportedReturnShape,
+    ResolvedSourceCatalogue, ResolvedSourceCatalogueError, SignatureSlot, UnsupportedReturnShape,
+    materialize_resolved_source_catalogue, materialize_standard_resolved_source_catalogue,
 };
 pub use resolver::{
     CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientBodyKind,
