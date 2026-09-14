@@ -1918,7 +1918,7 @@ mod tests {
     }
 
     #[test]
-    fn active_expiration_retains_idempotency_key_with_its_invocation() {
+    fn active_expiration_never_allocates_a_second_executable_operation() {
         let mut runtime = Runtime::new(RuntimeId::new("r"));
         let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
         request.idempotency_key = Some("key".into());
@@ -1927,13 +1927,22 @@ mod tests {
             _ => unreachable!(),
         };
 
+        assert_eq!(runtime.next_invocation, 1);
+        assert_eq!(runtime.invocations.len(), 1);
+        assert_eq!(runtime.idempotency.len(), 1);
         runtime.expire(&first).unwrap();
+        assert_eq!(runtime.next_invocation, 1);
+        assert_eq!(runtime.invocations.len(), 1);
+        assert_eq!(runtime.idempotency.len(), 1);
 
         let second = match runtime.admit(request).unwrap() {
             Admission::Active { handle } => handle,
             _ => panic!("active expiry must retain the original operation"),
         };
         assert_eq!(second.invocation(), first.invocation());
+        assert_eq!(runtime.next_invocation, 1);
+        assert_eq!(runtime.invocations.len(), 1);
+        assert_eq!(runtime.idempotency.len(), 1);
         assert_eq!(runtime.check_handle(&first), Ok(()));
         assert_eq!(runtime.check_handle(&second), Ok(()));
     }
