@@ -1728,6 +1728,162 @@ impl ScenarioExecutionWitnesses {
     }
 }
 
+/// The origin of reviewed implementation evidence.  Only bounded production
+/// unit evidence belongs in an [`ImplementationEvidenceOverlay`]; model,
+/// skipped, and engine evidence remain deliberately separate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImplementationEvidenceSource {
+    ProductionUnit,
+    Model,
+    Skipped,
+    EngineWitness,
+}
+
+/// A reviewed, publication-pinned production-unit result.  This is not an
+/// [`EngineWitness`]: it records a bounded implementation result without
+/// claiming that an Orna engine executed a corpus fixture.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImplementationEvidenceBinding {
+    pub requirement_id: String,
+    pub publication_digests: BTreeMap<String, String>,
+    pub implementation_ref: String,
+    pub test_ref: String,
+    /// The machine-readable origin/classification of this bounded evidence.
+    /// Only [`ImplementationEvidenceSource::ProductionUnit`] is admitted.
+    pub source: ImplementationEvidenceSource,
+    /// The concrete test subject that produced this observation.
+    pub subject: String,
+    /// The exact command used to observe the result.
+    pub command: String,
+    /// The recorded result of that command, distinct from its normalized
+    /// [`EvidenceStatus`].
+    pub result: String,
+    pub observed_status: EvidenceStatus,
+}
+
+/// Immutable machine-readable bounded production evidence retained by the
+/// staging overlay. This is not Orna-engine execution evidence.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ImplementationEvidence {
+    requirement_id: String,
+    implementation_ref: String,
+    test_ref: String,
+    source: ImplementationEvidenceSource,
+    subject: String,
+    command: String,
+    result: String,
+    observed_status: EvidenceStatus,
+}
+
+impl ImplementationEvidence {
+    #[must_use]
+    pub fn requirement_id(&self) -> &str {
+        &self.requirement_id
+    }
+    #[must_use]
+    pub fn implementation_ref(&self) -> &str {
+        &self.implementation_ref
+    }
+    #[must_use]
+    pub fn test_ref(&self) -> &str {
+        &self.test_ref
+    }
+    #[must_use]
+    pub fn source(&self) -> &ImplementationEvidenceSource {
+        &self.source
+    }
+    #[must_use]
+    pub fn subject(&self) -> &str {
+        &self.subject
+    }
+    #[must_use]
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+    #[must_use]
+    pub fn result(&self) -> &str {
+        &self.result
+    }
+    #[must_use]
+    pub fn observed_status(&self) -> &EvidenceStatus {
+        &self.observed_status
+    }
+}
+
+/// Bounded production-unit traceability.  Its aggregate is intentionally not
+/// an execution claim: even passing entries remain only partially executed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImplementationEvidenceAggregate {
+    PartiallyExecuted,
+}
+
+/// Reviewed bounded implementation evidence pinned to one exact publication.
+/// The API has no conversion to [`EngineWitnesses`] and is deliberately a
+/// staging/report input, not an Orna-engine execution claim.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ImplementationEvidenceOverlay {
+    publication_digests: BTreeMap<String, String>,
+    evidence: Vec<ImplementationEvidence>,
+    aggregate: ImplementationEvidenceAggregate,
+}
+
+impl ImplementationEvidenceOverlay {
+    #[must_use]
+    pub fn publication_digests(&self) -> &BTreeMap<String, String> {
+        &self.publication_digests
+    }
+    #[must_use]
+    pub fn evidence(&self) -> &[ImplementationEvidence] {
+        &self.evidence
+    }
+    #[must_use]
+    pub fn aggregate(&self) -> ImplementationEvidenceAggregate {
+        self.aggregate
+    }
+}
+
+fn validate_repository_reference(reference: &str, kind: &str) -> Result<(), String> {
+    let Some((path, symbol)) = reference.split_once("::") else {
+        return Err(format!("invalid repository-relative {kind} reference"));
+    };
+    let valid_path = !path.is_empty()
+        && !path.starts_with('/')
+        && !path.starts_with('~')
+        && !path.contains(':')
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && path.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+                })
+        });
+    let valid_symbol = !symbol.is_empty()
+        && !symbol.chars().any(char::is_control)
+        && symbol.split("::").all(|segment| {
+            let mut characters = segment.chars();
+            matches!(characters.next(), Some(character) if character.is_ascii_alphabetic() || character == '_')
+                && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+        });
+    if !valid_path || !valid_symbol {
+        return Err(format!("invalid repository-relative {kind} reference"));
+    }
+    Ok(())
+}
+
+fn validate_evidence_text(value: &str, kind: &str) -> Result<(), String> {
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(format!("invalid implementation evidence {kind}"));
+    }
+    Ok(())
+}
+
 pub struct Harness {
     corpus: Corpus,
     claim: ImplementationClaim,
@@ -1914,6 +2070,86 @@ impl Harness {
         Ok(EngineWitnesses {
             publication_digests: report.publication_digests.clone(),
             witnesses,
+        })
+    }
+
+    /// Bind independently reviewed bounded production-unit evidence without
+    /// changing the frozen requirement register or creating engine witnesses.
+    /// Every entry is pinned to the complete publication digest set, and the
+    /// aggregate remains [`ImplementationEvidenceAggregate::PartiallyExecuted`]
+    /// regardless of individual pass/fail observations.
+    pub fn implementation_evidence_overlay(
+        &self,
+        bindings: &[ImplementationEvidenceBinding],
+    ) -> Result<ImplementationEvidenceOverlay, String> {
+        let requirements = self
+            .corpus
+            .requirements
+            .iter()
+            .map(|requirement| requirement.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut seen = BTreeSet::new();
+        let mut evidence = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            if !requirements.contains(binding.requirement_id.as_str()) {
+                return Err(format!(
+                    "unknown implementation evidence requirement: {}",
+                    binding.requirement_id
+                ));
+            }
+            if binding.publication_digests != self.corpus.publication_digests {
+                return Err(
+                    "implementation evidence publication digests do not match corpus".into(),
+                );
+            }
+            match &binding.source {
+                ImplementationEvidenceSource::ProductionUnit => {}
+                ImplementationEvidenceSource::Model => {
+                    return Err("model evidence cannot enter implementation overlay".into());
+                }
+                ImplementationEvidenceSource::Skipped => {
+                    return Err("skipped evidence cannot enter implementation overlay".into());
+                }
+                ImplementationEvidenceSource::EngineWitness => {
+                    return Err("engine evidence cannot enter implementation overlay".into());
+                }
+            }
+            if !matches!(
+                binding.observed_status,
+                EvidenceStatus::Passed | EvidenceStatus::Failed
+            ) {
+                return Err("implementation evidence status must be passed or failed".into());
+            }
+            validate_repository_reference(&binding.implementation_ref, "implementation")?;
+            validate_repository_reference(&binding.test_ref, "test")?;
+            validate_evidence_text(&binding.subject, "subject")?;
+            validate_evidence_text(&binding.command, "command")?;
+            validate_evidence_text(&binding.result, "result")?;
+            if !seen.insert((
+                binding.requirement_id.as_str(),
+                binding.implementation_ref.as_str(),
+                binding.test_ref.as_str(),
+            )) {
+                return Err(format!(
+                    "duplicate implementation evidence binding: {}",
+                    binding.requirement_id
+                ));
+            }
+            evidence.push(ImplementationEvidence {
+                requirement_id: binding.requirement_id.clone(),
+                implementation_ref: binding.implementation_ref.clone(),
+                test_ref: binding.test_ref.clone(),
+                source: binding.source.clone(),
+                subject: binding.subject.clone(),
+                command: binding.command.clone(),
+                result: binding.result.clone(),
+                observed_status: binding.observed_status.clone(),
+            });
+        }
+        Ok(ImplementationEvidenceOverlay {
+            publication_digests: self.corpus.publication_digests.clone(),
+            evidence,
+            aggregate: ImplementationEvidenceAggregate::PartiallyExecuted,
         })
     }
 
