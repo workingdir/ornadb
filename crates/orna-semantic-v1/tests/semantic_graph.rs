@@ -2277,15 +2277,72 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
         alias.diagnostics
     );
 
-    let unsupported = analyze(&[ModuleInput::new(
+    let metadata = analyze(&[ModuleInput::new(
         "unsupported-sys.orna",
         "fn metadata() = sys.meta(1);",
     )]);
+    assert!(metadata.is_ok(), "{:#?}", metadata.diagnostics);
+    let metadata = &metadata.modules.values().next().unwrap().symbols["metadata"];
+    assert!(matches!(
+        &metadata.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Applied {
+                base: "sys.ValueMetadata".into(),
+                arguments: vec![Type::Int],
+            }
+    ));
+    assert!(metadata.effects.effects.contains("database read"));
+    assert!(metadata.effects.may_fail);
+
+    let named_metadata = analyze(&[ModuleInput::new(
+        "named-metadata.orna",
+        "pub fn metadata() = sys.meta(value: 1);",
+    )]);
+    assert!(named_metadata.is_ok(), "{:#?}", named_metadata.diagnostics);
+    let named_metadata = &named_metadata.modules.values().next().unwrap().symbols["metadata"];
+    assert!(matches!(
+        &named_metadata.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Applied {
+                base: "sys.ValueMetadata".into(),
+                arguments: vec![Type::Int],
+            }
+    ));
+
+    let invalid_metadata = analyze(&[ModuleInput::new(
+        "unsupported-sys.orna",
+        "fn metadata() = sys.meta(value: 1, extra: 2);",
+    )]);
     assert!(
-        has(&unsupported, DIAG_UNSUPPORTED),
+        has(&invalid_metadata, DIAG_TYPE),
         "{:#?}",
-        unsupported.diagnostics
+        invalid_metadata.diagnostics
     );
+
+    let invalid_label = analyze(&[ModuleInput::new(
+        "invalid-metadata-label.orna",
+        "fn metadata() = sys.meta(other: 1);",
+    )]);
+    assert!(
+        has(&invalid_label, DIAG_TYPE),
+        "{:#?}",
+        invalid_label.diagnostics
+    );
+
+    let invalid_value = analyze(&[ModuleInput::new(
+        "invalid-metadata-value.orna",
+        "fn metadata() = sys.meta(missing);",
+    )]);
+    assert!(
+        has(&invalid_value, DIAG_UNRESOLVED),
+        "{:#?}",
+        invalid_value.diagnostics
+    );
+    let invalid_value = &invalid_value.modules.values().next().unwrap().symbols["metadata"];
+    assert!(matches!(
+        &invalid_value.ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Error
+    ));
 
     for source in [
         "fn absent_on_view() = sys.database.legacy_member;",

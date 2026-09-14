@@ -9663,6 +9663,15 @@ fn infer_descriptor_system_call(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
     let functions = system_api::embedded_system_api().function(&path.join("."))?;
+    if path == ["sys", "meta"] {
+        return Some(infer_meta_system_call(
+            functions,
+            arguments,
+            scope,
+            local,
+            diagnostics,
+        ));
+    }
     let supported = functions
         .iter()
         .filter(|function| descriptor_function_is_staticly_supported(function))
@@ -9723,6 +9732,99 @@ fn infer_descriptor_system_call(
             .expect("supported descriptor functions have concrete types"),
         effects,
     })
+}
+
+/// `sys.meta<T>` is the one generic system operation whose type parameter is
+/// determined directly by its value argument.  Keep this substitution local
+/// to the reflective metadata call; invocation generics additionally require
+/// runtime result witnesses and therefore remain outside this semantic slice.
+fn infer_meta_system_call(
+    functions: &[system_api::FunctionDescriptor],
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let mut effects = EffectSummary::default();
+    let values = arguments
+        .iter()
+        .map(|argument| {
+            let value = infer(&argument.value, scope, local, diagnostics);
+            effects.join(&value.effects);
+            value.ty
+        })
+        .collect::<Vec<_>>();
+    let valid_shape = arguments.len() == 1
+        && arguments[0]
+            .name
+            .as_deref()
+            .is_none_or(|name| name == "value");
+    let Some(function) = functions.iter().find(|function| {
+        function.type_parameters.len() == 1
+            && function.parameters.len() == 1
+            && function.parameters[0].name == "value"
+            && function.parameters[0].ty
+                == system_api::SystemType::Named(
+                    function.type_parameters.iter().next().unwrap().clone(),
+                )
+    }) else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "portable generic system function is described but not implemented by this semantic slice",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    if !valid_shape {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "arguments do not match a portable system function overload",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+    if matches!(values.as_slice(), [Type::Error]) {
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+    effects.join(&descriptor_effects(function.effect));
+    let parameter = function.type_parameters.iter().next().unwrap();
+    let value_type = &values[0];
+    let result = substitute_descriptor_type(&function.result, parameter, value_type);
+    Inferred {
+        ty: result.unwrap_or(Type::Error),
+        effects,
+    }
+}
+
+fn substitute_descriptor_type(
+    ty: &system_api::SystemType,
+    parameter: &str,
+    value: &Type,
+) -> Option<Type> {
+    match ty {
+        system_api::SystemType::Named(name) if name == parameter => Some(value.clone()),
+        system_api::SystemType::Named(_) => Some(descriptor_type(ty)),
+        system_api::SystemType::Applied { base, arguments } => Some(Type::Applied {
+            base: base.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| substitute_descriptor_type(argument, parameter, value))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        system_api::SystemType::List(element) => Some(Type::List(Box::new(
+            substitute_descriptor_type(element, parameter, value)?,
+        ))),
+        system_api::SystemType::Optional(element) => Some(Type::Optional(Box::new(
+            substitute_descriptor_type(element, parameter, value)?,
+        ))),
+    }
 }
 
 fn descriptor_arguments_match(
