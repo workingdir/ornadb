@@ -5628,8 +5628,20 @@ fn infer(
                     effects,
                 };
             }
-            let ty = if matches!(op.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=") {
+            let ty = if matches!(op.as_str(), "==" | "!=") {
                 Type::Bool
+            } else if matches!(op.as_str(), "<" | "<=" | ">" | ">=") {
+                if left.ty == Type::Error || right.ty == Type::Error {
+                    Type::Error
+                } else if left.ty != right.ty || !is_evaluator_ordered_comparison_type(&left.ty) {
+                    // The bounded evaluator rejects mixed values and values
+                    // without an ordered representation. Keep equality
+                    // separate: it deliberately has broader semantics.
+                    diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
+                    Type::Error
+                } else {
+                    Type::Bool
+                }
             } else {
                 require_same(&left.ty, &right.ty, diagnostics);
                 left.ty
@@ -9541,6 +9553,24 @@ fn is_ordered_range_bound(ty: &Type) -> bool {
         ty,
         Type::Int | Type::Decimal | Type::Float | Type::Date | Type::Instant
     )
+}
+
+/// Types whose direct ordered comparisons the bounded evaluator accepts.
+///
+/// This deliberately mirrors the evaluator's existing surface rather than
+/// defining a broader language-level ordering policy. In particular, the
+/// semantic checker leaves its existing Bool and Str behaviour unchanged.
+fn is_evaluator_ordered_comparison_type(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Int
+            | Type::Decimal
+            | Type::Float
+            | Type::Date
+            | Type::Instant
+            | Type::Text
+            | Type::Bool
+    ) || matches!(ty, Type::Range(element) if is_ordered_range_bound(element))
 }
 
 /// Applies the closed affine-absolute aggregation rule for the operations that
