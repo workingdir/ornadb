@@ -2202,7 +2202,11 @@ fn check_item(
                 {
                     diagnostics.push(diag(DIAG_DUPLICATE, "duplicate primary-key field"));
                 }
-                let ty = key.annotation.as_ref().map(type_of).unwrap_or(Type::Error);
+                let ty = key
+                    .annotation
+                    .as_ref()
+                    .map(|annotation| resolved_type_of(annotation, scope))
+                    .unwrap_or(Type::Error);
                 let is_range = matches!(&ty, Type::Range(_))
                     || matches!(&ty, Type::Applied { base, .. } if base == "Range");
                 let is_float = matches!(&ty, Type::Float)
@@ -4678,6 +4682,16 @@ fn infer_contextual(
         };
     }
     if let (Expr::Range { lower, upper, .. }, Type::Range(element_type)) = (expr, expected) {
+        if lower.is_none() && upper.is_none() {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "an untyped range needs at least one endpoint or a range context",
+            ));
+            return Inferred {
+                ty: expected.clone(),
+                effects: EffectSummary::default(),
+            };
+        }
         let mut effects = EffectSummary::default();
         for endpoint in [lower.as_deref(), upper.as_deref()].into_iter().flatten() {
             let inferred = infer_contextual(endpoint, element_type, scope, local, diagnostics);
@@ -9523,7 +9537,10 @@ fn infer_generic_pipeline_stage(
 }
 
 fn is_ordered_range_bound(ty: &Type) -> bool {
-    matches!(ty, Type::Int | Type::Decimal | Type::Float | Type::Date)
+    matches!(
+        ty,
+        Type::Int | Type::Decimal | Type::Float | Type::Date | Type::Instant
+    )
 }
 
 /// Applies the closed affine-absolute aggregation rule for the operations that
