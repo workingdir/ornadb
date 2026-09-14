@@ -284,7 +284,7 @@ fn binary_check_accepts_a_core_only_project_without_std() {
 }
 
 #[test]
-fn binary_repl_executes_pinned_standard_math_but_other_paths_reject_it() {
+fn binary_repl_rejects_uncaptured_standard_import_without_host_substitution() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
@@ -353,6 +353,22 @@ fn binary_repl_executes_pinned_standard_math_but_other_paths_reject_it() {
     assert!(stream.stdout.is_empty());
     assert_eq!(stream.stderr, check.stderr);
 
+    let repl = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "repl",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(!repl.status.success());
+    assert!(repl.stdout.is_empty());
+    assert_eq!(
+        repl.stderr,
+        b"error[ORNA-S010-IMPORT]: imported module is unavailable\nhelp: use a captured standard dependency or remove the import\n"
+    );
+
     let repl_directory = tempfile::tempdir().expect("standard-free REPL project directory");
     std::fs::write(
         repl_directory.path().join("main.orna"),
@@ -360,29 +376,6 @@ fn binary_repl_executes_pinned_standard_math_but_other_paths_reject_it() {
     )
     .expect("standard-free project source");
     initialize_project(repl_directory.path());
-
-    let repl = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .args([
-            "--db",
-            repl_directory.path().to_str().expect("UTF-8 path"),
-            "repl",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("CLI process");
-    let mut repl = repl;
-    repl.stdin
-        .take()
-        .expect("REPL stdin")
-        .write_all(b"use std.math;\nmath.increment(41)\n:quit\n")
-        .expect("REPL input");
-    let repl = repl.wait_with_output().expect("REPL process output");
-    assert!(repl.status.success());
-    assert_eq!(repl.stdout, b"> > 42 : Int\n> ");
-    assert!(repl.stderr.is_empty());
 
     let mut unlisted_repl = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
