@@ -321,7 +321,7 @@ fn resolves_only_the_submitted_regular_file_and_keeps_the_logical_path() {
     assert!(absolute.stdout.is_empty());
     assert_eq!(
         String::from_utf8(absolute.stderr).expect("UTF-8 diagnostic"),
-        format!("{absolute_text}:14..15: ORNA0001: expected a schema name after CREATE SCHEMA\n")
+        "<redacted>:14..15: ORNA0001: expected a schema name after CREATE SCHEMA\n"
     );
 
     let linked = run_source_check(&nested, "linked.orna").expect("linked source");
@@ -355,6 +355,51 @@ fn resolves_only_the_submitted_regular_file_and_keeps_the_logical_path() {
         );
     }
     fs::set_permissions(&denied, fs::Permissions::from_mode(0o600)).expect("restore mode");
+}
+
+#[test]
+fn source_diagnostic_paths_are_redacted_or_preserved_by_contract() {
+    let directory = TestDirectory::new("diagnostic-paths").expect("test directory");
+    let nested = directory.0.join("nested");
+    fs::create_dir(&nested).expect("nested directory");
+    fs::write(directory.0.join("traversal.orna"), b"CREATE SCHEMA ;").expect("traversal source");
+    fs::write(nested.join("back\\slash.orna"), b"CREATE SCHEMA ;").expect("backslash source");
+    fs::write(nested.join("C:drive.orna"), b"CREATE SCHEMA ;").expect("drive source");
+    fs::write(nested.join("empty-component.orna"), b"CREATE SCHEMA ;")
+        .expect("empty-component source");
+    fs::create_dir(nested.join("src")).expect("Unicode source directory");
+    fs::write(nested.join("src/entrée.orna"), b"CREATE SCHEMA ;").expect("Unicode source");
+
+    for (working_directory, path) in [
+        (&directory.0, "../traversal.orna"),
+        (&nested, "back\\slash.orna"),
+        (&nested, "C:drive.orna"),
+        (&directory.0, "nested//empty-component.orna"),
+    ] {
+        let output = run_source_check(working_directory, path).expect("unsafe source check");
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            output.stderr,
+            b"<redacted>:14..15: ORNA0001: expected a schema name after CREATE SCHEMA\n"
+        );
+    }
+
+    let absolute = nested.join("src/entrée.orna");
+    let output = run_source_check(&directory.0, absolute.to_str().expect("UTF-8 path"))
+        .expect("absolute source check");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        output.stderr,
+        b"<redacted>:14..15: ORNA0001: expected a schema name after CREATE SCHEMA\n"
+    );
+
+    let unicode = run_source_check(&nested, "src/entrée.orna").expect("Unicode source check");
+    assert_eq!(unicode.status.code(), Some(1));
+    assert_eq!(
+        unicode.stderr,
+        "src/entrée.orna:14..15: ORNA0001: expected a schema name after CREATE SCHEMA\n".as_bytes()
+    );
 }
 
 #[test]
