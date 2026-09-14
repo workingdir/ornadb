@@ -1690,7 +1690,7 @@ fn primitive(name: &str) -> Option<Type> {
     })
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Scope {
     names: BTreeMap<String, Symbol>,
     ambiguous: BTreeSet<String>,
@@ -1730,6 +1730,9 @@ struct Scope {
     /// Locally declared protocol member surfaces used to check non-generic
     /// nested implementation members without inventing generic dispatch.
     local_protocols: BTreeMap<String, Vec<ProtocolMember>>,
+    /// Generic type parameters bound by the function currently being checked.
+    /// These names are local semantic witnesses, not globally declared types.
+    generic_type_parameters: BTreeSet<String>,
 }
 fn resolve_imports(
     namespace: &Namespace,
@@ -1833,6 +1836,7 @@ fn resolve_imports(
                 _ => None,
             })
             .collect(),
+        generic_type_parameters: BTreeSet::new(),
     };
     for (name, symbol) in attached_symbols {
         scope
@@ -2731,12 +2735,14 @@ fn static_type_is_known(ty: &Type, scope: &Scope) -> bool {
                     | "std.Document"
                     | "std.ByteStream"
                     | "std.UI"
-            ) || scope.names.get(name).is_some_and(|symbol| {
-                matches!(
-                    symbol.kind,
-                    SymbolKind::Type | SymbolKind::Enum | SymbolKind::Table
-                )
-            })
+            ) || system_api::embedded_system_api().describes_type(name)
+                || scope.generic_type_parameters.contains(name)
+                || scope.names.get(name).is_some_and(|symbol| {
+                    matches!(
+                        symbol.kind,
+                        SymbolKind::Type | SymbolKind::Enum | SymbolKind::Table
+                    )
+                })
         }
         Type::List(inner)
         | Type::Range(inner)
@@ -2750,12 +2756,13 @@ fn static_type_is_known(ty: &Type, scope: &Scope) -> bool {
             .iter()
             .all(|element| static_type_is_known(element, scope)),
         Type::Applied { base, arguments } => {
-            matches!(
+            (matches!(
                 base.as_str(),
                 "List" | "Range" | "Relation" | "Stream" | "Money" | "Float" | "Decimal"
-            ) && arguments
-                .iter()
-                .all(|argument| static_type_is_known(argument, scope))
+            ) || system_api::embedded_system_api().describes_type(base))
+                && arguments
+                    .iter()
+                    .all(|argument| static_type_is_known(argument, scope))
         }
         Type::MoneyPerUnit { currency, unit } => {
             static_type_is_known(currency, scope) && static_type_is_known(unit, scope)
@@ -3035,6 +3042,24 @@ fn same_default_expression(left: &Expr, right: &Expr) -> bool {
                 && same_default_arguments(left_arguments, right_arguments)
         }
         (
+            Expr::GenericCall {
+                callee: left_callee,
+                type_arguments: left_type_arguments,
+                arguments: left_arguments,
+                ..
+            },
+            Expr::GenericCall {
+                callee: right_callee,
+                type_arguments: right_type_arguments,
+                arguments: right_arguments,
+                ..
+            },
+        ) => {
+            same_default_expression(left_callee, right_callee)
+                && same_default_type_expressions(left_type_arguments, right_type_arguments)
+                && same_default_arguments(left_arguments, right_arguments)
+        }
+        (
             Expr::Index {
                 base: left_base,
                 index: left_index,
@@ -3242,6 +3267,14 @@ fn same_default_type_options(left: Option<&TypeExpr>, right: Option<&TypeExpr>) 
         (None, None) => true,
         _ => false,
     }
+}
+
+fn same_default_type_expressions(left: &[TypeExpr], right: &[TypeExpr]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| type_of(left) == type_of(right))
 }
 
 fn same_default_pattern_options(left: Option<&Pattern>, right: Option<&Pattern>) -> bool {
@@ -3601,6 +3634,9 @@ fn expr_has_write(expr: &Expr, scope: &Scope, local: &BTreeMap<String, Symbol>) 
     match expr {
         Expr::Call {
             callee, arguments, ..
+        }
+        | Expr::GenericCall {
+            callee, arguments, ..
         } => {
             call_may_write(callee, scope, local)
                 || expr_has_write(callee, scope, local)
@@ -3838,6 +3874,12 @@ fn check_function(
         unreachable!("function checker called for a non-function declaration");
     };
     validate_function_signature_annotations(signature, scope, diagnostics);
+    let mut function_scope = scope.clone();
+    function_scope.generic_type_parameters = signature
+        .generics
+        .iter()
+        .map(|generic| generic.name.clone())
+        .collect();
     let mut local = BTreeMap::new();
     let mut default_effects = EffectSummary::default();
     for parameter in &signature.parameters {
@@ -3856,7 +3898,7 @@ fn check_function(
             let inferred = infer_contextual(
                 default,
                 ty.as_ref().unwrap_or(&Type::Error),
-                scope,
+                &function_scope,
                 &local,
                 diagnostics,
             );
@@ -3875,14 +3917,14 @@ fn check_function(
         );
     }
     if let Some(expected) = signature.result.as_ref().map(type_of) {
-        let mut inferred = infer_contextual(body, &expected, scope, &local, diagnostics);
+        let mut inferred = infer_contextual(body, &expected, &function_scope, &local, diagnostics);
         inferred.effects.join(&default_effects);
         require_same(&expected, &inferred.ty, diagnostics);
         if let Some(symbol) = symbols.get_mut(&signature.name) {
             symbol.effects = inferred.effects;
         }
     } else {
-        let mut inferred = infer(body, scope, &local, diagnostics);
+        let mut inferred = infer(body, &function_scope, &local, diagnostics);
         inferred.effects.join(&default_effects);
         if let Some(symbol) = symbols.get_mut(&signature.name) {
             symbol.effects = inferred.effects;
@@ -3891,7 +3933,7 @@ fn check_function(
             }
         }
     }
-    validate_loop_transfers(body, scope, &local, &mut Vec::new(), diagnostics);
+    validate_loop_transfers(body, &function_scope, &local, &mut Vec::new(), diagnostics);
 }
 
 /// Validate transfer statements after ordinary expression inference. `for` and
@@ -3930,6 +3972,14 @@ fn validate_loop_transfers(
             }
         }
         Expr::Call {
+            callee, arguments, ..
+        } => {
+            validate_loop_transfers(callee, scope, local, loops, diagnostics);
+            for argument in arguments {
+                validate_loop_transfers(&argument.value, scope, local, loops, diagnostics);
+            }
+        }
+        Expr::GenericCall {
             callee, arguments, ..
         } => {
             validate_loop_transfers(callee, scope, local, loops, diagnostics);
@@ -4746,32 +4796,20 @@ fn infer(
             if let Some(path) = qualified_path(callee)
                 && path.first() == Some(&"sys")
                 && let Some(inferred) =
-                    infer_descriptor_system_call(&path, arguments, scope, local, diagnostics)
+                    infer_descriptor_system_call(&path, arguments, None, scope, local, diagnostics)
             {
                 return inferred;
             }
             if let Some(currency) = money_constructor_currency(callee)
-                && arguments.len() == 1
-                && arguments[0].name.is_none()
+                && let Some(inferred) = infer_money_constructor(
+                    Type::Named(currency.into()),
+                    arguments,
+                    scope,
+                    local,
+                    diagnostics,
+                )
             {
-                let value = infer(&arguments[0].value, scope, local, diagnostics);
-                if is_binary_float(&value.ty) {
-                    diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "Money cannot be constructed from an inexact Float without explicit rounding",
-                    ));
-                    return Inferred {
-                        ty: Type::Error,
-                        effects: value.effects,
-                    };
-                }
-                return Inferred {
-                    ty: Type::Applied {
-                        base: "Money".into(),
-                        arguments: vec![Type::Named(currency.into())],
-                    },
-                    effects: value.effects,
-                };
+                return inferred;
             }
             if let Some(inferred) =
                 infer_stream_from_list(callee, arguments, scope, local, diagnostics)
@@ -4861,6 +4899,46 @@ fn infer(
                         effects,
                     }
                 }
+            }
+        }
+        Expr::GenericCall {
+            callee,
+            type_arguments,
+            arguments,
+            ..
+        } => {
+            if let Some(path) = qualified_path(callee)
+                && path.first() == Some(&"sys")
+                && let Some(inferred) = infer_descriptor_system_call(
+                    &path,
+                    arguments,
+                    Some(type_arguments),
+                    scope,
+                    local,
+                    diagnostics,
+                )
+            {
+                return inferred;
+            }
+            if let Some(currency) = money_generic_constructor_currency(callee, type_arguments)
+                && let Some(inferred) =
+                    infer_money_constructor(currency, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            let intrinsic = intrinsic_call_effects(callee);
+            let mut effects = infer(callee, scope, local, diagnostics).effects;
+            effects.join(&intrinsic);
+            for argument in arguments {
+                effects.join(&infer(&argument.value, scope, local, diagnostics).effects);
+            }
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "generic calls are outside this semantic slice",
+            ));
+            Inferred {
+                ty: Type::Error,
+                effects,
             }
         }
         Expr::Unary { op, rhs, .. } => {
@@ -5266,6 +5344,14 @@ fn lambda_numeric_parameter_usage(expression: &Expr, name: &str) -> bool {
                         .iter()
                         .any(|argument| visit(&argument.value, name))
             }
+            Expr::GenericCall {
+                callee, arguments, ..
+            } => {
+                visit(callee, name)
+                    || arguments
+                        .iter()
+                        .any(|argument| visit(&argument.value, name))
+            }
             Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
                 elements.iter().any(|element| visit(element, name))
             }
@@ -5411,6 +5497,14 @@ fn inferred_record_fields(body: &Expr, name: &str) -> BTreeMap<String, Type> {
                     visit(&argument.value, name, fields);
                 }
             }
+            Expr::GenericCall {
+                callee, arguments, ..
+            } => {
+                visit(callee, name, fields);
+                for argument in arguments {
+                    visit(&argument.value, name, fields);
+                }
+            }
             Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
                 for element in elements {
                     visit(element, name, fields);
@@ -5487,6 +5581,14 @@ fn parameter_comparison_usage(expression: &Expr, name: &str) -> bool {
             Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => visit(rhs, name),
             Expr::Field { base, .. } | Expr::Index { base, .. } => visit(base, name),
             Expr::Call {
+                callee, arguments, ..
+            } => {
+                visit(callee, name)
+                    || arguments
+                        .iter()
+                        .any(|argument| visit(&argument.value, name))
+            }
+            Expr::GenericCall {
                 callee, arguments, ..
             } => {
                 visit(callee, name)
@@ -7999,6 +8101,23 @@ fn infer_success_pipeline(
     } else {
         infer(lhs, scope, local, diagnostics)
     };
+    if let Expr::GenericCall {
+        callee,
+        type_arguments,
+        arguments,
+        ..
+    } = rhs
+    {
+        return infer_generic_pipeline_stage(
+            input,
+            callee,
+            type_arguments,
+            arguments,
+            scope,
+            local,
+            diagnostics,
+        );
+    }
     if diagnostics.iter().any(|diagnostic| {
         diagnostic.message()
             == "a durable consumer function may own only one checkpointed source root"
@@ -8847,6 +8966,78 @@ fn infer_named_pipeline_stage(
     }
 }
 
+fn infer_generic_pipeline_stage(
+    input: Inferred,
+    callee: &Expr,
+    type_arguments: &[TypeExpr],
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let mut effects = input.effects;
+    let Some(path) = qualified_path(callee) else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "generic pipeline stage must be a supported named callable",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    if path == ["sys", "meta"] || path == ["sys", "await"] {
+        let stage = infer_descriptor_system_call_with_input(
+            &path,
+            arguments,
+            type_arguments,
+            &input.ty,
+            scope,
+            local,
+            diagnostics,
+        )
+        .expect("known system generic pipeline path has a descriptor");
+        effects.join(&stage.effects);
+        return Inferred {
+            ty: stage.ty,
+            effects,
+        };
+    }
+    if let Some(currency) = money_generic_constructor_currency(callee, type_arguments) {
+        if arguments.is_empty() {
+            let stage = infer_money_constructor_type(currency, &input.ty, diagnostics);
+            effects.join(&stage.effects);
+            return Inferred {
+                ty: stage.ty,
+                effects,
+            };
+        }
+        for argument in arguments {
+            effects.join(&infer(&argument.value, scope, local, diagnostics).effects);
+        }
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "Money constructor pipeline stage requires the piped value as its only argument",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+    effects.join(&infer(callee, scope, local, diagnostics).effects);
+    for argument in arguments {
+        effects.join(&infer(&argument.value, scope, local, diagnostics).effects);
+    }
+    diagnostics.push(diag(
+        DIAG_UNSUPPORTED,
+        "generic pipeline stage is outside this semantic slice",
+    ));
+    Inferred {
+        ty: Type::Error,
+        effects,
+    }
+}
+
 fn is_numeric_range_bound(ty: &Type) -> bool {
     matches!(ty, Type::Int | Type::Decimal | Type::Float)
 }
@@ -9455,6 +9646,7 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
         return true;
     }
     match (expected, actual) {
+        (Type::Optional(_), Type::Null) => true,
         (
             Type::Applied {
                 base: expected_base,
@@ -9619,8 +9811,8 @@ fn infer_descriptor_system_path(
 
 fn descriptor_function_is_staticly_supported(function: &system_api::FunctionDescriptor) -> bool {
     // Semantic admission can model every concrete portable signature and its
-    // declared effect. Generic functions remain explicitly unsupported until
-    // this layer has descriptor-driven type-argument inference.
+    // declared effect. Generic functions remain explicitly unsupported unless
+    // a dedicated descriptor-driven admission path handles their type args.
     function.type_parameters.is_empty()
 }
 
@@ -9658,6 +9850,7 @@ fn descriptor_function_type(function: &system_api::FunctionDescriptor) -> Option
 fn infer_descriptor_system_call(
     path: &[&str],
     arguments: &[orna_syntax_v1::Argument],
+    type_arguments: Option<&[TypeExpr]>,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -9667,6 +9860,29 @@ fn infer_descriptor_system_call(
         return Some(infer_meta_system_call(
             functions,
             arguments,
+            type_arguments,
+            None,
+            scope,
+            local,
+            diagnostics,
+        ));
+    }
+    if path == ["sys", "await"] {
+        return Some(infer_await_system_call(
+            functions,
+            arguments,
+            type_arguments,
+            None,
+            scope,
+            local,
+            diagnostics,
+        ));
+    }
+    if type_arguments.is_some() {
+        return Some(infer_unsupported_generic_system_call(
+            functions,
+            arguments,
+            type_arguments.expect("checked above"),
             scope,
             local,
             diagnostics,
@@ -9734,13 +9950,14 @@ fn infer_descriptor_system_call(
     })
 }
 
-/// `sys.meta<T>` is the one generic system operation whose type parameter is
-/// determined directly by its value argument.  Keep this substitution local
-/// to the reflective metadata call; invocation generics additionally require
-/// runtime result witnesses and therefore remain outside this semantic slice.
-fn infer_meta_system_call(
+/// Generic system operations outside the explicitly implemented subset still
+/// have to validate the source expressions that feed them.  This keeps nested
+/// diagnostics and effects visible while the operation itself remains closed
+/// with an unsupported result.
+fn infer_unsupported_generic_system_call(
     functions: &[system_api::FunctionDescriptor],
     arguments: &[orna_syntax_v1::Argument],
+    type_arguments: &[TypeExpr],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -9749,16 +9966,130 @@ fn infer_meta_system_call(
     let values = arguments
         .iter()
         .map(|argument| {
-            let value = infer(&argument.value, scope, local, diagnostics);
+            let value = if argument.name.as_deref() == Some("as") {
+                infer_type_argument(&argument.value)
+                    .unwrap_or_else(|| infer(&argument.value, scope, local, diagnostics))
+            } else {
+                infer(&argument.value, scope, local, diagnostics)
+            };
             effects.join(&value.effects);
             value.ty
         })
         .collect::<Vec<_>>();
-    let valid_shape = arguments.len() == 1
-        && arguments[0]
-            .name
-            .as_deref()
-            .is_none_or(|name| name == "value");
+
+    if let Some(function) = functions
+        .iter()
+        .find(|function| !function.type_parameters.is_empty())
+    {
+        let substitutions = type_arguments
+            .iter()
+            .map(|type_argument| valid_static_type(type_argument, scope))
+            .collect::<Option<Vec<_>>>()
+            .filter(|arguments| arguments.len() == function.type_parameters.len())
+            .map(|arguments| {
+                function
+                    .type_parameters
+                    .iter()
+                    .cloned()
+                    .zip(arguments)
+                    .collect::<BTreeMap<_, _>>()
+            });
+        if let Some(substitutions) = substitutions {
+            let parameters = function
+                .parameters
+                .iter()
+                .map(|parameter| substitute_generic_descriptor_type(&parameter.ty, &substitutions))
+                .collect::<Option<Vec<_>>>();
+            if let Some(parameters) = parameters {
+                let names = function
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect::<Vec<_>>();
+                let defaults = function
+                    .parameters
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, parameter)| parameter.has_default.then_some(index))
+                    .collect();
+                check_call_arguments(
+                    &parameters,
+                    Some(&names),
+                    &defaults,
+                    arguments,
+                    &values,
+                    None,
+                    diagnostics,
+                );
+            }
+        }
+        effects.join(&descriptor_effects(function.effect));
+    }
+    diagnostics.push(diag(
+        DIAG_UNSUPPORTED,
+        "explicit generic arguments are not implemented for this portable system function",
+    ));
+    Inferred {
+        ty: Type::Error,
+        effects,
+    }
+}
+
+fn substitute_generic_descriptor_type(
+    ty: &system_api::SystemType,
+    substitutions: &BTreeMap<String, Type>,
+) -> Option<Type> {
+    match ty {
+        system_api::SystemType::Named(name) => substitutions
+            .get(name)
+            .cloned()
+            .or_else(|| Some(descriptor_type(ty))),
+        system_api::SystemType::Applied { base, arguments } => Some(Type::Applied {
+            base: base.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| substitute_generic_descriptor_type(argument, substitutions))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        system_api::SystemType::List(element) => Some(Type::List(Box::new(
+            substitute_generic_descriptor_type(element, substitutions)?,
+        ))),
+        system_api::SystemType::Optional(element) => Some(Type::Optional(Box::new(
+            substitute_generic_descriptor_type(element, substitutions)?,
+        ))),
+    }
+}
+
+/// `sys.meta<T>` is the one generic system operation whose type parameter is
+/// determined directly by its value argument.  Keep this substitution local
+/// to the reflective metadata call; invocation generics additionally require
+/// runtime result witnesses and therefore remain outside this semantic slice.
+fn infer_meta_system_call(
+    functions: &[system_api::FunctionDescriptor],
+    arguments: &[orna_syntax_v1::Argument],
+    type_arguments: Option<&[TypeExpr]>,
+    input: Option<&Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let mut effects = EffectSummary::default();
+    let has_input = input.is_some();
+    let mut values = input.into_iter().cloned().collect::<Vec<_>>();
+    values.extend(arguments.iter().map(|argument| {
+        let value = infer(&argument.value, scope, local, diagnostics);
+        effects.join(&value.effects);
+        value.ty
+    }));
+    let valid_shape = if has_input {
+        arguments.is_empty()
+    } else {
+        arguments.len() == 1
+            && arguments[0]
+                .name
+                .as_deref()
+                .is_none_or(|name| name == "value")
+    };
     let Some(function) = functions.iter().find(|function| {
         function.type_parameters.len() == 1
             && function.parameters.len() == 1
@@ -9787,7 +10118,7 @@ fn infer_meta_system_call(
             effects,
         };
     }
-    if matches!(values.as_slice(), [Type::Error]) {
+    if values.iter().any(|value| matches!(value, Type::Error)) {
         return Inferred {
             ty: Type::Error,
             effects,
@@ -9795,12 +10126,238 @@ fn infer_meta_system_call(
     }
     effects.join(&descriptor_effects(function.effect));
     let parameter = function.type_parameters.iter().next().unwrap();
-    let value_type = &values[0];
+    let value_type = values.first().expect("valid sys.meta shape");
+    if let Some(type_arguments) = type_arguments {
+        let Some(type_argument) = type_arguments
+            .iter()
+            .map(|type_argument| valid_static_type(type_argument, scope))
+            .collect::<Option<Vec<_>>>()
+            .and_then(|arguments| (arguments.len() == 1).then(|| arguments[0].clone()))
+        else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "sys.meta requires exactly one explicit type argument when generic arguments are supplied",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        };
+        if type_argument != *value_type {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "sys.meta explicit type argument must match the value type",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        }
+    }
     let result = substitute_descriptor_type(&function.result, parameter, value_type);
     Inferred {
         ty: result.unwrap_or(Type::Error),
         effects,
     }
+}
+
+fn infer_descriptor_system_call_with_input(
+    path: &[&str],
+    arguments: &[orna_syntax_v1::Argument],
+    type_arguments: &[TypeExpr],
+    input: &Type,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let functions = system_api::embedded_system_api().function(&path.join("."))?;
+    match path {
+        ["sys", "meta"] => Some(infer_meta_system_call(
+            functions,
+            arguments,
+            Some(type_arguments),
+            Some(input),
+            scope,
+            local,
+            diagnostics,
+        )),
+        ["sys", "await"] => Some(infer_await_system_call(
+            functions,
+            arguments,
+            Some(type_arguments),
+            Some(input),
+            scope,
+            local,
+            diagnostics,
+        )),
+        _ => None,
+    }
+}
+
+/// `sys.await<T>` binds its result type from the typed invocation handle.  No
+/// other generic system function is admitted here: those calls still require
+/// an explicit semantic/runtime bridge rather than a guessed type argument.
+fn infer_await_system_call(
+    functions: &[system_api::FunctionDescriptor],
+    arguments: &[orna_syntax_v1::Argument],
+    type_arguments: Option<&[TypeExpr]>,
+    input: Option<&Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let mut effects = EffectSummary::default();
+    let has_input = input.is_some();
+    let mut values = input.into_iter().cloned().collect::<Vec<_>>();
+    values.extend(arguments.iter().map(|argument| {
+        let value = infer(&argument.value, scope, local, diagnostics);
+        effects.join(&value.effects);
+        value.ty
+    }));
+    let Some(function) = functions.iter().find(|function| {
+        function.type_parameters == BTreeSet::from(["T".to_owned()])
+            && function.parameters.len() == 2
+            && function.parameters[0].name == "invocation"
+            && function.parameters[0].ty
+                == system_api::SystemType::Applied {
+                    base: "sys.InvocationHandle".into(),
+                    arguments: vec![system_api::SystemType::Named("T".into())],
+                }
+            && !function.parameters[0].has_default
+            && function.parameters[1].name == "timeout"
+            && function.parameters[1].ty
+                == system_api::SystemType::Optional(Box::new(system_api::SystemType::Named(
+                    "Duration".into(),
+                )))
+            && function.parameters[1].has_default
+            && function.result
+                == system_api::SystemType::Applied {
+                    base: "sys.InvocationResult".into(),
+                    arguments: vec![system_api::SystemType::Named("T".into())],
+                }
+            && function.effect == system_api::SystemEffect::Invoke
+    }) else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "portable generic system function is described but not implemented by this semantic slice",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    if values.iter().any(|value| matches!(value, Type::Error)) {
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+
+    let mut used = vec![false; function.parameters.len()];
+    let mut next_positional = 0usize;
+    let mut invocation_type = None;
+    let mut valid = true;
+    let input_offset = usize::from(has_input);
+    let supplied = input.into_iter().map(|value| (None, value)).chain(
+        arguments
+            .iter()
+            .zip(values.iter().skip(input_offset))
+            .map(|(argument, value)| (argument.name.as_deref(), value)),
+    );
+    for (name, value) in supplied {
+        let index = if let Some(name) = name {
+            function
+                .parameters
+                .iter()
+                .position(|parameter| parameter.name == *name)
+        } else {
+            while used.get(next_positional) == Some(&true) {
+                next_positional += 1;
+            }
+            let index = (next_positional < function.parameters.len()).then_some(next_positional);
+            next_positional += 1;
+            index
+        };
+        let Some(index) = index else {
+            valid = false;
+            continue;
+        };
+        if used[index] {
+            valid = false;
+            continue;
+        }
+        used[index] = true;
+        match index {
+            0 => match value {
+                Type::Applied { base, arguments }
+                    if base == "sys.InvocationHandle" && arguments.len() == 1 =>
+                {
+                    invocation_type = arguments.first().cloned();
+                }
+                _ => valid = false,
+            },
+            1 => {
+                let expected = descriptor_type(&function.parameters[index].ty);
+                if !await_timeout_type_matches(&expected, value) {
+                    valid = false;
+                }
+            }
+            _ => valid = false,
+        }
+    }
+    if !used[0] || !valid {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "arguments do not match a portable system function overload",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+    let result_type = invocation_type.expect("valid invocation handle supplies its type");
+    if let Some(type_arguments) = type_arguments {
+        let Some(type_argument) = type_arguments
+            .iter()
+            .map(|type_argument| valid_static_type(type_argument, scope))
+            .collect::<Option<Vec<_>>>()
+            .and_then(|arguments| (arguments.len() == 1).then(|| arguments[0].clone()))
+        else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "sys.await requires exactly one explicit type argument when generic arguments are supplied",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        };
+        if type_argument != result_type {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "sys.await explicit type argument must match the invocation handle result type",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        }
+    }
+    effects.join(&descriptor_effects(function.effect));
+    Inferred {
+        ty: substitute_descriptor_type(&function.result, "T", &result_type).unwrap_or(Type::Error),
+        effects,
+    }
+}
+
+fn await_timeout_type_matches(expected: &Type, actual: &Type) -> bool {
+    types_match(expected, actual)
+        || matches!(
+            actual,
+            Type::Applied { base, arguments }
+                if matches!(base.as_str(), "Int" | "Decimal" | "Float")
+                    && matches!(arguments.as_slice(), [Type::Named(unit)] if unit == "s")
+        )
 }
 
 fn substitute_descriptor_type(
@@ -9918,6 +10475,7 @@ fn descriptor_type(ty: &system_api::SystemType) -> Type {
             "Str" => Type::Text,
             "Bool" => Type::Bool,
             "Null" => Type::Null,
+            "Duration" => Type::Named("std.DURATION".into()),
             other => Type::Named(other.into()),
         },
         system_api::SystemType::Applied { base, arguments } if base == "Relation" => {
@@ -10147,6 +10705,56 @@ fn money_constructor_currency(expr: &Expr) -> Option<&str> {
     };
     let currency = text.strip_prefix("Money<")?.strip_suffix('>')?;
     (!currency.is_empty() && !currency.contains(',')).then_some(currency)
+}
+
+fn money_generic_constructor_currency(expr: &Expr, type_arguments: &[TypeExpr]) -> Option<Type> {
+    if !matches!(expr, Expr::Name { text, .. } if text == "Money") || type_arguments.len() != 1 {
+        return None;
+    }
+    match type_of(&type_arguments[0]) {
+        Type::Named(currency) if !currency.is_empty() => Some(Type::Named(currency)),
+        _ => None,
+    }
+}
+
+fn infer_money_constructor(
+    currency: Type,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    if arguments.len() != 1 || arguments[0].name.is_some() {
+        return None;
+    }
+    let value = infer(&arguments[0].value, scope, local, diagnostics);
+    let mut inferred = infer_money_constructor_type(currency, &value.ty, diagnostics);
+    inferred.effects = value.effects;
+    Some(inferred)
+}
+
+fn infer_money_constructor_type(
+    currency: Type,
+    value: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if is_binary_float(value) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "Money cannot be constructed from an inexact Float without explicit rounding",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    }
+    Inferred {
+        ty: Type::Applied {
+            base: "Money".into(),
+            arguments: vec![currency],
+        },
+        effects: EffectSummary::default(),
+    }
 }
 
 fn is_money_rate(ty: &Type) -> bool {
@@ -10635,6 +11243,14 @@ fn tables_referenced(
                 visit(rhs, names);
             }
             Expr::Call {
+                callee, arguments, ..
+            } => {
+                visit(callee, names);
+                for a in arguments {
+                    visit(&a.value, names);
+                }
+            }
+            Expr::GenericCall {
                 callee, arguments, ..
             } => {
                 visit(callee, names);
