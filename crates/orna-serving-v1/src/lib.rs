@@ -519,7 +519,10 @@ impl Serving {
             Message::Cancel {
                 target_kind: TargetKind::Request,
                 target,
-            } if envelope.request.is_some() && envelope.watch.is_none() => {
+            } if envelope.request.is_some()
+                && envelope.watch.is_none()
+                && envelope.request != Some(*target) =>
+            {
                 self.cancel_request(session_id, *target)
             }
             _ => Err(Error::MalformedAdmission),
@@ -686,6 +689,23 @@ mod tests {
         let mut state = admitted();
         state.reserve_request(id(1), id(4)).unwrap();
         state.start_request(id(1), id(4)).unwrap();
+        let self_targeting = Envelope {
+            request: Some(id(4)),
+            watch: None,
+            message: Message::Cancel {
+                target_kind: TargetKind::Request,
+                target: id(4),
+            },
+            extensions: BTreeMap::new(),
+        };
+        assert_eq!(
+            state.cancel_envelope(id(1), &self_targeting),
+            Err(Error::MalformedAdmission)
+        );
+        assert_eq!(
+            state.request_state(id(1), id(4)).unwrap(),
+            RequestState::Running
+        );
         let envelope = Envelope {
             request: Some(id(8)),
             watch: None,
