@@ -269,6 +269,16 @@ fn websocket_upgrade(address: std::net::SocketAddr, session: &str, token: &str) 
     websocket
 }
 
+fn protocol_depth_limited_envelope(request: [u8; 16]) -> Vec<u8> {
+    let mut nested = vec![0x81; ProtocolLimits::default().max_depth + 1];
+    nested.push(0xf6);
+    let mut envelope = vec![0xa5, 0, 1, 1, 1, 2, 0x50];
+    envelope.extend(request);
+    envelope.extend([3, 0xf6, 4, 0xa1, 0]);
+    envelope.extend(nested);
+    envelope
+}
+
 fn websocket_eval(
     address: std::net::SocketAddr,
     session: &str,
@@ -620,6 +630,66 @@ fn loopback_host_closes_an_invalid_client_direction_envelope_with_1002() {
         let mut close = Vec::new();
         websocket.read_to_end(&mut close).unwrap();
         assert_eq!(close, b"\x88\x02\x03\xea");
+        sender.send(()).unwrap();
+        session
+    });
+
+    assert_eq!(
+        host.serve_until_cancellation(receiver.map(|_| ())),
+        Err(LiveHostError::Cancelled)
+    );
+    let session = client.join().unwrap();
+    let (identity, digest) = stored_runtime_identity(uuid_bytes(&database));
+    let state = block_on(RuntimeState::open(
+        initialized.repository(),
+        identity,
+        digest,
+    ))
+    .unwrap();
+    assert!(
+        block_on(state.request_status_for_identity(RequestIdentity {
+            session_id: uuid_bytes(&session),
+            request_id,
+        }))
+        .unwrap()
+        .is_none()
+    );
+    let _released = TcpListener::bind(address).unwrap();
+}
+
+#[test]
+fn loopback_host_closes_a_protocol_limit_with_1009_without_admission() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let database = initialized.metadata().database_id().to_string();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let request_id = [0x52; 16];
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let client = std::thread::spawn(move || {
+        let mut create = TcpStream::connect(address).unwrap();
+        create
+            .write_all(request(address, &database).as_bytes())
+            .unwrap();
+        let created = read_response(&mut create);
+        let session = json_field(&created, "session");
+        let token = json_field(&created, "resume_token");
+        create.shutdown(Shutdown::Write).unwrap();
+        let mut ignored = Vec::new();
+        create.read_to_end(&mut ignored).unwrap();
+
+        let limited = protocol_depth_limited_envelope(request_id);
+        assert!(limited.len() < ProtocolLimits::default().max_message_bytes);
+        assert_eq!(
+            Envelope::decode(&limited, ProtocolLimits::default()),
+            Err(orna_protocol_v1::Error::Limit)
+        );
+        let mut websocket = websocket_upgrade(address, &session, &token);
+        websocket.write_all(&masked(true, 2, &limited)).unwrap();
+        websocket.shutdown(Shutdown::Write).unwrap();
+        let mut close = Vec::new();
+        websocket.read_to_end(&mut close).unwrap();
+        assert_eq!(close, b"\x88\x02\x03\xf1");
         sender.send(()).unwrap();
         session
     });
