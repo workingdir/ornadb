@@ -1,7 +1,10 @@
 //! Bounded, logical traceability for the published Orna 1.0.0 reference bundle.
 //! The report intentionally contains identifiers and statuses, never source bodies or host paths.
 
-use orna_conformance_v1::{EngineWitnesses, ScenarioExecutionWitnesses, Stage};
+use orna_conformance_v1::{
+    EngineWitnesses, EvidenceStatus, ImplementationEvidenceAggregate,
+    ImplementationEvidenceOverlay, ImplementationEvidenceSource, ScenarioExecutionWitnesses, Stage,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -37,6 +40,9 @@ pub struct Report {
     pub schema_profile_members: Vec<InventoryEntry>,
     pub fixture_classes: Vec<FixtureClass>,
     pub behavioral_scenarios: Vec<ScenarioTrace>,
+    /// Reviewed production-unit evidence. This remains distinct from both
+    /// engine and scenario execution witnesses.
+    pub bounded_production_evidence: Vec<BoundedProductionEvidence>,
 }
 /// A release-payload disposition. This inventory does not establish execution;
 /// missing implementation and test references remain explicit coverage gaps.
@@ -78,6 +84,20 @@ pub struct FixtureClass {
 pub struct ScenarioTrace {
     pub scenario_id: String,
     pub requirements: Vec<String>,
+    pub status: Status,
+}
+/// A publication-pinned bounded production-unit observation. Its status is
+/// always partial: it never claims that an Orna engine executed a fixture.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct BoundedProductionEvidence {
+    pub requirement_id: String,
+    pub source: ImplementationEvidenceSource,
+    pub subject: String,
+    pub command: String,
+    pub result: String,
+    pub observed_status: EvidenceStatus,
+    pub implementation_ref: String,
+    pub test_ref: String,
     pub status: Status,
 }
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
@@ -182,7 +202,7 @@ struct Model {
 /// Returns an error when the reference bundle or its publication digests are
 /// invalid.
 pub fn generate(root: impl AsRef<Path>) -> Result<Report> {
-    generate_inner(root.as_ref(), None, None)
+    generate_inner(root.as_ref(), None, None, None)
 }
 
 /// Generate the frozen report with an execution register produced by the
@@ -197,7 +217,7 @@ pub fn generate_with_engine_witnesses(
     root: impl AsRef<Path>,
     witnesses: &EngineWitnesses,
 ) -> Result<Report> {
-    generate_inner(root.as_ref(), Some(witnesses), None)
+    generate_inner(root.as_ref(), Some(witnesses), None, None)
 }
 
 /// Generate the frozen report with implementation-scenario execution
@@ -212,13 +232,29 @@ pub fn generate_with_scenario_execution_witnesses(
     root: impl AsRef<Path>,
     witnesses: &ScenarioExecutionWitnesses,
 ) -> Result<Report> {
-    generate_inner(root.as_ref(), None, Some(witnesses))
+    generate_inner(root.as_ref(), None, Some(witnesses), None)
+}
+
+/// Generate the frozen report with publication-pinned bounded production-unit
+/// evidence. This records only partial implementation evidence: it cannot
+/// create engine witnesses or promote a requirement to [`Status::Executed`].
+///
+/// # Errors
+///
+/// Returns an error when the reference bundle, its digests, or the overlay is
+/// invalid, duplicated, unknown, or pinned to a different publication.
+pub fn generate_with_implementation_evidence_overlay(
+    root: impl AsRef<Path>,
+    overlay: &ImplementationEvidenceOverlay,
+) -> Result<Report> {
+    generate_inner(root.as_ref(), None, None, Some(overlay))
 }
 
 fn generate_inner(
     root: &Path,
     engine_witnesses: Option<&EngineWitnesses>,
     scenario_execution_witnesses: Option<&ScenarioExecutionWitnesses>,
+    implementation_evidence_overlay: Option<&ImplementationEvidenceOverlay>,
 ) -> Result<Report> {
     let release: Release = read_json(root, "release.json")?;
     if release.version != VERSION
@@ -305,6 +341,7 @@ fn generate_inner(
                 }
             })
             .collect(),
+        bounded_production_evidence: Vec::new(),
     };
     if let Some(witnesses) = engine_witnesses {
         apply_engine_witnesses(&mut report, witnesses, &manifest)?;
@@ -312,7 +349,136 @@ fn generate_inner(
     if let Some(witnesses) = scenario_execution_witnesses {
         apply_scenario_execution_witnesses(&mut report, witnesses, &scenarios)?;
     }
+    if let Some(overlay) = implementation_evidence_overlay {
+        apply_implementation_evidence_overlay(&mut report, overlay)?;
+    }
     Ok(report)
+}
+
+fn apply_implementation_evidence_overlay(
+    report: &mut Report,
+    overlay: &ImplementationEvidenceOverlay,
+) -> Result<()> {
+    if report.publication_digests != *overlay.publication_digests() {
+        return Err(err(
+            "implementation evidence publication digests do not match report",
+        ));
+    }
+    if overlay.aggregate() != ImplementationEvidenceAggregate::PartiallyExecuted {
+        return Err(err("implementation evidence overlay has invalid aggregate"));
+    }
+    let mut requirements = report
+        .requirements
+        .iter_mut()
+        .map(|requirement| (requirement.requirement_id.clone(), requirement))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    for evidence in overlay.evidence() {
+        if evidence.source() != &ImplementationEvidenceSource::ProductionUnit {
+            return Err(err(
+                "non-production evidence cannot enter traceability report",
+            ));
+        }
+        if !matches!(
+            evidence.observed_status(),
+            EvidenceStatus::Passed | EvidenceStatus::Failed
+        ) {
+            return Err(err(
+                "implementation evidence status must be passed or failed",
+            ));
+        }
+        validate_overlay_reference(evidence.implementation_ref(), "implementation")?;
+        validate_overlay_reference(evidence.test_ref(), "test")?;
+        validate_overlay_text(evidence.subject(), "subject")?;
+        validate_overlay_text(evidence.command(), "command")?;
+        validate_overlay_text(evidence.result(), "result")?;
+        if !seen.insert((
+            evidence.requirement_id(),
+            evidence.implementation_ref(),
+            evidence.test_ref(),
+        )) {
+            return Err(err("duplicate implementation evidence binding"));
+        }
+        let requirement = requirements
+            .get_mut(evidence.requirement_id())
+            .ok_or_else(|| {
+                err(format!(
+                    "implementation evidence names unknown requirement: {}",
+                    evidence.requirement_id()
+                ))
+            })?;
+        let boundary = Boundary {
+            kind: "bounded-production-evidence".into(),
+            logical_id: format!("{}:{}", evidence.implementation_ref(), evidence.test_ref()),
+            implementation_ref: Some(evidence.implementation_ref().into()),
+            test_ref: Some(evidence.test_ref().into()),
+            status: Status::PartiallyExecuted,
+        };
+        requirement.boundaries.push(boundary);
+        requirement.status = aggregate(
+            &requirement
+                .boundaries
+                .iter()
+                .map(|boundary| boundary.status)
+                .collect::<Vec<_>>(),
+        );
+        report
+            .bounded_production_evidence
+            .push(BoundedProductionEvidence {
+                requirement_id: evidence.requirement_id().into(),
+                source: evidence.source().clone(),
+                subject: evidence.subject().into(),
+                command: evidence.command().into(),
+                result: evidence.result().into(),
+                observed_status: evidence.observed_status().clone(),
+                implementation_ref: evidence.implementation_ref().into(),
+                test_ref: evidence.test_ref().into(),
+                status: Status::PartiallyExecuted,
+            });
+    }
+    Ok(())
+}
+
+fn validate_overlay_reference(reference: &str, kind: &str) -> Result<()> {
+    let Some((path, symbol)) = reference.split_once("::") else {
+        return Err(err(format!(
+            "invalid repository-relative {kind} evidence reference"
+        )));
+    };
+    let valid_path = !path.is_empty()
+        && !path.starts_with('/')
+        && !path.starts_with('~')
+        && !path.contains(':')
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && path.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+                })
+        });
+    let valid_symbol = !symbol.is_empty()
+        && !symbol.chars().any(char::is_control)
+        && symbol.split("::").all(|segment| {
+            let mut characters = segment.chars();
+            matches!(characters.next(), Some(character) if character.is_ascii_alphabetic() || character == '_')
+                && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+        });
+    if !valid_path || !valid_symbol {
+        return Err(err(format!(
+            "invalid repository-relative {kind} evidence reference"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_overlay_text(value: &str, kind: &str) -> Result<()> {
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(err(format!("invalid implementation evidence {kind}")));
+    }
+    Ok(())
 }
 
 fn apply_engine_witnesses(
@@ -1175,6 +1341,122 @@ mod tests {
             .find(|scenario| scenario.scenario_id == "LET-REBIND-091")
             .expect("published scenario");
         assert_eq!(scenario.status, Status::JustifiedGap);
+    }
+    fn date_range_overlay(corpus: orna_conformance_v1::Corpus) -> ImplementationEvidenceOverlay {
+        let publication_digests = corpus.publication_digests.clone();
+        let harness = orna_conformance_v1::Harness::new(corpus);
+        harness
+            .implementation_evidence_overlay(&[orna_conformance_v1::ImplementationEvidenceBinding {
+                requirement_id: "ORNA-RANGE-001".into(),
+                publication_digests,
+                implementation_ref: "crates/orna-evaluator-v1/src/lib.rs::Value::Range".into(),
+                test_ref: "crates/orna-evaluator-v1/tests/evaluator.rs::date_ranges_are_canonical_membership_values_with_optional_bounds".into(),
+                source: ImplementationEvidenceSource::ProductionUnit,
+                subject: "date range canonical encoding and membership".into(),
+                command: "cargo test -p orna-evaluator-v1 --test evaluator date_ranges_are_canonical_membership_values_with_optional_bounds".into(),
+                result: "1 passed; 0 failed".into(),
+                observed_status: EvidenceStatus::Passed,
+            }])
+            .expect("Date range evidence is accepted")
+    }
+    #[test]
+    fn date_overlay_is_a_distinct_partial_machine_readable_collection() {
+        let root = corpus();
+        let evidence_path = root.join("tests/requirement-evidence.json");
+        let frozen_evidence = fs::read(&evidence_path).expect("frozen evidence reads");
+        let overlay = date_range_overlay(
+            orna_conformance_v1::Corpus::load(&root).expect("conformance corpus loads"),
+        );
+
+        let report = generate_with_implementation_evidence_overlay(&root, &overlay)
+            .expect("Date overlay is accepted");
+        assert_eq!(report.bounded_production_evidence.len(), 1);
+        assert_eq!(
+            report.bounded_production_evidence[0].requirement_id,
+            "ORNA-RANGE-001"
+        );
+        assert_eq!(
+            report.bounded_production_evidence[0].source,
+            ImplementationEvidenceSource::ProductionUnit
+        );
+        assert_eq!(
+            report.bounded_production_evidence[0].status,
+            Status::PartiallyExecuted
+        );
+        assert_eq!(
+            report.bounded_production_evidence[0].observed_status,
+            EvidenceStatus::Passed
+        );
+        let requirement = report
+            .requirements
+            .iter()
+            .find(|requirement| requirement.requirement_id == "ORNA-RANGE-001")
+            .expect("range requirement");
+        assert_eq!(requirement.status, Status::PartiallyExecuted);
+        assert!(requirement.boundaries.iter().any(|boundary| {
+            boundary.kind == "bounded-production-evidence"
+                && boundary.status == Status::PartiallyExecuted
+                && boundary.implementation_ref.as_deref()
+                    == Some("crates/orna-evaluator-v1/src/lib.rs::Value::Range")
+        }));
+        let serialized = serde_json::to_value(&report).expect("report serializes");
+        assert_eq!(
+            serialized["bounded_production_evidence"][0]["source"],
+            serde_json::json!("production-unit")
+        );
+        assert_eq!(
+            serialized["bounded_production_evidence"][0]["status"],
+            serde_json::json!("partially-executed")
+        );
+        assert_eq!(
+            fs::read(evidence_path).expect("frozen evidence remains readable"),
+            frozen_evidence
+        );
+    }
+    #[test]
+    fn implementation_overlay_refuses_a_mismatched_publication_inventory() {
+        let root = corpus();
+        let mut corpus =
+            orna_conformance_v1::Corpus::load(&root).expect("conformance corpus loads");
+        let digest = corpus
+            .publication_digests
+            .values_mut()
+            .next()
+            .expect("publication inventory is populated");
+        digest.replace_range(..1, if digest.starts_with('0') { "1" } else { "0" });
+        let overlay = date_range_overlay(corpus);
+
+        assert!(generate_with_implementation_evidence_overlay(&root, &overlay).is_err());
+    }
+    #[test]
+    fn implementation_overlay_never_creates_engine_witnesses_or_executed_statuses() {
+        let root = corpus();
+        let overlay = date_range_overlay(
+            orna_conformance_v1::Corpus::load(&root).expect("conformance corpus loads"),
+        );
+        let report = generate_with_implementation_evidence_overlay(&root, &overlay)
+            .expect("Date overlay is accepted");
+
+        assert!(
+            report
+                .bounded_production_evidence
+                .iter()
+                .all(|evidence| evidence.status == Status::PartiallyExecuted)
+        );
+        assert!(
+            report
+                .requirements
+                .iter()
+                .all(|requirement| requirement.status != Status::Executed)
+        );
+        let range = report
+            .requirements
+            .iter()
+            .find(|requirement| requirement.requirement_id == "ORNA-RANGE-001")
+            .expect("range requirement");
+        assert!(range.boundaries.iter().all(|boundary| {
+            boundary.kind != "engine-witness" && boundary.status != Status::Executed
+        }));
     }
     #[test]
     fn reproducible() {
