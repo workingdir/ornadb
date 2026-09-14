@@ -211,6 +211,7 @@ pub struct ReferenceProjectInvocationEvidence {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReferenceProjectNegativeEvidence {
     pub invoke: String,
+    pub args: Vec<Value>,
     pub expected: String,
     pub status: EvidenceStatus,
     pub rollback_verified: bool,
@@ -872,6 +873,7 @@ async fn execute_reference_project_runtime_adapter(
             }
             negative_cases.push(ReferenceProjectNegativeEvidence {
                 invoke: case.invoke.clone(),
+                args: case.args.clone(),
                 expected: case.expect.clone(),
                 status: EvidenceStatus::Passed,
                 rollback_verified,

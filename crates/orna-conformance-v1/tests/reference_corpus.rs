@@ -299,13 +299,6 @@ fn reference_project_runtime_adapter_reports_exactly_separate_evidence() {
             .all(|invocation| invocation.status == EvidenceStatus::Passed
                 && !invocation.checks.is_empty())
     );
-    assert_eq!(evidence.negative_cases.len(), 3);
-    assert!(
-        evidence
-            .negative_cases
-            .iter()
-            .all(|case| case.status == EvidenceStatus::Passed && case.rollback_verified)
-    );
     let expected_negative_cases = serde_json::json!([
         {
             "invoke": "library.lend",
@@ -323,21 +316,36 @@ fn reference_project_runtime_adapter_reports_exactly_separate_evidence() {
             "expect": "duplicate key; existing loan unchanged"
         }
     ]);
-    let actual_negative_cases = corpus
-        .project_expectations
+    let actual_negative_cases = evidence
         .negative_cases
         .iter()
         .map(|case| {
             serde_json::json!({
                 "invoke": case.invoke,
                 "args": case.args,
-                "expect": case.expect
+                "expect": case.expected,
+                "status": case.status,
+                "rollback_verified": case.rollback_verified
             })
+        })
+        .collect::<Vec<_>>();
+    let expected_negative_cases = expected_negative_cases
+        .as_array()
+        .expect("negative-case oracle is an array")
+        .iter()
+        .cloned()
+        .map(|mut case| {
+            let object = case
+                .as_object_mut()
+                .expect("negative-case oracle entries are objects");
+            object.insert("status".into(), serde_json::json!(EvidenceStatus::Passed));
+            object.insert("rollback_verified".into(), serde_json::json!(true));
+            case
         })
         .collect::<Vec<_>>();
     assert_eq!(
         serde_json::Value::Array(actual_negative_cases),
-        expected_negative_cases
+        serde_json::Value::Array(expected_negative_cases)
     );
 
     // The distinct report type/classification and explicit false flags keep
