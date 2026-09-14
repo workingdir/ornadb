@@ -741,6 +741,7 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
                 initial_tables: "empty".into(),
             },
             steps: Vec::new(),
+            negative_cases: Vec::new(),
         },
     }
 }
