@@ -1,7 +1,7 @@
 #![allow(clippy::single_element_loop)]
 use std::{
     io::{self, IsTerminal, Write},
-    process::ExitCode,
+    process::{Command as ProcessCommand, ExitCode},
 };
 
 use orna_protocol::CallFailure;
@@ -10,7 +10,8 @@ mod cli;
 mod source_check;
 
 use cli::{
-    ColorChoice, Command, ParsedInvocation, RawCallParameters, USAGE, parse_invocation, write_help,
+    ColorChoice, Command, ParsedInvocation, RawCallParameters, StatusFormat, USAGE,
+    parse_invocation, write_help,
 };
 
 #[cfg(test)]
@@ -39,6 +40,12 @@ fn main() -> ExitCode {
         endpoint_explicit,
         command,
     } = parsed;
+    if endpoint_explicit && matches!(&command, Command::Status(_)) {
+        write_stderr_line(
+            "orna: status observes the current Git worktree and does not accept --db",
+        );
+        return ExitCode::from(2);
+    }
     let endpoint_is_unsupported = endpoint_command_is_unsupported(&endpoint, &command);
     if endpoint_explicit
         && !matches!(&command, Command::Help(_) | Command::Version)
@@ -73,6 +80,7 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::Status(format) => run_status(format),
         Command::Run => match endpoint {
             orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
                 match orna_server::run_sqlite_server(path) {
@@ -386,6 +394,135 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+/// Observes the caller's Git worktree without involving an Orna database
+/// endpoint. Porcelain is sourced from the repository boundary so its record
+/// format remains the API's fixed NUL-delimited porcelain-v2 representation.
+/// Short output deliberately delegates compact presentation to Git.
+fn run_status(format: StatusFormat) -> ExitCode {
+    let current_directory = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(_) => {
+            write_stderr_line("orna: E2100: status could not determine the current directory");
+            return ExitCode::from(1);
+        }
+    };
+    let repository = match orna_repository_v1::Repository::discover(&current_directory) {
+        Ok(repository) => repository,
+        Err(_) => {
+            write_stderr_line("orna: E2100: status requires a Git worktree");
+            return ExitCode::from(1);
+        }
+    };
+    let output = match format {
+        StatusFormat::Human => git_status(&repository, &current_directory, false),
+        StatusFormat::Porcelain => repository
+            .worktree_state()
+            .map(|state| state.as_porcelain_v2_z().to_vec())
+            .map_err(|_| ()),
+        StatusFormat::Short => git_status(&repository, &current_directory, true),
+    };
+    let output = match output {
+        Ok(output) => output,
+        Err(()) => {
+            write_stderr_line("orna: E2100: status could not read the Git worktree");
+            return ExitCode::from(1);
+        }
+    };
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    match stdout.write_all(&output).and_then(|()| stdout.flush()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(_) => {
+            write_stderr_line("orna: E2100: status could not write output");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// The repository API exposes only stable porcelain-v2 records. Git owns the
+/// human compact rendering, including quoting and caller-relative paths.
+fn git_status(
+    repository: &orna_repository_v1::Repository,
+    current_directory: &std::path::Path,
+    short: bool,
+) -> Result<Vec<u8>, ()> {
+    let git_directory = git_directory(repository)?;
+    let mut command = ProcessCommand::new("git");
+    command
+        .current_dir(current_directory)
+        .arg("--git-dir")
+        .arg(git_directory)
+        .arg("--work-tree")
+        .arg(repository.worktree())
+        .arg("status")
+        .args(short.then_some("--short"))
+        .args(["--no-color", "--untracked-files=all"]);
+    scrub_git_routing_environment(&mut command);
+    let output = command.output().map_err(|_| ())?;
+    output.status.success().then_some(output.stdout).ok_or(())
+}
+
+fn git_directory(repository: &orna_repository_v1::Repository) -> Result<std::path::PathBuf, ()> {
+    let mut command = ProcessCommand::new("git");
+    command
+        .arg("-C")
+        .arg(repository.worktree())
+        .args(["rev-parse", "--git-dir"]);
+    scrub_git_routing_environment(&mut command);
+    let output = command.output().map_err(|_| ())?;
+    if !output.status.success() {
+        return Err(());
+    }
+    let git_directory = std::str::from_utf8(&output.stdout).map_err(|_| ())?.trim();
+    if git_directory.is_empty() {
+        return Err(());
+    }
+    let git_directory = std::path::PathBuf::from(git_directory);
+    Ok(if git_directory.is_absolute() {
+        git_directory
+    } else {
+        repository.worktree().join(git_directory)
+    })
+}
+
+fn scrub_git_routing_environment(command: &mut ProcessCommand) {
+    for variable in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_PREFIX",
+        "GIT_NAMESPACE",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_GRAFT_FILE",
+        "GIT_SHALLOW_FILE",
+    ] {
+        command.env_remove(variable);
+    }
+    for (variable, _) in std::env::vars_os() {
+        if variable.as_encoded_bytes().starts_with(b"GIT_CONFIG_KEY_")
+            || variable
+                .as_encoded_bytes()
+                .starts_with(b"GIT_CONFIG_VALUE_")
+        {
+            command.env_remove(variable);
+        }
+    }
+    command.env("GIT_OPTIONAL_LOCKS", "0");
 }
 
 fn run_invoke_command<W, E>(
@@ -786,6 +923,38 @@ mod tests {
         assert_eq!(
             parse_command(arguments(&["orna", "help", "repl"])),
             Some(Command::Help(HelpTopic::Repl)),
+        );
+    }
+
+    #[test]
+    fn accepts_exact_status_output_modes() {
+        assert_eq!(
+            parse_command(arguments(&["orna", "status", "--porcelain"])),
+            Some(Command::Status(StatusFormat::Porcelain)),
+        );
+        assert_eq!(
+            parse_command(arguments(&["orna", "status", "--short"])),
+            Some(Command::Status(StatusFormat::Short)),
+        );
+        assert_eq!(
+            parse_command(arguments(&["orna", "status", "--help"])),
+            Some(Command::Help(HelpTopic::Status)),
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_extra_status_options() {
+        for values in [
+            vec!["orna", "status", "--porcelain=v2"],
+            vec!["orna", "status", "--short", "extra"],
+            vec!["orna", "status", "--porcelain", "--short"],
+            vec!["orna", "status", "--unknown"],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
+        assert_eq!(
+            parse_command(arguments(&["orna", "status"])),
+            Some(Command::Status(StatusFormat::Human)),
         );
     }
 
