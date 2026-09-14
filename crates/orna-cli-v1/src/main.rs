@@ -15,9 +15,7 @@ use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
     ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
 };
-use orna_evaluator_v1::{
-    Environment, Limits, reference_standard_profile, reference_standard_sources,
-};
+use orna_evaluator_v1::{Environment, Limits};
 use orna_foundation_v1::{OvbRaw, Value};
 use orna_runtime_v1::RuntimeIdentity;
 
@@ -656,6 +654,14 @@ fn run_status_short(endpoint: &Endpoint) -> Result<(), Diagnostic> {
 }
 
 fn load_project(endpoint: &Endpoint) -> Result<orna_project_v1::LoadedProject, Diagnostic> {
+    let project = load_project_without_standard_rejection(endpoint)?;
+    reject_uncaptured_standard_modules(&project)?;
+    Ok(project)
+}
+
+fn load_project_without_standard_rejection(
+    endpoint: &Endpoint,
+) -> Result<orna_project_v1::LoadedProject, Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
@@ -664,7 +670,7 @@ fn load_project(endpoint: &Endpoint) -> Result<orna_project_v1::LoadedProject, D
             "run the command inside a Git worktree or provide a local project path",
         )
     })?;
-    let project = orna_project_v1::ProjectLoader::default()
+    orna_project_v1::ProjectLoader::default()
         .load(&repository)
         .map_err(|_| {
             Diagnostic::target(
@@ -672,9 +678,7 @@ fn load_project(endpoint: &Endpoint) -> Result<orna_project_v1::LoadedProject, D
                 "project source could not be loaded",
                 "fix the project module graph and source boundaries, then run check again",
             )
-        })?;
-    reject_uncaptured_standard_modules(&project)?;
-    Ok(project)
+        })
 }
 
 fn reject_uncaptured_standard_modules(
@@ -1012,35 +1016,21 @@ fn repl_session(endpoint: &Endpoint) -> Result<AdmittedReplSession, Diagnostic> 
         Endpoint::Path(_) | Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => true,
     };
     if project_context {
-        let path = local_project_path(endpoint)?;
-        let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
-            Diagnostic::target(
-                "E2100",
-                "project Git worktree could not be discovered",
-                "run the command inside a Git worktree or provide a local project path",
-            )
-        })?;
-        let project = orna_project_v1::ProjectLoader::default()
-            .load_with_standard_profile(&repository, Some(reference_standard_profile()))
-            .map_err(|_| {
-                Diagnostic::target(
-                    "E2100",
-                    "project source could not be loaded",
-                    "fix the project module graph and source boundaries, then start the REPL again",
-                )
-            })?;
-        return AdmittedReplSession::from_loaded_project(
-            &project,
-            reference_standard_sources(),
-            Limits::default(),
-        )
-        .map_err(|error| repl_session_error(&error));
+        let project = load_project_without_standard_rejection(endpoint)?;
+        return AdmittedReplSession::from_loaded_project(&project, [], Limits::default())
+            .map_err(|error| repl_session_error(&error));
     }
     Ok(AdmittedReplSession::new(Limits::default()))
 }
 
 fn repl_session_error(error: &ReplError) -> Diagnostic {
-    if error.code().starts_with("ORNA-S") || error.code() == "ORNA-REPL-SEMANTIC" {
+    if matches!(error.code(), "ORNA-REPL-STANDARD" | "ORNA-S010-IMPORT") {
+        Diagnostic::target(
+            "ORNA-S010-IMPORT",
+            "imported module is unavailable",
+            "use a captured standard dependency or remove the import",
+        )
+    } else if error.code().starts_with("ORNA-S") || error.code() == "ORNA-REPL-SEMANTIC" {
         Diagnostic::target(
             "E2101",
             "project semantic analysis failed",
@@ -1437,11 +1427,13 @@ mod tests {
         );
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
+        let error = repl_session(&endpoint).expect_err("uncaptured standard module");
+        assert_eq!(error.code, "ORNA-S010-IMPORT");
+        assert_eq!(error.exit, Exit::Target);
+        assert_eq!(error.title, "imported module is unavailable");
         assert_eq!(
-            repl_session(&endpoint)
-                .expect_err("uncaptured standard module")
-                .code,
-            "E2101"
+            error.help,
+            "use a captured standard dependency or remove the import"
         );
     }
 
