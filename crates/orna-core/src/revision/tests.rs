@@ -26,6 +26,306 @@ const fn digest<const BYTE: u8>() -> Sha256Digest {
     Sha256Digest::from_bytes([BYTE; 32])
 }
 
+fn valid_source_for_artifact_provenance() -> StoredSourceRevision {
+    let contents = [
+        (
+            SourceUnitId::from_bytes(id::<3>()),
+            "crm/schema.orna",
+            "CREATE SCHEMA crm;\n",
+        ),
+        (
+            SourceUnitId::from_bytes(id::<4>()),
+            "crm/functions.orna",
+            "-- cafe\u{301}\nFUNCTION crm.lookup;\n",
+        ),
+    ];
+    let units = contents
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, (id, path, content))| {
+            StoredSourceUnit::new(
+                id,
+                ordinal as u32,
+                path,
+                content,
+                source_unit_content_digest(content).unwrap(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let bundle = SourceBundleId::from_bytes(id::<1>());
+    let bundle_hash = source_bundle_digest(&units).unwrap();
+    let revision_hash = source_revision_record_digest(bundle, None, bundle_hash).unwrap();
+    StoredSourceRevision::new(
+        bundle,
+        SourceRevisionId::from_bytes(id::<2>()),
+        None,
+        units,
+        bundle_hash,
+        revision_hash,
+    )
+    .unwrap()
+}
+
+fn valid_provenance_artifact() -> ExecutableArtifact {
+    let payload = vec![1, 2, 3];
+    let content_hash = crate::canonical_hash::artifact_payload_digest(&payload).unwrap();
+    ExecutableArtifact::new(
+        ExecutableArtifactKind::Server,
+        "orna.server-plan",
+        1,
+        payload,
+        content_hash,
+    )
+    .unwrap()
+}
+
+fn valid_provenance_compatibility() -> ArtifactCompatibilityCoordinates {
+    ArtifactCompatibilityCoordinates::new(
+        "orna.language/1",
+        "orna.sys/1",
+        "orna.codec/1",
+        "orna.repository/1",
+        "orna.storage/1",
+        "orna.protocol/1",
+        vec!["storage/portable".to_owned(), "protocol/live".to_owned()],
+    )
+    .unwrap()
+}
+
+fn valid_provenance_envelope() -> ExecutableArtifactProvenance {
+    let source = valid_source_for_artifact_provenance();
+    let revision = FunctionRevisionRecord::new(
+        FunctionId::from_bytes(id::<20>()),
+        FunctionRevisionId::from_bytes(id::<21>()),
+        1,
+        SourceOrigin::new(SourceUnitId::from_bytes(id::<4>()), 10, 30).unwrap(),
+        crate::canonical_hash::function_declaration_digest(b"FUNCTION crm.lookup;").unwrap(),
+        digest::<23>(),
+        "orna.language/1",
+        valid_provenance_artifact(),
+    )
+    .unwrap();
+    let catalogue = ArtifactCatalogueCompatibility::new(
+        CatalogueRevisionId::from_bytes(id::<24>()),
+        CatalogueHashVersion::Version1,
+        digest::<25>(),
+        None,
+    )
+    .unwrap();
+    ExecutableArtifactProvenance::new(
+        &source,
+        catalogue,
+        valid_provenance_compatibility(),
+        revision,
+    )
+    .unwrap()
+}
+
+#[test]
+fn executable_artifact_provenance_requires_exact_declaration_hash() {
+    let source = valid_source_for_artifact_provenance();
+    let valid = valid_provenance_envelope();
+    let wrong_hash = FunctionRevisionRecord::new(
+        valid.revision().function(),
+        valid.revision().id(),
+        valid.revision().revision_number(),
+        valid.revision().declaration_origin(),
+        digest::<22>(),
+        valid.revision().semantic_hash(),
+        valid.revision().language_version(),
+        valid.revision().artifact().clone(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        ExecutableArtifactProvenance::new(
+            &source,
+            valid.catalogue(),
+            valid.compatibility().clone(),
+            wrong_hash,
+        ),
+        Err(ArtifactProvenanceError::DeclarationContentHashMismatch)
+    );
+}
+
+#[test]
+fn executable_artifact_provenance_rejects_invalid_declaration_ranges() {
+    let source = valid_source_for_artifact_provenance();
+    let valid = valid_provenance_envelope();
+    let make_revision = |origin| {
+        FunctionRevisionRecord::new(
+            valid.revision().function(),
+            valid.revision().id(),
+            valid.revision().revision_number(),
+            origin,
+            valid.revision().declaration_content_hash(),
+            valid.revision().semantic_hash(),
+            valid.revision().language_version(),
+            valid.revision().artifact().clone(),
+        )
+        .unwrap()
+    };
+
+    for origin in [
+        SourceOrigin::new(SourceUnitId::from_bytes(id::<4>()), 10, 10).unwrap(),
+        SourceOrigin::new(SourceUnitId::from_bytes(id::<4>()), 10, 100).unwrap(),
+        SourceOrigin::new(SourceUnitId::from_bytes(id::<4>()), 8, 30).unwrap(),
+        SourceOrigin::new(SourceUnitId::from_bytes(id::<99>()), 0, 1).unwrap(),
+    ] {
+        assert_eq!(
+            ExecutableArtifactProvenance::new(
+                &source,
+                valid.catalogue(),
+                valid.compatibility().clone(),
+                make_revision(origin),
+            ),
+            Err(ArtifactProvenanceError::DeclarationOriginOutsideSourceSnapshot)
+        );
+    }
+
+    assert!(SourceOrigin::new(SourceUnitId::from_bytes(id::<4>()), 30, 10).is_err());
+}
+
+#[test]
+fn executable_artifact_provenance_deserialized_tampering_fails_closed() {
+    let valid = valid_provenance_envelope();
+    let source = valid_source_for_artifact_provenance();
+    let mut tampered = serde_json::to_value(&valid).unwrap();
+    tampered["revision"]["declaration_content_hash"] =
+        serde_json::to_value(digest::<22>()).unwrap();
+    let tampered: ExecutableArtifactProvenance = serde_json::from_value(tampered).unwrap();
+
+    assert_eq!(
+        tampered.validate(),
+        Err(ArtifactProvenanceError::DigestMismatch)
+    );
+
+    let mut tampered = valid.clone();
+    tampered.revision.declaration_content_hash = digest::<22>();
+    tampered.digest = tampered.calculate_digest().unwrap();
+    tampered.validate().unwrap();
+    assert_eq!(
+        tampered.validate_against(
+            &source,
+            &valid.catalogue(),
+            valid.compatibility(),
+            tampered.revision(),
+        ),
+        Err(ArtifactProvenanceError::DeclarationContentHashMismatch)
+    );
+
+    let mut malformed = valid.clone();
+    malformed.revision.declaration_origin =
+        SourceOrigin::new(SourceUnitId::from_bytes(id::<4>()), 30, 30).unwrap();
+    malformed.digest = malformed.calculate_digest().unwrap();
+    assert_eq!(
+        malformed.validate(),
+        Err(ArtifactProvenanceError::DeclarationOriginOutsideSourceSnapshot)
+    );
+}
+
+#[test]
+fn executable_artifact_provenance_binds_complete_source_and_compatibility() {
+    let envelope = valid_provenance_envelope();
+
+    assert_eq!(envelope.version(), ExecutableArtifactProvenance::VERSION);
+    assert_eq!(
+        envelope.source().bundle(),
+        SourceBundleId::from_bytes(id::<1>())
+    );
+    assert_eq!(
+        envelope.source().revision(),
+        SourceRevisionId::from_bytes(id::<2>())
+    );
+    assert_eq!(
+        envelope.catalogue().hash_version(),
+        CatalogueHashVersion::Version1
+    );
+    assert_eq!(envelope.compatibility().sys_version(), "orna.sys/1");
+    assert_eq!(
+        envelope.revision().function(),
+        FunctionId::from_bytes(id::<20>())
+    );
+    assert_ne!(envelope.digest(), Sha256Digest::from_bytes([0; 32]));
+    envelope.validate().unwrap();
+}
+
+#[test]
+fn executable_artifact_provenance_rejects_tampering_and_incomplete_metadata() {
+    let envelope = valid_provenance_envelope();
+    let mut tampered = envelope.clone();
+    tampered.digest = digest::<99>();
+    assert_eq!(
+        tampered.validate(),
+        Err(ArtifactProvenanceError::DigestMismatch)
+    );
+
+    assert_eq!(
+        ArtifactCompatibilityCoordinates::new(
+            "",
+            "orna.sys/1",
+            "orna.codec/1",
+            "orna.repository/1",
+            "orna.storage/1",
+            "orna.protocol/1",
+            vec![],
+        ),
+        Err(ArtifactProvenanceError::EmptyCompatibilityCoordinate {
+            field: "language_version"
+        })
+    );
+
+    let source = valid_source_for_artifact_provenance();
+    let invalid_source = StoredSourceRevision::new(
+        source.bundle(),
+        source.id(),
+        source.parent(),
+        source.units().to_vec(),
+        digest::<98>(),
+        source.revision_hash(),
+    )
+    .unwrap();
+    let revision = envelope.revision().clone();
+    let catalogue = envelope.catalogue();
+    assert_eq!(
+        ExecutableArtifactProvenance::new(
+            &invalid_source,
+            catalogue,
+            envelope.compatibility().clone(),
+            revision,
+        ),
+        Err(ArtifactProvenanceError::InvalidSourceSnapshot)
+    );
+}
+
+#[test]
+fn executable_artifact_provenance_requires_catalogue_standard_coordinate_pairing() {
+    assert_eq!(
+        ArtifactCatalogueCompatibility::new(
+            CatalogueRevisionId::from_bytes(id::<30>()),
+            CatalogueHashVersion::Version2,
+            digest::<31>(),
+            None,
+        ),
+        Err(ArtifactProvenanceError::MissingStandardLibraryCompatibility)
+    );
+    assert_eq!(
+        ArtifactCatalogueCompatibility::new(
+            CatalogueRevisionId::from_bytes(id::<30>()),
+            CatalogueHashVersion::Version1,
+            digest::<31>(),
+            Some(ArtifactStandardLibraryCompatibility::new(
+                StandardLibraryRevisionId::from_bytes(id::<32>()),
+                SourceRevisionId::from_bytes(id::<33>()),
+                StandardLibraryDigestVersion::Version1,
+                digest::<34>(),
+            )),
+        ),
+        Err(ArtifactProvenanceError::UnexpectedStandardLibraryCompatibility)
+    );
+}
+
 #[test]
 fn canonical_hash_versions_convert_from_exact_supported_numbers() {
     assert_eq!(CatalogueHashVersion::Version1.to_u32(), 1);
@@ -126,6 +426,99 @@ fn source(parent: Option<SourceRevisionId>) -> StoredSourceRevision {
         digest::<6>(),
     )
     .unwrap()
+}
+
+#[test]
+fn executable_artifact_provenance_binds_source_catalogue_compatibility_and_revision() {
+    let source = valid_source_for_artifact_provenance();
+    let provenance = valid_provenance_envelope();
+    let catalogue = provenance.catalogue();
+    let compatibility = valid_provenance_compatibility();
+    let revision = provenance.revision().clone();
+
+    assert_eq!(provenance.version(), ExecutableArtifactProvenance::VERSION);
+    assert_eq!(provenance.source().bundle(), source.bundle());
+    assert_eq!(provenance.source().revision(), source.id());
+    assert_eq!(provenance.source().bundle_hash(), source.bundle_hash());
+    assert_eq!(provenance.source().revision_hash(), source.revision_hash());
+    assert_eq!(provenance.catalogue(), catalogue);
+    assert_eq!(provenance.compatibility(), &compatibility);
+    assert_eq!(provenance.revision(), &revision);
+    assert_ne!(provenance.digest(), Sha256Digest::from_bytes([0; 32]));
+    provenance.validate().unwrap();
+    provenance
+        .validate_against(&source, &catalogue, &compatibility, &revision)
+        .unwrap();
+}
+
+#[test]
+fn executable_artifact_provenance_rejects_unknown_versions_and_tampering() {
+    let provenance = valid_provenance_envelope();
+
+    let mut unknown_version = serde_json::to_value(&provenance).unwrap();
+    unknown_version["version"] = serde_json::json!(2);
+    let unknown_version: ExecutableArtifactProvenance =
+        serde_json::from_value(unknown_version).unwrap();
+    assert!(matches!(
+        unknown_version.validate(),
+        Err(ArtifactProvenanceError::UnsupportedEnvelopeVersion { version: 2 })
+    ));
+
+    let mut changed_coordinates = serde_json::to_value(&provenance).unwrap();
+    changed_coordinates["compatibility"]["sys_version"] = serde_json::json!("orna.sys/2");
+    let changed_coordinates: ExecutableArtifactProvenance =
+        serde_json::from_value(changed_coordinates).unwrap();
+    assert_eq!(
+        changed_coordinates.validate(),
+        Err(ArtifactProvenanceError::DigestMismatch)
+    );
+
+    let mut changed_payload = serde_json::to_value(&provenance).unwrap();
+    changed_payload["revision"]["artifact"]["bytes"]["payload"][0] = serde_json::json!(9);
+    let changed_payload: ExecutableArtifactProvenance =
+        serde_json::from_value(changed_payload).unwrap();
+    assert_eq!(
+        changed_payload.validate(),
+        Err(ArtifactProvenanceError::InvalidArtifact)
+    );
+}
+
+#[test]
+fn executable_artifact_provenance_rejects_invalid_source_and_context() {
+    let valid = valid_provenance_envelope();
+    let source = valid_source_for_artifact_provenance();
+    let invalid_source = StoredSourceRevision::new(
+        source.bundle(),
+        source.id(),
+        source.parent(),
+        source.units().to_vec(),
+        digest::<98>(),
+        source.revision_hash(),
+    )
+    .unwrap();
+    let result = ExecutableArtifactProvenance::new(
+        &invalid_source,
+        valid.catalogue(),
+        valid.compatibility().clone(),
+        valid.revision().clone(),
+    );
+    assert_eq!(result, Err(ArtifactProvenanceError::InvalidSourceSnapshot));
+
+    let source = valid_source_for_artifact_provenance();
+    let compatibility = valid_provenance_compatibility();
+    let revision = valid.revision().clone();
+    let provenance = valid;
+    let other_catalogue = ArtifactCatalogueCompatibility::new(
+        CatalogueRevisionId::from_bytes(id::<210>()),
+        CatalogueHashVersion::Version1,
+        digest::<211>(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        provenance.validate_against(&source, &other_catalogue, &compatibility, &revision),
+        Err(ArtifactProvenanceError::CatalogueCoordinatesMismatch)
+    );
 }
 
 fn empty_catalogue() -> CatalogueSnapshot {
