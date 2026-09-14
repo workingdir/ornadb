@@ -60,6 +60,7 @@ impl VersionFence {
 pub enum FieldType {
     Bool,
     Int,
+    Float,
     Str,
     Uuid,
     Custom(String),
@@ -296,6 +297,13 @@ fn validate_schema(
                     field: field.id,
                 });
             }
+            if field.ty == FieldType::Float && field.role == FieldRole::Key {
+                return Err(PlanningError::IncompatibleField {
+                    table: table.id,
+                    field: field.id,
+                    reason: "Float is not permitted as a primary-key component",
+                });
+            }
             if let Some(fallback) = &field.introduction_fallback {
                 if fallback.encode().is_err() {
                     return Err(PlanningError::IncompatibleField {
@@ -523,6 +531,56 @@ mod tests {
                 CanonicalValue::new(orna_foundation_v1::OvbRaw::Text("GB".into())).unwrap(),
             ),
         }
+    }
+
+    #[test]
+    fn float_primary_keys_fail_closed_before_operations_are_emitted() {
+        let float_key = Field {
+            id: id(2),
+            name: "measurement".into(),
+            ty: FieldType::Float,
+            role: FieldRole::Key,
+            optional: false,
+            introduction_fallback: None,
+        };
+        let schema = schema(table(true, vec![float_key]));
+
+        assert!(matches!(
+            plan(&schema, &schema, &request(vec![])),
+            Err(PlanningError::IncompatibleField {
+                reason: "Float is not permitted as a primary-key component",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn float_stored_and_computed_fields_remain_valid() {
+        let source = schema(table(
+            true,
+            vec![
+                field(2, "name", false),
+                Field {
+                    id: id(3),
+                    name: "reading".into(),
+                    ty: FieldType::Float,
+                    role: FieldRole::Stored,
+                    optional: true,
+                    introduction_fallback: None,
+                },
+                Field {
+                    id: id(4),
+                    name: "normalized".into(),
+                    ty: FieldType::Float,
+                    role: FieldRole::Computed,
+                    optional: false,
+                    introduction_fallback: None,
+                },
+            ],
+        ));
+
+        let planned = plan(&source, &source, &request(vec![])).unwrap();
+        assert!(planned.operations().is_empty());
     }
 
     #[test]
