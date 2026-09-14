@@ -164,6 +164,22 @@ fn canonical_key(value: &CanonicalValue) -> String {
         .map(hex)
         .unwrap_or_else(|_| "invalid-canonical-value".into())
 }
+
+fn contains_float(value: &orna_foundation_v1::OvbRaw) -> bool {
+    match value {
+        orna_foundation_v1::OvbRaw::Float(_) => true,
+        orna_foundation_v1::OvbRaw::Array(values) => values.iter().any(contains_float),
+        orna_foundation_v1::OvbRaw::Map(entries) => entries
+            .iter()
+            .any(|(key, value)| contains_float(key) || contains_float(value)),
+        orna_foundation_v1::OvbRaw::Tag(_, value) => contains_float(value),
+        orna_foundation_v1::OvbRaw::Null
+        | orna_foundation_v1::OvbRaw::Bool(_)
+        | orna_foundation_v1::OvbRaw::Int(_)
+        | orna_foundation_v1::OvbRaw::Bytes(_)
+        | orna_foundation_v1::OvbRaw::Text(_) => false,
+    }
+}
 fn hex(bytes: Vec<u8>) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -426,6 +442,12 @@ fn validate_rekeys(
                 reason: "automatic keys cannot be rekeyed",
             });
         }
+        if contains_float(rekey.old_key.raw()) || contains_float(rekey.new_key.raw()) {
+            return Err(PlanningError::InvalidRekey {
+                table: rekey.table,
+                reason: "Float is not permitted in a primary-key component",
+            });
+        }
         if rekey.old_key == rekey.new_key {
             return Err(PlanningError::InvalidRekey {
                 table: rekey.table,
@@ -581,6 +603,59 @@ mod tests {
 
         let planned = plan(&source, &source, &request(vec![])).unwrap();
         assert!(planned.operations().is_empty());
+    }
+
+    #[test]
+    fn float_rekey_components_fail_before_operations_are_emitted() {
+        let source = schema(table(true, vec![field(2, "name", false)]));
+        let cases = [
+            (
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Float(1.0f64.to_bits())).unwrap(),
+                CanonicalValue::uuid([3; 16]),
+            ),
+            (
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Array(vec![
+                    orna_foundation_v1::OvbRaw::Text("region".into()),
+                    orna_foundation_v1::OvbRaw::Array(vec![orna_foundation_v1::OvbRaw::Float(
+                        2.0f64.to_bits(),
+                    )]),
+                ]))
+                .unwrap(),
+                CanonicalValue::uuid([4; 16]),
+            ),
+            (
+                CanonicalValue::uuid([5; 16]),
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Tag(
+                    60013,
+                    Box::new(orna_foundation_v1::OvbRaw::Array(vec![
+                        orna_foundation_v1::OvbRaw::Int(1.into()),
+                        orna_foundation_v1::OvbRaw::Map(vec![(
+                            orna_foundation_v1::OvbRaw::Text("component".into()),
+                            orna_foundation_v1::OvbRaw::Float(3.0f64.to_bits()),
+                        )]),
+                    ])),
+                ))
+                .unwrap(),
+            ),
+        ];
+
+        for (old_key, new_key) in cases {
+            assert!(matches!(
+                plan(
+                    &source,
+                    &source,
+                    &request(vec![RekeyIntent {
+                        table: id(1),
+                        old_key,
+                        new_key,
+                    }])
+                ),
+                Err(PlanningError::InvalidRekey {
+                    reason: "Float is not permitted in a primary-key component",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
