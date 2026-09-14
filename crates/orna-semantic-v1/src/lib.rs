@@ -1527,6 +1527,11 @@ fn type_of(ty: &TypeExpr) -> Type {
         }
         TypeExpr::Name {
             path, arguments, ..
+        } if path.as_slice() == ["Range"] && arguments.len() == 1 => {
+            Type::Range(Box::new(type_of(&arguments[0])))
+        }
+        TypeExpr::Name {
+            path, arguments, ..
         } => Type::Applied {
             base: path.join("."),
             arguments: arguments.iter().map(type_of).collect(),
@@ -2198,7 +2203,8 @@ fn check_item(
                     diagnostics.push(diag(DIAG_DUPLICATE, "duplicate primary-key field"));
                 }
                 let ty = key.annotation.as_ref().map(type_of).unwrap_or(Type::Error);
-                let is_range = matches!(&ty, Type::Applied { base, .. } if base == "Range");
+                let is_range = matches!(&ty, Type::Range(_))
+                    || matches!(&ty, Type::Applied { base, .. } if base == "Range");
                 let is_float = matches!(&ty, Type::Float)
                     || matches!(&ty, Type::Applied { base, .. } if base == "Float");
                 if is_range || is_float {
@@ -4564,8 +4570,10 @@ fn validate_loop_transfers(
             let enters_loop = loop_context.is_some();
             let mut body_locals = local.clone();
             if let (ControlKind::For, Some(binding), Some(iterable)) = (kind, binding, condition)
-                && let Some(element) =
-                    finite_for_element_type(&infer(iterable, scope, local, &mut Vec::new()).ty)
+                && let Some(element) = finite_for_element_type(
+                    iterable,
+                    &infer(iterable, scope, local, &mut Vec::new()).ty,
+                )
             {
                 bind_pattern(binding, element, &mut body_locals, &mut Vec::new());
             }
@@ -5447,23 +5455,23 @@ fn infer(
                     Type::Error
                 }
                 [one] => {
-                    if !is_numeric_range_bound(&one.ty) {
+                    if !is_ordered_range_bound(&one.ty) {
                         diagnostics.push(diag(
                             DIAG_TYPE,
-                            "range endpoints must have one compatible numeric type",
+                            "range bounds must have the same ordered type",
                         ));
                         Type::Error
                     } else {
                         Type::Range(Box::new(one.ty.clone()))
                     }
                 }
-                [left, right] if left.ty == right.ty && is_numeric_range_bound(&left.ty) => {
+                [left, right] if left.ty == right.ty && is_ordered_range_bound(&left.ty) => {
                     Type::Range(Box::new(left.ty.clone()))
                 }
                 _ => {
                     diagnostics.push(diag(
                         DIAG_TYPE,
-                        "range endpoints must have one compatible numeric type",
+                        "range bounds must have the same ordered type",
                     ));
                     Type::Error
                 }
@@ -5494,12 +5502,12 @@ fn infer(
                 };
             }
             if matches!(op.as_str(), ".." | "..=") {
-                let ty = if left.ty == right.ty && is_numeric_range_bound(&left.ty) {
+                let ty = if left.ty == right.ty && is_ordered_range_bound(&left.ty) {
                     Type::Range(Box::new(left.ty))
                 } else {
                     diagnostics.push(diag(
                         DIAG_TYPE,
-                        "range bounds must have the same numeric type",
+                        "range bounds must have the same ordered type",
                     ));
                     Type::Error
                 };
@@ -5512,7 +5520,7 @@ fn infer(
                         Type::Bool
                     }
                     _ => {
-                        diagnostics.push(diag(DIAG_TYPE, "membership requires a numeric range"));
+                        diagnostics.push(diag(DIAG_TYPE, "membership requires an ordered range"));
                         Type::Error
                     }
                 };
@@ -6234,8 +6242,9 @@ fn infer_for(
         };
     }
 
-    let iterable = infer(iterable, scope, local, diagnostics);
-    let Some(element) = finite_for_element_type(&iterable.ty) else {
+    let iterable_expression = iterable;
+    let iterable = infer(iterable_expression, scope, local, diagnostics);
+    let Some(element) = finite_for_element_type(iterable_expression, &iterable.ty) else {
         if !matches!(iterable.ty, Type::Error) {
             diagnostics.push(diag(
                 DIAG_UNSUPPORTED,
@@ -6261,10 +6270,14 @@ fn infer_for(
 /// The runtime has a finite numeric-range contract only for canonical integer
 /// ranges. Keep all other `Iterable` forms fail-closed until their iteration
 /// and element-binding contracts are implemented.
-fn finite_for_element_type(iterable: &Type) -> Option<Type> {
+fn finite_for_element_type(expression: &Expr, iterable: &Type) -> Option<Type> {
     match iterable {
         Type::List(element) => Some((**element).clone()),
-        Type::Range(element) if element.as_ref() == &Type::Int => Some(Type::Int),
+        Type::Range(element)
+            if element.as_ref() == &Type::Int && matches!(expression, Expr::Range { .. }) =>
+        {
+            Some(Type::Int)
+        }
         _ => None,
     }
 }
@@ -9509,8 +9522,8 @@ fn infer_generic_pipeline_stage(
     }
 }
 
-fn is_numeric_range_bound(ty: &Type) -> bool {
-    matches!(ty, Type::Int | Type::Decimal | Type::Float)
+fn is_ordered_range_bound(ty: &Type) -> bool {
+    matches!(ty, Type::Int | Type::Decimal | Type::Float | Type::Date)
 }
 
 /// Applies the closed affine-absolute aggregation rule for the operations that

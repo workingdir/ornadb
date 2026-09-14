@@ -4013,6 +4013,63 @@ fn optional_numeric_ranges_infer_from_endpoints_or_expected_range_context() {
 }
 
 #[test]
+fn typed_date_ranges_are_ordered_values_with_contextual_unbounded_endpoints() {
+    let valid = analyze(&[ModuleInput::new(
+        "date-ranges.orna",
+        r#"
+            fn half_open(): Range<Date> = 2026-01-01..2027-01-01;
+            fn closed(): Range<Date> = 2026-01-01..=2027-01-01;
+            fn lower_unbounded(): Range<Date> = ..2027-01-01;
+            fn upper_unbounded(): Range<Date> = 2026-01-01..;
+            fn equal_half_open(): Range<Date> = 2026-01-01..2026-01-01;
+            fn equal_closed(): Range<Date> = 2026-01-01..=2026-01-01;
+            fn reversed(): Range<Date> = 2027-01-01..2026-01-01;
+        "#,
+    )]);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
+
+    let module = valid.modules.values().next().expect("date-range module");
+    for name in [
+        "half_open",
+        "closed",
+        "lower_unbounded",
+        "upper_unbounded",
+        "equal_half_open",
+        "equal_closed",
+        "reversed",
+    ] {
+        assert!(matches!(
+            &module.symbols[name].ty,
+            Type::Function { result, .. } if result.as_ref() == &Type::Range(Box::new(Type::Date))
+        ));
+    }
+
+    for (source, expected) in [
+        (
+            "fn invalid() = 2026-01-01..1;",
+            "range bounds must have the same ordered type",
+        ),
+        (
+            "fn invalid() = 1..2026-01-01;",
+            "range bounds must have the same ordered type",
+        ),
+    ] {
+        let invalid = analyze(&[ModuleInput::new("mixed-date-range.orna", source)]);
+        let diagnostic = invalid
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .expect("mixed range endpoints must be rejected");
+        assert_eq!(
+            diagnostic.message(),
+            expected,
+            "{source}: {:?}",
+            invalid.diagnostics
+        );
+    }
+}
+
+#[test]
 fn affine_collection_aggregates_keep_mean_and_admit_extrema() {
     let valid = analyze(&[ModuleInput::new(
         "average.orna",
