@@ -5960,6 +5960,7 @@ mod transaction_admission_tests {
                     initial_tables: "empty".into(),
                 },
                 steps: Vec::new(),
+                negative_cases: Vec::new(),
             },
         };
 
@@ -6297,6 +6298,7 @@ mod bounded_tests {
                     initial_tables: "empty".into(),
                 },
                 steps: Vec::new(),
+                negative_cases: Vec::new(),
             },
         };
 
@@ -6412,6 +6414,7 @@ mod durable_tests {
                     initial_tables: "empty".into(),
                 },
                 steps: Vec::new(),
+                negative_cases: Vec::new(),
             },
         }
     }
@@ -7711,6 +7714,7 @@ mod list_stream_tests {
                     initial_tables: "empty".into(),
                 },
                 steps: Vec::new(),
+                negative_cases: Vec::new(),
             },
         }
     }
@@ -7842,6 +7846,7 @@ mod list_stream_tests {
                     initial_tables: "empty".into(),
                 },
                 steps: Vec::new(),
+                negative_cases: Vec::new(),
             },
         }
     }
