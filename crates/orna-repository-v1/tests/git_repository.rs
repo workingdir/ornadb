@@ -62,6 +62,35 @@ fn repository() -> TempDir {
     temp
 }
 
+fn configure_hostile_git_environment(command: &mut Command, hostile: &Path) {
+    command
+        .env("GIT_DIR", hostile.join(".git"))
+        .env("GIT_WORK_TREE", hostile)
+        .env("GIT_INDEX_FILE", hostile.join(".git/index"))
+        .env("GIT_COMMON_DIR", hostile.join(".git"))
+        .env("GIT_OBJECT_DIRECTORY", hostile.join(".git/objects"))
+        .env(
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            hostile.join(".git/objects"),
+        )
+        .env("GIT_CEILING_DIRECTORIES", hostile)
+        .env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "0")
+        .env("GIT_CONFIG_SYSTEM", hostile.join("system.gitconfig"))
+        .env("GIT_CONFIG_GLOBAL", hostile.join("global.gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "0")
+        .env("GIT_CONFIG", hostile.join("hostile.gitconfig"))
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.worktree")
+        .env("GIT_CONFIG_VALUE_0", hostile)
+        .env("GIT_IMPLICIT_WORK_TREE", "0")
+        .env("GIT_PREFIX", "hostile")
+        .env("GIT_NAMESPACE", "hostile")
+        .env("GIT_REPLACE_REF_BASE", "refs/replace-hostile")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_GRAFT_FILE", hostile.join("grafts"))
+        .env("GIT_SHALLOW_FILE", hostile.join("shallow"));
+}
+
 fn git_state(
     repository: &Repository,
     root: &Path,
@@ -789,6 +818,71 @@ fn discovers_head_index_worktree_and_per_worktree_runtime_area() {
     );
     let cwd = repo.cwd_generation(RuntimeGeneration::new(9)).unwrap();
     assert_eq!(cwd.runtime().get(), 9);
+}
+
+#[test]
+fn hostile_git_routing_child() {
+    let Some(root) = std::env::var_os("ORNA_TEST_GIT_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let repo = Repository::discover(&root).unwrap();
+    let expected_head = std::env::var("ORNA_TEST_EXPECTED_HEAD").unwrap();
+    let expected_index_tree = std::env::var("ORNA_TEST_EXPECTED_INDEX_TREE").unwrap();
+    let expected_runtime = PathBuf::from(std::env::var_os("ORNA_TEST_EXPECTED_RUNTIME").unwrap());
+
+    assert_eq!(
+        repo.head().unwrap().as_ref().map(|head| head.as_str()),
+        Some(expected_head.as_str())
+    );
+    assert_eq!(
+        repo.index_generation()
+            .unwrap()
+            .tree()
+            .map(|tree| tree.as_str()),
+        Some(expected_index_tree.as_str())
+    );
+    assert!(!repo.worktree_state().unwrap().is_clean());
+    let cwd = repo.cwd_generation(RuntimeGeneration::new(41)).unwrap();
+    assert_eq!(
+        cwd.head().map(|head| head.as_str()),
+        Some(expected_head.as_str())
+    );
+    assert_eq!(cwd.branch(), Some("main"));
+    assert!(!cwd.worktree().is_clean());
+    assert_eq!(repo.runtime_paths().root(), expected_runtime);
+}
+
+#[test]
+fn hostile_git_routing_cannot_redirect_repository_observations() {
+    let root = repository();
+    let hostile = repository();
+    fs::write(hostile.path().join("hostile-only.txt"), "hostile\n").unwrap();
+    git(hostile.path(), &["add", "hostile-only.txt"]);
+    git(hostile.path(), &["commit", "-m", "hostile"]);
+
+    let repo = Repository::discover(root.path()).unwrap();
+    fs::write(root.path().join("ordinary.txt"), "root staged\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "root unstaged\n").unwrap();
+    let expected_head = repo.head().unwrap();
+    let expected_index = repo.index_generation().unwrap();
+    let expected_runtime = repo.runtime_paths().root().to_owned();
+
+    let expected_head = expected_head.unwrap();
+    let expected_index_tree = expected_index.tree().unwrap().clone();
+    let mut child = Command::new(std::env::current_exe().unwrap());
+    child.args(["--exact", "hostile_git_routing_child", "--nocapture"]);
+    child
+        .env("ORNA_TEST_GIT_ROOT", root.path())
+        .env("ORNA_TEST_EXPECTED_HEAD", expected_head.as_str())
+        .env(
+            "ORNA_TEST_EXPECTED_INDEX_TREE",
+            expected_index_tree.as_str(),
+        )
+        .env("ORNA_TEST_EXPECTED_RUNTIME", &expected_runtime);
+    configure_hostile_git_environment(&mut child, hostile.path());
+    assert!(child.status().unwrap().success());
 }
 
 #[test]
