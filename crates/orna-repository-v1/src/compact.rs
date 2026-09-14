@@ -8,6 +8,7 @@
 //! restart journal before a ref can become visible.
 
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fmt,
     fs::{self, OpenOptions},
@@ -17,7 +18,7 @@ use std::{
 use bytes::Bytes;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
-use orna_syntax_v1::{Expr, LiteralKind, parse_row};
+use orna_syntax_v1::{parse_row, Expr, LiteralKind};
 use parquet::{
     basic::{Compression, Encoding, PageType, Type},
     file::reader::{FileReader, SerializedFileReader},
@@ -33,9 +34,72 @@ use crate::{
 
 /// Maximum number of entries in one canonical compact-manifest shard.
 pub const COMPACT_MANIFEST_SHARD_LIMIT: usize = 256;
+/// Maximum declared uncompressed size of one compact Parquet page.
+///
+/// This is the compact profile's 16 MiB uncompressed row-group ceiling used
+/// as the decoded allocation ceiling for a page as well.  It is checked from
+/// the serialized page header before parquet-rs can allocate its decompressed
+/// buffer.
+pub const COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES: usize = 16 * 1024 * 1024;
 const COMPACT_PROFILE: &str = "compact-storage-v1";
 const MAX_COMPACT_FILE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_COMPACT_ROW_GROUP_ROWS: i64 = 65_536;
+
+fn canonical_key_order(left: &[u8], right: &[u8]) -> Result<Ordering, RepositoryError> {
+    let left_value =
+        CanonicalValue::decode(left).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let right_value =
+        CanonicalValue::decode(right).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    compare_canonical_key_raw(left_value.raw(), right_value.raw()).or_else(|_| Ok(left.cmp(right)))
+}
+
+fn compare_canonical_key_raw(left: &OvbRaw, right: &OvbRaw) -> Result<Ordering, RepositoryError> {
+    if let (OvbRaw::Tag(60015, left), OvbRaw::Tag(60015, right)) = (left, right) {
+        let (OvbRaw::Array(left), OvbRaw::Array(right)) = (left.as_ref(), right.as_ref()) else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        for (left, right) in left.iter().zip(right) {
+            let ordering = compare_canonical_key_raw(left, right)?;
+            if ordering != Ordering::Equal {
+                return Ok(ordering);
+            }
+        }
+        return Ok(left.len().cmp(&right.len()));
+    }
+    let ordering = match (left, right) {
+        (OvbRaw::Int(left), OvbRaw::Int(right)) => left.cmp(right),
+        (OvbRaw::Bool(left), OvbRaw::Bool(right)) => left.cmp(right),
+        (OvbRaw::Text(left), OvbRaw::Text(right)) => left.cmp(right),
+        (OvbRaw::Tag(60001, left), OvbRaw::Tag(60001, right)) => {
+            let (OvbRaw::Text(left), OvbRaw::Text(right)) = (left.as_ref(), right.as_ref()) else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            left.cmp(right)
+        }
+        _ => return Err(RepositoryError::InvalidCompactManifest),
+    };
+    Ok(ordering)
+}
+
+fn canonical_key_extrema<'a, I>(mut keys: I) -> Result<(&'a [u8], &'a [u8]), RepositoryError>
+where
+    I: Iterator<Item = &'a [u8]>,
+{
+    let first = keys.next().ok_or(RepositoryError::InvalidCompactManifest)?;
+    keys.try_fold((first, first), |(min, max), key| {
+        let min = if canonical_key_order(key, min)? == Ordering::Less {
+            key
+        } else {
+            min
+        };
+        let max = if canonical_key_order(key, max)? == Ordering::Greater {
+            key
+        } else {
+            max
+        };
+        Ok::<_, RepositoryError>((min, max))
+    })
+}
 
 /// The compact role of one immutable segment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -136,7 +200,7 @@ impl CompactSegment {
             || self.encoder_version.is_empty()
             || !self.encoder_version.bytes().all(is_safe_atom)
             || self.bytes.is_empty()
-            || self.min_key > self.max_key
+            || canonical_key_order(&self.min_key, &self.max_key)? == Ordering::Greater
             || self.row_count == 0
             || self
                 .relative_path
@@ -265,7 +329,7 @@ impl CompactManifestEntry {
             || self.generation == 0
             || self.encoder_version.is_empty()
             || !self.encoder_version.bytes().all(is_safe_atom)
-            || self.min_key > self.max_key
+            || canonical_key_order(&self.min_key, &self.max_key)? == Ordering::Greater
             || self.row_count == 0
             || self.compressed_bytes == 0
             || self.min_event_time.is_some() != self.max_event_time.is_some()
@@ -393,7 +457,7 @@ fn verify_physical_metadata(
                             Encoding::PLAIN | Encoding::RLE | Encoding::RLE_DICTIONARY
                         )
                     })
-                    || column.num_values() < row_group.num_rows()
+                    || column.num_values() != row_group.num_rows()
                     || column.compressed_size() <= 0
                     || column.uncompressed_size() <= 0
                     || column.statistics().is_none()
@@ -413,11 +477,15 @@ fn verify_physical_metadata(
                 .get_column_page_reader(column)
                 .map_err(|_| RepositoryError::InvalidCompactManifest)?;
             let mut data_pages = 0usize;
+            let mut page_values = 0_i64;
             for page in pages {
                 let page = page.map_err(|_| RepositoryError::InvalidCompactManifest)?;
                 if page.is_data_page() {
                     data_pages = data_pages
                         .checked_add(1)
+                        .ok_or(RepositoryError::InvalidCompactManifest)?;
+                    page_values = page_values
+                        .checked_add(i64::from(page.num_values()))
                         .ok_or(RepositoryError::InvalidCompactManifest)?;
                     if page.page_type() != PageType::DATA_PAGE_V2 {
                         return Err(RepositoryError::InvalidCompactManifest);
@@ -430,6 +498,9 @@ fn verify_physical_metadata(
                 }
             }
             if data_pages == 0 {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            if page_values != group.metadata().column(column).num_values() {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
         }
@@ -547,7 +618,27 @@ fn verify_page_checksums(
     bytes: &[u8],
     row_groups: &[parquet::file::metadata::RowGroupMetaData],
 ) -> Result<(), RepositoryError> {
+    scan_compact_page_headers(bytes, row_groups, true, true)
+}
+
+/// Validates the complete compact page framing required at a storage-reader
+/// boundary. This is intentionally shared with repository admission so a
+/// direct reader cannot accept a weaker Parquet profile than publication.
+pub fn validate_compact_page_uncompressed_sizes(
+    bytes: &[u8],
+    row_groups: &[parquet::file::metadata::RowGroupMetaData],
+) -> Result<(), RepositoryError> {
+    scan_compact_page_headers(bytes, row_groups, true, true)
+}
+
+fn scan_compact_page_headers(
+    bytes: &[u8],
+    row_groups: &[parquet::file::metadata::RowGroupMetaData],
+    require_checksums: bool,
+    require_data_page_v2: bool,
+) -> Result<(), RepositoryError> {
     for row_group in row_groups {
+        let mut row_group_uncompressed_len = 0usize;
         for column in row_group.columns() {
             let start = column
                 .dictionary_page_offset()
@@ -564,9 +655,16 @@ fn verify_page_checksums(
             let mut cursor = start;
             while cursor < end {
                 let header = parse_compact_page_header(&bytes[cursor..end])?;
-                if !header.has_checksum {
+                if (require_checksums && !header.has_checksum)
+                    || header.uncompressed_len > COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES
+                    || (require_data_page_v2 && !matches!(header.page_type, 2 | 3))
+                {
                     return Err(RepositoryError::InvalidCompactManifest);
                 }
+                row_group_uncompressed_len = row_group_uncompressed_len
+                    .checked_add(header.uncompressed_len)
+                    .filter(|size| *size <= COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES)
+                    .ok_or(RepositoryError::InvalidCompactManifest)?;
                 cursor = cursor
                     .checked_add(header.encoded_len)
                     .and_then(|value| value.checked_add(header.compressed_len))
@@ -584,14 +682,18 @@ fn verify_page_checksums(
 struct CompactPageHeader {
     encoded_len: usize,
     compressed_len: usize,
+    uncompressed_len: usize,
     has_checksum: bool,
+    page_type: i32,
 }
 
 fn parse_compact_page_header(bytes: &[u8]) -> Result<CompactPageHeader, RepositoryError> {
     let mut cursor = 0;
     let mut last_field = 0_i16;
     let mut compressed_len = None;
+    let mut uncompressed_len = None;
     let mut has_checksum = false;
+    let mut page_type = None;
     loop {
         let tag = take_compact_byte(bytes, &mut cursor)?;
         let kind = tag & 0x0f;
@@ -610,7 +712,13 @@ fn parse_compact_page_header(bytes: &[u8]) -> Result<CompactPageHeader, Reposito
             return Err(RepositoryError::InvalidCompactManifest);
         }
         last_field = field;
-        if field == 3 && kind == 5 {
+        if field == 1 && kind == 5 {
+            page_type = Some(decode_compact_i32(bytes, &mut cursor)?);
+        } else if field == 2 && kind == 5 {
+            let value = decode_compact_i32(bytes, &mut cursor)?;
+            uncompressed_len =
+                Some(usize::try_from(value).map_err(|_| RepositoryError::InvalidCompactManifest)?);
+        } else if field == 3 && kind == 5 {
             let value = decode_compact_i32(bytes, &mut cursor)?;
             compressed_len =
                 Some(usize::try_from(value).map_err(|_| RepositoryError::InvalidCompactManifest)?);
@@ -624,7 +732,9 @@ fn parse_compact_page_header(bytes: &[u8]) -> Result<CompactPageHeader, Reposito
     Ok(CompactPageHeader {
         encoded_len: cursor,
         compressed_len: compressed_len.ok_or(RepositoryError::InvalidCompactManifest)?,
+        uncompressed_len: uncompressed_len.ok_or(RepositoryError::InvalidCompactManifest)?,
         has_checksum,
+        page_type: page_type.ok_or(RepositoryError::InvalidCompactManifest)?,
     })
 }
 
@@ -870,16 +980,11 @@ impl CompactManifest {
                 u64::try_from(number).map_err(|_| RepositoryError::InvalidCompactManifest)?;
             let file = shard_path(self.table, number)?;
             let bytes = canonical_shard(entries)?;
-            let min_key = entries
-                .iter()
-                .map(|entry| entry.min_key.as_slice())
-                .min()
-                .ok_or(RepositoryError::InvalidCompactManifest)?;
-            let max_key = entries
-                .iter()
-                .map(|entry| entry.max_key.as_slice())
-                .max()
-                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            let (min_key, max_key) = canonical_key_extrema(
+                entries
+                    .iter()
+                    .flat_map(|entry| [entry.min_key.as_slice(), entry.max_key.as_slice()]),
+            )?;
             shards.push(ShardDescriptor {
                 number,
                 min_key: min_key.to_vec(),
@@ -1776,11 +1881,14 @@ impl Repository {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
             let parsed = parse_shard(&shard_bytes)?;
+            let (min_key, max_key) = canonical_key_extrema(
+                parsed
+                    .iter()
+                    .flat_map(|entry| [entry.min_key.as_slice(), entry.max_key.as_slice()]),
+            )?;
             if parsed.len() != shard.entries
-                || parsed.iter().map(|entry| entry.min_key.as_slice()).min()
-                    != Some(shard.min_key.as_slice())
-                || parsed.iter().map(|entry| entry.max_key.as_slice()).max()
-                    != Some(shard.max_key.as_slice())
+                || min_key != shard.min_key.as_slice()
+                || max_key != shard.max_key.as_slice()
             {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
@@ -1842,11 +1950,17 @@ impl Repository {
                 Ok(parsed) => parsed,
                 Err(_) => return Ok(crate::GitDeclaredObjectSetState::Malformed),
             };
+            let (min_key, max_key) = match canonical_key_extrema(
+                parsed
+                    .iter()
+                    .flat_map(|entry| [entry.min_key.as_slice(), entry.max_key.as_slice()]),
+            ) {
+                Ok(extrema) => extrema,
+                Err(_) => return Ok(crate::GitDeclaredObjectSetState::Malformed),
+            };
             if parsed.len() != shard.entries
-                || parsed.iter().map(|entry| entry.min_key.as_slice()).min()
-                    != Some(shard.min_key.as_slice())
-                || parsed.iter().map(|entry| entry.max_key.as_slice()).max()
-                    != Some(shard.max_key.as_slice())
+                || min_key != shard.min_key.as_slice()
+                || max_key != shard.max_key.as_slice()
             {
                 return Ok(crate::GitDeclaredObjectSetState::Malformed);
             }
@@ -2254,11 +2368,14 @@ impl Repository {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
             let parsed = parse_shard(&shard_bytes)?;
+            let (min_key, max_key) = canonical_key_extrema(
+                parsed
+                    .iter()
+                    .flat_map(|entry| [entry.min_key.as_slice(), entry.max_key.as_slice()]),
+            )?;
             if parsed.len() != shard.entries
-                || parsed.iter().map(|entry| entry.min_key.as_slice()).min()
-                    != Some(shard.min_key.as_slice())
-                || parsed.iter().map(|entry| entry.max_key.as_slice()).max()
-                    != Some(shard.max_key.as_slice())
+                || min_key != shard.min_key.as_slice()
+                || max_key != shard.max_key.as_slice()
             {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
@@ -2517,9 +2634,6 @@ fn parse_manifest_header(bytes: &[u8]) -> Result<ParsedManifestHeader, Repositor
         let hash = parse_hex_32(string_field(&shard, "hash")?)?;
         let min_key = decode_hex(string_field(&shard, "min_key")?)?;
         let max_key = decode_hex(string_field(&shard, "max_key")?)?;
-        if min_key > max_key {
-            return Err(RepositoryError::InvalidCompactManifest);
-        }
         shards.push(ParsedShard {
             file,
             min_key,
