@@ -12,8 +12,10 @@ use orna_core::{
     catalogue::{CatalogueSnapshot, FunctionDefinition, FunctionReturn},
     catalogue_diff::{CatalogueSemanticDiff, catalogue_diff},
     revision::{
-        ActiveDatabaseRevision, DefinitionOrigin, DefinitionReference, DeployableRevision,
-        ExecutableArtifact, ExpressionArtifact, FunctionRevisionRecord, RevisionPair, Sha256Digest,
+        ActiveDatabaseRevision, ArtifactCatalogueCompatibility, ArtifactCompatibilityCoordinates,
+        ArtifactProvenanceError, ArtifactStandardLibraryCompatibility, DefinitionOrigin,
+        DefinitionReference, DeployableRevision, ExecutableArtifact, ExecutableArtifactProvenance,
+        ExpressionArtifact, FunctionRevisionRecord, RevisionPair, Sha256Digest,
         StoredSourceRevision,
     },
     types::ResolvedType,
@@ -95,6 +97,16 @@ pub enum ResolvedSourceCatalogueError {
         /// The immutable function revision identity.
         revision: FunctionRevisionId,
     },
+    /// The compiler could not bind a newly compiled revision to the candidate
+    /// catalogue that owns it.
+    MissingCandidateFunction {
+        /// The immutable function identity retained by the revision.
+        function: FunctionId,
+        /// The immutable revision identity that could not be handed off.
+        revision: FunctionRevisionId,
+    },
+    /// Constructing the digest-bound artifact provenance envelope failed.
+    ArtifactProvenance(ArtifactProvenanceError),
 }
 
 impl fmt::Display for ResolvedSourceCatalogueError {
@@ -133,6 +145,11 @@ impl fmt::Display for ResolvedSourceCatalogueError {
                 formatter,
                 "function {function} has an invalid artifact digest for revision {revision}"
             ),
+            Self::MissingCandidateFunction { function, revision } => write!(
+                formatter,
+                "candidate has no function {function} for newly compiled revision {revision}"
+            ),
+            Self::ArtifactProvenance(error) => error.fmt(formatter),
         }
     }
 }
@@ -146,7 +163,9 @@ impl Error for ResolvedSourceCatalogueError {
             | Self::UnsupportedType { .. }
             | Self::MissingType { .. }
             | Self::MissingFunctionRevision { .. }
-            | Self::InvalidFunctionArtifactDigest { .. } => None,
+            | Self::InvalidFunctionArtifactDigest { .. }
+            | Self::MissingCandidateFunction { .. } => None,
+            Self::ArtifactProvenance(error) => Some(error),
         }
     }
 }
@@ -163,6 +182,42 @@ struct FunctionArtifactEntry {
     definition: FunctionDefinition,
     revision: FunctionRevisionRecord,
     references: Vec<DefinitionReference>,
+}
+
+/// One immutable compiler-to-runtime artifact provenance handoff.
+///
+/// This is produced only for executable revisions compiled in the candidate
+/// source snapshot. It preserves the checked definition and references beside
+/// the digest-bound provenance envelope, but does not admit or execute the
+/// artifact.
+#[derive(Clone, Debug)]
+pub struct ProvenancedFunctionArtifact {
+    definition: FunctionDefinition,
+    revision: FunctionRevisionRecord,
+    references: Vec<DefinitionReference>,
+    provenance: ExecutableArtifactProvenance,
+}
+
+impl ProvenancedFunctionArtifact {
+    /// Returns the exact candidate definition that owns the artifact.
+    pub fn definition(&self) -> &FunctionDefinition {
+        &self.definition
+    }
+
+    /// Returns the immutable compiled function revision and artifact bytes.
+    pub fn revision(&self) -> &FunctionRevisionRecord {
+        &self.revision
+    }
+
+    /// Returns the checked dependency and effect reference evidence.
+    pub fn references(&self) -> &[DefinitionReference] {
+        &self.references
+    }
+
+    /// Returns the digest-bound source, catalogue, and compatibility evidence.
+    pub fn provenance(&self) -> &ExecutableArtifactProvenance {
+        &self.provenance
+    }
 }
 
 impl From<PrepareError> for ResolvedSourceCatalogueError {
@@ -277,6 +332,78 @@ impl ResolvedSourceCatalogue {
             )
         })
     }
+
+    /// Produces provenance handoffs for revisions compiled in this candidate.
+    ///
+    /// Inherited revisions are deliberately omitted: their artifacts belong to
+    /// their original source snapshots and must not be rebound to this
+    /// candidate. The caller provides the exact portable compatibility tuple
+    /// for this compiler build; catalogue and standard-library coordinates are
+    /// derived solely from the already validated candidate.
+    pub fn new_function_artifact_handoffs(
+        &self,
+        compatibility: &ArtifactCompatibilityCoordinates,
+    ) -> Result<Vec<ProvenancedFunctionArtifact>, ResolvedSourceCatalogueError> {
+        let catalogue = artifact_catalogue_compatibility(&self.candidate)?;
+        self.candidate
+            .new_function_revisions()
+            .iter()
+            .map(|revision| {
+                let function = self
+                    .candidate
+                    .candidate()
+                    .function_by_id(revision.function())
+                    .ok_or(ResolvedSourceCatalogueError::MissingCandidateFunction {
+                        function: revision.function(),
+                        revision: revision.id(),
+                    })?;
+                let references = self
+                    .candidate
+                    .references()
+                    .iter()
+                    .filter(|reference| {
+                        reference.source_function() == revision.function()
+                            && reference.source_revision() == revision.id()
+                    })
+                    .cloned()
+                    .collect();
+                let provenance = ExecutableArtifactProvenance::new(
+                    self.candidate.source(),
+                    catalogue,
+                    compatibility.clone(),
+                    revision.clone(),
+                )
+                .map_err(ResolvedSourceCatalogueError::ArtifactProvenance)?;
+                Ok(ProvenancedFunctionArtifact {
+                    definition: function.clone(),
+                    revision: revision.clone(),
+                    references,
+                    provenance,
+                })
+            })
+            .collect()
+    }
+}
+
+fn artifact_catalogue_compatibility(
+    candidate: &DeployableRevision,
+) -> Result<ArtifactCatalogueCompatibility, ResolvedSourceCatalogueError> {
+    let context = candidate.catalogue_hash_context();
+    let standard = context.standard().map(|standard| {
+        ArtifactStandardLibraryCompatibility::new(
+            standard.revision(),
+            standard.source().id(),
+            standard.digest_version(),
+            standard.digest(),
+        )
+    });
+    ArtifactCatalogueCompatibility::new(
+        candidate.candidate().revision(),
+        context.version(),
+        candidate.catalogue_hash(),
+        standard,
+    )
+    .map_err(ResolvedSourceCatalogueError::ArtifactProvenance)
 }
 
 /// Materializes a complete core candidate from a successful compiler check.
@@ -293,6 +420,22 @@ pub fn materialize_resolved_source_catalogue(
 ) -> Result<ResolvedSourceCatalogue, ResolvedSourceCatalogueError> {
     let candidate = prepare(report, expected_base, active)?;
     materialize_prepared_source_catalogue(candidate, active)
+}
+
+/// Materializes a complete compiler candidate for artifact-provenance handoff.
+///
+/// Unlike [`materialize_resolved_source_catalogue`], this metadata-only route
+/// does not project function signatures into the current runtime invocation
+/// boundary. It retains compiler-produced artifact and reference facts so they
+/// can be bound to source and compatibility provenance; it neither admits nor
+/// executes an artifact.
+pub fn materialize_provenance_source_catalogue(
+    report: &CheckReport,
+    expected_base: RevisionPair,
+    active: &ActiveDatabaseRevision,
+) -> Result<ResolvedSourceCatalogue, ResolvedSourceCatalogueError> {
+    let candidate = prepare(report, expected_base, active)?;
+    materialize_prepared_provenance_catalogue(candidate, active)
 }
 
 /// Materializes a complete core candidate from a successful standard-authorized
@@ -317,6 +460,13 @@ fn materialize_prepared_source_catalogue(
     active: &ActiveDatabaseRevision,
 ) -> Result<ResolvedSourceCatalogue, ResolvedSourceCatalogueError> {
     validate_invocation_projection(&candidate)?;
+    materialize_prepared_provenance_catalogue(candidate, active)
+}
+
+fn materialize_prepared_provenance_catalogue(
+    candidate: DeployableRevision,
+    active: &ActiveDatabaseRevision,
+) -> Result<ResolvedSourceCatalogue, ResolvedSourceCatalogueError> {
     let function_artifacts = materialize_function_artifacts(&candidate, active)?;
     let diff = catalogue_diff(active.catalogue(), candidate.candidate());
     Ok(ResolvedSourceCatalogue {
@@ -545,14 +695,16 @@ mod tests {
         CatalogueRevisionId, FunctionId, FunctionRevisionId, SourceBundleId, SourceRevisionId,
         SourceUnitId,
         canonical_hash::{
-            artifact_payload_digest, catalogue_digest, source_bundle_digest,
-            source_revision_record_digest,
+            artifact_payload_digest, catalogue_digest, catalogue_digest_with_context,
+            function_declaration_digest, source_bundle_digest, source_revision_record_digest,
+            source_unit_content_digest,
         },
         revision::{
-            ActiveDatabaseRevision, DefinitionIdentity, DefinitionReferenceKind,
-            DefinitionReferenceTarget, DeployableRevision, ExecutableArtifact,
-            ExecutableArtifactKind, FunctionRevisionRecord, RevisionPair, SourceOrigin,
-            StoredSourceRevision, StoredSourceUnit,
+            ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
+            CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity,
+            DefinitionReferenceKind, DefinitionReferenceTarget, DeployableRevision,
+            ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord, RevisionPair,
+            SourceOrigin, StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
         },
         source::{SourceBundle, SourceUnit},
         types::StandardScalar,
@@ -610,6 +762,60 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn generic_public_materialization_without_functions_has_no_artifact_handoffs() {
+        let active = empty_active();
+        let source =
+            SourceBundle::new([SourceUnit::new("tasks.orna", "CREATE SCHEMA app;")]).unwrap();
+        let report = crate::check(&source, active.catalogue());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+
+        let resolved = materialize_resolved_source_catalogue(&report, active.pair(), &active)
+            .expect("a no-function candidate is representable by the public materializer");
+
+        assert!(
+            resolved
+                .new_function_artifact_handoffs(&test_compatibility())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn generic_public_provenance_materialization_hands_off_scalar_function_without_runtime_admission()
+     {
+        let active = empty_active();
+        let source = SourceBundle::new([SourceUnit::new(
+            "tasks.orna",
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.echo() RETURNS BOOLEAN RETURN TRUE;",
+        )])
+        .unwrap();
+        let report = crate::check(&source, active.catalogue());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+
+        let resolved = materialize_provenance_source_catalogue(&report, active.pair(), &active)
+            .expect("compiler provenance retains scalar artifacts without runtime admission");
+        let handoffs = resolved
+            .new_function_artifact_handoffs(&test_compatibility())
+            .unwrap();
+
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(handoffs[0].definition().name().to_string(), "app.echo");
+        assert_eq!(
+            handoffs[0].revision().artifact().kind(),
+            ExecutableArtifactKind::Client
+        );
+        handoffs[0].provenance().validate().unwrap();
     }
 
     #[test]
@@ -706,6 +912,250 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn new_function_artifact_handoff_binds_candidate_source_catalogue_and_coordinates() {
+        let active = empty_active();
+        let revision = FunctionRevisionId::from_bytes([0x83; 16]);
+        let candidate = candidate_with_function(
+            &active,
+            revision,
+            vec![valid_function_revision(
+                revision,
+                artifact_payload_digest(&[0x01, 0x02]).unwrap(),
+            )],
+        );
+        let resolved = materialize_prepared_source_catalogue(candidate, &active).unwrap();
+        let compatibility = test_compatibility();
+
+        let handoffs = resolved
+            .new_function_artifact_handoffs(&compatibility)
+            .unwrap();
+
+        assert_eq!(handoffs.len(), 1);
+        let handoff = &handoffs[0];
+        assert_eq!(handoff.definition().id(), handoff.revision().function());
+        assert_eq!(handoff.revision().id(), revision);
+        assert!(handoff.references().is_empty());
+        assert_eq!(
+            handoff.provenance().source().revision(),
+            resolved.source().id()
+        );
+        assert_eq!(
+            handoff.provenance().catalogue().revision(),
+            resolved.candidate().revision()
+        );
+        assert_eq!(
+            handoff.provenance().catalogue().digest(),
+            resolved.catalogue_hash()
+        );
+        handoff
+            .provenance()
+            .validate_against(
+                resolved.source(),
+                &artifact_catalogue_compatibility(&resolved.candidate).unwrap(),
+                &compatibility,
+                handoff.revision(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn formatting_only_reuse_produces_no_artifact_handoff() {
+        let initial_source =
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.first() RETURNS BOOLEAN RETURN TRUE;";
+        let reformatted_source = "-- preserved semantics\nCREATE SCHEMA app;\nCREATE CLIENT FUNCTION app.first() RETURNS BOOL RETURN true;";
+        let initial_active = empty_active();
+        let initial = crate::prepare(
+            &checked_report(initial_source, initial_active.catalogue()),
+            initial_active.pair(),
+            &initial_active,
+        )
+        .unwrap();
+        let active = activate(&initial);
+        let reused = crate::prepare(
+            &checked_report(reformatted_source, active.catalogue()),
+            active.pair(),
+            &active,
+        )
+        .unwrap();
+
+        assert!(reused.new_function_revisions().is_empty());
+        assert!(
+            handoff_catalogue(reused, &active)
+                .new_function_artifact_handoffs(&test_compatibility())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn mixed_changed_and_reused_candidate_hands_off_only_changed_revision() {
+        let initial_source = "CREATE SCHEMA app; \
+            CREATE CLIENT FUNCTION app.first() RETURNS BOOLEAN RETURN TRUE; \
+            CREATE CLIENT FUNCTION app.second() RETURNS BOOLEAN RETURN TRUE;";
+        let changed_source = "CREATE SCHEMA app; \
+            CREATE CLIENT FUNCTION app.first() RETURNS BOOL RETURN true; \
+            CREATE CLIENT FUNCTION app.second() RETURNS BOOLEAN RETURN FALSE;";
+        let initial_active = empty_active();
+        let initial = crate::prepare(
+            &checked_report(initial_source, initial_active.catalogue()),
+            initial_active.pair(),
+            &initial_active,
+        )
+        .unwrap();
+        let active = activate(&initial);
+        let changed = crate::prepare(
+            &checked_report(changed_source, active.catalogue()),
+            active.pair(),
+            &active,
+        )
+        .unwrap();
+
+        assert_eq!(changed.new_function_revisions().len(), 1);
+        let changed_revision = changed.new_function_revisions()[0].id();
+        let handoffs = handoff_catalogue(changed, &active)
+            .new_function_artifact_handoffs(&test_compatibility())
+            .unwrap();
+
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(handoffs[0].revision().id(), changed_revision);
+        assert_eq!(handoffs[0].definition().name().to_string(), "app.second");
+    }
+
+    #[test]
+    fn standard_v2_public_materialization_retains_standard_provenance() {
+        let verified = crate::tests::verified_canonical_standard_source_fixture();
+        let standard = crate::check_standard_library_source(&verified).unwrap();
+        let active = empty_standard_application_active(&verified);
+        let context =
+            crate::StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let source = SourceBundle::new([SourceUnit::new(
+            "application.orna",
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;",
+        )])
+        .unwrap();
+        let report = crate::check_standard_application(&source, &context);
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+
+        let resolved =
+            materialize_standard_resolved_source_catalogue(&report, active.pair(), &active)
+                .unwrap();
+        let handoffs = resolved
+            .new_function_artifact_handoffs(&test_compatibility())
+            .unwrap();
+
+        assert_eq!(handoffs.len(), 1);
+        let catalogue = handoffs[0].provenance().catalogue();
+        assert_eq!(catalogue.hash_version(), CatalogueHashVersion::Version2);
+        let standard = catalogue
+            .standard()
+            .expect("version two pins standard evidence");
+        assert_eq!(standard.revision(), verified.revision());
+        assert_eq!(standard.source_revision(), verified.source().id());
+        assert_eq!(standard.digest_version(), verified.digest_version());
+        assert_eq!(standard.digest(), verified.digest());
+    }
+
+    fn test_compatibility() -> ArtifactCompatibilityCoordinates {
+        ArtifactCompatibilityCoordinates::new(
+            "orna.language/1",
+            "orna.sys/1",
+            "orna.codec/1",
+            "orna.repository/1",
+            "orna.storage/1",
+            "orna.presentation/1",
+            vec!["portable".to_owned()],
+        )
+        .unwrap()
+    }
+
+    fn checked_report(source: &str, base: &CatalogueSnapshot) -> CheckReport {
+        let bundle = SourceBundle::new([SourceUnit::new("tasks.orna", source)]).unwrap();
+        crate::check(&bundle, base)
+    }
+
+    fn activate(candidate: &DeployableRevision) -> ActiveDatabaseRevision {
+        ActiveDatabaseRevision::new(
+            candidate.candidate_pair(),
+            candidate.source().clone(),
+            candidate.candidate().clone(),
+            candidate.catalogue_hash(),
+            candidate.expressions().to_vec(),
+            candidate.new_function_revisions().to_vec(),
+            candidate.origins().to_vec(),
+            candidate.references().to_vec(),
+        )
+        .unwrap()
+    }
+
+    fn handoff_catalogue(
+        candidate: DeployableRevision,
+        active: &ActiveDatabaseRevision,
+    ) -> ResolvedSourceCatalogue {
+        let function_artifacts = materialize_function_artifacts(&candidate, active).unwrap();
+        let diff = catalogue_diff(active.catalogue(), candidate.candidate());
+        ResolvedSourceCatalogue {
+            base: active.catalogue().clone(),
+            candidate,
+            diff,
+            function_artifacts,
+        }
+    }
+
+    fn empty_standard_application_active(
+        standard: &VerifiedStandardLibrarySnapshot,
+    ) -> ActiveDatabaseRevision {
+        let unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x21; 16]),
+            0,
+            "application.orna",
+            "",
+            source_unit_content_digest("").unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x22; 16]),
+            SourceRevisionId::from_bytes([0x23; 16]),
+            None,
+            vec![unit],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x22; 16]),
+                None,
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0x24; 16]),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_two(standard.clone());
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &[], &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source.id(), catalogue.revision()),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            ),
+            context,
+        )
+        .unwrap()
+    }
+
     fn valid_function_revision(
         revision: FunctionRevisionId,
         content_hash: Sha256Digest,
@@ -736,7 +1186,7 @@ mod tests {
         revisions: Vec<FunctionRevisionRecord>,
     ) -> DeployableRevision {
         let source_unit_id = SourceUnitId::from_bytes([0x84; 16]);
-        let source_text = "CREATE SCHEMA app;";
+        let source_text = "CREATE CLIENT FUNCTION app.echo() RETURNS app.item RETURN app.item;";
         let source_unit = StoredSourceUnit::new(
             source_unit_id,
             0,
@@ -813,8 +1263,8 @@ mod tests {
                     revision_record.function(),
                     revision_record.id(),
                     revision_record.revision_number(),
-                    revision_record.declaration_origin(),
-                    revision_record.declaration_content_hash(),
+                    origin,
+                    function_declaration_digest(source_text.as_bytes()).unwrap(),
                     semantic_hash,
                     revision_record.language_version(),
                     revision_record.artifact().clone(),
