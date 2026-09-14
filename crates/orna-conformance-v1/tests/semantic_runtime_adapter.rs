@@ -104,6 +104,7 @@ fn semantic_project_resolution_uses_project_relative_module_names() {
                 initial_tables: "empty".into(),
             },
             steps: Vec::new(),
+            negative_cases: Vec::new(),
         },
     };
 
@@ -175,6 +176,7 @@ async fn project_stream_ignores_unrelated_false_module_assertion() {
                 initial_tables: "empty".into(),
             },
             steps: Vec::new(),
+            negative_cases: Vec::new(),
         },
     };
     let identity = RuntimeIdentity {
@@ -285,6 +287,7 @@ async fn project_stream_rolls_back_when_affected_module_assertion_fails() {
                 initial_tables: "empty".into(),
             },
             steps: Vec::new(),
+            negative_cases: Vec::new(),
         },
     };
     let identity = RuntimeIdentity {
@@ -382,6 +385,7 @@ async fn project_stream_admission_rejects_multiple_applicable_module_assertions(
                 initial_tables: "empty".into(),
             },
             steps: Vec::new(),
+            negative_cases: Vec::new(),
         },
     };
 
@@ -467,6 +471,7 @@ fn project_row_admission_resolves_declared_owner_path_key_and_evaluated_body() {
                 initial_tables: "empty".into(),
             },
             steps: Vec::new(),
+            negative_cases: Vec::new(),
         },
     };
 
@@ -516,6 +521,7 @@ fn project_row_admission_rejects_unsupported_key_types_without_string_fallback()
                 initial_tables: "empty".into(),
             },
             steps: Vec::new(),
+            negative_cases: Vec::new(),
         },
     };
 
@@ -602,6 +608,7 @@ fn project_row_admission_rejects_path_key_and_schema_failures() {
                     initial_tables: "empty".into(),
                 },
                 steps: Vec::new(),
+                negative_cases: Vec::new(),
             },
         };
         let StageOutcome::Failed(diagnostic) =
@@ -648,6 +655,7 @@ fn project_row_admission_admits_automatic_and_composite_keys() {
                 initial_tables: "empty".into(),
             },
             steps: Vec::new(),
+            negative_cases: Vec::new(),
         },
     };
 
@@ -684,6 +692,7 @@ fn project_row_admission_rejects_computed_fields() {
                 initial_tables: "empty".into(),
             },
             steps: Vec::new(),
+            negative_cases: Vec::new(),
         },
     };
 
@@ -1071,6 +1080,7 @@ fn pure_project(modules: Vec<SourceUnit>) -> ProjectUnit {
                 initial_tables: "empty".into(),
             },
             steps: Vec::new(),
+            negative_cases: Vec::new(),
         },
     }
 }
@@ -1096,6 +1106,7 @@ fn admission_project(module_source: &str, loose_rows: Vec<SourceUnit>) -> Projec
                 initial_tables: "empty".into(),
             },
             steps: Vec::new(),
+            negative_cases: Vec::new(),
         },
     }
 }
