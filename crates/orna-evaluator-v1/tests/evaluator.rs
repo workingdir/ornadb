@@ -3635,6 +3635,122 @@ fn integer_ranges_reject_unsupported_forms_and_obey_finite_limits() {
     );
 }
 
+fn date_range(lower: Option<&str>, upper: Option<&str>, upper_inclusive: bool) -> Value {
+    let endpoint = |value: Option<&str>| match value {
+        Some(value) => Raw::Tag(
+            60013,
+            Box::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Tag(60001, Box::new(Raw::Text(value.into()))),
+            ])),
+        ),
+        None => Raw::Tag(60013, Box::new(Raw::Array(vec![Raw::Int(0.into())]))),
+    };
+    Value::new(Raw::Tag(
+        60019,
+        Box::new(Raw::Array(vec![
+            endpoint(lower),
+            endpoint(upper),
+            Raw::Bool(upper_inclusive),
+        ])),
+    ))
+    .unwrap()
+}
+
+#[test]
+fn date_ranges_are_canonical_membership_values_with_optional_bounds() {
+    let half_open = date_range(Some("2024-02-01"), Some("2024-02-03"), false);
+    assert_eq!(evaluate("2024-02-01..2024-02-03"), half_open);
+    assert_eq!(
+        evaluate("2024-02-01 in 2024-02-01..2024-02-03"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate("2024-02-03 in 2024-02-01..2024-02-03"),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate("2024-02-03 in 2024-02-01..=2024-02-03"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate("2024-01-01 in ..2024-02-01"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate("2024-03-01 in 2024-02-01.."),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+
+    let environment =
+        Environment::from([("range".into(), date_range(None, Some("2024-02-01"), false))]);
+    assert_eq!(
+        evaluate_expression("range", &environment, Limits::default()).unwrap(),
+        date_range(None, Some("2024-02-01"), false)
+    );
+}
+
+#[test]
+fn date_ranges_allow_empty_values_but_reject_mixed_bounds_and_iteration() {
+    assert_eq!(
+        evaluate("2024-02-01 in 2024-02-01..2024-02-01"),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate("2024-02-01 in 2024-02-03..2024-02-01"),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    for source in [
+        "2024-02-01..1",
+        "2024-02-01 in 2024-02-01..1",
+        "1 in 2024-02-01..2024-02-03",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                source,
+                &Environment::new(),
+                Limits::default()
+            )),
+            "ORNA-EVAL-TYPE",
+            "{source}"
+        );
+    }
+    assert_eq!(
+        code(evaluate_expression(
+            "if true { for date in 2024-02-01..2024-02-03 { date }; 0 }",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-TYPE"
+    );
+    assert_eq!(
+        evaluate("if true { let total = 0; for value in 1..=3 { total += value; }; total }"),
+        Value::int(6.into())
+    );
+}
+
+#[test]
+fn range_ordering_validates_unbounded_endpoint_types_before_lexicographic_ordering() {
+    assert_eq!(
+        evaluate("(..2024-02-01) < (2024-02-01..)"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    for source in [
+        "(..2024-02-01) < (1..)",
+        "sort_by([(..2024-02-01), (1..)], value => value)",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                source,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            "ORNA-EVAL-TYPE",
+            "{source}"
+        );
+    }
+}
+
 fn object_id(byte: u8) -> Raw {
     Raw::Tag(37, Box::new(Raw::Bytes(vec![byte; 16])))
 }
