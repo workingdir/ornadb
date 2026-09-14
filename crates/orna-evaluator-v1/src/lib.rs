@@ -3133,12 +3133,29 @@ impl Context<'_, '_> {
                 total.to_bits()
             }));
         }
+        if values
+            .iter()
+            .all(|value| matches!(value, Value::Decimal(_)))
+            && !values.is_empty()
+        {
+            let Value::Decimal(first) = &values[0] else {
+                unreachable!("non-empty all-Decimal list has a first Decimal")
+            };
+            let mut total = first.clone();
+            for value in &values[1..] {
+                let Value::Decimal(value) = value else {
+                    unreachable!("all-Decimal list was checked above")
+                };
+                total = total.add(value)?;
+            }
+            return Ok(Value::Decimal(total));
+        }
         let mut total = BigInt::ZERO;
         for value in values {
             let Value::Int(value) = value else {
-                // Decimal, mixed numeric kinds, Money and affine quantities
-                // remain outside this evaluator slice until their runtime
-                // contracts exist.
+                // Mixed numeric kinds, Money and affine quantities remain
+                // outside this evaluator slice until their runtime contracts
+                // exist.
                 return Err(error("ORNA-EVAL-UNSUPPORTED"));
             };
             total = self.integer(&total + value)?;
