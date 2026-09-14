@@ -31,6 +31,7 @@ Commands:
   invoke ...   Run one stored function.
   repl ...     Open the function-backed REPL.
   inspect ...  Inspect a completed invocation.
+  status ...   Show the current Git worktree status.
   source ...   Check or apply one source file.
   state ...    Read or update user state.
 
@@ -55,6 +56,7 @@ const HELP_SOURCE: &str = "Work with Orna source.\n\nUsage:\n  orna source check
 const HELP_INVOKE: &str = "Run a stored function.\n\nUsage:\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n\nOptions:\n  --arg <parameter>=<value>  Bind a parameter.\n  --args-file <path>        Read arguments from a JSON file.\n  --output <value>          Select an output format or type.\n  --trace <policy>          Set tracing: off, basic, normal, verbose, or profile.\n  --runtime <family>        Select tty or qt.\n  --explain                 Show the request without running it.\n  --no-progress             Hide progress diagnostics.\n";
 const HELP_INVOKE_LOCAL_PATH: &str = "Run a stored function.\n\nUsage:\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n\nOptions:\n  --arg <parameter>=<value>  Bind a parameter.\n  --args-file <path>        Read arguments from a JSON file.\n  --output <value>          Select an output format or type.\n  --trace <policy>          Set tracing: off, basic, normal, verbose, or profile.\n  --runtime <family>        Select tty or qt.\n  --explain                 Show the request without running it.\n  --no-progress             Hide progress diagnostics.\n\nSQLite LocalPath note: the SQLite backend does not support --trace.\n";
 const HELP_REPL: &str = "Open the standard function-backed Orna session.\n\nUsage:\n  orna\n  orna repl\n\nThe session is a normal CLIENT function invocation. The selected local runtime\nowns terminal or graphical surfaces and input events.\n";
+const HELP_STATUS: &str = "Show the current Git worktree status.\n\nUsage:\n  orna status\n  orna status --porcelain\n  orna status --short\n\nOptions:\n  --porcelain  Emit stable NUL-delimited Git porcelain v2 records.\n  --short      Emit Git-compatible compact worktree status.\n";
 const HELP_STATE: &str = "Read or update user state.\n\nUsage:\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n\nOptions for get:\n  --profile <state-profile>\n  --instance <canonical-function-id> [--instance-key <instance-key>]\n  --expect-type <canonical-function-id> <canonical-state-slot-id> <canonical-type-id>\n\nOptions for set:\n  --function <canonical-function-id>\n  --instance-key <instance-key>\n  --slot <canonical-state-slot-id>\n  --revision <create|revision-number>\n  --type <canonical-type-id>\n  --value-file <path>\n  --profile <state-profile>\n";
 const HELP_INSPECT: &str = "Inspect a completed invocation.\n\nUsage:\n  orna inspect <invocation-id> [options]\n\nOptions:\n  --projection <name>  Select one of: invocation_nodes, calls, resources, state_cells, ui_nodes, presentation_candidates, runtime_bindings, security_decisions.\n  --trace              Include trace events.\n  --after <n>          Resume after a sequence number.\n  --include-values     Include value data where permitted.\n  --include-source     Include source provenance.\n  --include-security   Include security decisions.\n  --include-runtime    Include runtime bindings.\n  --epoch <epoch-id>   Inspect an exact epoch.\n";
 
@@ -106,6 +108,7 @@ pub(crate) enum HelpTopic {
     Invoke,
     InvokeLocalPath,
     Repl,
+    Status,
     State,
     Inspect,
     Runtime,
@@ -119,6 +122,13 @@ pub(crate) enum RawCallParameters {
     None,
     One(RawCallParameterId),
     Pair(RawCallParameterId, RawCallParameterId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StatusFormat {
+    Human,
+    Porcelain,
+    Short,
 }
 
 /// One parsed `orna invoke` command (ADR 0056 step 4).
@@ -158,6 +168,7 @@ pub(crate) enum Command {
     SecurityGrantExecute(FunctionId),
     SecurityAdmin(orna_server::InstalledSecurityAdminRequest),
     RawCall(FunctionId, RawCallParameters),
+    Status(StatusFormat),
     Invoke(InvokeArguments),
     State(orna_server::InstalledUserStateRequest),
     Inspect(orna_server::InstalledInspectRequest),
@@ -173,6 +184,7 @@ pub(crate) fn help_text(topic: HelpTopic) -> &'static str {
         HelpTopic::Invoke => HELP_INVOKE,
         HelpTopic::InvokeLocalPath => HELP_INVOKE_LOCAL_PATH,
         HelpTopic::Repl => HELP_REPL,
+        HelpTopic::Status => HELP_STATUS,
         HelpTopic::State => HELP_STATE,
         HelpTopic::Inspect => HELP_INSPECT,
         HelpTopic::Runtime => HELP_RUNTIME,
@@ -247,6 +259,7 @@ where
         Some(value) if value == OsStr::new("invoke") => HelpTopic::Invoke,
         Some(value) if value == OsStr::new("state") => HelpTopic::State,
         Some(value) if value == OsStr::new("repl") => HelpTopic::Repl,
+        Some(value) if value == OsStr::new("status") => HelpTopic::Status,
         Some(value) if value == OsStr::new("inspect") => HelpTopic::Inspect,
         Some(value) if value == OsStr::new("runtime") => HelpTopic::Runtime,
         Some(value) if value == OsStr::new("security") => HelpTopic::Security,
@@ -386,6 +399,7 @@ fn is_command_name(value: &OsStr) -> bool {
                 | "inspect"
                 | "security"
                 | "repl"
+                | "status"
                 | "version"
                 | "backend-shell"
         )
@@ -464,6 +478,22 @@ where
             } else {
                 default_repl_command(runtime)
             }
+        }
+        Some(value) if value == OsStr::new("status") => {
+            if args.peek().is_some_and(is_help_flag) {
+                let _ = args.next();
+                return args
+                    .next()
+                    .is_none()
+                    .then_some(Command::Help(HelpTopic::Status));
+            }
+            let format = match args.next().as_deref() {
+                None => StatusFormat::Human,
+                Some(value) if value == OsStr::new("--porcelain") => StatusFormat::Porcelain,
+                Some(value) if value == OsStr::new("--short") => StatusFormat::Short,
+                _ => return None,
+            };
+            args.next().is_none().then_some(Command::Status(format))
         }
 
         Some(value) if value == OsStr::new("server") => match args.next().as_deref() {
