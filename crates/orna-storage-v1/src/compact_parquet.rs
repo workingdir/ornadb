@@ -9,20 +9,21 @@
 
 use std::{cmp::Ordering, collections::BTreeMap, error::Error, fmt};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use bytes::Bytes;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
-    CompactManifest, CompactManifestEntry, GitCommitRef, Repository, RepositoryError, Uuid,
+    validate_compact_page_uncompressed_sizes, CompactManifest, CompactManifestEntry, GitCommitRef,
+    Repository, RepositoryError, Uuid, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES,
 };
 use parquet::{
-    basic::{ConvertedType, Encoding, Type},
+    basic::{Compression, ConvertedType, Encoding, Type},
     column::reader::ColumnReader,
     file::reader::{FileReader, SerializedFileReader},
 };
 
 use crate::compact::{
-    COMPACT_STORAGE_PROFILE, CompactExactKeySource, CompactKeyError, CompactOvbProfile,
+    CompactExactKeySource, CompactKeyError, CompactOvbProfile, COMPACT_STORAGE_PROFILE,
 };
 
 /// A physical reader failure. Unsupported mappings are explicit: this slice
@@ -150,6 +151,8 @@ impl CompactParquetKeySource {
         let reader = SerializedFileReader::new(Bytes::copy_from_slice(bytes))
             .map_err(|_| CompactParquetError::InvalidParquet)?;
         validate_file_metadata(&reader, profile, table, expected_row_count)?;
+        validate_compact_page_uncompressed_sizes(bytes, reader.metadata().row_groups())
+            .map_err(|_| CompactParquetError::InvalidParquet)?;
         let key_columns = key_columns(&reader, profile)?;
         let mut values: Vec<Vec<OvbRaw>> = vec![Vec::new(); key_columns.len()];
         let mut observed = 0u64;
@@ -162,9 +165,11 @@ impl CompactParquetKeySource {
                 return Err(CompactParquetError::InvalidParquet);
             }
             let rows = usize::try_from(rows).map_err(|_| CompactParquetError::InvalidParquet)?;
+            for column in 0..row_group.num_columns() {
+                validate_physical_column(&*row_group, column, rows)?;
+            }
             let mut group_values: Vec<Vec<OvbRaw>> = Vec::with_capacity(key_columns.len());
             for column in &key_columns {
-                validate_key_column(&*row_group, column.index, rows)?;
                 let column_values = match column.kind {
                     KeyColumnKind::Int => read_int64_column(&*row_group, column.index, rows)?
                         .into_iter()
@@ -247,9 +252,24 @@ impl CompactParquetKeySource {
             .ok_or_else(|| CompactParquetError::SegmentUnavailable(entry.segment_id()))?;
         let keys =
             Self::decode_verified_bytes(&self.profile, self.table, bytes, entry.row_count())?;
-        let (Some(min_key), Some(max_key)) = (keys.iter().min(), keys.iter().max()) else {
+        let Some((first_key, rest)) = keys.split_first() else {
             return Err(CompactParquetError::ManifestKeyBoundsMismatch);
         };
+        let (min_key, max_key) =
+            rest.iter()
+                .try_fold((first_key, first_key), |(min_key, max_key), key| {
+                    let min_key = if compare_encoded_keys(key, min_key)? == Ordering::Less {
+                        key
+                    } else {
+                        min_key
+                    };
+                    let max_key = if compare_encoded_keys(key, max_key)? == Ordering::Greater {
+                        key
+                    } else {
+                        max_key
+                    };
+                    Ok::<_, CompactParquetError>((min_key, max_key))
+                })?;
         if min_key.as_slice() != entry.min_key() || max_key.as_slice() != entry.max_key() {
             return Err(CompactParquetError::ManifestKeyBoundsMismatch);
         }
@@ -257,12 +277,15 @@ impl CompactParquetKeySource {
     }
 }
 
-fn validate_key_column(
+fn validate_physical_column(
     row_group: &dyn parquet::file::reader::RowGroupReader,
     index: usize,
     expected_rows: usize,
 ) -> Result<(), CompactParquetError> {
     let metadata = row_group.metadata().column(index);
+    if !matches!(metadata.compression(), Compression::ZSTD(_)) {
+        return Err(CompactParquetError::InvalidParquet);
+    }
     let observed =
         u64::try_from(metadata.num_values()).map_err(|_| CompactParquetError::InvalidParquet)?;
     let expected = u64::try_from(expected_rows).map_err(|_| CompactParquetError::InvalidParquet)?;
@@ -310,6 +333,25 @@ fn validate_key_column(
         });
     }
     Ok(())
+}
+
+fn compare_encoded_keys(left: &[u8], right: &[u8]) -> Result<Ordering, CompactParquetError> {
+    let left = CanonicalValue::decode(left).map_err(|_| CompactParquetError::InvalidMetadata)?;
+    let right = CanonicalValue::decode(right).map_err(|_| CompactParquetError::InvalidMetadata)?;
+    compare_key_components(&key_components(left.raw())?, &key_components(right.raw())?)
+}
+
+fn key_components(raw: &OvbRaw) -> Result<Vec<OvbRaw>, CompactParquetError> {
+    match raw {
+        OvbRaw::Tag(60015, value) => match value.as_ref() {
+            OvbRaw::Array(values) if !values.is_empty() => Ok(values.clone()),
+            _ => Err(CompactParquetError::InvalidMetadata),
+        },
+        OvbRaw::Int(_) | OvbRaw::Bool(_) | OvbRaw::Text(_) | OvbRaw::Tag(60001, _) => {
+            Ok(vec![raw.clone()])
+        }
+        _ => Err(CompactParquetError::InvalidMetadata),
+    }
 }
 
 fn compare_key_components(
@@ -1171,6 +1213,40 @@ mod tests {
         optional_first: bool,
         descriptor_types: Option<Vec<OvbRaw>>,
     ) -> Vec<u8> {
+        with_page_checksums(parquet_without_checksums(
+            profile,
+            ids,
+            values,
+            optional_first,
+            descriptor_types,
+        ))
+    }
+
+    fn parquet_without_checksums(
+        profile: &CompactOvbProfile,
+        ids: &[[u8; 16]],
+        values: &[Vec<i64>],
+        optional_first: bool,
+        descriptor_types: Option<Vec<OvbRaw>>,
+    ) -> Vec<u8> {
+        parquet_without_checksums_with_compression(
+            profile,
+            ids,
+            values,
+            optional_first,
+            descriptor_types,
+            Compression::ZSTD(Default::default()),
+        )
+    }
+
+    fn parquet_without_checksums_with_compression(
+        profile: &CompactOvbProfile,
+        ids: &[[u8; 16]],
+        values: &[Vec<i64>],
+        optional_first: bool,
+        descriptor_types: Option<Vec<OvbRaw>>,
+        compression: Compression,
+    ) -> Vec<u8> {
         let mut message = String::from("message schema {");
         for (index, id) in ids.iter().enumerate() {
             let repetition = if optional_first && index == 0 {
@@ -1210,7 +1286,7 @@ mod tests {
         ];
         let properties = Arc::new(
             WriterProperties::builder()
-                .set_compression(Compression::ZSTD(Default::default()))
+                .set_compression(compression)
                 .set_dictionary_enabled(false)
                 .set_encoding(Encoding::PLAIN)
                 .set_writer_version(WriterVersion::PARQUET_2_0)
@@ -1595,7 +1671,7 @@ mod tests {
         }
         row_group.close().unwrap();
         writer.close().unwrap();
-        bytes
+        with_page_checksums(bytes)
     }
 
     fn expected_scalar(value: i64) -> Vec<u8> {
@@ -1953,7 +2029,11 @@ mod tests {
     struct TestPageHeader {
         encoded_len: usize,
         compressed_len: usize,
+        uncompressed_value_offset: usize,
+        uncompressed_value_len: usize,
         checksum_predecessor: u8,
+        has_checksum: bool,
+        page_type_offset: usize,
         next_field_offset: Option<usize>,
         next_field_id: Option<u8>,
         stop_offset: usize,
@@ -1963,9 +2043,13 @@ mod tests {
         let mut cursor = 0;
         let mut previous = 0_u8;
         let mut compressed_len = None;
+        let mut uncompressed_value_offset = None;
+        let mut uncompressed_value_len = None;
         let mut next_field_offset = None;
         let mut next_field_id = None;
         let mut checksum_predecessor = None;
+        let mut has_checksum = false;
+        let mut page_type_offset = None;
         loop {
             let field_offset = cursor;
             let tag = compact_byte(bytes, &mut cursor);
@@ -1974,7 +2058,11 @@ mod tests {
                 return TestPageHeader {
                     encoded_len: cursor,
                     compressed_len: compressed_len.unwrap(),
+                    uncompressed_value_offset: uncompressed_value_offset.unwrap(),
+                    uncompressed_value_len: uncompressed_value_len.unwrap(),
                     checksum_predecessor: checksum_predecessor.unwrap_or(previous),
+                    has_checksum,
+                    page_type_offset: page_type_offset.unwrap(),
                     next_field_offset,
                     next_field_id,
                     stop_offset: field_offset,
@@ -1991,7 +2079,18 @@ mod tests {
                 next_field_id = Some(field);
                 checksum_predecessor = Some(previous);
             }
-            if field == 3 && kind == 5 {
+            if field == 4 {
+                has_checksum = true;
+            }
+            if field == 1 && kind == 5 {
+                page_type_offset = Some(cursor);
+                compact_i32(bytes, &mut cursor);
+            } else if field == 2 && kind == 5 {
+                let value_offset = cursor;
+                let _ = compact_i32(bytes, &mut cursor);
+                uncompressed_value_offset = Some(value_offset);
+                uncompressed_value_len = Some(cursor - value_offset);
+            } else if field == 3 && kind == 5 {
                 compressed_len = Some(compact_i32(bytes, &mut cursor) as usize);
             } else {
                 compact_skip(bytes, &mut cursor, kind);
@@ -2003,53 +2102,307 @@ mod tests {
     fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
         let metadata = reader.metadata().clone();
-        let column = metadata.row_group(0).column(0);
-        let start = column.data_page_offset() as usize;
-        let length = column.compressed_size() as usize;
-        let header = page_header(&bytes[start..start + length]);
-        let body_start = start + header.encoded_len;
-        let body_end = body_start + header.compressed_len;
-        let checksum = crc32(&bytes[body_start..body_end]);
-        let checksum_delta = 4_u8.checked_sub(header.checksum_predecessor).unwrap();
-        let mut checksum_field = vec![(checksum_delta << 4) | 5];
-        compact_varint(
-            ((i64::from(checksum as i32) << 1) ^ (i64::from(checksum as i32) >> 31)) as u64,
-            &mut checksum_field,
-        );
         let footer = footer_start(&bytes);
-        let mut data = bytes[..footer].to_vec();
-        let insertion = start + header.next_field_offset.unwrap_or(header.stop_offset);
-        data.splice(insertion..insertion, checksum_field.iter().copied());
-        if let Some(next) = header.next_field_offset {
-            let position = start + next + checksum_field.len();
-            let delta = header.next_field_id.unwrap().checked_sub(4).unwrap();
-            data[position] = (data[position] & 0x0f) | (delta << 4);
-        }
+        let source = &bytes;
+        let mut chunks = metadata
+            .row_groups()
+            .iter()
+            .enumerate()
+            .flat_map(|(row_group, group)| {
+                group
+                    .columns()
+                    .iter()
+                    .enumerate()
+                    .map(move |(column, meta)| {
+                        let start = meta
+                            .dictionary_page_offset()
+                            .unwrap_or_else(|| meta.data_page_offset())
+                            as usize;
+                        let end = start + meta.compressed_size() as usize;
+                        let data_offset = meta.data_page_offset() as usize - start;
+                        let (data, data_shift, inserted) =
+                            checksummed_chunk(&source[start..end], data_offset);
+                        (
+                            row_group,
+                            column,
+                            start,
+                            end,
+                            data_offset,
+                            data,
+                            data_shift,
+                            inserted,
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        chunks.sort_by_key(|chunk| chunk.2);
 
-        let mut metadata = metadata.into_builder();
-        let mut row_groups = metadata.take_row_groups();
-        let row_group = row_groups.pop().unwrap();
-        let mut row_group = row_group.into_builder();
-        let mut columns = row_group.take_columns();
-        let column = columns.pop().unwrap();
-        let compressed_size = column.compressed_size();
-        columns.push(
-            column
-                .into_builder()
-                .set_total_compressed_size(
-                    compressed_size + i64::try_from(data.len() - footer).unwrap(),
-                )
-                .build()
-                .unwrap(),
+        let mut data = bytes[..chunks.first().map_or(footer, |chunk| chunk.2)].to_vec();
+        let mut cursor = data.len();
+        let mut updates = Vec::with_capacity(chunks.len());
+        for (row_group, column, start, end, data_offset, chunk, data_shift, inserted) in chunks {
+            data.extend(&bytes[cursor..start]);
+            let new_start = data.len();
+            data.extend(chunk);
+            let new_data_offset = new_start + data_offset + data_shift;
+            updates.push((row_group, column, new_start, new_data_offset, inserted));
+            cursor = end;
+        }
+        data.extend(&bytes[cursor..footer]);
+
+        let mut row_groups = metadata.row_groups().to_vec();
+        for (row_group, group) in row_groups.iter_mut().enumerate() {
+            let mut builder = group.clone().into_builder();
+            let mut columns = builder.take_columns();
+            for (column, meta) in columns.iter_mut().enumerate() {
+                let Some((_, _, new_start, new_data_offset, inserted)) = updates
+                    .iter()
+                    .find(|(rg, col, _, _, _)| *rg == row_group && *col == column)
+                else {
+                    continue;
+                };
+                let new_start = *new_start as i64;
+                let new_data_offset = *new_data_offset as i64;
+                let dictionary_page_offset = meta.dictionary_page_offset().map(|_| new_start);
+                let replacement = meta
+                    .clone()
+                    .into_builder()
+                    .set_data_page_offset(new_data_offset)
+                    .set_dictionary_page_offset(dictionary_page_offset)
+                    .set_total_compressed_size(meta.compressed_size() + *inserted as i64)
+                    .build()
+                    .unwrap();
+                *meta = replacement;
+            }
+            *group = builder.set_column_metadata(columns).build().unwrap();
+        }
+        let metadata = parquet::file::metadata::ParquetMetaData::new(
+            metadata.file_metadata().clone(),
+            row_groups,
         );
-        let row_group = row_group.set_column_metadata(columns).build().unwrap();
-        let metadata = metadata.add_row_group(row_group).build();
         let mut new_footer = Vec::new();
         parquet::file::metadata::ParquetMetaDataWriter::new(&mut new_footer, &metadata)
             .finish()
             .unwrap();
         data.extend(new_footer);
         data
+    }
+
+    fn checksummed_chunk(bytes: &[u8], data_offset: usize) -> (Vec<u8>, usize, usize) {
+        let mut output = Vec::with_capacity(bytes.len() + 8);
+        let mut cursor = 0;
+        let mut inserted = 0;
+        let mut data_shift = 0;
+        while cursor < bytes.len() {
+            let header = page_header(&bytes[cursor..]);
+            let body_start = cursor + header.encoded_len;
+            let body_end = body_start + header.compressed_len;
+            if cursor == data_offset {
+                data_shift = inserted;
+            }
+            if header.has_checksum {
+                output.extend(&bytes[cursor..body_end]);
+            } else {
+                let checksum = crc32(&bytes[body_start..body_end]);
+                let checksum_delta = 4_u8.checked_sub(header.checksum_predecessor).unwrap();
+                let mut checksum_field = vec![(checksum_delta << 4) | 5];
+                compact_varint(
+                    ((i64::from(checksum as i32) << 1) ^ (i64::from(checksum as i32) >> 31)) as u64,
+                    &mut checksum_field,
+                );
+                let mut page_header = bytes[cursor..body_start].to_vec();
+                let insertion = header.next_field_offset.unwrap_or(header.stop_offset);
+                page_header.splice(insertion..insertion, checksum_field.iter().copied());
+                if let Some(next) = header.next_field_offset {
+                    let position = next + checksum_field.len();
+                    let delta = header.next_field_id.unwrap().checked_sub(4).unwrap();
+                    page_header[position] = (page_header[position] & 0x0f) | (delta << 4);
+                }
+                output.extend(page_header);
+                output.extend(&bytes[body_start..body_end]);
+                inserted += checksum_field.len();
+            }
+            cursor = body_end;
+        }
+        if data_offset == bytes.len() {
+            data_shift = inserted;
+        }
+        (output, data_shift, inserted)
+    }
+
+    fn with_uncompressed_page_size(bytes: Vec<u8>, uncompressed_page_size: i32) -> Vec<u8> {
+        with_uncompressed_page_size_for_column(bytes, 0, uncompressed_page_size)
+    }
+
+    fn with_uncompressed_page_size_for_column(
+        bytes: Vec<u8>,
+        target_column: usize,
+        uncompressed_page_size: i32,
+    ) -> Vec<u8> {
+        let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+        let metadata = reader.metadata().clone();
+        let column = metadata.row_group(0).column(target_column);
+        let start = usize::try_from(column.data_page_offset()).unwrap();
+        let length = usize::try_from(column.compressed_size()).unwrap();
+        let header = page_header(&bytes[start..start + length]);
+        let body_start = start + header.encoded_len;
+        let body_end = body_start + header.compressed_len;
+        let mut encoded_size = Vec::new();
+        compact_varint(
+            ((i64::from(uncompressed_page_size) << 1) ^ (i64::from(uncompressed_page_size) >> 31))
+                as u64,
+            &mut encoded_size,
+        );
+        let mut page_header = bytes[start..body_start].to_vec();
+        page_header.splice(
+            header.uncompressed_value_offset
+                ..header.uncompressed_value_offset + header.uncompressed_value_len,
+            encoded_size,
+        );
+        let mut data = bytes[..start].to_vec();
+        data.extend(page_header);
+        data.extend(&bytes[body_start..body_end]);
+        let footer = footer_start(&bytes);
+        data.extend(&bytes[body_end..footer]);
+
+        let compressed_size_delta = i64::try_from(encoded_size_len(uncompressed_page_size))
+            .unwrap()
+            - i64::try_from(header.uncompressed_value_len).unwrap();
+        let mut row_groups = metadata.row_groups().to_vec();
+        let row_group = row_groups.pop().unwrap();
+        let mut row_group = row_group.into_builder();
+        let mut columns = row_group.take_columns();
+        for (index, column) in columns.iter_mut().enumerate() {
+            let mut builder = column.clone().into_builder();
+            if index == target_column {
+                builder = builder
+                    .set_total_compressed_size(column.compressed_size() + compressed_size_delta);
+            } else if index > target_column {
+                builder = builder
+                    .set_data_page_offset(column.data_page_offset() + compressed_size_delta)
+                    .set_dictionary_page_offset(
+                        column
+                            .dictionary_page_offset()
+                            .map(|offset| offset + compressed_size_delta),
+                    );
+            }
+            *column = builder.build().unwrap();
+        }
+        let row_group = row_group.set_column_metadata(columns).build().unwrap();
+        row_groups.push(row_group);
+        let metadata = parquet::file::metadata::ParquetMetaData::new(
+            metadata.file_metadata().clone(),
+            row_groups,
+        );
+        let mut footer_bytes = Vec::new();
+        parquet::file::metadata::ParquetMetaDataWriter::new(&mut footer_bytes, &metadata)
+            .finish()
+            .unwrap();
+        data.extend(footer_bytes);
+        data
+    }
+
+    fn with_first_page_type(bytes: Vec<u8>, page_type: i32) -> Vec<u8> {
+        let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+        let column = reader.metadata().row_group(0).column(0);
+        let start = column.data_page_offset() as usize;
+        let length = column.compressed_size() as usize;
+        let header = page_header(&bytes[start..start + length]);
+        let encoded = ((i64::from(page_type) << 1) ^ (i64::from(page_type) >> 31)) as u8;
+        let mut bytes = bytes;
+        bytes[start + header.page_type_offset] = encoded;
+        bytes
+    }
+
+    fn encoded_size_len(value: i32) -> usize {
+        let mut encoded = Vec::new();
+        compact_varint(
+            ((i64::from(value) << 1) ^ (i64::from(value) >> 31)) as u64,
+            &mut encoded,
+        );
+        encoded.len()
+    }
+
+    #[test]
+    fn rejects_uncompressed_page_above_profile_limit_before_page_decode() {
+        let profile = profile(&[KEY_A]);
+        let bytes = with_uncompressed_page_size(
+            mixed_parquet(&profile, &[KEY_A], &[TestColumn::Int(&[1])], false, None),
+            i32::try_from(COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES + 1).unwrap(),
+        );
+
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 1),
+            Err(CompactParquetError::InvalidParquet)
+        ));
+    }
+
+    #[test]
+    fn direct_reader_requires_data_page_v2_and_page_checksums() {
+        let profile = profile(&[KEY_A]);
+        let without_checksums =
+            parquet_without_checksums(&profile, &[KEY_A], &[vec![1]], false, None);
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &without_checksums, 1),
+            Err(CompactParquetError::InvalidParquet)
+        ));
+
+        let data_page_v1 =
+            with_first_page_type(parquet(&profile, &[KEY_A], &[vec![1]], false, None), 0);
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &data_page_v1, 1),
+            Err(CompactParquetError::InvalidParquet)
+        ));
+    }
+
+    #[test]
+    fn direct_reader_rejects_otherwise_valid_uncompressed_parquet() {
+        let profile = profile(&[KEY_A]);
+        let bytes = with_page_checksums(parquet_without_checksums_with_compression(
+            &profile,
+            &[KEY_A],
+            &[vec![1]],
+            false,
+            None,
+            Compression::UNCOMPRESSED,
+        ));
+
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 1),
+            Err(CompactParquetError::InvalidParquet)
+        ));
+    }
+
+    #[test]
+    fn rejects_row_group_decoded_budget_across_physical_columns() {
+        let profile = profile(&[KEY_A]);
+        let bytes = with_uncompressed_page_size_for_column(
+            with_uncompressed_page_size_for_column(
+                parquet(&profile, &[KEY_A, KEY_B], &[vec![1], vec![2]], false, None),
+                0,
+                i32::try_from(COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES / 2 + 1).unwrap(),
+            ),
+            1,
+            i32::try_from(COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES / 2 + 1).unwrap(),
+        );
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 1),
+            Err(CompactParquetError::InvalidParquet)
+        ));
+    }
+
+    #[test]
+    fn canonical_manifest_extrema_order_signed_integers_by_value() {
+        let negative_two = canonical_ovb_int("-2");
+        let negative_one = canonical_ovb_int("-1");
+        assert_eq!(
+            compare_encoded_keys(&negative_two, &negative_one).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_encoded_keys(&negative_one, &negative_two).unwrap(),
+            Ordering::Greater
+        );
     }
 
     fn with_column_num_values(bytes: Vec<u8>, num_values: i64) -> Vec<u8> {
@@ -2453,19 +2806,17 @@ mod tests {
         let (temp, repository) = repository();
         let head = repository.head().unwrap().unwrap();
         let generation = repository.index_generation().unwrap();
-        assert!(
-            repository
-                .prepare_compact_publication(
-                    &head,
-                    generation.clone(),
-                    CompactManifest::empty(TABLE, expected_profile.schema_fingerprint()),
-                    [9; 16],
-                    [8; 32],
-                    &[valid],
-                    "valid schema descriptor fixture",
-                )
-                .is_ok()
-        );
+        assert!(repository
+            .prepare_compact_publication(
+                &head,
+                generation.clone(),
+                CompactManifest::empty(TABLE, expected_profile.schema_fingerprint()),
+                [9; 16],
+                [8; 32],
+                &[valid],
+                "valid schema descriptor fixture",
+            )
+            .is_ok());
         assert!(matches!(
             repository.prepare_compact_publication(
                 &head,
@@ -2559,10 +2910,9 @@ mod tests {
             &SEGMENT_ID.to_string()[..2]
         ))
         .unwrap();
-        // Bounds use canonical OVB byte order: the length prefix puts beta
-        // before alpha even though their textual order is the reverse.
-        let min_key = expected_text("beta");
-        let max_key = expected_text("alpha");
+        // Manifest extrema use the typed key order, not the OVB byte order.
+        let min_key = expected_text("alpha");
+        let max_key = expected_text("beta");
         let columns = CanonicalValue::new(OvbRaw::Array(vec![descriptor_with_encoding(
             KEY_A,
             str_type(),
@@ -2654,14 +3004,12 @@ mod tests {
         let dates = [0_i32, 1_i32, 1_i32];
         let plain = mixed_parquet(&profile, &[KEY_A], &[TestColumn::Date(&dates)], false, None);
         let reader = SerializedFileReader::new(Bytes::copy_from_slice(&plain)).unwrap();
-        assert!(
-            reader
-                .metadata()
-                .row_group(0)
-                .column(0)
-                .encodings()
-                .any(|encoding| encoding == Encoding::PLAIN)
-        );
+        assert!(reader
+            .metadata()
+            .row_group(0)
+            .column(0)
+            .encodings()
+            .any(|encoding| encoding == Encoding::PLAIN));
         assert_eq!(
             CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &plain, 3).unwrap(),
             vec![
@@ -2680,14 +3028,12 @@ mod tests {
             true,
         );
         let reader = SerializedFileReader::new(Bytes::copy_from_slice(&dictionary)).unwrap();
-        assert!(
-            reader
-                .metadata()
-                .row_group(0)
-                .column(0)
-                .encodings()
-                .any(|encoding| encoding == parquet::basic::Encoding::RLE_DICTIONARY)
-        );
+        assert!(reader
+            .metadata()
+            .row_group(0)
+            .column(0)
+            .encodings()
+            .any(|encoding| encoding == parquet::basic::Encoding::RLE_DICTIONARY));
         assert_eq!(
             CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &dictionary, 3)
                 .unwrap(),
@@ -3262,14 +3608,12 @@ mod tests {
             None,
         );
         let reader = SerializedFileReader::new(Bytes::copy_from_slice(&plain)).unwrap();
-        assert!(
-            reader
-                .metadata()
-                .row_group(0)
-                .column(0)
-                .encodings()
-                .any(|encoding| encoding == Encoding::PLAIN)
-        );
+        assert!(reader
+            .metadata()
+            .row_group(0)
+            .column(0)
+            .encodings()
+            .any(|encoding| encoding == Encoding::PLAIN));
         assert_eq!(
             CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &plain, 2).unwrap(),
             vec![expected_text("alpha"), expected_text("beta")]
@@ -3285,14 +3629,12 @@ mod tests {
             true,
         );
         let reader = SerializedFileReader::new(Bytes::copy_from_slice(&dictionary)).unwrap();
-        assert!(
-            reader
-                .metadata()
-                .row_group(0)
-                .column(0)
-                .encodings()
-                .any(|encoding| { encoding == parquet::basic::Encoding::RLE_DICTIONARY })
-        );
+        assert!(reader
+            .metadata()
+            .row_group(0)
+            .column(0)
+            .encodings()
+            .any(|encoding| { encoding == parquet::basic::Encoding::RLE_DICTIONARY }));
         assert_eq!(
             CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &dictionary, 3)
                 .unwrap(),
