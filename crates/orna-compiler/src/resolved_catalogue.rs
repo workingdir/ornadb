@@ -7,19 +7,22 @@
 use std::{error::Error, fmt};
 
 use orna_core::{
+    FunctionId, FunctionRevisionId, TypeId,
     canonical_hash::artifact_payload_digest,
     catalogue::{CatalogueSnapshot, FunctionDefinition, FunctionReturn},
-    catalogue_diff::{catalogue_diff, CatalogueSemanticDiff},
+    catalogue_diff::{CatalogueSemanticDiff, catalogue_diff},
     revision::{
         ActiveDatabaseRevision, DefinitionOrigin, DefinitionReference, DeployableRevision,
         ExecutableArtifact, ExpressionArtifact, FunctionRevisionRecord, RevisionPair, Sha256Digest,
         StoredSourceRevision,
     },
     types::ResolvedType,
-    FunctionId, FunctionRevisionId, TypeId,
 };
 
-use crate::{prepare, CheckReport, PrepareError};
+use crate::{
+    CheckReport, PrepareError, PrepareStandardApplicationError, StandardApplicationCheckReport,
+    prepare, prepare_standard_application,
+};
 
 /// One signature slot whose exact resolved type may be projected by a runtime
 /// invocation adapter.
@@ -47,6 +50,8 @@ pub enum UnsupportedReturnShape {
 pub enum ResolvedSourceCatalogueError {
     /// The existing compiler candidate pipeline rejected the source.
     Preparation(PrepareError),
+    /// Standard-authorized preparation rejected the source or its authority.
+    StandardPreparation(PrepareStandardApplicationError),
     /// A function has a result shape outside the current runtime boundary.
     UnsupportedReturn {
         /// The core function identity.
@@ -96,6 +101,7 @@ impl fmt::Display for ResolvedSourceCatalogueError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Preparation(error) => error.fmt(formatter),
+            Self::StandardPreparation(error) => error.fmt(formatter),
             Self::UnsupportedReturn { function, shape } => {
                 write!(
                     formatter,
@@ -135,6 +141,7 @@ impl Error for ResolvedSourceCatalogueError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Preparation(error) => Some(error),
+            Self::StandardPreparation(error) => Some(error),
             Self::UnsupportedReturn { .. }
             | Self::UnsupportedType { .. }
             | Self::MissingType { .. }
@@ -161,6 +168,12 @@ struct FunctionArtifactEntry {
 impl From<PrepareError> for ResolvedSourceCatalogueError {
     fn from(error: PrepareError) -> Self {
         Self::Preparation(error)
+    }
+}
+
+impl From<PrepareStandardApplicationError> for ResolvedSourceCatalogueError {
+    fn from(error: PrepareStandardApplicationError) -> Self {
+        Self::StandardPreparation(error)
     }
 }
 
@@ -279,6 +292,30 @@ pub fn materialize_resolved_source_catalogue(
     active: &ActiveDatabaseRevision,
 ) -> Result<ResolvedSourceCatalogue, ResolvedSourceCatalogueError> {
     let candidate = prepare(report, expected_base, active)?;
+    materialize_prepared_source_catalogue(candidate, active)
+}
+
+/// Materializes a complete core candidate from a successful standard-authorized
+/// compiler check.
+///
+/// Standard application checking carries the pinned standard catalogue and
+/// library digest that cannot be represented by the legacy [`CheckReport`].
+/// This additive entry point preserves that authority through
+/// [`prepare_standard_application`] and shares the same runtime projection
+/// boundary as the legacy entry point.
+pub fn materialize_standard_resolved_source_catalogue(
+    report: &StandardApplicationCheckReport,
+    expected_base: RevisionPair,
+    active: &ActiveDatabaseRevision,
+) -> Result<ResolvedSourceCatalogue, ResolvedSourceCatalogueError> {
+    let candidate = prepare_standard_application(report, expected_base, active)?;
+    materialize_prepared_source_catalogue(candidate, active)
+}
+
+fn materialize_prepared_source_catalogue(
+    candidate: DeployableRevision,
+    active: &ActiveDatabaseRevision,
+) -> Result<ResolvedSourceCatalogue, ResolvedSourceCatalogueError> {
     validate_invocation_projection(&candidate)?;
     let function_artifacts = materialize_function_artifacts(&candidate, active)?;
     let diff = catalogue_diff(active.catalogue(), candidate.candidate());
@@ -505,6 +542,8 @@ fn validate_signature_type(
 mod tests {
     use super::*;
     use orna_core::{
+        CatalogueRevisionId, FunctionId, FunctionRevisionId, SourceBundleId, SourceRevisionId,
+        SourceUnitId,
         canonical_hash::{
             artifact_payload_digest, catalogue_digest, source_bundle_digest,
             source_revision_record_digest,
@@ -517,8 +556,6 @@ mod tests {
         },
         source::{SourceBundle, SourceUnit},
         types::StandardScalar,
-        CatalogueRevisionId, FunctionId, FunctionRevisionId, SourceBundleId, SourceRevisionId,
-        SourceUnitId,
     };
 
     #[test]
