@@ -3686,6 +3686,38 @@ fn decimal_range(
     .unwrap()
 }
 
+fn instant_range(
+    lower: Option<(i64, u32)>,
+    upper: Option<(i64, u32)>,
+    upper_inclusive: bool,
+) -> Value {
+    let endpoint = |value: Option<(i64, u32)>| match value {
+        Some((unix_seconds, nanosecond)) => Raw::Tag(
+            60013,
+            Box::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Tag(
+                    60002,
+                    Box::new(Raw::Array(vec![
+                        Raw::Int(unix_seconds.into()),
+                        Raw::Int(nanosecond.into()),
+                    ])),
+                ),
+            ])),
+        ),
+        None => Raw::Tag(60013, Box::new(Raw::Array(vec![Raw::Int(0.into())]))),
+    };
+    Value::new(Raw::Tag(
+        60019,
+        Box::new(Raw::Array(vec![
+            endpoint(lower),
+            endpoint(upper),
+            Raw::Bool(upper_inclusive),
+        ])),
+    ))
+    .unwrap()
+}
+
 #[test]
 fn decimal_ranges_are_canonical_membership_values_with_optional_bounds_and_ordering() {
     let half_open = decimal_range(Some((125, -2)), Some((25, -1)), false);
@@ -3836,6 +3868,92 @@ fn date_ranges_allow_empty_values_but_reject_mixed_bounds_and_iteration() {
     assert_eq!(
         evaluate("if true { let total = 0; for value in 1..=3 { total += value; }; total }"),
         Value::int(6.into())
+    );
+}
+
+#[test]
+fn instant_ranges_are_canonical_membership_values_with_optional_bounds_and_ordering() {
+    let half_open = instant_range(Some((0, 0)), Some((1, 2)), false);
+    assert_eq!(
+        evaluate("1970-01-01T00:00:00Z..1970-01-01T00:00:01.000000002Z"),
+        half_open
+    );
+    assert_eq!(
+        evaluate("1970-01-01T01:00:00+01:00 in 1969-12-31T23:00:00Z..1970-01-01T00:00:00Z"),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate("1970-01-01T00:00:00Z in 1970-01-01T00:00:00Z..1970-01-01T00:00:01.000000002Z"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate(
+            "1970-01-01T00:00:01.000000002Z in 1970-01-01T00:00:00Z..1970-01-01T00:00:01.000000002Z"
+        ),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate(
+            "1970-01-01T00:00:01.000000002Z in 1970-01-01T00:00:00Z..=1970-01-01T00:00:01.000000002Z"
+        ),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate("1969-12-31T23:59:59Z in ..1970-01-01T00:00:00Z"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate("1970-01-01T00:00:02Z in 1970-01-01T00:00:01Z.."),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate(
+            "(1970-01-01T00:00:00Z..1970-01-01T00:00:01Z) < (1970-01-01T00:00:01Z..1970-01-01T00:00:02Z)"
+        ),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+}
+
+#[test]
+fn instant_ranges_allow_empty_values_but_reject_mixed_types_and_iteration() {
+    assert_eq!(
+        evaluate("1970-01-01T00:00:00Z in 1970-01-01T00:00:00Z..1970-01-01T00:00:00Z"),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate("1970-01-01T00:00:01Z in 1970-01-01T00:00:02Z..1970-01-01T00:00:01Z"),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    for source in [
+        "1970-01-01T00:00:00Z..1",
+        "1970-01-01T00:00:00Z in 1970-01-01T00:00:00Z..1",
+        "1 in 1970-01-01T00:00:00Z..1970-01-01T00:00:01Z",
+        "1970-01-01T00:00:00Z..1.0f",
+        "1.0f in 1.0f..5.0f",
+        "(..1970-01-01T00:00:00Z) < (1..)",
+        "sort_by([(..1970-01-01T00:00:00Z), (1..)], value => value)",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                source,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            "ORNA-EVAL-TYPE",
+            "{source}"
+        );
+    }
+    let environment = Environment::from([(
+        "range".into(),
+        instant_range(Some((0, 0)), Some((1, 0)), false),
+    )]);
+    assert_eq!(
+        code(evaluate_expression(
+            "if true { for instant in range { instant }; 0 }",
+            &environment,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-TYPE"
     );
 }
 
