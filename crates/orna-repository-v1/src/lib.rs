@@ -33,9 +33,11 @@ mod init;
 mod transport;
 
 pub use compact::{
-    COMPACT_MANIFEST_SHARD_LIMIT, CompactManifest, CompactManifestEntry, CompactManifestWitness,
-    CompactPublicationPending, CompactPublicationPlan, CompactPublicationReconciliation,
-    CompactPublicationRecovery, CompactRuntimeReceipt, CompactSegment, CompactSegmentRole,
+    COMPACT_MANIFEST_SHARD_LIMIT, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactManifest,
+    CompactManifestEntry, CompactManifestWitness, CompactPublicationPending,
+    CompactPublicationPlan, CompactPublicationReconciliation, CompactPublicationRecovery,
+    CompactRuntimeReceipt, CompactSegment, CompactSegmentRole,
+    validate_compact_page_uncompressed_sizes,
 };
 pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
@@ -126,6 +128,50 @@ const CHECKOUT_JOURNAL_MAGIC: &[u8] = b"ORNA-CHECKOUT-JOURNAL\0";
 const GIT_INDEX_LOCK_MAGIC: &[u8] = b"ORNA-GIT-INDEX-LOCK\0";
 const MAX_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublicationMaterializationPhase {
+    Clean,
+    QuarantinePrepared,
+    Quarantined,
+    Installed,
+}
+
+impl PublicationMaterializationPhase {
+    fn code(self) -> u8 {
+        match self {
+            Self::Clean => 0,
+            Self::QuarantinePrepared => 1,
+            Self::Quarantined => 2,
+            Self::Installed => 3,
+        }
+    }
+
+    fn from_code(code: u8) -> Result<Self, RepositoryError> {
+        match code {
+            0 => Ok(Self::Clean),
+            1 => Ok(Self::QuarantinePrepared),
+            2 => Ok(Self::Quarantined),
+            3 => Ok(Self::Installed),
+            _ => Err(RepositoryError::InvalidPublicationJournal),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PublicationMaterialization {
+    phase: PublicationMaterializationPhase,
+    quarantine: Option<String>,
+}
+
+impl PublicationMaterialization {
+    const fn clean() -> Self {
+        Self {
+            phase: PublicationMaterializationPhase::Clean,
+            quarantine: None,
+        }
+    }
+}
+
 /// The recovery stages persisted for one publication attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PublicationJournalStage {
@@ -168,6 +214,7 @@ pub struct PublicationJournalEntry {
     path: ManagedPath,
     expected: Option<Vec<u8>>,
     next: Option<Vec<u8>>,
+    materialization: PublicationMaterialization,
 }
 
 impl PublicationJournalEntry {
@@ -176,6 +223,7 @@ impl PublicationJournalEntry {
             path,
             expected,
             next,
+            materialization: PublicationMaterialization::clean(),
         }
     }
 
@@ -190,6 +238,10 @@ impl PublicationJournalEntry {
     pub fn next(&self) -> Option<&[u8]> {
         self.next.as_deref()
     }
+
+    fn materialization(&self) -> &PublicationMaterialization {
+        &self.materialization
+    }
 }
 
 /// A restart-safe publication record stored in the private runtime area.
@@ -202,6 +254,8 @@ pub struct PublicationJournal {
     compact_manifest: Option<CompactManifestWitness>,
     entries: Vec<PublicationJournalEntry>,
     stage: PublicationJournalStage,
+    wire_version: u8,
+    binding_version: u8,
 }
 
 impl PublicationJournal {
@@ -261,6 +315,8 @@ impl PublicationJournal {
             compact_manifest: None,
             entries,
             stage: PublicationJournalStage::Prepared,
+            wire_version: 5,
+            binding_version: 5,
         })
     }
 
@@ -315,7 +371,7 @@ impl PublicationJournal {
     fn encode(&self) -> Result<Vec<u8>, RepositoryError> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(JOURNAL_MAGIC);
-        bytes.push(4);
+        bytes.push(self.wire_version);
         put_string(&mut bytes, self.old_head.as_str())?;
         put_string(&mut bytes, self.new_head.as_str())?;
         put_optional_string(
@@ -329,12 +385,14 @@ impl PublicationJournal {
             }
             None => bytes.push(0),
         }
-        match &self.compact_manifest {
-            Some(witness) => {
-                bytes.push(1);
-                witness.encode(&mut bytes)?;
+        if self.wire_version >= 3 {
+            match &self.compact_manifest {
+                Some(witness) => {
+                    bytes.push(1);
+                    witness.encode(&mut bytes)?;
+                }
+                None => bytes.push(0),
             }
-            None => bytes.push(0),
         }
         bytes.push(self.stage.code());
         put_u32(&mut bytes, self.entries.len())?;
@@ -347,6 +405,10 @@ impl PublicationJournal {
             put_string(&mut bytes, path)?;
             put_optional_bytes(&mut bytes, entry.expected.as_deref())?;
             put_optional_bytes(&mut bytes, entry.next.as_deref())?;
+            if self.wire_version >= 5 {
+                bytes.push(entry.materialization.phase.code());
+                put_optional_string(&mut bytes, entry.materialization.quarantine.as_deref())?;
+            }
         }
         if bytes.len() > MAX_JOURNAL_BYTES {
             return Err(RepositoryError::InvalidPublicationJournal);
@@ -357,6 +419,10 @@ impl PublicationJournal {
     fn lock_binding(&self) -> Result<[u8; 32], RepositoryError> {
         let mut stable = self.clone();
         stable.stage = PublicationJournalStage::Prepared;
+        stable.wire_version = stable.binding_version;
+        for entry in &mut stable.entries {
+            entry.materialization = PublicationMaterialization::clean();
+        }
         Ok(Sha256::digest(stable.encode()?).into())
     }
 
@@ -366,7 +432,7 @@ impl PublicationJournal {
         }
         let mut cursor = JOURNAL_MAGIC.len();
         let version = take_byte(bytes, &mut cursor)?;
-        if version != 2 && version != 3 && version != 4 {
+        if version != 2 && version != 3 && version != 4 && version != 5 {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         let old_head =
@@ -381,7 +447,7 @@ impl PublicationJournal {
             1 => Some(take_fixed_array::<16>(bytes, &mut cursor)?),
             _ => return Err(RepositoryError::InvalidPublicationJournal),
         };
-        let compact_manifest = if version == 4 {
+        let compact_manifest = if version >= 4 {
             match take_byte(bytes, &mut cursor)? {
                 0 => None,
                 1 => Some(CompactManifestWitness::decode(
@@ -413,12 +479,27 @@ impl PublicationJournal {
             if !paths.insert(path.clone()) {
                 return Err(RepositoryError::InvalidPublicationJournal);
             }
-            entries.push(PublicationJournalEntry::new(path, expected, next));
+            let materialization = if version == 5 {
+                let phase =
+                    PublicationMaterializationPhase::from_code(take_byte(bytes, &mut cursor)?)?;
+                let quarantine = take_optional_string(bytes, &mut cursor)?;
+                if (phase == PublicationMaterializationPhase::Clean) == quarantine.is_some()
+                    || phase != PublicationMaterializationPhase::Clean && quarantine.is_none()
+                {
+                    return Err(RepositoryError::InvalidPublicationJournal);
+                }
+                PublicationMaterialization { phase, quarantine }
+            } else {
+                PublicationMaterialization::clean()
+            };
+            let mut entry = PublicationJournalEntry::new(path, expected, next);
+            entry.materialization = materialization;
+            entries.push(entry);
         }
         if cursor != bytes.len() {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
-        Ok(Self {
+        let journal = Self {
             old_head,
             new_head,
             base_index_tree,
@@ -426,7 +507,64 @@ impl PublicationJournal {
             compact_manifest,
             entries,
             stage,
-        })
+            wire_version: version,
+            binding_version: version,
+        };
+        for (index, entry) in journal.entries.iter().enumerate() {
+            if entry.materialization.phase != PublicationMaterializationPhase::Clean
+                && entry.materialization.quarantine.as_deref()
+                    != Some(journal.quarantine_name(index)?.as_str())
+            {
+                return Err(RepositoryError::InvalidPublicationJournal);
+            }
+        }
+        Ok(journal)
+    }
+
+    fn quarantine_name(&self, index: usize) -> Result<String, RepositoryError> {
+        let mut stable = self.clone();
+        stable.stage = PublicationJournalStage::Prepared;
+        stable.wire_version = 5;
+        for entry in &mut stable.entries {
+            entry.materialization = PublicationMaterialization::clean();
+        }
+        let mut digest = Sha256::new();
+        digest.update(stable.encode()?);
+        digest.update(index.to_le_bytes());
+        let digest = digest.finalize();
+        let suffix = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        Ok(format!(".orna-quarantine-journal-{suffix}"))
+    }
+
+    fn set_materialization(
+        &mut self,
+        index: usize,
+        phase: PublicationMaterializationPhase,
+        quarantine: Option<String>,
+    ) -> Result<(), RepositoryError> {
+        let expected_quarantine = self.quarantine_name(index)?;
+        if (phase == PublicationMaterializationPhase::Clean && quarantine.is_some())
+            || (phase != PublicationMaterializationPhase::Clean && quarantine.is_none())
+        {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        if phase != PublicationMaterializationPhase::Clean
+            && quarantine.as_deref() != Some(expected_quarantine.as_str())
+        {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        if self.wire_version < 5 {
+            self.wire_version = 5;
+        }
+        let entry = self
+            .entries
+            .get_mut(index)
+            .ok_or(RepositoryError::InvalidPublicationJournal)?;
+        entry.materialization = PublicationMaterialization { phase, quarantine };
+        Ok(())
     }
 }
 
@@ -1501,7 +1639,7 @@ impl Repository {
             candidate,
             paths,
             &base_index,
-            git_lock,
+            &git_lock,
         )
     }
 
@@ -1511,7 +1649,7 @@ impl Repository {
         candidate: &PrivateCommit,
         paths: &[ManagedPath],
         base_index: &[u8],
-        git_lock: GitIndexLock,
+        _git_lock: &GitIndexLock,
     ) -> Result<IndexGeneration, RepositoryError> {
         if self.head()?.as_ref() != Some(candidate.commit()) {
             return Err(RepositoryError::StaleHead);
@@ -1571,8 +1709,10 @@ impl Repository {
             )
             .and_then(|directory| directory.sync_all())
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            drop(git_lock);
-            self.index_generation()
+            Ok(IndexGeneration {
+                head: self.head()?,
+                tree: self.index_tree_from_file(&index)?,
+            })
         })();
         let _ = fs::remove_file(&candidate_index);
         result
@@ -1808,6 +1948,7 @@ impl Repository {
             }
             self.verify_compact_publication_binding(journal, candidate)?;
         }
+        let _coordination_lock = self.acquire_coordination_lock()?;
         let paths = journal
             .entries()
             .iter()
@@ -1817,7 +1958,7 @@ impl Repository {
         let index = self.git_path("index")?;
         let base_index = self.capture_index_for_expected(expected_index, &index)?;
         let lock_binding = journal.lock_binding()?;
-        self.write_publication_journal(journal)?;
+        self.write_publication_journal_locked(journal)?;
         // Own Git's writer lock before exposing the new ref. This closes the
         // post-ref/pre-index race where an ordinary Git writer could publish
         // the captured, stale index.
@@ -1827,7 +1968,8 @@ impl Repository {
         // the ref; the later worktree check still protects the unavoidable
         // race with an editor that writes during publication.
         for entry in journal.entries() {
-            let current = self.managed_file_bytes(&entry.path)?;
+            let target = self.managed_target(&entry.path)?;
+            let current = self.read_managed_file(&target)?;
             if current.as_deref() != entry.expected() && current.as_deref() != entry.next() {
                 drop(git_lock);
                 return Err(RepositoryError::ManagedContentConflict);
@@ -1842,30 +1984,23 @@ impl Repository {
         )?;
 
         journal.advance(PublicationJournalStage::RefAdvanced)?;
-        self.write_publication_journal(journal)?;
+        self.write_publication_journal_locked(journal)?;
         let reconciled = self.reconcile_published_index_locked(
             expected_index,
             candidate,
             &paths,
             &base_index,
-            git_lock,
+            &git_lock,
         )?;
 
         journal.advance(PublicationJournalStage::IndexReconciled)?;
-        self.write_publication_journal(journal)?;
-        for entry in journal.entries() {
-            let current = self.managed_file_bytes(&entry.path)?;
-            if current.as_deref() == entry.next() {
-                continue;
-            }
-            if current.as_deref() != entry.expected() {
-                return Err(RepositoryError::ManagedContentConflict);
-            }
-            self.materialize_managed_file(&entry.path, entry.expected(), entry.next())?;
+        self.write_publication_journal_locked(journal)?;
+        for index in 0..journal.entries().len() {
+            self.materialize_publication_entry_locked(journal, index)?;
         }
 
         journal.advance(PublicationJournalStage::WorktreeReconciled)?;
-        self.write_publication_journal(journal)?;
+        self.write_publication_journal_locked(journal)?;
         Ok(reconciled)
     }
 
@@ -1915,57 +2050,73 @@ impl Repository {
             tree: Some(base_tree),
         };
 
-        if journal.stage() == PublicationJournalStage::Prepared {
-            match self.head()? {
-                Some(head) if &head == journal.old_head() => {
-                    let actual = self.index_generation()?;
-                    if actual != expected_index {
-                        return Err(RepositoryError::StaleIndex {
-                            expected: expected_index,
-                            actual,
-                        });
-                    }
-                    return Err(RepositoryError::PublicationPending);
-                }
-                Some(head) if &head == journal.new_head() => {
-                    journal.advance(PublicationJournalStage::RefAdvanced)?;
-                    self.write_publication_journal(&journal)?;
-                }
-                _ => return Err(RepositoryError::StaleHead),
-            }
-        }
-
-        if journal.stage() == PublicationJournalStage::RefAdvanced {
-            if self.head()?.as_ref() != Some(journal.new_head()) {
-                return Err(RepositoryError::StaleHead);
-            }
-            let current = self.index_generation()?;
-            let _reconciled = if current.tree() == expected_index.tree() {
-                let paths = journal
-                    .entries()
-                    .iter()
-                    .map(|entry| entry.path.clone())
-                    .collect::<Vec<_>>();
-                self.reconcile_published_index(&expected_index, &candidate, &paths)?
-            } else if self.index_entries_match_candidate(&candidate, journal.entries())? {
-                current
-            } else {
+        if journal.stage() == PublicationJournalStage::Prepared
+            && self.head()?.as_ref() == Some(journal.old_head())
+        {
+            let actual = self.index_generation()?;
+            if actual != expected_index {
                 return Err(RepositoryError::StaleIndex {
                     expected: expected_index,
-                    actual: current,
+                    actual,
                 });
-            };
-            journal.advance(PublicationJournalStage::IndexReconciled)?;
-            self.write_publication_journal(&journal)?;
-            self.recover_publication_worktree(&mut journal)?;
-            return Err(RepositoryError::RuntimeCompletionRequired);
+            }
+            return Err(RepositoryError::PublicationPending);
         }
 
-        if journal.stage() == PublicationJournalStage::IndexReconciled {
+        if matches!(
+            journal.stage(),
+            PublicationJournalStage::Prepared
+                | PublicationJournalStage::RefAdvanced
+                | PublicationJournalStage::IndexReconciled
+        ) {
             if self.head()?.as_ref() != Some(journal.new_head()) {
                 return Err(RepositoryError::StaleHead);
             }
-            self.recover_publication_worktree(&mut journal)?;
+            let _coordination_lock = self.acquire_coordination_lock()?;
+            let index = self.git_path("index")?;
+            let git_lock =
+                GitIndexLock::acquire_owned(index.with_extension("lock"), journal.lock_binding()?)?;
+
+            if journal.stage() == PublicationJournalStage::Prepared {
+                journal.advance(PublicationJournalStage::RefAdvanced)?;
+                self.write_publication_journal_locked(&journal)?;
+            }
+            if journal.stage() == PublicationJournalStage::RefAdvanced {
+                let current = IndexGeneration {
+                    head: self.head()?,
+                    tree: self.index_tree_from_file(&index)?,
+                };
+                let _reconciled = if current.tree() == expected_index.tree() {
+                    let paths = journal
+                        .entries()
+                        .iter()
+                        .map(|entry| entry.path.clone())
+                        .collect::<Vec<_>>();
+                    let base_index =
+                        fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                    self.reconcile_published_index_locked(
+                        &expected_index,
+                        &candidate,
+                        &paths,
+                        &base_index,
+                        &git_lock,
+                    )?
+                } else if self.index_entries_match_candidate(&candidate, journal.entries())? {
+                    current
+                } else {
+                    return Err(RepositoryError::StaleIndex {
+                        expected: expected_index,
+                        actual: current,
+                    });
+                };
+                journal.advance(PublicationJournalStage::IndexReconciled)?;
+                self.write_publication_journal_locked(&journal)?;
+            }
+            if journal.stage() == PublicationJournalStage::IndexReconciled {
+                self.recover_publication_worktree_locked(&mut journal)?;
+            }
+            drop(git_lock);
+            return Err(RepositoryError::RuntimeCompletionRequired);
         }
         if journal.stage() == PublicationJournalStage::WorktreeReconciled {
             return Err(RepositoryError::RuntimeCompletionRequired);
@@ -2027,23 +2178,281 @@ impl Repository {
         Ok(candidate)
     }
 
-    fn recover_publication_worktree(
+    fn recover_publication_worktree_locked(
         &self,
         journal: &mut PublicationJournal,
     ) -> Result<(), RepositoryError> {
-        for entry in journal.entries() {
-            let current = self.managed_file_bytes(&entry.path)?;
+        for index in 0..journal.entries().len() {
+            self.materialize_publication_entry_locked(journal, index)?;
+        }
+        journal.advance(PublicationJournalStage::WorktreeReconciled)?;
+        self.write_publication_journal_locked(journal)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn materialize_publication_entry(
+        &self,
+        journal: &mut PublicationJournal,
+        index: usize,
+    ) -> Result<(), RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        self.materialize_publication_entry_locked(journal, index)
+    }
+
+    fn materialize_publication_entry_locked(
+        &self,
+        journal: &mut PublicationJournal,
+        index: usize,
+    ) -> Result<(), RepositoryError> {
+        let entry = journal
+            .entries()
+            .get(index)
+            .ok_or(RepositoryError::InvalidPublicationJournal)?
+            .clone();
+        let quarantine_name = journal.quarantine_name(index)?;
+        let target = self.managed_target(&entry.path)?;
+        let parent = target
+            .parent()
+            .ok_or(RepositoryError::LocalStateUnavailable)?;
+        fs::create_dir_all(parent).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        self.validate_managed_parent(parent)?;
+        let quarantine = parent.join(&quarantine_name);
+        let quarantine_bytes = self.read_managed_file(&quarantine)?;
+        let current = self.read_managed_file(&target)?;
+        let phase = entry.materialization().phase;
+
+        if phase == PublicationMaterializationPhase::Clean {
+            if quarantine_bytes.is_some() {
+                return Err(RepositoryError::ManagedContentConflict);
+            }
             if current.as_deref() == entry.next() {
-                continue;
+                return Ok(());
             }
             if current.as_deref() != entry.expected() {
                 return Err(RepositoryError::ManagedContentConflict);
             }
-            self.materialize_managed_file(&entry.path, entry.expected(), entry.next())?;
+            journal.set_materialization(
+                index,
+                PublicationMaterializationPhase::QuarantinePrepared,
+                Some(quarantine_name.clone()),
+            )?;
+            self.write_publication_journal_locked(journal)?;
+        } else if let Some(bytes) = quarantine_bytes.as_deref() {
+            if Some(bytes) != entry.expected() {
+                return Err(RepositoryError::ManagedContentConflict);
+            }
+            if current.as_deref() == entry.next() {
+                self.remove_verified_quarantine(
+                    parent,
+                    &quarantine,
+                    &target,
+                    entry.expected(),
+                    entry.next(),
+                )?;
+                journal.set_materialization(index, PublicationMaterializationPhase::Clean, None)?;
+                self.write_publication_journal_locked(journal)?;
+                return Ok(());
+            }
+            if current.is_some() {
+                return Err(RepositoryError::ManagedContentConflict);
+            }
+            if entry.next().is_none() {
+                if self.read_managed_file(&target)?.is_some()
+                    || self.read_managed_file(&quarantine)?.as_deref() != entry.expected()
+                {
+                    return Err(RepositoryError::ManagedContentConflict);
+                }
+                journal.set_materialization(
+                    index,
+                    PublicationMaterializationPhase::Installed,
+                    Some(quarantine_name.clone()),
+                )?;
+                self.write_publication_journal_locked(journal)?;
+            } else {
+                self.materialize_managed_file_impl_with_quarantine_locked(
+                    &entry.path,
+                    None,
+                    entry.next(),
+                    None,
+                    None,
+                    None,
+                )?;
+                if self.read_managed_file(&target)?.as_deref() != entry.next()
+                    || self.read_managed_file(&quarantine)?.as_deref() != entry.expected()
+                {
+                    return Err(RepositoryError::ManagedContentConflict);
+                }
+                journal.set_materialization(
+                    index,
+                    PublicationMaterializationPhase::Installed,
+                    Some(quarantine_name.clone()),
+                )?;
+                self.write_publication_journal_locked(journal)?;
+            }
+            self.remove_verified_quarantine(
+                parent,
+                &quarantine,
+                &target,
+                entry.expected(),
+                entry.next(),
+            )?;
+            journal.set_materialization(index, PublicationMaterializationPhase::Clean, None)?;
+            self.write_publication_journal_locked(journal)?;
+            return Ok(());
+        } else if current.as_deref() == entry.next() {
+            journal.set_materialization(index, PublicationMaterializationPhase::Clean, None)?;
+            self.write_publication_journal_locked(journal)?;
+            return Ok(());
+        } else if phase != PublicationMaterializationPhase::QuarantinePrepared
+            || current.as_deref() != entry.expected()
+        {
+            return Err(RepositoryError::ManagedContentConflict);
         }
-        journal.advance(PublicationJournalStage::WorktreeReconciled)?;
-        self.write_publication_journal(journal)?;
-        Ok(())
+
+        let mut after_boundary = |phase| {
+            journal.set_materialization(index, phase, Some(quarantine_name.clone()))?;
+            self.write_publication_journal_locked(journal)
+        };
+        self.materialize_managed_file_impl_with_quarantine_locked(
+            &entry.path,
+            entry.expected(),
+            entry.next(),
+            Some(&quarantine),
+            None,
+            Some(&mut after_boundary),
+        )?;
+        journal.set_materialization(index, PublicationMaterializationPhase::Clean, None)?;
+        self.write_publication_journal_locked(journal)
+    }
+
+    fn remove_verified_quarantine(
+        &self,
+        parent: &Path,
+        quarantine: &Path,
+        target: &Path,
+        expected_quarantine: Option<&[u8]>,
+        expected_target: Option<&[u8]>,
+    ) -> Result<(), RepositoryError> {
+        self.remove_verified_quarantine_with_boundary(
+            parent,
+            quarantine,
+            target,
+            expected_quarantine,
+            expected_target,
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    fn remove_verified_quarantine_with_boundary(
+        &self,
+        parent: &Path,
+        quarantine: &Path,
+        target: &Path,
+        expected_quarantine: Option<&[u8]>,
+        expected_target: Option<&[u8]>,
+        after_final_verification: Option<&mut dyn FnMut() -> Result<(), RepositoryError>>,
+    ) -> Result<(), RepositoryError> {
+        self.remove_verified_quarantine_inner(
+            parent,
+            quarantine,
+            target,
+            expected_quarantine,
+            expected_target,
+            after_final_verification,
+        )
+    }
+
+    #[cfg(not(test))]
+    fn remove_verified_quarantine_with_boundary(
+        &self,
+        parent: &Path,
+        quarantine: &Path,
+        target: &Path,
+        expected_quarantine: Option<&[u8]>,
+        expected_target: Option<&[u8]>,
+        _after_final_verification: Option<&mut dyn FnMut() -> Result<(), RepositoryError>>,
+    ) -> Result<(), RepositoryError> {
+        self.remove_verified_quarantine_inner(
+            parent,
+            quarantine,
+            target,
+            expected_quarantine,
+            expected_target,
+            None,
+        )
+    }
+
+    fn remove_verified_quarantine_inner(
+        &self,
+        parent: &Path,
+        quarantine: &Path,
+        target: &Path,
+        expected_quarantine: Option<&[u8]>,
+        expected_target: Option<&[u8]>,
+        mut after_final_verification: Option<&mut dyn FnMut() -> Result<(), RepositoryError>>,
+    ) -> Result<(), RepositoryError> {
+        if self.read_managed_file(quarantine)?.as_deref() != expected_quarantine
+            || self.read_managed_file(target)?.as_deref() != expected_target
+        {
+            return Err(RepositoryError::ManagedContentConflict);
+        }
+        self.runtime.ensure_exists()?;
+        let cleanup_parent = self.runtime.root().join("publication-cleanup");
+        fs::create_dir_all(&cleanup_parent).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let cleanup = (0..8)
+            .map(|_| {
+                cleanup_parent.join(format!(
+                    ".orna-quarantine-cleanup-{}-{}",
+                    std::process::id(),
+                    Uuid::new_v4()
+                ))
+            })
+            .find(|path| !path.exists())
+            .ok_or(RepositoryError::LocalStateUnavailable)?;
+        match Self::rename_path_without_replacement(quarantine, &cleanup) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(RepositoryError::PublicationRecoveryConflict);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(RepositoryError::PublicationRecoveryConflict);
+            }
+            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+        }
+        let moved = self.read_managed_file(&cleanup)?;
+        if moved.as_deref() != expected_quarantine {
+            let _ = Self::rename_path_without_replacement(&cleanup, quarantine);
+            return Err(RepositoryError::PublicationRecoveryConflict);
+        }
+        if fs::symlink_metadata(quarantine).is_ok()
+            || self.read_managed_file(target)?.as_deref() != expected_target
+        {
+            return Err(RepositoryError::PublicationRecoveryConflict);
+        }
+
+        // The cleanup object is now in the private runtime area.  Its final
+        // removal cannot act on a worktree pathname, so a replacement at the
+        // old quarantine name is preserved.  The hook is test-only and
+        // represents that replacement at the final public-path boundary.
+        if let Some(hook) = after_final_verification.as_mut() {
+            hook()?;
+        }
+        let public_replacement = fs::symlink_metadata(quarantine).is_ok();
+        fs::remove_file(&cleanup).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                RepositoryError::PublicationRecoveryConflict
+            } else {
+                RepositoryError::LocalStateUnavailable
+            }
+        })?;
+        if public_replacement {
+            return Err(RepositoryError::PublicationRecoveryConflict);
+        }
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| RepositoryError::LocalStateUnavailable)
     }
 
     /// Captures the affected managed worktree bytes only when the selected
@@ -2218,6 +2627,59 @@ impl Repository {
             head: self.head()?,
             tree: self.git_optional_tree(["write-tree"])?,
         })
+    }
+
+    fn git_optional_tree<const N: usize>(
+        &self,
+        args: [&str; N],
+    ) -> Result<Option<IndexTreeRef>, RepositoryError> {
+        let mut command = self.command();
+        command.args(args);
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if output.status.success() {
+            return self
+                .index_tree_from_native_oid(trim_output(&output.stdout))
+                .map(Some);
+        }
+        // `write-tree` failure (including exit 128) is a corrupt or
+        // unmerged index, never an absent tree.
+        Err(RepositoryError::GitOperationFailed)
+    }
+
+    fn index_tree_from_file(&self, index: &Path) -> Result<Option<IndexTreeRef>, RepositoryError> {
+        let bytes = match fs::read(index) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+        };
+        let parent = index
+            .parent()
+            .ok_or(RepositoryError::LocalStateUnavailable)?;
+        let temporary = parent.join(format!(
+            ".orna-index-observe-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let result = (|| {
+            let mut file = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            file.write_all(&bytes)
+                .and_then(|_| file.sync_all())
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            let mut command = self.command();
+            command
+                .env("GIT_INDEX_FILE", &temporary)
+                .args(["write-tree"]);
+            let tree = self.index_tree_from_native_oid(trim_output(&self.run(command)?.stdout))?;
+            Ok(Some(tree))
+        })();
+        let _ = fs::remove_file(&temporary);
+        result
     }
 
     fn capture_index_for_expected(
@@ -3512,10 +3974,52 @@ impl Repository {
         path: &ManagedPath,
         expected: Option<&[u8]>,
         next: Option<&[u8]>,
+        before_install: Option<&mut dyn FnMut()>,
+    ) -> Result<(), RepositoryError> {
+        self.materialize_managed_file_impl_with_quarantine(
+            path,
+            expected,
+            next,
+            None,
+            before_install,
+            None,
+        )
+    }
+
+    fn materialize_managed_file_impl_with_quarantine(
+        &self,
+        path: &ManagedPath,
+        expected: Option<&[u8]>,
+        next: Option<&[u8]>,
+        quarantine_path: Option<&Path>,
+        before_install: Option<&mut dyn FnMut()>,
+        after_boundary: Option<
+            &mut dyn FnMut(PublicationMaterializationPhase) -> Result<(), RepositoryError>,
+        >,
+    ) -> Result<(), RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        self.materialize_managed_file_impl_with_quarantine_locked(
+            path,
+            expected,
+            next,
+            quarantine_path,
+            before_install,
+            after_boundary,
+        )
+    }
+
+    fn materialize_managed_file_impl_with_quarantine_locked(
+        &self,
+        path: &ManagedPath,
+        expected: Option<&[u8]>,
+        next: Option<&[u8]>,
+        quarantine_path: Option<&Path>,
         mut before_install: Option<&mut dyn FnMut()>,
+        mut after_boundary: Option<
+            &mut dyn FnMut(PublicationMaterializationPhase) -> Result<(), RepositoryError>,
+        >,
     ) -> Result<(), RepositoryError> {
         self.ensure_atomic_worktree_install_supported()?;
-        let _lock = self.acquire_coordination_lock()?;
         let target = self.managed_target(path)?;
         let current = self.read_managed_file(&target)?;
         if current.as_deref() != expected {
@@ -3552,15 +4056,25 @@ impl Repository {
                     hook();
                 }
                 let quarantine = if expected.is_some() {
-                    let quarantine = self.new_managed_quarantine(parent)?;
+                    let quarantine = match quarantine_path {
+                        Some(path) => {
+                            match fs::symlink_metadata(path) {
+                                Ok(_) => return Err(RepositoryError::ManagedContentConflict),
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                                Err(_) => {
+                                    return Err(RepositoryError::LocalStateUnavailable);
+                                }
+                            }
+                            path.to_path_buf()
+                        }
+                        None => self.new_managed_quarantine(parent)?,
+                    };
                     match fs::rename(&target, &quarantine) {
                         Ok(()) => {}
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                            let _ = fs::remove_file(&quarantine);
                             return Err(RepositoryError::ManagedContentConflict);
                         }
                         Err(_) => {
-                            let _ = fs::remove_file(&quarantine);
                             return Err(RepositoryError::LocalStateUnavailable);
                         }
                     }
@@ -3572,20 +4086,21 @@ impl Repository {
                             Err(error) => Err(error),
                         };
                     }
+                    if let Some(hook) = after_boundary.as_mut() {
+                        hook(PublicationMaterializationPhase::Quarantined)?;
+                    }
                     Some(quarantine)
                 } else {
                     None
                 };
                 if let Err(error) = self.install_managed_candidate(&candidate, &target) {
-                    if let Some(quarantine) = quarantine {
-                        fs::remove_file(quarantine)
-                            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-                    }
                     return Err(error);
                 }
+                if let Some(hook) = after_boundary.as_mut() {
+                    hook(PublicationMaterializationPhase::Installed)?;
+                }
                 if let Some(quarantine) = quarantine {
-                    fs::remove_file(quarantine)
-                        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                    self.remove_verified_quarantine(parent, &quarantine, &target, expected, next)?;
                 }
                 fs::File::open(parent)
                     .and_then(|directory| directory.sync_all())
@@ -3615,15 +4130,23 @@ impl Repository {
                 let parent = target
                     .parent()
                     .ok_or(RepositoryError::LocalStateUnavailable)?;
-                let quarantine = self.new_managed_quarantine(parent)?;
+                let quarantine = match quarantine_path {
+                    Some(path) => {
+                        match fs::symlink_metadata(path) {
+                            Ok(_) => return Err(RepositoryError::ManagedContentConflict),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+                        }
+                        path.to_path_buf()
+                    }
+                    None => self.new_managed_quarantine(parent)?,
+                };
                 match fs::rename(&target, &quarantine) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        let _ = fs::remove_file(&quarantine);
                         return Err(RepositoryError::ManagedContentConflict);
                     }
                     Err(_) => {
-                        let _ = fs::remove_file(&quarantine);
                         return Err(RepositoryError::LocalStateUnavailable);
                     }
                 }
@@ -3635,12 +4158,16 @@ impl Repository {
                         Err(error) => Err(error),
                     };
                 }
+                if let Some(hook) = after_boundary.as_mut() {
+                    hook(PublicationMaterializationPhase::Quarantined)?;
+                }
                 if fs::symlink_metadata(&target).is_ok() {
-                    fs::remove_file(&quarantine)
-                        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
                     return Err(RepositoryError::ManagedContentConflict);
                 }
-                fs::remove_file(&quarantine).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                if let Some(hook) = after_boundary.as_mut() {
+                    hook(PublicationMaterializationPhase::Installed)?;
+                }
+                self.remove_verified_quarantine(parent, &quarantine, &target, expected, None)?;
                 fs::File::open(parent)
                     .and_then(|directory| directory.sync_all())
                     .map_err(|_| RepositoryError::LocalStateUnavailable)?;
@@ -3664,7 +4191,6 @@ impl Repository {
                 Ok(file) => {
                     if file.sync_all().is_err() {
                         drop(file);
-                        let _ = fs::remove_file(&quarantine);
                         return Err(RepositoryError::LocalStateUnavailable);
                     }
                     return Ok(quarantine);
@@ -3674,6 +4200,58 @@ impl Repository {
             }
         }
         Err(RepositoryError::LocalStateUnavailable)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn rename_path_without_replacement(from: &Path, to: &Path) -> std::io::Result<()> {
+        let from_parent = from
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let to_parent = to
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let from_directory = rustix::fs::openat(
+            rustix::fs::CWD,
+            from_parent,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?;
+        let to_directory = rustix::fs::openat(
+            rustix::fs::CWD,
+            to_parent,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?;
+        rustix::fs::renameat_with(
+            &from_directory,
+            from.file_name().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing source name")
+            })?,
+            &to_directory,
+            to.file_name().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing target name")
+            })?,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(std::io::Error::from)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn rename_path_without_replacement(from: &Path, to: &Path) -> std::io::Result<()> {
+        if fs::symlink_metadata(to).is_ok() {
+            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+        }
+        fs::rename(from, to)
     }
 
     fn restore_managed_quarantine(
@@ -3697,8 +4275,19 @@ impl Repository {
                     hook();
                 }
                 match fs::hard_link(quarantine, target) {
-                    Ok(()) => fs::remove_file(quarantine)
-                        .map_err(|_| RepositoryError::LocalStateUnavailable),
+                    Ok(()) => {
+                        let parent = target
+                            .parent()
+                            .ok_or(RepositoryError::LocalStateUnavailable)?;
+                        let target_bytes = self.read_managed_file(target)?;
+                        self.remove_verified_quarantine(
+                            parent,
+                            quarantine,
+                            target,
+                            target_bytes.as_deref(),
+                            target_bytes.as_deref(),
+                        )
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                         Err(RepositoryError::ManagedContentConflict)
                     }
@@ -3754,24 +4343,6 @@ impl Repository {
     }
     fn git<const N: usize>(&self, args: [&str; N]) -> Result<String, RepositoryError> {
         Self::git_at(&self.worktree, args, false)
-    }
-    fn git_optional_tree<const N: usize>(
-        &self,
-        args: [&str; N],
-    ) -> Result<Option<IndexTreeRef>, RepositoryError> {
-        let mut command = self.command();
-        command.args(args);
-        let output = command
-            .output()
-            .map_err(|_| RepositoryError::GitUnavailable)?;
-        if output.status.success() {
-            return self
-                .index_tree_from_native_oid(trim_output(&output.stdout))
-                .map(Some);
-        }
-        // `write-tree` failure (including exit 128) is a corrupt or
-        // unmerged index, never an absent tree.
-        Err(RepositoryError::GitOperationFailed)
     }
     fn git_bytes<const N: usize>(&self, args: [&str; N]) -> Result<Vec<u8>, RepositoryError> {
         let mut command = self.command();
@@ -4073,7 +4644,7 @@ impl Repository {
             .read(true)
             .write(true)
             .truncate(false)
-            .open(path)
+            .open(&path)
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         file.try_lock_exclusive()
             .map_err(|_| RepositoryError::RepositoryBusy)?;
@@ -5501,6 +6072,9 @@ pub enum RepositoryError {
     },
     StaleCwd,
     ManagedContentConflict,
+    /// Recovery found a pathname or private quarantine state that changed
+    /// while it was being reconciled. The unexpected bytes remain on disk.
+    PublicationRecoveryConflict,
     RepositoryBusy,
     GitIndexLockPresent,
     StaleHead,
@@ -5549,6 +6123,9 @@ impl fmt::Display for RepositoryError {
             Self::StaleCwd => f.write_str("Git CWD changed during observation"),
             Self::ManagedContentConflict => {
                 f.write_str("managed worktree content changed since capture")
+            }
+            Self::PublicationRecoveryConflict => {
+                f.write_str("publication recovery found unexpected local state")
             }
             Self::RepositoryBusy => {
                 f.write_str("another local Orna operation owns the repository lock")
@@ -5768,7 +6345,8 @@ mod tests {
     use std::{env, os::unix::ffi::OsStringExt, path::PathBuf};
 
     use super::{
-        GitIndexLock, PublicationJournal, PublicationJournalEntry, PublicationJournalStage,
+        GitCommitRef, GitIndexLock, ManagedFileChange, ManagedPath, PublicationJournal,
+        PublicationJournalEntry, PublicationJournalStage, PublicationMaterializationPhase,
         RemoteContinuity, Repository, RepositoryError, RuntimeGeneration, parse_remote_orna_refs,
     };
 
@@ -6233,6 +6811,194 @@ mod tests {
     }
 
     #[test]
+    fn fresh_recovery_resumes_persisted_index_and_completion_phases() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        git(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(root.path(), &["config", "user.name", "Repository test"]);
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let candidate = repository
+            .build_private_commit(
+                &head,
+                &[ManagedFileChange::new(
+                    path.clone(),
+                    Some(b"first\n".to_vec()),
+                )],
+                "orna: publish runtime data",
+            )
+            .unwrap();
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            head.clone(),
+            candidate.commit().clone(),
+            index.tree().unwrap().clone(),
+            [31; 16],
+            vec![PublicationJournalEntry::new(
+                path.clone(),
+                None,
+                Some(b"first\n".to_vec()),
+            )],
+        )
+        .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        repository.advance_current_ref(&head, &candidate).unwrap();
+        journal
+            .advance(PublicationJournalStage::RefAdvanced)
+            .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        repository
+            .reconcile_published_index(&index, &candidate, std::slice::from_ref(&path))
+            .unwrap();
+        journal
+            .advance(PublicationJournalStage::IndexReconciled)
+            .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+
+        assert!(matches!(
+            repository.recover_publication(),
+            Err(RepositoryError::RuntimeCompletionRequired)
+        ));
+        assert_eq!(
+            fs::read(root.path().join(path.as_path())).unwrap(),
+            b"first\n"
+        );
+        let mut completed = repository.read_publication_journal().unwrap().unwrap();
+        repository
+            .mark_runtime_complete([31; 16], &mut completed)
+            .unwrap();
+
+        let old_head = repository.head().unwrap().unwrap();
+        let old_index = repository.index_generation().unwrap();
+        let candidate = repository
+            .build_private_commit(
+                &old_head,
+                &[ManagedFileChange::new(
+                    path.clone(),
+                    Some(b"second\n".to_vec()),
+                )],
+                "orna: publish runtime data",
+            )
+            .unwrap();
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            old_head.clone(),
+            candidate.commit().clone(),
+            old_index.tree().unwrap().clone(),
+            [32; 16],
+            vec![PublicationJournalEntry::new(
+                path.clone(),
+                Some(b"first\n".to_vec()),
+                Some(b"second\n".to_vec()),
+            )],
+        )
+        .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        repository
+            .advance_current_ref(&old_head, &candidate)
+            .unwrap();
+        journal
+            .advance(PublicationJournalStage::RefAdvanced)
+            .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        repository
+            .reconcile_published_index(&old_index, &candidate, std::slice::from_ref(&path))
+            .unwrap();
+        journal
+            .advance(PublicationJournalStage::IndexReconciled)
+            .unwrap();
+        repository
+            .materialize_publication_entry(&mut journal, 0)
+            .unwrap();
+        journal
+            .advance(PublicationJournalStage::WorktreeReconciled)
+            .unwrap();
+        journal
+            .advance(PublicationJournalStage::RuntimeCompleted)
+            .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+
+        assert!(repository.recover_publication().unwrap().is_some());
+        assert!(repository.read_publication_journal().unwrap().is_none());
+        assert_eq!(
+            fs::read(root.path().join(path.as_path())).unwrap(),
+            b"second\n"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn legacy_journal_fixtures_preserve_lock_binding_for_versions_two_through_four() {
+        let root = tempfile::TempDir::new().unwrap();
+        let fixture = |hex: &str| {
+            assert!(hex.len() % 2 == 0);
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let fixtures = [
+            (
+                2,
+                "4f524e412d5055422d4a4f55524e414c000228000000616161616161616161616161616161616161616161616161616161616161616161616161616161612800000062626262626262626262626262626262626262626262626262626262626262626262626262626262ffffffff0001010000001500000067656e6572617465642f6c65676163792e6f726e61060000006265666f7265050000006166746572",
+            ),
+            (
+                3,
+                "4f524e412d5055422d4a4f55524e414c000328000000616161616161616161616161616161616161616161616161616161616161616161616161616161612800000062626262626262626262626262626262626262626262626262626262626262626262626262626262ffffffff000001010000001500000067656e6572617465642f6c65676163792e6f726e61060000006265666f7265050000006166746572",
+            ),
+            (
+                4,
+                "4f524e412d5055422d4a4f55524e414c000428000000616161616161616161616161616161616161616161616161616161616161616161616161616161612800000062626262626262626262626262626262626262626262626262626262626262626262626262626262ffffffff000001010000001500000067656e6572617465642f6c65676163792e6f726e61060000006265666f7265050000006166746572",
+            ),
+        ];
+
+        for (version, hex) in fixtures {
+            let bytes = fixture(hex);
+            let decoded = PublicationJournal::decode(&bytes, 40).unwrap();
+            assert_eq!(decoded.wire_version, version);
+            assert_eq!(decoded.old_head().as_str(), &"a".repeat(40));
+            assert_eq!(decoded.new_head().as_str(), &"b".repeat(40));
+            assert!(decoded.base_index_tree().is_none());
+            assert_eq!(decoded.runtime_intent_id(), None);
+            assert_eq!(decoded.stage(), PublicationJournalStage::Prepared);
+            assert_eq!(decoded.entries().len(), 1);
+            assert_eq!(
+                decoded.entries()[0].path.as_path(),
+                Path::new("generated/legacy.orna")
+            );
+            assert_eq!(decoded.entries()[0].expected(), Some(&b"before"[..]));
+            assert_eq!(decoded.entries()[0].next(), Some(&b"after"[..]));
+
+            let binding = decoded.lock_binding().unwrap();
+            let lock_path = root.path().join(format!("index-{version}.lock"));
+            fs::write(
+                &lock_path,
+                dead_publisher_lock_bytes(binding, [version; 16]),
+            )
+            .unwrap();
+            GitIndexLock::reclaim_abandoned(lock_path.clone(), binding).unwrap();
+            assert!(!lock_path.exists());
+
+            let mismatch_path = root.path().join(format!("mismatch-{version}.lock"));
+            let original = dead_publisher_lock_bytes([version + 10; 32], [version; 16]);
+            fs::write(&mismatch_path, &original).unwrap();
+            assert!(matches!(
+                GitIndexLock::reclaim_abandoned(mismatch_path.clone(), binding),
+                Err(RepositoryError::GitIndexLockPresent)
+            ));
+            assert_eq!(fs::read(mismatch_path).unwrap(), original);
+        }
+    }
+
+    #[test]
     fn checkout_preflight_rejects_same_commit_branch_attachment_drift() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
@@ -6241,6 +7007,7 @@ mod tests {
             &["config", "user.email", "test@example.invalid"],
         );
         git(root.path(), &["config", "user.name", "Repository test"]);
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
         git(root.path(), &["commit", "-m", "initial"]);
@@ -6351,6 +7118,337 @@ mod tests {
     }
 
     #[test]
+    fn journaled_materialization_replaces_and_deletes_without_quarantine_leaks() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        git(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(root.path(), &["config", "user.name", "Repository test"]);
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let tree = repository
+            .index_generation()
+            .unwrap()
+            .tree()
+            .unwrap()
+            .clone();
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            head.clone(),
+            GitCommitRef("b".repeat(40)),
+            tree.clone(),
+            [21; 16],
+            vec![PublicationJournalEntry::new(
+                path.clone(),
+                None,
+                Some(b"first".to_vec()),
+            )],
+        )
+        .unwrap();
+        repository
+            .materialize_publication_entry(&mut journal, 0)
+            .unwrap();
+        assert_eq!(
+            fs::read(root.path().join(path.as_path())).unwrap(),
+            b"first"
+        );
+
+        let mut replacement = PublicationJournal::new_with_runtime_intent(
+            head.clone(),
+            GitCommitRef("c".repeat(40)),
+            tree.clone(),
+            [22; 16],
+            vec![PublicationJournalEntry::new(
+                path.clone(),
+                Some(b"first".to_vec()),
+                Some(b"second".to_vec()),
+            )],
+        )
+        .unwrap();
+        let replacement_name = replacement.quarantine_name(0).unwrap();
+        repository
+            .materialize_publication_entry(&mut replacement, 0)
+            .unwrap();
+        assert_eq!(
+            fs::read(root.path().join(path.as_path())).unwrap(),
+            b"second"
+        );
+        assert!(
+            !root
+                .path()
+                .join("generated")
+                .join(replacement_name)
+                .exists()
+        );
+
+        let mut deletion = PublicationJournal::new_with_runtime_intent(
+            head,
+            GitCommitRef("d".repeat(40)),
+            tree,
+            [23; 16],
+            vec![PublicationJournalEntry::new(
+                path.clone(),
+                Some(b"second".to_vec()),
+                None,
+            )],
+        )
+        .unwrap();
+        repository
+            .materialize_publication_entry(&mut deletion, 0)
+            .unwrap();
+        assert!(!root.path().join(path.as_path()).exists());
+    }
+
+    #[test]
+    fn journaled_materialization_preserves_quarantine_on_install_conflict_and_deletion_cleanup() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        git(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(root.path(), &["config", "user.name", "Repository test"]);
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let conflict_path = ManagedPath::new("generated/conflict.orna").unwrap();
+        let conflict_target = root.path().join(conflict_path.as_path());
+        fs::create_dir_all(conflict_target.parent().unwrap()).unwrap();
+        fs::write(&conflict_target, b"captured").unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let tree = repository
+            .index_generation()
+            .unwrap()
+            .tree()
+            .unwrap()
+            .clone();
+        let mut conflict = PublicationJournal::new_with_runtime_intent(
+            head.clone(),
+            GitCommitRef("f".repeat(40)),
+            tree.clone(),
+            [25; 16],
+            vec![PublicationJournalEntry::new(
+                conflict_path.clone(),
+                Some(b"captured".to_vec()),
+                Some(b"published".to_vec()),
+            )],
+        )
+        .unwrap();
+        let conflict_name = conflict.quarantine_name(0).unwrap();
+        conflict
+            .set_materialization(
+                0,
+                PublicationMaterializationPhase::QuarantinePrepared,
+                Some(conflict_name.clone()),
+            )
+            .unwrap();
+        repository.write_publication_journal(&conflict).unwrap();
+        let mut after_boundary = |phase| {
+            conflict.set_materialization(0, phase, Some(conflict_name.clone()))?;
+            repository.write_publication_journal_locked(&conflict)?;
+            if phase == PublicationMaterializationPhase::Quarantined {
+                fs::write(&conflict_target, b"external").unwrap();
+            }
+            Ok(())
+        };
+        assert!(matches!(
+            repository.materialize_managed_file_impl_with_quarantine(
+                &conflict_path,
+                Some(b"captured"),
+                Some(b"published"),
+                Some(&conflict_target.parent().unwrap().join(&conflict_name)),
+                None,
+                Some(&mut after_boundary),
+            ),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        let conflict_quarantine = conflict_target.parent().unwrap().join(conflict_name);
+        assert_eq!(fs::read(&conflict_quarantine).unwrap(), b"captured");
+        assert_eq!(fs::read(&conflict_target).unwrap(), b"external");
+        let persisted = repository.read_publication_journal().unwrap().unwrap();
+        assert_eq!(
+            persisted.entries()[0].materialization().phase,
+            PublicationMaterializationPhase::Quarantined
+        );
+
+        let delete_path = ManagedPath::new("generated/delete.orna").unwrap();
+        let delete_target = root.path().join(delete_path.as_path());
+        let mut deletion = PublicationJournal::new_with_runtime_intent(
+            head,
+            GitCommitRef("1".repeat(40)),
+            tree,
+            [26; 16],
+            vec![PublicationJournalEntry::new(
+                delete_path,
+                Some(b"to-delete".to_vec()),
+                None,
+            )],
+        )
+        .unwrap();
+        let delete_name = deletion.quarantine_name(0).unwrap();
+        let delete_quarantine = delete_target.parent().unwrap().join(&delete_name);
+        fs::write(&delete_quarantine, b"to-delete").unwrap();
+        deletion
+            .set_materialization(
+                0,
+                PublicationMaterializationPhase::Installed,
+                Some(delete_name),
+            )
+            .unwrap();
+        repository.write_publication_journal(&deletion).unwrap();
+        let mut recovered = repository.read_publication_journal().unwrap().unwrap();
+        repository
+            .materialize_publication_entry(&mut recovered, 0)
+            .unwrap();
+        assert!(!delete_target.exists());
+        assert!(!delete_quarantine.exists());
+        assert_eq!(
+            recovered.entries()[0].materialization().phase,
+            PublicationMaterializationPhase::Clean
+        );
+    }
+
+    #[test]
+    fn final_quarantine_replacement_is_preserved_and_reports_conflict() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        git(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(root.path(), &["config", "user.name", "Repository test"]);
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let parent = root.path().join("generated");
+        fs::create_dir_all(&parent).unwrap();
+        let quarantine = parent.join(".orna-quarantine-boundary");
+        let target = parent.join("row.orna");
+        fs::write(&quarantine, b"captured").unwrap();
+        fs::write(&target, b"published").unwrap();
+        let mut replacement_at_boundary = || {
+            fs::write(&quarantine, b"external").unwrap();
+            Ok(())
+        };
+
+        assert!(matches!(
+            repository.remove_verified_quarantine_with_boundary(
+                &parent,
+                &quarantine,
+                &target,
+                Some(b"captured"),
+                Some(b"published"),
+                Some(&mut replacement_at_boundary),
+            ),
+            Err(RepositoryError::PublicationRecoveryConflict)
+        ));
+        assert_eq!(fs::read(&quarantine).unwrap(), b"external");
+        assert!(
+            !repository
+                .runtime_paths()
+                .root()
+                .join("publication-cleanup")
+                .read_dir()
+                .unwrap()
+                .any(|entry| entry.is_ok())
+        );
+    }
+
+    #[test]
+    fn journaled_materialization_recovers_a_persisted_quarantine_phase() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        git(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(root.path(), &["config", "user.name", "Repository test"]);
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let tree = repository
+            .index_generation()
+            .unwrap()
+            .tree()
+            .unwrap()
+            .clone();
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            head,
+            GitCommitRef("e".repeat(40)),
+            tree,
+            [24; 16],
+            vec![PublicationJournalEntry::new(
+                path.clone(),
+                Some(b"captured".to_vec()),
+                Some(b"published".to_vec()),
+            )],
+        )
+        .unwrap();
+        let quarantine = root
+            .path()
+            .join("generated")
+            .join(journal.quarantine_name(0).unwrap());
+        fs::create_dir_all(quarantine.parent().unwrap()).unwrap();
+        fs::write(&quarantine, b"captured").unwrap();
+        journal
+            .set_materialization(
+                0,
+                PublicationMaterializationPhase::Quarantined,
+                Some(
+                    quarantine
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            )
+            .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        let mut recovered = repository.read_publication_journal().unwrap().unwrap();
+
+        repository
+            .materialize_publication_entry(&mut recovered, 0)
+            .unwrap();
+        assert_eq!(
+            fs::read(root.path().join(path.as_path())).unwrap(),
+            b"published"
+        );
+        assert!(!quarantine.exists());
+        assert_eq!(
+            recovered.entries()[0].materialization().phase,
+            PublicationMaterializationPhase::Clean
+        );
+        assert_eq!(
+            repository
+                .read_publication_journal()
+                .unwrap()
+                .unwrap()
+                .entries()[0]
+                .materialization()
+                .phase,
+            PublicationMaterializationPhase::Clean
+        );
+    }
+
+    #[test]
     fn replacement_preserves_editor_race_after_final_check() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
@@ -6359,6 +7457,7 @@ mod tests {
             &["config", "user.email", "test@example.invalid"],
         );
         git(root.path(), &["config", "user.name", "Repository test"]);
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
         git(root.path(), &["commit", "-m", "initial"]);
@@ -6411,6 +7510,7 @@ mod tests {
             &["config", "user.email", "test@example.invalid"],
         );
         git(root.path(), &["config", "user.name", "Repository test"]);
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
         git(root.path(), &["commit", "-m", "initial"]);
@@ -6494,6 +7594,7 @@ mod tests {
             &["config", "user.email", "test@example.invalid"],
         );
         git(root.path(), &["config", "user.name", "Repository test"]);
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
         git(root.path(), &["commit", "-m", "initial"]);
