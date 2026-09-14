@@ -3996,6 +3996,35 @@ fn lower_relation_expression_with_resolution(
                 );
             }
         }
+        Expr::GenericCall {
+            callee, arguments, ..
+        } => {
+            // Generic applications have the same expression children as an
+            // ordinary call.  Their type arguments are syntax-only here;
+            // semantic admission owns their validation, while this bounded
+            // relation rewriter must still visit the callee and values in
+            // source order without inventing evaluator support.
+            lower_relation_expression_with_resolution(
+                callee,
+                table_keys,
+                float_fields,
+                table_fields,
+                functions,
+                namespace,
+                shadowed,
+            );
+            for argument in arguments {
+                lower_relation_expression_with_resolution(
+                    &mut argument.value,
+                    table_keys,
+                    float_fields,
+                    table_fields,
+                    functions,
+                    namespace,
+                    shadowed,
+                );
+            }
+        }
         Expr::Index { base, index, .. } => {
             lower_relation_expression_with_resolution(
                 base,
