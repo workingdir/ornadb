@@ -429,6 +429,12 @@ pub enum Expr {
         arguments: Vec<Argument>,
         span: SourceSpan,
     },
+    GenericCall {
+        callee: Box<Expr>,
+        type_arguments: Vec<TypeExpr>,
+        arguments: Vec<Argument>,
+        span: SourceSpan,
+    },
     Index {
         base: Box<Expr>,
         index: Box<Expr>,
@@ -761,6 +767,16 @@ fn expr_depth(expr: &Expr) -> usize {
             std::iter::once(expr_depth(callee))
                 .chain(arguments.iter().map(|argument| expr_depth(&argument.value))),
         ),
+        Expr::GenericCall {
+            callee,
+            type_arguments,
+            arguments,
+            ..
+        } => max_depth(
+            std::iter::once(expr_depth(callee))
+                .chain(type_arguments.iter().map(type_depth))
+                .chain(arguments.iter().map(|argument| expr_depth(&argument.value))),
+        ),
         Expr::Index { base, index, .. } => expr_depth(base).max(expr_depth(index)),
         Expr::Field { base, .. } => expr_depth(base),
         Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
@@ -811,59 +827,6 @@ fn expr_depth(expr: &Expr) -> usize {
     }
 }
 
-fn type_expr_text(ty: &TypeExpr) -> String {
-    match ty {
-        TypeExpr::Name {
-            path, arguments, ..
-        } => {
-            let mut text = path.join(".");
-            if !arguments.is_empty() {
-                text.push('<');
-                text.push_str(
-                    &arguments
-                        .iter()
-                        .map(type_expr_text)
-                        .collect::<Vec<_>>()
-                        .join(","),
-                );
-                text.push('>');
-            }
-            text
-        }
-        TypeExpr::Optional { inner, .. } => format!("{}?", type_expr_text(inner)),
-        TypeExpr::Product { lhs, op, rhs, .. } => {
-            format!("{}{}{}", type_expr_text(lhs), op, type_expr_text(rhs))
-        }
-        TypeExpr::List { inner, .. } => format!("[{}]", type_expr_text(inner)),
-        TypeExpr::Record { fields, .. } => format!(
-            "{{{}}}",
-            fields
-                .iter()
-                .map(|(name, ty, _)| format!("{name}:{}", type_expr_text(ty)))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        TypeExpr::Tuple { elements, .. } => format!(
-            "({})",
-            elements
-                .iter()
-                .map(type_expr_text)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        TypeExpr::Function {
-            parameters, result, ..
-        } => format!(
-            "fn({}):{}",
-            parameters
-                .iter()
-                .map(type_expr_text)
-                .collect::<Vec<_>>()
-                .join(","),
-            type_expr_text(result)
-        ),
-    }
-}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaseArm {
     pub pattern: Pattern,
@@ -882,6 +845,7 @@ impl Expr {
             | Self::Binary { span, .. }
             | Self::Range { span, .. }
             | Self::Call { span, .. }
+            | Self::GenericCall { span, .. }
             | Self::Field { span, .. }
             | Self::Group { span, .. }
             | Self::Tuple { span, .. }
@@ -1345,6 +1309,18 @@ fn annotate_expr(expr: &mut Expr, source: &str, file: &str) {
         }
         Expr::Call { callee, span, .. } => {
             annotate_expr(callee, source, file);
+            annotate_span(span, source, file)
+        }
+        Expr::GenericCall {
+            callee,
+            type_arguments,
+            span,
+            ..
+        } => {
+            annotate_expr(callee, source, file);
+            for type_argument in type_arguments {
+                annotate_type(type_argument, source, file)
+            }
             annotate_span(span, source, file)
         }
         Expr::Field { base, span, .. } => {
@@ -3239,7 +3215,13 @@ impl Parser {
                     while !self.eof() && !self.is_punct(">") {
                         arguments.push(self.parse_type_expr()?);
                         if self.is_punct(",") {
-                            self.bump()
+                            self.bump();
+                            if self.is_punct(">") {
+                                self.error_here(
+                                    "ORNA-PARSE-001",
+                                    "trailing commas are not allowed in generic type arguments",
+                                );
+                            }
                         } else {
                             break;
                         }
@@ -3404,16 +3386,32 @@ impl Parser {
         false
     }
 
-    fn parse_generic_callee_name(&mut self, base: &str) -> Option<String> {
-        if !self.generic_call_ahead() {
+    fn parse_generic_type_arguments(&mut self) -> Option<Vec<TypeExpr>> {
+        if !self.is_punct("<") {
             return None;
         }
         self.bump();
+        if self.is_punct(">") {
+            self.error_here(
+                "ORNA-PARSE-001",
+                "generic calls require at least one type argument",
+            );
+            self.bump();
+            return None;
+        }
         let mut arguments = Vec::new();
         while !self.eof() && !self.is_punct(">") {
-            arguments.push(type_expr_text(&self.parse_type_expr()?));
+            arguments.push(self.parse_type_expr()?);
             if self.is_punct(",") {
                 self.bump();
+                if self.is_punct(">") {
+                    self.error_here(
+                        "ORNA-PARSE-001",
+                        "trailing commas are not allowed in generic type arguments",
+                    );
+                    self.bump();
+                    return None;
+                }
             } else {
                 break;
             }
@@ -3422,7 +3420,7 @@ impl Parser {
             return None;
         }
         self.bump();
-        Some(format!("{base}<{}>", arguments.join(",")))
+        Some(arguments)
     }
 
     fn pratt(&mut self, min: u8, mode: NominalBraceMode) -> Option<Expr> {
@@ -3499,6 +3497,19 @@ impl Parser {
                         name: t.text,
                         span: SourceSpan::new(start, t.span.end),
                     };
+                    if nominal_path(&lhs).is_some()
+                        && self.generic_call_ahead()
+                        && let Some(type_arguments) = self.parse_generic_type_arguments()
+                    {
+                        let arguments = self.parse_arguments();
+                        let end = self.previous().span.end;
+                        lhs = Expr::GenericCall {
+                            callee: Box::new(lhs),
+                            type_arguments,
+                            arguments,
+                            span: SourceSpan::new(start, end),
+                        };
+                    }
                     continue;
                 } else {
                     self.error_here("ORNA-PARSE-001", "expected field name");
@@ -3641,11 +3652,24 @@ impl Parser {
                         body: Box::new(body),
                     });
                 }
-                let generic_name = self.parse_generic_callee_name(&t.text);
-                let text = generic_name.unwrap_or_else(|| t.text.clone());
+                if self.generic_call_ahead()
+                    && let Some(type_arguments) = self.parse_generic_type_arguments()
+                {
+                    let arguments = self.parse_arguments();
+                    let end = self.previous().span.end;
+                    return Some(Expr::GenericCall {
+                        callee: Box::new(Expr::Name {
+                            text: t.text,
+                            span: t.span.clone(),
+                        }),
+                        type_arguments,
+                        arguments,
+                        span: SourceSpan::new(t.span.start, end),
+                    });
+                }
                 Some(Expr::Name {
-                    text,
-                    span: t.span.join(self.previous().span.clone()),
+                    text: t.text,
+                    span: t.span,
                 })
             }
             TokenKind::Integer

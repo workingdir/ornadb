@@ -331,9 +331,136 @@ fn expression_ast_retains_control_and_postfix_structure() {
 fn generic_type_constructor_is_admitted_as_a_call_callee() {
     let parsed = parse_module("pub fn bad(value: Float) = Money<GBP>(value);");
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
-    let Declaration::Function { .. } = &parsed.value.items[0].declaration else {
+    let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
         panic!("expected function declaration");
     };
+    assert!(matches!(
+        body,
+        Expr::GenericCall {
+            callee,
+            type_arguments,
+            ..
+        } if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "Money")
+            && matches!(
+                type_arguments.as_slice(),
+                [orna_syntax_v1::TypeExpr::Name { path, arguments, .. }]
+                    if path == &["GBP".to_owned()] && arguments.is_empty()
+            )
+    ));
+}
+
+#[test]
+fn bare_generic_call_retains_type_arguments_structurally() {
+    let parsed = parse_expression("f<Int>(x)");
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    let Expr::GenericCall {
+        callee,
+        type_arguments,
+        arguments,
+        ..
+    } = parsed.value
+    else {
+        panic!("expected a structured generic call");
+    };
+    assert!(matches!(
+        callee.as_ref(),
+        Expr::Name { text, .. } if text == "f"
+    ));
+    assert!(matches!(
+        type_arguments.as_slice(),
+        [orna_syntax_v1::TypeExpr::Name { path, arguments, .. }]
+            if path == &["Int".to_owned()] && arguments.is_empty()
+    ));
+    assert!(matches!(
+        arguments.as_slice(),
+        [orna_syntax_v1::Argument { name: None, value: Expr::Name { text, .. }, .. }]
+            if text == "x"
+    ));
+}
+
+#[test]
+fn qualified_generic_call_retains_type_arguments_structurally() {
+    let parsed = parse_expression("sys.await<Int>(job)");
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    let Expr::GenericCall {
+        callee,
+        type_arguments,
+        arguments,
+        ..
+    } = parsed.value
+    else {
+        panic!("expected a structured generic call");
+    };
+    assert!(matches!(
+        callee.as_ref(),
+        Expr::Field { base, name, .. }
+            if name == "await"
+                && matches!(base.as_ref(), Expr::Name { text, .. } if text == "sys")
+    ));
+    assert!(matches!(
+        type_arguments.as_slice(),
+        [orna_syntax_v1::TypeExpr::Name { path, arguments, .. }]
+            if path == &["Int".to_owned()] && arguments.is_empty()
+    ));
+    assert!(matches!(
+        arguments.as_slice(),
+        [orna_syntax_v1::Argument { name: None, value: Expr::Name { text, .. }, .. }]
+            if text == "job"
+    ));
+}
+
+#[test]
+fn generic_calls_require_a_qualified_name_callee() {
+    for source in ["f().g<Int>(x)", "items[0].g<Int>(x)"] {
+        let parsed = parse_expression(source);
+        assert!(!parsed.is_ok(), "{source:?} unexpectedly parsed");
+        assert!(!parsed.diagnostics.is_empty(), "{source:?}");
+    }
+}
+
+#[test]
+fn empty_generic_call_arguments_are_rejected_at_parse_stage() {
+    for source in ["f<>(x)", "sys.await<>(x)"] {
+        let parsed = parse_expression(source);
+        assert!(!parsed.is_ok(), "{source:?} unexpectedly parsed");
+        assert!(
+            parsed.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "ORNA-PARSE-001"
+                    && diagnostic.message == "generic calls require at least one type argument"
+            }),
+            "{source:?}: {:?}",
+            parsed.diagnostics
+        );
+    }
+}
+
+#[test]
+fn generic_type_arguments_reject_trailing_commas_at_every_type_argument_level() {
+    macro_rules! assert_rejected {
+        ($source:expr, $parsed:expr) => {{
+            let parsed = $parsed;
+            assert!(
+                !parsed.is_ok(),
+                "{source:?} unexpectedly parsed",
+                source = $source
+            );
+            assert!(
+                parsed.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "ORNA-PARSE-001"
+                        && diagnostic.message
+                            == "trailing commas are not allowed in generic type arguments"
+                }),
+                "{:?}: {:?}",
+                $source,
+                parsed.diagnostics
+            );
+        }};
+    }
+    for source in ["f<Int,>(x)", "f<List<Int,>>(x)"] {
+        assert_rejected!(source, parse_expression(source));
+    }
+    let source = "fn f(value: List<Int,>) = value;";
+    assert_rejected!(source, parse_module(source));
 }
 
 #[test]
