@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use num_bigint::BigInt;
 use orna_evaluator_v1::{
     EffectHandler, Environment, EvaluationError, Limits, StepBudget, evaluate_expression,
     evaluate_function, evaluate_parsed, evaluate_repl, invoke_named, invoke_named_with_effects,
@@ -1274,6 +1275,39 @@ fn std_collection_sum_accumulates_exactly_in_order_and_returns_integer_zero() {
         )
         .unwrap(),
         Value::int(0.into())
+    );
+}
+
+#[test]
+fn std_collection_decimal_sum_preserves_exact_canonical_arithmetic() {
+    let large_coefficient = BigInt::parse_bytes(b"12345678901234567891", 10).unwrap();
+    for (expression, expected) in [
+        (
+            "sum([1.20, 2.003])",
+            Value::decimal(3203.into(), (-3).into()).unwrap(),
+        ),
+        (
+            "sum([12345678901234567890.1, 0.9])",
+            Value::decimal(large_coefficient, 0.into()).unwrap(),
+        ),
+        (
+            "sum([999.999, -999.99, 0.001])",
+            Value::decimal(1.into(), (-2).into()).unwrap(),
+        ),
+    ] {
+        assert_eq!(evaluate(expression), expected, "{expression}");
+    }
+}
+
+#[test]
+fn std_collection_decimal_sum_rejects_mixed_numeric_kinds() {
+    assert_eq!(
+        code(evaluate_expression(
+            "sum([1.0, 2])",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-UNSUPPORTED"
     );
 }
 
