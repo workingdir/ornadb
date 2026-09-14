@@ -5,6 +5,14 @@
 //! a compiler/runtime adapter.  Consequently a skipped adapter can never be
 //! mistaken for a passing implementation.
 
+use futures::executor::block_on;
+use num_bigint::BigInt;
+use orna_evaluator_v1::Environment;
+use orna_foundation_v1::{OvbRaw, Value as CanonicalValue};
+use orna_repository_v1::Repository;
+use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+use orna_stream_v1::{Checkpoint, CheckpointKey, Component, ConsumerIdentity};
+use orna_syntax_v1::{Declaration, Expr, Pattern, TableMember, TypeExpr, parse_module};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -12,6 +20,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 mod admitted_repl;
@@ -81,6 +91,7 @@ pub enum EvidenceClass {
     Model,
     Semantic,
     Runtime,
+    RuntimeAdapter,
     Skipped,
 }
 
@@ -159,6 +170,8 @@ pub struct ProjectUnit {
 pub struct ProjectExpectations {
     pub environment: ProjectEnvironment,
     pub steps: Vec<ProjectExpectationStep>,
+    #[serde(default)]
+    pub negative_cases: Vec<ProjectNegativeCase>,
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProjectEnvironment {
@@ -174,11 +187,52 @@ pub struct ProjectExpectationStep {
     pub expect: Value,
 }
 #[derive(Debug, Clone, Deserialize)]
+pub struct ProjectNegativeCase {
+    pub invoke: String,
+    pub args: Vec<Value>,
+    pub expect: String,
+}
+#[derive(Debug, Clone, Deserialize)]
 pub struct ProjectManifest {
     pub project: String,
     pub entry: String,
     pub modules: Vec<String>,
     pub expected: String,
+    pub implementation_execution: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReferenceProjectInvocationEvidence {
+    pub invoke: String,
+    pub status: EvidenceStatus,
+    pub checks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReferenceProjectNegativeEvidence {
+    pub invoke: String,
+    pub expected: String,
+    pub status: EvidenceStatus,
+    pub rollback_verified: bool,
+}
+
+/// Evidence from the existing durable project/table/stream adapter.
+///
+/// This is intentionally not part of [`RunReport`]: it is not compiler
+/// artifact execution and cannot be used as an Orna-engine conformance
+/// witness.  The separate classification makes that boundary machine-visible.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReferenceProjectRuntimeEvidence {
+    pub classification: EvidenceClass,
+    pub specification_version: String,
+    pub profile: String,
+    pub implementation_execution: String,
+    pub compiler_artifact_execution: bool,
+    pub full_orna_engine_conformance: bool,
+    pub status: EvidenceStatus,
+    pub detail: String,
+    pub invocations: Vec<ReferenceProjectInvocationEvidence>,
+    pub negative_cases: Vec<ReferenceProjectNegativeEvidence>,
 }
 
 /// A requirement-linked scenario from the authoritative corpus.  Scenarios
@@ -560,6 +614,7 @@ impl Corpus {
             || project.entry != "main.orna"
             || project.modules.len() != 5
             || project.expected != "examples/reference/expectations.json"
+            || project.implementation_execution != "not executed"
         {
             return Err(CorpusError(
                 "project manifest does not describe the complete reference project".into(),
@@ -584,6 +639,841 @@ impl Corpus {
         }
         Ok(())
     }
+
+    /// Loads the immutable reference project as independently addressable
+    /// modules for the durable runtime adapter.  The project manifest's
+    /// implementation execution marker is validated before this seam returns.
+    pub fn reference_project(&self) -> Result<ProjectUnit, CorpusError> {
+        let manifest: ProjectManifest = read_json(&self.root, "tests/project-manifest.json")?;
+        if manifest.implementation_execution != "not executed" {
+            return Err(CorpusError(
+                "reference project implementation execution marker must remain not executed".into(),
+            ));
+        }
+        let root = self.root.join(&manifest.project);
+        let declared_modules = manifest.modules.iter().cloned().collect::<BTreeSet<_>>();
+        let modules = manifest
+            .modules
+            .into_iter()
+            .map(|name| {
+                Ok(SourceUnit {
+                    fixture_id: "PROJECT-REFERENCE".into(),
+                    source_id: format!("{}/{}", manifest.project, name),
+                    parse_as: "module_unit".into(),
+                    source: fs::read_to_string(root.join(name)).map_err(|_| {
+                        CorpusError("reference project module is unreadable".into())
+                    })?,
+                })
+            })
+            .collect::<Result<Vec<_>, CorpusError>>()?;
+        Ok(ProjectUnit {
+            fixture_id: "PROJECT-REFERENCE".into(),
+            project_id: manifest.project,
+            environment_id: Some("reference-offline".into()),
+            modules,
+            loose_rows: discover_loose_rows(&root, &declared_modules)?,
+            expectations: self.project_expectations.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ReferenceTableSchema {
+    fields: Vec<(String, String)>,
+    key_count: usize,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct ReferenceRuntimeSnapshot {
+    tables: BTreeMap<String, Vec<(Vec<u8>, Vec<u8>)>>,
+    checkpoint: Option<Checkpoint>,
+}
+
+/// Execute the immutable reference project through the existing durable
+/// project/table/stream adapter.  The returned record is deliberately a
+/// separate evidence product: it cannot be promoted to compiler or engine
+/// conformance evidence.
+pub fn run_reference_project_runtime_adapter(corpus: &Corpus) -> ReferenceProjectRuntimeEvidence {
+    match block_on(execute_reference_project_runtime_adapter(corpus)) {
+        Ok(mut evidence) => {
+            evidence.classification = EvidenceClass::RuntimeAdapter;
+            evidence
+        }
+        Err(detail) => ReferenceProjectRuntimeEvidence {
+            classification: EvidenceClass::RuntimeAdapter,
+            specification_version: corpus.manifest.version.clone(),
+            profile: "reference-project-runtime-adapter".into(),
+            implementation_execution: "not executed".into(),
+            compiler_artifact_execution: false,
+            full_orna_engine_conformance: false,
+            status: EvidenceStatus::Failed,
+            detail,
+            invocations: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+    }
+}
+
+async fn execute_reference_project_runtime_adapter(
+    corpus: &Corpus,
+) -> Result<ReferenceProjectRuntimeEvidence, String> {
+    let project = corpus
+        .reference_project()
+        .map_err(|_| "immutable reference project could not be loaded".to_owned())?;
+    let schemas = reference_table_schemas(&project)?;
+    let (root, repository) = create_reference_runtime_repository()?;
+    let result = async {
+        let identity = RuntimeIdentity {
+            database_id: [121; 16],
+            repository_id: [122; 16],
+        };
+        let owner_id = [123; 16];
+        let initial_digest = [124; 32];
+        let evaluator = DurableTransactionalEvaluator::default();
+        let mut invocations = Vec::new();
+
+        if project.expectations.steps.len() != 4 {
+            return Err("immutable reference project must contain four positive steps".into());
+        }
+        for (step_index, step) in project.expectations.steps.iter().enumerate() {
+            let entry = reference_entry_name(&project, &step.invoke)?;
+            if step_index == 2 || step_index == 3 {
+                if entry != "sensors.ingest" {
+                    return Err("reference stream expectation is not sensors.ingest".into());
+                }
+                let before = if step_index == 3 {
+                    let state = RuntimeState::open(&repository, identity, initial_digest)
+                        .await
+                        .map_err(|_| "reference runtime state could not be reopened".to_owned())?;
+                    let key = reference_stream_checkpoint_key(&project, identity)?;
+                    let snapshot = reference_runtime_snapshot(&state, &schemas, &key).await?;
+                    drop(state);
+                    Some(snapshot)
+                } else {
+                    None
+                };
+                expect_pass(
+                    evaluator
+                        .execute_project_stream(
+                            &repository,
+                            identity,
+                            owner_id,
+                            initial_digest,
+                            &project,
+                            &entry,
+                        )
+                        .await
+                        .map_err(|_| "reference stream activation failed".to_owned())?,
+                    &entry,
+                )?;
+                let state = RuntimeState::open(&repository, identity, initial_digest)
+                    .await
+                    .map_err(|_| "reference runtime state could not be reopened".to_owned())?;
+                let mut checks = verify_reference_step(
+                    &state,
+                    &project,
+                    &schemas,
+                    step,
+                    before
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.tables.get("Reading"))
+                        .map(Vec::len),
+                )
+                .await?;
+                if let Some(before) = before {
+                    let key = reference_stream_checkpoint_key(&project, identity)?;
+                    let after = reference_runtime_snapshot(&state, &schemas, &key).await?;
+                    if before != after {
+                        return Err(
+                            "second reference stream invocation changed rows or checkpoint"
+                                .into(),
+                        );
+                    }
+                    checks.push("all table rows and checkpoint unchanged on rerun".into());
+                }
+                drop(state);
+                invocations.push(ReferenceProjectInvocationEvidence {
+                    invoke: entry,
+                    status: EvidenceStatus::Passed,
+                    checks,
+                });
+            } else {
+                if entry != format!("main.{}", step.invoke) {
+                    return Err("reference transaction expectation is not rooted in main".into());
+                }
+                expect_pass(
+                    evaluator
+                        .execute_project(
+                            &repository,
+                            identity,
+                            owner_id,
+                            initial_digest,
+                            &project,
+                            &entry,
+                        )
+                        .await
+                        .map_err(|_| "reference transaction activation failed".to_owned())?,
+                    &entry,
+                )?;
+                let state = RuntimeState::open(&repository, identity, initial_digest)
+                    .await
+                    .map_err(|_| "reference runtime state could not be reopened".to_owned())?;
+                let checks = verify_reference_step(
+                    &state,
+                    &project,
+                    &schemas,
+                    step,
+                    None,
+                )
+                .await?;
+                drop(state);
+                invocations.push(ReferenceProjectInvocationEvidence {
+                    invoke: entry,
+                    status: EvidenceStatus::Passed,
+                    checks,
+                });
+            }
+        }
+
+        let mut negative_cases = Vec::new();
+        for case in &project.expectations.negative_cases {
+            let before = {
+                let state = RuntimeState::open(&repository, identity, initial_digest)
+                    .await
+                    .map_err(|_| "reference runtime state could not be reopened".to_owned())?;
+                let snapshot = reference_table_snapshot(&state, &schemas).await?;
+                drop(state);
+                snapshot
+            };
+            let arguments = reference_arguments(&project, case)?;
+            let outcome = evaluator
+                .execute_project_with_arguments(
+                    &repository,
+                    identity,
+                    owner_id,
+                    initial_digest,
+                    &project,
+                    &case.invoke,
+                    &arguments,
+                )
+                .await
+                .map_err(|_| "reference negative activation could not be admitted".to_owned())?;
+            if !matches!(outcome, StageOutcome::Failed(_)) {
+                return Err(format!("negative reference invocation did not fail: {}", case.invoke));
+            }
+            let state = RuntimeState::open(&repository, identity, initial_digest)
+                .await
+                .map_err(|_| "reference runtime state could not be reopened".to_owned())?;
+            let after = reference_table_snapshot(&state, &schemas).await?;
+            drop(state);
+            let rollback_verified = before == after;
+            if !rollback_verified {
+                return Err(format!("negative reference invocation changed rows: {}", case.invoke));
+            }
+            negative_cases.push(ReferenceProjectNegativeEvidence {
+                invoke: case.invoke.clone(),
+                expected: case.expect.clone(),
+                status: EvidenceStatus::Passed,
+                rollback_verified,
+            });
+        }
+
+        Ok(ReferenceProjectRuntimeEvidence {
+            classification: EvidenceClass::RuntimeAdapter,
+            specification_version: corpus.manifest.version.clone(),
+            profile: "reference-project-runtime-adapter".into(),
+            implementation_execution: "not executed".into(),
+            compiler_artifact_execution: false,
+            full_orna_engine_conformance: false,
+            status: EvidenceStatus::Passed,
+            detail: "durable runtime-adapter evidence; not compiler-produced artifact execution or full Orna-engine conformance".into(),
+            invocations,
+            negative_cases,
+        })
+    }
+    .await;
+    drop(repository);
+    match (result, cleanup_reference_runtime_repository(&root)) {
+        (Ok(evidence), Ok(())) => Ok(evidence),
+        (Err(detail), Ok(())) => Err(detail),
+        (Ok(_), Err(cleanup)) => Err(cleanup),
+        (Err(detail), Err(cleanup)) => Err(format!("{detail}; {cleanup}")),
+    }
+}
+
+fn cleanup_reference_runtime_repository(root: &Path) -> Result<(), String> {
+    fs::remove_dir_all(root).map_err(|_| "reference runtime scratch cleanup failed".to_owned())
+}
+
+fn create_reference_runtime_repository() -> Result<(PathBuf, Repository), String> {
+    let target_root = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("target")
+        });
+    let root = target_root.join(format!(
+        "orna-reference-runtime-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos())
+    ));
+    fs::create_dir_all(&target_root)
+        .map_err(|_| "reference runtime target directory could not be created".to_owned())?;
+    fs::create_dir(&root)
+        .map_err(|_| "reference runtime scratch repository could not be created".to_owned())?;
+    let initialized = Command::new("git")
+        .args(["init", "--quiet", "-b", "main"])
+        .current_dir(&root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !initialized {
+        return Err(match cleanup_reference_runtime_repository(&root) {
+            Ok(()) => "reference runtime scratch repository could not be initialized".into(),
+            Err(cleanup) => {
+                format!("reference runtime scratch repository could not be initialized; {cleanup}")
+            }
+        });
+    }
+    let repository = match Repository::discover(&root) {
+        Ok(repository) => repository,
+        Err(_) => {
+            return Err(match cleanup_reference_runtime_repository(&root) {
+                Ok(()) => "reference runtime repository could not be discovered".to_owned(),
+                Err(cleanup) => {
+                    format!("reference runtime repository could not be discovered; {cleanup}")
+                }
+            });
+        }
+    };
+    Ok((root, repository))
+}
+
+fn expect_pass(
+    outcome: StageOutcome<orna_foundation_v1::Diagnostic>,
+    entry: &str,
+) -> Result<(), String> {
+    match outcome {
+        StageOutcome::Passed => Ok(()),
+        StageOutcome::Failed(_) => Err(format!("reference invocation failed: {entry}")),
+        StageOutcome::Skipped { .. } => Err(format!("reference invocation was skipped: {entry}")),
+    }
+}
+
+fn reference_entry_name(project: &ProjectUnit, invoke: &str) -> Result<String, String> {
+    if invoke.contains('.') {
+        return Ok(invoke.to_owned());
+    }
+    let module = project
+        .modules
+        .iter()
+        .find(|unit| unit.source_id.ends_with("/main.orna"))
+        .ok_or_else(|| "reference entry module is missing".to_owned())?;
+    let namespace = module
+        .source_id
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.strip_suffix(".orna"))
+        .ok_or_else(|| "reference entry module identity is invalid".to_owned())?;
+    Ok(format!("{namespace}.{invoke}"))
+}
+
+async fn verify_reference_step(
+    state: &RuntimeState,
+    project: &ProjectUnit,
+    schemas: &BTreeMap<String, ReferenceTableSchema>,
+    step: &ProjectExpectationStep,
+    previous_reading_count: Option<usize>,
+) -> Result<Vec<String>, String> {
+    let object = step
+        .expect
+        .as_object()
+        .ok_or_else(|| "reference expectation must be an object".to_owned())?;
+    let mut checks = Vec::new();
+    for (name, expected) in object {
+        match name.as_str() {
+            "checkpoint_next" => {
+                let expected = expected.as_u64().ok_or_else(|| {
+                    "reference checkpoint expectation is not an integer".to_owned()
+                })?;
+                let key = reference_stream_checkpoint_key(
+                    project,
+                    state
+                        .identity()
+                        .await
+                        .map_err(|_| "reference runtime identity could not be read".to_owned())?,
+                )?;
+                let checkpoint = state
+                    .stream_checkpoint(&key)
+                    .await
+                    .map_err(|_| "reference stream checkpoint could not be read".to_owned())?;
+                let observed = checkpoint
+                    .committed
+                    .as_ref()
+                    .and_then(|position| position.token.as_str().parse::<u64>().ok())
+                    .ok_or_else(|| {
+                        "reference stream checkpoint has no numeric position".to_owned()
+                    })?;
+                if observed != expected {
+                    return Err(
+                        "reference stream checkpoint disagrees with immutable expectation".into(),
+                    );
+                }
+                checks.push("checkpoint matched immutable expectation".into());
+            }
+            "additional_rows" => {
+                let expected = expected.as_u64().ok_or_else(|| {
+                    "reference additional-row expectation is not an integer".to_owned()
+                })?;
+                let before = previous_reading_count.ok_or_else(|| {
+                    "reference additional-row expectation lacks a baseline".to_owned()
+                })?;
+                let observed = state
+                    .committed_table_rows("Reading")
+                    .await
+                    .map_err(|_| "reference Reading rows could not be read".to_owned())?
+                    .len()
+                    .saturating_sub(before);
+                if observed as u64 != expected {
+                    return Err("reference stream added an unexpected number of rows".into());
+                }
+                checks.push("additional row count matched immutable expectation".into());
+            }
+            table_name => {
+                let table = table_name
+                    .rsplit_once('.')
+                    .map_or(table_name, |(_, table)| table);
+                let schema = schemas
+                    .get(table)
+                    .ok_or_else(|| format!("reference expectation names unknown table: {table}"))?;
+                let actual = state
+                    .committed_table_rows(table)
+                    .await
+                    .map_err(|_| format!("reference table rows could not be read: {table}"))?;
+                if let Some(expected_count) = expected.as_u64() {
+                    if actual.len() as u64 != expected_count {
+                        return Err(format!("reference row count disagrees for {table}"));
+                    }
+                } else if expected.is_array() {
+                    let expected_rows = reference_expected_rows(schema, expected)?;
+                    if actual != expected_rows {
+                        return Err(format!("reference rows disagree for {table}"));
+                    }
+                } else {
+                    return Err(format!(
+                        "reference expectation has unsupported shape for {table}"
+                    ));
+                }
+                checks.push(format!("exact rows/count matched for {table}"));
+            }
+        }
+    }
+    Ok(checks)
+}
+
+async fn reference_table_snapshot(
+    state: &RuntimeState,
+    schemas: &BTreeMap<String, ReferenceTableSchema>,
+) -> Result<BTreeMap<String, Vec<(Vec<u8>, Vec<u8>)>>, String> {
+    let mut snapshot = BTreeMap::new();
+    for table in schemas.keys() {
+        snapshot.insert(
+            table.clone(),
+            state
+                .committed_table_rows(table)
+                .await
+                .map_err(|_| format!("reference table snapshot could not read {table}"))?,
+        );
+    }
+    Ok(snapshot)
+}
+
+async fn reference_runtime_snapshot(
+    state: &RuntimeState,
+    schemas: &BTreeMap<String, ReferenceTableSchema>,
+    checkpoint_key: &CheckpointKey,
+) -> Result<ReferenceRuntimeSnapshot, String> {
+    Ok(ReferenceRuntimeSnapshot {
+        tables: reference_table_snapshot(state, schemas).await?,
+        checkpoint: Some(
+            state
+                .stream_checkpoint(checkpoint_key)
+                .await
+                .map_err(|_| "reference stream checkpoint could not be read".to_owned())?,
+        ),
+    })
+}
+
+fn reference_table_schemas(
+    project: &ProjectUnit,
+) -> Result<BTreeMap<String, ReferenceTableSchema>, String> {
+    let mut schemas = BTreeMap::new();
+    for module in &project.modules {
+        let parsed = parse_module(&module.source);
+        if !parsed.is_ok() {
+            return Err("reference project module could not be parsed".into());
+        }
+        for item in parsed.value.items {
+            let Declaration::Table {
+                name,
+                keys,
+                members,
+            } = item.declaration
+            else {
+                continue;
+            };
+            let mut fields = Vec::new();
+            for key in &keys {
+                let field = match &key.pattern {
+                    Pattern::Name(field, _) => field.clone(),
+                    _ => return Err("reference table key is not a named field".into()),
+                };
+                let ty = key
+                    .annotation
+                    .as_ref()
+                    .and_then(reference_type_name)
+                    .ok_or_else(|| "reference table key type is missing".to_owned())?;
+                fields.push((field, ty.to_owned()));
+            }
+            for member in members {
+                if let TableMember::Field { name, ty, .. } = member {
+                    let ty = reference_type_name(&ty)
+                        .ok_or_else(|| "reference table field type is unsupported".to_owned())?;
+                    fields.push((name, ty.to_owned()));
+                }
+            }
+            if schemas
+                .insert(
+                    name,
+                    ReferenceTableSchema {
+                        fields,
+                        key_count: keys.len(),
+                    },
+                )
+                .is_some()
+            {
+                return Err("reference project declares a duplicate table".into());
+            }
+        }
+    }
+    Ok(schemas)
+}
+
+fn reference_type_name(ty: &TypeExpr) -> Option<&str> {
+    match ty {
+        TypeExpr::Name { path, .. } => path.last().map(String::as_str),
+        _ => None,
+    }
+}
+
+fn reference_expected_rows(
+    schema: &ReferenceTableSchema,
+    expected: &Value,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+    let mut rows = Vec::new();
+    for row in expected
+        .as_array()
+        .ok_or_else(|| "reference rows expectation is not an array".to_owned())?
+    {
+        let values = row
+            .as_array()
+            .ok_or_else(|| "reference row expectation is not an array".to_owned())?;
+        if values.len() != schema.fields.len() {
+            return Err("reference row expectation does not match its table schema".into());
+        }
+        let mut encoded_fields = schema
+            .fields
+            .iter()
+            .zip(values)
+            .map(|((name, ty), value)| {
+                Ok((
+                    OvbRaw::Text(name.clone()),
+                    reference_json_value(value, ty)?.raw().clone(),
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        encoded_fields.sort_by_cached_key(|(name, _)| {
+            CanonicalValue::new(name.clone())
+                .expect("reference field name is canonical")
+                .encode()
+                .expect("reference field name encodes")
+        });
+        let record = CanonicalValue::new(OvbRaw::Map(encoded_fields))
+            .map_err(|_| "reference expected row is not canonical".to_owned())?;
+        let key_values = schema
+            .fields
+            .iter()
+            .take(schema.key_count)
+            .zip(values)
+            .map(|((_, ty), value)| reference_json_value(value, ty))
+            .collect::<Result<Vec<_>, String>>()?;
+        let key = if key_values.len() == 1 {
+            key_values[0].clone()
+        } else {
+            CanonicalValue::new(OvbRaw::Array(
+                key_values.iter().map(|value| value.raw().clone()).collect(),
+            ))
+            .map_err(|_| "reference expected composite key is not canonical".to_owned())?
+        };
+        rows.push((
+            key.encode()
+                .map_err(|_| "reference expected key does not encode".to_owned())?,
+            record
+                .encode()
+                .map_err(|_| "reference expected row does not encode".to_owned())?,
+        ));
+    }
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(rows)
+}
+
+fn reference_json_value(value: &Value, ty: &str) -> Result<CanonicalValue, String> {
+    match ty {
+        "Str" => value
+            .as_str()
+            .map(|text| {
+                CanonicalValue::new(OvbRaw::Text(text.to_owned()))
+                    .expect("reference text is canonical")
+            })
+            .ok_or_else(|| "reference string value has the wrong JSON type".to_owned()),
+        "Int" => value
+            .as_i64()
+            .map(|integer| CanonicalValue::int(BigInt::from(integer)))
+            .ok_or_else(|| "reference integer value has the wrong JSON type".to_owned()),
+        "Decimal" => value
+            .as_str()
+            .and_then(reference_decimal)
+            .ok_or_else(|| "reference decimal value is not canonical text".to_owned()),
+        _ => Err(format!("unsupported reference field type: {ty}")),
+    }
+}
+
+fn reference_decimal(text: &str) -> Option<CanonicalValue> {
+    let (mantissa, exponent) = match text.find(['e', 'E']) {
+        Some(index) => (&text[..index], text[index + 1..].parse::<i64>().ok()?),
+        None => (text, 0),
+    };
+    let (whole, fraction) = mantissa.split_once('.')?;
+    let coefficient = BigInt::parse_bytes(format!("{whole}{fraction}").as_bytes(), 10)?;
+    let exponent = exponent.checked_sub(i64::try_from(fraction.len()).ok()?)?;
+    CanonicalValue::decimal(coefficient, BigInt::from(exponent)).ok()
+}
+
+fn reference_arguments(
+    project: &ProjectUnit,
+    case: &ProjectNegativeCase,
+) -> Result<Environment, String> {
+    let (namespace, function) = case
+        .invoke
+        .split_once('.')
+        .ok_or_else(|| "reference negative invocation is not qualified".to_owned())?;
+    let module = project
+        .modules
+        .iter()
+        .find(|unit| unit.source_id.ends_with(&format!("/{namespace}.orna")))
+        .ok_or_else(|| "reference negative invocation module is missing".to_owned())?;
+    let parsed = parse_module(&module.source);
+    let signature = parsed
+        .value
+        .items
+        .into_iter()
+        .find_map(|item| match item.declaration {
+            Declaration::Function { signature, .. } if signature.name == function => {
+                Some(signature)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| "reference negative invocation function is missing".to_owned())?;
+    if signature.parameters.len() != case.args.len() {
+        return Err("reference negative invocation argument count disagrees".into());
+    }
+    signature
+        .parameters
+        .into_iter()
+        .zip(&case.args)
+        .map(|(parameter, value)| {
+            let name = match parameter.pattern {
+                Pattern::Name(name, _) => name,
+                _ => return Err("reference negative argument binding is not named".into()),
+            };
+            Ok((name, reference_untyped_json_value(value)?))
+        })
+        .collect()
+}
+
+fn reference_untyped_json_value(value: &Value) -> Result<CanonicalValue, String> {
+    if let Some(text) = value.as_str() {
+        return Ok(CanonicalValue::new(OvbRaw::Text(text.to_owned()))
+            .expect("reference text is canonical"));
+    }
+    if let Some(integer) = value.as_i64() {
+        return Ok(CanonicalValue::int(BigInt::from(integer)));
+    }
+    Err("reference negative argument has unsupported JSON type".into())
+}
+
+fn reference_stream_checkpoint_key(
+    project: &ProjectUnit,
+    identity: RuntimeIdentity,
+) -> Result<CheckpointKey, String> {
+    let module = project
+        .modules
+        .iter()
+        .find(|unit| unit.source_id.ends_with("/sensors.orna"))
+        .ok_or_else(|| "reference sensor module is missing".to_owned())?;
+    let parsed = parse_module(&module.source);
+    let body = parsed
+        .value
+        .items
+        .into_iter()
+        .find_map(|item| match item.declaration {
+            Declaration::Function { signature, body } if signature.name == "input" => Some(body),
+            _ => None,
+        })
+        .ok_or_else(|| "reference sensor input function is missing".to_owned())?;
+    let Expr::Call {
+        callee, arguments, ..
+    } = body
+    else {
+        return Err("reference sensor input is not a list source".into());
+    };
+    if reference_expr_path(&callee) != ["Stream", "from_list"] {
+        return Err("reference sensor input uses an unsupported source".into());
+    }
+    let [values, source] = arguments.as_slice() else {
+        return Err("reference sensor input arguments are incomplete".into());
+    };
+    let Expr::List { elements, .. } = &values.value else {
+        return Err("reference sensor input values are not a list".into());
+    };
+    let source_name = source
+        .name
+        .as_deref()
+        .filter(|name| *name == "source_identity")
+        .and_then(|_| match &source.value {
+            Expr::Literal { text, kind, .. } if *kind == orna_syntax_v1::LiteralKind::String => {
+                reference_string(text)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| "reference sensor source identity is missing".to_owned())?;
+    let payloads = elements
+        .iter()
+        .map(reference_literal)
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .map(|value| {
+            value
+                .encode()
+                .map_err(|_| "reference sensor payload is not canonical".to_owned())
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut digest = Sha256::new();
+    digest.update(b"ORNA-LIST-STREAM-IDENTITY\0");
+    for payload in &payloads {
+        digest.update(
+            u64::try_from(payload.len())
+                .map_err(|_| "reference sensor payload is too large".to_owned())?
+                .to_be_bytes(),
+        );
+        digest.update(payload);
+    }
+    let suffix = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let source_identity = format!("{source_name}:{suffix}");
+    let component = |value: String| {
+        Component::new(value).map_err(|_| "reference stream identity is invalid".to_owned())
+    };
+    let database = identity
+        .database_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(CheckpointKey {
+        consumer: ConsumerIdentity {
+            principal: component(format!("database:{database}"))?,
+            root: component("public-function".into())?,
+            function: component("sensors.ingest".into())?,
+            binding: component("arguments:[]".into())?,
+        },
+        source_format: component("orna-stream-v1".into())?,
+        source: component(source_identity)?,
+        partition_format: component("literal-list".into())?,
+        partition: None,
+        position_format: component("ordinal".into())?,
+    })
+}
+
+fn reference_expr_path(expr: &Expr) -> Vec<&str> {
+    match expr {
+        Expr::Name { text, .. } => vec![text],
+        Expr::Field { base, name, .. } => {
+            let mut path = reference_expr_path(base);
+            path.push(name);
+            path
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn reference_literal(expr: &Expr) -> Result<CanonicalValue, String> {
+    match expr {
+        Expr::Literal { text, kind, .. } => match kind {
+            orna_syntax_v1::LiteralKind::Integer => text
+                .parse::<BigInt>()
+                .map(CanonicalValue::int)
+                .map_err(|_| "reference integer literal is invalid".into()),
+            orna_syntax_v1::LiteralKind::Decimal => {
+                reference_decimal(text).ok_or_else(|| "reference decimal literal is invalid".into())
+            }
+            orna_syntax_v1::LiteralKind::String => reference_string(text)
+                .map(|text| {
+                    CanonicalValue::new(OvbRaw::Text(text)).expect("reference text is canonical")
+                })
+                .ok_or_else(|| "reference string literal is invalid".into()),
+            orna_syntax_v1::LiteralKind::Boolean => {
+                Ok(CanonicalValue::new(OvbRaw::Bool(text == "true"))
+                    .expect("reference boolean is canonical"))
+            }
+            orna_syntax_v1::LiteralKind::Null => {
+                Ok(CanonicalValue::new(OvbRaw::Null).expect("reference null is canonical"))
+            }
+            _ => Err("reference literal kind is unsupported".into()),
+        },
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+            let mut encoded = fields
+                .iter()
+                .map(|field| {
+                    Ok((
+                        OvbRaw::Text(field.name.clone()),
+                        reference_literal(&field.value)?.raw().clone(),
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            encoded.sort_by_cached_key(|(name, _)| {
+                CanonicalValue::new(name.clone())
+                    .expect("reference field name is canonical")
+                    .encode()
+                    .expect("reference field name encodes")
+            });
+            CanonicalValue::new(OvbRaw::Map(encoded))
+                .map_err(|_| "reference record literal is not canonical".into())
+        }
+        _ => Err("reference source payload is not a literal record".into()),
+    }
+}
+
+fn reference_string(text: &str) -> Option<String> {
+    let body = text.strip_prefix('"')?.strip_suffix('"')?;
+    (!body.contains('\\')).then(|| body.to_owned())
 }
 
 fn checked_path(relative: &str) -> Result<(), CorpusError> {
