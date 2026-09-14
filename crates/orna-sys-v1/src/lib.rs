@@ -37,11 +37,37 @@ macro_rules! identity {
 }
 
 identity!(FunctionId);
-identity!(RevisionId);
 identity!(SnapshotId);
 identity!(RuntimeId);
 identity!(InvocationId);
 identity!(TypeId);
+
+/// Opaque identity for one immutable semantic revision.
+///
+/// Its 32 bytes are supplied by the authoritative revision producer. This
+/// type intentionally neither derives those bytes nor treats them as another
+/// identifier or digest type.
+///
+/// The derived `Serialize` implementation is an internal, non-normative
+/// projection, including when a caller selects JSON. It is not a portable wire
+/// encoding. Portable `sys.RevisionId` values use the separate OVB tag-60023
+/// `[qualified_type_name, representation]` boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
+pub struct RevisionId([u8; 32]);
+
+impl RevisionId {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub const fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FunctionIdentity {
@@ -1074,10 +1100,7 @@ fn identity<T>(request: &AdmissionRequest<T>, arguments: &ArgumentMap) -> Invoca
         &mut bytes,
         request.function.identity.function.as_str().as_bytes(),
     );
-    append(
-        &mut bytes,
-        request.function.identity.revision.as_str().as_bytes(),
-    );
+    append(&mut bytes, request.function.identity.revision.as_bytes());
     append(
         &mut bytes,
         request.function.identity.snapshot.as_str().as_bytes(),
@@ -1220,7 +1243,7 @@ mod tests {
         FunctionDescriptor {
             identity: FunctionIdentity {
                 function: FunctionId::new("f"),
-                revision: RevisionId::new("r1"),
+                revision: RevisionId::from_bytes([0x11; 32]),
                 snapshot: SnapshotId::new("s1"),
             },
             parameters: vec![Parameter {
@@ -1233,6 +1256,29 @@ mod tests {
             callable: true,
             generics_resolved: true,
         }
+    }
+    #[test]
+    fn revision_id_is_an_exact_byte_oriented_nominal_value() {
+        let bytes = [0x7e; 32];
+        let revision = RevisionId::from_bytes(bytes);
+
+        let _: fn([u8; 32]) -> RevisionId = RevisionId::from_bytes;
+        assert_eq!(revision.as_bytes(), &bytes);
+        assert_eq!(revision.into_bytes(), bytes);
+    }
+    #[test]
+    fn changing_one_revision_byte_changes_the_invocation_identity() {
+        let request = request(Some(value("Int", "1")), ArgumentMap::default());
+        let bound = bind(&request.function, &request.arguments).unwrap();
+        let original = identity(&request, &bound);
+
+        let mut changed = request;
+        let mut revision = *changed.function.identity.revision.as_bytes();
+        revision[0] ^= 1;
+        changed.function.identity.revision = RevisionId::from_bytes(revision);
+        let changed_bound = bind(&changed.function, &changed.arguments).unwrap();
+
+        assert_ne!(original, identity(&changed, &changed_bound));
     }
     fn request(default: Option<TypedValue>, args: ArgumentMap) -> AdmissionRequest<String> {
         AdmissionRequest {

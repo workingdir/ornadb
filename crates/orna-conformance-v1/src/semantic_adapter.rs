@@ -6033,7 +6033,7 @@ mod bounded_tests {
         FunctionDescriptor {
             identity: FunctionIdentity {
                 function: FunctionId::new("math.answer"),
-                revision: RevisionId::new("source-r1"),
+                revision: RevisionId::from_bytes([0x62; 32]),
                 snapshot: SnapshotId::new("source-s1"),
             },
             parameters: Vec::new(),
