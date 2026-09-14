@@ -1512,6 +1512,25 @@ fn published_money_and_affine_diagnostics_are_preserved() {
         diagnostic.message()
             == "Money cannot be constructed from an inexact Float without explicit rounding"
     }));
+
+    let exact_constructor = analyze(&[ModuleInput::new(
+        "constructor.orna",
+        "pub fn good(value: Decimal) = Money<GBP>(value);",
+    )]);
+    assert!(
+        exact_constructor.is_ok(),
+        "{:?}",
+        exact_constructor.diagnostics
+    );
+    let good = &exact_constructor.modules.values().next().unwrap().exports["good"];
+    assert!(matches!(
+        &good.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Applied {
+                base: "Money".into(),
+                arguments: vec![Type::Named("GBP".into())],
+            }
+    ));
 }
 
 #[test]
@@ -2309,6 +2328,73 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
             }
     ));
 
+    let explicit_metadata = analyze(&[ModuleInput::new(
+        "explicit-metadata.orna",
+        "pub fn integer() = sys.meta<Int>(1); pub fn text() = sys.meta<Str>(\"value\"); pub fn generic<T>(value: T) = sys.meta<T>(value); pub fn piped() = 1 | sys.meta<Int>(); pub fn money() = 1 | Money<GBP>();",
+    )]);
+    assert!(
+        explicit_metadata.is_ok(),
+        "{:#?}",
+        explicit_metadata.diagnostics
+    );
+    let explicit_metadata = explicit_metadata.modules.values().next().unwrap();
+    for (name, value_type) in [
+        ("integer", Type::Int),
+        ("piped", Type::Int),
+        ("text", Type::Text),
+    ] {
+        let symbol = &explicit_metadata.exports[name];
+        assert!(matches!(
+            &symbol.ty,
+            Type::Function { result, .. }
+                if result.as_ref() == &Type::Applied {
+                    base: "sys.ValueMetadata".into(),
+                    arguments: vec![value_type.clone()],
+                }
+        ));
+        assert!(symbol.effects.effects.contains("database read"));
+        assert!(symbol.effects.may_fail);
+    }
+    let generic = &explicit_metadata.exports["generic"];
+    assert!(matches!(
+        &generic.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Applied {
+                base: "sys.ValueMetadata".into(),
+                arguments: vec![Type::Named("T".into())],
+            }
+    ));
+    let money = &explicit_metadata.exports["money"];
+    assert!(matches!(
+        &money.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Applied {
+                base: "Money".into(),
+                arguments: vec![Type::Named("GBP".into())],
+            }
+    ));
+
+    for source in [
+        "fn mismatch() = sys.meta<Str>(1);",
+        "fn unknown() = sys.meta<Missing>(1);",
+        "fn too_many() = sys.meta<Int, Str>(1);",
+        "fn incompatible_pipeline() = 1 | sys.meta<Str>();",
+        "fn unsupported_cancel(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(job);",
+        "fn unsupported_start() = sys.start<Int>(1, 2, as: 3);",
+    ] {
+        let rejected = analyze(&[ModuleInput::new("invalid-explicit-metadata.orna", source)]);
+        let code = if source.contains("unsupported_") {
+            DIAG_UNSUPPORTED
+        } else {
+            DIAG_TYPE
+        };
+        assert!(
+            has(&rejected, code),
+            "{source}: {:#?}",
+            rejected.diagnostics
+        );
+    }
+
     let invalid_metadata = analyze(&[ModuleInput::new(
         "unsupported-sys.orna",
         "fn metadata() = sys.meta(value: 1, extra: 2);",
@@ -2355,6 +2441,164 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
             rejected.diagnostics
         );
     }
+}
+
+#[test]
+fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls() {
+    let valid = analyze(&[ModuleInput::new(
+        "await-generic.orna",
+        "pub fn awaited(failure: sys.Failure) = sys.await(sys.admin.replay_failure(failure.reference, expected_version: failure.version));",
+    )]);
+    assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
+    let awaited = &valid.modules.values().next().unwrap().exports["awaited"];
+    assert!(matches!(
+        &awaited.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Applied {
+                base: "sys.InvocationResult".into(),
+                arguments: vec![Type::Named("sys.Value".into())],
+            }
+    ));
+    assert!(awaited.effects.effects.contains("admin"));
+    assert!(awaited.effects.effects.contains("invoke"));
+    assert!(awaited.effects.may_fail);
+
+    let typed = analyze(&[ModuleInput::new(
+        "await-generic-typed.orna",
+        "pub fn omitted(job: sys.InvocationHandle<Int>) = sys.await(invocation: job); pub fn null_timeout(job: sys.InvocationHandle<Int>) = sys.await(job, null); pub fn duration_timeout(job: sys.InvocationHandle<Int>) = sys.await(job, timeout: 1.s); pub fn explicit(job: sys.InvocationHandle<Int>) = sys.await<Int>(job); pub fn explicit_named(job: sys.InvocationHandle<Int>) = sys.await<Int>(invocation: job, timeout: null); pub fn local_generic<T>(job: sys.InvocationHandle<T>) = sys.await<T>(job);",
+    )]);
+    assert!(typed.is_ok(), "{:#?}", typed.diagnostics);
+    let typed = typed.modules.values().next().unwrap();
+    for name in [
+        "omitted",
+        "null_timeout",
+        "duration_timeout",
+        "explicit",
+        "explicit_named",
+    ] {
+        let typed = &typed.exports[name];
+        assert!(matches!(
+            &typed.ty,
+            Type::Function { result, .. }
+                if result.as_ref() == &Type::Applied {
+                    base: "sys.InvocationResult".into(),
+                    arguments: vec![Type::Int],
+                }
+        ));
+        assert_eq!(
+            typed.effects.effects,
+            std::collections::BTreeSet::from(["invoke".into()])
+        );
+        assert!(typed.effects.may_fail);
+    }
+
+    let local_generic = &typed.exports["local_generic"];
+    assert!(matches!(
+        &local_generic.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Applied {
+                base: "sys.InvocationResult".into(),
+                arguments: vec![Type::Named("T".into())],
+            }
+    ));
+    assert_eq!(
+        local_generic.effects.effects,
+        std::collections::BTreeSet::from(["invoke".into()])
+    );
+    assert!(local_generic.effects.may_fail);
+
+    for source in [
+        "fn missing() = sys.await();",
+        "fn wrong() = sys.await(1);",
+        "fn duplicate(job: sys.InvocationHandle<Int>) = sys.await(job, invocation: job);",
+        "fn wrong_label(failure: sys.Failure) = sys.await(job: sys.admin.replay_failure(failure.reference, expected_version: failure.version));",
+        "fn wrong_timeout(failure: sys.Failure) = sys.await(sys.admin.replay_failure(failure.reference, expected_version: failure.version), deadline: null);",
+        "fn unknown(failure: sys.Failure) = sys.cancel(sys.admin.replay_failure(failure.reference, expected_version: failure.version));",
+        "fn extra_generic(job: sys.InvocationHandle<Int>) = sys.await<Int, Str>(job);",
+        "fn mismatched_generic(job: sys.InvocationHandle<Int>) = sys.await<Str>(job);",
+    ] {
+        let rejected = analyze(&[ModuleInput::new("await-generic-invalid.orna", source)]);
+        assert!(
+            has(
+                &rejected,
+                if source.contains("unknown") {
+                    DIAG_UNSUPPORTED
+                } else {
+                    DIAG_TYPE
+                }
+            ),
+            "{source}: {:#?}",
+            rejected.diagnostics
+        );
+    }
+
+    let empty_generic = analyze(&[ModuleInput::new(
+        "await-generic-invalid.orna",
+        "fn empty_generic(job: sys.InvocationHandle<Int>) = sys.await<>(job);",
+    )]);
+    assert!(
+        has(&empty_generic, "ORNA-S000-PARSE"),
+        "{:#?}",
+        empty_generic.diagnostics
+    );
+
+    let unknown_generic = analyze(&[ModuleInput::new(
+        "await-generic-invalid.orna",
+        "fn unknown_generic(job: sys.InvocationHandle<Int>) = sys.await<U>(job);",
+    )]);
+    assert!(
+        has(&unknown_generic, DIAG_TYPE),
+        "{:#?}",
+        unknown_generic.diagnostics
+    );
+
+    let unsupported_generic = analyze(&[ModuleInput::new(
+        "await-generic-unsupported.orna",
+        "fn unsupported(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(missing);",
+    )]);
+    assert!(
+        has(&unsupported_generic, DIAG_UNSUPPORTED),
+        "{:#?}",
+        unsupported_generic.diagnostics
+    );
+    assert!(
+        has(&unsupported_generic, DIAG_UNRESOLVED),
+        "{:#?}",
+        unsupported_generic.diagnostics
+    );
+    let unsupported = &unsupported_generic.modules.values().next().unwrap().symbols["unsupported"];
+    assert!(unsupported.effects.effects.contains("invoke"));
+    assert!(unsupported.effects.may_fail);
+
+    let mismatched_generic = analyze(&[ModuleInput::new(
+        "await-generic-unsupported.orna",
+        "fn mismatched(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(1);",
+    )]);
+    assert!(
+        has(&mismatched_generic, DIAG_TYPE),
+        "{:#?}",
+        mismatched_generic.diagnostics
+    );
+    assert!(
+        has(&mismatched_generic, DIAG_UNSUPPORTED),
+        "{:#?}",
+        mismatched_generic.diagnostics
+    );
+
+    let already_error = analyze(&[ModuleInput::new(
+        "await-generic-error.orna",
+        "fn invalid() = sys.await(missing);",
+    )]);
+    assert!(
+        has(&already_error, DIAG_UNRESOLVED),
+        "{:#?}",
+        already_error.diagnostics
+    );
+    let invalid = &already_error.modules.values().next().unwrap().symbols["invalid"];
+    assert!(matches!(
+        &invalid.ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Error
+    ));
 }
 
 #[test]
