@@ -135,10 +135,12 @@ pub struct DurableSysInvocationObservation {
 /// The currently supportable, durable subset of one public
 /// `sys.InvocationArgument` row.
 ///
-/// The durable metadata is always redacted and retains a value digest.  It
-/// does not retain a `sys.TypeRef` or recoverable `sys.Value`, so those fields
-/// are deliberately absent rather than represented by fabricated references
-/// or values.
+/// The durable metadata is always redacted. It does not retain a
+/// `sys.TypeRef` or recoverable `sys.Value`, so those fields are deliberately
+/// absent rather than represented by fabricated references or values. The
+/// private value digest is also absent here: hashes of protected,
+/// low-entropy values remain dictionary-testable and must not cross the
+/// public system-value boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableSysInvocationArgumentObservation {
     /// `sys.InvocationArgument.reference`.
@@ -152,9 +154,9 @@ pub struct DurableSysInvocationArgumentObservation {
     /// `sys.InvocationArgument.type`, when a checked type witness was
     /// retained. Missing evidence remains unavailable.
     pub type_reference: Option<TypeRef>,
-    /// `sys.InvocationArgument.digest`; sealed metadata always has this
-    /// redaction-safe digest.
-    pub digest: [u8; 32],
+    /// `sys.InvocationArgument.digest`; protected argument observations do not
+    /// expose the private value digest.
+    pub digest: Option<[u8; 32]>,
     /// `sys.InvocationArgument.redacted`.
     pub redacted: bool,
 }
@@ -263,7 +265,7 @@ impl SealedInvocationObservation {
                     name: argument.name.clone(),
                     position: argument.position,
                     type_reference: argument.type_reference.clone(),
-                    digest: argument.value_digest,
+                    digest: None,
                     redacted: argument.redacted,
                 })
                 .collect(),
@@ -1283,6 +1285,7 @@ mod tests {
         SYS_INVOCATION_TABLE_ID, SystemReferenceError, Value,
         validate_invocation_argument_reference, validate_invocation_reference,
     };
+    use sha2::{Digest, Sha256};
 
     fn capture(generation: u64) -> CwdCapture {
         capture_for_runtime([8; 16], generation)
@@ -1493,11 +1496,22 @@ mod tests {
             projection.arguments[0].position,
             internal.arguments[0].position
         );
-        assert_eq!(
-            projection.arguments[0].digest,
-            internal.arguments[0].value_digest
-        );
+        assert_eq!(projection.arguments[0].digest, None);
         assert!(projection.arguments[0].redacted);
+    }
+
+    #[test]
+    fn redacted_projection_never_exposes_low_entropy_candidate_digest() {
+        let mut internal = observation(&capture(1), 2, SealedInvocationObservationStatus::Running);
+        let pin_digest: [u8; 32] = Sha256::digest(b"0000").into();
+        let alternate_pin_digest: [u8; 32] = Sha256::digest(b"1234").into();
+        internal.arguments[0].value_digest = pin_digest;
+
+        let projection = internal.durable_sys_projection().unwrap();
+
+        assert_eq!(projection.arguments[0].digest, None);
+        assert_ne!(projection.arguments[0].digest, Some(pin_digest));
+        assert_ne!(projection.arguments[0].digest, Some(alternate_pin_digest));
     }
 
     #[test]
@@ -1643,6 +1657,7 @@ mod tests {
         );
         assert_eq!(arguments.len(), 1);
         assert_eq!(arguments[0].invocation, invocations[0].reference);
+        assert_eq!(arguments[0].digest, None);
     }
 
     #[test]
