@@ -10,6 +10,7 @@ use std::{
     fs::{self, OpenOptions},
     future::{Future, Ready, ready},
     io::{ErrorKind, Write},
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
@@ -3730,8 +3731,18 @@ impl RuntimeState {
             (lease, failure_payload)
         };
 
-        let handler_result = handler.handle(&item);
-        if control.cancelled() {
+        let (handler_result, handler_panicked) =
+            match catch_unwind(AssertUnwindSafe(|| handler.handle(&item))) {
+                Ok(result) => (result, false),
+                Err(_) => (
+                    StreamHandlerResult::Fail(SafeDiagnostic {
+                        code: DiagnosticCode::Internal,
+                        class: DiagnosticClass::Permanent,
+                    }),
+                    true,
+                ),
+            };
+        if !handler_panicked && control.cancelled() {
             let result = self
                 .stream_backend(writer)
                 .apply_async(CommitIntent::Cancel { lease })
@@ -5647,7 +5658,14 @@ impl RuntimeState {
             delivery: grant.failure.0.clone(),
             payload,
         };
-        match handler.handle(&item) {
+        let handler_result = match catch_unwind(AssertUnwindSafe(|| handler.handle(&item))) {
+            Ok(result) => result,
+            Err(_) => StreamHandlerResult::Fail(SafeDiagnostic {
+                code: DiagnosticCode::Internal,
+                class: DiagnosticClass::Permanent,
+            }),
+        };
+        match handler_result {
             StreamHandlerResult::Commit(batch) => self
                 .commit_stream_replay(StreamReplayCommit {
                     writer,
@@ -13181,6 +13199,17 @@ mod tests {
         }
     }
 
+    struct PanickingHandler {
+        calls: usize,
+    }
+
+    impl StreamHandler for PanickingHandler {
+        fn handle(&mut self, _: &StreamItem) -> StreamHandlerResult {
+            self.calls += 1;
+            panic!("deliberate stream handler panic")
+        }
+    }
+
     struct CancelAfterFirstCommitHandler {
         calls: usize,
         control: StreamRunGate,
@@ -15192,6 +15221,214 @@ mod tests {
         let row = rows.next().await.unwrap().expect("retained payload");
         let retained: Vec<u8> = row.get(0).unwrap();
         assert_eq!(retained, payload);
+    }
+
+    #[tokio::test]
+    async fn panicking_delivery_becomes_redacted_failure_and_retry_recovers() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("panic-delivery", "panic-next");
+        let key = delivery.checkpoint_key();
+        let payload = vec![7, 8, 9];
+        let mut source = TestSource {
+            key: key.clone(),
+            item: Some(StreamItem {
+                delivery: delivery.clone(),
+                payload: payload.clone(),
+            }),
+            polls: 0,
+        };
+        let mut handler = PanickingHandler { calls: 0 };
+        let checkpoint_before = state
+            .stream_backend(writer)
+            .checkpoint_async(&key)
+            .await
+            .unwrap();
+
+        let failure = match state
+            .run_stream_once(writer, &key, &mut source, &mut handler)
+            .await
+            .unwrap()
+        {
+            StreamStep::Failed { failure } => failure,
+            other => panic!("unexpected panicking delivery result: {other:?}"),
+        };
+        assert_eq!(handler.calls, 1);
+        assert_eq!(failure.diagnostic.code, DiagnosticCode::Internal);
+        assert_eq!(failure.diagnostic.class, DiagnosticClass::Permanent);
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&key)
+                .await
+                .unwrap(),
+            checkpoint_before
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert!(
+            load_stream_lease(&state.connection, &key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_payload_metadata_async(&failure.identity)
+                .await
+                .unwrap(),
+            Some(StreamFailurePayloadMetadata {
+                plaintext_bytes: Some(payload.len() as u64),
+                protected_reference: false,
+                redacted: true,
+            })
+        );
+
+        let retry = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Retry {
+                failure: failure.identity.clone(),
+                expected_version: failure.version,
+                expected: (&checkpoint_before).into(),
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::RetryScheduled { failure } => failure,
+            other => panic!("unexpected retry result: {other:?}"),
+        };
+        assert_eq!(retry.status, FailureStatus::Retrying);
+
+        let mut source = TestSource {
+            key: key.clone(),
+            item: Some(StreamItem { delivery, payload }),
+            polls: 0,
+        };
+        let mut recovery_handler = CommitHandler { calls: 0 };
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut recovery_handler)
+                .await
+                .unwrap(),
+            StreamStep::Committed {
+                checkpoint: StreamCheckpoint { version: 1, .. }
+            }
+        ));
+        assert_eq!(recovery_handler.calls, 1);
+        let recovered = state
+            .stream_backend(writer)
+            .failure_async(&failure.identity)
+            .await
+            .unwrap()
+            .expect("recovered failure");
+        assert_eq!(recovered.identity, failure.identity);
+        assert_eq!(recovered.status, FailureStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn panicking_replay_returns_to_skipped_and_later_recovery_preserves_checkpoint() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let payload = vec![3, 2, 1];
+        let (grant, checkpoint, delivery) = protected_replay_fixture(
+            &state,
+            writer,
+            "panic-replay",
+            Sha256::digest(&payload).into(),
+        )
+        .await;
+        let provider = ReplayProvider {
+            payload: payload.clone(),
+        };
+        let mut handler = PanickingHandler { calls: 0 };
+        let failed = match state
+            .stream_backend(writer)
+            .replay_async_with_provider(grant, &provider, &mut handler)
+            .await
+            .unwrap()
+        {
+            CommitResult::ReplayFailed { failure } => failure,
+            other => panic!("unexpected panicking replay result: {other:?}"),
+        };
+        assert_eq!(handler.calls, 1);
+        assert_eq!(failed.status, FailureStatus::Skipped);
+        assert_eq!(failed.diagnostic.code, DiagnosticCode::Internal);
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        let mut claims = state
+            .connection
+            .query("SELECT count(*) FROM stream_replay_claim", ())
+            .await
+            .unwrap();
+        let claim_count: i64 = claims
+            .next()
+            .await
+            .unwrap()
+            .expect("claim count")
+            .get(0)
+            .unwrap();
+        assert_eq!(claim_count, 0);
+
+        let next_grant = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Replay {
+                failure: failed.identity.clone(),
+                expected_version: failed.version,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::ReplayGranted { grant } => grant,
+            other => panic!("unexpected recovery replay result: {other:?}"),
+        };
+        let mut recovery_handler = ReplayHandler {
+            payload: Vec::new(),
+            result: Some(StreamHandlerResult::Commit(StreamMutationBatch {
+                mutations: Vec::new(),
+                next_digest: digest(3),
+            })),
+        };
+        let recovered = match state
+            .stream_backend(writer)
+            .replay_async_with_provider(next_grant, &provider, &mut recovery_handler)
+            .await
+            .unwrap()
+        {
+            CommitResult::ReplayCompleted { failure } => failure,
+            other => panic!("unexpected replay recovery result: {other:?}"),
+        };
+        assert_eq!(recovered.status, FailureStatus::Replayed);
+        assert_eq!(recovery_handler.payload, payload);
+        let mut claims = state
+            .connection
+            .query("SELECT count(*) FROM stream_replay_claim", ())
+            .await
+            .unwrap();
+        let claim_count: i64 = claims
+            .next()
+            .await
+            .unwrap()
+            .expect("claim count")
+            .get(0)
+            .unwrap();
+        assert_eq!(claim_count, 0);
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
+        );
     }
 
     #[tokio::test]
