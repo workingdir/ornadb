@@ -398,6 +398,276 @@ fn engine_witnesses_require_an_exact_expectation_satisfied_fixture_stage() {
     );
 }
 
+fn date_range_implementation_bindings(
+    publication_digests: &std::collections::BTreeMap<String, String>,
+) -> Vec<ImplementationEvidenceBinding> {
+    [
+        (
+            "ORNA-RANGE-001",
+            "crates/orna-evaluator-v1/src/lib.rs::Value::Range",
+            "crates/orna-evaluator-v1/tests/evaluator.rs::date_ranges_are_canonical_membership_values_with_optional_bounds",
+        ),
+        (
+            "ORNA-RANGE-002",
+            "crates/orna-evaluator-v1/src/lib.rs::Value::Range",
+            "crates/orna-evaluator-v1/tests/evaluator.rs::date_ranges_are_canonical_membership_values_with_optional_bounds",
+        ),
+        (
+            "ORNA-RANGE-003",
+            "crates/orna-evaluator-v1/src/lib.rs::Value::Range",
+            "crates/orna-evaluator-v1/tests/evaluator.rs::date_ranges_are_canonical_membership_values_with_optional_bounds",
+        ),
+        (
+            "ORNA-RANGE-004",
+            "crates/orna-evaluator-v1/src/lib.rs::Value::Range",
+            "crates/orna-evaluator-v1/tests/evaluator.rs::date_ranges_allow_empty_values_but_reject_mixed_bounds_and_iteration",
+        ),
+        (
+            "ORNA-RANGE-005",
+            "crates/orna-evaluator-v1/src/lib.rs::compare_values",
+            "crates/orna-evaluator-v1/tests/evaluator.rs::range_ordering_validates_unbounded_endpoint_types_before_lexicographic_ordering",
+        ),
+        (
+            "ORNA-RANGE-006",
+            "crates/orna-evaluator-v1/src/lib.rs::eval_infix",
+            "crates/orna-evaluator-v1/tests/evaluator.rs::date_ranges_are_canonical_membership_values_with_optional_bounds",
+        ),
+        (
+            "ORNA-RANGE-006",
+            "crates/orna-evaluator-v1/src/lib.rs::finite_range_values",
+            "crates/orna-evaluator-v1/tests/evaluator.rs::date_ranges_allow_empty_values_but_reject_mixed_bounds_and_iteration",
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(requirement_id, implementation_ref, test_ref)| ImplementationEvidenceBinding {
+            requirement_id: requirement_id.into(),
+            publication_digests: publication_digests.clone(),
+            implementation_ref: implementation_ref.into(),
+            test_ref: test_ref.into(),
+            source: ImplementationEvidenceSource::ProductionUnit,
+            subject: test_ref.into(),
+            command: "CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=0' cargo test -p orna-evaluator-v1 --test evaluator".into(),
+            result: "99 passed; 0 failed".into(),
+            observed_status: EvidenceStatus::Passed,
+        },
+    )
+    .collect()
+}
+
+#[test]
+fn date_range_implementation_evidence_is_pinned_partial_and_does_not_promote_the_plan() {
+    let corpus = Corpus::load_default().expect("reference corpus loads");
+    let frozen_range_plan = corpus
+        .requirement_evidence
+        .requirements
+        .iter()
+        .find(|entry| entry.requirement == "ORNA-RANGE-006")
+        .expect("range plan exists")
+        .tests
+        .clone();
+    let bindings = date_range_implementation_bindings(&corpus.publication_digests);
+    let harness = Harness::new(corpus);
+
+    let overlay = harness
+        .implementation_evidence_overlay(&bindings)
+        .expect("reviewed Date range production evidence is accepted");
+    assert_eq!(overlay.evidence().len(), 7);
+    assert_eq!(
+        overlay.aggregate(),
+        ImplementationEvidenceAggregate::PartiallyExecuted
+    );
+    assert!(
+        overlay
+            .evidence()
+            .iter()
+            .all(|entry| entry.observed_status() == &EvidenceStatus::Passed)
+    );
+    assert_eq!(
+        overlay.evidence()[5].test_ref(),
+        "crates/orna-evaluator-v1/tests/evaluator.rs::date_ranges_are_canonical_membership_values_with_optional_bounds"
+    );
+    assert_eq!(
+        overlay.evidence()[6].test_ref(),
+        "crates/orna-evaluator-v1/tests/evaluator.rs::date_ranges_allow_empty_values_but_reject_mixed_bounds_and_iteration"
+    );
+    let serialized = serde_json::to_value(&overlay).expect("overlay serializes");
+    assert_eq!(
+        serialized["evidence"][0]["source"],
+        serde_json::json!("production-unit")
+    );
+    assert_eq!(
+        serialized["evidence"][0]["subject"],
+        serde_json::json!(
+            "crates/orna-evaluator-v1/tests/evaluator.rs::date_ranges_are_canonical_membership_values_with_optional_bounds"
+        )
+    );
+    assert_eq!(
+        serialized["evidence"][0]["command"],
+        serde_json::json!(
+            "CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=0' cargo test -p orna-evaluator-v1 --test evaluator"
+        )
+    );
+    assert_eq!(
+        serialized["evidence"][0]["result"],
+        serde_json::json!("99 passed; 0 failed")
+    );
+    assert_eq!(
+        serialized["evidence"][0]["observed-status"],
+        serde_json::json!("passed")
+    );
+    assert_eq!(
+        serialized["publication-digests"],
+        serde_json::to_value(overlay.publication_digests()).expect("digests serialize")
+    );
+
+    let reloaded = Corpus::load_default().expect("reference corpus reloads");
+    let reloaded_range_plan = reloaded
+        .requirement_evidence
+        .requirements
+        .iter()
+        .find(|entry| entry.requirement == "ORNA-RANGE-006")
+        .expect("range plan remains")
+        .tests
+        .clone();
+    assert_eq!(reloaded_range_plan, frozen_range_plan);
+    assert_eq!(reloaded_range_plan[0]["status"], "planned");
+}
+
+#[test]
+fn implementation_evidence_overlay_rejects_unpinned_nonproduction_and_engine_inputs() {
+    let corpus = Corpus::load_default().expect("reference corpus loads");
+    let mut binding = date_range_implementation_bindings(&corpus.publication_digests)
+        .into_iter()
+        .next()
+        .expect("Date binding exists");
+    let harness = Harness::new(corpus);
+
+    binding.requirement_id = "ORNA-NOT-A-REQUIREMENT".into();
+    assert!(
+        harness
+            .implementation_evidence_overlay(std::slice::from_ref(&binding))
+            .is_err()
+    );
+
+    binding.requirement_id = "ORNA-RANGE-001".into();
+    let digest = binding
+        .publication_digests
+        .values_mut()
+        .next()
+        .expect("publication inventory is populated");
+    let replacement = if digest.starts_with('0') { "1" } else { "0" };
+    digest.replace_range(..1, replacement);
+    assert!(
+        harness
+            .implementation_evidence_overlay(std::slice::from_ref(&binding))
+            .is_err()
+    );
+
+    let publication_digests = Corpus::load_default()
+        .expect("reference corpus reloads")
+        .publication_digests;
+    binding.publication_digests = publication_digests;
+    for source in [
+        ImplementationEvidenceSource::Model,
+        ImplementationEvidenceSource::Skipped,
+        ImplementationEvidenceSource::EngineWitness,
+    ] {
+        binding.source = source;
+        assert!(
+            harness
+                .implementation_evidence_overlay(std::slice::from_ref(&binding))
+                .is_err()
+        );
+    }
+
+    binding.source = ImplementationEvidenceSource::ProductionUnit;
+    for invalid_status in [EvidenceStatus::Skipped, EvidenceStatus::Specified] {
+        binding.observed_status = invalid_status;
+        assert!(
+            harness
+                .implementation_evidence_overlay(std::slice::from_ref(&binding))
+                .is_err()
+        );
+    }
+    binding.observed_status = EvidenceStatus::Failed;
+    assert_eq!(
+        harness
+            .implementation_evidence_overlay(std::slice::from_ref(&binding))
+            .expect("failed production-unit evidence remains representable")
+            .aggregate(),
+        ImplementationEvidenceAggregate::PartiallyExecuted
+    );
+    binding.observed_status = EvidenceStatus::Passed;
+    assert!(
+        harness
+            .implementation_evidence_overlay(&[binding.clone(), binding])
+            .is_err()
+    );
+}
+
+#[test]
+fn implementation_evidence_overlay_rejects_malformed_repository_references_and_text() {
+    let corpus = Corpus::load_default().expect("reference corpus loads");
+    let binding = date_range_implementation_bindings(&corpus.publication_digests)
+        .into_iter()
+        .next()
+        .expect("Date binding exists");
+    let harness = Harness::new(corpus);
+
+    for malformed in [
+        "/crates/orna-evaluator-v1/src/lib.rs::eval_infix",
+        "C:/crates/orna-evaluator-v1/src/lib.rs::eval_infix",
+        "crates/../orna-evaluator-v1/src/lib.rs::eval_infix",
+        "https://example.invalid/lib.rs::eval_infix",
+        "crates/orna-evaluator-v1/src/lib.rs::",
+        "crates/orna-evaluator-v1/src/lib.rs::eval_infix::",
+        "crates//orna-evaluator-v1/src/lib.rs::eval_infix",
+        "crates/orna-evaluator-v1/src/lib.rs::eval/infix",
+        "crates/orna-evaluator-v1/src/lib.rs::eval\ninfix",
+        "crates/\u{1b}orna-evaluator-v1/src/lib.rs::eval_infix",
+        "crates/orna-evaluator-v1/src/lib.rs",
+    ] {
+        let mut malformed_implementation = binding.clone();
+        malformed_implementation.implementation_ref = malformed.into();
+        assert!(
+            harness
+                .implementation_evidence_overlay(std::slice::from_ref(&malformed_implementation))
+                .is_err(),
+            "implementation reference must be rejected: {malformed:?}"
+        );
+
+        let mut malformed_test = binding.clone();
+        malformed_test.test_ref = malformed.into();
+        assert!(
+            harness
+                .implementation_evidence_overlay(std::slice::from_ref(&malformed_test))
+                .is_err(),
+            "test reference must be rejected: {malformed:?}"
+        );
+    }
+
+    for (kind, invalid) in [
+        ("subject", ""),
+        ("command", "cargo test\n-p orna-evaluator-v1"),
+        ("result", "97 passed\u{1b}[0m"),
+    ] {
+        let mut malformed = binding.clone();
+        match kind {
+            "subject" => malformed.subject = invalid.into(),
+            "command" => malformed.command = invalid.into(),
+            "result" => malformed.result = invalid.into(),
+            _ => unreachable!("test cases enumerate all evidence text fields"),
+        }
+        assert!(
+            harness
+                .implementation_evidence_overlay(std::slice::from_ref(&malformed))
+                .is_err(),
+            "{kind} must reject control or empty text"
+        );
+    }
+}
+
 #[test]
 fn scenario_witnesses_bind_only_declared_passed_implementation_scenarios() {
     let harness = Harness::new(Corpus::load_default().expect("reference corpus loads"));
