@@ -12,6 +12,7 @@
 //! checks need base or storage context and do not belong in this module.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     error::Error,
@@ -58,7 +59,7 @@ pub enum DurableCatalogueRevisionRole {
 
 /// A durable catalogue canonical-hash contract version.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum CatalogueHashVersion {
     /// The original application-only catalogue hash.
     Version1,
@@ -122,7 +123,7 @@ impl TryFrom<u32> for FunctionSemanticHashVersion {
 
 /// A durable standard-library digest contract version.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum StandardLibraryDigestVersion {
     /// The initial standard-library digest.
     Version1,
@@ -914,6 +915,704 @@ impl ExecutableArtifact {
     pub const fn content_hash(&self) -> Sha256Digest {
         self.bytes.content_hash
     }
+}
+
+/// The source snapshot identity recorded beside a compiler-produced artifact.
+///
+/// The source bytes remain owned by [`StoredSourceRevision`]. This compact
+/// value carries the complete identity needed to distinguish the bundle,
+/// revision, parent and both integrity hashes without copying those bytes into
+/// every artifact record.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ArtifactSourceSnapshot {
+    bundle: SourceBundleId,
+    revision: SourceRevisionId,
+    parent: Option<SourceRevisionId>,
+    bundle_hash: Sha256Digest,
+    revision_hash: Sha256Digest,
+}
+
+impl ArtifactSourceSnapshot {
+    fn from_revision(source: &StoredSourceRevision) -> Result<Self, ArtifactProvenanceError> {
+        if source.parent() == Some(source.id()) {
+            return Err(ArtifactProvenanceError::InvalidSourceSnapshot);
+        }
+        let bundle_hash = crate::canonical_hash::source_bundle_digest(source.units())
+            .map_err(|_| ArtifactProvenanceError::InvalidSourceSnapshot)?;
+        if bundle_hash != source.bundle_hash() {
+            return Err(ArtifactProvenanceError::InvalidSourceSnapshot);
+        }
+        let revision_hash = crate::canonical_hash::source_revision_record_digest(
+            source.bundle(),
+            source.parent(),
+            source.bundle_hash(),
+        )
+        .map_err(|_| ArtifactProvenanceError::InvalidSourceSnapshot)?;
+        if revision_hash != source.revision_hash() {
+            return Err(ArtifactProvenanceError::InvalidSourceSnapshot);
+        }
+
+        Ok(Self {
+            bundle: source.bundle(),
+            revision: source.id(),
+            parent: source.parent(),
+            bundle_hash: source.bundle_hash(),
+            revision_hash: source.revision_hash(),
+        })
+    }
+
+    /// Returns the source bundle identity.
+    pub const fn bundle(self) -> SourceBundleId {
+        self.bundle
+    }
+
+    /// Returns the complete source revision identity.
+    pub const fn revision(self) -> SourceRevisionId {
+        self.revision
+    }
+
+    /// Returns the parent source revision, when present.
+    pub const fn parent(self) -> Option<SourceRevisionId> {
+        self.parent
+    }
+
+    /// Returns the canonical hash of the complete ordered source bundle.
+    pub const fn bundle_hash(self) -> Sha256Digest {
+        self.bundle_hash
+    }
+
+    /// Returns the canonical hash of the source revision record.
+    pub const fn revision_hash(self) -> Sha256Digest {
+        self.revision_hash
+    }
+}
+
+/// Compatibility coordinates embedded in a build and its executable artifact.
+///
+/// These fields mirror the portable `sys.CompatibilityInfo` tuple. They are
+/// deliberately plain coordinates: this core envelope does not claim that a
+/// runtime can execute an artifact merely because it can deserialize it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ArtifactCompatibilityCoordinates {
+    language_version: String,
+    sys_version: String,
+    canonical_orna_codec_version: String,
+    repository_layout_version: String,
+    storage_manifest_version: String,
+    presentation_protocol_version: String,
+    supported_profiles: Vec<String>,
+}
+
+impl ArtifactCompatibilityCoordinates {
+    /// Creates the exact compatibility tuple retained by an artifact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        language_version: impl Into<String>,
+        sys_version: impl Into<String>,
+        canonical_orna_codec_version: impl Into<String>,
+        repository_layout_version: impl Into<String>,
+        storage_manifest_version: impl Into<String>,
+        presentation_protocol_version: impl Into<String>,
+        supported_profiles: Vec<String>,
+    ) -> Result<Self, ArtifactProvenanceError> {
+        let coordinates = Self {
+            language_version: language_version.into(),
+            sys_version: sys_version.into(),
+            canonical_orna_codec_version: canonical_orna_codec_version.into(),
+            repository_layout_version: repository_layout_version.into(),
+            storage_manifest_version: storage_manifest_version.into(),
+            presentation_protocol_version: presentation_protocol_version.into(),
+            supported_profiles,
+        };
+        coordinates.validate()?;
+        Ok(coordinates)
+    }
+
+    /// Returns the language compatibility coordinate.
+    pub fn language_version(&self) -> &str {
+        &self.language_version
+    }
+
+    /// Returns the system API compatibility coordinate.
+    pub fn sys_version(&self) -> &str {
+        &self.sys_version
+    }
+
+    /// Returns the canonical Orna codec compatibility coordinate.
+    pub fn canonical_orna_codec_version(&self) -> &str {
+        &self.canonical_orna_codec_version
+    }
+
+    /// Returns the repository layout compatibility coordinate.
+    pub fn repository_layout_version(&self) -> &str {
+        &self.repository_layout_version
+    }
+
+    /// Returns the storage manifest compatibility coordinate.
+    pub fn storage_manifest_version(&self) -> &str {
+        &self.storage_manifest_version
+    }
+
+    /// Returns the presentation/protocol compatibility coordinate.
+    pub fn presentation_protocol_version(&self) -> &str {
+        &self.presentation_protocol_version
+    }
+
+    /// Returns the explicitly supported profile identifiers.
+    pub fn supported_profiles(&self) -> &[String] {
+        &self.supported_profiles
+    }
+
+    fn validate(&self) -> Result<(), ArtifactProvenanceError> {
+        for (field, value) in [
+            ("language_version", self.language_version.as_str()),
+            ("sys_version", self.sys_version.as_str()),
+            (
+                "canonical_orna_codec_version",
+                self.canonical_orna_codec_version.as_str(),
+            ),
+            (
+                "repository_layout_version",
+                self.repository_layout_version.as_str(),
+            ),
+            (
+                "storage_manifest_version",
+                self.storage_manifest_version.as_str(),
+            ),
+            (
+                "presentation_protocol_version",
+                self.presentation_protocol_version.as_str(),
+            ),
+        ] {
+            if value.is_empty() {
+                return Err(ArtifactProvenanceError::EmptyCompatibilityCoordinate { field });
+            }
+        }
+        if self
+            .supported_profiles
+            .iter()
+            .any(|profile| profile.is_empty())
+        {
+            return Err(ArtifactProvenanceError::EmptySupportedProfile);
+        }
+        Ok(())
+    }
+}
+
+/// The standard-library coordinate used by a version-two catalogue hash.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ArtifactStandardLibraryCompatibility {
+    revision: StandardLibraryRevisionId,
+    source_revision: SourceRevisionId,
+    digest_version: StandardLibraryDigestVersion,
+    digest: Sha256Digest,
+}
+
+impl ArtifactStandardLibraryCompatibility {
+    /// Creates the retained standard-library compatibility coordinate.
+    pub const fn new(
+        revision: StandardLibraryRevisionId,
+        source_revision: SourceRevisionId,
+        digest_version: StandardLibraryDigestVersion,
+        digest: Sha256Digest,
+    ) -> Self {
+        Self {
+            revision,
+            source_revision,
+            digest_version,
+            digest,
+        }
+    }
+
+    /// Returns the standard-library revision identity.
+    pub const fn revision(self) -> StandardLibraryRevisionId {
+        self.revision
+    }
+
+    /// Returns the retained standard source revision identity.
+    pub const fn source_revision(self) -> SourceRevisionId {
+        self.source_revision
+    }
+
+    /// Returns the standard-library digest contract version.
+    pub const fn digest_version(self) -> StandardLibraryDigestVersion {
+        self.digest_version
+    }
+
+    /// Returns the canonical standard-library digest.
+    pub const fn digest(self) -> Sha256Digest {
+        self.digest
+    }
+}
+
+/// Catalogue identity and hash coordinates required by an executable artifact.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ArtifactCatalogueCompatibility {
+    revision: CatalogueRevisionId,
+    hash_version: CatalogueHashVersion,
+    digest: Sha256Digest,
+    standard: Option<ArtifactStandardLibraryCompatibility>,
+}
+
+impl ArtifactCatalogueCompatibility {
+    /// Creates catalogue coordinates for an application artifact.
+    pub fn new(
+        revision: CatalogueRevisionId,
+        hash_version: CatalogueHashVersion,
+        digest: Sha256Digest,
+        standard: Option<ArtifactStandardLibraryCompatibility>,
+    ) -> Result<Self, ArtifactProvenanceError> {
+        let coordinates = Self {
+            revision,
+            hash_version,
+            digest,
+            standard,
+        };
+        coordinates.validate()?;
+        Ok(coordinates)
+    }
+
+    /// Returns the catalogue revision identity.
+    pub const fn revision(self) -> CatalogueRevisionId {
+        self.revision
+    }
+
+    /// Returns the catalogue hash contract version.
+    pub const fn hash_version(self) -> CatalogueHashVersion {
+        self.hash_version
+    }
+
+    /// Returns the canonical catalogue digest.
+    pub const fn digest(self) -> Sha256Digest {
+        self.digest
+    }
+
+    /// Returns the pinned standard-library coordinate for version two.
+    pub const fn standard(self) -> Option<ArtifactStandardLibraryCompatibility> {
+        self.standard
+    }
+
+    fn validate(&self) -> Result<(), ArtifactProvenanceError> {
+        if self.revision == EMPTY_APPLICATION_CATALOGUE_REVISION_ID {
+            return Err(ArtifactProvenanceError::ReservedCatalogueRevision);
+        }
+        match (self.hash_version, self.standard) {
+            (CatalogueHashVersion::Version1, None) | (CatalogueHashVersion::Version2, Some(_)) => {
+                Ok(())
+            }
+            (CatalogueHashVersion::Version1, Some(_)) => {
+                Err(ArtifactProvenanceError::UnexpectedStandardLibraryCompatibility)
+            }
+            (CatalogueHashVersion::Version2, None) => {
+                Err(ArtifactProvenanceError::MissingStandardLibraryCompatibility)
+            }
+        }
+    }
+}
+
+/// A versioned, digest-bound provenance envelope for one executable artifact.
+///
+/// This is metadata and integrity evidence only. It does not deserialize or
+/// execute the payload, and it does not define or replace any system revision
+/// identifier. A caller must still perform runtime-specific admission.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExecutableArtifactProvenance {
+    version: u32,
+    source: ArtifactSourceSnapshot,
+    catalogue: ArtifactCatalogueCompatibility,
+    compatibility: ArtifactCompatibilityCoordinates,
+    revision: FunctionRevisionRecord,
+    digest: Sha256Digest,
+}
+
+impl ExecutableArtifactProvenance {
+    /// The first version of the core artifact provenance envelope.
+    pub const VERSION: u32 = 1;
+
+    /// Creates and binds one compiler-produced executable artifact to its
+    /// complete source and compatibility provenance.
+    pub fn new(
+        source: &StoredSourceRevision,
+        catalogue: ArtifactCatalogueCompatibility,
+        compatibility: ArtifactCompatibilityCoordinates,
+        revision: FunctionRevisionRecord,
+    ) -> Result<Self, ArtifactProvenanceError> {
+        let source_identity = ArtifactSourceSnapshot::from_revision(source)?;
+        validate_declaration_origin(source, &revision)?;
+        let mut envelope = Self {
+            version: Self::VERSION,
+            source: source_identity,
+            catalogue,
+            compatibility,
+            revision,
+            digest: Sha256Digest::from_bytes([0; 32]),
+        };
+        envelope.validate_unsigned()?;
+        envelope.digest = envelope.calculate_digest()?;
+        Ok(envelope)
+    }
+
+    /// Returns the envelope format version.
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// Returns the complete source snapshot identity.
+    pub const fn source(&self) -> ArtifactSourceSnapshot {
+        self.source
+    }
+
+    /// Returns the catalogue compatibility coordinates.
+    pub const fn catalogue(&self) -> ArtifactCatalogueCompatibility {
+        self.catalogue
+    }
+
+    /// Returns the portable build compatibility tuple.
+    pub fn compatibility(&self) -> &ArtifactCompatibilityCoordinates {
+        &self.compatibility
+    }
+
+    /// Returns the function and immutable function-revision metadata.
+    pub fn revision(&self) -> &FunctionRevisionRecord {
+        &self.revision
+    }
+
+    /// Returns the digest binding all envelope metadata and artifact bytes.
+    pub const fn digest(&self) -> Sha256Digest {
+        self.digest
+    }
+
+    /// Validates the envelope's structural invariants and digest binding.
+    ///
+    /// This method is required after deserializing an envelope. Deserialization
+    /// intentionally does not grant artifact authority by itself.
+    pub fn validate(&self) -> Result<(), ArtifactProvenanceError> {
+        self.validate_unsigned()?;
+        if self.calculate_digest()? != self.digest {
+            return Err(ArtifactProvenanceError::DigestMismatch);
+        }
+        Ok(())
+    }
+
+    /// Validates this envelope against the exact source, catalogue
+    /// coordinates, compatibility tuple and function revision used to build
+    /// it. A self-digest alone is not external authority: callers recovering
+    /// an envelope must use this method before treating it as provenance.
+    pub fn validate_against(
+        &self,
+        source: &StoredSourceRevision,
+        catalogue: &ArtifactCatalogueCompatibility,
+        compatibility: &ArtifactCompatibilityCoordinates,
+        revision: &FunctionRevisionRecord,
+    ) -> Result<(), ArtifactProvenanceError> {
+        self.validate()?;
+        let expected_source = ArtifactSourceSnapshot::from_revision(source)?;
+        validate_declaration_origin(source, revision)?;
+        if self.source != expected_source {
+            return Err(ArtifactProvenanceError::SourceSnapshotMismatch);
+        }
+        if &self.catalogue != catalogue {
+            return Err(ArtifactProvenanceError::CatalogueCoordinatesMismatch);
+        }
+        if &self.compatibility != compatibility {
+            return Err(ArtifactProvenanceError::CompatibilityCoordinatesMismatch);
+        }
+        if &self.revision != revision {
+            return Err(ArtifactProvenanceError::FunctionRevisionMismatch);
+        }
+        Ok(())
+    }
+
+    fn validate_unsigned(&self) -> Result<(), ArtifactProvenanceError> {
+        if self.version != Self::VERSION {
+            return Err(ArtifactProvenanceError::UnsupportedEnvelopeVersion {
+                version: self.version,
+            });
+        }
+        if self.source.parent() == Some(self.source.revision()) {
+            return Err(ArtifactProvenanceError::InvalidSourceSnapshot);
+        }
+        let origin = self.revision.declaration_origin();
+        if origin.byte_start() >= origin.byte_end() {
+            return Err(ArtifactProvenanceError::DeclarationOriginOutsideSourceSnapshot);
+        }
+        self.catalogue.validate()?;
+        self.compatibility.validate()?;
+        if self.revision.revision_number() == 0 {
+            return Err(ArtifactProvenanceError::ZeroFunctionRevisionNumber);
+        }
+        if self.revision.language_version() != self.compatibility.language_version() {
+            return Err(ArtifactProvenanceError::LanguageVersionMismatch);
+        }
+        let artifact = self.revision.artifact();
+        if artifact.format().is_empty()
+            || artifact.version() == 0
+            || artifact.payload().is_empty()
+            || crate::canonical_hash::artifact_payload_digest(artifact.payload())
+                .map_err(|_| ArtifactProvenanceError::InvalidArtifact)?
+                != artifact.content_hash()
+        {
+            return Err(ArtifactProvenanceError::InvalidArtifact);
+        }
+        Ok(())
+    }
+
+    fn calculate_digest(&self) -> Result<Sha256Digest, ArtifactProvenanceError> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"ornadb.artifact-provenance/v1\0");
+        hash_u32(&mut hasher, self.version);
+        hash_id(&mut hasher, self.source.bundle().to_bytes());
+        hash_id(&mut hasher, self.source.revision().to_bytes());
+        hash_optional_id(&mut hasher, self.source.parent());
+        hash_digest(&mut hasher, self.source.bundle_hash());
+        hash_digest(&mut hasher, self.source.revision_hash());
+        hash_id(&mut hasher, self.catalogue.revision().to_bytes());
+        hash_u32(&mut hasher, self.catalogue.hash_version().to_u32());
+        hash_digest(&mut hasher, self.catalogue.digest());
+        match self.catalogue.standard() {
+            None => hasher.update([0]),
+            Some(standard) => {
+                hasher.update([1]);
+                hash_id(&mut hasher, standard.revision().to_bytes());
+                hash_id(&mut hasher, standard.source_revision().to_bytes());
+                hash_u32(&mut hasher, standard.digest_version().to_u32());
+                hash_digest(&mut hasher, standard.digest());
+            }
+        }
+        hash_coordinates(&mut hasher, &self.compatibility)?;
+        hash_id(&mut hasher, self.revision.function().to_bytes());
+        hash_id(&mut hasher, self.revision.id().to_bytes());
+        hash_u64(&mut hasher, self.revision.revision_number());
+        hash_id(
+            &mut hasher,
+            self.revision.declaration_origin().source_unit().to_bytes(),
+        );
+        hash_u32(&mut hasher, self.revision.declaration_origin().byte_start());
+        hash_u32(&mut hasher, self.revision.declaration_origin().byte_end());
+        hash_digest(&mut hasher, self.revision.declaration_content_hash());
+        hash_digest(&mut hasher, self.revision.semantic_hash());
+        hash_u32(&mut hasher, self.revision.semantic_hash_version().to_u32());
+        hash_text(&mut hasher, self.revision.language_version())?;
+        let artifact = self.revision.artifact();
+        hasher.update([match artifact.kind() {
+            ExecutableArtifactKind::Server => 0,
+            ExecutableArtifactKind::Client => 1,
+        }]);
+        hash_text(&mut hasher, artifact.format())?;
+        hash_u32(&mut hasher, artifact.version());
+        hash_bytes(&mut hasher, artifact.payload())?;
+        hash_digest(&mut hasher, artifact.content_hash());
+        Ok(Sha256Digest::from_bytes(hasher.finalize().into()))
+    }
+}
+
+/// An error proving that an artifact provenance envelope cannot be trusted.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ArtifactProvenanceError {
+    /// The envelope format version is not supported by this implementation.
+    UnsupportedEnvelopeVersion { version: u32 },
+    /// A required compatibility coordinate is empty.
+    EmptyCompatibilityCoordinate { field: &'static str },
+    /// A supported profile identifier is empty.
+    EmptySupportedProfile,
+    /// The catalogue uses the reserved offline-check identity.
+    ReservedCatalogueRevision,
+    /// A version-one catalogue unexpectedly names a standard library.
+    UnexpectedStandardLibraryCompatibility,
+    /// A version-two catalogue omitted its standard-library coordinate.
+    MissingStandardLibraryCompatibility,
+    /// The source revision or its retained hashes are inconsistent.
+    InvalidSourceSnapshot,
+    /// The declaration origin is not within the complete source snapshot.
+    DeclarationOriginOutsideSourceSnapshot,
+    /// The declaration hash does not match the exact source-origin bytes.
+    DeclarationContentHashMismatch,
+    /// The function language coordinate differs from the build coordinate.
+    LanguageVersionMismatch,
+    /// The artifact payload or descriptor is inconsistent.
+    InvalidArtifact,
+    /// A canonical envelope component is too large to encode.
+    LengthOverflow { field: &'static str },
+    /// The retained envelope digest does not match its contents.
+    DigestMismatch,
+    /// The embedded function revision number is zero.
+    ZeroFunctionRevisionNumber,
+    /// The envelope source identity differs from the supplied source.
+    SourceSnapshotMismatch,
+    /// The envelope catalogue coordinates differ from the supplied coordinates.
+    CatalogueCoordinatesMismatch,
+    /// The envelope build coordinates differ from the supplied coordinates.
+    CompatibilityCoordinatesMismatch,
+    /// The envelope function revision differs from the supplied revision.
+    FunctionRevisionMismatch,
+}
+
+impl fmt::Display for ArtifactProvenanceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedEnvelopeVersion { version } => write!(
+                formatter,
+                "unsupported artifact provenance version {version}"
+            ),
+            Self::EmptyCompatibilityCoordinate { field } => {
+                write!(
+                    formatter,
+                    "artifact compatibility coordinate {field} is empty"
+                )
+            }
+            Self::EmptySupportedProfile => {
+                formatter.write_str("artifact supported profile is empty")
+            }
+            Self::ReservedCatalogueRevision => {
+                formatter.write_str("artifact catalogue uses the reserved offline-check revision")
+            }
+            Self::UnexpectedStandardLibraryCompatibility => formatter.write_str(
+                "version-one artifact catalogue unexpectedly has standard-library compatibility",
+            ),
+            Self::MissingStandardLibraryCompatibility => formatter
+                .write_str("version-two artifact catalogue lacks standard-library compatibility"),
+            Self::InvalidSourceSnapshot => {
+                formatter.write_str("artifact source snapshot is invalid")
+            }
+            Self::DeclarationOriginOutsideSourceSnapshot => {
+                formatter.write_str("artifact declaration origin is outside its source snapshot")
+            }
+            Self::DeclarationContentHashMismatch => {
+                formatter.write_str("artifact declaration hash differs from source-origin bytes")
+            }
+            Self::LanguageVersionMismatch => {
+                formatter.write_str("artifact language coordinates disagree")
+            }
+            Self::InvalidArtifact => {
+                formatter.write_str("artifact payload or descriptor is invalid")
+            }
+            Self::LengthOverflow { field } => {
+                write!(formatter, "artifact provenance {field} exceeds u32 length")
+            }
+            Self::DigestMismatch => formatter.write_str("artifact provenance digest mismatch"),
+            Self::ZeroFunctionRevisionNumber => {
+                formatter.write_str("artifact provenance function revision number is zero")
+            }
+            Self::SourceSnapshotMismatch => {
+                formatter.write_str("artifact provenance source snapshot mismatch")
+            }
+            Self::CatalogueCoordinatesMismatch => {
+                formatter.write_str("artifact provenance catalogue coordinates mismatch")
+            }
+            Self::CompatibilityCoordinatesMismatch => {
+                formatter.write_str("artifact provenance compatibility coordinates mismatch")
+            }
+            Self::FunctionRevisionMismatch => {
+                formatter.write_str("artifact provenance function revision mismatch")
+            }
+        }
+    }
+}
+
+impl Error for ArtifactProvenanceError {}
+
+fn validate_declaration_origin(
+    source: &StoredSourceRevision,
+    revision: &FunctionRevisionRecord,
+) -> Result<(), ArtifactProvenanceError> {
+    let origin = revision.declaration_origin();
+    let Some(unit) = source
+        .units()
+        .iter()
+        .find(|unit| unit.id() == origin.source_unit())
+    else {
+        return Err(ArtifactProvenanceError::DeclarationOriginOutsideSourceSnapshot);
+    };
+    if origin.byte_start() >= origin.byte_end()
+        || origin.byte_end() as usize > unit.content().len()
+        || !unit
+            .content()
+            .is_char_boundary(origin.byte_start() as usize)
+        || !unit.content().is_char_boundary(origin.byte_end() as usize)
+    {
+        return Err(ArtifactProvenanceError::DeclarationOriginOutsideSourceSnapshot);
+    }
+    let declaration =
+        &unit.content().as_bytes()[origin.byte_start() as usize..origin.byte_end() as usize];
+    let declaration_hash = crate::canonical_hash::function_declaration_digest(declaration)
+        .map_err(|_| ArtifactProvenanceError::InvalidSourceSnapshot)?;
+    if declaration_hash != revision.declaration_content_hash() {
+        return Err(ArtifactProvenanceError::DeclarationContentHashMismatch);
+    }
+    Ok(())
+}
+
+fn hash_id(hasher: &mut Sha256, id: [u8; 16]) {
+    hasher.update(id);
+}
+
+fn hash_optional_id(hasher: &mut Sha256, id: Option<SourceRevisionId>) {
+    match id {
+        None => hasher.update([0]),
+        Some(id) => {
+            hasher.update([1]);
+            hash_id(hasher, id.to_bytes());
+        }
+    }
+}
+
+fn hash_digest(hasher: &mut Sha256, digest: Sha256Digest) {
+    hasher.update(digest.to_bytes());
+}
+
+fn hash_u32(hasher: &mut Sha256, value: u32) {
+    hasher.update(value.to_be_bytes());
+}
+
+fn hash_u64(hasher: &mut Sha256, value: u64) {
+    hasher.update(value.to_be_bytes());
+}
+
+fn hash_text(hasher: &mut Sha256, value: &str) -> Result<(), ArtifactProvenanceError> {
+    hash_bytes_named(hasher, value.as_bytes(), "text")
+}
+
+fn hash_bytes(hasher: &mut Sha256, value: &[u8]) -> Result<(), ArtifactProvenanceError> {
+    hash_bytes_named(hasher, value, "payload")
+}
+
+fn hash_bytes_named(
+    hasher: &mut Sha256,
+    value: &[u8],
+    field: &'static str,
+) -> Result<(), ArtifactProvenanceError> {
+    let length = u32::try_from(value.len())
+        .map_err(|_| ArtifactProvenanceError::LengthOverflow { field })?;
+    hash_u32(hasher, length);
+    hasher.update(value);
+    Ok(())
+}
+
+fn hash_coordinates(
+    hasher: &mut Sha256,
+    coordinates: &ArtifactCompatibilityCoordinates,
+) -> Result<(), ArtifactProvenanceError> {
+    for value in [
+        coordinates.language_version(),
+        coordinates.sys_version(),
+        coordinates.canonical_orna_codec_version(),
+        coordinates.repository_layout_version(),
+        coordinates.storage_manifest_version(),
+        coordinates.presentation_protocol_version(),
+    ] {
+        hash_text(hasher, value)?;
+    }
+    let profile_count = u32::try_from(coordinates.supported_profiles().len()).map_err(|_| {
+        ArtifactProvenanceError::LengthOverflow {
+            field: "supported profiles",
+        }
+    })?;
+    hash_u32(hasher, profile_count);
+    for profile in coordinates.supported_profiles() {
+        hash_text(hasher, profile)?;
+    }
+    Ok(())
 }
 
 /// One immutable revision of an executable function.
