@@ -596,6 +596,24 @@ fn relation_comparisons_require_an_explicit_comparison_operation() {
 }
 
 #[test]
+fn ordered_comparisons_reject_mismatched_and_unsupported_evaluator_values() {
+    for expression in ["1 < true", "[1] < [2]", "{ value: 1 } < { value: 2 }"] {
+        let result = analyze(&[ModuleInput::new(
+            "ordered-comparison.orna",
+            format!("pub fn compare() = {expression};"),
+        )]);
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code() == DIAG_TYPE
+                    && diagnostic.message() == "static types are incompatible"
+            }),
+            "{expression}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
 fn failure_skip_requires_a_typed_version_precondition() {
     for arguments in [
         "failure.reference, expected_status: failure.status, reason: reason",
