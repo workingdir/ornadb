@@ -432,14 +432,27 @@ impl Runtime {
         self.generation
     }
     /// Starts a new owner generation and invalidates every handle from the
-    /// previous generation. Live invocation state is deliberately not
-    /// reparented across an owner restart.
+    /// previous generation. Terminal observations remain available to a
+    /// matching idempotent request; work that was still active is retained as
+    /// an orphaned classification and is never re-executed.
     pub fn restart(&mut self) -> RuntimeId {
         self.generation = self.generation.saturating_add(1);
         self.id = RuntimeId::new(format!("{}@{}", self.id.as_str(), self.generation));
-        self.next_invocation = 0;
-        self.invocations.clear();
-        self.idempotency.clear();
+        for invocation in self.invocations.values_mut() {
+            if invocation.terminal.is_none() {
+                invocation.terminal = Some(RetainedInvocationResult::ClassificationOnly(
+                    TerminalClass::Orphaned,
+                ));
+            }
+        }
+        for entry in self.idempotency.values_mut() {
+            if entry.terminal.is_none() {
+                entry.terminal = self
+                    .invocations
+                    .get(&entry.invocation)
+                    .and_then(|invocation| invocation.terminal.clone());
+            }
+        }
         self.id.clone()
     }
     pub fn admit<T>(
@@ -466,8 +479,12 @@ impl Runtime {
                 None => Admission::Active { handle },
             });
         }
-        self.next_invocation += 1;
-        let invocation = InvocationId::new(format!("invocation-{}", self.next_invocation));
+        let next_invocation = self
+            .next_invocation
+            .checked_add(1)
+            .ok_or(AdmissionError::RuntimeUnavailable)?;
+        self.next_invocation = next_invocation;
+        let invocation = InvocationId::new(format!("invocation-{next_invocation}"));
         let boundary = ExecutionBoundary {
             invocation: invocation.clone(),
             identity: identity.clone(),
@@ -704,18 +721,26 @@ impl Runtime {
     }
     pub fn expire<T>(&mut self, handle: &InvocationHandle<T>) -> Result<(), AdmissionError> {
         self.check_handle(handle)?;
-        if self
+        let Some(outcome) = self
             .invocations
             .get(&handle.invocation)
             .expect("checked")
             .terminal
-            .is_none()
-        {
+            .as_ref()
+            .map(RetainedInvocationResult::terminal_class)
+        else {
             return Ok(());
+        };
+        for entry in self
+            .idempotency
+            .values_mut()
+            .filter(|entry| entry.invocation == handle.invocation)
+        {
+            entry.terminal = Some(RetainedInvocationResult::ClassificationOnly(
+                outcome.clone(),
+            ));
         }
         self.invocations.remove(&handle.invocation);
-        self.idempotency
-            .retain(|_, entry| entry.invocation != handle.invocation);
         Ok(())
     }
     fn handle<T>(&self, invocation: &InvocationId, result_type: TypeId) -> InvocationHandle<T> {
@@ -1572,9 +1597,9 @@ mod tests {
         assert!(matches!(
             supervisor.run(request, &mut after_restart),
             Ok(InvocationState::Terminal(RetainedInvocationResult::Success(ref retained)))
-                if retained.canonical() == Some(b"after-restart".as_slice())
+                if retained.canonical() == Some(b"answer".as_slice())
         ));
-        assert_eq!(after_restart.calls, 1);
+        assert_eq!(after_restart.calls, 0);
     }
     #[test]
     fn supervised_start_timeout_does_not_cancel_or_duplicate_work() {
@@ -1758,13 +1783,13 @@ mod tests {
     }
 
     #[test]
-    fn restart_changes_runtime_generation_and_invalidates_prior_handles() {
+    fn restart_changes_runtime_generation_and_retains_active_as_orphaned() {
         let mut runtime = Runtime::new(RuntimeId::new("owner"));
-        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
-        request.idempotency_key = Some("key".into());
+        let mut active_request = request(Some(value("Int", "1")), ArgumentMap::default());
+        active_request.idempotency_key = Some("key".into());
         let old_id = runtime.id().clone();
         let old_generation = runtime.generation();
-        let old_handle = match runtime.admit(request.clone()).unwrap() {
+        let old_handle = match runtime.admit(active_request.clone()).unwrap() {
             Admission::New { handle, .. } => handle,
             _ => unreachable!(),
         };
@@ -1778,12 +1803,75 @@ mod tests {
             runtime.check_handle(&old_handle),
             Err(AdmissionError::ForeignRuntime)
         );
-        let new_handle = match runtime.admit(request).unwrap() {
-            Admission::New { handle, .. } => handle,
-            _ => panic!("a restarted owner must not replay prior idempotency state"),
+        assert_eq!(
+            runtime.invocation_state(&old_handle),
+            Err(AdmissionError::ForeignRuntime)
+        );
+        let new_handle = match runtime.admit(active_request.clone()).unwrap() {
+            Admission::Terminal {
+                handle,
+                outcome: TerminalClass::Orphaned,
+                result: RetainedInvocationResult::ClassificationOnly(TerminalClass::Orphaned),
+            } => handle,
+            _ => panic!("a restarted owner must retain the orphaned operation"),
         };
         assert_ne!(new_handle.runtime(), old_handle.runtime());
         assert_eq!(new_handle.invocation(), old_handle.invocation());
+
+        let mut executor = Executor {
+            calls: 0,
+            result: InvocationResult::Success(value("Str", "must-not-run")),
+        };
+        assert!(matches!(
+            runtime.run(active_request, &mut executor),
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::ClassificationOnly(TerminalClass::Orphaned)
+            ))
+        ));
+        assert_eq!(executor.calls, 0);
+
+        let mut next_request = request(Some(value("Int", "1")), ArgumentMap::default());
+        next_request.idempotency_key = Some("next-key".into());
+        let next_handle = match runtime.admit(next_request).unwrap() {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+        assert_ne!(next_handle.invocation(), old_handle.invocation());
+    }
+
+    #[test]
+    fn restart_preserves_terminal_result_and_fences_old_handle() {
+        let mut runtime = Runtime::new(RuntimeId::new("owner"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.idempotency_key = Some("key".into());
+        let old_handle = match runtime.admit(request.clone()).unwrap() {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+        runtime
+            .retain_terminal(
+                &old_handle,
+                InvocationResult::Success(value("Str", "answer")),
+            )
+            .unwrap();
+
+        runtime.restart();
+
+        assert_eq!(
+            runtime.check_handle(&old_handle),
+            Err(AdmissionError::ForeignRuntime)
+        );
+        let mut executor = Executor {
+            calls: 0,
+            result: InvocationResult::Success(value("Str", "must-not-run")),
+        };
+        assert!(matches!(
+            runtime.run(request, &mut executor),
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::Success(ref value)
+            )) if value.canonical() == Some(b"answer".as_slice())
+        ));
+        assert_eq!(executor.calls, 0);
     }
 
     #[test]
@@ -1869,6 +1957,118 @@ mod tests {
             Err(AdmissionError::IdempotencyMismatch)
         ));
     }
+    #[test]
+    fn terminal_expiration_retains_classification_without_operational_handle() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.idempotency_key = Some("key".into());
+        let handle = match runtime.admit(request.clone()).unwrap() {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+
+        runtime
+            .retain_terminal(&handle, InvocationResult::Success(value("Str", "answer")))
+            .unwrap();
+        runtime.expire(&handle).unwrap();
+
+        assert_eq!(
+            runtime.check_handle(&handle),
+            Err(AdmissionError::ExpiredHandle)
+        );
+        let replay = runtime.admit(request.clone()).unwrap();
+        assert!(matches!(
+            replay,
+            Admission::Terminal {
+                outcome: TerminalClass::Succeeded,
+                result: RetainedInvocationResult::ClassificationOnly(TerminalClass::Succeeded),
+                ..
+            }
+        ));
+
+        let mut executor = Executor {
+            calls: 0,
+            result: InvocationResult::Success(value("Str", "rerun")),
+        };
+        assert!(matches!(
+            runtime.run(request.clone(), &mut executor),
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::ClassificationOnly(TerminalClass::Succeeded)
+            ))
+        ));
+        assert_eq!(executor.calls, 0);
+
+        let mut mismatched = request;
+        mismatched.context.locale = Some("en-GB".into());
+        assert!(matches!(
+            runtime.admit(mismatched),
+            Err(AdmissionError::IdempotencyMismatch)
+        ));
+    }
+    #[test]
+    fn terminal_expiration_retains_classification_across_restart() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.idempotency_key = Some("key".into());
+        let handle = match runtime.admit(request.clone()).unwrap() {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+        runtime
+            .retain_terminal(&handle, InvocationResult::Success(value("Str", "before")))
+            .unwrap();
+        runtime.expire(&handle).unwrap();
+        runtime.restart();
+
+        let mut executor = Executor {
+            calls: 0,
+            result: InvocationResult::Success(value("Str", "after")),
+        };
+        assert!(matches!(
+            runtime.run(request, &mut executor),
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::ClassificationOnly(TerminalClass::Succeeded)
+            ))
+        ));
+        assert_eq!(executor.calls, 0);
+    }
+
+    #[test]
+    fn invocation_id_exhaustion_fails_closed_without_overwriting_retained_state() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let mut retained_request = request(Some(value("Int", "1")), ArgumentMap::default());
+        retained_request.idempotency_key = Some("retained".into());
+        let retained_handle = match runtime.admit(retained_request.clone()).unwrap() {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+        runtime
+            .retain_terminal(
+                &retained_handle,
+                InvocationResult::Success(value("Str", "retained")),
+            )
+            .unwrap();
+
+        runtime.next_invocation = u64::MAX;
+        let mut fresh_request = request(Some(value("Int", "1")), ArgumentMap::default());
+        fresh_request.idempotency_key = Some("fresh".into());
+
+        assert!(matches!(
+            runtime.admit(fresh_request),
+            Err(AdmissionError::RuntimeUnavailable)
+        ));
+        assert_eq!(runtime.next_invocation, u64::MAX);
+        assert_eq!(runtime.invocations.len(), 1);
+        assert_eq!(runtime.idempotency.len(), 1);
+        assert!(matches!(
+            runtime.admit(retained_request),
+            Ok(Admission::Terminal {
+                result: RetainedInvocationResult::Success(ref result),
+                ..
+            }) if result.canonical() == Some(b"retained".as_slice())
+        ));
+    }
+
     #[test]
     fn cancellation_is_not_ordinary_failure() {
         let cancelled: InvocationResult<()> = InvocationResult::Cancelled(Some(Diagnostic {
