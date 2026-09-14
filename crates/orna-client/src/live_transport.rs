@@ -230,22 +230,30 @@ impl LiveClient {
         if response.status() != expected_status {
             return Err(LiveTransportError::HttpStatus(response.status()));
         }
-        let set_cookie = response
+        let set_cookies = response
             .headers()
-            .get("set-cookie")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned)
-            .ok_or(LiveTransportError::Response(
+            .get_all("set-cookie")
+            .iter()
+            .map(|value| {
+                value
+                    .to_str()
+                    .map(str::to_owned)
+                    .map_err(|_| LiveTransportError::Response("invalid session cookie"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if set_cookies.is_empty() {
+            return Err(LiveTransportError::Response(
                 "session response omitted cookie",
-            ))?;
+            ));
+        }
         let body =
             read_bounded_response_body(response, self.config.limits.max_message_bytes).await?;
         reject_duplicate_json_members(&body, self.config.limits.max_depth)?;
         let value: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|_| LiveTransportError::Response("invalid session JSON"))?;
-        let mut session = parse_session(
+        let mut session = parse_session_with_set_cookies(
             value,
-            &set_cookie,
+            &set_cookies,
             self.config.limits,
             self.config.endpoint.scheme() == "https",
         )?;
@@ -430,6 +438,45 @@ fn parse_session(
         cookie,
         limits: response_limits,
     })
+}
+
+fn parse_session_with_set_cookies(
+    value: serde_json::Value,
+    set_cookies: &[String],
+    limits: Limits,
+    secure_transport: bool,
+) -> Result<LiveSession, LiveTransportError> {
+    let object = value.as_object().ok_or(LiveTransportError::Response(
+        "session response is not an object",
+    ))?;
+    const SESSION_FIELDS: &[&str] = &[
+        "session",
+        "database",
+        "runtime",
+        "resume_token",
+        "websocket_path",
+        "lease_ms",
+        "limits",
+    ];
+    if object.len() != SESSION_FIELDS.len()
+        || object
+            .keys()
+            .any(|key| !SESSION_FIELDS.contains(&key.as_str()))
+    {
+        return Err(LiveTransportError::Response(
+            "session response has unknown fields",
+        ));
+    }
+    let websocket_path = object
+        .get("websocket_path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(LiveTransportError::Response("websocket_path"))?;
+    let cookie = select_session_cookie(
+        set_cookies.iter().map(String::as_str),
+        websocket_path,
+        secure_transport,
+    )?;
+    parse_session(value, &cookie, limits, secure_transport)
 }
 
 fn validate_resume_token(token: &str) -> Result<(), LiveTransportError> {
@@ -629,6 +676,34 @@ fn parse_set_cookie(
         return Err(LiveTransportError::Response("invalid session cookie"));
     }
     Ok(pair.to_owned())
+}
+
+fn select_session_cookie<'a, I>(
+    values: I,
+    websocket_path: &str,
+    secure_transport: bool,
+) -> Result<String, LiveTransportError>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut selected = None;
+    for value in values {
+        let pair = value.split(';').next().unwrap_or_default().trim();
+        let name = pair.split_once('=').map_or(pair, |(name, _)| name).trim();
+        if name != "orna_session" {
+            continue;
+        }
+        if selected.is_some() {
+            return Err(LiveTransportError::Response(
+                "session response contains duplicate session cookies",
+            ));
+        }
+        parse_set_cookie(value, websocket_path, secure_transport)?;
+        selected = Some(value.to_owned());
+    }
+    selected.ok_or(LiveTransportError::Response(
+        "session response omitted cookie",
+    ))
 }
 
 fn json_whitespace(byte: u8) -> bool {
@@ -1036,6 +1111,49 @@ mod tests {
 
     fn valid_cookie() -> String {
         "orna_session=opaque-cookie; Path=/orna/live/00000000-0000-0000-0000-000000000001; HttpOnly; SameSite=Strict; Secure".into()
+    }
+
+    #[test]
+    fn session_cookie_selection_allows_unrelated_cookie_before_session() {
+        let cookie = valid_cookie();
+        let set_cookies = vec!["tracking=unrelated".to_owned(), cookie];
+        let session =
+            parse_session_with_set_cookies(valid_response(), &set_cookies, Limits::default(), true)
+                .unwrap();
+        assert_eq!(session.cookie, "orna_session=opaque-cookie");
+    }
+
+    #[test]
+    fn session_cookie_selection_allows_unrelated_cookie_after_session() {
+        let cookie = valid_cookie();
+        let set_cookies = vec![cookie, "tracking=unrelated".to_owned()];
+        let session =
+            parse_session_with_set_cookies(valid_response(), &set_cookies, Limits::default(), true)
+                .unwrap();
+        assert_eq!(session.cookie, "orna_session=opaque-cookie");
+    }
+
+    #[test]
+    fn session_cookie_selection_rejects_duplicate_session_cookies() {
+        let cookie = valid_cookie();
+        let replacement = cookie.replace("opaque-cookie", "replacement");
+        let set_cookies = vec![cookie, replacement];
+        assert!(
+            parse_session_with_set_cookies(valid_response(), &set_cookies, Limits::default(), true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn session_cookie_selection_rejects_missing_session_cookie() {
+        let set_cookies = vec![
+            "tracking=unrelated".to_owned(),
+            "preference=dark".to_owned(),
+        ];
+        assert!(
+            parse_session_with_set_cookies(valid_response(), &set_cookies, Limits::default(), true)
+                .is_err()
+        );
     }
 
     #[test]
