@@ -36,7 +36,7 @@ fn incompatible_typed_request(mode: InvocationMode) -> AdmissionRequest<()> {
         function: FunctionDescriptor {
             identity: FunctionIdentity {
                 function: FunctionId::new("contact"),
-                revision: RevisionId::new("r1"),
+                revision: RevisionId::from_bytes([0x61; 32]),
                 snapshot: SnapshotId::new("s1"),
             },
             parameters: Vec::new(),
