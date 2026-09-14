@@ -19,7 +19,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use parquet::{
-    basic::{Compression, PageType, Type},
+    basic::{Compression, Encoding, PageType, Type},
     file::reader::{FileReader, SerializedFileReader},
 };
 use sha2::{Digest, Sha256};
@@ -387,6 +387,12 @@ fn verify_physical_metadata(
             || row_group.num_columns() == 0
             || row_group.columns().iter().any(|column| {
                 !matches!(column.compression(), Compression::ZSTD(_))
+                    || column.encodings().any(|encoding| {
+                        !matches!(
+                            encoding,
+                            Encoding::PLAIN | Encoding::RLE | Encoding::RLE_DICTIONARY
+                        )
+                    })
                     || column.num_values() < row_group.num_rows()
                     || column.compressed_size() <= 0
                     || column.uncompressed_size() <= 0
@@ -416,6 +422,11 @@ fn verify_physical_metadata(
                     if page.page_type() != PageType::DATA_PAGE_V2 {
                         return Err(RepositoryError::InvalidCompactManifest);
                     }
+                    if !matches!(page.encoding(), Encoding::PLAIN | Encoding::RLE_DICTIONARY) {
+                        return Err(RepositoryError::InvalidCompactManifest);
+                    }
+                } else if page.is_dictionary_page() && page.encoding() != Encoding::PLAIN {
+                    return Err(RepositoryError::InvalidCompactManifest);
                 }
             }
             if data_pages == 0 {
@@ -3021,6 +3032,15 @@ mod tests {
     }
 
     fn bool_parquet(table: Uuid, schema: &SchemaDescriptor, columns: &[u8]) -> Vec<u8> {
+        bool_parquet_with_encoding(table, schema, columns, Encoding::PLAIN)
+    }
+
+    fn bool_parquet_with_encoding(
+        table: Uuid,
+        schema: &SchemaDescriptor,
+        columns: &[u8],
+        encoding: Encoding,
+    ) -> Vec<u8> {
         let physical_name = format!("f_{}", BOOL_FIELD.simple());
         let schema_descriptor = Arc::new(
             parse_message_type(&format!(
@@ -3049,6 +3069,7 @@ mod tests {
             WriterProperties::builder()
                 .set_compression(Compression::ZSTD(Default::default()))
                 .set_dictionary_enabled(false)
+                .set_encoding(encoding)
                 .set_writer_version(WriterVersion::PARQUET_2_0)
                 .set_key_value_metadata(Some(metadata))
                 .build(),
@@ -3316,6 +3337,19 @@ mod tests {
         assert_eq!((records, values_read, levels_read), (2, 2, 2));
         assert_eq!(values, [false, true]);
         drop(root);
+    }
+
+    #[test]
+    fn rejects_forbidden_compact_value_encoding_before_publication() {
+        let descriptor = bool_schema(BOOL_TABLE, BOOL_FIELD);
+        let schema = schema_descriptor_fingerprint(&descriptor).unwrap();
+        let columns = bool_columns(BOOL_FIELD);
+        let bytes = bool_parquet_with_encoding(BOOL_TABLE, &descriptor, &columns, Encoding::RLE);
+
+        assert!(matches!(
+            verify_physical_metadata(BOOL_TABLE, schema, "test-encoder-v1", &columns, 2, &bytes,),
+            Err(RepositoryError::InvalidCompactManifest)
+        ));
     }
 
     #[test]
