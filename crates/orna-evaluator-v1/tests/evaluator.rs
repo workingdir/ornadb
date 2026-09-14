@@ -3571,7 +3571,7 @@ fn integer_ranges_are_canonical_membership_values_and_finite_iterables() {
 
 #[test]
 fn integer_ranges_reject_unsupported_forms_and_obey_finite_limits() {
-    for source in ["1.0..5.0", "1 in 1.0..5.0", "1 in 1..5.0"] {
+    for source in ["1.0f..5.0f", "1 in 1.0f..5.0f", "1 in 1..5.0f"] {
         assert_eq!(
             code(evaluate_expression(
                 source,
@@ -3655,6 +3655,116 @@ fn date_range(lower: Option<&str>, upper: Option<&str>, upper_inclusive: bool) -
         ])),
     ))
     .unwrap()
+}
+
+fn decimal_range(
+    lower: Option<(i64, i64)>,
+    upper: Option<(i64, i64)>,
+    upper_inclusive: bool,
+) -> Value {
+    let endpoint = |value: Option<(i64, i64)>| match value {
+        Some((coefficient, exponent10)) => Raw::Tag(
+            60013,
+            Box::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Value::decimal(coefficient.into(), exponent10.into())
+                    .unwrap()
+                    .raw()
+                    .clone(),
+            ])),
+        ),
+        None => Raw::Tag(60013, Box::new(Raw::Array(vec![Raw::Int(0.into())]))),
+    };
+    Value::new(Raw::Tag(
+        60019,
+        Box::new(Raw::Array(vec![
+            endpoint(lower),
+            endpoint(upper),
+            Raw::Bool(upper_inclusive),
+        ])),
+    ))
+    .unwrap()
+}
+
+#[test]
+fn decimal_ranges_are_canonical_membership_values_with_optional_bounds_and_ordering() {
+    let half_open = decimal_range(Some((125, -2)), Some((25, -1)), false);
+    assert_eq!(evaluate("1.25..2.5"), half_open);
+    assert_eq!(
+        evaluate("1.25 in 1.25..2.5"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate("2.5 in 1.25..2.5"),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate("2.5 in 1.25..=2.5"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate("-1.0 in ..1.25"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate("3.0 in 2.5.."),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate("(1.25..2.5) < (1.5..2.5)"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+
+    let environment =
+        Environment::from([("range".into(), decimal_range(None, Some((125, -2)), false))]);
+    assert_eq!(
+        evaluate_expression("range", &environment, Limits::default()).unwrap(),
+        decimal_range(None, Some((125, -2)), false)
+    );
+}
+
+#[test]
+fn decimal_ranges_allow_empty_values_but_reject_mixed_types_and_iteration() {
+    assert_eq!(
+        evaluate("1.25 in 1.25..1.25"),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate("1.25 in 2.5..1.25"),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    for source in [
+        "1.25..2",
+        "1.25 in 1.25..2",
+        "1 in 1.25..2.5",
+        "1.25f..2.5f",
+        "2024-02-01..2.5",
+        "2024-02-01T00:00:00Z..2.5",
+        "(..1.25) < (1..)",
+        "sort_by([(..1.25), (1..)], value => value)",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                source,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            "ORNA-EVAL-TYPE",
+            "{source}"
+        );
+    }
+    let environment = Environment::from([(
+        "range".into(),
+        decimal_range(Some((125, -2)), Some((25, -1)), false),
+    )]);
+    assert_eq!(
+        code(evaluate_expression(
+            "if true { for value in range { value }; 0 }",
+            &environment,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-TYPE"
+    );
 }
 
 #[test]

@@ -4059,6 +4059,7 @@ fn option_value(
 fn range_endpoint_kind(value: &Value) -> Option<&'static str> {
     match value {
         Value::Int(_) => Some("Int"),
+        Value::Decimal(_) => Some("Decimal"),
         Value::Date(_) => Some("Date"),
         _ => None,
     }
