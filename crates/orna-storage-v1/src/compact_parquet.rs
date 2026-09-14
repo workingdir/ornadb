@@ -266,7 +266,7 @@ fn validate_key_column(
     let observed =
         u64::try_from(metadata.num_values()).map_err(|_| CompactParquetError::InvalidParquet)?;
     let expected = u64::try_from(expected_rows).map_err(|_| CompactParquetError::InvalidParquet)?;
-    if observed > expected {
+    if observed != expected {
         return Err(CompactParquetError::RowCountMismatch { expected, observed });
     }
     if metadata.encodings().any(|encoding| {
@@ -281,6 +281,7 @@ fn validate_key_column(
     let mut pages = row_group
         .get_column_page_reader(index)
         .map_err(|_| CompactParquetError::InvalidParquet)?;
+    let mut page_values = 0_u64;
     while let Some(page) = pages
         .get_next_page()
         .map_err(|_| CompactParquetError::InvalidParquet)?
@@ -296,6 +297,17 @@ fn validate_key_column(
         if !supported {
             return Err(CompactParquetError::UnsupportedValueEncoding);
         }
+        if page.is_data_page() {
+            page_values = page_values
+                .checked_add(u64::from(page.num_values()))
+                .ok_or(CompactParquetError::InvalidParquet)?;
+        }
+    }
+    if page_values != expected {
+        return Err(CompactParquetError::RowCountMismatch {
+            expected,
+            observed: page_values,
+        });
     }
     Ok(())
 }
@@ -2067,6 +2079,45 @@ mod tests {
         data
     }
 
+    fn with_understated_row_counts(bytes: Vec<u8>) -> Vec<u8> {
+        let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+        let footer = footer_start(&bytes);
+        let file = reader.metadata().file_metadata();
+        let metadata = parquet::file::metadata::FileMetaData::new(
+            file.version(),
+            1,
+            file.created_by().map(str::to_owned),
+            file.key_value_metadata().cloned(),
+            file.schema_descr_ptr(),
+            file.column_orders().cloned(),
+        );
+        let row_groups = reader
+            .metadata()
+            .row_groups()
+            .iter()
+            .cloned()
+            .map(|row_group| {
+                let mut row_group = row_group.into_builder();
+                let mut columns = row_group.take_columns();
+                let column = columns.pop().unwrap();
+                columns.push(column.into_builder().set_num_values(1).build().unwrap());
+                row_group
+                    .set_num_rows(1)
+                    .set_column_metadata(columns)
+                    .build()
+                    .unwrap()
+            })
+            .collect();
+        let rewritten = parquet::file::metadata::ParquetMetaData::new(metadata, row_groups);
+        let mut new_footer = Vec::new();
+        parquet::file::metadata::ParquetMetaDataWriter::new(&mut new_footer, &rewritten)
+            .finish()
+            .unwrap();
+        let mut data = bytes[..footer].to_vec();
+        data.extend(new_footer);
+        data
+    }
+
     fn footer_start(bytes: &[u8]) -> usize {
         let length =
             u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap());
@@ -3343,6 +3394,20 @@ mod tests {
             Err(CompactParquetError::RowCountMismatch {
                 expected: 2,
                 observed: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_surplus_data_page_values_hidden_by_understated_footer_counts() {
+        let profile = profile(&[KEY_A]);
+        let bytes =
+            with_understated_row_counts(parquet(&profile, &[KEY_A], &[vec![7, 42]], false, None));
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 1),
+            Err(CompactParquetError::RowCountMismatch {
+                expected: 1,
+                observed: 2
             })
         ));
     }
