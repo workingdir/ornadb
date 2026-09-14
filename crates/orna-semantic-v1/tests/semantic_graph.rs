@@ -1327,6 +1327,21 @@ fn table_keys_reject_ranges_with_the_published_primary_key_rule() {
 }
 
 #[test]
+fn table_keys_reject_transparent_range_aliases_with_the_published_primary_key_rule() {
+    let result = analyze(&[ModuleInput::new(
+        "range-alias-key.orna",
+        r#"
+            type Window = Range<Instant>;
+            pub table Bad(period: Window) { value: Str, }
+        "#,
+    )]);
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "Range<T> is not a primary-key type in version 1.0"
+    }));
+}
+
+#[test]
 fn automatic_key_tables_reject_explicit_rekey_operations() {
     let result = analyze(&[ModuleInput::new(
         "rekey.orna",
@@ -4067,6 +4082,71 @@ fn typed_date_ranges_are_ordered_values_with_contextual_unbounded_endpoints() {
             invalid.diagnostics
         );
     }
+}
+
+#[test]
+fn typed_instant_ranges_are_ordered_values_with_contextual_unbounded_endpoints() {
+    let valid = analyze(&[ModuleInput::new(
+        "instant-ranges.orna",
+        r#"
+            fn half_open(): Range<Instant> = 2026-01-01T00:00:00Z..2027-01-01T00:00:00Z;
+            fn closed(): Range<Instant> = 2026-01-01T00:00:00Z..=2027-01-01T00:00:00Z;
+            fn lower_unbounded(): Range<Instant> = ..2027-01-01T00:00:00Z;
+            fn upper_unbounded(): Range<Instant> = 2026-01-01T00:00:00Z..;
+            fn equal_half_open(): Range<Instant> = 2026-01-01T00:00:00Z..2026-01-01T00:00:00Z;
+            fn equal_closed(): Range<Instant> = 2026-01-01T00:00:00Z..=2026-01-01T00:00:00Z;
+            fn reversed(): Range<Instant> = 2027-01-01T00:00:00Z..2026-01-01T00:00:00Z;
+        "#,
+    )]);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
+
+    let module = valid.modules.values().next().expect("instant-range module");
+    for name in [
+        "half_open",
+        "closed",
+        "lower_unbounded",
+        "upper_unbounded",
+        "equal_half_open",
+        "equal_closed",
+        "reversed",
+    ] {
+        assert!(matches!(
+            &module.symbols[name].ty,
+            Type::Function { result, .. } if result.as_ref() == &Type::Range(Box::new(Type::Instant))
+        ));
+    }
+
+    for source in [
+        "fn invalid() = 2026-01-01T00:00:00Z..1;",
+        "fn invalid() = 2026-01-01T00:00:00Z..2026-01-01;",
+    ] {
+        let invalid = analyze(&[ModuleInput::new("mixed-instant-range.orna", source)]);
+        let diagnostic = invalid
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .expect("mixed range endpoints must be rejected");
+        assert_eq!(
+            diagnostic.message(),
+            "range bounds must have the same ordered type",
+            "{source}: {:?}",
+            invalid.diagnostics
+        );
+    }
+}
+
+#[test]
+fn contextual_empty_instant_ranges_are_rejected() {
+    let result = analyze(&[ModuleInput::new(
+        "empty-instant-range.orna",
+        "fn empty(): Range<Instant> = ..;",
+    )]);
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code() == DIAG_TYPE
+            && diagnostic.message()
+                == "an untyped range needs at least one endpoint or a range context"
+    }));
 }
 
 #[test]
