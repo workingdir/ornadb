@@ -493,6 +493,10 @@ fn date_range_implementation_evidence_is_pinned_partial_and_does_not_promote_the
     );
     let serialized = serde_json::to_value(&overlay).expect("overlay serializes");
     assert_eq!(
+        serde_json::to_vec(&overlay).expect("overlay serializes deterministically"),
+        serde_json::to_vec(&overlay).expect("overlay serializes deterministically")
+    );
+    assert_eq!(
         serialized["evidence"][0]["source"],
         serde_json::json!("production-unit")
     );
@@ -532,6 +536,16 @@ fn date_range_implementation_evidence_is_pinned_partial_and_does_not_promote_the
         .clone();
     assert_eq!(reloaded_range_plan, frozen_range_plan);
     assert_eq!(reloaded_range_plan[0]["status"], "planned");
+}
+
+#[test]
+fn implementation_evidence_overlay_rejects_empty_bindings() {
+    let harness = Harness::new(Corpus::load_default().expect("reference corpus loads"));
+
+    assert!(
+        harness.implementation_evidence_overlay(&[]).is_err(),
+        "an empty overlay must not advertise partial execution"
+    );
 }
 
 #[test]
