@@ -2073,6 +2073,9 @@ fn interrupted_force_checkout_after_discard_journal_recovers_recorded_target() {
 fn interrupted_force_checkout_after_git_switch_recovers_selected_target() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
+    fs::write(root.path().join(".gitignore"), "local-cache/\n").unwrap();
+    git(root.path(), &["add", ".gitignore"]);
+    git(root.path(), &["commit", "-m", "ignore local cache"]);
     git(root.path(), &["branch", "experiment"]);
     git(root.path(), &["switch", "experiment"]);
     fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
@@ -2086,6 +2089,11 @@ fn interrupted_force_checkout_after_git_switch_recovers_selected_target() {
     git(root.path(), &["add", "main.orna"]);
     fs::write(root.path().join("main.orna"), "unstaged preserve\n").unwrap();
     fs::write(root.path().join("untracked.txt"), "untracked preserve\n").unwrap();
+    let ignored_path = root.path().join("local-cache").join("keep.bin");
+    let ignored_bytes = b"ignored local bytes\0\xff\n".to_vec();
+    fs::create_dir_all(ignored_path.parent().unwrap()).unwrap();
+    fs::write(&ignored_path, &ignored_bytes).unwrap();
+    git(root.path(), &["check-ignore", "-q", "local-cache/keep.bin"]);
     let plan = repo
         .plan_checkout("experiment", RuntimeGeneration::new(40))
         .unwrap();
@@ -2123,6 +2131,7 @@ fn interrupted_force_checkout_after_git_switch_recovers_selected_target() {
         fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
         "untracked preserve\n"
     );
+    assert_eq!(fs::read(ignored_path).unwrap(), ignored_bytes);
 }
 
 #[test]
