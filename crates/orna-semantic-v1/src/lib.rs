@@ -1733,6 +1733,16 @@ struct Scope {
     /// Generic type parameters bound by the function currently being checked.
     /// These names are local semantic witnesses, not globally declared types.
     generic_type_parameters: BTreeSet<String>,
+    /// Local generic function signatures. Imported generic functions are
+    /// intentionally absent because their declaration-level bounds are not
+    /// part of this source-local semantic scope.
+    generic_functions: BTreeMap<String, orna_syntax_v1::FunctionSignature>,
+    /// Bounds available for generic parameters in the function currently
+    /// being checked.
+    generic_type_bounds: BTreeMap<String, Vec<TypeExpr>>,
+    /// Nested protocol implementations keyed by nominal target. This is the
+    /// closed-world evidence used by local generic bound checks.
+    protocol_implementations: BTreeMap<String, Vec<Type>>,
 }
 fn resolve_imports(
     namespace: &Namespace,
@@ -1837,7 +1847,74 @@ fn resolve_imports(
             })
             .collect(),
         generic_type_parameters: BTreeSet::new(),
+        generic_functions: tree
+            .items
+            .iter()
+            .filter_map(|item| match &item.declaration {
+                Declaration::Function { signature, .. } if !signature.generics.is_empty() => {
+                    Some((signature.name.clone(), signature.clone()))
+                }
+                _ => None,
+            })
+            .collect(),
+        generic_type_bounds: BTreeMap::new(),
+        protocol_implementations: BTreeMap::new(),
     };
+    for item in &tree.items {
+        let (target, members) = match &item.declaration {
+            Declaration::Type {
+                name,
+                representation: TypeRepresentation::Nominal { members },
+                ..
+            } => (
+                name,
+                members
+                    .iter()
+                    .filter_map(|member| match member {
+                        TypeMember::Implementation { implementation, .. } => Some(implementation),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            Declaration::Type {
+                name,
+                representation: TypeRepresentation::Alias { refinements, .. },
+                ..
+            } => (
+                name,
+                refinements
+                    .iter()
+                    .filter_map(|member| match member {
+                        TypeMember::Implementation { implementation, .. } => Some(implementation),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            Declaration::Table { name, members, .. } => (
+                name,
+                members
+                    .iter()
+                    .filter_map(|member| match member {
+                        orna_syntax_v1::TableMember::Implementation { implementation, .. } => {
+                            Some(implementation)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => continue,
+        };
+        let protocols = members
+            .into_iter()
+            .map(|implementation| resolved_type_of(&implementation.protocol, &scope))
+            .filter(|protocol| *protocol != Type::Error)
+            .collect::<Vec<_>>();
+        scope
+            .protocol_implementations
+            .entry(target.clone())
+            .or_default()
+            .extend(protocols);
+    }
     for (name, symbol) in attached_symbols {
         scope
             .names
@@ -2800,12 +2877,11 @@ fn validate_nested_implementation_function(
         let effective_type = required
             .annotation
             .as_ref()
-            .map(|annotation| resolved_type_of(annotation, scope))
+            .map(|annotation| nested_member_type(annotation, scope, target, target_shape, true))
             .or_else(|| {
-                implementation
-                    .annotation
-                    .as_ref()
-                    .map(|annotation| resolved_type_of(annotation, scope))
+                implementation.annotation.as_ref().map(|annotation| {
+                    nested_member_type(annotation, scope, target, target_shape, true)
+                })
             });
         let protocol_default_type = required.default.as_ref().and_then(|default| {
             validate_default_expression(
@@ -2862,12 +2938,12 @@ fn validate_nested_implementation_function(
     let effective_result = required
         .result
         .as_ref()
-        .map(|result| resolved_type_of(result, scope))
+        .map(|result| nested_member_type(result, scope, target, target_shape, false))
         .or_else(|| {
             implementation
                 .result
                 .as_ref()
-                .map(|result| resolved_type_of(result, scope))
+                .map(|result| nested_member_type(result, scope, target, target_shape, false))
         });
     if let Some(expected) = effective_result {
         let before = diagnostics.len();
@@ -2877,6 +2953,27 @@ fn validate_nested_implementation_function(
         }
     } else if local.values().any(|symbol| symbol.ty != Type::Error) {
         infer(body, scope, &local, diagnostics);
+    }
+}
+
+fn nested_member_type(
+    annotation: &TypeExpr,
+    scope: &Scope,
+    target: &Type,
+    target_shape: Option<&Type>,
+    structural_self: bool,
+) -> Type {
+    if resolved_type_of(annotation, scope) == Type::Named("Self".into()) {
+        if structural_self {
+            target_shape
+                .filter(|shape| matches!(shape, Type::Record(_)))
+                .unwrap_or(target)
+                .clone()
+        } else {
+            target.clone()
+        }
+    } else {
+        resolved_type_of(annotation, scope)
     }
 }
 
@@ -3737,6 +3834,9 @@ fn validate_function_signature_annotations(
     for generic in &signature.generics {
         for bound in &generic.bounds {
             validate_type_annotation(bound, scope, &generic_names, diagnostics);
+            if bound_protocol_type(bound, scope).is_none() {
+                diagnostics.push(diag(DIAG_TYPE, "generic bound must name a protocol"));
+            }
         }
     }
     for parameter in &signature.parameters {
@@ -3880,6 +3980,11 @@ fn check_function(
         .iter()
         .map(|generic| generic.name.clone())
         .collect();
+    function_scope.generic_type_bounds = signature
+        .generics
+        .iter()
+        .map(|generic| (generic.name.clone(), generic.bounds.clone()))
+        .collect();
     let mut local = BTreeMap::new();
     let mut default_effects = EffectSummary::default();
     for parameter in &signature.parameters {
@@ -3934,6 +4039,357 @@ fn check_function(
         }
     }
     validate_loop_transfers(body, &function_scope, &local, &mut Vec::new(), diagnostics);
+}
+
+fn type_mentions_generic(ty: &Type, generic_names: &BTreeSet<String>) -> bool {
+    match ty {
+        Type::Named(name) => generic_names.contains(name),
+        Type::List(inner)
+        | Type::Range(inner)
+        | Type::Relation(inner)
+        | Type::Stream(inner)
+        | Type::Optional(inner) => type_mentions_generic(inner, generic_names),
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(|element| type_mentions_generic(element, generic_names)),
+        Type::Record(fields) => fields
+            .values()
+            .any(|field| type_mentions_generic(field, generic_names)),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(|argument| type_mentions_generic(argument, generic_names)),
+        Type::MoneyPerUnit { currency, unit } => {
+            type_mentions_generic(currency, generic_names)
+                || type_mentions_generic(unit, generic_names)
+        }
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(|parameter| type_mentions_generic(parameter, generic_names))
+                || type_mentions_generic(result, generic_names)
+        }
+        Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Error => false,
+    }
+}
+
+fn substitute_generic_type(ty: &Type, substitutions: &BTreeMap<String, Type>) -> Type {
+    match ty {
+        Type::Named(name) => substitutions
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| ty.clone()),
+        Type::List(inner) => Type::List(Box::new(substitute_generic_type(inner, substitutions))),
+        Type::Range(inner) => Type::Range(Box::new(substitute_generic_type(inner, substitutions))),
+        Type::Relation(inner) => {
+            Type::Relation(Box::new(substitute_generic_type(inner, substitutions)))
+        }
+        Type::Stream(inner) => {
+            Type::Stream(Box::new(substitute_generic_type(inner, substitutions)))
+        }
+        Type::Record(fields) => Type::Record(
+            fields
+                .iter()
+                .map(|(name, field)| (name.clone(), substitute_generic_type(field, substitutions)))
+                .collect(),
+        ),
+        Type::Tuple(elements) => Type::Tuple(
+            elements
+                .iter()
+                .map(|element| substitute_generic_type(element, substitutions))
+                .collect(),
+        ),
+        Type::Optional(inner) => {
+            Type::Optional(Box::new(substitute_generic_type(inner, substitutions)))
+        }
+        Type::Applied { base, arguments } => Type::Applied {
+            base: base.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| substitute_generic_type(argument, substitutions))
+                .collect(),
+        },
+        Type::MoneyPerUnit { currency, unit } => Type::MoneyPerUnit {
+            currency: Box::new(substitute_generic_type(currency, substitutions)),
+            unit: Box::new(substitute_generic_type(unit, substitutions)),
+        },
+        Type::Function {
+            parameters,
+            parameter_names,
+            default_parameters,
+            result,
+        } => Type::Function {
+            parameters: parameters
+                .iter()
+                .map(|parameter| substitute_generic_type(parameter, substitutions))
+                .collect(),
+            parameter_names: parameter_names.clone(),
+            default_parameters: default_parameters.clone(),
+            result: Box::new(substitute_generic_type(result, substitutions)),
+        },
+        Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Error => ty.clone(),
+    }
+}
+
+fn constrain_generic_type(
+    expected: &Type,
+    actual: &Type,
+    generic_names: &BTreeSet<String>,
+    substitutions: &mut BTreeMap<String, Type>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let Type::Named(name) = expected
+        && generic_names.contains(name)
+    {
+        if let Some(previous) = substitutions.get(name) {
+            if previous != actual && previous != &Type::Error && actual != &Type::Error {
+                diagnostics.push(diag(DIAG_TYPE, "generic argument types are inconsistent"));
+            }
+        } else {
+            substitutions.insert(name.clone(), actual.clone());
+        }
+        return;
+    }
+    match (expected, actual) {
+        (Type::List(expected), Type::List(actual))
+        | (Type::Range(expected), Type::Range(actual))
+        | (Type::Relation(expected), Type::Relation(actual))
+        | (Type::Stream(expected), Type::Stream(actual))
+        | (Type::Optional(expected), Type::Optional(actual)) => {
+            constrain_generic_type(expected, actual, generic_names, substitutions, diagnostics)
+        }
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: actual_base,
+                arguments: actual_arguments,
+            },
+        ) if expected_base == actual_base && expected_arguments.len() == actual_arguments.len() => {
+            for (expected, actual) in expected_arguments.iter().zip(actual_arguments) {
+                constrain_generic_type(expected, actual, generic_names, substitutions, diagnostics);
+            }
+        }
+        (Type::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => {
+            for (expected, actual) in expected.iter().zip(actual) {
+                constrain_generic_type(expected, actual, generic_names, substitutions, diagnostics);
+            }
+        }
+        (Type::Record(expected), Type::Record(actual)) => {
+            for (name, expected) in expected {
+                if let Some(actual) = actual.get(name) {
+                    constrain_generic_type(
+                        expected,
+                        actual,
+                        generic_names,
+                        substitutions,
+                        diagnostics,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn bound_protocol_type(bound: &TypeExpr, scope: &Scope) -> Option<Type> {
+    let Type::Named(name) = resolved_type_of(bound, scope) else {
+        return None;
+    };
+    if scope.local_protocols.contains_key(&name)
+        || scope
+            .names
+            .get(&name)
+            .is_some_and(|symbol| symbol.kind == SymbolKind::Protocol)
+        || matches!(name.as_str(), "Display" | "Present")
+    {
+        Some(Type::Named(name))
+    } else {
+        None
+    }
+}
+
+fn type_implements_protocol(ty: &Type, protocol: &Type, scope: &Scope) -> bool {
+    let Type::Named(name) = ty else {
+        return false;
+    };
+    if scope
+        .generic_type_bounds
+        .get(name)
+        .into_iter()
+        .flatten()
+        .filter_map(|bound| bound_protocol_type(bound, scope))
+        .any(|bound| bound == *protocol)
+    {
+        return true;
+    }
+    scope
+        .protocol_implementations
+        .get(name)
+        .is_some_and(|implementations| {
+            implementations
+                .iter()
+                .any(|candidate| candidate == protocol)
+        })
+}
+
+/// Typecheck a source-local generic function call.  The declaration remains
+/// an ordinary function symbol for catalogue compatibility; this path carries
+/// only the local generic metadata needed for static substitution and bounds.
+fn infer_local_generic_call(
+    callee: &Expr,
+    explicit_type_arguments: Option<&[TypeExpr]>,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let Expr::Name { text, .. } = callee else {
+        return None;
+    };
+    if local.contains_key(text) {
+        return None;
+    }
+    let signature = scope.generic_functions.get(text)?;
+    let generic_names = signature
+        .generics
+        .iter()
+        .map(|generic| generic.name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut substitutions = BTreeMap::new();
+    if let Some(type_arguments) = explicit_type_arguments {
+        if type_arguments.len() != signature.generics.len() {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "generic argument count does not match the function signature",
+            ));
+        }
+        for (generic, argument) in signature.generics.iter().zip(type_arguments) {
+            let Some(argument) = valid_static_type(argument, scope) else {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "generic type argument is not a valid static type",
+                ));
+                continue;
+            };
+            substitutions.insert(generic.name.clone(), argument);
+        }
+    }
+    let raw_parameters = signature
+        .parameters
+        .iter()
+        .map(|parameter| {
+            parameter
+                .annotation
+                .as_ref()
+                .map(|annotation| resolved_type_of(annotation, scope))
+                .unwrap_or(Type::Error)
+        })
+        .collect::<Vec<_>>();
+    let parameter_names = signature
+        .parameters
+        .iter()
+        .map(|parameter| match &parameter.pattern {
+            Pattern::Name(name, _) => name.clone(),
+            _ => String::new(),
+        })
+        .collect::<Vec<_>>();
+    let mut effects = intrinsic_call_effects(callee);
+    if let Some(symbol) = resolved_callable_symbol(callee, scope, local) {
+        effects.join(&symbol.effects);
+    }
+    let values = arguments
+        .iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            let expected =
+                expected_call_parameter(&raw_parameters, Some(&parameter_names), arguments, index);
+            let inferred = if let Some(expected) = expected {
+                if type_mentions_generic(expected, &generic_names) {
+                    infer(&argument.value, scope, local, diagnostics)
+                } else {
+                    infer_contextual(&argument.value, expected, scope, local, diagnostics)
+                }
+            } else {
+                infer(&argument.value, scope, local, diagnostics)
+            };
+            effects.join(&inferred.effects);
+            if let Some(expected) = expected {
+                constrain_generic_type(
+                    expected,
+                    &inferred.ty,
+                    &generic_names,
+                    &mut substitutions,
+                    diagnostics,
+                );
+            }
+            inferred.ty
+        })
+        .collect::<Vec<_>>();
+    for generic in &signature.generics {
+        let Some(actual) = substitutions.get(&generic.name) else {
+            diagnostics.push(diag(DIAG_TYPE, "generic type argument cannot be inferred"));
+            continue;
+        };
+        for bound in &generic.bounds {
+            let Some(protocol) = bound_protocol_type(bound, scope) else {
+                diagnostics.push(diag(DIAG_TYPE, "generic bound must name a protocol"));
+                continue;
+            };
+            if !type_implements_protocol(actual, &protocol, scope) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "generic type argument does not satisfy its protocol bound",
+                ));
+            }
+        }
+    }
+    let parameters = raw_parameters
+        .iter()
+        .map(|parameter| substitute_generic_type(parameter, &substitutions))
+        .collect::<Vec<_>>();
+    let defaults = signature
+        .parameters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, parameter)| parameter.default.as_ref().map(|_| index))
+        .collect::<BTreeSet<_>>();
+    check_call_arguments(
+        &parameters,
+        Some(&parameter_names),
+        &defaults,
+        arguments,
+        &values,
+        None,
+        diagnostics,
+    );
+    Some(Inferred {
+        ty: signature
+            .result
+            .as_ref()
+            .map(|result| substitute_generic_type(&resolved_type_of(result, scope), &substitutions))
+            .unwrap_or(Type::Error),
+        effects,
+    })
 }
 
 /// Validate transfer statements after ordinary expression inference. `for` and
@@ -4836,6 +5292,11 @@ fn infer(
             {
                 return inferred;
             }
+            if let Some(inferred) =
+                infer_local_generic_call(callee, None, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
             let intrinsic = intrinsic_call_effects(callee);
             let callee = infer(callee, scope, local, diagnostics);
             let mut effects = callee.effects.clone();
@@ -4924,6 +5385,16 @@ fn infer(
                 && let Some(inferred) =
                     infer_money_constructor(currency, arguments, scope, local, diagnostics)
             {
+                return inferred;
+            }
+            if let Some(inferred) = infer_local_generic_call(
+                callee,
+                Some(type_arguments),
+                arguments,
+                scope,
+                local,
+                diagnostics,
+            ) {
                 return inferred;
             }
             let intrinsic = intrinsic_call_effects(callee);
