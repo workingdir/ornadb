@@ -137,11 +137,17 @@ enum Invocation {
     LibraryLend { book_id: String, borrower: String },
     ProjectFunction(String),
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StatusFormat {
+    Human,
+    Porcelain,
+    Short,
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Command {
     Repl(Option<String>),
     Init(Option<PathBuf>),
-    Status { short: bool },
+    Status { format: StatusFormat },
     Check,
     Invoke(String),
     Run(Invocation),
@@ -202,22 +208,22 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             Command::Init(target)
         }
         Some("status") => match words.next() {
-            Some("--porcelain") => Command::Status { short: false },
-            Some("--short") => Command::Status { short: true },
+            Some("--porcelain") => Command::Status {
+                format: StatusFormat::Porcelain,
+            },
+            Some("--short") => Command::Status {
+                format: StatusFormat::Short,
+            },
             Some(_) => {
                 return Err(Diagnostic::usage(
                     "E1002",
-                    "`status` only supports `--porcelain` or `--short`",
-                    "use `status --porcelain` or `status --short`",
+                    "`status` supports no option, `--porcelain`, or `--short`",
+                    "use `status`, `status --porcelain`, or `status --short`",
                 ));
             }
-            None => {
-                return Err(Diagnostic::usage(
-                    "E1001",
-                    "`status` needs an output format",
-                    "use `status --porcelain` or `status --short`",
-                ));
-            }
+            None => Command::Status {
+                format: StatusFormat::Human,
+            },
         },
         Some("check") => Command::Check,
         Some("invoke") => Command::Invoke(
@@ -517,6 +523,50 @@ fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
                 "retry `status --porcelain`",
             )
         })?;
+    Ok(())
+}
+
+fn run_status_human(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+    let path = local_project_path(endpoint)?;
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree could not be discovered",
+            "run the command inside a Git worktree or provide a local project path",
+        )
+    })?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository.worktree())
+        .arg("status")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .output()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "local Git worktree status could not be read",
+                "check that Git can read the local worktree, then retry `status`",
+            )
+        })?;
+    if !output.status.success() {
+        return Err(Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be read",
+            "check that Git can read the local worktree, then retry `status`",
+        ));
+    }
+    io::stdout().write_all(&output.stdout).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be written",
+            "retry `status`",
+        )
+    })?;
     Ok(())
 }
 
@@ -1121,7 +1171,7 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     match parsed.command.clone() {
         Command::Help => {
             println!(
-                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|status --porcelain|status --short|check|invoke TARGET|run [QUALIFIED_FUNCTION]|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
+                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|status|status --porcelain|status --short|check|invoke TARGET|run [QUALIFIED_FUNCTION]|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
             );
             println!("orna-cli-v1 init [DIRECTORY]");
             Ok(())
@@ -1131,8 +1181,15 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             Ok(())
         }
         Command::Init(ref target) => initialize_repository(target.as_deref()),
-        Command::Status { short: false } => run_status(&parsed.endpoint),
-        Command::Status { short: true } => run_status_short(&parsed.endpoint),
+        Command::Status {
+            format: StatusFormat::Human,
+        } => run_status_human(&parsed.endpoint),
+        Command::Status {
+            format: StatusFormat::Porcelain,
+        } => run_status(&parsed.endpoint),
+        Command::Status {
+            format: StatusFormat::Short,
+        } => run_status_short(&parsed.endpoint),
         Command::Check => check_project(&parsed.endpoint),
         Command::Invoke(ref target) => run_pure_invocation(&parsed.endpoint, target),
         Command::Repl(ref expression) => run_repl(&parsed.endpoint, expression.as_deref()),
@@ -1232,25 +1289,35 @@ mod tests {
             parse_cli(&["status".into(), "--porcelain".into()])
                 .expect("parses")
                 .command,
-            Command::Status { short: false }
+            Command::Status {
+                format: StatusFormat::Porcelain,
+            }
         );
         assert_eq!(
             parse_cli(&["status".into()])
-                .expect_err("status format is required")
-                .code,
-            "E1001"
+                .expect("human status parses")
+                .command,
+            Command::Status {
+                format: StatusFormat::Human,
+            }
         );
         assert_eq!(
             parse_cli(&["status".into(), "--short".into()])
                 .expect("short status parses")
                 .command,
-            Command::Status { short: true }
+            Command::Status {
+                format: StatusFormat::Short,
+            }
         );
+        let error = parse_cli(&["status".into(), "--porcelain=v2".into()])
+            .expect_err("status format is exact");
+        assert_eq!(error.code, "E1002");
         assert_eq!(
-            parse_cli(&["status".into(), "--porcelain=v2".into()])
-                .expect_err("status format is exact")
-                .code,
-            "E1002"
+            (error.title, error.help),
+            (
+                "`status` supports no option, `--porcelain`, or `--short`",
+                "use `status`, `status --porcelain`, or `status --short`"
+            )
         );
         assert_eq!(
             parse_cli(&["init".into()]).expect("parses").command,
@@ -1294,6 +1361,27 @@ mod tests {
         );
         let error = parse_cli(&["serve".into()]).expect_err("unsupported");
         assert_eq!((error.code, error.exit), ("E1002", Exit::Usage));
+    }
+
+    #[test]
+    fn bare_status_dispatches_to_git_human_status() {
+        let directory = tempfile::tempdir().expect("status repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git init")
+                .success()
+        );
+        let parsed = parse_cli(&["status".into()]).expect("human status parses");
+        assert_eq!(
+            execute(&Parsed {
+                endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
+                command: parsed.command,
+            }),
+            Ok(())
+        );
     }
 
     #[test]
