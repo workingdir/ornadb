@@ -636,6 +636,14 @@ fn ambiguous_expr(
                     .iter()
                     .any(|argument| ambiguous_expr(&argument.value, ambiguities, shadowed))
         }
+        Expr::GenericCall {
+            callee, arguments, ..
+        } => {
+            ambiguous_expr(callee, ambiguities, shadowed)
+                || arguments
+                    .iter()
+                    .any(|argument| ambiguous_expr(&argument.value, ambiguities, shadowed))
+        }
         Expr::Index { base, index, .. } => {
             ambiguous_expr(base, ambiguities, shadowed)
                 || ambiguous_expr(index, ambiguities, shadowed)
