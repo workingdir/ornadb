@@ -1301,6 +1301,81 @@ fn loopback_host_evaluates_pure_source_retains_state_and_replays_terminal_eval()
 }
 
 #[test]
+fn loopback_host_fences_a_pure_eval_request_fingerprint_without_reexecution() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let database = initialized.metadata().database_id().to_string();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let client = std::thread::spawn(move || {
+        let mut create = TcpStream::connect(address).unwrap();
+        create
+            .write_all(request(address, &database).as_bytes())
+            .unwrap();
+        let created = read_response(&mut create);
+        let session = json_field(&created, "session");
+        let token = json_field(&created, "resume_token");
+        create.shutdown(Shutdown::Write).unwrap();
+        let mut ignored = Vec::new();
+        create.read_to_end(&mut ignored).unwrap();
+
+        let request_id = [96; 16];
+        let retained = websocket_eval(
+            address,
+            &session,
+            &token,
+            &database,
+            request_id,
+            "let answer: Int = 40;",
+        );
+        assert!(matches!(
+            retained.message,
+            Message::Result {
+                status: ResultStatus::RetainedWithoutValue,
+                value: None,
+                ..
+            }
+        ));
+
+        let mismatch = websocket_eval(
+            address,
+            &session,
+            &token,
+            &database,
+            request_id,
+            "let answer: Int = 99;",
+        );
+        assert_eq!(mismatch.request, Some(request_id));
+        assert!(mismatch.watch.is_none());
+        assert!(
+            matches!(mismatch.message, Message::Diagnostic { .. })
+                && format!("{mismatch:?}").contains("wire.request_mismatch")
+        );
+
+        let unchanged =
+            websocket_eval(address, &session, &token, &database, [97; 16], "answer + 2");
+        let Message::Result {
+            status: ResultStatus::Success,
+            value: Some(value),
+            ..
+        } = unchanged.message
+        else {
+            panic!("request mismatch must preserve the retained Eval session state");
+        };
+        assert_eq!(value.encode().unwrap(), vec![0x18, 42]);
+        sender.send(()).unwrap();
+    });
+
+    assert_eq!(
+        host.serve_until_cancellation(receiver.map(|_| ())),
+        Err(LiveHostError::Cancelled)
+    );
+    client.join().unwrap();
+    let _released = TcpListener::bind(address).unwrap();
+}
+
+#[test]
 fn loopback_host_replays_pre_overlay_eval_rejection_without_binding_source() {
     let temporary = TemporaryRepository::new();
     let initialized = initialize_repository(temporary.path()).unwrap();
