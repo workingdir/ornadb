@@ -210,6 +210,18 @@ impl CompactManifestEntry {
         self.sha256
     }
 
+    /// Returns the immutable canonical key lower bound recorded in this
+    /// manifest entry.
+    pub fn min_key(&self) -> &[u8] {
+        &self.min_key
+    }
+
+    /// Returns the immutable canonical key upper bound recorded in this
+    /// manifest entry.
+    pub fn max_key(&self) -> &[u8] {
+        &self.max_key
+    }
+
     fn from_segment(
         table: Uuid,
         segment: &CompactSegment,
