@@ -2082,6 +2082,9 @@ impl Harness {
         &self,
         bindings: &[ImplementationEvidenceBinding],
     ) -> Result<ImplementationEvidenceOverlay, String> {
+        if bindings.is_empty() {
+            return Err("implementation evidence overlay requires at least one binding".into());
+        }
         let requirements = self
             .corpus
             .requirements
