@@ -73,11 +73,18 @@ pub(crate) struct RelationDescriptor {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FunctionDescriptor {
+    /// The exact JSON overload label, including any disambiguating type.
+    pub label: String,
     pub name: String,
     pub type_parameters: BTreeSet<String>,
     pub parameters: Vec<ParameterDescriptor>,
     pub result: SystemType,
     pub effect: SystemEffect,
+    pub purpose: String,
+    pub contract: Option<String>,
+    pub preconditions: Option<String>,
+    pub ownership: Option<String>,
+    pub snapshot_rule: Option<String>,
 }
 
 /// The portable API has a deliberately closed effect vocabulary.  Treating a
@@ -139,6 +146,7 @@ pub(crate) enum SystemApiError {
     InvalidRemovedName,
     InvalidRelationMetadata,
     InvalidValueTypeMetadata,
+    InvalidFunctionMetadata,
 }
 
 impl SystemApi {
@@ -372,14 +380,8 @@ impl SystemApi {
         let mut parsed_functions = Vec::new();
         let mut function_signatures = BTreeSet::new();
         for raw_function in raw.functions {
-            let descriptor = parse_function(
-                &raw_function.signature,
-                raw_function.effect,
-                &type_arities,
-                &singletons,
-                &types,
-                &enums,
-            )?;
+            let descriptor =
+                parse_function(&raw_function, &type_arities, &singletons, &types, &enums)?;
             let identity = function_identity(&descriptor);
             if !function_signatures.insert(identity) {
                 return Err(SystemApiError::DuplicateName);
@@ -693,15 +695,15 @@ fn language_type_arities() -> BTreeMap<String, usize> {
 }
 
 fn parse_function(
-    signature: &str,
-    effect: String,
+    raw: &RawFunction,
     type_arities: &BTreeMap<String, usize>,
     singletons: &BTreeMap<String, SingletonDescriptor>,
     types: &BTreeMap<String, TypeDescriptor>,
     enums: &BTreeMap<String, BTreeSet<String>>,
 ) -> Result<FunctionDescriptor, SystemApiError> {
-    let effect = parse_effect(&effect)?;
-    let signature = signature
+    let effect = parse_effect(&raw.effect)?;
+    let signature = raw
+        .signature
         .strip_prefix("fn ")
         .ok_or(SystemApiError::InvalidFunction)?;
     let open = signature.find('(').ok_or(SystemApiError::InvalidFunction)?;
@@ -743,14 +745,84 @@ fn parse_function(
             has_default: default.is_some(),
         });
     }
+    validate_function_metadata(
+        &raw.name,
+        &raw.purpose,
+        raw.contract.as_deref(),
+        raw.preconditions.as_deref(),
+        raw.ownership.as_deref(),
+        raw.snapshot_rule.as_deref(),
+    )?;
     Ok(FunctionDescriptor {
+        label: raw.name.clone(),
         name,
         type_parameters,
         parameters,
         result,
         effect,
+        purpose: raw.purpose.clone(),
+        contract: raw.contract.clone(),
+        preconditions: raw.preconditions.clone(),
+        ownership: raw.ownership.clone(),
+        snapshot_rule: raw.snapshot_rule.clone(),
     })
 }
+
+fn validate_function_metadata(
+    label: &str,
+    purpose: &str,
+    contract: Option<&str>,
+    preconditions: Option<&str>,
+    ownership: Option<&str>,
+    snapshot_rule: Option<&str>,
+) -> Result<(), SystemApiError> {
+    let requires_contract = label.starts_with("sys.admin.");
+    let requires_preconditions = FUNCTIONS_WITH_PRECONDITIONS.contains(&label);
+    let requires_ownership = matches!(label, "sys.start(Value)" | "sys.start<T>");
+    let requires_snapshot_rule = matches!(
+        label,
+        "sys.invoke(Value)" | "sys.invoke<T>" | "sys.start(Value)" | "sys.start<T>"
+    );
+    if purpose.trim().is_empty()
+        || contract.is_some_and(blank)
+        || preconditions.is_some_and(blank)
+        || ownership.is_some_and(blank)
+        || snapshot_rule.is_some_and(blank)
+        || (requires_contract != contract.is_some())
+        || (requires_preconditions != preconditions.is_some())
+        || (requires_ownership != ownership.is_some())
+        || (requires_snapshot_rule != snapshot_rule.is_some())
+    {
+        return Err(SystemApiError::InvalidFunctionMetadata);
+    }
+    Ok(())
+}
+
+fn blank(value: &str) -> bool {
+    value.trim().is_empty()
+}
+
+// These are the exact callable labels carrying the normative `preconditions`
+// member in api/sys.json.  Applicability is keyed by the full label so a
+// precondition cannot be silently inherited by an unrelated overload.
+const FUNCTIONS_WITH_PRECONDITIONS: &[&str] = &[
+    "sys.admin.checkout(SnapshotRef)",
+    "sys.admin.checkout(CommitRef)",
+    "sys.admin.checkout(BranchRef)",
+    "sys.admin.checkout(TagRef)",
+    "sys.admin.checkout(GitOid)",
+    "sys.admin.checkout(Str)",
+    "sys.admin.create_branch(SnapshotRef)",
+    "sys.admin.create_branch(CommitRef)",
+    "sys.admin.create_branch(BranchRef)",
+    "sys.admin.create_branch(TagRef)",
+    "sys.admin.create_branch(GitOid)",
+    "sys.admin.create_branch(Str)",
+    "sys.admin.retry_failure",
+    "sys.admin.skip_failure",
+    "sys.admin.replay_failure",
+    "sys.admin.resolve_failure",
+];
 
 fn parse_effect(effect: &str) -> Result<SystemEffect, SystemApiError> {
     match effect {
@@ -1310,6 +1382,11 @@ struct RawFunction {
     name: String,
     signature: String,
     effect: String,
+    purpose: String,
+    contract: Option<String>,
+    preconditions: Option<String>,
+    ownership: Option<String>,
+    snapshot_rule: Option<String>,
 }
 
 struct RawRemovedName {
@@ -1639,6 +1716,11 @@ fn raw_function(value: &serde_json::Value) -> Result<RawFunction, SystemApiError
         name: text(value_at(value, "name")?)?.to_owned(),
         signature: text(value_at(value, "signature")?)?.to_owned(),
         effect: text(value_at(value, "effect")?)?.to_owned(),
+        purpose: text(value_at(value, "purpose")?)?.to_owned(),
+        contract: optional_text(value.get("contract"))?,
+        preconditions: optional_text(value.get("preconditions"))?,
+        ownership: optional_text(value.get("ownership"))?,
+        snapshot_rule: optional_text(value.get("snapshot_rule"))?,
     })
 }
 
@@ -1697,6 +1779,13 @@ fn optional_strings(value: Option<&serde_json::Value>) -> Result<Vec<String>, Sy
     }
 }
 
+fn optional_text(value: Option<&serde_json::Value>) -> Result<Option<String>, SystemApiError> {
+    value
+        .map(text)
+        .transpose()
+        .map(|value| value.map(str::to_owned))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1711,6 +1800,15 @@ mod tests {
             .unwrap()
             .iter_mut()
             .find(|value| value["name"] == "sys.RowRef<T>")
+            .unwrap()
+    }
+
+    fn function_index(document: &serde_json::Value, label: &str) -> usize {
+        document["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|function| function["name"] == label)
             .unwrap()
     }
 
@@ -2049,8 +2147,7 @@ mod tests {
             .iter()
             .map(|function| {
                 parse_function(
-                    &function.signature,
-                    function.effect.clone(),
+                    function,
                     &type_arities,
                     &api.singletons,
                     &api.types,
@@ -2066,8 +2163,7 @@ mod tests {
         );
         for function in &raw.functions {
             let parsed = parse_function(
-                &function.signature,
-                function.effect.clone(),
+                function,
                 &type_arities,
                 &api.singletons,
                 &api.types,
@@ -2080,6 +2176,18 @@ mod tests {
                 "raw function label {} must resolve to its parsed descriptor",
                 function.name
             );
+            let retained = api
+                .function(&parsed.name)
+                .unwrap()
+                .iter()
+                .find(|candidate| candidate.label == function.name)
+                .expect("the exact overload label must be retained");
+            assert_eq!(retained.label, function.name);
+            assert_eq!(retained.purpose, function.purpose);
+            assert_eq!(retained.contract, function.contract);
+            assert_eq!(retained.preconditions, function.preconditions);
+            assert_eq!(retained.ownership, function.ownership);
+            assert_eq!(retained.snapshot_rule, function.snapshot_rule);
             assert!(matches!(
                 parsed.effect,
                 SystemEffect::Read | SystemEffect::Invoke | SystemEffect::Admin
@@ -2099,6 +2207,182 @@ mod tests {
         // retained: this proves only its count and fail-closed loader
         // validation. Neither limitation is evidence of complete
         // system/runtime conformance.
+    }
+
+    #[test]
+    fn function_metadata_is_required_by_applicable_contract() {
+        let raw = raw_document(EMBEDDED_SYSTEM_API).unwrap();
+        let declared_preconditions = raw
+            .functions
+            .iter()
+            .filter(|function| function.preconditions.is_some())
+            .map(|function| function.name.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            declared_preconditions.len(),
+            FUNCTIONS_WITH_PRECONDITIONS.len()
+        );
+        assert_eq!(
+            declared_preconditions,
+            FUNCTIONS_WITH_PRECONDITIONS.iter().copied().collect()
+        );
+
+        let mut blank_purpose = document();
+        blank_purpose["functions"][0]["purpose"] = serde_json::json!("  ");
+        assert_eq!(
+            SystemApi::from_json(&blank_purpose.to_string()),
+            Err(SystemApiError::InvalidFunctionMetadata)
+        );
+
+        let mut missing_purpose = document();
+        missing_purpose["functions"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("purpose");
+        assert_eq!(
+            SystemApi::from_json(&missing_purpose.to_string()),
+            Err(SystemApiError::InvalidJson)
+        );
+
+        let mut non_string_purpose = document();
+        non_string_purpose["functions"][0]["purpose"] = serde_json::json!(42);
+        assert_eq!(
+            SystemApi::from_json(&non_string_purpose.to_string()),
+            Err(SystemApiError::InvalidJson)
+        );
+
+        let admin = function_index(&document(), "sys.admin.commit");
+        let mut missing_contract = document();
+        missing_contract["functions"][admin]
+            .as_object_mut()
+            .unwrap()
+            .remove("contract");
+        assert_eq!(
+            SystemApi::from_json(&missing_contract.to_string()),
+            Err(SystemApiError::InvalidFunctionMetadata)
+        );
+
+        let plan = function_index(&document(), "sys.admin.plan_checkout(SnapshotRef)");
+        let mut missing_plan_contract = document();
+        missing_plan_contract["functions"][plan]
+            .as_object_mut()
+            .unwrap()
+            .remove("contract");
+        assert_eq!(
+            SystemApi::from_json(&missing_plan_contract.to_string()),
+            Err(SystemApiError::InvalidFunctionMetadata)
+        );
+
+        let checkout = function_index(&document(), "sys.admin.checkout(SnapshotRef)");
+        let mut missing_preconditions = document();
+        missing_preconditions["functions"][checkout]
+            .as_object_mut()
+            .unwrap()
+            .remove("preconditions");
+        assert_eq!(
+            SystemApi::from_json(&missing_preconditions.to_string()),
+            Err(SystemApiError::InvalidFunctionMetadata)
+        );
+
+        let mut misplaced_admin_preconditions = document();
+        misplaced_admin_preconditions["functions"][admin]["preconditions"] =
+            serde_json::json!("must not be declared");
+        assert_eq!(
+            SystemApi::from_json(&misplaced_admin_preconditions.to_string()),
+            Err(SystemApiError::InvalidFunctionMetadata)
+        );
+
+        let meta = function_index(&document(), "sys.meta");
+        let mut misplaced_preconditions = document();
+        misplaced_preconditions["functions"][meta]["preconditions"] =
+            serde_json::json!("must not be declared");
+        assert_eq!(
+            SystemApi::from_json(&misplaced_preconditions.to_string()),
+            Err(SystemApiError::InvalidFunctionMetadata)
+        );
+
+        for value in [serde_json::json!("  "), serde_json::json!(42)] {
+            let mut invalid = document();
+            invalid["functions"][admin]["contract"] = value;
+            assert_eq!(
+                SystemApi::from_json(&invalid.to_string()),
+                if invalid["functions"][admin]["contract"].is_string() {
+                    Err(SystemApiError::InvalidFunctionMetadata)
+                } else {
+                    Err(SystemApiError::InvalidJson)
+                }
+            );
+        }
+
+        let retry = function_index(&document(), "sys.admin.retry_failure");
+        for value in [serde_json::json!("  "), serde_json::json!(42)] {
+            let mut invalid = document();
+            invalid["functions"][retry]["preconditions"] = value;
+            assert_eq!(
+                SystemApi::from_json(&invalid.to_string()),
+                if invalid["functions"][retry]["preconditions"].is_string() {
+                    Err(SystemApiError::InvalidFunctionMetadata)
+                } else {
+                    Err(SystemApiError::InvalidJson)
+                }
+            );
+        }
+
+        let start = function_index(&document(), "sys.start(Value)");
+        let mut missing_ownership = document();
+        missing_ownership["functions"][start]
+            .as_object_mut()
+            .unwrap()
+            .remove("ownership");
+        assert_eq!(
+            SystemApi::from_json(&missing_ownership.to_string()),
+            Err(SystemApiError::InvalidFunctionMetadata)
+        );
+
+        let invoke = function_index(&document(), "sys.invoke(Value)");
+        let mut missing_snapshot_rule = document();
+        missing_snapshot_rule["functions"][invoke]
+            .as_object_mut()
+            .unwrap()
+            .remove("snapshot_rule");
+        assert_eq!(
+            SystemApi::from_json(&missing_snapshot_rule.to_string()),
+            Err(SystemApiError::InvalidFunctionMetadata)
+        );
+
+        for (label, member) in [
+            ("sys.start(Value)", "ownership"),
+            ("sys.invoke(Value)", "snapshot_rule"),
+        ] {
+            let index = function_index(&document(), label);
+            for value in [serde_json::json!("  "), serde_json::json!(42)] {
+                let mut invalid = document();
+                invalid["functions"][index][member] = value;
+                assert_eq!(
+                    SystemApi::from_json(&invalid.to_string()),
+                    if invalid["functions"][index][member].is_string() {
+                        Err(SystemApiError::InvalidFunctionMetadata)
+                    } else {
+                        Err(SystemApiError::InvalidJson)
+                    },
+                    "{label} {member} must be nonblank text"
+                );
+            }
+        }
+
+        let mut misplaced_ownership = document();
+        misplaced_ownership["functions"][meta]["ownership"] = serde_json::json!("session-owned");
+        assert_eq!(
+            SystemApi::from_json(&misplaced_ownership.to_string()),
+            Err(SystemApiError::InvalidFunctionMetadata)
+        );
+
+        let mut misplaced_snapshot_rule = document();
+        misplaced_snapshot_rule["functions"][meta]["snapshot_rule"] = serde_json::json!("pinned");
+        assert_eq!(
+            SystemApi::from_json(&misplaced_snapshot_rule.to_string()),
+            Err(SystemApiError::InvalidFunctionMetadata)
+        );
     }
 
     #[test]
@@ -2505,14 +2789,20 @@ mod tests {
         );
 
         let mut duplicate = document();
-        let duplicate_function = duplicate["functions"][0].clone();
+        let duplicate_function = duplicate["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|function| function["name"] == "sys.admin.commit")
+            .unwrap()
+            .clone();
         duplicate["functions"]
             .as_array_mut()
             .unwrap()
             .push(duplicate_function);
         duplicate["counts"]["functions"] = serde_json::Value::from(67);
         duplicate["functions"].as_array_mut().unwrap()[66]["effect"] =
-            serde_json::Value::String("admin".into());
+            serde_json::Value::String("read".into());
         assert_eq!(
             SystemApi::from_json(&duplicate.to_string()),
             Err(SystemApiError::DuplicateName)
