@@ -69,8 +69,8 @@ use orna_protocol::{
     encode_constructed_server_frame, encode_registered_server_frame, encode_resource_server_frame,
     encode_server_frame, encode_session_server_frame,
 };
-use orna_repository_v1::{Repository, inspect_metadata};
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState, WriterLease};
+use orna_repository_v1::{Repository, RuntimeOwnerLock, inspect_metadata};
+use orna_runtime_v1::{RuntimeError, RuntimeIdentity, RuntimeState, WriterLease};
 use orna_standard::{RegisteredOpaqueCodecsError, registered_opaque_codecs};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -733,6 +733,7 @@ pub(crate) struct RawSocketRuntimeAdmission {
     identity: RuntimeIdentity,
     initial_digest: [u8; 32],
     owner: [u8; 16],
+    _owner_lock: Arc<RuntimeOwnerLock>,
     gate: Arc<AsyncMutex<()>>,
 }
 
@@ -746,11 +747,15 @@ impl RawSocketRuntimeAdmission {
         if owner == [0; 16] {
             return Err(());
         }
+        let owner_lock = repository
+            .acquire_runtime_owner_lock(owner)
+            .map_err(|_| ())?;
         Ok(Self {
             repository,
             identity,
             initial_digest,
             owner,
+            _owner_lock: Arc::new(owner_lock),
             gate: Arc::new(AsyncMutex::new(())),
         })
     }
@@ -768,10 +773,33 @@ impl RawSocketRuntimeAdmission {
         let state = RuntimeState::open(&self.repository, self.identity, self.initial_digest)
             .await
             .map_err(|_| raw_admission_error("runtime state"))?;
-        let lease = state
-            .acquire_lease(self.owner)
+        let lease = match state.acquire_lease(self.owner).await {
+            Ok(lease) => lease,
+            Err(RuntimeError::LeaseHeld) => {
+                let abandoned = state
+                    .current_lease()
+                    .await
+                    .map_err(|_| raw_admission_error("runtime owner fence"))?
+                    .ok_or_else(|| raw_admission_error("runtime owner fence"))?;
+                if self._owner_lock.previous_owner() != Some(abandoned.owner_id) {
+                    return Err(raw_admission_error("runtime owner liveness"));
+                }
+                let replacement = state
+                    .takeover_lease(abandoned, self.owner)
+                    .await
+                    .map_err(|_| raw_admission_error("runtime owner takeover"))?;
+                replacement
+            }
+            Err(_) => return Err(raw_admission_error("runtime owner fence")),
+        };
+        // A takeover with unfinished requests leaves a durable recovery
+        // barrier. Do not admit a sealed invocation until another trusted
+        // recovery worker has cleared it. Checking this on every capture also
+        // prevents later captures by the replacement owner from bypassing it.
+        state
+            .complete_takeover_recovery(lease)
             .await
-            .map_err(|_| raw_admission_error("runtime owner fence"))?;
+            .map_err(|_| raw_admission_error("runtime recovery"))?;
         let capture = state
             .capture()
             .await
