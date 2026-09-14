@@ -1011,11 +1011,7 @@ impl Value {
             }
             Raw::Bool(value) => Ok(Self::Bool(*value)),
             Raw::Int(value) => context.integer(value.clone()).map(Self::Int),
-            Raw::Float(bits)
-                if f64::from_bits(*bits).is_finite() || *bits == CANONICAL_NAN_BITS =>
-            {
-                Ok(Self::Float(*bits))
-            }
+            Raw::Float(bits) => Ok(Self::Float(*bits)),
             Raw::Text(value) => context.string(value.clone()).map(Self::String),
             Raw::Tag(60001, boxed) => {
                 let Raw::Text(value) = boxed.as_ref() else {
@@ -1896,22 +1892,24 @@ impl Context<'_, '_> {
         else {
             return Err(error("ORNA-EVAL-TYPE"));
         };
-        if range_endpoint_kind(&value).is_none() {
+        let range_kind = range_endpoint_kind_for_range(lower.as_deref(), upper.as_deref())?;
+        if range_endpoint_kind(&value) != Some(range_kind) {
             return Err(error("ORNA-EVAL-TYPE"));
         }
         let lower_matches = match lower {
-            Some(lower) => compare_values(&value, &lower)?.is_ge(),
+            Some(lower) => {
+                range_membership_compare(&value, &lower)?.is_some_and(|ordering| ordering.is_ge())
+            }
             None => true,
         };
         let upper_matches = match upper {
-            Some(upper) => {
-                let ordering = compare_values(&value, &upper)?;
+            Some(upper) => range_membership_compare(&value, &upper)?.is_some_and(|ordering| {
                 if upper_inclusive {
                     ordering.is_le()
                 } else {
                     ordering.is_lt()
                 }
-            }
+            }),
             None => true,
         };
         Ok(Value::Bool(lower_matches && upper_matches))
@@ -4060,6 +4058,7 @@ fn range_endpoint_kind(value: &Value) -> Option<&'static str> {
     match value {
         Value::Int(_) => Some("Int"),
         Value::Decimal(_) => Some("Decimal"),
+        Value::Float(_) => Some("Float"),
         Value::Date(_) => Some("Date"),
         Value::Instant { .. } => Some("Instant"),
         _ => None,
@@ -4170,6 +4169,17 @@ fn compare_values(left: &Value, right: &Value) -> Result<std::cmp::Ordering, Eva
         _ => Err(error("ORNA-EVAL-TYPE")),
     }
 }
+fn range_membership_compare(
+    left: &Value,
+    right: &Value,
+) -> Result<Option<std::cmp::Ordering>, EvaluationError> {
+    match (left, right) {
+        (Value::Float(left), Value::Float(right)) => {
+            Ok(f64::from_bits(*left).partial_cmp(&f64::from_bits(*right)))
+        }
+        _ => compare_values(left, right).map(Some),
+    }
+}
 fn compare_range_lower(
     left: &Option<Box<Value>>,
     right: &Option<Box<Value>>,
@@ -4178,7 +4188,7 @@ fn compare_range_lower(
         (None, None) => Ok(std::cmp::Ordering::Equal),
         (None, Some(_)) => Ok(std::cmp::Ordering::Less),
         (Some(_), None) => Ok(std::cmp::Ordering::Greater),
-        (Some(left), Some(right)) => compare_values(left, right),
+        (Some(left), Some(right)) => compare_range_endpoints(left, right),
     }
 }
 fn compare_range_upper(
@@ -4189,7 +4199,16 @@ fn compare_range_upper(
         (None, None) => Ok(std::cmp::Ordering::Equal),
         (None, Some(_)) => Ok(std::cmp::Ordering::Greater),
         (Some(_), None) => Ok(std::cmp::Ordering::Less),
-        (Some(left), Some(right)) => compare_values(left, right),
+        (Some(left), Some(right)) => compare_range_endpoints(left, right),
+    }
+}
+fn compare_range_endpoints(
+    left: &Value,
+    right: &Value,
+) -> Result<std::cmp::Ordering, EvaluationError> {
+    match (left, right) {
+        (Value::Float(left), Value::Float(right)) => Ok(float_total_cmp(*left, *right)),
+        _ => compare_values(left, right),
     }
 }
 fn lawful_sort_key(value: &Value) -> Result<(), EvaluationError> {
