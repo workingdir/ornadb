@@ -526,6 +526,10 @@ pub enum LocalRawSocketServerError {
     },
     /// The dedicated listener thread panicked.
     ListenerThread,
+    /// Durable runtime capture or recovery denied startup admission. Details
+    /// are intentionally opaque so local runtime state is not disclosed
+    /// through this API.
+    StartupAdmission,
     /// A host socket or filesystem operation failed.
     Io {
         /// The host I/O failure.
@@ -539,6 +543,7 @@ impl fmt::Display for LocalRawSocketServerError {
             Self::InvalidSocketState => "local raw socket state is invalid",
             Self::Infrastructure { .. } => "local raw socket infrastructure failed",
             Self::ListenerThread => "local raw socket listener thread failed",
+            Self::StartupAdmission => "local raw socket startup admission failed",
             Self::Io { .. } => "local raw socket host I/O failed",
         })
     }
@@ -549,7 +554,7 @@ impl Error for LocalRawSocketServerError {
         match self {
             Self::Infrastructure { source } => Some(source),
             Self::Io { source } => Some(source),
-            Self::InvalidSocketState | Self::ListenerThread => None,
+            Self::InvalidSocketState | Self::ListenerThread | Self::StartupAdmission => None,
         }
     }
 }
@@ -656,14 +661,41 @@ pub fn start_local_raw_socket(
 
 /// Starts the local raw listener with executable-owned runtime admission.
 ///
-/// The admission provider is consumed only by the authenticated sealed invoke
-/// preflight path. It captures and verifies a runtime pin before
-/// `CALL_ACCEPTED`, then retains its owner fence through lifecycle preparation.
+/// The admission provider is consumed for listener startup preflight and by
+/// the authenticated sealed-invocation admission path. Startup preflight
+/// captures and verifies durable runtime ownership before socket creation;
+/// sealed invocation admission captures and verifies a runtime pin before
+/// `CALL_ACCEPTED`, then retains its owner fence through lifecycle
+/// preparation.
 pub(crate) fn start_local_raw_socket_with_runtime_admission(
     runtime_directory: &Path,
     kernel: PostgresKernel,
     admission: RawSocketRuntimeAdmission,
 ) -> Result<LocalRawSocketServer, LocalRawSocketServerError> {
+    // SAFETY: these calls only read the current process credentials.
+    let uid = unsafe { nix::libc::geteuid() };
+    // SAFETY: these calls only read the current process credentials.
+    let gid = unsafe { nix::libc::getegid() };
+    require_runtime_directory(runtime_directory, uid, gid)?;
+    // Run the asynchronous durable admission on a separate thread. This
+    // synchronous startup API can itself be called from a Tokio runtime, in
+    // which case nesting `block_on` on the caller thread would panic.
+    let preflight_admission = admission.clone();
+    thread::Builder::new()
+        .name("orna-raw-preflight".to_owned())
+        .spawn(move || -> Result<(), LocalRawSocketServerError> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| LocalRawSocketServerError::ListenerThread)?;
+            runtime
+                .block_on(preflight_admission.capture())
+                .map(|_| ())
+                .map_err(|_| LocalRawSocketServerError::StartupAdmission)
+        })
+        .map_err(|_| LocalRawSocketServerError::ListenerThread)?
+        .join()
+        .map_err(|_| LocalRawSocketServerError::ListenerThread)??;
     start_local_raw_socket_with_admission(runtime_directory, kernel, Some(admission))
 }
 
@@ -781,14 +813,18 @@ impl RawSocketRuntimeAdmission {
                     .await
                     .map_err(|_| raw_admission_error("runtime owner fence"))?
                     .ok_or_else(|| raw_admission_error("runtime owner fence"))?;
-                if self._owner_lock.previous_owner() != Some(abandoned.owner_id) {
-                    return Err(raw_admission_error("runtime owner liveness"));
+                if abandoned.owner_id == self.owner {
+                    abandoned
+                } else {
+                    if self._owner_lock.previous_owner() != Some(abandoned.owner_id) {
+                        return Err(raw_admission_error("runtime owner liveness"));
+                    }
+                    let replacement = state
+                        .takeover_lease(abandoned, self.owner)
+                        .await
+                        .map_err(|_| raw_admission_error("runtime owner takeover"))?;
+                    replacement
                 }
-                let replacement = state
-                    .takeover_lease(abandoned, self.owner)
-                    .await
-                    .map_err(|_| raw_admission_error("runtime owner takeover"))?;
-                replacement
             }
             Err(_) => return Err(raw_admission_error("runtime owner fence")),
         };
@@ -5135,6 +5171,7 @@ fn report_private_dispatch_source(source: &orna_postgres::PostgresKernelError) {
 #[cfg(test)]
 mod runtime_admission_tests {
     use super::*;
+    use std::str::FromStr;
 
     #[derive(Clone)]
     struct OwnerLossFinalizer {
@@ -5183,6 +5220,126 @@ mod runtime_admission_tests {
         let admission = RawSocketRuntimeAdmission::from_repository(repository.clone())
             .expect("runtime admission provider");
         (directory, repository, admission)
+    }
+
+    fn runtime_directory() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().expect("temporary runtime directory");
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o711))
+            .expect("runtime directory permissions");
+        directory
+    }
+
+    fn test_kernel() -> PostgresKernel {
+        PostgresKernel::from_str("host=127.0.0.1 port=1 dbname=absent").expect("kernel config")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_admission_startup_preflight_is_safe_inside_a_tokio_runtime() {
+        let (_repository_directory, _repository, admission) = repository_admission();
+        let runtime_directory = runtime_directory();
+        let socket_path = runtime_directory.path().join(SOCKET_NAME);
+        assert!(!socket_path.exists());
+
+        let server = start_local_raw_socket_with_runtime_admission(
+            runtime_directory.path(),
+            test_kernel(),
+            admission,
+        )
+        .expect("runtime admission startup");
+        assert!(socket_path.exists());
+        server.stop().expect("stop listener");
+        assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn runtime_admission_startup_preflight_blocks_unresolved_takeover() {
+        let (_repository_directory, repository, admission) = repository_admission();
+        let identity = orna_runtime_v1::RequestIdentity {
+            session_id: [0x71; 16],
+            request_id: [0x72; 16],
+        };
+        let fingerprint = [0x73; 32];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let abandoned_lease = runtime.block_on(async {
+            let (_context, fence) = admission.capture().await.expect("initial runtime capture");
+            let state =
+                RuntimeState::open(&repository, admission.identity, admission.initial_digest)
+                    .await
+                    .expect("runtime state");
+            let (_, capability) = state
+                .reserve_request_with_admission(identity, fingerprint)
+                .await
+                .expect("request reservation");
+            state
+                .start_request_with_owner_and_admission(
+                    identity,
+                    fingerprint,
+                    fence.lease,
+                    capability.expect("owner-bound capability"),
+                )
+                .await
+                .expect("request start");
+            fence.lease
+        });
+        drop(runtime);
+        drop(admission);
+
+        let replacement =
+            RawSocketRuntimeAdmission::from_repository(repository).expect("replacement admission");
+        let replacement_owner = replacement.owner;
+        let replacement_identity = replacement.identity;
+        let replacement_initial_digest = replacement.initial_digest;
+        let runtime_directory = runtime_directory();
+        let socket_path = runtime_directory.path().join(SOCKET_NAME);
+        let result = start_local_raw_socket_with_runtime_admission(
+            runtime_directory.path(),
+            test_kernel(),
+            replacement,
+        );
+
+        assert!(matches!(
+            result,
+            Err(LocalRawSocketServerError::StartupAdmission)
+        ));
+        assert!(!socket_path.exists());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("verification runtime");
+        let (lease, status, recovery) = runtime.block_on(async {
+            let state = RuntimeState::open(
+                &repository,
+                replacement_identity,
+                replacement_initial_digest,
+            )
+            .await
+            .expect("runtime state");
+            let lease = state.current_lease().await.expect("durable lease");
+            let status = state
+                .request_status(identity, fingerprint)
+                .await
+                .expect("running request status");
+            let recovery = state
+                .complete_takeover_recovery(lease.expect("replacement lease"))
+                .await;
+            (lease, status, recovery)
+        });
+        assert_eq!(
+            lease,
+            Some(WriterLease {
+                owner_id: replacement_owner,
+                epoch: abandoned_lease.epoch + 1,
+            })
+        );
+        assert_eq!(
+            status.expect("retained request").state,
+            RequestState::Running
+        );
+        assert_eq!(recovery, Err(RuntimeError::RecoveryPending));
     }
 
     #[tokio::test]
