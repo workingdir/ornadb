@@ -8,7 +8,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fmt, fs,
-    io::Write,
+    io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Output, Stdio},
 };
@@ -16,7 +16,6 @@ use std::{
 #[cfg(target_os = "linux")]
 use std::{
     ffi::{OsStr, OsString},
-    io::Read,
     mem::MaybeUninit,
     os::unix::ffi::OsStrExt,
 };
@@ -4644,6 +4643,60 @@ impl Repository {
         Ok(CoordinationLock { file })
     }
 
+    /// Acquires the process-lifetime owner lock for this worktree's local
+    /// runtime.
+    ///
+    /// The lock is intentionally separate from short-lived repository
+    /// coordination locks. A live embedded owner retains it for its complete
+    /// lifetime; successful acquisition after an abrupt owner exit is the
+    /// host-level liveness witness needed before a runtime lease takeover.
+    pub fn acquire_runtime_owner_lock(
+        &self,
+        owner_id: [u8; 16],
+    ) -> Result<RuntimeOwnerLock, RepositoryError> {
+        if owner_id == [0; 16] {
+            return Err(RepositoryError::InvalidInternalRef);
+        }
+        let locks = self.runtime.locks();
+        fs::create_dir_all(&locks).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let path = locks.join("runtime-owner.lock");
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        file.try_lock_exclusive()
+            .map_err(|_| RepositoryError::RepositoryBusy)?;
+        let mut previous = Vec::new();
+        (&file)
+            .take(16 + 1)
+            .read_to_end(&mut previous)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let previous_owner = match previous.as_slice() {
+            [] => None,
+            bytes if bytes.len() == 16 => Some(
+                bytes
+                    .try_into()
+                    .map_err(|_| RepositoryError::LocalStateUnavailable)?,
+            ),
+            _ => return Err(RepositoryError::LocalStateUnavailable),
+        };
+        file.set_len(0)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        file.write_all(&owner_id)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        file.sync_all()
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        Ok(RuntimeOwnerLock {
+            file,
+            previous_owner,
+        })
+    }
+
     fn managed_target(&self, path: &ManagedPath) -> Result<PathBuf, RepositoryError> {
         let target = self.worktree.join(path.as_path());
         self.validate_managed_parent(
@@ -4978,6 +5031,25 @@ struct CoordinationLock {
 }
 
 impl Drop for CoordinationLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+/// A process-lifetime local runtime owner lock.
+pub struct RuntimeOwnerLock {
+    file: fs::File,
+    previous_owner: Option<[u8; 16]>,
+}
+
+impl RuntimeOwnerLock {
+    /// Returns the owner identity recorded by the previous holder, if any.
+    pub fn previous_owner(&self) -> Option<[u8; 16]> {
+        self.previous_owner
+    }
+}
+
+impl Drop for RuntimeOwnerLock {
     fn drop(&mut self) {
         let _ = self.file.unlock();
     }
@@ -6407,6 +6479,31 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn runtime_owner_lock_excludes_a_second_owner_until_drop() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        git(
+            root.path(),
+            &["config", "user.email", "owner-lock@example.invalid"],
+        );
+        git(root.path(), &["config", "user.name", "Owner lock test"]);
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let first = repository.acquire_runtime_owner_lock([1; 16]).unwrap();
+        assert!(matches!(
+            repository.acquire_runtime_owner_lock([2; 16]),
+            Err(RepositoryError::RepositoryBusy)
+        ));
+        drop(first);
+        let second = repository.acquire_runtime_owner_lock([2; 16]).unwrap();
+        assert_eq!(second.previous_owner(), Some([1; 16]));
     }
 
     fn git(directory: &Path, arguments: &[&str]) -> String {
