@@ -1785,6 +1785,19 @@ mod tests {
     }
 
     fn verified_fixture_with_schema_ovb(profile: &CompactOvbProfile, schema_ovb: &[u8]) -> Vec<u8> {
+        verified_fixture_with_schema_ovb_metadata(
+            profile,
+            Some(KeyValue::new(
+                "orna.schema.ovb".into(),
+                Some(BASE64.encode(schema_ovb)),
+            )),
+        )
+    }
+
+    fn verified_fixture_with_schema_ovb_metadata(
+        profile: &CompactOvbProfile,
+        schema_metadata: Option<KeyValue>,
+    ) -> Vec<u8> {
         let original = with_page_checksums(parquet(profile, &[KEY_A], &[vec![1]], false, None));
         let reader = SerializedFileReader::new(Bytes::from(original.clone())).unwrap();
         let file = reader.metadata().file_metadata();
@@ -1792,21 +1805,30 @@ mod tests {
             .unwrap()
             .encode()
             .unwrap();
+        let mut metadata = vec![
+            KeyValue::new("orna.profile".into(), Some(COMPACT_STORAGE_PROFILE.into())),
+            KeyValue::new("orna.table".into(), Some(TABLE.to_string())),
+            KeyValue::new(
+                "orna.schema.sha256".into(),
+                Some(hex_digest(profile.schema_fingerprint())),
+            ),
+        ];
+        if let Some(schema_metadata) = schema_metadata {
+            metadata.push(schema_metadata);
+        }
+        metadata.push(KeyValue::new(
+            "orna.columns.ovb".into(),
+            Some(BASE64.encode(columns)),
+        ));
+        metadata.push(KeyValue::new(
+            "orna.encoder".into(),
+            Some("test-encoder-v1".into()),
+        ));
         let metadata = parquet::file::metadata::FileMetaData::new(
             1,
             file.num_rows(),
             file.created_by().map(str::to_owned),
-            Some(vec![
-                KeyValue::new("orna.profile".into(), Some(COMPACT_STORAGE_PROFILE.into())),
-                KeyValue::new("orna.table".into(), Some(TABLE.to_string())),
-                KeyValue::new(
-                    "orna.schema.sha256".into(),
-                    Some(hex_digest(profile.schema_fingerprint())),
-                ),
-                KeyValue::new("orna.schema.ovb".into(), Some(BASE64.encode(schema_ovb))),
-                KeyValue::new("orna.columns.ovb".into(), Some(BASE64.encode(columns))),
-                KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
-            ]),
+            Some(metadata),
             file.schema_descr_ptr(),
             file.column_orders().cloned(),
         );
@@ -2302,6 +2324,59 @@ mod tests {
         assert!(matches!(
             CompactParquetKeySource::decode_verified_bytes(&expected_profile, TABLE, &bytes, 1),
             Err(CompactParquetError::InvalidMetadata)
+        ));
+    }
+
+    #[test]
+    fn reader_requires_canonical_schema_ovb_metadata() {
+        let profile = profile(&[KEY_A]);
+        let decode = |bytes: Vec<u8>| {
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 1)
+        };
+        let assert_invalid = |bytes: Vec<u8>| {
+            assert!(matches!(
+                decode(bytes),
+                Err(CompactParquetError::InvalidMetadata)
+            ));
+        };
+
+        assert_eq!(
+            decode(verified_fixture(&profile)).unwrap(),
+            vec![expected_scalar(1)]
+        );
+
+        // The required key must be present, even when all other metadata is valid.
+        assert_invalid(verified_fixture_with_schema_ovb_metadata(&profile, None));
+        assert_invalid(verified_fixture_with_schema_ovb_metadata(
+            &profile,
+            Some(KeyValue::new("orna.schema.ovb".into(), None)),
+        ));
+
+        assert_invalid(verified_fixture_with_schema_ovb_metadata(
+            &profile,
+            Some(KeyValue::new(
+                "orna.schema.ovb".into(),
+                Some("not-base64".into()),
+            )),
+        ));
+        assert_invalid(verified_fixture_with_schema_ovb_metadata(
+            &profile,
+            Some(KeyValue::new(
+                "orna.schema.ovb".into(),
+                Some(BASE64.encode([0xff])),
+            )),
+        ));
+
+        let canonical = profile.schema().encode().unwrap();
+        assert_eq!(canonical[1], 0);
+        let mut noncanonical = canonical;
+        noncanonical.splice(1..2, [0x18, 0]);
+        assert_invalid(verified_fixture_with_schema_ovb_metadata(
+            &profile,
+            Some(KeyValue::new(
+                "orna.schema.ovb".into(),
+                Some(BASE64.encode(noncanonical)),
+            )),
         ));
     }
 
