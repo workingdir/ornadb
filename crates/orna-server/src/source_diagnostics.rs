@@ -4,6 +4,8 @@ use std::io::{self, Write};
 
 use orna_compiler::{CompilerDiagnostic, DiagnosticSeverity, ParseReport, SourceLocation};
 
+const REDACTED_PATH: &str = "<redacted>";
+
 /// Renders compiler diagnostics in the stable source-command wire format.
 pub(crate) fn render_diagnostics(diagnostics: &[CompilerDiagnostic]) -> Vec<u8> {
     let mut output = Vec::new();
@@ -34,7 +36,7 @@ pub(crate) fn write_diagnostics(
         write!(
             output,
             "{}:{}..{}: {}: ",
-            location.logical_path(),
+            public_diagnostic_path(location.logical_path()),
             span.start(),
             span.end(),
             diagnostic.code().as_str(),
@@ -133,6 +135,7 @@ fn write_source_annotation(
     kind: AnnotationKind,
     colour: bool,
 ) -> io::Result<usize> {
+    let public_path = public_diagnostic_path(location.logical_path());
     let arrow = match kind {
         AnnotationKind::Primary(_) => "-->",
         AnnotationKind::Related => ":::",
@@ -150,7 +153,7 @@ fn write_source_annotation(
         write!(
             output,
             "{}:{}..{}: ",
-            location.logical_path(),
+            public_path,
             location.span().start(),
             location.span().end(),
         )?;
@@ -174,13 +177,7 @@ fn write_source_annotation(
     } else {
         write!(output, "  {arrow} ")?;
     }
-    writeln!(
-        output,
-        "{}:{}:{}",
-        location.logical_path(),
-        start_line + 1,
-        column
-    )?;
+    writeln!(output, "{}:{}:{}", public_path, start_line + 1, column)?;
     writeln!(output, "{:>gutter_width$} |", "")?;
 
     for selected in selected_source_lines(start_line, end_line) {
@@ -444,6 +441,37 @@ fn source_character_is_escaped(character: char) -> bool {
         || is_format_control(character)
 }
 
+/// Returns a source path that is safe to expose outside trusted inspection.
+/// The original logical path remains available to the source-unit lookup
+/// above; only the public rendering is redacted.
+fn public_diagnostic_path(path: &str) -> &str {
+    if is_safe_diagnostic_path(path) {
+        path
+    } else {
+        REDACTED_PATH
+    }
+}
+
+fn is_safe_diagnostic_path(path: &str) -> bool {
+    if path == REDACTED_PATH {
+        return true;
+    }
+
+    let bytes = path.as_bytes();
+    if bytes.is_empty()
+        || bytes[0] == b'/'
+        || bytes.contains(&b'\\')
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        || path.chars().any(char::is_control)
+    {
+        return false;
+    }
+
+    !path
+        .split('/')
+        .any(|component| component.is_empty() || matches!(component, "." | ".."))
+}
+
 fn is_format_control(character: char) -> bool {
     matches!(
         character,
@@ -698,6 +726,74 @@ mod tests {
 
         assert!(rendered.contains("  --> other.orna:14..15: unexpected syntax"));
         assert!(!rendered.contains("1 | CREATE SCHEMA ;"));
+    }
+
+    #[test]
+    fn redacts_unsafe_paths_in_machine_and_human_annotations() {
+        for path in [
+            "/private/source.orna",
+            "../private/source.orna",
+            "src\\private.orna",
+            "C:/private/source.orna",
+            "src//private.orna",
+            "src/\u{0007}private.orna",
+        ] {
+            let report = report_for_path(path, "CREATE SCHEMA ;");
+            let machine = String::from_utf8(render_diagnostics(report.diagnostics()))
+                .expect("diagnostics are UTF-8");
+            let human = String::from_utf8(render_human_diagnostics(
+                report.parse_report(),
+                report.diagnostics(),
+                false,
+            ))
+            .expect("diagnostics are UTF-8");
+
+            assert!(machine.starts_with(
+                "<redacted>:14..15: ORNA0001: expected a schema name after CREATE SCHEMA\n"
+            ));
+            assert!(human.contains("  --> <redacted>:1:15"));
+            assert!(!machine.contains(path));
+            assert!(!human.contains(path));
+        }
+    }
+
+    #[test]
+    fn preserves_unicode_relative_paths_and_redacts_related_and_fallback_annotations() {
+        let safe_path = "src/entrée/メイン.orna";
+        let safe_report = report_for_path(safe_path, "CREATE SCHEMA ;");
+        let safe_machine = String::from_utf8(render_diagnostics(safe_report.diagnostics()))
+            .expect("diagnostics are UTF-8");
+        let safe_human = String::from_utf8(render_human_diagnostics(
+            safe_report.parse_report(),
+            safe_report.diagnostics(),
+            false,
+        ))
+        .expect("diagnostics are UTF-8");
+        assert!(safe_machine.starts_with(
+            "src/entrée/メイン.orna:14..15: ORNA0001: expected a schema name after CREATE SCHEMA\n"
+        ));
+        assert!(safe_human.contains("  --> src/entrée/メイン.orna:1:15"));
+
+        let unsafe_path = "../private/source.orna";
+        let related_report = report_for_path(unsafe_path, "CREATE SCHEMA app;\nCREATE SCHEMA app;");
+        let related_human = String::from_utf8(render_human_diagnostics(
+            related_report.parse_report(),
+            related_report.diagnostics(),
+            false,
+        ))
+        .expect("diagnostics are UTF-8");
+        assert!(related_human.matches("<redacted>").count() >= 2);
+        assert!(!related_human.contains(unsafe_path));
+
+        let source_report = report_for("CREATE SCHEMA ;");
+        let fallback = String::from_utf8(render_human_diagnostics(
+            source_report.parse_report(),
+            related_report.diagnostics(),
+            false,
+        ))
+        .expect("diagnostics are UTF-8");
+        assert!(fallback.contains("  --> <redacted>:14..15: unexpected syntax"));
+        assert!(!fallback.contains(unsafe_path));
     }
 
     #[test]
