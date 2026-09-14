@@ -46,11 +46,14 @@ pub(crate) struct SingletonDescriptor {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TypeDescriptor {
     pub name: String,
+    pub kind: String,
+    pub purpose: String,
     /// The exact ordered parameters declared by the value-type application.
     /// Keeping this metadata prevents `sys.Foo<T>` and a disconnected JSON
     /// `type_parameters` list from silently describing different contracts.
     pub type_parameters: Vec<String>,
     pub fields: BTreeMap<String, SystemType>,
+    pub invariants: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -135,6 +138,7 @@ pub(crate) enum SystemApiError {
     InvalidRelationAlias,
     InvalidRemovedName,
     InvalidRelationMetadata,
+    InvalidValueTypeMetadata,
 }
 
 impl SystemApi {
@@ -175,8 +179,11 @@ impl SystemApi {
                 name.clone(),
                 TypeDescriptor {
                     name,
+                    kind: String::new(),
+                    purpose: String::new(),
                     type_parameters: Vec::new(),
                     fields: BTreeMap::new(),
+                    invariants: Vec::new(),
                 },
             )?;
         }
@@ -188,8 +195,11 @@ impl SystemApi {
                 name.clone(),
                 TypeDescriptor {
                     name,
+                    kind: String::new(),
+                    purpose: String::new(),
                     type_parameters: Vec::new(),
                     fields: BTreeMap::new(),
+                    invariants: Vec::new(),
                 },
             )?;
         }
@@ -222,6 +232,7 @@ impl SystemApi {
         for value in raw.value_types {
             let (name, type_parameters) =
                 value_type_declaration(&value.name, &value.type_parameters)?;
+            validate_value_type_metadata(&value)?;
             let parameters = type_parameters.iter().cloned().collect();
             let fields = fields(value.fields, &type_arities, &parameters)?;
             insert_descriptor(
@@ -229,8 +240,11 @@ impl SystemApi {
                 name.clone(),
                 TypeDescriptor {
                     name,
+                    kind: value.kind,
+                    purpose: value.purpose,
                     type_parameters,
                     fields,
+                    invariants: value.invariants,
                 },
             )?;
         }
@@ -1265,8 +1279,11 @@ struct RawReferenceAlias {
 
 struct RawValueType {
     name: String,
+    kind: String,
+    purpose: String,
     type_parameters: Vec<String>,
     fields: Vec<RawField>,
+    invariants: Vec<String>,
 }
 
 struct RawRelation {
@@ -1562,12 +1579,30 @@ fn raw_value_type(value: &serde_json::Value) -> Result<RawValueType, SystemApiEr
     let value = object(value)?;
     Ok(RawValueType {
         name: text(value_at(value, "name")?)?.to_owned(),
+        kind: text(value_at(value, "kind")?)?.to_owned(),
+        purpose: text(value_at(value, "purpose")?)?.to_owned(),
         type_parameters: optional_strings(value.get("type_parameters"))?,
         fields: optional_values(value.get("fields"))?
             .iter()
             .map(raw_field)
             .collect::<Result<_, _>>()?,
+        invariants: strings(value_at(value, "invariants")?)?,
     })
+}
+
+fn validate_value_type_metadata(value: &RawValueType) -> Result<(), SystemApiError> {
+    if !matches!(
+        value.kind.as_str(),
+        "opaque-generic" | "opaque" | "record" | "record-generic"
+    ) || value.purpose.trim().is_empty()
+        || value
+            .invariants
+            .iter()
+            .any(|invariant| invariant.trim().is_empty())
+    {
+        return Err(SystemApiError::InvalidValueTypeMetadata);
+    }
+    Ok(())
 }
 
 fn raw_relation(value: &serde_json::Value) -> Result<RawRelation, SystemApiError> {
@@ -1841,13 +1876,32 @@ mod tests {
             );
         }
 
+        let document = document();
+        let value_types = document["value_types"]
+            .as_array()
+            .expect("value_types must be an array");
         for value in &raw.value_types {
             let (name, parameters) =
                 value_type_declaration(&value.name, &value.type_parameters).unwrap();
             let retained = api.types.get(&name).expect("every value type is retained");
+            let json_value = value_types
+                .iter()
+                .find(|candidate| candidate["name"] == value.name)
+                .expect("every raw value type has an authoritative JSON entry");
             assert_eq!(retained.name, name);
+            assert_eq!(retained.kind, json_value["kind"].as_str().unwrap());
+            assert_eq!(retained.purpose, json_value["purpose"].as_str().unwrap());
             assert_eq!(retained.type_parameters, parameters);
             assert_eq!(retained.fields.len(), value.fields.len());
+            assert_eq!(
+                retained.invariants,
+                json_value["invariants"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|invariant| invariant.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            );
             for field in &value.fields {
                 assert_eq!(
                     retained.fields.get(&field.name),
@@ -1904,7 +1958,6 @@ mod tests {
             );
         }
 
-        let document = document();
         let relations = document["relations"]
             .as_array()
             .expect("relations must be an array");
@@ -2104,6 +2157,46 @@ mod tests {
         assert_eq!(
             SystemApi::from_json(&source),
             Err(SystemApiError::InvalidRelationMetadata)
+        );
+    }
+
+    #[test]
+    fn malformed_value_type_metadata_fails_closed() {
+        for (member, value) in [
+            ("kind", serde_json::json!("unknown")),
+            ("purpose", serde_json::json!("  ")),
+            ("invariants", serde_json::json!(["", "valid"])),
+        ] {
+            let mut document = document();
+            value_type(&mut document)[member] = value;
+            let source = serde_json::to_string(&document).unwrap();
+            assert_eq!(
+                SystemApi::from_json(&source),
+                Err(SystemApiError::InvalidValueTypeMetadata),
+                "value-type member {member} must be rejected"
+            );
+        }
+
+        for member in ["kind", "purpose", "invariants"] {
+            let mut document = document();
+            value_type(&mut document)
+                .as_object_mut()
+                .unwrap()
+                .remove(member);
+            let source = serde_json::to_string(&document).unwrap();
+            assert_eq!(
+                SystemApi::from_json(&source),
+                Err(SystemApiError::InvalidJson),
+                "missing value-type member {member} must be rejected"
+            );
+        }
+
+        let mut non_string_invariant = document();
+        value_type(&mut non_string_invariant)["invariants"] = serde_json::json!([42]);
+        let source = serde_json::to_string(&non_string_invariant).unwrap();
+        assert_eq!(
+            SystemApi::from_json(&source),
+            Err(SystemApiError::InvalidJson)
         );
     }
 
