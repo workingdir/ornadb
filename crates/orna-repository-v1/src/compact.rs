@@ -18,7 +18,7 @@ use std::{
 use bytes::Bytes;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
-use orna_syntax_v1::{parse_row, Expr, LiteralKind};
+use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use parquet::{
     basic::{Compression, Encoding, PageType, Type},
     file::reader::{FileReader, SerializedFileReader},
@@ -391,6 +391,25 @@ fn verify_physical_entry(
         entry.row_count,
         bytes,
     )
+}
+
+/// Applies the full committed-manifest witness to one materialized segment.
+/// Keeping this as the single byte-verification boundary makes committed reads
+/// and no-lazy hydration planning reject the same object substitution, digest,
+/// size, and physical-Parquet failures.
+fn verify_manifest_segment_bytes(
+    table: Uuid,
+    entry: &CompactManifestEntry,
+    object: &str,
+    bytes: &[u8],
+) -> Result<(), RepositoryError> {
+    if object != entry.git_object_id
+        || Sha256::digest(bytes).as_slice() != entry.sha256
+        || verify_physical_entry(table, entry, bytes).is_err()
+    {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    Ok(())
 }
 
 fn verify_physical_metadata(
@@ -1531,15 +1550,8 @@ impl Repository {
         let Some((_mode, object)) = self.tree_entry_at(commit, &entry.relative_path)? else {
             return Err(RepositoryError::InvalidCompactManifest);
         };
-        if object != entry.git_object_id {
-            return Err(RepositoryError::InvalidCompactManifest);
-        }
         let bytes = self.git_bytes(["cat-file", "blob", &object])?;
-        if Sha256::digest(&bytes).as_slice() != entry.sha256
-            || verify_physical_entry(table, entry, &bytes).is_err()
-        {
-            return Err(RepositoryError::InvalidCompactManifest);
-        }
+        verify_manifest_segment_bytes(table, entry, &object, &bytes)?;
         Ok(bytes)
     }
 
@@ -1998,6 +2010,102 @@ impl Repository {
         self.observe_declared_segment_blob_set(&object_ids)
     }
 
+    /// Plans the exact compact-segment objects required to hydrate `table` at
+    /// `commit`, without fetching or changing any local Git state.
+    ///
+    /// Manifest and shard metadata must be locally materialized and canonical.
+    /// Every materialized segment is verified using the same object identity,
+    /// SHA-256, compressed-size, and physical-Parquet checks used by committed
+    /// manifest reads. A locally absent segment is retained only when the
+    /// no-lazy observer proves it is a promised blob. Missing, malformed, or
+    /// otherwise unverified state fails closed.
+    pub fn plan_compact_manifest_hydration(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+    ) -> Result<BTreeMap<String, crate::GitObjectState>, RepositoryError> {
+        if !matches!(
+            self.observe_git_object(commit.as_str())?,
+            crate::GitObjectState::Materialized {
+                kind: crate::GitObjectKind::Commit,
+                ..
+            }
+        ) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+
+        let manifest_path = managed_child(&compact_root(table), "manifest.orna")?;
+        let manifest_bytes = self
+            .observed_committed_file_bytes(commit, &manifest_path)?
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        let header = parse_manifest_header(&manifest_bytes)?;
+        if header.table != table {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+
+        let mut entries = Vec::new();
+        let mut shard_bytes_by_path = Vec::new();
+        for shard in &header.shards {
+            let shard_bytes = self
+                .observed_committed_file_bytes(commit, &shard.file)?
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            if Sha256::digest(&shard_bytes).as_slice() != shard.hash {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let parsed = parse_shard(&shard_bytes)?;
+            let (min_key, max_key) = canonical_key_extrema(
+                parsed
+                    .iter()
+                    .flat_map(|entry| [entry.min_key.as_slice(), entry.max_key.as_slice()]),
+            )?;
+            if parsed.len() != shard.entries
+                || min_key != shard.min_key.as_slice()
+                || max_key != shard.max_key.as_slice()
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            shard_bytes_by_path.push((shard.file.clone(), shard_bytes));
+            entries.extend(parsed);
+        }
+        let manifest = CompactManifest {
+            table: header.table,
+            schema: header.schema,
+            next_generation: header.next_generation,
+            entries,
+        };
+        manifest.validate(Some(self.native_object_id_length()?))?;
+        verify_canonical_manifest_files(&manifest, &manifest_bytes, &shard_bytes_by_path)?;
+
+        let mut plan = BTreeMap::new();
+        for entry in manifest.entries() {
+            let Some((mode, object)) = self.observed_tree_entry_at(commit, &entry.relative_path)?
+            else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            if !matches!(mode.as_str(), "100644" | "100755") || object != entry.git_object_id {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let state = self.observe_git_object(&object)?;
+            match state {
+                crate::GitObjectState::Materialized {
+                    kind: crate::GitObjectKind::Blob,
+                    ..
+                } => {
+                    let bytes = self.observed_git_blob_bytes(&object)?;
+                    verify_manifest_segment_bytes(table, entry, &object, &bytes)?;
+                }
+                crate::GitObjectState::Promised => {}
+                crate::GitObjectState::Materialized { .. }
+                | crate::GitObjectState::Unavailable
+                | crate::GitObjectState::Malformed => {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+            plan.insert(object, state);
+        }
+        Ok(plan)
+    }
+
     fn observed_committed_file_bytes(
         &self,
         commit: &GitCommitRef,
@@ -2006,11 +2114,15 @@ impl Repository {
         let Some((_mode, object)) = self.observed_tree_entry_at(commit, path)? else {
             return Ok(None);
         };
+        Ok(Some(self.observed_git_blob_bytes(&object)?))
+    }
+
+    fn observed_git_blob_bytes(&self, object: &str) -> Result<Vec<u8>, RepositoryError> {
         let mut command = self.observer_command();
         command
             .env("GIT_NO_LAZY_FETCH", "1")
-            .args(["cat-file", "blob", &object]);
-        Ok(Some(self.run(command)?.stdout))
+            .args(["cat-file", "blob", object]);
+        Ok(self.run(command)?.stdout)
     }
 
     fn observed_tree_entry_at(
@@ -2277,12 +2389,7 @@ impl Repository {
                 return Err(RepositoryError::InvalidCompactManifest);
             };
             let bytes = self.git_bytes(["cat-file", "blob", &object])?;
-            if object != entry.git_object_id
-                || Sha256::digest(&bytes).as_slice() != entry.sha256
-                || verify_physical_entry(manifest.table, entry, &bytes).is_err()
-            {
-                return Err(RepositoryError::InvalidCompactManifest);
-            }
+            verify_manifest_segment_bytes(manifest.table, entry, &object, &bytes)?;
         }
         Ok(())
     }
