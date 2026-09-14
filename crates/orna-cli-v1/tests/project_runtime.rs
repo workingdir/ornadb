@@ -284,7 +284,7 @@ fn binary_check_accepts_a_core_only_project_without_std() {
 }
 
 #[test]
-fn binary_repl_rejects_uncaptured_standard_import_without_host_substitution() {
+fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_substitution() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
@@ -304,10 +304,8 @@ fn binary_repl_rejects_uncaptured_standard_import_without_host_substitution() {
         .expect("CLI process");
     assert!(!check.status.success());
     assert!(check.stdout.is_empty());
-    assert_eq!(
-        check.stderr,
-        b"error[E2101]: standard library imports are unsupported by this CLI\nhelp: remove standard-library imports; this CLI currently admits core-only projects\n"
-    );
+    let expected = b"error[ORNA-S010-IMPORT]: imported module is unavailable\nhelp: use a captured standard dependency or remove the import\n";
+    assert_eq!(check.stderr, expected);
 
     let run = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -320,10 +318,7 @@ fn binary_repl_rejects_uncaptured_standard_import_without_host_substitution() {
         .expect("CLI process");
     assert!(!run.status.success());
     assert!(run.stdout.is_empty());
-    assert_eq!(
-        run.stderr,
-        b"error[E2101]: standard library imports are unsupported by this CLI\nhelp: remove standard-library imports; this CLI currently admits core-only projects\n"
-    );
+    assert_eq!(run.stderr, expected);
 
     let invoke = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -337,7 +332,7 @@ fn binary_repl_rejects_uncaptured_standard_import_without_host_substitution() {
         .expect("CLI process");
     assert!(!invoke.status.success());
     assert!(invoke.stdout.is_empty());
-    assert_eq!(invoke.stderr, check.stderr);
+    assert_eq!(invoke.stderr, expected);
 
     let stream = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -351,7 +346,7 @@ fn binary_repl_rejects_uncaptured_standard_import_without_host_substitution() {
         .expect("CLI process");
     assert!(!stream.status.success());
     assert!(stream.stdout.is_empty());
-    assert_eq!(stream.stderr, check.stderr);
+    assert_eq!(stream.stderr, expected);
 
     let repl = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
