@@ -3387,7 +3387,10 @@ impl LiveHost {
         if bytes.len() > self.limits.protocol.max_message_bytes {
             return Err(Error::Limit);
         }
-        Envelope::decode(bytes, self.limits.protocol).map_err(|_| Error::InvalidMessage)
+        Envelope::decode(bytes, self.limits.protocol).map_err(|error| match error {
+            orna_protocol_v1::Error::Limit => Error::Limit,
+            _ => Error::InvalidMessage,
+        })
     }
 
     /// The execution host calls these around work it has accepted from a
