@@ -21,6 +21,10 @@ use orna_protocol_v1::{Envelope, Limits, Message as ProtocolMessage};
 
 use crate::live_session::{AuthenticatedLiveTransport, LiveByteDriver};
 
+const MIN_PROFILE_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+const MIN_PROFILE_DEPTH: usize = 64;
+const MIN_PROFILE_NODES: usize = 100_000;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TlsPolicy {
     RequireTls,
@@ -500,15 +504,24 @@ fn parse_response_limits(
     {
         return Err(LiveTransportError::Response("limits has unknown fields"));
     }
-    let max_message_bytes = positive_bounded_usize(
+    let max_message_bytes = profile_bounded_usize(
         object.get("max_message_bytes"),
         "max_message_bytes",
         configured.max_message_bytes,
+        MIN_PROFILE_MESSAGE_BYTES,
     )?;
-    let max_depth =
-        positive_bounded_usize(object.get("max_depth"), "max_depth", configured.max_depth)?;
-    let max_nodes =
-        positive_bounded_usize(object.get("max_nodes"), "max_nodes", configured.max_nodes)?;
+    let max_depth = profile_bounded_usize(
+        object.get("max_depth"),
+        "max_depth",
+        configured.max_depth,
+        MIN_PROFILE_DEPTH,
+    )?;
+    let max_nodes = profile_bounded_usize(
+        object.get("max_nodes"),
+        "max_nodes",
+        configured.max_nodes,
+        MIN_PROFILE_NODES,
+    )?;
     let max_collection_items = positive_bounded_usize(
         object.get("max_collection_items"),
         "max_collection_items",
@@ -547,6 +560,19 @@ fn positive_bounded_usize(
         .and_then(|value| usize::try_from(value).ok())
         .filter(|value| *value > 0 && *value <= maximum)
         .ok_or(LiveTransportError::Response(name))?;
+    Ok(value)
+}
+
+fn profile_bounded_usize(
+    value: Option<&serde_json::Value>,
+    name: &'static str,
+    maximum: usize,
+    minimum: usize,
+) -> Result<usize, LiveTransportError> {
+    let value = positive_bounded_usize(value, name, maximum)?;
+    if value < minimum {
+        return Err(LiveTransportError::Response(name));
+    }
     Ok(value)
 }
 
@@ -1106,5 +1132,41 @@ mod tests {
         let distinct =
             parse_session(valid_response(), &valid_cookie(), Limits::default(), true).unwrap();
         assert_ne!(distinct.cookie, format!("orna_session={}", valid_token()));
+    }
+
+    #[test]
+    fn session_parser_rejects_limits_below_mandatory_profile_minimums() {
+        for (name, value) in [
+            (
+                "max_message_bytes",
+                serde_json::json!(MIN_PROFILE_MESSAGE_BYTES - 1),
+            ),
+            ("max_depth", serde_json::json!(MIN_PROFILE_DEPTH - 1)),
+            ("max_nodes", serde_json::json!(MIN_PROFILE_NODES - 1)),
+        ] {
+            let mut response = valid_response();
+            response["limits"][name] = value;
+            assert!(
+                parse_session(response, &valid_cookie(), Limits::default(), true).is_err(),
+                "advertised {name} below the profile minimum must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn session_parser_retains_configured_profile_limit_ceilings() {
+        let mut configured = Limits::default();
+        configured.max_message_bytes = MIN_PROFILE_MESSAGE_BYTES + 1;
+        configured.max_depth = MIN_PROFILE_DEPTH + 1;
+        configured.max_nodes = MIN_PROFILE_NODES + 1;
+
+        let mut response = valid_response();
+        response["limits"]["max_message_bytes"] = configured.max_message_bytes.into();
+        response["limits"]["max_depth"] = configured.max_depth.into();
+        response["limits"]["max_nodes"] = configured.max_nodes.into();
+        response["limits"]["max_outgoing_bytes"] = configured.max_message_bytes.into();
+
+        let session = parse_session(response, &valid_cookie(), configured, true).unwrap();
+        assert_eq!(session.limits, configured);
     }
 }
