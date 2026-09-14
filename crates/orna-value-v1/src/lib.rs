@@ -1933,6 +1933,65 @@ mod tests {
         assert!(handle(tag(37, Raw::Bytes(vec![2; 15]))).is_err());
     }
     #[test]
+    fn sys_revision_id_is_a_closed_32_byte_portable_identifier() {
+        let revision_id =
+            |name: Raw, representation: Raw| tag(60023, Raw::Array(vec![name, representation]));
+        let valid = revision_id(Raw::Text("sys.RevisionId".into()), Raw::Bytes(vec![7; 32]));
+        let canonical = |raw: Raw| {
+            let value = Value::new(raw).expect("valid system value was rejected");
+            let encoded = value.encode().unwrap();
+            assert_eq!(Value::decode(&encoded).unwrap().raw(), value.raw());
+            encoded
+        };
+        let encodings = [
+            canonical(Raw::Text("revision".into())),
+            canonical(revision_id(
+                Raw::Text("sys.DatabaseId".into()),
+                uuid_raw([7; 16]),
+            )),
+            canonical(tag(
+                60025,
+                Raw::Array(vec![Raw::Text("sha256".into()), Raw::Bytes(vec![7; 32])]),
+            )),
+            canonical(valid.clone()),
+        ];
+        for (index, left) in encodings.iter().enumerate() {
+            assert!(encodings[index + 1..].iter().all(|right| left != right));
+        }
+
+        let mut noncanonical = encodings[3].clone();
+        noncanonical.splice(4..5, [0x78, 0x0e]);
+        assert!(Value::decode(&noncanonical).is_err());
+
+        let rejected = [
+            revision_id(Raw::Text("sys.RevisionId".into()), Raw::Bytes(vec![7; 31])),
+            revision_id(Raw::Text("sys.RevisionId".into()), Raw::Bytes(vec![7; 33])),
+            revision_id(Raw::Text("Str".into()), Raw::Bytes(vec![7; 32])),
+            revision_id(Raw::Text("Digest".into()), Raw::Bytes(vec![7; 32])),
+            revision_id(Raw::Text("sys.Digest".into()), Raw::Bytes(vec![7; 32])),
+            revision_id(Raw::Text("sys.RevisionId".into()), uuid_raw([7; 16])),
+            revision_id(
+                Raw::Text("sys.RevisionId".into()),
+                tag(
+                    60025,
+                    Raw::Array(vec![Raw::Text("sha256".into()), Raw::Bytes(vec![7; 32])]),
+                ),
+            ),
+            tag(60023, Raw::Text("sys.RevisionId".into())),
+            tag(60023, Raw::Array(vec![Raw::Text("sys.RevisionId".into())])),
+            revision_id(
+                Raw::Bytes(b"sys.RevisionId".to_vec()),
+                Raw::Bytes(vec![7; 32]),
+            ),
+        ];
+        for raw in rejected {
+            assert!(Value::new(raw.clone()).is_err());
+            let mut encoded = Vec::new();
+            write_raw(&raw, &mut encoded).unwrap();
+            assert!(Value::decode(&encoded).is_err());
+        }
+    }
+    #[test]
     fn float_vectors() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../reference/Orna-1.0.0/tests/float-vectors.json"
