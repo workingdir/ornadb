@@ -688,9 +688,9 @@ fn reject_uncaptured_standard_modules(
         return Ok(());
     }
     Err(Diagnostic::target(
-        "E2101",
-        "standard library imports are unsupported by this CLI",
-        "remove standard-library imports; this CLI currently admits core-only projects",
+        "ORNA-S010-IMPORT",
+        "imported module is unavailable",
+        "use a captured standard dependency or remove the import",
     ))
 }
 
@@ -1669,7 +1669,15 @@ mod tests {
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
         let error = check_project(&endpoint).expect_err("uncaptured standard module");
-        assert_eq!((error.code, error.exit), ("E2101", Exit::Target));
+        assert_eq!(
+            (error.code, error.exit, error.title, error.help),
+            (
+                "ORNA-S010-IMPORT",
+                Exit::Target,
+                "imported module is unavailable",
+                "use a captured standard dependency or remove the import",
+            )
+        );
     }
 
     #[test]
@@ -1691,15 +1699,14 @@ mod tests {
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
         let error = check_project(&endpoint).expect_err("unbundled standard module");
-        assert_eq!(error.code, "E2101");
-        assert_eq!(error.exit, Exit::Target);
         assert_eq!(
-            error.title,
-            "standard library imports are unsupported by this CLI"
-        );
-        assert_eq!(
-            error.help,
-            "remove standard-library imports; this CLI currently admits core-only projects"
+            (error.code, error.exit, error.title, error.help),
+            (
+                "ORNA-S010-IMPORT",
+                Exit::Target,
+                "imported module is unavailable",
+                "use a captured standard dependency or remove the import",
+            )
         );
     }
 
@@ -1724,7 +1731,15 @@ mod tests {
             command: Command::Invoke("seed".into()),
         };
         let error = execute(&parsed).expect_err("uncaptured standard module");
-        assert_eq!((error.code, error.exit), ("E2101", Exit::Target));
+        assert_eq!(
+            (error.code, error.exit, error.title, error.help),
+            (
+                "ORNA-S010-IMPORT",
+                Exit::Target,
+                "imported module is unavailable",
+                "use a captured standard dependency or remove the import",
+            )
+        );
     }
 
     #[test]
@@ -1748,7 +1763,15 @@ mod tests {
             command: Command::Invoke("seed".into()),
         };
         let error = execute(&parsed).expect_err("uncaptured standard module");
-        assert_eq!((error.code, error.exit), ("E2101", Exit::Target));
+        assert_eq!(
+            (error.code, error.exit, error.title, error.help),
+            (
+                "ORNA-S010-IMPORT",
+                Exit::Target,
+                "imported module is unavailable",
+                "use a captured standard dependency or remove the import",
+            )
+        );
     }
 
     #[test]
