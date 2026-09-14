@@ -3485,7 +3485,7 @@ mod tests {
             let (retirement_acknowledgements, retirement_acknowledgement_receiver) =
                 futures::channel::mpsc::unbounded();
             let (retirement_gate_sender, mut actor_retirement_gates) =
-                futures::channel::mpsc::unbounded::<RetirementGates>();
+                futures::channel::mpsc::unbounded::<super::RetirementGates>();
             let (retirement_gate_bridge, mut retirement_gates) =
                 futures::channel::mpsc::unbounded();
             let (retirement_forwarded, retirement_forwarded_signal) =
