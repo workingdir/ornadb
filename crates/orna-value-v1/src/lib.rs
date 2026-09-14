@@ -1174,13 +1174,7 @@ fn validate_diagnostic(v: &Raw, depth: usize) -> Result<()> {
         }
         Snapshot::decode(&span[0])?;
         let path = text(&span[1])?;
-        if path != "<redacted>"
-            && (!path.is_ascii()
-                || path.starts_with('/')
-                || path
-                    .split('/')
-                    .any(|p| p.is_empty() || p == "." || p == ".."))
-        {
+        if !is_safe_diagnostic_path(path) {
             return Err(Error::InvalidTag);
         }
         let start = int_u64(&span[2])?;
@@ -1205,6 +1199,29 @@ fn validate_diagnostic(v: &Raw, depth: usize) -> Result<()> {
         uuid_array(id)?;
     }
     Ok(())
+}
+
+/// Returns whether a diagnostic span path is safe outside trusted developer
+/// inspection. The protocol permits repository-relative UTF-8 paths or the
+/// explicit redaction marker, never host-specific path syntax.
+fn is_safe_diagnostic_path(path: &str) -> bool {
+    if path == "<redacted>" {
+        return true;
+    }
+
+    let bytes = path.as_bytes();
+    if bytes.is_empty()
+        || bytes[0] == b'/'
+        || bytes.contains(&b'\\')
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        || path.chars().any(char::is_control)
+    {
+        return false;
+    }
+
+    !path
+        .split('/')
+        .any(|component| component.is_empty() || matches!(component, "." | ".."))
 }
 fn validate_error(v: &Raw, depth: usize) -> Result<()> {
     if depth > MAX_DEPTH {
@@ -2113,6 +2130,60 @@ mod tests {
         assert!(Value::new(tag(60016, Raw::Map(vec![]))).is_err());
         assert!(Value::new(tag(60012, Raw::Array(vec![]))).is_err());
     }
+
+    fn diagnostic_with_path(path: &str) -> Raw {
+        tag(
+            60011,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
+                (Raw::Int(1.into()), Raw::Int(3.into())),
+                (Raw::Int(2.into()), Raw::Text("safe message".into())),
+                (
+                    Raw::Int(3.into()),
+                    Raw::Array(vec![Raw::Array(vec![
+                        Snapshot::cwd([1; 16], [2; 16], 0.into()).unwrap().raw(),
+                        Raw::Text(path.into()),
+                        Raw::Int(0.into()),
+                        Raw::Int(0.into()),
+                    ])]),
+                ),
+                (Raw::Int(4.into()), Raw::Array(vec![])),
+                (Raw::Int(5.into()), Raw::Array(vec![])),
+                (Raw::Int(6.into()), Raw::Bool(false)),
+            ]),
+        )
+    }
+
+    #[test]
+    fn diagnostic_paths_are_relative_utf8_or_redacted_at_both_ovb_boundaries() {
+        for path in [
+            "",
+            "/absolute/main.orna",
+            "../main.orna",
+            "src/../main.orna",
+            "src//main.orna",
+            "./src/main.orna",
+            "src\\main.orna",
+            "C:/src/main.orna",
+            "c:src/main.orna",
+            "\\\\server\\share\\main.orna",
+            "src/\0main.orna",
+            "src/\nmain.orna",
+        ] {
+            let raw = diagnostic_with_path(path);
+            assert!(Value::new(raw.clone()).is_err(), "unsafe path was admitted");
+            let mut bytes = Vec::new();
+            write_raw(&raw, &mut bytes).unwrap();
+            assert!(Value::decode(&bytes).is_err(), "unsafe path was decoded");
+        }
+
+        for path in ["src/entrée/メイン.orna", "<redacted>"] {
+            let value = Value::new(diagnostic_with_path(path)).expect("safe path rejected");
+            let bytes = value.encode().unwrap();
+            assert!(Value::decode(&bytes).is_ok(), "safe path was not decoded");
+        }
+    }
+
     #[test]
     fn sys_value_money_binds_its_currency_witness() {
         let currency = [7u8; 16];
