@@ -3571,7 +3571,7 @@ fn integer_ranges_are_canonical_membership_values_and_finite_iterables() {
 
 #[test]
 fn integer_ranges_reject_unsupported_forms_and_obey_finite_limits() {
-    for source in ["1.0f..5.0f", "1 in 1.0f..5.0f", "1 in 1..5.0f"] {
+    for source in ["1 in 1.0f..5.0f", "1 in 1..5.0f"] {
         assert_eq!(
             code(evaluate_expression(
                 source,
@@ -3686,6 +3686,28 @@ fn decimal_range(
     .unwrap()
 }
 
+fn float_range(lower: Option<f64>, upper: Option<f64>, upper_inclusive: bool) -> Value {
+    let endpoint = |value: Option<f64>| match value {
+        Some(value) => Raw::Tag(
+            60013,
+            Box::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Float(value.to_bits()),
+            ])),
+        ),
+        None => Raw::Tag(60013, Box::new(Raw::Array(vec![Raw::Int(0.into())]))),
+    };
+    Value::new(Raw::Tag(
+        60019,
+        Box::new(Raw::Array(vec![
+            endpoint(lower),
+            endpoint(upper),
+            Raw::Bool(upper_inclusive),
+        ])),
+    ))
+    .unwrap()
+}
+
 fn instant_range(
     lower: Option<(i64, u32)>,
     upper: Option<(i64, u32)>,
@@ -3769,7 +3791,6 @@ fn decimal_ranges_allow_empty_values_but_reject_mixed_types_and_iteration() {
         "1.25..2",
         "1.25 in 1.25..2",
         "1 in 1.25..2.5",
-        "1.25f..2.5f",
         "2024-02-01..2.5",
         "2024-02-01T00:00:00Z..2.5",
         "(..1.25) < (1..)",
@@ -3796,6 +3817,132 @@ fn decimal_ranges_allow_empty_values_but_reject_mixed_types_and_iteration() {
             Limits::default(),
         )),
         "ORNA-EVAL-TYPE"
+    );
+}
+
+#[test]
+fn float_ranges_support_finite_membership_with_optional_bounds() {
+    let half_open = float_range(Some(1.25), Some(2.5), false);
+    assert_eq!(evaluate("1.25f..2.5f"), half_open);
+    assert_eq!(
+        evaluate("1.25f in 1.25f..2.5f"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate("2.5f in 1.25f..2.5f"),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate("2.5f in 1.25f..=2.5f"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate("-1.0f in ..1.25f"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate("3.0f in 2.5f.."),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+}
+
+#[test]
+fn float_ranges_reject_mixed_types_and_iteration_and_nan_is_not_a_member() {
+    assert_eq!(
+        evaluate("1.25f in 1.25f..1.25f"),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate("1.25f in 2.5f..1.25f"),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    for source in ["1.25f..2", "1.25f in 1.25f..2", "1 in 1.25f..2.5f"] {
+        assert_eq!(
+            code(evaluate_expression(
+                source,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            "ORNA-EVAL-TYPE",
+            "{source}"
+        );
+    }
+    let range = float_range(Some(1.25), Some(2.5), false);
+    let environment = Environment::from([
+        ("range".into(), range),
+        ("nan".into(), Value::float_bits(CANONICAL_NAN_BITS)),
+    ]);
+    assert_eq!(
+        evaluate_expression("nan in range", &environment, Limits::default()).unwrap(),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "if true { for value in range { value }; 0 }",
+            &environment,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-TYPE"
+    );
+}
+
+#[test]
+fn float_ranges_allow_non_finite_endpoints_and_total_ordering() {
+    let whole = float_range(Some(f64::NEG_INFINITY), Some(f64::INFINITY), false);
+    let nan_lower = float_range(Some(f64::from_bits(CANONICAL_NAN_BITS)), Some(2.5), false);
+    let negative_zero = float_range(Some(-0.0), Some(1.0), false);
+    let positive_zero = float_range(Some(0.0), Some(1.0), false);
+    let finite_lower = float_range(Some(1.0), Some(2.5), false);
+    let environment = Environment::from([
+        ("whole".into(), whole.clone()),
+        ("nan_lower".into(), nan_lower.clone()),
+        ("negative_zero".into(), negative_zero),
+        ("positive_zero".into(), positive_zero),
+        ("finite_lower".into(), finite_lower),
+        ("nan".into(), Value::float_bits(CANONICAL_NAN_BITS)),
+    ]);
+    assert_eq!(
+        evaluate_expression("1.0f in whole", &environment, Limits::default()).unwrap(),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate_expression("nan in whole", &environment, Limits::default()).unwrap(),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate_expression("1.0f in nan_lower", &environment, Limits::default()).unwrap(),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate_expression("nan in nan_lower", &environment, Limits::default()).unwrap(),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate_expression("nan in 1..2", &environment, Limits::default())
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-TYPE"
+    );
+    assert_eq!(
+        evaluate_expression("finite_lower < nan_lower", &environment, Limits::default(),).unwrap(),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate_expression(
+            "negative_zero < positive_zero",
+            &environment,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate_expression("whole", &environment, Limits::default()).unwrap(),
+        whole
+    );
+    assert_eq!(
+        evaluate_expression("nan_lower", &environment, Limits::default()).unwrap(),
+        nan_lower
     );
 }
 
@@ -3929,7 +4076,6 @@ fn instant_ranges_allow_empty_values_but_reject_mixed_types_and_iteration() {
         "1970-01-01T00:00:00Z in 1970-01-01T00:00:00Z..1",
         "1 in 1970-01-01T00:00:00Z..1970-01-01T00:00:01Z",
         "1970-01-01T00:00:00Z..1.0f",
-        "1.0f in 1.0f..5.0f",
         "(..1970-01-01T00:00:00Z) < (1..)",
         "sort_by([(..1970-01-01T00:00:00Z), (1..)], value => value)",
     ] {
