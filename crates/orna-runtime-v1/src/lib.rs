@@ -8756,7 +8756,7 @@ async fn sync_stream_observation_tx(
         ),
         CommitResult::ReplayGranted { grant } => (
             grant.failure.0.checkpoint_key(),
-            Some(StreamObservationStatus::BackingOff),
+            None,
             0,
             0,
             0,
@@ -8767,7 +8767,7 @@ async fn sync_stream_observation_tx(
         ),
         CommitResult::ReplayCompleted { failure } | CommitResult::Resolved { failure } => (
             failure.identity.0.checkpoint_key(),
-            Some(StreamObservationStatus::Running),
+            None,
             0,
             0,
             0,
@@ -8778,7 +8778,7 @@ async fn sync_stream_observation_tx(
         ),
         CommitResult::ReplayFailed { failure } => (
             failure.identity.0.checkpoint_key(),
-            Some(StreamObservationStatus::Failed),
+            None,
             0,
             0,
             0,
@@ -8789,7 +8789,7 @@ async fn sync_stream_observation_tx(
         ),
         CommitResult::ReplayCancelled { failure } => (
             failure.identity.0.checkpoint_key(),
-            Some(StreamObservationStatus::Failed),
+            None,
             0,
             0,
             0,
@@ -23097,6 +23097,343 @@ mod tests {
         assert_eq!(
             state.stream_observation(stream.id).await,
             Err(RuntimeError::RecoveryInvalid)
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_updates_preserve_paused_source_stream_observation() {
+        fn expected_failure_reference(
+            capture: &CwdCapture,
+            key: &CheckpointKey,
+            failure: &FailureIdentity,
+        ) -> FailureRef {
+            failure_reference(
+                capture.database_id(),
+                capture.snapshot().clone(),
+                key.consumer.canonical(),
+                key.source.as_str().to_owned(),
+                key.partition
+                    .as_ref()
+                    .map(|value| value.as_str().to_owned()),
+                key.position_format.as_str().to_owned(),
+                failure.0.position.token.as_str().to_owned(),
+            )
+            .unwrap()
+        }
+
+        async fn skipped_failure(
+            state: &RuntimeState,
+            writer: WriterLease,
+            delivery: DeliveryIdentity,
+            expected: CheckpointPrecondition,
+        ) -> (FailureRecord, StreamCheckpoint) {
+            let mut backend = state.stream_backend(writer);
+            let lease = match backend
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected delivery lease: {other:?}"),
+            };
+            let failure = match backend
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(Vec::new()),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected failure result: {other:?}"),
+            };
+            let skip_lease = match backend
+                .apply_async(CommitIntent::Acquire {
+                    delivery,
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Skip,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected skip lease: {other:?}"),
+            };
+            let checkpoint = match backend
+                .apply_async(CommitIntent::Skip {
+                    lease: skip_lease,
+                    expected,
+                    expected_failure_version: failure.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+                other => panic!("unexpected skip result: {other:?}"),
+            };
+            let failure = backend
+                .failure_async(&failure.identity)
+                .await
+                .unwrap()
+                .expect("skipped failure");
+            (failure, checkpoint)
+        }
+
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(209)).await.unwrap();
+        let first_delivery = stream_delivery("replay-state:0", "replay-state:1");
+        let key = first_delivery.checkpoint_key();
+        let run = state
+            .begin_observed_request(
+                RunObservationRegistration {
+                    request: request(210, 211),
+                    consumer_identity: key.consumer.clone(),
+                    function: "pkg.replay-state".into(),
+                    source_identity: Some(key.source.as_str().to_owned()),
+                    invocation_id: id(212),
+                },
+                digest(213),
+                writer,
+            )
+            .await
+            .unwrap()
+            .run
+            .expect("registered live run");
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: None,
+                checkpoint: key.clone(),
+            })
+            .await
+            .unwrap();
+
+        let (success_failure, first_checkpoint) = skipped_failure(
+            &state,
+            writer,
+            first_delivery,
+            CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+        )
+        .await;
+        let (failed_replay_failure, second_checkpoint) = skipped_failure(
+            &state,
+            writer,
+            stream_delivery("replay-state:1", "replay-state:2"),
+            (&first_checkpoint).into(),
+        )
+        .await;
+        let (cancelled_replay_failure, checkpoint_before_replay) = skipped_failure(
+            &state,
+            writer,
+            stream_delivery("replay-state:2", "replay-state:3"),
+            (&second_checkpoint).into(),
+        )
+        .await;
+
+        assert!(matches!(
+            state.pause_stream(writer, key.clone()).await.unwrap(),
+            StreamAdministrationOutcome::Paused { changed: true }
+        ));
+        let capture = state.capture().await.unwrap();
+        assert_eq!(
+            state
+                .stream_observation(stream.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            StreamObservationStatus::Paused
+        );
+
+        let success_grant = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Replay {
+                failure: success_failure.identity.clone(),
+                expected_version: success_failure.version,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::ReplayGranted { grant } => grant,
+            other => panic!("unexpected replay grant: {other:?}"),
+        };
+        assert_eq!(
+            state
+                .stream_observation(stream.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            StreamObservationStatus::Paused
+        );
+        assert_eq!(
+            state.stream_checkpoint(&key).await.unwrap(),
+            checkpoint_before_replay
+        );
+        assert_eq!(
+            state
+                .claim_stream_replay(writer, &success_grant)
+                .await
+                .unwrap(),
+            Ok(())
+        );
+        let replayed = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::ReplayComplete {
+                failure: success_grant.failure.clone(),
+                expected_version: success_grant.version,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::ReplayCompleted { failure } => failure,
+            other => panic!("unexpected replay completion: {other:?}"),
+        };
+        assert_eq!(replayed.status, FailureStatus::Replayed);
+        let resolved = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Resolve {
+                failure: replayed.identity,
+                expected_version: replayed.version,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Resolved { failure } => failure,
+            other => panic!("unexpected resolution: {other:?}"),
+        };
+        assert_eq!(resolved.status, FailureStatus::Resolved);
+        let after_success = state.stream_observation(stream.id).await.unwrap().unwrap();
+        assert_eq!(after_success.status, StreamObservationStatus::Paused);
+        assert_eq!(
+            after_success.last_failure,
+            Some(expected_failure_reference(
+                &capture,
+                &key,
+                &success_failure.identity
+            ))
+        );
+        assert_eq!(
+            after_success.diagnostic,
+            Some(SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Permanent,
+            })
+        );
+        assert_eq!(
+            state.stream_checkpoint(&key).await.unwrap(),
+            checkpoint_before_replay
+        );
+
+        let failed_grant = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Replay {
+                failure: failed_replay_failure.identity.clone(),
+                expected_version: failed_replay_failure.version,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::ReplayGranted { grant } => grant,
+            other => panic!("unexpected replay grant: {other:?}"),
+        };
+        let replay_failed = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::ReplayFail {
+                failure: failed_grant.failure,
+                expected_version: failed_grant.version,
+                diagnostic: SafeDiagnostic {
+                    code: DiagnosticCode::DecodeRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::ReplayFailed { failure } => failure,
+            other => panic!("unexpected replay failure: {other:?}"),
+        };
+        assert_eq!(replay_failed.status, FailureStatus::Skipped);
+        let after_failure = state.stream_observation(stream.id).await.unwrap().unwrap();
+        assert_eq!(after_failure.status, StreamObservationStatus::Paused);
+        assert_eq!(
+            after_failure.last_failure,
+            Some(expected_failure_reference(
+                &capture,
+                &key,
+                &replay_failed.identity
+            ))
+        );
+        assert_eq!(
+            after_failure.diagnostic,
+            Some(SafeDiagnostic {
+                code: DiagnosticCode::DecodeRejected,
+                class: DiagnosticClass::Permanent,
+            })
+        );
+        assert_eq!(
+            state.stream_checkpoint(&key).await.unwrap(),
+            checkpoint_before_replay
+        );
+
+        let cancellation_grant = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Replay {
+                failure: cancelled_replay_failure.identity.clone(),
+                expected_version: cancelled_replay_failure.version,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::ReplayGranted { grant } => grant,
+            other => panic!("unexpected replay grant: {other:?}"),
+        };
+        let replay_cancelled = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::ReplayCancel {
+                failure: cancellation_grant.failure,
+                expected_version: cancellation_grant.version,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::ReplayCancelled { failure } => failure,
+            other => panic!("unexpected replay cancellation: {other:?}"),
+        };
+        assert_eq!(replay_cancelled.status, FailureStatus::Skipped);
+        let after_cancellation = state.stream_observation(stream.id).await.unwrap().unwrap();
+        assert_eq!(after_cancellation.status, StreamObservationStatus::Paused);
+        assert_eq!(
+            after_cancellation.last_failure,
+            Some(expected_failure_reference(
+                &capture,
+                &key,
+                &replay_cancelled.identity
+            ))
+        );
+        assert_eq!(
+            after_cancellation.diagnostic,
+            Some(SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Permanent,
+            })
+        );
+        assert_eq!(
+            state.stream_checkpoint(&key).await.unwrap(),
+            checkpoint_before_replay
         );
     }
 
