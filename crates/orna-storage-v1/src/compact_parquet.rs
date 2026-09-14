@@ -40,6 +40,7 @@ pub enum CompactParquetError {
     NullKey,
     RowCountMismatch { expected: u64, observed: u64 },
     UnorderedPrimaryKeys,
+    ManifestKeyBoundsMismatch,
     Key(CompactKeyError),
     SegmentUnavailable(Uuid),
 }
@@ -68,6 +69,9 @@ impl fmt::Display for CompactParquetError {
             }
             Self::UnorderedPrimaryKeys => {
                 f.write_str("compact primary keys are not in canonical order")
+            }
+            Self::ManifestKeyBoundsMismatch => {
+                f.write_str("compact manifest key bounds do not match decoded primary keys")
             }
             Self::Key(error) => error.fmt(f),
             Self::SegmentUnavailable(id) => write!(f, "compact segment is unavailable: {id}"),
@@ -241,7 +245,15 @@ impl CompactParquetKeySource {
             .segments
             .get(&entry.segment_id())
             .ok_or_else(|| CompactParquetError::SegmentUnavailable(entry.segment_id()))?;
-        Self::decode_verified_bytes(&self.profile, self.table, bytes, entry.row_count())
+        let keys =
+            Self::decode_verified_bytes(&self.profile, self.table, bytes, entry.row_count())?;
+        let (Some(min_key), Some(max_key)) = (keys.iter().min(), keys.iter().max()) else {
+            return Err(CompactParquetError::ManifestKeyBoundsMismatch);
+        };
+        if min_key.as_slice() != entry.min_key() || max_key.as_slice() != entry.max_key() {
+            return Err(CompactParquetError::ManifestKeyBoundsMismatch);
+        }
+        Ok(keys)
     }
 }
 
@@ -1015,6 +1027,7 @@ fn hex_digest(bytes: [u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compact::CompactLogicalKeyError;
     use orna_foundation_v1::SchemaDescriptor;
     use orna_repository_v1::{
         CompactManifest, CompactSegment, CompactSegmentRole, ManagedFileChange, ManagedPath,
@@ -1798,7 +1811,16 @@ mod tests {
         profile: &CompactOvbProfile,
         schema_metadata: Option<KeyValue>,
     ) -> Vec<u8> {
-        let original = with_page_checksums(parquet(profile, &[KEY_A], &[vec![1]], false, None));
+        verified_fixture_with_values(profile, &[1], schema_metadata)
+    }
+
+    fn verified_fixture_with_values(
+        profile: &CompactOvbProfile,
+        values: &[i64],
+        schema_metadata: Option<KeyValue>,
+    ) -> Vec<u8> {
+        let original =
+            with_page_checksums(parquet(profile, &[KEY_A], &[values.to_vec()], false, None));
         let reader = SerializedFileReader::new(Bytes::from(original.clone())).unwrap();
         let file = reader.metadata().file_metadata();
         let columns = CanonicalValue::new(OvbRaw::Array(vec![descriptor(KEY_A, int_type())]))
@@ -2227,6 +2249,102 @@ mod tests {
             Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
         ));
         drop(temp);
+    }
+
+    #[test]
+    fn committed_segment_key_bounds_must_match_decoded_canonical_keys() {
+        let profile = profile(&[KEY_A]);
+        let bytes = verified_fixture_with_values(
+            &profile,
+            &[1, 2],
+            Some(KeyValue::new(
+                "orna.schema.ovb".into(),
+                Some(BASE64.encode(profile.schema().encode().unwrap())),
+            )),
+        );
+        let columns = CanonicalValue::new(OvbRaw::Array(vec![descriptor(KEY_A, int_type())]))
+            .unwrap()
+            .encode()
+            .unwrap();
+
+        for (min_key, max_key, expect_mismatch) in [
+            (expected_scalar(0), expected_scalar(2), true),
+            (expected_scalar(1), expected_scalar(3), true),
+            (expected_scalar(1), expected_scalar(2), false),
+        ] {
+            let (temp, repository) = repository();
+            let segment_path = ManagedPath::new(format!(
+                ".orna/storage/{TABLE}/data/{}/{SEGMENT_ID}.parquet",
+                &SEGMENT_ID.to_string()[..2]
+            ))
+            .unwrap();
+            let segment = CompactSegment::new(
+                SEGMENT_ID,
+                CompactSegmentRole::Data,
+                profile.schema_fingerprint(),
+                "test-encoder-v1",
+                segment_path,
+                bytes.clone(),
+                min_key,
+                max_key,
+                2,
+                columns.clone(),
+                true,
+                false,
+            )
+            .unwrap();
+            let head = repository.head().unwrap().unwrap();
+            let plan = repository
+                .prepare_compact_publication(
+                    &head,
+                    repository.index_generation().unwrap(),
+                    CompactManifest::empty(TABLE, profile.schema_fingerprint()),
+                    [10; 16],
+                    [11; 32],
+                    &[segment],
+                    "committed compact key-bound fixture",
+                )
+                .unwrap();
+            let manifest = plan.manifest().clone();
+            let pending = repository
+                .publish_compact_repository_boundary(plan)
+                .unwrap();
+            let source = CompactParquetKeySource::from_verified_manifest(
+                &repository,
+                pending.commit(),
+                &manifest,
+                profile.clone(),
+            )
+            .unwrap();
+            let result = source
+                .exact_keys(&manifest.entries()[0])
+                .map(|keys| keys.collect::<Result<Vec<_>, _>>());
+
+            if expect_mismatch {
+                assert!(matches!(
+                    result,
+                    Err(CompactParquetError::ManifestKeyBoundsMismatch)
+                ));
+            } else {
+                assert_eq!(
+                    result.unwrap().unwrap(),
+                    vec![expected_scalar(1), expected_scalar(2)]
+                );
+            }
+
+            let logical = profile.logical_key_index(&manifest, &source, 2);
+            if expect_mismatch {
+                assert!(matches!(
+                    logical,
+                    Err(CompactLogicalKeyError::Source(
+                        CompactParquetError::ManifestKeyBoundsMismatch
+                    ))
+                ));
+            } else {
+                assert_eq!(logical.unwrap().len(), 2);
+            }
+            drop(temp);
+        }
     }
 
     #[test]
