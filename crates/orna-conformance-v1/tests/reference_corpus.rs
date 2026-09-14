@@ -306,6 +306,39 @@ fn reference_project_runtime_adapter_reports_exactly_separate_evidence() {
             .iter()
             .all(|case| case.status == EvidenceStatus::Passed && case.rollback_verified)
     );
+    let expected_negative_cases = serde_json::json!([
+        {
+            "invoke": "library.lend",
+            "args": ["missing-book", "reader-2"],
+            "expect": "cross-table assertion failure; no new loan"
+        },
+        {
+            "invoke": "warehouse.transfer",
+            "args": ["north", "south", "pencil", 100],
+            "expect": "assertion failure; both stock rows unchanged"
+        },
+        {
+            "invoke": "library.lend",
+            "args": ["book-1", "reader-2"],
+            "expect": "duplicate key; existing loan unchanged"
+        }
+    ]);
+    let actual_negative_cases = corpus
+        .project_expectations
+        .negative_cases
+        .iter()
+        .map(|case| {
+            serde_json::json!({
+                "invoke": case.invoke,
+                "args": case.args,
+                "expect": case.expect
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        serde_json::Value::Array(actual_negative_cases),
+        expected_negative_cases
+    );
 
     // The distinct report type/classification and explicit false flags keep
     // this adapter evidence outside the EngineWitnesses API and its claims.
