@@ -1,6 +1,7 @@
 use orna_conformance_v1::{
     BoundedEvaluator, ConformanceAdapter, Corpus, DurableTransactionalEvaluator, EvidenceStatus,
-    Harness, RuntimeAdapter, RuntimeEvaluator, Scenario, SourceUnit, StageOutcome,
+    Harness, ProjectEnvironment, ProjectExpectations, ProjectUnit, RuntimeAdapter,
+    RuntimeEvaluator, Scenario, SourceUnit, StageOutcome,
 };
 use orna_evaluator_v1::Limits;
 use orna_foundation_v1::Value;
@@ -62,6 +63,32 @@ fn durable_source(fixture_id: &str, source: &str) -> SourceUnit {
         source_id: format!("{fixture_id}.orna"),
         parse_as: "module_unit".into(),
         source: source.into(),
+    }
+}
+
+fn durable_project(fixture_id: &str, source: &str) -> ProjectUnit {
+    ProjectUnit {
+        fixture_id: fixture_id.into(),
+        project_id: fixture_id.into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: fixture_id.into(),
+            source_id: format!("{fixture_id}/main.orna"),
+            parse_as: "module_unit".into(),
+            source: source.into(),
+        }],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
     }
 }
 
@@ -264,16 +291,18 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
         database_id: [51; 16],
         repository_id: [52; 16],
     };
+    let project = durable_project(
+        "TXN-002",
+        "pub table Order(id: Int) { text: Str, } pub table Payment(id: Int) { text: Str, } pub table Audit(id: Int) { text: Str, } fn main() { Order.insert({ id: 1, text: \"order\" }); Payment.insert({ id: 1, text: \"payment\" }); Audit.insert({ id: 1, text: \"audit\" }); assert Order.count() == 1; assert Payment.count() == 1; assert Audit.count() == 1; }",
+    );
     let outcome = evaluator
-        .execute_source(
+        .execute_project(
             &repository,
             identity,
             [53; 16],
             [54; 32],
-            &durable_source(
-                "TXN-002",
-                "pub table Order(id: Int) { text: Str, } pub table Payment(id: Int) { text: Str, } pub table Audit(id: Int) { text: Str, } fn main() { Order.insert({ id: 1, text: \"order\" }); Payment.insert({ id: 1, text: \"payment\" }); Audit.insert({ id: 1, text: \"audit\" }); assert Order.count() == 1; assert Payment.count() == 1; assert Audit.count() == 1; }",
-            ),
+            &project,
+            "main.main",
         )
         .await
         .expect("durable commit execution");
