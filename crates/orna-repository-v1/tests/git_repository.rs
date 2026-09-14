@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -168,6 +169,10 @@ fn compact_segment_with_manifest_columns(
     .unwrap();
     let physical_columns = compact_columns();
     let bytes = compact_parquet(table, ordinal, &physical_columns, payload);
+    let key = CanonicalValue::new(OvbRaw::Int(ordinal.into()))
+        .unwrap()
+        .encode()
+        .unwrap();
     CompactSegment::new(
         segment_id,
         CompactSegmentRole::Data,
@@ -175,8 +180,8 @@ fn compact_segment_with_manifest_columns(
         "test-encoder-v1",
         path,
         bytes,
-        ordinal.to_be_bytes().to_vec(),
-        ordinal.to_be_bytes().to_vec(),
+        key.clone(),
+        key,
         1,
         columns,
         true,
@@ -258,7 +263,10 @@ fn date_segment(table: Uuid, ordinal: u64, days: &[i32]) -> CompactSegment {
     let schema = date_schema(table);
     let columns = date_columns();
     let bytes = date_parquet(table, &schema, &columns, days);
-    let bound = ordinal.to_be_bytes().to_vec();
+    let bound = CanonicalValue::new(OvbRaw::Int(ordinal.into()))
+        .unwrap()
+        .encode()
+        .unwrap();
     CompactSegment::new(
         segment_id,
         CompactSegmentRole::Data,
@@ -2850,12 +2858,23 @@ fn compact_manifest_observation_uses_the_committed_manifest_segment_set() {
     publish_compact_repository_boundary(&repo, plan).unwrap();
     let head = repo.head().unwrap().unwrap();
     let before = git_state(&repo, root.path());
+    let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
+    let object = manifest.entries()[0].git_object_id().to_owned();
 
     assert_eq!(
         repo.observe_compact_manifest_segment_blobs(&head, table)
             .unwrap(),
         GitDeclaredObjectSetState::Complete
     );
+    let hydration = repo.plan_compact_manifest_hydration(&head, table).unwrap();
+    assert_eq!(hydration.len(), 1);
+    assert!(matches!(
+        hydration.get(&object),
+        Some(GitObjectState::Materialized {
+            kind: GitObjectKind::Blob,
+            ..
+        })
+    ));
     assert_eq!(git_state(&repo, root.path()), before);
 }
 
@@ -2886,18 +2905,41 @@ fn compact_manifest_observation_keeps_a_declared_promised_segment_unhydrated() {
     assert!(object_path.is_file());
     with_partial_clone(root.path());
     fs::remove_file(&object_path).unwrap();
-    let before = git_state(&repo, root.path());
+    let head_before = repo.head().unwrap();
+    let refs_before = git(
+        root.path(),
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
+    let index_before = fs::read(root.path().join(".git/index")).unwrap();
+    let worktree_before = fs::read(root.path().join("main.orna")).unwrap();
 
     assert_eq!(
         repo.observe_compact_manifest_segment_blobs(&head, table)
             .unwrap(),
         GitDeclaredObjectSetState::Complete
     );
-    assert!(
-        !object_path.exists(),
-        "observation hydrated a promised segment"
+    let hydration = repo.plan_compact_manifest_hydration(&head, table).unwrap();
+    assert_eq!(
+        hydration,
+        BTreeMap::from([(object.clone(), GitObjectState::Promised)])
     );
-    assert_eq!(git_state(&repo, root.path()), before);
+    assert!(!object_path.exists(), "planner hydrated a promised segment");
+    assert_eq!(repo.head().unwrap(), head_before);
+    assert_eq!(
+        git(
+            root.path(),
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+        ),
+        refs_before
+    );
+    assert_eq!(
+        fs::read(root.path().join(".git/index")).unwrap(),
+        index_before
+    );
+    assert_eq!(
+        fs::read(root.path().join("main.orna")).unwrap(),
+        worktree_before
+    );
 }
 
 #[test]
