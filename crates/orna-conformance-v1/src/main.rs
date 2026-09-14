@@ -1,9 +1,9 @@
 use futures::executor::block_on;
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, Corpus, DurableTransactionalEvaluator, EvidenceStatus,
-    Harness, ImplementationClaim, ReferenceProjectRuntimeEvidence, RuntimeAdapter,
-    RuntimeEvaluator, Scenario, SourceUnit, StageOutcome, SyntaxAdapter, TransactionalEvaluator,
-    run_reference_project_runtime_adapter,
+    Harness, ImplementationClaim, ProjectEnvironment, ProjectExpectations, ProjectUnit,
+    ReferenceProjectRuntimeEvidence, RuntimeAdapter, RuntimeEvaluator, Scenario, SourceUnit,
+    StageOutcome, SyntaxAdapter, TransactionalEvaluator, run_reference_project_runtime_adapter,
 };
 use orna_evaluator_v1::Limits as EvaluatorLimits;
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText, Value};
@@ -408,6 +408,32 @@ fn transaction_contract(scenario: &Scenario) -> bool {
     }
 }
 
+fn transaction_project(fixture_id: &str, source: &str) -> ProjectUnit {
+    ProjectUnit {
+        fixture_id: fixture_id.into(),
+        project_id: fixture_id.into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: fixture_id.into(),
+            source_id: format!("{fixture_id}/main.orna"),
+            parse_as: "module_unit".into(),
+            source: source.into(),
+        }],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+    }
+}
+
 fn run_durable_transaction_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     let root = conformance_scratch_root("orna-conformance-transaction");
     if fs::create_dir(&root).is_err() {
@@ -447,13 +473,19 @@ fn run_durable_transaction_scenario(scenario: &Scenario) -> StageOutcome<Diagnos
             database_id: [41; 16],
             repository_id: [42; 16],
         };
-        let outcome = match block_on(evaluator.execute_source(
-            &repository,
-            identity,
-            [43; 16],
-            [44; 32],
-            &unit,
-        )) {
+        let outcome = match if scenario.id == "TXN-002" {
+            let project = transaction_project(&scenario.id, &unit.source);
+            block_on(evaluator.execute_project(
+                &repository,
+                identity,
+                [43; 16],
+                [44; 32],
+                &project,
+                "main.main",
+            ))
+        } else {
+            block_on(evaluator.execute_source(&repository, identity, [43; 16], [44; 32], &unit))
+        } {
             Ok(outcome) => outcome,
             Err(_) => return None,
         };
