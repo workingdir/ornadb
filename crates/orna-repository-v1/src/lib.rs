@@ -6057,7 +6057,9 @@ fn valid_branch_name(name: &str) -> bool {
         && !name.contains("..")
         && !name.contains("//")
         && !name.bytes().any(|byte| {
-            byte <= b' ' || matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+            byte <= b' '
+                || byte == 0x7f
+                || matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
         })
 }
 

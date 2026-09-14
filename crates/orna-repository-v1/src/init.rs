@@ -7,6 +7,7 @@
 //! second parser for an ad hoc metadata language.
 
 use std::{
+    ffi::OsString,
     fmt,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -21,7 +22,7 @@ use uuid::{Uuid, Version};
 
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 
-use crate::{Repository, RepositoryError, scrub_git_routing_environment};
+use crate::{Repository, RepositoryError, scrub_git_routing_environment, valid_branch_name};
 
 const FORMAT_DIRECTORY: &str = ".orna";
 const FORMAT_FILE: &str = "format.orna";
@@ -30,6 +31,7 @@ const MAIN_FILE: &str = "main.orna";
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
 const REPOSITORY_FORMAT: i64 = 1;
 const STORAGE_PROFILE: &str = "compact-storage-v1";
+const MAX_INHERITED_GIT_CONFIG_ENTRIES: usize = 1024;
 
 /// A stable repository identity, represented by UUIDv4 bytes.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -216,8 +218,17 @@ pub fn inspect_metadata(
 
 fn initialize_git(target: &Path) -> Result<(), RepositoryInitError> {
     let mut command = Command::new("git");
+    if let Some(initial_branch) = configured_initial_branch() {
+        command
+            .arg("-c")
+            .arg(format!("init.defaultBranch={initial_branch}"));
+    }
     command.arg("init").arg("--").arg(target);
     scrub_git_routing_environment(&mut command);
+    command.env("GIT_CONFIG_NOSYSTEM", "1").env(
+        "GIT_CONFIG_GLOBAL",
+        if cfg!(windows) { "NUL" } else { "/dev/null" },
+    );
     let output = command
         .output()
         .map_err(|_| RepositoryInitError::GitUnavailable)?;
@@ -226,6 +237,67 @@ fn initialize_git(target: &Path) -> Result<(), RepositoryInitError> {
     } else {
         Err(RepositoryInitError::GitOperationFailed)
     }
+}
+
+/// Carries forward only the explicitly supported initial-branch setting from
+/// Git's environment configuration. All other `GIT_CONFIG*` variables remain
+/// scrubbed so config files and injected key/value pairs cannot redirect init.
+fn configured_initial_branch() -> Option<String> {
+    let count = std::env::var_os("GIT_CONFIG_COUNT")?
+        .to_str()?
+        .parse::<usize>()
+        .ok()?;
+    configured_initial_branch_entries(
+        count,
+        (0..count).map(|index| {
+            (
+                std::env::var_os(format!("GIT_CONFIG_KEY_{index}")),
+                std::env::var_os(format!("GIT_CONFIG_VALUE_{index}")),
+            )
+        }),
+    )
+}
+
+fn configured_initial_branch_entries(
+    count: usize,
+    entries: impl IntoIterator<Item = (Option<OsString>, Option<OsString>)>,
+) -> Option<String> {
+    if count > MAX_INHERITED_GIT_CONFIG_ENTRIES {
+        return None;
+    }
+    let mut initial_branch = None;
+    let mut entries = entries.into_iter();
+    for _ in 0..count {
+        let Some((key, value)) = entries.next() else {
+            return None;
+        };
+        let (Some(key), Some(value)) = (key, value) else {
+            return None;
+        };
+        if key != OsString::from("init.defaultBranch") {
+            continue;
+        }
+        let Some(value) = value.to_str() else {
+            return None;
+        };
+        if initial_branch.is_some() || !valid_initial_branch_name(value) {
+            return None;
+        }
+        initial_branch = Some(value.to_owned());
+    }
+    initial_branch
+}
+
+fn valid_initial_branch_name(name: &str) -> bool {
+    valid_branch_name(name)
+        && name != "@"
+        && name != "."
+        && !name.contains("@{")
+        && name.split('/').all(|component| {
+            !component.starts_with('.')
+                && !component.ends_with('.')
+                && !component.ends_with(".lock")
+        })
 }
 
 fn inspect_metadata_unlocked(
@@ -594,7 +666,12 @@ impl FromStr for DatabaseId {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, process::Command};
+    use std::{
+        ffi::OsString,
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+    };
 
     use super::{
         DATABASE_FILE, FORMAT_DIRECTORY, FORMAT_FILE, Repository, RepositoryInitError,
@@ -710,6 +787,221 @@ mod tests {
         let initialized = initialize_repository(&target).unwrap();
         assert_eq!(initialized.repository().worktree(), target);
         assert!(target.join(".git").is_dir());
+    }
+
+    #[test]
+    fn hostile_git_config_is_scrubbed_except_initial_branch() {
+        let fixture = tempfile::tempdir().unwrap();
+        let foreign = fixture.path().join("foreign");
+        fs::create_dir(&foreign).unwrap();
+        git(&foreign, &["init", "--quiet", "-b", "foreign"]);
+        git(
+            &foreign,
+            &["config", "user.email", "repository-init@example.invalid"],
+        );
+        git(&foreign, &["config", "user.name", "Repository init test"]);
+        fs::write(foreign.join("foreign.txt"), "foreign\n").unwrap();
+        git(&foreign, &["add", "foreign.txt"]);
+        let foreign_head = fs::read(foreign.join(".git/HEAD")).unwrap();
+        let foreign_config = fs::read(foreign.join(".git/config")).unwrap();
+        let foreign_index = fs::read(foreign.join(".git/index")).unwrap();
+        let foreign_file = fs::read(foreign.join("foreign.txt")).unwrap();
+        let hostile_config = fixture.path().join("hostile.gitconfig");
+        fs::write(
+            &hostile_config,
+            format!("[core]\n\tworktree = {}\n", foreign.display()),
+        )
+        .unwrap();
+        let global_config = fixture.path().join("global.gitconfig");
+        fs::write(
+            &global_config,
+            format!(
+                "[core]\n\tbare = true\n\tworktree = {}\n[init]\n\tdefaultBranch = @\n",
+                foreign.display()
+            ),
+        )
+        .unwrap();
+        let target = fixture.path().join("target");
+
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child.args([
+            "--exact",
+            "init::tests::hostile_git_config_is_scrubbed_except_initial_branch_child",
+            "--nocapture",
+        ]);
+        child
+            .env("ORNA_INIT_HOSTILE_TARGET", &target)
+            .env("ORNA_INIT_HOSTILE_FOREIGN_HEAD", foreign.join(".git/HEAD"))
+            .env("GIT_DIR", foreign.join(".git"))
+            .env("GIT_WORK_TREE", &foreign)
+            .env("GIT_INDEX_FILE", foreign.join(".git/index"))
+            .env("GIT_CONFIG_SYSTEM", fixture.path().join("system.gitconfig"))
+            .env("GIT_CONFIG_GLOBAL", &global_config)
+            .env("GIT_CONFIG_NOSYSTEM", "0")
+            .env("GIT_CONFIG", &hostile_config)
+            .env("GIT_CONFIG_COUNT", "3")
+            .env("GIT_CONFIG_KEY_0", "init.defaultBranch")
+            .env("GIT_CONFIG_VALUE_0", "custom-init-branch")
+            .env("GIT_CONFIG_KEY_1", "core.worktree")
+            .env("GIT_CONFIG_VALUE_1", &foreign)
+            .env("GIT_CONFIG_KEY_2", "core.bare")
+            .env("GIT_CONFIG_VALUE_2", "true");
+        let output = child.output().unwrap();
+        assert!(
+            output.status.success(),
+            "hostile child failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(target.join(".git").is_dir());
+        assert_eq!(fs::read(foreign.join(".git/HEAD")).unwrap(), foreign_head);
+        assert_eq!(
+            fs::read(foreign.join(".git/config")).unwrap(),
+            foreign_config
+        );
+        assert_eq!(fs::read(foreign.join(".git/index")).unwrap(), foreign_index);
+        assert_eq!(fs::read(foreign.join("foreign.txt")).unwrap(), foreign_file);
+    }
+
+    #[test]
+    fn hostile_git_config_is_scrubbed_except_initial_branch_child() {
+        if std::env::var_os("ORNA_INIT_HOSTILE_TARGET").is_none() {
+            return;
+        }
+        let target = PathBuf::from(std::env::var_os("ORNA_INIT_HOSTILE_TARGET").unwrap());
+        initialize_repository(&target).unwrap();
+        assert!(target.join(".git").is_dir());
+        assert_eq!(
+            fs::read_to_string(target.join(".git/HEAD")).unwrap(),
+            "ref: refs/heads/custom-init-branch\n"
+        );
+        let foreign_head =
+            PathBuf::from(std::env::var_os("ORNA_INIT_HOSTILE_FOREIGN_HEAD").unwrap());
+        assert!(foreign_head.is_file());
+    }
+
+    #[test]
+    fn inherited_initial_branch_rejects_git_invalid_values() {
+        for value in [
+            ".",
+            "foo.",
+            "foo.lock",
+            "foo.lock/bar",
+            "foo/bar.lock",
+            "foo/bar.",
+            ".foo",
+            "foo@{bar}",
+            "\x7f",
+        ] {
+            assert_eq!(
+                super::configured_initial_branch_entries(
+                    1,
+                    [(
+                        Some(OsString::from("init.defaultBranch")),
+                        Some(OsString::from(value)),
+                    )],
+                ),
+                None,
+                "Git-invalid branch value {value:?} must reject forwarding"
+            );
+        }
+        assert_eq!(
+            super::configured_initial_branch_entries(
+                1,
+                [(
+                    Some(OsString::from("init.defaultBranch")),
+                    Some(OsString::from("topic")),
+                )],
+            ),
+            Some("topic".to_owned())
+        );
+        assert_eq!(
+            super::configured_initial_branch_entries(
+                1,
+                [(
+                    Some(OsString::from("init.defaultBranch")),
+                    Some(OsString::from("@")),
+                )],
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn inherited_initial_branch_rejects_incomplete_git_config_slots() {
+        let target = Some(OsString::from("init.defaultBranch"));
+        let value = Some(OsString::from("topic"));
+        let non_target = Some(OsString::from("core.bare"));
+
+        for entries in [
+            vec![(None, value.clone()), (target.clone(), value.clone())],
+            vec![(target.clone(), value.clone()), (None, value.clone())],
+            vec![(target.clone(), None), (non_target.clone(), value.clone())],
+            vec![(target, value), (non_target, None)],
+        ] {
+            assert_eq!(
+                super::configured_initial_branch_entries(2, entries),
+                None,
+                "an incomplete declared Git config slot must reject forwarding"
+            );
+        }
+    }
+
+    #[test]
+    fn inherited_initial_branch_rejects_duplicate_target_entries() {
+        let target = |value| {
+            (
+                Some(OsString::from("init.defaultBranch")),
+                Some(OsString::from(value)),
+            )
+        };
+
+        for entries in [
+            vec![target("first"), target("second")],
+            vec![target("first"), target("foo.")],
+            vec![target("foo."), target("second")],
+        ] {
+            assert_eq!(
+                super::configured_initial_branch_entries(2, entries),
+                None,
+                "duplicate init.defaultBranch entries must reject forwarding"
+            );
+        }
+    }
+
+    #[test]
+    fn inherited_initial_branch_rejects_over_limit_and_accepts_exact_bound() {
+        let mut entries = vec![(None, None); super::MAX_INHERITED_GIT_CONFIG_ENTRIES + 1];
+        entries[0] = (
+            Some(OsString::from("init.defaultBranch")),
+            Some(OsString::from("over-limit")),
+        );
+        assert_eq!(
+            super::configured_initial_branch_entries(
+                super::MAX_INHERITED_GIT_CONFIG_ENTRIES + 1,
+                entries,
+            ),
+            None
+        );
+
+        let mut entries = vec![
+            (
+                Some(OsString::from("core.bare")),
+                Some(OsString::from("false")),
+            );
+            super::MAX_INHERITED_GIT_CONFIG_ENTRIES
+        ];
+        entries[super::MAX_INHERITED_GIT_CONFIG_ENTRIES - 1] = (
+            Some(OsString::from("init.defaultBranch")),
+            Some(OsString::from("at-cap")),
+        );
+        assert_eq!(
+            super::configured_initial_branch_entries(
+                super::MAX_INHERITED_GIT_CONFIG_ENTRIES,
+                entries,
+            ),
+            Some("at-cap".to_owned())
+        );
     }
 
     #[cfg(unix)]
