@@ -12,6 +12,7 @@
 //! environment changes, fixture catalogues, or runtime evaluation are needed.
 
 use orna_semantic_v1::{Analysis, DIAG_TYPE, DIAG_UNRESOLVED, ModuleInput, analyze};
+use orna_syntax_v1::parse_module_with_file;
 
 fn analyze_main(source: &str) -> Analysis {
     analyze(&[ModuleInput::new("main.orna", source)])
@@ -787,6 +788,202 @@ fn mixed_generic_protocol_members_keep_their_checkable_surface() {
     // member merely by sharing its name; otherwise substitution is being
     // guessed instead of checked.
     expect_diagnostics(&generic_implementation, &[DIAG_TYPE]);
+}
+
+#[test]
+fn local_generic_protocol_bounds_accept_a_satisfying_call_and_substitute_result() {
+    let result = analyze_main(
+        r#"
+            type Ordering = Int;
+            pub protocol Display {
+                fn display(self): Str;
+            }
+            pub protocol Order {
+                fn compare(self, other: Self): Ordering;
+            }
+            pub type Ranked {
+                value: Int,
+                impl Display {
+                    fn display(self): Str = "ranked";
+                }
+                impl Order {
+                    fn compare(self, other: Self): Int = self.value - other.value;
+                }
+            }
+            pub fn keep<T impl Display + Order>(value: T): T = value;
+            pub fn accepted(): Ranked = keep(Ranked { value: 1 });
+        "#,
+    );
+    expect_accepted(&result);
+    let module = result.modules.values().next().expect("generic module");
+    assert_eq!(
+        module
+            .symbols
+            .get("accepted")
+            .expect("accepted function")
+            .ty,
+        orna_semantic_v1::Type::Function {
+            parameters: Vec::new(),
+            parameter_names: Some(Vec::new()),
+            result: Box::new(orna_semantic_v1::Type::Named("Ranked".into())),
+            default_parameters: Default::default(),
+        }
+    );
+}
+
+#[test]
+fn self_result_keeps_nominal_target_identity() {
+    let result = analyze_main(
+        r#"
+            pub protocol Reproduce {
+                fn reproduce(self): Self;
+            }
+            pub type Box {
+                value: Int,
+                impl Reproduce {
+                    fn reproduce(self): Self = { value: self.value };
+                }
+            }
+        "#,
+    );
+    expect_diagnostics(&result, &[DIAG_TYPE]);
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message() == "static types are incompatible" })
+    );
+}
+
+#[test]
+fn local_generic_protocol_bounds_reject_a_missing_implementation() {
+    let result = analyze_main(
+        r#"
+            pub protocol Display {
+                fn display(self): Str;
+            }
+            pub protocol Order {
+                fn compare(self, other: Self): Int;
+            }
+            pub type DisplayOnly {
+                value: Int,
+                impl Display {
+                    fn display(self): Str = "display-only";
+                }
+            }
+            pub fn keep<T impl Display + Order>(value: T): T = value;
+            pub fn rejected(): DisplayOnly = keep(DisplayOnly { value: 1 });
+        "#,
+    );
+    expect_diagnostics(&result, &[DIAG_TYPE]);
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "generic type argument does not satisfy its protocol bound"
+    }));
+}
+
+#[test]
+fn generic_protocol_overlap_rejection_is_independent_of_source_order() {
+    for implementations in [
+        r#"
+            impl Display { fn display(self): Str = "first"; }
+            impl Display { fn display(self): Str = "second"; }
+        "#,
+        r#"
+            impl Display { fn display(self): Str = "second"; }
+            impl Display { fn display(self): Str = "first"; }
+        "#,
+    ] {
+        let result = analyze_main(&format!(
+            "pub type Repeated {{ value: Int, {implementations} }}"
+        ));
+        expect_diagnostics(&result, &[DIAG_TYPE]);
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message() == "overlapping protocol implementations are invalid"
+        }));
+    }
+}
+
+#[test]
+fn colon_generic_bounds_receive_the_frozen_legacy_diagnostic() {
+    let parsed = parse_module_with_file(
+        "pub fn legacy<T: Display>(value: T): T = value;",
+        "legacy-bound.orna",
+    );
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "ORNA091-E-BOUND-COLON"
+            && diagnostic.message == "protocol bounds use `<T impl Protocol>`"
+    }));
+}
+
+#[test]
+fn generic_calls_retain_callee_effect_and_failure_summaries() {
+    let filesystem = analyze_main(
+        r#"
+            pub protocol Display {
+                fn display(self): Str;
+            }
+            pub type Note {
+                value: Str,
+                impl Display {
+                    fn display(self): Str = self.value;
+                }
+            }
+            pub fn reads<T impl Display>(value: T): Bool =
+                std.io.fs.read_text("private-input") == "ok";
+            pub table Book(id: Int) { value: Str, }
+            pub table Loan(id: Int) { book_id: Int, }
+            assert every(Loan, loan =>
+                exists(Book, book => book.id == loan.book_id)
+                && reads<Note>(Note { value: "note" })
+            );
+        "#,
+    );
+    assert!(filesystem.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "declaration assertion uses forbidden filesystem effect"
+    }));
+    let reads = filesystem
+        .modules
+        .values()
+        .next()
+        .expect("filesystem module")
+        .symbols
+        .get("reads")
+        .expect("generic filesystem function");
+    assert!(reads.effects.effects.contains("filesystem"));
+    assert!(reads.effects.may_fail);
+
+    let fallible = analyze_main(
+        r#"
+            pub protocol Display {
+                fn display(self): Str;
+            }
+            pub type Note {
+                value: Str,
+                impl Display {
+                    fn display(self): Str = self.value;
+                }
+            }
+            pub fn maybe<T impl Display>(value: T): Bool = one([true]);
+            pub table Book(id: Int) { value: Str, }
+            pub table Loan(id: Int) { book_id: Int, }
+            assert every(Loan, loan =>
+                exists(Book, book => book.id == loan.book_id)
+                && maybe<Note>(Note { value: "note" })
+            );
+        "#,
+    );
+    assert!(fallible.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "assertion has forbidden effects or failure"
+    }));
+    let maybe = fallible
+        .modules
+        .values()
+        .next()
+        .expect("fallible module")
+        .symbols
+        .get("maybe")
+        .expect("generic fallible function");
+    assert!(maybe.effects.may_fail);
 }
 
 #[test]
