@@ -2,7 +2,10 @@ use futures::{
     executor::block_on,
     io::{AsyncRead, AsyncWrite, Cursor},
 };
-use orna_foundation_v1::CanonicalValue;
+use orna_foundation_v1::{
+    CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, OvbRaw, SafeText,
+    Value,
+};
 use orna_live_v1::{
     CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpConnection,
     HttpConnectionError, HttpEncodeError, HttpIoError, HttpParseError, Limits, ListenerBindError,
@@ -3943,10 +3946,77 @@ fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
     }
     .encode(Limits::default().protocol)
     .unwrap();
+    let mismatch_outcome = block_on(host.dispatch_frame(
+        [6; 16],
+        2,
+        Frame::Binary(mismatch),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(mismatch_outcome.outcome, FrameOutcome::Accepted);
+    let response = mismatch_outcome.response.expect("request mismatch response");
+    let diagnostic = FoundationDiagnostic::new(
+        SafeText::new(Error::RequestMismatch.code()).unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::redacted(),
+    )
+    .unwrap()
+    .redacted()
+    .with_reference([61; 16]);
+    let diagnostic = Value::decode(&diagnostic.encode_ovb().unwrap())
+        .unwrap()
+        .raw()
+        .clone();
+    let expected = Value::new(OvbRaw::Map(vec![
+        (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+        (OvbRaw::Int(1.into()), OvbRaw::Int(19.into())),
+        (OvbRaw::Int(2.into()), OvbRaw::Bytes([61; 16].to_vec())),
+        (OvbRaw::Int(3.into()), OvbRaw::Null),
+        (
+            OvbRaw::Int(4.into()),
+            OvbRaw::Map(vec![(OvbRaw::Int(0.into()), diagnostic)]),
+        ),
+    ]))
+    .unwrap()
+    .encode()
+    .unwrap();
     assert_eq!(
-        block_on(host.dispatch_frame([6; 16], 2, Frame::Binary(mismatch), &mut application,)),
-        Err(Error::RequestMismatch)
+        response,
+        Envelope::decode(&expected, Limits::default().protocol).unwrap()
     );
+
+    let fresh_status = Envelope {
+        request: Some([62; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [31; 16],
+            fingerprint: [41; 32],
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let fresh_response = block_on(host.dispatch_frame(
+        [6; 16],
+        2,
+        Frame::Binary(fresh_status),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("fresh request status response");
+    assert!(matches!(
+        fresh_response.message,
+        Message::RequestStatusResult {
+            target,
+            state,
+            fingerprint,
+            result,
+        } if target == [31; 16]
+            && state == orna_protocol_v1::RequestState::Reserved
+            && fingerprint == Some([41; 32])
+            && result.is_none()
+    ));
     // RequestStatus only reads durable state: neither active rows nor
     // retained terminal rows may invoke the application while reporting it.
     assert_eq!(application.calls, 0);
