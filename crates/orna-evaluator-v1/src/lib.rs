@@ -4061,6 +4061,7 @@ fn range_endpoint_kind(value: &Value) -> Option<&'static str> {
         Value::Int(_) => Some("Int"),
         Value::Decimal(_) => Some("Decimal"),
         Value::Date(_) => Some("Date"),
+        Value::Instant { .. } => Some("Instant"),
         _ => None,
     }
 }
