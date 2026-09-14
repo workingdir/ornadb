@@ -34,17 +34,62 @@ use orna_core::{
 
 use super::*;
 use crate::{
-    StandardApplicationCheckContext, StandardSourceIdentitySeed, check, check_standard_application,
+    ResolvedSourceCatalogueError, SignatureSlot, StandardApplicationCheckContext,
+    StandardSourceIdentitySeed, UnsupportedReturnShape, check, check_standard_application,
     check_standard_library_source, materialize_resolved_source_catalogue,
+    materialize_standard_resolved_source_catalogue,
     mutation::{
         MutationAssignment, MutationExpression, MutationExpressionKind,
         MutationRecordFieldExpression, MutationRecordFieldExpressionKind, MutationValueType,
     },
-    prepare_standard_source, ResolvedSourceCatalogueError, SignatureSlot, UnsupportedReturnShape,
+    prepare_standard_source,
 };
 mod client;
 mod mutation;
 mod query;
+
+#[test]
+fn materializes_standard_value_function_through_public_catalogue_handoff() {
+    let verified = crate::tests::verified_canonical_standard_source_fixture();
+    let standard = check_standard_library_source(&verified).unwrap();
+    let boolean_id = standard.value_types()[0].id();
+    let active = empty_standard_application_active(&verified);
+    let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+    let source =
+        "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;";
+    let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+    let report = check_standard_application(&bundle, &context);
+
+    assert!(
+        report.diagnostics().is_empty(),
+        "{:?}",
+        report.diagnostics()
+    );
+    let resolved =
+        materialize_standard_resolved_source_catalogue(&report, active.pair(), &active).unwrap();
+    let mut artifacts = resolved.function_artifacts();
+    let (definition, revision, artifact, references) = artifacts.next().unwrap();
+    assert!(artifacts.next().is_none());
+    assert_eq!(
+        definition.return_type(),
+        &FunctionReturn::Single(ResolvedType::Value(boolean_id))
+    );
+    assert_eq!(definition.current_revision(), revision.id());
+    assert_eq!(revision.function(), definition.id());
+    assert_eq!(artifact, revision.artifact());
+    assert_eq!(
+        orna_core::canonical_hash::artifact_payload_digest(artifact.payload()).unwrap(),
+        artifact.content_hash()
+    );
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0].source_function(), definition.id());
+    assert_eq!(references[0].source_revision(), revision.id());
+    assert_eq!(references[0].ordinal(), 0);
+    assert_eq!(
+        references[0].target(),
+        DefinitionReferenceTarget::ValueType(boolean_id)
+    );
+}
 
 #[test]
 fn stream_signature_reference_sequence_includes_reference_element() {
