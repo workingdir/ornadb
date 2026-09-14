@@ -11,7 +11,7 @@ use std::{cmp::Ordering, collections::BTreeMap, error::Error, fmt};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
-use orna_foundation_v1::{CanonicalValue, OvbRaw};
+use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
     CompactManifest, CompactManifestEntry, GitCommitRef, Repository, RepositoryError, Uuid,
 };
@@ -418,6 +418,22 @@ fn validate_file_metadata(
         return Err(CompactParquetError::InvalidMetadata);
     };
     if schema_hash != hex_digest(profile.schema_fingerprint()) {
+        return Err(CompactParquetError::InvalidMetadata);
+    }
+    let Some(schema_ovb) = values.get("orna.schema.ovb").and_then(|value| *value) else {
+        return Err(CompactParquetError::InvalidMetadata);
+    };
+    let schema_ovb = BASE64
+        .decode(schema_ovb)
+        .map_err(|_| CompactParquetError::InvalidMetadata)?;
+    let descriptor =
+        SchemaDescriptor::decode(&schema_ovb).map_err(|_| CompactParquetError::InvalidMetadata)?;
+    if descriptor.raw() != profile.schema().raw()
+        || descriptor
+            .encode()
+            .map_err(|_| CompactParquetError::InvalidMetadata)?
+            != schema_ovb
+    {
         return Err(CompactParquetError::InvalidMetadata);
     }
     let Some(columns) = values.get("orna.columns.ovb").and_then(|value| *value) else {
@@ -1161,6 +1177,10 @@ mod tests {
                 "orna.schema.sha256".into(),
                 Some(hex_digest(profile.schema_fingerprint())),
             ),
+            KeyValue::new(
+                "orna.schema.ovb".into(),
+                Some(BASE64.encode(profile.schema().encode().unwrap())),
+            ),
             KeyValue::new("orna.columns.ovb".into(), Some(BASE64.encode(columns))),
         ];
         let properties = Arc::new(
@@ -1328,6 +1348,10 @@ mod tests {
             KeyValue::new(
                 "orna.schema.sha256".into(),
                 Some(hex_digest(profile.schema_fingerprint())),
+            ),
+            KeyValue::new(
+                "orna.schema.ovb".into(),
+                Some(BASE64.encode(profile.schema().encode().unwrap())),
             ),
             KeyValue::new("orna.columns.ovb".into(), Some(BASE64.encode(columns))),
         ];
@@ -2264,6 +2288,21 @@ mod tests {
             Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
         ));
         drop(temp);
+    }
+
+    #[test]
+    fn reader_rejects_schema_descriptor_that_does_not_match_profile() {
+        let expected_profile = profile(&[KEY_A]);
+        let unrelated = profile(&[KEY_B]);
+        let bytes = verified_fixture_with_schema_ovb(
+            &expected_profile,
+            &unrelated.schema().encode().unwrap(),
+        );
+
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&expected_profile, TABLE, &bytes, 1),
+            Err(CompactParquetError::InvalidMetadata)
+        ));
     }
 
     #[test]
