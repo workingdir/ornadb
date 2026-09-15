@@ -11,7 +11,7 @@
 //! Inputs are in-memory modules with logical paths: no files, temp directories,
 //! environment changes, fixture catalogues, or runtime evaluation are needed.
 
-use orna_semantic_v1::{Analysis, DIAG_TYPE, DIAG_UNRESOLVED, ModuleInput, analyze};
+use orna_semantic_v1::{Analysis, DIAG_TYPE, DIAG_UNRESOLVED, ModuleInput, Type, analyze};
 use orna_syntax_v1::parse_module_with_file;
 
 fn analyze_main(source: &str) -> Analysis {
@@ -94,6 +94,54 @@ fn unsupported_product_annotation_requires_type_diagnostic() {
 #[test]
 fn incompatible_function_return_reports_type_diagnostic() {
     let result = analyze_main(r#"pub fn bad(): Int = "wrong";"#);
+    expect_diagnostics(&result, &[DIAG_TYPE]);
+}
+
+#[test]
+fn annotated_direct_return_is_checked_and_ends_the_function_body() {
+    let result = analyze_main(
+        r#"
+            pub fn integer(): Int {
+                return 1;
+                1;
+            }
+        "#,
+    );
+    expect_accepted(&result);
+}
+
+#[test]
+fn direct_return_ends_body_before_later_statement() {
+    let result = analyze_main(
+        r#"
+            pub fn integer() {
+                return 1;
+                "ignored";
+            }
+        "#,
+    );
+    expect_accepted(&result);
+    let symbol = result
+        .modules
+        .values()
+        .next()
+        .and_then(|module| module.symbols.get("integer"))
+        .expect("inferred direct-return function");
+    assert!(matches!(
+        &symbol.ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Int
+    ));
+}
+
+#[test]
+fn direct_return_mismatch_reports_type_diagnostic() {
+    let result = analyze_main(
+        r#"
+            pub fn bad(): Int {
+                return "wrong";
+            }
+        "#,
+    );
     expect_diagnostics(&result, &[DIAG_TYPE]);
 }
 
@@ -329,6 +377,65 @@ fn compatible_nested_impl_signatures_are_accepted() {
     ] {
         expect_accepted(&analyze_main(source));
     }
+}
+
+#[test]
+fn nested_impl_direct_return_uses_member_result_context() {
+    let result = analyze_main(
+        r#"
+            pub protocol P {
+                fn value(self): Int;
+            }
+            pub type Box {
+                impl P {
+                    fn value(self): Int {
+                        return 1;
+                        "ignored";
+                    }
+                }
+            }
+        "#,
+    );
+    expect_accepted(&result);
+}
+
+#[test]
+fn nested_impl_direct_return_mismatch_reports_one_type_diagnostic() {
+    let result = analyze_main(
+        r#"
+            pub protocol P {
+                fn value(self): Int;
+            }
+            pub type Box {
+                impl P {
+                    fn value(self): Int {
+                        return "wrong";
+                    }
+                }
+            }
+        "#,
+    );
+    assert_eq!(
+        result.diagnostics.len(),
+        1,
+        "expected one diagnostic, got {:#?}",
+        result.diagnostics
+    );
+    assert_eq!(result.diagnostics[0].code(), DIAG_TYPE);
+}
+
+#[test]
+fn unreachable_break_and_tail_after_direct_return_are_ignored() {
+    let result = analyze_main(
+        r#"
+            pub fn integer(): Int {
+                return 1;
+                break;
+                "ignored";
+            }
+        "#,
+    );
+    expect_accepted(&result);
 }
 
 #[test]
