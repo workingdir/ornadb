@@ -1577,8 +1577,10 @@ impl Parser {
                     "ORNA091-E-VAR",
                     "use `let`; assignment may replace the local slot",
                 )),
-                "opaque" => Some(("ORNA091-E-OPAQUE", "use the unified `type` declaration")),
-                "currency" => Some((
+                "opaque" if self.is_legacy_opaque_declaration(i) => {
+                    Some(("ORNA091-E-OPAQUE", "use the unified `type` declaration"))
+                }
+                "currency" if self.is_legacy_currency_declaration(i) => Some((
                     "ORNA091-E-CURRENCY",
                     "declare an ordinary nominal type with a nested Currency implementation",
                 )),
@@ -1870,6 +1872,41 @@ impl Parser {
             return false;
         }
         Self::has_terminated_initializer(tokens, pattern_end + 1)
+    }
+    fn is_legacy_opaque_declaration(&self, at: usize) -> bool {
+        let tokens = &self.tokens;
+        Self::is_legacy_module_declaration_start(tokens, at)
+            && matches!(
+                tokens.get(at + 1).map(|token| &token.kind),
+                Some(TokenKind::Identifier { .. })
+            )
+            && Self::token_is_punct(tokens, at + 2, "=")
+            && Self::has_terminated_initializer(tokens, at + 3)
+    }
+    fn is_legacy_currency_declaration(&self, at: usize) -> bool {
+        let tokens = &self.tokens;
+        Self::is_legacy_module_declaration_start(tokens, at)
+            && matches!(
+                tokens.get(at + 1).map(|token| &token.kind),
+                Some(TokenKind::Identifier { .. })
+            )
+            && Self::token_is_punct(tokens, at + 2, "{")
+    }
+    fn is_legacy_module_declaration_start(tokens: &[Token], at: usize) -> bool {
+        let mut braces = 0usize;
+        for token in &tokens[..at] {
+            match token.kind {
+                TokenKind::Punct("{") => braces += 1,
+                TokenKind::Punct("}") => braces = braces.saturating_sub(1),
+                _ => {}
+            }
+        }
+        braces == 0
+            && (at == 0
+                || matches!(
+                    tokens.get(at.saturating_sub(1)).map(|token| &token.kind),
+                    Some(TokenKind::Keyword(Keyword::Pub)) | Some(TokenKind::Punct(";" | "}"))
+                ))
     }
     fn is_legacy_match_expression(&self, at: usize) -> bool {
         let tokens = &self.tokens;
