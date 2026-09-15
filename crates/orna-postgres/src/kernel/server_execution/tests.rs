@@ -2690,6 +2690,54 @@ fn contextualized_kernel_failures_keep_the_pinned_execution_context_and_source()
 }
 
 #[test]
+fn server_plan_admission_rejects_a_context_from_another_revision_pair() {
+    let standard = presenter_standard();
+    let active = presenter_active(&standard);
+    let function = FunctionId::from_bytes([0x69; 16]);
+    let pair = active.pair();
+
+    for mismatched in [
+        RevisionPair::new(
+            orna_core::SourceRevisionId::from_bytes([0x6a; 16]),
+            pair.catalogue(),
+        ),
+        RevisionPair::new(pair.source(), CatalogueRevisionId::from_bytes([0x6b; 16])),
+    ] {
+        let context = ServerSelectContext::new(
+            mismatched,
+            function,
+            FunctionRevisionId::from_bytes([0x6c; 16]),
+        );
+        let error = super::operations::validate_active_server_select_context(&active, context)
+            .expect_err("a SERVER plan must not cross revision pairs");
+        let PostgresKernelError::ServerSelect(ServerSelectError::AuthorisationMismatch {
+            authorised,
+            active: recovered,
+        }) = error
+        else {
+            panic!("revision-pair rejection must use the typed authorisation mismatch");
+        };
+        assert_eq!(authorised.function(), function);
+        assert_eq!(authorised.revision(), mismatched);
+        assert_eq!(recovered, pair);
+    }
+}
+
+#[test]
+fn server_plan_admission_accepts_the_exact_recovered_revision_pair() {
+    let standard = presenter_standard();
+    let active = presenter_active(&standard);
+    let context = ServerSelectContext::new(
+        active.pair(),
+        FunctionId::from_bytes([0x6d; 16]),
+        FunctionRevisionId::from_bytes([0x6e; 16]),
+    );
+
+    super::operations::validate_active_server_select_context(&active, context)
+        .expect("an exact active pair must remain admissible");
+}
+
+#[test]
 fn successful_result_reconstructs_the_shutdown_error_context() {
     let pair = RevisionPair::new(
         orna_core::SourceRevisionId::from_bytes([0x65; 16]),

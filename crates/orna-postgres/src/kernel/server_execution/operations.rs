@@ -236,6 +236,7 @@ pub(super) async fn prepare_active_transaction(
     context: ServerSelectContext,
     arguments: &[FunctionArgument],
 ) -> Result<PreparedServerExecution, PostgresKernelError> {
+    validate_active_server_select_context(active, context)?;
     let revision = active
         .function_revisions()
         .iter()
@@ -448,6 +449,19 @@ pub(super) async fn prepare_active_transaction(
         variable_payload_limit: lowered.variable_payload_limit,
         cardinality,
     })
+}
+
+pub(super) fn validate_active_server_select_context(
+    active: &ActiveDatabaseRevision,
+    context: ServerSelectContext,
+) -> Result<(), PostgresKernelError> {
+    if context.pair() != active.pair() {
+        return Err(server_error(ServerSelectError::AuthorisationMismatch {
+            authorised: Box::new(InvocationTarget::new(context.function(), context.pair())),
+            active: active.pair(),
+        }));
+    }
+    Ok(())
 }
 
 async fn execute_active_transaction(
