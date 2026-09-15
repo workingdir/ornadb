@@ -603,7 +603,7 @@ async fn project_stream_cancellation_before_first_poll_is_retained_without_failu
         .await
         .expect("cancellation result");
     assert!(
-        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-LIST-STREAM-CANCELLED"),
+        matches!(outcome, StageOutcome::Cancelled(ref diagnostic) if diagnostic.code() == "ORNA-LIST-STREAM-CANCELLED"),
         "cancellation remains a narrow diagnostic outcome: {outcome:?}"
     );
 
@@ -676,7 +676,7 @@ async fn project_stream_cancellation_after_one_commit_retains_progress_without_f
         .await
         .expect("cancellation result");
     assert!(
-        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-LIST-STREAM-CANCELLED"),
+        matches!(outcome, StageOutcome::Cancelled(ref diagnostic) if diagnostic.code() == "ORNA-LIST-STREAM-CANCELLED"),
         "cancellation remains a narrow diagnostic outcome: {outcome:?}"
     );
 
