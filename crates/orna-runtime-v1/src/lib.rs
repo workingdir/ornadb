@@ -2397,6 +2397,31 @@ impl RuntimeState {
         &self,
         registration: StreamObservationRegistration,
     ) -> Result<StreamObservation, RuntimeError> {
+        self.register_stream_observation_inner(None, registration)
+            .await
+    }
+
+    /// Registers a durable `sys.Stream` observation while retaining the
+    /// caller's writer fence through the registration transaction.
+    ///
+    /// New activation paths must use this boundary. The compatibility
+    /// wrapper above remains available for existing administrative callers,
+    /// but it cannot protect a registration against owner replacement
+    /// between lease acquisition and insertion.
+    pub async fn register_stream_observation_with_owner(
+        &self,
+        writer: WriterLease,
+        registration: StreamObservationRegistration,
+    ) -> Result<StreamObservation, RuntimeError> {
+        self.register_stream_observation_inner(Some(writer), registration)
+            .await
+    }
+
+    async fn register_stream_observation_inner(
+        &self,
+        writer: Option<WriterLease>,
+        registration: StreamObservationRegistration,
+    ) -> Result<StreamObservation, RuntimeError> {
         validate_observation_text(&registration.producer)?;
         if let Some(consumer) = &registration.consumer {
             validate_observation_text(consumer)?;
@@ -2407,6 +2432,9 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         self.require_recovery_barrier_clear(&tx).await?;
+        if let Some(writer) = writer {
+            self.require_owner(&tx, writer).await?;
+        }
         let capture = capture_tx(&tx).await?;
         let run = load_run_observation_tx(&tx, registration.run, &capture)
             .await?
@@ -3629,6 +3657,36 @@ impl RuntimeState {
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Retains a writer-fenced terminal stream failure for an admitted
+    /// observation whose runner cannot produce a delivery failure record.
+    /// This is used only for unexpected runner boundaries; ordinary delivery
+    /// failures continue through the failure-record path, which retains the
+    /// exact FailureRef and payload metadata.
+    pub async fn fail_stream_observation_with_owner(
+        &self,
+        writer: WriterLease,
+        key: &CheckpointKey,
+        diagnostic: SafeDiagnostic,
+    ) -> Result<(), RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&transaction, writer).await?;
+        sync_stream_observation_event_tx(
+            &transaction,
+            key,
+            StreamObservationStatus::Failed,
+            Some(diagnostic),
+        )
+        .await?;
         transaction
             .commit()
             .await
