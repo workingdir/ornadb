@@ -180,6 +180,25 @@ fn legacy_effect_handler_keeps_existing_budget_behavior() {
 }
 
 #[test]
+fn fail_reemits_the_original_error_instead_of_returning_a_value() {
+    let result = evaluate_expression(
+        "(1 / 0) |? (failure => fail(failure))",
+        &Environment::new(),
+        Limits::default(),
+    );
+
+    assert_eq!(code(result), "ORNA-EVAL-DIVIDE-BY-ZERO");
+}
+
+#[test]
+fn fail_from_a_recovery_handler_reaches_the_next_recovery_boundary() {
+    assert_eq!(
+        evaluate("(1 / 0) |? (failure => fail(failure)) |? (failure => 7)"),
+        Value::int(7.into())
+    );
+}
+
+#[test]
 fn effect_handler_can_return_unit_values() {
     let functions = functions_from_source("fn entry() = Note.delete(1);");
     let mut effects = UnitEffects;
