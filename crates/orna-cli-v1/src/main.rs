@@ -989,8 +989,8 @@ fn run_project_stream_invocation(endpoint: &Endpoint, root_entry: &str) -> Resul
         }
         StageOutcome::Failed(_) => Err(Diagnostic::target(
             "E2200",
-            "durable project invocation was rejected",
-            "the project stream failed atomically; no partial changes were committed",
+            "durable project stream delivery failed",
+            "the failed delivery was rolled back; prior committed deliveries and their checkpoint progress remain; inspect the recorded failure before retrying the stream",
         )),
         StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "durable project stream invocation is not available",
@@ -1821,6 +1821,24 @@ mod tests {
         assert!(rendered.contains("static types are incompatible"));
         assert!(rendered.contains("fix the first reported source contract error"));
     }
+
+    #[test]
+    fn stream_failure_diagnostic_describes_delivery_scoped_rollback() {
+        let diagnostic = Diagnostic::target(
+            "E2200",
+            "durable project stream delivery failed",
+            "the failed delivery was rolled back; prior committed deliveries and their checkpoint progress remain; inspect the recorded failure before retrying the stream",
+        );
+        let rendered = diagnostic.to_string();
+
+        assert!(rendered.contains("the failed delivery was rolled back"));
+        assert!(
+            rendered.contains("prior committed deliveries and their checkpoint progress remain")
+        );
+        assert!(rendered.contains("inspect the recorded failure before retrying the stream"));
+        assert!(!rendered.contains("failed atomically"));
+    }
+
     #[test]
     fn endpoints_reject_secrets() {
         assert_eq!(
