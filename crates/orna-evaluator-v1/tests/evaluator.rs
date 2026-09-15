@@ -2227,6 +2227,19 @@ fn root_every_and_exists_remain_shadowable_by_admitted_functions_and_locals() {
 }
 
 #[test]
+fn admitted_function_named_fail_shadows_the_intrinsic() {
+    assert_eq!(
+        call_module(
+            "fn fail(value: Int) = value + 1; fn run() = fail(1);",
+            "run()",
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(2.into())
+    );
+}
+
+#[test]
 fn root_one_remains_shadowable_and_does_not_change_relation_member_behavior() {
     assert_eq!(
         call_module(
@@ -3745,6 +3758,19 @@ fn transfer_boundaries_reject_loop_transfers_from_a_called_lambda() {
             Limits::default(),
         )),
         "ORNA-EVAL-UNSUPPORTED"
+    );
+}
+
+#[test]
+fn fail_argument_propagates_a_return_transfer_before_error_matching() {
+    assert_eq!(
+        invoke(
+            "fn run() = fail(if true { return 7; } else { 0 });",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(7.into())
     );
 }
 
