@@ -1070,7 +1070,8 @@ impl SysStreamProjection {
         run: &RunObservation,
     ) -> Result<Self, RuntimeError> {
         if observation.live
-            && (run.status.is_terminal()
+            && (!run.live
+                || run.status.is_terminal()
                 || matches!(
                     observation.status,
                     StreamObservationStatus::Completed
@@ -22849,6 +22850,45 @@ mod tests {
         assert_eq!(
             project_retained_observations(retained),
             Err(RuntimeError::ObservationCoordinateMismatch)
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_sys_projection_rejects_live_stream_with_historical_parent() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let request = request(225, 226);
+        let key = stream_delivery("retained", "historical-parent").checkpoint_key();
+        state.reserve_request(request, digest(227)).await.unwrap();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: key.consumer.clone(),
+                function: "pkg.retained-parent".into(),
+                source_identity: None,
+                invocation_id: id(228),
+            })
+            .await
+            .unwrap();
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: None,
+                checkpoint: key,
+            })
+            .await
+            .unwrap();
+        let mut historical_run = run;
+        historical_run.live = false;
+
+        assert_eq!(
+            project_retained_observations(RuntimeObservationView {
+                capture: historical_run.snapshot.clone(),
+                runs: vec![historical_run],
+                streams: vec![stream],
+            }),
+            Err(RuntimeError::RecoveryInvalid)
         );
     }
 
