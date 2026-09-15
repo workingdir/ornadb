@@ -72,6 +72,24 @@ fn compatible_local_annotated_initializers_are_accepted() {
     expect_accepted(&result);
 }
 
+// ORNA-INFER-002 and -007: an unsupported annotation must reject at its
+// declaration boundary rather than become an internal wildcard that permits
+// incompatible function bodies or calls.
+#[test]
+fn unsupported_product_annotation_requires_type_diagnostic() {
+    let result = analyze_main(
+        r#"
+            pub fn bad(value: Int * Int): Bool = value;
+            pub fn caller(): Bool = bad("wrong");
+        "#,
+    );
+    expect_diagnostics(&result, &[DIAG_TYPE]);
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message() == "type product is not a supported static type"));
+}
+
 // Diagnostic control for the same Int/Str conflict at a checked boundary.
 #[test]
 fn incompatible_function_return_reports_type_diagnostic() {
