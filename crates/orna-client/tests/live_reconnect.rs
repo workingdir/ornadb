@@ -39,6 +39,7 @@ const THIRD_TOKEN: &str = "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII";
 enum ReplacementResponse {
     Resubscribe,
     FreshWatchDelta,
+    NonzeroFreshWatch,
     ExistingAutomatic,
     WrongWatch,
     Correlated,
@@ -275,7 +276,9 @@ async fn websocket_snapshot(
     .unwrap();
     if matches!(
         response,
-        ReplacementResponse::Resubscribe | ReplacementResponse::FreshWatchDelta
+        ReplacementResponse::Resubscribe
+            | ReplacementResponse::FreshWatchDelta
+            | ReplacementResponse::NonzeroFreshWatch
     ) {
         let Some(Ok(WebSocketMessage::Binary(request))) = socket.next().await else {
             panic!("expected subscribe binary frame");
@@ -284,12 +287,7 @@ async fn websocket_snapshot(
             Envelope::decode(&request, Limits::default()).unwrap(),
             subscribe()
         );
-        let revision =
-            if token == FIRST_TOKEN || matches!(response, ReplacementResponse::FreshWatchDelta) {
-                0
-            } else {
-                1
-            };
+        let revision = u8::from(matches!(response, ReplacementResponse::NonzeroFreshWatch));
         let text = if token == FIRST_TOKEN { "old" } else { "new" };
         socket
             .send(WebSocketMessage::Binary(
@@ -326,6 +324,7 @@ async fn websocket_snapshot(
             | ReplacementResponse::LimitsChanged
             | ReplacementResponse::TransportFailure
             | ReplacementResponse::FreshWatchDelta
+            | ReplacementResponse::NonzeroFreshWatch
             | ReplacementResponse::Resubscribe => unreachable!(),
         };
         socket
@@ -454,8 +453,35 @@ fn reconnect_resubscribes_with_a_new_watch() {
         assert_eq!(driver.watch(), [8; 16]);
         assert!(matches!(
             driver.receive_once().await,
-            Ok(LiveSessionEvent::SnapshotPublished { revision: 1 })
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
         ));
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn reconnect_rejects_nonzero_revision_for_a_fresh_watch() {
+    run(async {
+        let (endpoint, server) = spawn_server(
+            ReplacementResponse::NonzeroFreshWatch,
+            RUNTIME,
+            default_limits(),
+        )
+        .await;
+        let client = client(endpoint);
+        let (session, mut driver) = initial_driver(&client).await;
+        assert!(matches!(
+            driver.receive_once().await,
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
+        assert!(matches!(
+            client
+                .reconnect_driver(&session, &mut driver, subscribe())
+                .await,
+            Err(LiveReconnectError::AfterResume(_))
+        ));
+        assert_eq!(driver.watch(), [7; 16]);
+        assert_eq!(driver.presentation().published().unwrap().revision(), 0);
         server.await.unwrap();
     });
 }
