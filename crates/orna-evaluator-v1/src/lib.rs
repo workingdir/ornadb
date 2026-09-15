@@ -3181,6 +3181,33 @@ impl Context<'_, '_> {
                 Value::Option(Some(Box::new(Value::Float(value))))
             }));
         }
+        let temporal_kind = values.first().and_then(range_endpoint_kind);
+        if matches!(temporal_kind, Some("Date" | "Instant"))
+            && values
+                .iter()
+                .all(|value| range_endpoint_kind(value) == temporal_kind)
+        {
+            let mut candidate = None;
+            for value in values {
+                let replace = match candidate.as_ref() {
+                    None => true,
+                    Some(current) => {
+                        let ordering = compare_values(value, current)?;
+                        if name == "min" {
+                            ordering.is_lt()
+                        } else {
+                            ordering.is_gt()
+                        }
+                    }
+                };
+                if replace {
+                    // Strict comparison retains the first equal temporal
+                    // value, including equivalent Instant offsets.
+                    candidate = Some(value.clone());
+                }
+            }
+            return Ok(candidate.map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))));
+        }
         let mut candidate = None;
         for value in values {
             let Value::Int(value) = value else {
