@@ -248,6 +248,120 @@ fn legacy_var_declarations_remain_rejected_at_statement_boundaries() {
     }
 }
 
+// `match` is a contextual identifier in Orna 1.0.0. The removed expression
+// form is recognized only when its statement/function-body shape includes
+// legacy `=>` arms.
+#[test]
+fn match_is_accepted_in_ordinary_identifier_positions() {
+    accepted_body(
+        "type match { match: match, } \
+         table match(match: match) { match: match, } \
+         protocol match { static match: match; fn match(match: match): match; } \
+         enum match { match { match: match }, } \
+         fn match(match: match): match { \
+             let match: match = match; \
+             match = replacement; \
+             { match: match }; \
+             match.member; \
+             namespace.match; \
+             call(match: match); \
+             match \
+         }",
+    );
+}
+
+#[test]
+fn match_is_accepted_as_a_lambda_parameter() {
+    accepted_body("fn f() = match => { let f = x => x; f };");
+}
+
+#[test]
+fn match_lambda_is_accepted_as_a_record_field_value() {
+    accepted_body("fn f() = { value: match => { let f = x => x; f } };");
+}
+
+#[test]
+fn match_is_accepted_as_a_field_name_before_a_nested_lambda_record() {
+    accepted_body("fn f() = { match: { value: x => x } };");
+}
+
+#[test]
+fn match_is_accepted_in_a_return_type_product_before_a_lambda_body() {
+    accepted_body("fn f(): match * match { let f = x => x; f }");
+}
+
+#[test]
+fn legacy_match_expression_remains_rejected_at_a_function_body_boundary() {
+    let parsed = parse_module(
+        "pub fn bad(status: Status): Str = match status { Status.ready => \"ready\" };",
+    );
+    assert_eq!(
+        parsed.diagnostics.first().map(|diagnostic| diagnostic.code),
+        Some("ORNA091-E-MATCH"),
+        "{:?}",
+        parsed.diagnostics
+    );
+}
+
+#[test]
+fn legacy_match_expression_is_rejected_after_record_or_nominal_constructor_scrutinee() {
+    for source in [
+        "fn f() = match Status { value: raw } { Status.ready => \"ready\" };",
+        "fn f() = match Status {} { Status.ready => \"ready\" };",
+        "fn f() = match { value: raw } { Status.ready => \"ready\" };",
+    ] {
+        let parsed = parse_module(source);
+        assert_eq!(
+            parsed.diagnostics.first().map(|diagnostic| diagnostic.code),
+            Some("ORNA091-E-MATCH"),
+            "{source:?}: {:?}",
+            parsed.diagnostics
+        );
+    }
+}
+
+#[test]
+fn legacy_match_expression_is_rejected_at_nested_expression_boundaries() {
+    for source in [
+        "fn f() = call(match status { Status.ready => \"ready\" });",
+        "fn f() = [match status { Status.ready => \"ready\" }];",
+        "fn f() = (match status { Status.ready => \"ready\" });",
+        "fn f() = { value: match status { Status.ready => \"ready\" } };",
+    ] {
+        let parsed = parse_module(source);
+        assert_eq!(
+            parsed.diagnostics.first().map(|diagnostic| diagnostic.code),
+            Some("ORNA091-E-MATCH"),
+            "{source:?}: {:?}",
+            parsed.diagnostics
+        );
+    }
+}
+
+#[test]
+fn legacy_match_expression_is_rejected_after_expression_introducers() {
+    for source in [
+        "fn f() = true && match status { Status.ready => \"ready\" };",
+        "fn f() = 1 + match status { Status.ready => \"ready\" };",
+        "fn f() = value | match status { Status.ready => \"ready\" };",
+        "fn f() = if match status { Status.ready => true } { 1 };",
+        "fn f() = while match status { Status.ready => true } { 1 };",
+        "fn f() = for item in match status { Status.ready => item } { item };",
+        "fn f() = case match status { Status.ready => true } { true: 1 };",
+        "fn f() { return match status { Status.ready => \"ready\" }; }",
+        "fn f() { break match status { Status.ready => \"ready\" }; }",
+        "fn f() { assert match status { Status.ready => true }; }",
+    ] {
+        let parsed = parse_module(source);
+        assert_eq!(
+            parsed.diagnostics.first().map(|diagnostic| diagnostic.code),
+            Some("ORNA091-E-MATCH"),
+            "{source:?}: {:?}",
+            parsed.diagnostics
+        );
+    }
+}
+
 // grammar/orna.ebnf: qualified_name and nominal_constructor (optional fields);
 // source/04-lexical.md: Contextual names and construction;
 // source/06-expressions.md: ORNA-ENUM-003 requires explicit payload fields.
