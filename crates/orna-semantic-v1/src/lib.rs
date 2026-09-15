@@ -2696,6 +2696,34 @@ fn check_item(
                 .nominal_rows
                 .get(target_name)
                 .or_else(|| scope.table_rows.get(target_name));
+            let mut field_locals = BTreeMap::new();
+            for member in members {
+                let TypeMember::Field {
+                    name,
+                    ty,
+                    initializer,
+                    ..
+                } = member
+                else {
+                    continue;
+                };
+                let expected = resolved_type_of(ty, scope);
+                if let Some(initializer) = initializer {
+                    let inferred =
+                        infer_contextual(initializer, &expected, scope, &field_locals, diagnostics);
+                    require_same(&expected, &inferred.ty, diagnostics);
+                }
+                field_locals.insert(
+                    name.clone(),
+                    Symbol {
+                        table_schema: None,
+                        kind: SymbolKind::Let,
+                        ty: expected,
+                        public: false,
+                        effects: EffectSummary::default(),
+                    },
+                );
+            }
             validate_non_overlapping_implementations(
                 members.iter().filter_map(|member| match member {
                     TypeMember::Implementation { implementation, .. } => Some(implementation),
