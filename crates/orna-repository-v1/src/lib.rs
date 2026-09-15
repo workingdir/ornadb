@@ -2715,7 +2715,35 @@ impl Repository {
             paths.insert(path.to_vec());
         }
         for path in self
+            .git_bytes([
+                "diff",
+                "--cached",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                "--",
+            ])?
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            paths.insert(path.to_vec());
+        }
+        for path in self
             .git_bytes(["ls-files", "--others", "--exclude-standard", "-z", "--"])?
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            paths.insert(path.to_vec());
+        }
+        for path in self
+            .git_bytes([
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+                "--",
+            ])?
             .split(|byte| *byte == 0)
             .filter(|path| !path.is_empty())
         {
