@@ -2555,6 +2555,22 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
+        // `fail(error_value)` is an abrupt intrinsic, not an ordinary
+        // callable. Error values only exist while a recovery handler is
+        // running, so re-emitting one preserves the original diagnostic and
+        // lets the surrounding `|?` boundary decide whether to handle it.
+        if matches!(callee, Expr::Name { text, .. } if text == "fail")
+            && !scope.0.contains_key("fail")
+        {
+            if input.is_some() || arguments.len() != 1 {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+            let value = self.evaluate(&arguments[0].value, scope, depth + 1)?;
+            return match value {
+                Value::Error(failure) => Err(failure),
+                _ => Err(error("ORNA-EVAL-TYPE")),
+            };
+        }
         if is_relation_source(callee) {
             if input.is_some() || arguments.len() != 1 {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
