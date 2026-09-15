@@ -3925,7 +3925,19 @@ fn validate_type_annotation(
         }
         // Products are also used for dimensional/unit identities whose
         // qualified declarations are deliberately opaque in this scope.
-        TypeExpr::Product { .. } => {}
+        // Validate their leaves, then reject only a product the closed type
+        // model cannot represent. Otherwise an unsupported product becomes
+        // the internal error sentinel and silently bypasses later checks.
+        TypeExpr::Product { lhs, rhs, .. } => {
+            validate_type_annotation(lhs, scope, generic_names, diagnostics);
+            validate_type_annotation(rhs, scope, generic_names, diagnostics);
+            if type_of(type_expr) == Type::Error {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "type product is not a supported static type",
+                ));
+            }
+        }
         TypeExpr::Record { fields, .. } => {
             for (_, field, _) in fields {
                 validate_type_annotation(field, scope, generic_names, diagnostics);
