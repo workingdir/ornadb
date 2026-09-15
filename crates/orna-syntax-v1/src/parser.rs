@@ -1577,7 +1577,6 @@ impl Parser {
                     "ORNA091-E-VAR",
                     "use `let`; assignment may replace the local slot",
                 )),
-                "match" => Some(("ORNA091-E-MATCH", "use `case` with colon-delimited arms")),
                 "opaque" => Some(("ORNA091-E-OPAQUE", "use the unified `type` declaration")),
                 "currency" => Some((
                     "ORNA091-E-CURRENCY",
@@ -1871,6 +1870,75 @@ impl Parser {
             return false;
         }
         Self::has_terminated_initializer(tokens, pattern_end + 1)
+    }
+    fn is_legacy_match_expression(&self, at: usize) -> bool {
+        let tokens = &self.tokens;
+        if Self::token_is_punct(tokens, at + 1, ":") || Self::token_is_punct(tokens, at + 1, "=>") {
+            return false;
+        }
+
+        let mut delimiter_depth = 0usize;
+        let mut index = at + 1;
+        'scrutinee: while let Some(token) = tokens.get(index) {
+            match token.kind {
+                TokenKind::Punct("(" | "[") => {
+                    delimiter_depth += 1;
+                    index += 1;
+                }
+                TokenKind::Punct(")" | "]") if delimiter_depth == 0 => return false,
+                TokenKind::Punct(")" | "]") => {
+                    delimiter_depth -= 1;
+                    index += 1;
+                }
+                TokenKind::Punct("{") if delimiter_depth == 0 => {
+                    let mut brace_depth = 0usize;
+                    let mut nested_delimiter_depth = 0usize;
+                    let mut has_top_level_colon = false;
+                    let mut has_top_level_arrow = false;
+                    for (brace_index, token) in tokens.iter().enumerate().skip(index) {
+                        match token.kind {
+                            TokenKind::Punct("{") => brace_depth += 1,
+                            TokenKind::Punct("}") => {
+                                brace_depth = brace_depth.saturating_sub(1);
+                                if brace_depth == 0 {
+                                    if has_top_level_colon || !has_top_level_arrow {
+                                        index = brace_index + 1;
+                                        continue 'scrutinee;
+                                    }
+                                    return has_top_level_arrow;
+                                }
+                            }
+                            TokenKind::Punct("(" | "[") if brace_depth == 1 => {
+                                nested_delimiter_depth += 1;
+                            }
+                            TokenKind::Punct(")" | "]")
+                                if brace_depth == 1 && nested_delimiter_depth > 0 =>
+                            {
+                                nested_delimiter_depth -= 1;
+                            }
+                            TokenKind::Punct(":")
+                                if brace_depth == 1 && nested_delimiter_depth == 0 =>
+                            {
+                                has_top_level_colon = true;
+                            }
+                            TokenKind::Punct("=>")
+                                if brace_depth == 1 && nested_delimiter_depth == 0 =>
+                            {
+                                has_top_level_arrow = true;
+                            }
+                            TokenKind::Eof => return false,
+                            _ => {}
+                        }
+                    }
+                    return false;
+                }
+                TokenKind::Punct(";" | "}" | ",") | TokenKind::Eof if delimiter_depth == 0 => {
+                    return false;
+                }
+                _ => index += 1,
+            }
+        }
+        false
     }
     fn legacy_pattern_end(tokens: &[Token], at: usize) -> Option<usize> {
         let token = tokens.get(at)?;
@@ -3760,6 +3828,16 @@ impl Parser {
         }
         match t.kind {
             TokenKind::Identifier { .. } | TokenKind::Keyword(Keyword::SelfValue) => {
+                if matches!(t.kind, TokenKind::Identifier { .. })
+                    && t.text == "match"
+                    && self.is_legacy_match_expression(self.at)
+                {
+                    self.errors.push(Diagnostic::error(
+                        "ORNA091-E-MATCH",
+                        "use `case` with colon-delimited arms",
+                        t.span.clone(),
+                    ));
+                }
                 self.bump();
                 if self.is_punct("=>") {
                     self.bump();
