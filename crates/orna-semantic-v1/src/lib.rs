@@ -2980,12 +2980,15 @@ fn validate_nested_implementation_function(
         });
     if let Some(expected) = effective_result {
         let before = diagnostics.len();
-        let inferred = infer_contextual(body, &expected, scope, &local, diagnostics);
-        if diagnostics.len() == before {
+        let FunctionBodyInference {
+            inferred,
+            direct_return,
+        } = infer_function_body(body, Some(&expected), scope, &local, diagnostics);
+        if !direct_return && diagnostics.len() == before {
             require_same(&expected, &inferred.ty, diagnostics);
         }
     } else if local.values().any(|symbol| symbol.ty != Type::Error) {
-        infer(body, scope, &local, diagnostics);
+        infer_function_body(body, None, scope, &local, diagnostics);
     }
 }
 
@@ -3959,6 +3962,119 @@ fn validate_type_annotation(
     }
 }
 
+struct FunctionBodyInference {
+    inferred: Inferred,
+    direct_return: bool,
+}
+
+fn infer_function_body(
+    body: &Expr,
+    expected: Option<&Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> FunctionBodyInference {
+    let Expr::Block { statements, .. } = body else {
+        return FunctionBodyInference {
+            inferred: match expected {
+                Some(expected) => infer_contextual(body, expected, scope, local, diagnostics),
+                None => infer(body, scope, local, diagnostics),
+            },
+            direct_return: false,
+        };
+    };
+    let Some(return_index) = statements
+        .iter()
+        .position(|statement| matches!(statement, Statement::Return { .. }))
+    else {
+        return FunctionBodyInference {
+            inferred: match expected {
+                Some(expected) => infer_contextual(body, expected, scope, local, diagnostics),
+                None => infer(body, scope, local, diagnostics),
+            },
+            direct_return: false,
+        };
+    };
+
+    let mut locals = local.clone();
+    let mut effects = EffectSummary::default();
+    for statement in &statements[..return_index] {
+        match statement {
+            Statement::Let {
+                pattern,
+                annotation,
+                value,
+                ..
+            } => {
+                let inferred = if let Some(annotation) = annotation {
+                    validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
+                    let expected = type_of(annotation);
+                    let inferred = infer_contextual(value, &expected, scope, &locals, diagnostics);
+                    require_same(&expected, &inferred.ty, diagnostics);
+                    inferred
+                } else {
+                    infer(value, scope, &locals, diagnostics)
+                };
+                effects.join(&inferred.effects);
+                bind_pattern(pattern, inferred.ty, &mut locals, diagnostics);
+            }
+            Statement::Assert { value, .. } => {
+                let inferred = infer(value, scope, &locals, diagnostics);
+                effects.join(&inferred.effects);
+                require_same(&Type::Bool, &inferred.ty, diagnostics);
+            }
+            Statement::Expression { value, .. } | Statement::Control { value, .. } => {
+                effects.join(&infer(value, scope, &locals, diagnostics).effects);
+            }
+            Statement::Assignment {
+                target,
+                operator,
+                value,
+                ..
+            } => effects.join(&infer_assignment(
+                target,
+                operator,
+                value,
+                scope,
+                &mut locals,
+                diagnostics,
+            )),
+            Statement::Break { value, .. } => {
+                if let Some(value) = value {
+                    effects.join(&infer(value, scope, &locals, diagnostics).effects);
+                }
+            }
+            Statement::Continue { .. } => {}
+            Statement::Return { .. } => unreachable!("return is outside the function-body prefix"),
+        }
+    }
+
+    let Statement::Return { value, .. } = &statements[return_index] else {
+        unreachable!("function-body return index must identify a return statement");
+    };
+    let returned = match (value, expected) {
+        (Some(value), Some(expected)) => {
+            infer_contextual(value, expected, scope, &locals, diagnostics)
+        }
+        (Some(value), None) => infer(value, scope, &locals, diagnostics),
+        (None, _) => Inferred {
+            ty: Type::Null,
+            effects: EffectSummary::default(),
+        },
+    };
+    if let Some(expected) = expected {
+        require_same(expected, &returned.ty, diagnostics);
+    }
+    effects.join(&returned.effects);
+    FunctionBodyInference {
+        inferred: Inferred {
+            ty: returned.ty,
+            effects,
+        },
+        direct_return: true,
+    }
+}
+
 fn scope_contains_named_type(scope: &Scope, name: &str) -> bool {
     scope
         .available_modules
@@ -4067,14 +4183,22 @@ fn check_function(
         );
     }
     if let Some(expected) = signature.result.as_ref().map(type_of) {
-        let mut inferred = infer_contextual(body, &expected, &function_scope, &local, diagnostics);
+        let FunctionBodyInference {
+            mut inferred,
+            direct_return,
+        } = infer_function_body(body, Some(&expected), &function_scope, &local, diagnostics);
         inferred.effects.join(&default_effects);
-        require_same(&expected, &inferred.ty, diagnostics);
+        if !direct_return {
+            require_same(&expected, &inferred.ty, diagnostics);
+        }
         if let Some(symbol) = symbols.get_mut(&signature.name) {
             symbol.effects = inferred.effects;
         }
     } else {
-        let mut inferred = infer(body, &function_scope, &local, diagnostics);
+        let FunctionBodyInference {
+            mut inferred,
+            direct_return: _,
+        } = infer_function_body(body, None, &function_scope, &local, diagnostics);
         inferred.effects.join(&default_effects);
         if let Some(symbol) = symbols.get_mut(&signature.name) {
             symbol.effects = inferred.effects;
@@ -4527,6 +4651,7 @@ fn validate_loop_transfers(
             statements, tail, ..
         } => {
             let mut block_locals = local.clone();
+            let mut terminated = false;
             for statement in statements {
                 match statement {
                     Statement::Let {
@@ -4580,10 +4705,14 @@ fn validate_loop_transfers(
                                 diagnostics,
                             );
                         }
+                        terminated = true;
+                        break;
                     }
                 }
             }
-            if let Some(tail) = tail {
+            if let Some(tail) = tail
+                && !terminated
+            {
                 validate_loop_transfers(tail, scope, &block_locals, loops, diagnostics);
             }
         }
