@@ -7,14 +7,95 @@ use orna_evaluator_v1::Limits;
 use orna_foundation_v1::{Diagnostic, OvbRaw, Value};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    NoFault, RunObservationStatus, RuntimeIdentity, RuntimeState, StreamObservationStatus,
-    TableMutation,
+    NoFault, RequestIdentity, RequestState, RunObservationStatus, RuntimeIdentity, RuntimeState,
+    StreamObservationStatus, StreamRunControl, TableMutation,
 };
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_stream_v1::{DiagnosticClass, DiagnosticCode};
 use sha2::Digest;
-use std::{collections::BTreeMap, process::Command};
+use std::{
+    collections::BTreeMap,
+    process::Command,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use tempfile::TempDir;
+
+struct CancelAtCheck {
+    checks: AtomicUsize,
+    cancel_on_check: usize,
+}
+
+impl CancelAtCheck {
+    fn new(cancel_on_check: usize) -> Self {
+        Self {
+            checks: AtomicUsize::new(0),
+            cancel_on_check,
+        }
+    }
+}
+
+impl StreamRunControl for CancelAtCheck {
+    fn cancelled(&self) -> bool {
+        self.checks.fetch_add(1, Ordering::SeqCst) + 1 >= self.cancel_on_check
+    }
+
+    fn acquire_admission(&self) -> bool {
+        true
+    }
+
+    fn release_admission(&self) {}
+}
+
+fn cancellation_project() -> ProjectUnit {
+    ProjectUnit {
+        fixture_id: "stream-cancellation".into(),
+        project_id: "stream-cancellation".into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: "stream-cancellation".into(),
+            source_id: "stream-cancellation/sensors.orna".into(),
+            parse_as: "module_unit".into(),
+            source: r#"
+                pub table Reading(id: Int) { value: Int, }
+                pub fn input() = Stream.from_list([1, 2], source_identity: "example:cancellation");
+                pub fn ingest() { input() | for_each(value => {
+                    Reading.insert({ id: value, value: value });
+                }); }
+            "#
+            .into(),
+        }],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+    }
+}
+
+fn initialized_repository(temp: &TempDir) -> Repository {
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "test@example.invalid"][..],
+        &["config", "user.name", "conformance test"][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(arguments)
+                .current_dir(temp.path())
+                .status()
+                .expect("git command")
+                .success()
+        );
+    }
+    Repository::discover(temp.path()).expect("repository")
+}
 
 #[test]
 fn transactional_fixture_preserves_order_reference_types_without_runtime_claims() {
@@ -491,6 +572,153 @@ async fn project_stream_admission_rejects_multiple_applicable_module_assertions(
         matches!(outcome, StageOutcome::Skipped { ref reason } if reason.contains("one applicable module assertion")),
         "multiple applicable module assertions must fail admission closed: {outcome:?}"
     );
+}
+
+#[tokio::test]
+async fn project_stream_cancellation_before_first_poll_is_retained_without_failure() {
+    let temp = TempDir::new().expect("temporary repository");
+    let repository = initialized_repository(&temp);
+    let identity = RuntimeIdentity {
+        database_id: [101; 16],
+        repository_id: [102; 16],
+    };
+    let request = RequestIdentity {
+        session_id: [103; 16],
+        request_id: [104; 16],
+    };
+    let fingerprint = [105; 32];
+    let control = CancelAtCheck::new(1);
+    let outcome = orna_conformance_v1::DurableTransactionalEvaluator::default()
+        .execute_project_stream_request_with_control(
+            &repository,
+            identity,
+            [106; 16],
+            [107; 32],
+            request,
+            fingerprint,
+            &cancellation_project(),
+            "sensors.ingest",
+            &control,
+        )
+        .await
+        .expect("cancellation result");
+    assert!(
+        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-LIST-STREAM-CANCELLED"),
+        "cancellation remains a narrow diagnostic outcome: {outcome:?}"
+    );
+
+    let state = RuntimeState::open(&repository, identity, [107; 32])
+        .await
+        .expect("runtime state");
+    assert_eq!(
+        state
+            .request_status(request, fingerprint)
+            .await
+            .expect("request status")
+            .expect("retained request")
+            .state,
+        RequestState::Cancelled
+    );
+    assert!(
+        state
+            .committed_table_rows("Reading")
+            .await
+            .expect("Reading rows")
+            .is_empty()
+    );
+    assert!(
+        state
+            .latest_checkpoint()
+            .await
+            .expect("checkpoint")
+            .is_none()
+    );
+
+    let runs = state.run_observations().await.expect("runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, RunObservationStatus::Cancelled);
+    assert_eq!(runs[0].checkpoint_count, 0);
+    let streams = state.stream_observations().await.expect("streams");
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0].status, StreamObservationStatus::Cancelled);
+    assert_eq!((streams[0].items_seen, streams[0].items_committed), (0, 0));
+    assert_eq!(streams[0].items_failed, 0);
+    assert!(streams[0].last_failure.is_none());
+    assert!(streams[0].diagnostic.is_none());
+}
+
+#[tokio::test]
+async fn project_stream_cancellation_after_one_commit_retains_progress_without_failure() {
+    let temp = TempDir::new().expect("temporary repository");
+    let repository = initialized_repository(&temp);
+    let identity = RuntimeIdentity {
+        database_id: [111; 16],
+        repository_id: [112; 16],
+    };
+    let request = RequestIdentity {
+        session_id: [113; 16],
+        request_id: [114; 16],
+    };
+    let fingerprint = [115; 32];
+    let control = CancelAtCheck::new(4);
+    let outcome = orna_conformance_v1::DurableTransactionalEvaluator::default()
+        .execute_project_stream_request_with_control(
+            &repository,
+            identity,
+            [116; 16],
+            [117; 32],
+            request,
+            fingerprint,
+            &cancellation_project(),
+            "sensors.ingest",
+            &control,
+        )
+        .await
+        .expect("cancellation result");
+    assert!(
+        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-LIST-STREAM-CANCELLED"),
+        "cancellation remains a narrow diagnostic outcome: {outcome:?}"
+    );
+
+    let state = RuntimeState::open(&repository, identity, [117; 32])
+        .await
+        .expect("runtime state");
+    assert_eq!(
+        state
+            .request_status(request, fingerprint)
+            .await
+            .expect("request status")
+            .expect("retained request")
+            .state,
+        RequestState::Cancelled
+    );
+    assert_eq!(
+        state
+            .committed_table_rows("Reading")
+            .await
+            .expect("Reading rows")
+            .len(),
+        1
+    );
+    assert!(
+        state
+            .latest_checkpoint()
+            .await
+            .expect("checkpoint")
+            .is_some()
+    );
+
+    let runs = state.run_observations().await.expect("runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, RunObservationStatus::Cancelled);
+    assert_eq!(runs[0].checkpoint_count, 1);
+    let streams = state.stream_observations().await.expect("streams");
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0].status, StreamObservationStatus::Cancelled);
+    assert_eq!((streams[0].items_seen, streams[0].items_committed), (1, 1));
+    assert_eq!(streams[0].items_failed, 0);
+    assert!(streams[0].last_failure.is_none());
+    assert!(streams[0].diagnostic.is_none());
 }
 
 #[test]
