@@ -1304,6 +1304,43 @@ fn checkout_force_authorization_is_canonical_and_stale_state_is_rejected() {
 }
 
 #[test]
+fn checkout_force_authorization_rejects_changed_bytes_for_an_ignored_path() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    fs::write(root.path().join(".gitignore"), "local-cache/\n").unwrap();
+    git(root.path(), &["add", ".gitignore"]);
+    git(root.path(), &["commit", "-m", "ignore local cache"]);
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+
+    let ignored_path = root.path().join("local-cache").join("keep.bin");
+    fs::create_dir_all(ignored_path.parent().unwrap()).unwrap();
+    fs::write(&ignored_path, b"ignored before\0\xff\n").unwrap();
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(42))
+        .unwrap();
+    let token = plan.force_token();
+    let status_before = git(root.path(), &["status", "--porcelain=v2"]);
+
+    // Ignored bytes are absent from ordinary status and checkout path sets,
+    // but remain part of the dirty worktree that a force plan must fence.
+    fs::write(&ignored_path, b"ignored after\0\xfe\n").unwrap();
+
+    assert_eq!(
+        git(root.path(), &["status", "--porcelain=v2"]),
+        status_before
+    );
+    assert!(matches!(
+        repo.authorize_checkout_force(&plan, true, Some(&token)),
+        Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
+    ));
+}
+
+#[test]
 fn same_commit_checkout_switches_attachment_without_discarding_local_state() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
