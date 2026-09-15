@@ -2255,6 +2255,71 @@ fn user_defined_fail_shadows_the_intrinsic() {
 }
 
 #[test]
+fn error_constructor_returns_an_inspectable_error_value() {
+    let result = analyze(&[ModuleInput::new(
+        "error-constructor.orna",
+        r#"
+            pub fn construct(code: Str, message: Str, cause: Error): Error =
+                error(code: code, message: message, cause: cause);
+            pub fn fresh(): Error = error(code: "message.invalid", message: "invalid message");
+            pub fn replacing(failure: Error): Error =
+                error(code: "message.invalid", message: "invalid message", cause: fail(failure));
+        "#,
+    )]);
+    assert!(result.is_ok(), "{:#?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "error-constructor")
+        .expect("error constructor module");
+    for name in ["construct", "fresh", "replacing"] {
+        assert!(matches!(
+            &module.symbols[name].ty,
+            Type::Function { result, .. } if result.as_ref() == &Type::Named("Error".into())
+        ));
+    }
+    assert!(module.symbols["replacing"].effects.may_fail);
+}
+
+#[test]
+fn error_constructor_rejects_invalid_named_arguments() {
+    for source in [
+        "pub fn invalid() = error(\"code\", \"message\");",
+        "pub fn invalid() = error(code: \"message.invalid\");",
+        "pub fn invalid() = error(code: \"message.invalid\", message: \"invalid\", extra: \"value\");",
+        "pub fn invalid() = error(code: \"message.invalid\", message: 1);",
+        "pub fn invalid() = error(code: \"message.invalid\", message: \"invalid\", code: \"duplicate\");",
+        "pub fn invalid() = error(code: \"message.invalid\", message: \"invalid\", cause: 1);",
+    ] {
+        let result = analyze(&[ModuleInput::new("error-invalid.orna", source)]);
+        assert!(
+            has(&result, DIAG_TYPE),
+            "{source}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn user_defined_error_shadows_the_intrinsic() {
+    let result = analyze(&[ModuleInput::new(
+        "error-shadow.orna",
+        "fn error(code: Str, message: Str): Int = 1; pub fn call() = error(code: \"x\", message: \"y\");",
+    )]);
+    assert!(result.is_ok(), "{:#?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "error-shadow")
+        .expect("error shadow module");
+    assert!(matches!(
+        &module.symbols["call"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Int
+    ));
+    assert!(!module.symbols["call"].effects.may_fail);
+}
+
+#[test]
 fn root_relation_and_stream_intrinsics_cover_reference_pipelines_without_execution() {
     let source = r#"
             pub table Book(id: Int) { title: Str, }
