@@ -3,6 +3,7 @@
 use std::io::{self, Write};
 
 use orna_compiler::{CompilerDiagnostic, DiagnosticSeverity, ParseReport, SourceLocation};
+use unicode_width::UnicodeWidthChar;
 
 const REDACTED_PATH: &str = "<redacted>";
 
@@ -54,7 +55,7 @@ fn display_column(text: &str) -> usize {
             character if source_character_is_escaped(character) => {
                 format!("\\u{{{:04X}}}", character as u32).chars().count()
             }
-            _ => 1,
+            character => character.width().unwrap_or(0),
         })
         .sum()
 }
@@ -849,7 +850,23 @@ mod source_context_tests {
     #[test]
     fn display_column_counts_utf8_scalars_and_expands_tabs() {
         assert_eq!(display_column("é\tX"), 6);
-        assert_eq!(display_column("e\u{301}"), 2);
+        assert_eq!(display_column("表\t🙂"), 8);
+        assert_eq!(display_column("e\u{301}"), 1);
+    }
+
+    #[test]
+    fn wide_source_text_keeps_the_caret_in_its_terminal_column() {
+        let report = report_for("CREATE SCHEMA \"表\"; CREATE SCHEMA ;");
+        let rendered = String::from_utf8(render_human_diagnostics(
+            report.parse_report(),
+            report.diagnostics(),
+            false,
+        ))
+        .expect("diagnostics are UTF-8");
+
+        assert!(rendered.contains("  --> main.orna:1:35"));
+        assert!(rendered.contains("1 | CREATE SCHEMA \"表\"; CREATE SCHEMA ;"));
+        assert!(rendered.contains(&format!("   | {}^ unexpected syntax", " ".repeat(34))));
     }
 
     #[test]
