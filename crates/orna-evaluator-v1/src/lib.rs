@@ -2561,11 +2561,15 @@ impl Context<'_, '_> {
         // lets the surrounding `|?` boundary decide whether to handle it.
         if matches!(callee, Expr::Name { text, .. } if text == "fail")
             && !scope.0.contains_key("fail")
+            && self.resolve_function_name(callee, scope).is_none()
         {
             if input.is_some() || arguments.len() != 1 {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
             let value = self.evaluate(&arguments[0].value, scope, depth + 1)?;
+            if self.transfer.is_some() {
+                return Ok(Value::Null);
+            }
             return match value {
                 Value::Error(failure) => Err(failure),
                 _ => Err(error("ORNA-EVAL-TYPE")),
