@@ -2633,6 +2633,35 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
+        // `now()` is an activation-scoped intrinsic. It is deliberately
+        // offered only through the existing effect boundary so the evaluator
+        // never reads a wall clock and callers without an activation handler
+        // fail closed as unsupported. A lexical/function binding named
+        // `now` retains precedence and therefore shadows this intrinsic.
+        if matches!(callee, Expr::Name { text, .. } if text == "now")
+            && !scope.0.contains_key("now")
+            && self.resolve_function_name(callee, scope).is_none()
+            && self.effects.is_some()
+        {
+            if input.is_some() || !arguments.is_empty() {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+            let remaining = self.limits.max_steps.saturating_sub(self.steps);
+            let mut budget = StepBudget::new(remaining);
+            let result = self
+                .effects
+                .as_deref_mut()
+                .expect("checked effect handler")
+                .handle_with_budget(callee, &[], &mut budget);
+            let debited = remaining - budget.remaining();
+            self.steps = self
+                .steps
+                .checked_add(debited)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            if let Some(value) = result? {
+                return Value::from_canonical(&value, self, depth + 1);
+            }
+        }
         if matches!(callee, Expr::Name { text, .. } if text == "error")
             && !scope.0.contains_key("error")
             && self.resolve_function_name(callee, scope).is_none()
@@ -4637,6 +4666,115 @@ mod tests {
 
     fn text(value: &str) -> CanonicalValue {
         CanonicalValue::new(Raw::Text(value.into())).expect("text is canonical")
+    }
+
+    struct FixedNow {
+        value: CanonicalValue,
+        calls: usize,
+    }
+
+    impl EffectHandler for FixedNow {
+        fn handle(
+            &mut self,
+            callee: &Expr,
+            arguments: &[CanonicalValue],
+        ) -> Result<Option<CanonicalValue>, EvaluationError> {
+            if matches!(callee, Expr::Name { text, .. } if text == "now") {
+                assert!(arguments.is_empty());
+                self.calls += 1;
+                Ok(Some(self.value.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    #[test]
+    fn bare_now_is_activation_effectful_and_user_function_shadowing_wins() {
+        let instant = CanonicalValue::new(Raw::Tag(
+            60002,
+            Box::new(Raw::Array(vec![
+                Raw::Int(1_700_000_000.into()),
+                Raw::Int(7.into()),
+            ])),
+        ))
+        .expect("canonical instant");
+        let functions = {
+            let parsed = orna_syntax_v1::parse_module("fn main() = [now(), now()];");
+            assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+            let orna_syntax_v1::Declaration::Function { signature, body } =
+                &parsed.value.items[0].declaration
+            else {
+                panic!("function expected")
+            };
+            Functions::from([(
+                signature.name.clone(),
+                PureFunction {
+                    parameters: signature.parameters.clone(),
+                    body: body.clone(),
+                    environment: Environment::new(),
+                },
+            )])
+        };
+        let mut effects = FixedNow {
+            value: instant.clone(),
+            calls: 0,
+        };
+        let repeated = invoke_named_with_effects(
+            "main",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut effects,
+        )
+        .expect("now effect result");
+        assert_eq!(
+            repeated,
+            CanonicalValue::new(Raw::Array(vec![
+                instant.raw().clone(),
+                instant.raw().clone()
+            ]))
+            .expect("canonical repeated result")
+        );
+        assert_eq!(effects.calls, 2);
+
+        let parsed = orna_syntax_v1::parse_module("fn now() = 7; fn main() = now();");
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+        let functions = parsed
+            .value
+            .items
+            .into_iter()
+            .map(|item| {
+                let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration
+                else {
+                    panic!("function expected")
+                };
+                (
+                    signature.name,
+                    PureFunction {
+                        parameters: signature.parameters,
+                        body,
+                        environment: Environment::new(),
+                    },
+                )
+            })
+            .collect();
+        let mut effects = FixedNow {
+            value: instant,
+            calls: 0,
+        };
+        assert_eq!(
+            invoke_named_with_effects(
+                "main",
+                &functions,
+                &Environment::new(),
+                Limits::default(),
+                &mut effects,
+            )
+            .expect("shadowed now result"),
+            CanonicalValue::new(Raw::Int(7.into())).expect("canonical integer")
+        );
+        assert_eq!(effects.calls, 0);
     }
 
     #[test]
