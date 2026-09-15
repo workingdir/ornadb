@@ -5114,12 +5114,6 @@ fn infer(
             }
         }
         Expr::Name { text, .. } | Expr::ReplBinding { text, .. } => {
-            if let Some(ty) = intrinsic_value_type(text) {
-                return Inferred {
-                    ty,
-                    effects: EffectSummary::default(),
-                };
-            }
             if scope.ambiguous.contains(text) {
                 diagnostics.push(diag(
                     DIAG_AMBIGUOUS,
@@ -5143,13 +5137,19 @@ fn infer(
                     ty: s.ty.clone(),
                     effects: s.effects.clone(),
                 },
-                None => {
-                    diagnostics.push(diag(DIAG_UNRESOLVED, "name cannot be resolved"));
-                    Inferred {
-                        ty: Type::Error,
+                None => match intrinsic_value_type(text) {
+                    Some(ty) => Inferred {
+                        ty,
                         effects: EffectSummary::default(),
+                    },
+                    None => {
+                        diagnostics.push(diag(DIAG_UNRESOLVED, "name cannot be resolved"));
+                        Inferred {
+                            ty: Type::Error,
+                            effects: EffectSummary::default(),
+                        }
                     }
-                }
+                },
             }
         }
         Expr::Group { inner, .. } => infer(inner, scope, local, diagnostics),
@@ -12440,6 +12440,44 @@ mod tests {
         assert!(has(&a, DIAG_ANNOTATION));
         assert!(has(&a, DIAG_UNRESOLVED));
     }
+
+    #[test]
+    fn source_bindings_shadow_the_now_intrinsic() {
+        let function_analysis = checked(&[ModuleInput::new(
+            "function.orna",
+            "fn now(): Int = 7; fn use_now(): Int = now();",
+        )]);
+        assert!(
+            function_analysis.is_ok(),
+            "{:#?}",
+            function_analysis.diagnostics
+        );
+        assert_eq!(
+            function_analysis.modules.values().next().unwrap().symbols["use_now"].ty,
+            Type::Function {
+                parameters: vec![],
+                parameter_names: Some(vec![]),
+                default_parameters: BTreeSet::new(),
+                result: Box::new(Type::Int),
+            }
+        );
+
+        let value_analysis = checked(&[ModuleInput::new(
+            "value.orna",
+            "fn use_now(now: Int): Int = now;",
+        )]);
+        assert!(value_analysis.is_ok(), "{:#?}", value_analysis.diagnostics);
+        assert_eq!(
+            value_analysis.modules.values().next().unwrap().symbols["use_now"].ty,
+            Type::Function {
+                parameters: vec![Type::Int],
+                parameter_names: Some(vec!["now".into()]),
+                default_parameters: BTreeSet::new(),
+                result: Box::new(Type::Int),
+            }
+        );
+    }
+
     #[test]
     fn infers_primitive_record_list_and_function_without_any() {
         let a = checked(&[ModuleInput::new(
