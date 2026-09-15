@@ -2168,6 +2168,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "turso",
+ "unicode-width",
 ]
 
 [[package]]
