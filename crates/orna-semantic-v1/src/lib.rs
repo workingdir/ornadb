@@ -1705,7 +1705,6 @@ fn primitive(name: &str) -> Option<Type> {
 struct Scope {
     names: BTreeMap<String, Symbol>,
     ambiguous: BTreeSet<String>,
-    current_namespace: Option<Namespace>,
     /// Direct `use module [as alias]` bindings. These are deliberately kept
     /// apart from ordinary values so only explicitly imported module roots can
     /// begin qualified module-member lookup.
@@ -1766,7 +1765,6 @@ fn resolve_imports(
     let mut scope = Scope {
         names: header.symbols.clone(),
         ambiguous: BTreeSet::new(),
-        current_namespace: Some(namespace.clone()),
         modules: BTreeMap::new(),
         available_modules: modules.clone(),
         table_rows: tree
@@ -3927,28 +3925,25 @@ fn validate_type_annotation(
         TypeExpr::Name {
             path, arguments, ..
         } => {
-            // Applied and qualified names include dimension/unit and
-            // catalogue identities whose declarations are intentionally not
-            // reconstructed by this validator. The closed unresolved-name
-            // proof applies to an unqualified, non-applied declaration name.
-            if path.len() == 1
-                && arguments.is_empty()
-                && !generic_names.contains(&path[0])
-                && !primitive(&path[0]).is_some()
-                && !scope.names.get(&path[0]).is_some_and(|symbol| {
-                    matches!(
-                        symbol.kind,
-                        SymbolKind::Type
-                            | SymbolKind::Enum
-                            | SymbolKind::Table
-                            | SymbolKind::Protocol
-                            | SymbolKind::Dimension
-                            | SymbolKind::Unit
-                    )
-                })
-                && !scope_contains_named_type(scope, &path[0])
-            {
+            // Numeric unit and currency arguments use the dimensional
+            // identity surface rather than ordinary generic type arguments.
+            // They still must resolve to a declared type, an explicit
+            // currency code, or one of the closed unit identities.
+            let dimensional_constructor = path.len() == 1
+                && matches!(path[0].as_str(), "Int" | "Decimal" | "Float" | "Money");
+            if !annotation_type_name_is_declared(path, scope, generic_names) {
                 diagnostics.push(diag(DIAG_UNRESOLVED, "type name cannot be resolved"));
+            }
+            if dimensional_constructor && !arguments.is_empty() {
+                if arguments.len() != 1
+                    || !dimensional_argument_is_declared(&arguments[0], scope, generic_names)
+                {
+                    diagnostics.push(diag(DIAG_UNRESOLVED, "type name cannot be resolved"));
+                }
+            } else {
+                for argument in arguments {
+                    validate_type_annotation(argument, scope, generic_names, diagnostics);
+                }
             }
         }
         TypeExpr::Optional { inner, .. } | TypeExpr::List { inner, .. } => {
@@ -3988,6 +3983,121 @@ fn validate_type_annotation(
             validate_type_annotation(result, scope, generic_names, diagnostics);
         }
     }
+}
+
+fn dimensional_argument_is_declared(
+    argument: &TypeExpr,
+    scope: &Scope,
+    generic_names: &BTreeSet<String>,
+) -> bool {
+    let TypeExpr::Name {
+        path, arguments, ..
+    } = argument
+    else {
+        return false;
+    };
+    if !arguments.is_empty() {
+        return false;
+    }
+    annotation_type_name_is_declared(path, scope, generic_names)
+        || path
+            .last()
+            .is_some_and(|name| is_currency_code(name) || is_implicit_unit(name))
+}
+
+fn is_implicit_unit(name: &str) -> bool {
+    matches!(
+        name,
+        "C" | "K"
+            | "day"
+            | "days"
+            | "hour"
+            | "hours"
+            | "minute"
+            | "minutes"
+            | "min"
+            | "second"
+            | "seconds"
+            | "s"
+            | "m"
+            | "km"
+            | "kWh"
+            | "mph"
+    )
+}
+
+fn annotation_type_name_is_declared(
+    path: &[String],
+    scope: &Scope,
+    generic_names: &BTreeSet<String>,
+) -> bool {
+    let Some(last) = path.last() else {
+        return false;
+    };
+    if path.len() == 1 {
+        return generic_names.contains(last)
+            || primitive(last).is_some()
+            || system_api::embedded_system_api().describes_type(last)
+            || matches!(
+                last.as_str(),
+                "List" | "Range" | "Relation" | "Stream" | "Money" | "Locale"
+            )
+            || scope.names.get(last).is_some_and(|symbol| {
+                matches!(
+                    symbol.kind,
+                    SymbolKind::Type
+                        | SymbolKind::Enum
+                        | SymbolKind::Table
+                        | SymbolKind::Protocol
+                        | SymbolKind::Dimension
+                        | SymbolKind::Unit
+                )
+            });
+    }
+
+    let qualified = path.join(".");
+    if matches!(
+        qualified.as_str(),
+        "std.DURATION"
+            | "std.UUID"
+            | "std.TIME"
+            | "std.BINARY_LARGE_OBJECT"
+            | "std.Action"
+            | "std.Rows"
+            | "std.JsonValue"
+            | "std.Document"
+            | "std.ByteStream"
+            | "std.UI"
+    ) || system_api::embedded_system_api().describes_type(&qualified)
+    {
+        return true;
+    }
+
+    let Some(root) = scope.modules.get(&path[0]) else {
+        return false;
+    };
+    let namespace = Namespace(
+        root.0
+            .iter()
+            .cloned()
+            .chain(path[1..path.len() - 1].iter().cloned())
+            .collect(),
+    );
+    scope
+        .available_modules
+        .get(&namespace)
+        .and_then(|module| module.exports.get(last))
+        .is_some_and(|symbol| {
+            matches!(
+                symbol.kind,
+                SymbolKind::Type
+                    | SymbolKind::Enum
+                    | SymbolKind::Table
+                    | SymbolKind::Protocol
+                    | SymbolKind::Dimension
+                    | SymbolKind::Unit
+            )
+        })
 }
 
 struct FunctionBodyInference {
@@ -4100,57 +4210,6 @@ fn infer_function_body(
             effects,
         },
         direct_return: true,
-    }
-}
-
-fn scope_contains_named_type(scope: &Scope, name: &str) -> bool {
-    scope
-        .available_modules
-        .iter()
-        .filter(|(namespace, _)| scope.current_namespace.as_ref() != Some(namespace))
-        .map(|(_, module)| module)
-        .flat_map(|module| module.exports.values())
-        .any(|symbol| type_contains_named(&symbol.ty, name))
-}
-
-fn type_contains_named(ty: &Type, name: &str) -> bool {
-    match ty {
-        Type::Named(candidate) => candidate == name,
-        Type::List(inner)
-        | Type::Range(inner)
-        | Type::Relation(inner)
-        | Type::Stream(inner)
-        | Type::Optional(inner) => type_contains_named(inner, name),
-        Type::Record(fields) => fields
-            .values()
-            .any(|field| type_contains_named(field, name)),
-        Type::Tuple(elements) => elements
-            .iter()
-            .any(|element| type_contains_named(element, name)),
-        Type::Applied { arguments, .. } => arguments
-            .iter()
-            .any(|argument| type_contains_named(argument, name)),
-        Type::MoneyPerUnit { currency, unit } => {
-            type_contains_named(currency, name) || type_contains_named(unit, name)
-        }
-        Type::Function {
-            parameters, result, ..
-        } => {
-            parameters
-                .iter()
-                .any(|parameter| type_contains_named(parameter, name))
-                || type_contains_named(result, name)
-        }
-        Type::Int
-        | Type::Decimal
-        | Type::Float
-        | Type::Date
-        | Type::Instant
-        | Type::Text
-        | Type::Bool
-        | Type::Null
-        | Type::Bottom
-        | Type::Error => false,
     }
 }
 

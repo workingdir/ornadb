@@ -163,6 +163,56 @@ fn declared_nominal_annotation_name_is_accepted() {
     expect_accepted(&result);
 }
 
+#[test]
+fn qualified_annotation_names_use_imported_module_scope() {
+    let accepted = analyze(&[
+        ModuleInput::new("vault.orna", "pub type Box { pub value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use vault; pub fn identity(value: vault.Box): vault.Box = value;",
+        ),
+    ]);
+    expect_accepted(&accepted);
+
+    let undeclared = analyze(&[
+        ModuleInput::new("vault.orna", "pub type Box { pub value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use vault; pub fn bad(value: vault.Missing): vault.Missing = value; pub fn applied(value: List<Missing>): List<Missing> = value;",
+        ),
+    ]);
+    expect_diagnostics(&undeclared, &[DIAG_UNRESOLVED]);
+
+    let not_imported = analyze(&[
+        ModuleInput::new("vault.orna", "pub type Box { pub value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            "pub fn bad(value: vault.Box): vault.Box = value;",
+        ),
+    ]);
+    expect_diagnostics(&not_imported, &[DIAG_UNRESOLVED]);
+}
+
+#[test]
+fn generic_and_function_type_annotations_remain_resolvable() {
+    let result = analyze_main(
+        r#"
+            pub fn identity<T>(value: T): T = value;
+            pub fn apply(callback: fn(Int): Int): Int = callback(1);
+            pub fn measured(value: Float<mph>): Float<mph> = value;
+        "#,
+    );
+    expect_accepted(&result);
+}
+
+#[test]
+fn dimensional_annotation_arguments_must_resolve() {
+    let result = analyze_main(
+        "pub fn bad(money: Money<Missing>, float: Float<Missing>, decimal: Decimal<Missing>, integer: Int<Missing>): Int = 0;",
+    );
+    expect_diagnostics(&result, &[DIAG_UNRESOLVED]);
+}
+
 // Diagnostic control: unresolved value names already have a classification.
 #[test]
 fn undeclared_value_name_reports_unresolved_diagnostic() {
