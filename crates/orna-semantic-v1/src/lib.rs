@@ -335,6 +335,9 @@ pub struct TableSchema {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableAdmission {
     pub required: BTreeSet<String>,
+    /// True when at least one required declaration field is hidden from the
+    /// exported representation. The field name and type remain private.
+    pub private_required: bool,
     pub computed: BTreeSet<String>,
     /// Ordered explicit key columns, or the implicit automatic id column.
     pub keys: Vec<(String, Type)>,
@@ -826,6 +829,7 @@ impl Catalogue {
             contact.clone(),
             TableAdmission {
                 required: BTreeSet::from(["name".into()]),
+                private_required: false,
                 computed: BTreeSet::from(["full_name".into()]),
                 keys: vec![("id".into(), Type::Text)],
                 automatic_key: false,
@@ -1722,6 +1726,10 @@ struct Scope {
     /// Local nominal record constructors elaborate to their declared row shape
     /// so field access remains structural inside inferred stream pipelines.
     nominal_rows: BTreeMap<String, Type>,
+    /// Names whose nominal rows belong to this source module. Imported rows
+    /// are selected from the explicitly resolved export instead of by short
+    /// name alone.
+    local_nominal_names: BTreeSet<String>,
     /// Local refined aliases retain their underlying representation so the
     /// closed `Port.from(value)` constructor can check the source value
     /// without erasing the refined nominal result.
@@ -1784,6 +1792,18 @@ fn resolve_imports(
             })
             .collect(),
         nominal_rows: tree.items.iter().filter_map(nominal_row_type).collect(),
+        local_nominal_names: tree
+            .items
+            .iter()
+            .filter_map(|item| match &item.declaration {
+                Declaration::Type {
+                    name,
+                    representation: TypeRepresentation::Nominal { .. },
+                    ..
+                } => Some(name.clone()),
+                _ => None,
+            })
+            .collect(),
         refined_types: tree
             .items
             .iter()
@@ -7132,28 +7152,53 @@ fn infer_nominal(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
     let mut actual = BTreeMap::new();
+    let mut supplied = Vec::with_capacity(fields.len());
     let mut effects = EffectSummary::default();
     for field in fields {
         let value = infer(&field.value, scope, local, diagnostics);
         effects.join(&value.effects);
-        actual.insert(field.name.clone(), value.ty);
+        supplied.push((field.name.clone(), value.ty.clone()));
+        if actual.insert(field.name.clone(), value.ty).is_some() {
+            diagnostics.push(diag(DIAG_DUPLICATE, "duplicate nominal constructor field"));
+        }
     }
-    let [name] = path else {
-        diagnostics.push(diag(
-            DIAG_UNSUPPORTED,
-            "qualified nominal constructors are outside this semantic slice",
-        ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
+    let path_text = path
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>();
+    let (symbol, expected, constructor_type) = if let [name] = path {
+        let symbol = scope
+            .names
+            .get(&name.text)
+            .filter(|symbol| symbol.kind == SymbolKind::Type);
+        let local_expected = scope.nominal_rows.get(&name.text).and_then(|ty| match ty {
+            Type::Record(fields) => Some(fields),
+            _ => None,
+        });
+        let exported_expected = symbol.and_then(Symbol::table_fields);
+        let expected = if scope.local_nominal_names.contains(&name.text) {
+            local_expected
+        } else {
+            exported_expected.or(local_expected)
         };
+        (symbol, expected, Type::Named(name.text.clone()))
+    } else {
+        let symbol = if path_text
+            .first()
+            .is_some_and(|root| local.contains_key(*root))
+        {
+            None
+        } else {
+            qualified_module_symbol(&path_text, scope)
+                .filter(|symbol| symbol.kind == SymbolKind::Type)
+        };
+        let expected = symbol.and_then(Symbol::table_fields);
+        let constructor_type = symbol
+            .map(|symbol| symbol.ty.clone())
+            .unwrap_or(Type::Error);
+        (symbol, expected, constructor_type)
     };
-    let declared = scope
-        .names
-        .get(&name.text)
-        .filter(|symbol| symbol.kind == SymbolKind::Type)
-        .and_then(|_| scope.nominal_rows.get(&name.text));
-    let Some(Type::Record(expected)) = declared else {
+    let (Some(symbol), Some(expected)) = (symbol, expected) else {
         diagnostics.push(diag(
             DIAG_UNRESOLVED,
             "nominal record type cannot be resolved",
@@ -7163,15 +7208,52 @@ fn infer_nominal(
             effects,
         };
     };
-    if expected.keys().ne(actual.keys()) {
+    let schema = symbol.table_schema.as_ref();
+    let admission = schema.and_then(|schema| schema.admission.as_ref());
+    let public_fields = schema.map(|schema| &schema.fields);
+    let invalid_fields = actual.keys().any(|field| !expected.contains_key(field));
+    let missing_public_required = admission.is_some_and(|admission| {
+        admission
+            .required
+            .iter()
+            .any(|field| !actual.contains_key(field))
+    });
+    let missing_private_required = admission.is_some_and(|admission| {
+        if !admission.private_required {
+            return false;
+        }
+        let Some(public_fields) = public_fields else {
+            return true;
+        };
+        let mut hidden_fields = expected
+            .keys()
+            .filter(|field| !public_fields.contains_key(*field));
+        if hidden_fields.next().is_some() {
+            expected
+                .keys()
+                .any(|field| !public_fields.contains_key(field) && !actual.contains_key(field))
+        } else {
+            // Imported schemas intentionally omit private field names. A
+            // private-required flag therefore proves that the constructor
+            // cannot be complete in this scope, even when all public fields
+            // were supplied.
+            true
+        }
+    });
+    let legacy_shape_mismatch = admission.is_none() && expected.keys().ne(actual.keys());
+    if invalid_fields
+        || missing_public_required
+        || missing_private_required
+        || legacy_shape_mismatch
+    {
         diagnostics.push(diag(
             DIAG_TYPE,
             "nominal constructor fields do not match the declared row",
         ));
     }
-    for (name, expected) in expected {
-        if let Some(actual) = actual.get(name) {
-            require_same(expected, actual, diagnostics);
+    for (name, actual) in supplied {
+        if let Some(expected) = expected.get(&name) {
+            require_same(expected, &actual, diagnostics);
         }
     }
     Inferred {
@@ -7179,7 +7261,7 @@ fn infer_nominal(
         // row is used only to validate constructor fields; returning it here
         // would make an inferred factory result structurally accessible from
         // unrelated modules.
-        ty: Type::Named(name.text.clone()),
+        ty: constructor_type,
         effects,
     }
 }
@@ -10548,6 +10630,29 @@ fn table_symbol<'a>(
     }
 }
 
+fn qualified_module_symbol<'a>(path: &[&str], scope: &'a Scope) -> Option<&'a Symbol> {
+    let last = path.last()?;
+    if path.len() < 2 {
+        return None;
+    }
+    let root = scope.modules.get(path[0])?;
+    let namespace = Namespace(
+        root.0
+            .iter()
+            .cloned()
+            .chain(
+                path[1..path.len() - 1]
+                    .iter()
+                    .map(|part| (*part).to_owned()),
+            )
+            .collect(),
+    );
+    scope
+        .available_modules
+        .get(&namespace)
+        .and_then(|module| module.exports.get(*last))
+}
+
 fn infer_table_projection(
     expression: &Expr,
     scope: &Scope,
@@ -12051,9 +12156,37 @@ fn declared_nominal_schema(item: &Item) -> Option<TableSchema> {
             | TypeMember::Implementation { .. } => None,
         })
         .collect();
+    let mut required = BTreeSet::new();
+    let mut private_required = false;
+    for member in members {
+        let TypeMember::Field {
+            visibility,
+            name,
+            initializer,
+            ..
+        } = member
+        else {
+            continue;
+        };
+        if initializer.is_none() {
+            if *visibility {
+                required.insert(name.clone());
+            } else {
+                private_required = true;
+            }
+        }
+    }
     Some(TableSchema {
         fields,
-        admission: None,
+        // Only declaration-backed completeness is exported.  Default
+        // expressions and private field types remain in the owning module.
+        admission: Some(TableAdmission {
+            required,
+            private_required,
+            computed: BTreeSet::new(),
+            keys: Vec::new(),
+            automatic_key: false,
+        }),
     })
 }
 
@@ -12093,6 +12226,7 @@ fn declared_table_schema(item: &Item) -> Option<TableSchema> {
         fields,
         admission: Some(TableAdmission {
             required,
+            private_required: false,
             computed,
             keys: if keys.is_empty() {
                 vec![("id".into(), Type::Int)]
