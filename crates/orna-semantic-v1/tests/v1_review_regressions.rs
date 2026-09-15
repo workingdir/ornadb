@@ -12,7 +12,8 @@
 //! environment changes, fixture catalogues, or runtime evaluation are needed.
 
 use orna_semantic_v1::{
-    Analysis, DIAG_ANNOTATION, DIAG_TYPE, DIAG_UNRESOLVED, ModuleInput, Namespace, Type, analyze,
+    Analysis, DIAG_ANNOTATION, DIAG_DUPLICATE, DIAG_TYPE, DIAG_UNRESOLVED, ModuleInput, Namespace,
+    Type, analyze,
 };
 use orna_syntax_v1::parse_module_with_file;
 
@@ -306,6 +307,136 @@ fn public_nominal_field_through_factory_is_accepted() {
         ),
     ]);
     expect_accepted(&result);
+}
+
+// ORNA-NOMINAL-005/-007: an imported constructor sees only public fields,
+// while declaration-backed required-field metadata prevents it from
+// manufacturing a value whose private representation is incomplete.
+#[test]
+fn imported_nominal_constructor_requires_private_fields() {
+    let incomplete = analyze(&[
+        ModuleInput::new("vault.orna", "pub type Vault { value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use vault.{Vault}; pub fn forge(): Vault = Vault {};",
+        ),
+    ]);
+    expect_diagnostics(&incomplete, &[DIAG_TYPE]);
+
+    let supplied_private = analyze(&[
+        ModuleInput::new("vault.orna", "pub type Vault { value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use vault.{Vault}; pub fn forge(): Vault = Vault { value: 1 };",
+        ),
+    ]);
+    expect_diagnostics(&supplied_private, &[DIAG_TYPE]);
+
+    let qualified_incomplete = analyze(&[
+        ModuleInput::new("vault.orna", "pub type Vault { value: Int, }"),
+        ModuleInput::new("main.orna", "use vault; pub fn forge() = vault.Vault {};"),
+    ]);
+    expect_diagnostics(&qualified_incomplete, &[DIAG_TYPE]);
+
+    let qualified_shadowed = analyze(&[
+        ModuleInput::new("vault.orna", "pub type Vault { pub value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use vault; pub fn forge() { let vault = 1; vault.Vault { value: 1 } }",
+        ),
+    ]);
+    expect_diagnostics(&qualified_shadowed, &[DIAG_UNRESOLVED]);
+}
+
+#[test]
+fn imported_nominal_constructor_accepts_complete_public_fields_and_defaults() {
+    let complete = analyze(&[
+        ModuleInput::new("vault.orna", "pub type Vault { pub value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use vault.{Vault}; pub fn forge(): Vault = Vault { value: 1 };",
+        ),
+    ]);
+    expect_accepted(&complete);
+
+    let defaulted = analyze(&[
+        ModuleInput::new("vault.orna", "pub type Vault { pub value: Int = 1, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use vault.{Vault}; pub fn forge(): Vault = Vault {};",
+        ),
+    ]);
+    expect_accepted(&defaulted);
+
+    let local =
+        analyze_main("pub type Vault { value: Int = 1, } pub fn forge(): Vault = Vault {};");
+    expect_accepted(&local);
+
+    let qualified = analyze(&[
+        ModuleInput::new("vault.orna", "pub type Vault { pub value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use vault; pub fn forge() = vault.Vault { value: 1 };",
+        ),
+    ]);
+    expect_accepted(&qualified);
+
+    let aliased = analyze(&[
+        ModuleInput::new("vault.orna", "pub type Vault { pub value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use vault as v; pub fn forge() = v.Vault { value: 1 };",
+        ),
+    ]);
+    expect_accepted(&aliased);
+
+    let colliding_short_names = analyze(&[
+        ModuleInput::new("alpha.orna", "pub type Vault { pub alpha: Int, }"),
+        ModuleInput::new("beta.orna", "pub type Vault { pub beta: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use beta.{Vault}; pub fn forge(): Vault = Vault { beta: 1 };",
+        ),
+    ]);
+    expect_accepted(&colliding_short_names);
+
+    let private_default_supplied = analyze(&[
+        ModuleInput::new("vault.orna", "pub type Vault { value: Int = 1, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use vault.{Vault}; pub fn forge(): Vault = Vault { value: 1 };",
+        ),
+    ]);
+    expect_diagnostics(&private_default_supplied, &[DIAG_TYPE]);
+
+    let local_private_required =
+        analyze_main("pub type Vault { value: Int, } pub fn forge(): Vault = Vault { value: 1 };");
+    expect_accepted(&local_private_required);
+
+    let exported = analyze(&[ModuleInput::new(
+        "vault.orna",
+        "pub type Vault { value: Int, }",
+    )]);
+    let vault = exported
+        .modules
+        .get(&Namespace(vec!["vault".into()]))
+        .and_then(|module| module.exports.get("Vault"))
+        .expect("exported nominal type");
+    let schema = vault.table_schema.as_ref().expect("nominal schema");
+    let admission = schema.admission.as_ref().expect("nominal admission");
+    assert!(!schema.fields.contains_key("value"));
+    assert!(!admission.required.contains("value"));
+    assert!(admission.private_required);
+}
+
+#[test]
+fn nominal_constructor_rejects_duplicate_fields() {
+    let result = analyze_main("type T { value: Int, } fn forge() = T { value: 1, value: 2 };");
+    expect_diagnostics(&result, &[DIAG_DUPLICATE]);
+
+    let first_value_is_checked =
+        analyze_main("type T { value: Int, } fn forge() = T { value: \"wrong\", value: 2 };");
+    expect_diagnostics(&first_value_is_checked, &[DIAG_DUPLICATE, DIAG_TYPE]);
 }
 
 // ORNA-GENERIC-011: every required member
