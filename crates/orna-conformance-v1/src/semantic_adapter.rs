@@ -1950,7 +1950,7 @@ impl DurableTransactionalEvaluator {
                     request,
                     fingerprint,
                     writer,
-                    StageOutcome::Failed(stream_cancelled_diagnostic()),
+                    StageOutcome::Cancelled(stream_cancelled_diagnostic()),
                 )
                 .await
             }
@@ -2125,6 +2125,14 @@ fn request_terminal(outcome: &StageOutcome<Diagnostic>) -> Result<TerminalOutcom
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
             );
         }
+        StageOutcome::Cancelled(diagnostic) => {
+            bytes.extend_from_slice(b"cancelled/");
+            bytes.extend(
+                diagnostic
+                    .encode_ovb()
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            );
+        }
         StageOutcome::Skipped { reason } => {
             bytes.extend_from_slice(b"skipped/");
             bytes.extend_from_slice(reason.as_bytes());
@@ -2146,6 +2154,11 @@ fn replay_request_terminal(bytes: &[u8]) -> Result<StageOutcome<Diagnostic>, Run
                 .map_err(|_| RuntimeError::RecoveryInvalid)?
                 .into(),
         });
+    }
+    if let Some(diagnostic) = body.strip_prefix(b"cancelled/") {
+        return Ok(StageOutcome::Cancelled(
+            Diagnostic::decode_ovb(diagnostic).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        ));
     }
     let diagnostic = body
         .strip_prefix(b"failed/")
@@ -2195,6 +2208,11 @@ async fn terminalize_observed_outcome(
                         class: DiagnosticClass::Permanent,
                     },
                 )
+                .await?;
+        }
+        StageOutcome::Cancelled(_) => {
+            state
+                .cancel_observed_request_with_owner(request, fingerprint, lease, terminal)
                 .await?;
         }
         StageOutcome::Passed | StageOutcome::Skipped { .. } => {
