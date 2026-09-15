@@ -1206,6 +1206,15 @@ async fn run_host_actor(
                     return;
                 };
                 let Ok(response) = result else {
+                    // A failed transport commit has already retired the
+                    // candidate. Hand its supervisor-owned join gate to the
+                    // outer retirement owner before reporting failure; if we
+                    // drop it here, the attachment remains fenced forever
+                    // after the worker exits.
+                    if retirement_gates.unbounded_send(retirement).is_err() {
+                        let _ = reply.send(Err(()));
+                        return;
+                    }
                     let _ = reply.send(Err(()));
                     continue;
                 };
