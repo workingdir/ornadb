@@ -1094,6 +1094,90 @@ fn inspect_render_rejects_mixed_target_before_rendering() {
 }
 
 #[test]
+fn inspect_resource_and_ui_rows_reject_high_half_epoch_mismatches() {
+    let verified = orna_standard::verify_standard_library_snapshot(
+        orna_standard::retained_standard_library_snapshot().unwrap(),
+    )
+    .unwrap();
+    let active = empty_version_two_active(&verified);
+    let pair = active.pair();
+    let epoch = inspect_epoch(0x96, 7);
+    let target = super::super::InvocationId::from_bytes([0x91; 16]);
+
+    let encode_row = |payload: Vec<u8>| {
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("standard catalogue");
+        let registry = super::super::registered_opaque_codecs(standard).expect("opaque registry");
+        let descriptor = super::super::TypeDescriptor::list(super::super::TypeDescriptor::named(
+            super::super::BINARY_LARGE_OBJECT_TYPE_ID,
+        ))
+        .expect("row descriptor");
+        let value = super::super::RuntimeValue::list(
+            &active,
+            descriptor,
+            vec![super::super::RuntimeValue::Bytes(payload)],
+        )
+        .expect("row value");
+        orna_protocol::encode_constructed_value(&active, &registry, &value).expect("encoded row")
+    };
+
+    let row = |kind: super::super::InspectCarrierKind, epoch_id: super::super::InspectEpochId| {
+        let mut payload = vec![kind.tag()];
+        payload.extend_from_slice(&[0; 8]);
+        payload.extend_from_slice(&epoch_id.to_bytes());
+        payload.extend_from_slice(&target.to_bytes());
+        payload.extend_from_slice(&[0x94; 16]);
+        payload.extend_from_slice(&pair.source().to_bytes());
+        payload.extend_from_slice(&pair.catalogue().to_bytes());
+        payload.extend_from_slice(&[1, 0]);
+        payload
+    };
+
+    for kind in [
+        super::super::InspectCarrierKind::Resources,
+        super::super::InspectCarrierKind::UiNodes,
+    ] {
+        let valid = super::super::InspectCarrierEnvelope::new(
+            kind,
+            epoch,
+            pair.source(),
+            pair.catalogue(),
+            vec![encode_row(row(kind, epoch))],
+        )
+        .expect("valid projection envelope");
+        assert_eq!(
+            super::super::inspect::inspect_projection_target_from_envelope(&active, &valid, kind),
+            Ok(Some(target)),
+            "{kind:?} row retains the complete epoch identity",
+        );
+
+        let mut mismatched_payload = row(kind, epoch);
+        mismatched_payload[9] ^= 1;
+        let mismatched = super::super::InspectCarrierEnvelope::new(
+            kind,
+            epoch,
+            pair.source(),
+            pair.catalogue(),
+            vec![encode_row(mismatched_payload)],
+        )
+        .expect("row high-half mismatch remains structurally encoded");
+        assert_eq!(
+            super::super::inspect::inspect_projection_target_from_envelope(
+                &active,
+                &mismatched,
+                kind,
+            ),
+            Err(super::super::ClientInspectError::Failed(
+                "inspect.epoch_mismatch".to_owned(),
+            )),
+            "{kind:?} row high-half mismatch must fail closed",
+        );
+    }
+}
+
+#[test]
 fn inspect_render_wrong_ui_type_fails_closed() {
     let (active, _, _, _) = version_one_active(true);
     assert!(!super::super::inspect_render_ui_value_matches(
