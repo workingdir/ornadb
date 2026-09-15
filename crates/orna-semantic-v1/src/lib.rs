@@ -1266,7 +1266,7 @@ pub fn analyze_with_catalogue(inputs: &[ModuleInput], catalogue: &Catalogue) -> 
             module.exports = module
                 .symbols
                 .iter()
-                .filter(|(_, s)| s.public)
+                .filter(|(_, s)| s.public && !type_contains_error(&s.ty))
                 .map(|(n, s)| (n.clone(), s.clone()))
                 .collect();
         }
@@ -1323,7 +1323,7 @@ fn stabilize_function_summaries(
                 module.exports = module
                     .symbols
                     .iter()
-                    .filter(|(_, symbol)| symbol.public)
+                    .filter(|(_, symbol)| symbol.public && !type_contains_error(&symbol.ty))
                     .map(|(name, symbol)| (name.clone(), symbol.clone()))
                     .collect();
             }
@@ -1415,7 +1415,7 @@ fn collect_header(
     }
     let exports = symbols
         .iter()
-        .filter(|(_, s)| s.public)
+        .filter(|(_, s)| s.public && !type_contains_error(&s.ty))
         .map(|(n, s)| (n.clone(), s.clone()))
         .collect();
     ModuleHeader {
@@ -5309,7 +5309,14 @@ fn infer(
                     effects: EffectSummary::default(),
                 };
             }
+            let diagnostics_before_base = diagnostics.len();
             let base = infer(base, scope, local, diagnostics);
+            if base.ty == Type::Error && diagnostics.len() == diagnostics_before_base {
+                return Inferred {
+                    ty: Type::Error,
+                    effects: base.effects,
+                };
+            }
             if let Some(ty) = infer_system_member(&base.ty, name) {
                 return Inferred {
                     ty,
@@ -6198,7 +6205,38 @@ fn inferred_lambda_parameter_type(body: &Expr, name: &str) -> Option<Type> {
         return Some(Type::Int);
     }
     inferred_record_parameter_type(body, name)
+        .filter(|ty| !type_contains_error(ty))
         .or_else(|| parameter_comparison_usage(body, name).then_some(Type::Error))
+}
+
+fn type_contains_error(ty: &Type) -> bool {
+    match ty {
+        Type::Error => true,
+        Type::List(inner)
+        | Type::Range(inner)
+        | Type::Relation(inner)
+        | Type::Stream(inner)
+        | Type::Optional(inner) => type_contains_error(inner),
+        Type::Tuple(elements) => elements.iter().any(type_contains_error),
+        Type::Record(fields) => fields.values().any(type_contains_error),
+        Type::Applied { arguments, .. } => arguments.iter().any(type_contains_error),
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_error(currency) || type_contains_error(unit)
+        }
+        Type::Function {
+            parameters, result, ..
+        } => parameters.iter().any(type_contains_error) || type_contains_error(result),
+        Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Named(_)
+        | Type::Bottom => false,
+    }
 }
 
 fn inferred_relation_parameter_type(body: &Expr, name: &str) -> Option<Type> {
@@ -7497,6 +7535,9 @@ fn infer_finite_list_collection(
         row.ty
     } else {
         for argument in arguments {
+            if malformed && matches!(argument.value, Expr::Lambda { .. }) {
+                continue;
+            }
             let value = infer(&argument.value, scope, local, diagnostics);
             effects.join(&value.effects);
         }
@@ -9801,13 +9842,6 @@ fn infer_named_pipeline_stage(
     let callee = infer(callee, scope, local, diagnostics);
     let mut effects = input.effects;
     effects.join(&callee.effects);
-    let mut values = Vec::with_capacity(arguments.len() + 1);
-    values.push(input.ty);
-    for argument in arguments {
-        let value = infer(&argument.value, scope, local, diagnostics);
-        effects.join(&value.effects);
-        values.push(value.ty);
-    }
     let Type::Function {
         parameters,
         parameter_names,
@@ -9815,6 +9849,17 @@ fn infer_named_pipeline_stage(
         default_parameters,
     } = callee.ty
     else {
+        for argument in arguments {
+            let value = if matches!(argument.value, Expr::Lambda { .. }) {
+                Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                }
+            } else {
+                infer(&argument.value, scope, local, diagnostics)
+            };
+            effects.join(&value.effects);
+        }
         diagnostics.push(diag(
             DIAG_UNSUPPORTED,
             "pipeline stage is not a supported named callable",
@@ -9824,6 +9869,35 @@ fn infer_named_pipeline_stage(
             effects,
         };
     };
+    let mut values = Vec::with_capacity(arguments.len() + 1);
+    values.push(input.ty);
+    for (index, argument) in arguments.iter().enumerate() {
+        let expected = expected_pipeline_call_parameter(
+            &parameters,
+            parameter_names.as_deref(),
+            arguments,
+            index,
+        );
+        let value = match expected {
+            Some(expected @ Type::Function { .. }) => {
+                infer_contextual(&argument.value, expected, scope, local, diagnostics)
+            }
+            Some(_) if matches!(argument.value, Expr::Lambda { .. }) => Inferred {
+                ty: Type::Error,
+                effects: EffectSummary::default(),
+            },
+            Some(expected) => {
+                infer_contextual(&argument.value, expected, scope, local, diagnostics)
+            }
+            None if matches!(argument.value, Expr::Lambda { .. }) => Inferred {
+                ty: Type::Error,
+                effects: EffectSummary::default(),
+            },
+            None => infer(&argument.value, scope, local, diagnostics),
+        };
+        effects.join(&value.effects);
+        values.push(value.ty);
+    }
     check_call_arguments(
         &parameters,
         parameter_names.as_deref(),
@@ -9837,6 +9911,26 @@ fn infer_named_pipeline_stage(
         ty: *result,
         effects,
     }
+}
+
+fn expected_pipeline_call_parameter<'a>(
+    parameters: &'a [Type],
+    parameter_names: Option<&'a [String]>,
+    arguments: &[orna_syntax_v1::Argument],
+    index: usize,
+) -> Option<&'a Type> {
+    let argument = arguments.get(index)?;
+    if let Some(name) = argument.name.as_deref() {
+        return parameter_names?
+            .iter()
+            .position(|parameter| parameter == name)
+            .and_then(|position| parameters.get(position));
+    }
+    let positional = arguments[..index]
+        .iter()
+        .filter(|argument| argument.name.is_none())
+        .count();
+    parameters.get(positional + 1)
 }
 
 fn infer_generic_pipeline_stage(
