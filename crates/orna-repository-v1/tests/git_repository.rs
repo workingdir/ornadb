@@ -3071,6 +3071,24 @@ fn observes_materialized_tree_blob_and_tag_without_mutation() {
 }
 
 #[test]
+fn observes_native_objects_with_case_insensitive_hex_spelling() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    // This is the fixed SHA-1 for the `main.orna` bytes written by
+    // `repository()`. Keeping the object ID explicit makes the case change
+    // deterministic instead of depending on a particular HEAD hash.
+    let object = "8bffabe30647ae6f01aec31fbcc2ad23dde3dcbd";
+    assert_eq!(git(root.path(), &["rev-parse", "HEAD:main.orna"]), object);
+    let uppercase = object.to_ascii_uppercase();
+    assert_ne!(object, uppercase);
+
+    assert_eq!(
+        repo.observe_git_object(&uppercase).unwrap(),
+        repo.observe_git_object(&object).unwrap()
+    );
+}
+
+#[test]
 fn reports_a_corrupt_local_object_as_malformed_without_mutation() {
     let root = repository();
     let object = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

@@ -3741,6 +3741,11 @@ impl Repository {
     /// only when valid local promisor configuration and reachability evidence
     /// support that interpretation; otherwise they remain unavailable.
     pub fn observe_git_object(&self, object_id: &str) -> Result<GitObjectState, RepositoryError> {
+        // Native Git object IDs are hexadecimal and Git reports them in their
+        // canonical lowercase form. Normalize the caller spelling before
+        // comparing command output so this observer agrees with
+        // `NativeObjectId::new` without weakening exact-ID validation.
+        let object_id = object_id.to_ascii_lowercase();
         let object_id_length = self.observer_native_object_id_length()?;
         if object_id.len() != object_id_length
             || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -3786,7 +3791,7 @@ impl Repository {
             return Ok(if capabilities.mode == GitRepositoryMode::Malformed {
                 GitObjectState::Malformed
             } else if capabilities.partial_clone {
-                match self.promisor_reachability(object_id)? {
+                match self.promisor_reachability(&object_id)? {
                     PromisorReachability::Proven => GitObjectState::Promised,
                     PromisorReachability::NotProven => GitObjectState::Unavailable,
                     PromisorReachability::Malformed => GitObjectState::Malformed,
