@@ -248,6 +248,53 @@ fn legacy_var_declarations_remain_rejected_at_statement_boundaries() {
     }
 }
 
+// `opaque` and `currency` are ordinary identifiers in Orna 1.0.0. Their
+// targeted diagnostics apply only to the removed top-level declaration forms.
+#[test]
+fn opaque_and_currency_are_accepted_in_ordinary_identifier_positions() {
+    for name in ["opaque", "currency"] {
+        accepted_body(&format!(
+            "type {name} {{ {name}: {name}, }} \
+             table {name}({name}: {name}) {{ {name}: {name}, }} \
+             protocol {name} {{ static {name}: {name}; fn {name}({name}: {name}): {name}; }} \
+             enum {name} {{ {name} {{ {name}: {name} }}, }} \
+             fn {name}({name}: {name}): {name} {{ \
+                 let {name}: {name} = {name}; \
+                 {name} = replacement; \
+                 {{ {name}: {name} }}; \
+                 {name}.member; \
+                 namespace.{name}; \
+                 call({name}: {name}); \
+                 {name} \
+             }}"
+        ));
+    }
+}
+
+#[test]
+fn legacy_opaque_and_currency_declarations_remain_rejected() {
+    for (source, expected) in [
+        ("opaque EmailAddress = Str;", "ORNA091-E-OPAQUE"),
+        ("pub opaque EmailAddress = Str;", "ORNA091-E-OPAQUE"),
+        (
+            "currency GBP { code: \"GBP\", symbol: \"£\", minor_digits: 2 }",
+            "ORNA091-E-CURRENCY",
+        ),
+        (
+            "pub currency GBP { code: \"GBP\", symbol: \"£\", minor_digits: 2 }",
+            "ORNA091-E-CURRENCY",
+        ),
+    ] {
+        let parsed = parse_module(source);
+        assert_eq!(
+            parsed.diagnostics.first().map(|diagnostic| diagnostic.code),
+            Some(expected),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
+    }
+}
+
 // `match` is a contextual identifier in Orna 1.0.0. The removed expression
 // form is recognized only when its statement/function-body shape includes
 // legacy `=>` arms.
