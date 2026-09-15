@@ -123,6 +123,123 @@ impl Value {
     } // unencodable marker
 }
 
+/// A typed view of the portable OVB Error value (tag 60016).
+///
+/// This wrapper carries no execution or language-level error semantics.  It
+/// only provides a typed construction and inspection boundary for the
+/// canonical representation already accepted by [`Value`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErrorValue(Value);
+
+impl ErrorValue {
+    /// Constructs a canonical Error value from its portable fields.
+    pub fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        causes: impl IntoIterator<Item = ErrorValue>,
+        safe_details: BTreeMap<String, Value>,
+    ) -> Result<Self> {
+        let mut details: Vec<(Raw, Raw)> = safe_details
+            .into_iter()
+            .map(|(key, value)| (Raw::Text(key), value.0))
+            .collect();
+        details.sort_by(|(left, _), (right, _)| {
+            encode_raw(left)
+                .expect("text map keys are always encodable")
+                .cmp(&encode_raw(right).expect("text map keys are always encodable"))
+        });
+
+        let raw = tag(
+            60016,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text(code.into())),
+                (Raw::Int(1.into()), Raw::Text(message.into())),
+                (
+                    Raw::Int(2.into()),
+                    Raw::Array(causes.into_iter().map(|cause| cause.0.0).collect()),
+                ),
+                (Raw::Int(3.into()), Raw::Map(details)),
+            ]),
+        );
+        Self::from_value(Value::new(raw)?)
+    }
+
+    /// Views a validated OVB value as a typed Error value.
+    pub fn from_value(value: Value) -> Result<Self> {
+        match value.raw() {
+            Raw::Tag(60016, inner) => {
+                validate_error(inner, 0)?;
+                Ok(Self(value))
+            }
+            _ => Err(Error::InvalidTag),
+        }
+    }
+
+    /// Decodes and validates a canonical OVB Error value.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        Self::from_value(Value::decode(bytes)?)
+    }
+
+    pub fn value(&self) -> &Value {
+        &self.0
+    }
+
+    pub fn into_value(self) -> Value {
+        self.0
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.0.encode()
+    }
+
+    pub fn code(&self) -> &str {
+        let fields = self.fields();
+        text(fields[&0]).expect("validated Error code is text")
+    }
+
+    pub fn message(&self) -> &str {
+        let fields = self.fields();
+        text(fields[&1]).expect("validated Error message is text")
+    }
+
+    pub fn causes(&self) -> Vec<Self> {
+        array(self.fields()[&2])
+            .expect("validated Error causes are an array")
+            .iter()
+            .map(|cause| {
+                Self::from_value(Value::new(cause.clone()).expect("validated cause"))
+                    .expect("validated Error cause")
+            })
+            .collect()
+    }
+
+    pub fn safe_details(&self) -> BTreeMap<String, Value> {
+        map(self.fields()[&3])
+            .expect("validated Error details are a map")
+            .iter()
+            .map(|(key, value)| {
+                (
+                    text(key)
+                        .expect("validated Error detail key is text")
+                        .to_owned(),
+                    Value::new(value.clone()).expect("validated Error detail value"),
+                )
+            })
+            .collect()
+    }
+
+    fn fields(&self) -> BTreeMap<u64, &Raw> {
+        integer_map(self.inner(), &[0, 1, 2, 3], &[]).expect("ErrorValue invariant was violated")
+    }
+
+    fn inner(&self) -> &Raw {
+        let Raw::Tag(60016, inner) = self.0.raw() else {
+            unreachable!("ErrorValue invariant was violated")
+        };
+        inner
+    }
+}
+
 fn tag(n: u64, raw: Raw) -> Raw {
     Raw::Tag(n, Box::new(raw))
 }
@@ -2188,6 +2305,61 @@ mod tests {
         assert!(Value::new(tag(60011, Raw::Map(vec![]))).is_err());
         assert!(Value::new(tag(60016, Raw::Map(vec![]))).is_err());
         assert!(Value::new(tag(60012, Raw::Array(vec![]))).is_err());
+    }
+
+    #[test]
+    fn error_value_round_trips_nested_causes_and_safe_details() {
+        let mut child_details = BTreeMap::new();
+        child_details.insert("retryable".into(), Value::new(Raw::Bool(true)).unwrap());
+        let child = ErrorValue::new("ORNA-E-CHILD", "child failure", [], child_details).unwrap();
+
+        let mut details = BTreeMap::new();
+        details.insert("attempt".into(), Value::int(3.into()));
+        details.insert("zeta".into(), Value::new(Raw::Text("safe".into())).unwrap());
+        let error = ErrorValue::new("ORNA-E-ROOT", "root failure", [child], details).unwrap();
+
+        assert_eq!(error.code(), "ORNA-E-ROOT");
+        assert_eq!(error.message(), "root failure");
+        assert_eq!(error.causes().len(), 1);
+        assert_eq!(error.causes()[0].code(), "ORNA-E-CHILD");
+        assert_eq!(
+            error.causes()[0].safe_details()["retryable"],
+            Value::new(Raw::Bool(true)).unwrap()
+        );
+        assert_eq!(error.safe_details()["attempt"], Value::int(3.into()));
+        assert_eq!(
+            error.safe_details()["zeta"],
+            Value::new(Raw::Text("safe".into())).unwrap()
+        );
+
+        let encoded = error.encode().unwrap();
+        let decoded = ErrorValue::decode(&encoded).unwrap();
+        assert_eq!(decoded, error);
+        assert_eq!(decoded.value().raw(), error.value().raw());
+    }
+
+    #[test]
+    fn error_value_preserves_malformed_rejection() {
+        let malformed = tag(
+            60016,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
+                (Raw::Int(1.into()), Raw::Text("safe".into())),
+                (
+                    Raw::Int(2.into()),
+                    Raw::Array(vec![Raw::Text("not-error".into())]),
+                ),
+                (
+                    Raw::Int(3.into()),
+                    Raw::Map(vec![(Raw::Int(4.into()), Raw::Bool(true))]),
+                ),
+            ]),
+        );
+        assert_eq!(Value::new(malformed.clone()), Err(Error::InvalidTag));
+
+        let mut bytes = Vec::new();
+        write_raw(&malformed, &mut bytes).unwrap();
+        assert_eq!(ErrorValue::decode(&bytes), Err(Error::InvalidTag));
     }
 
     fn diagnostic_with_path(path: &str) -> Raw {
