@@ -165,7 +165,7 @@ where
         let response = Envelope::decode(&first, limits).map_err(LiveBootstrapError::Protocol)?;
         if response.request != request.request
             || response.watch.is_none()
-            || !matches!(response.message, Message::Snapshot { .. })
+            || !matches!(response.message, Message::Snapshot { revision: 0, .. })
         {
             return Err(LiveBootstrapError::UnexpectedResponse);
         }
