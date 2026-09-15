@@ -1573,7 +1573,7 @@ impl Parser {
                 continue;
             };
             let diagnostic = match token.text.as_str() {
-                "var" => Some((
+                "var" if self.is_legacy_var_declaration(i) => Some((
                     "ORNA091-E-VAR",
                     "use `let`; assignment may replace the local slot",
                 )),
@@ -1853,6 +1853,128 @@ impl Parser {
                 ));
             }
         }
+    }
+    fn is_legacy_var_declaration(&self, at: usize) -> bool {
+        let tokens = &self.tokens;
+        let statement_boundary = at == 0
+            || matches!(
+                tokens.get(at.saturating_sub(1)).map(|token| &token.kind),
+                Some(TokenKind::Punct(";" | "{" | "}")) | Some(TokenKind::Keyword(Keyword::Pub))
+            );
+        if !statement_boundary {
+            return false;
+        }
+        let Some(pattern_end) = Self::legacy_pattern_end(tokens, at + 1) else {
+            return false;
+        };
+        if !Self::token_is_punct(tokens, pattern_end, "=") {
+            return false;
+        }
+        Self::has_terminated_initializer(tokens, pattern_end + 1)
+    }
+    fn legacy_pattern_end(tokens: &[Token], at: usize) -> Option<usize> {
+        let token = tokens.get(at)?;
+        match token.kind {
+            TokenKind::Identifier { .. } | TokenKind::Keyword(Keyword::SelfValue) => {
+                let mut end = at + 1;
+                while Self::token_is_punct(tokens, end, ".") {
+                    if !Self::token_is_contextual(tokens, end + 1) {
+                        return None;
+                    }
+                    end += 2;
+                }
+                if Self::token_is_punct(tokens, end, "{") {
+                    Self::legacy_record_pattern_end(tokens, end)
+                } else if Self::token_is_punct(tokens, end, "(") {
+                    Self::legacy_sequence_pattern_end(tokens, end, ")")
+                } else {
+                    Some(end)
+                }
+            }
+            TokenKind::Integer
+            | TokenKind::Decimal
+            | TokenKind::Float
+            | TokenKind::Date
+            | TokenKind::Instant
+            | TokenKind::String
+            | TokenKind::Keyword(Keyword::True | Keyword::False | Keyword::Null)
+            | TokenKind::Punct("_") => Some(at + 1),
+            TokenKind::Punct("(") => Self::legacy_sequence_pattern_end(tokens, at, ")"),
+            TokenKind::Punct("[") => Self::legacy_sequence_pattern_end(tokens, at, "]"),
+            TokenKind::Punct("{") => Self::legacy_record_pattern_end(tokens, at),
+            _ => None,
+        }
+    }
+    fn legacy_sequence_pattern_end(tokens: &[Token], open: usize, close: &str) -> Option<usize> {
+        let mut at = open + 1;
+        if Self::token_is_punct(tokens, at, close) {
+            return Some(at + 1);
+        }
+        loop {
+            at = Self::legacy_pattern_end(tokens, at)?;
+            if !Self::token_is_punct(tokens, at, ",") {
+                break;
+            }
+            at += 1;
+            if Self::token_is_punct(tokens, at, close) {
+                return Some(at + 1);
+            }
+        }
+        Self::token_is_punct(tokens, at, close).then_some(at + 1)
+    }
+    fn legacy_record_pattern_end(tokens: &[Token], open: usize) -> Option<usize> {
+        let mut at = open + 1;
+        if Self::token_is_punct(tokens, at, "}") {
+            return Some(at + 1);
+        }
+        loop {
+            if !Self::token_is_contextual(tokens, at) {
+                return None;
+            }
+            at += 1;
+            if Self::token_is_punct(tokens, at, ":") {
+                at = Self::legacy_pattern_end(tokens, at + 1)?;
+            }
+            if !Self::token_is_punct(tokens, at, ",") {
+                break;
+            }
+            at += 1;
+            if Self::token_is_punct(tokens, at, "}") {
+                return Some(at + 1);
+            }
+        }
+        Self::token_is_punct(tokens, at, "}").then_some(at + 1)
+    }
+    fn has_terminated_initializer(tokens: &[Token], start: usize) -> bool {
+        if matches!(
+            tokens.get(start).map(|token| &token.kind),
+            None | Some(TokenKind::Punct(";")) | Some(TokenKind::Eof)
+        ) {
+            return false;
+        }
+        let mut nesting = 0usize;
+        for token in &tokens[start..] {
+            match token.kind {
+                TokenKind::Punct("(" | "[" | "{") => nesting += 1,
+                TokenKind::Punct(")" | "]" | "}") => nesting = nesting.saturating_sub(1),
+                TokenKind::Punct(";") if nesting == 0 => return true,
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+    fn token_is_contextual(tokens: &[Token], at: usize) -> bool {
+        matches!(
+            tokens.get(at).map(|token| &token.kind),
+            Some(TokenKind::Identifier { .. } | TokenKind::Keyword(_))
+        )
+    }
+    fn token_is_punct(tokens: &[Token], at: usize, punct: &str) -> bool {
+        matches!(
+            tokens.get(at).map(|token| &token.kind),
+            Some(TokenKind::Punct(actual)) if *actual == punct
+        )
     }
     fn item(&mut self, module: bool) -> Option<Item> {
         let start = self.current().span.start;
