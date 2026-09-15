@@ -20,7 +20,8 @@ use orna_syntax_v1::{
     PatternField, ReplInput, Statement, StringSegment, parse_expression, parse_repl,
 };
 use orna_value_v1::{
-    CANONICAL_NAN_BITS, Raw, float_max, float_min, float_ordinary_eq, float_total_cmp,
+    CANONICAL_NAN_BITS, ErrorValue as CanonicalErrorValue, Raw, float_max, float_min,
+    float_ordinary_eq, float_total_cmp,
 };
 use unicode_normalization::UnicodeNormalization;
 
@@ -182,19 +183,52 @@ pub type Functions = BTreeMap<String, PureFunction>;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluationError {
     diagnostic: Box<Diagnostic>,
+    canonical: Option<CanonicalErrorValue>,
+    deliberate: bool,
 }
 
 impl EvaluationError {
     /// Constructs a payload-free error from an already-admitted safe code.
     /// Effect handlers cannot attach source, argument, or host payloads.
     pub fn redacted(code: SafeText) -> Self {
+        let canonical_code = code.as_str().to_owned();
         Self {
             diagnostic: Box::new(
                 Diagnostic::new(code, DiagnosticSeverity::Error, SafeText::redacted())
                     .expect("safe diagnostic code")
                     .redacted(),
             ),
+            canonical: Some(
+                CanonicalErrorValue::new(canonical_code, "<redacted>", [], BTreeMap::new())
+                    .expect("redacted error is canonical"),
+            ),
+            deliberate: false,
         }
+    }
+
+    fn from_canonical(value: CanonicalErrorValue) -> Self {
+        Self {
+            diagnostic: Box::new(
+                Diagnostic::new(
+                    SafeText::new("ORNA-EVAL-ERROR").expect("static safe code"),
+                    DiagnosticSeverity::Error,
+                    SafeText::redacted(),
+                )
+                .expect("safe diagnostic code")
+                .redacted(),
+            ),
+            canonical: Some(value),
+            deliberate: true,
+        }
+    }
+
+    /// Returns a deliberate canonical Error identity when one is retained.
+    pub fn canonical_error(&self) -> Option<&CanonicalErrorValue> {
+        self.canonical.as_ref().filter(|_| self.deliberate)
+    }
+
+    fn handler_error(&self) -> Result<CanonicalErrorValue, EvaluationError> {
+        self.canonical.clone().ok_or_else(|| self.clone())
     }
     pub fn diagnostic(&self) -> &Diagnostic {
         &self.diagnostic
@@ -205,7 +239,7 @@ impl EvaluationError {
 }
 impl fmt::Display for EvaluationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.diagnostic.code())
+        f.write_str(self.code())
     }
 }
 impl std::error::Error for EvaluationError {}
@@ -899,6 +933,9 @@ impl Value {
         }
     }
     fn canonical(self) -> Result<CanonicalValue, EvaluationError> {
+        if let Self::Error(failure) = self {
+            return Err(failure);
+        }
         CanonicalValue::new(self.raw()?).map_err(|_| error("ORNA-EVAL-VALUE"))
     }
     fn raw(self) -> Result<Raw, EvaluationError> {
@@ -906,8 +943,10 @@ impl Value {
             Self::Function(_) | Self::Closure(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
             Self::Relation(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
             // Error values are only available to the handling side of `|?`.
-            // They must not cross the successful canonical-value boundary.
-            Self::Error(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+            // They must not cross the successful canonical-value boundary,
+            // but a containing value must preserve the original failure while
+            // propagating to that boundary.
+            Self::Error(failure) => return Err(failure),
             Self::Null => Raw::Null,
             Self::Unit => Raw::Tag(60014, Box::new(Raw::Array(vec![]))),
             Self::Bool(value) => Raw::Bool(value),
@@ -1296,6 +1335,48 @@ impl Context<'_, '_> {
             Ok(value)
         }
     }
+    fn error_field(
+        &mut self,
+        failure: &EvaluationError,
+        name: &str,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.depth(depth)?;
+        let canonical = failure
+            .canonical
+            .as_ref()
+            .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+        match name {
+            "code" => self.string(canonical.code().to_owned()).map(Value::String),
+            "message" => self
+                .string(canonical.message().to_owned())
+                .map(Value::String),
+            "causes" => {
+                let causes = canonical.causes();
+                self.items(causes.len())?;
+                Ok(Value::List(
+                    causes
+                        .into_iter()
+                        .map(|cause| Value::Error(EvaluationError::from_canonical(cause)))
+                        .collect(),
+                ))
+            }
+            "safe_details" => {
+                let details = canonical.safe_details();
+                self.items(details.len())?;
+                let mut fields = BTreeMap::new();
+                for (key, value) in details {
+                    self.string(key.clone())?;
+                    let canonical = CanonicalValue::new(value.raw().clone())
+                        .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                    let value = Value::from_canonical(&canonical, self, depth + 1)?;
+                    fields.insert(key, value);
+                }
+                Ok(Value::Record(fields))
+            }
+            _ => Err(error("ORNA-EVAL-FIELD")),
+        }
+    }
     fn integer(&self, value: BigInt) -> Result<BigInt, EvaluationError> {
         if value.to_str_radix(10).len() > self.limits.max_integer_digits {
             Err(error("ORNA-EVAL-LIMIT"))
@@ -1429,18 +1510,15 @@ impl Context<'_, '_> {
                 }
                 self.index(base, index)
             }
-            Expr::Field { base, name, .. } => {
-                let Value::Record(fields) = self.evaluate(base, scope, depth + 1)? else {
-                    if self.transfer.is_some() {
-                        return Ok(Value::Null);
-                    }
-                    return Err(error("ORNA-EVAL-TYPE"));
-                };
-                fields
+            Expr::Field { base, name, .. } => match self.evaluate(base, scope, depth + 1)? {
+                Value::Record(fields) => fields
                     .get(name)
                     .cloned()
-                    .ok_or_else(|| error("ORNA-EVAL-FIELD"))
-            }
+                    .ok_or_else(|| error("ORNA-EVAL-FIELD")),
+                Value::Error(failure) => self.error_field(&failure, name, depth + 1),
+                _ if self.transfer.is_some() => Ok(Value::Null),
+                _ => Err(error("ORNA-EVAL-TYPE")),
+            },
             Expr::Control {
                 kind: ControlKind::If,
                 condition: Some(condition),
@@ -2555,6 +2633,52 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
+        if matches!(callee, Expr::Name { text, .. } if text == "error")
+            && !scope.0.contains_key("error")
+            && self.resolve_function_name(callee, scope).is_none()
+        {
+            if input.is_some() || arguments.iter().any(|argument| argument.name.is_none()) {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+            let mut supplied = BTreeMap::new();
+            for argument in arguments {
+                let name = argument
+                    .name
+                    .as_ref()
+                    .expect("unnamed arguments rejected above");
+                if !matches!(name.as_str(), "code" | "message" | "cause")
+                    || supplied.contains_key(name)
+                {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                let value = self.evaluate(&argument.value, scope, depth + 1)?;
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
+                supplied.insert(name.clone(), value);
+            }
+            let Value::String(code) = supplied
+                .remove("code")
+                .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?
+            else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            let Value::String(message) = supplied
+                .remove("message")
+                .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?
+            else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            let causes = match supplied.remove("cause") {
+                None => Vec::new(),
+                Some(Value::Error(cause)) => vec![cause.handler_error()?],
+                Some(_) => return Err(error("ORNA-EVAL-TYPE")),
+            };
+            let value = CanonicalErrorValue::new(code, message, causes, BTreeMap::new())
+                .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+            return Ok(Value::Error(EvaluationError::from_canonical(value)));
+        }
+
         // `fail(error_value)` is an abrupt intrinsic, not an ordinary
         // callable. Error values only exist while a recovery handler is
         // running, so re-emitting one preserves the original diagnostic and
@@ -4511,6 +4635,10 @@ mod tests {
         CanonicalValue::new(Raw::Int(value.into())).expect("integer is canonical")
     }
 
+    fn text(value: &str) -> CanonicalValue {
+        CanonicalValue::new(Raw::Text(value.into())).expect("text is canonical")
+    }
+
     #[test]
     fn recovery_pipelines_handle_ordinary_failures_and_skip_successes() {
         assert_eq!(
@@ -4522,6 +4650,476 @@ mod tests {
             evaluate_recovery("((1 / 0) |? (failure => 41)) | std.math.increment"),
             integer(42),
         );
+    }
+
+    #[test]
+    fn error_intrinsic_builds_tagged_error_and_rejects_successful_escape() {
+        let failure = evaluate_expression(
+            r#"error(code: "message.invalid", message: "invalid message")"#,
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap_err();
+        let canonical = failure.canonical_error().expect("canonical Error identity");
+        assert_eq!(canonical.code(), "message.invalid");
+        assert_eq!(canonical.message(), "invalid message");
+        assert!(canonical.causes().is_empty());
+        assert!(canonical.safe_details().is_empty());
+        assert!(matches!(canonical.value().raw(), Raw::Tag(60016, _)));
+    }
+
+    #[test]
+    fn deliberate_error_does_not_leak_source_code_into_diagnostics() {
+        let failure = evaluate_expression(
+            r#"error(code: "source\ncontrolled", message: "private message")"#,
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            failure.canonical_error().expect("canonical Error").code(),
+            "source\ncontrolled"
+        );
+        assert_eq!(failure.diagnostic().code(), "ORNA-EVAL-ERROR");
+        assert_eq!(failure.code(), "ORNA-EVAL-ERROR");
+        assert_eq!(failure.to_string(), "ORNA-EVAL-ERROR");
+        assert_eq!(failure.diagnostic().message(), "<redacted>");
+    }
+
+    #[test]
+    fn fail_reemits_deliberate_error_byte_identically() {
+        let source = r#"error(code: "inner", message: "inner")"#;
+        let original = evaluate_expression(source, &Environment::new(), Limits::default())
+            .unwrap_err()
+            .canonical_error()
+            .expect("canonical Error")
+            .encode()
+            .expect("canonical encoding");
+        let failure = evaluate_expression(
+            r#"fail(error(code: "inner", message: "inner")) |? (failure => fail(error(
+                code: "outer",
+                message: "outer",
+                cause: failure,
+            )))"#,
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap_err();
+        let canonical = failure.canonical_error().expect("canonical Error identity");
+        assert_eq!(canonical.code(), "outer");
+        assert_eq!(canonical.causes().len(), 1);
+        assert_eq!(canonical.causes()[0].code(), "inner");
+
+        let reemitted = evaluate_expression(
+            r#"fail(error(code: "inner", message: "inner")) |? (failure => fail(failure))"#,
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap_err()
+        .canonical_error()
+        .expect("canonical Error")
+        .encode()
+        .expect("canonical encoding");
+        assert_eq!(reemitted, original);
+    }
+
+    #[test]
+    fn ordinary_failure_reemits_its_original_identity() {
+        let original =
+            evaluate_expression("1 / 0", &Environment::new(), Limits::default()).unwrap_err();
+        let reemitted = evaluate_expression(
+            "(1 / 0) |? (failure => fail(failure))",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(original.code(), "ORNA-EVAL-DIVIDE-BY-ZERO");
+        assert_eq!(reemitted.code(), original.code());
+        assert!(original.canonical_error().is_none());
+        assert_eq!(
+            reemitted
+                .canonical
+                .as_ref()
+                .expect("retained ordinary identity")
+                .encode()
+                .expect("canonical encoding"),
+            original
+                .canonical
+                .as_ref()
+                .expect("retained ordinary identity")
+                .encode()
+                .expect("canonical encoding"),
+        );
+    }
+
+    #[test]
+    fn recovery_preserves_ordinary_failure_identity_inside_lists_and_records() {
+        let original =
+            evaluate_expression("1 / 0", &Environment::new(), Limits::default()).unwrap_err();
+        let original_bytes = original
+            .canonical
+            .as_ref()
+            .expect("ordinary identity")
+            .encode()
+            .expect("canonical encoding");
+
+        for source in [
+            "(1 / 0) |? (failure => [failure])",
+            "(1 / 0) |? (failure => { error: failure })",
+        ] {
+            let recovered =
+                evaluate_expression(source, &Environment::new(), Limits::default()).unwrap_err();
+            assert_eq!(recovered.code(), original.code(), "{source}");
+            assert_eq!(
+                recovered
+                    .canonical
+                    .as_ref()
+                    .expect("nested ordinary identity")
+                    .encode()
+                    .expect("canonical encoding"),
+                original_bytes,
+                "{source}",
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_preserves_deliberate_error_bytes_inside_lists_and_records() {
+        let error = r#"error(code: "nested.code", message: "nested message")"#;
+        let expected = evaluate_expression(error, &Environment::new(), Limits::default())
+            .unwrap_err()
+            .canonical_error()
+            .expect("deliberate identity")
+            .encode()
+            .expect("canonical encoding");
+
+        for source in [
+            r#"fail(error(code: "nested.code", message: "nested message")) |? (failure => [failure])"#,
+            r#"fail(error(code: "nested.code", message: "nested message")) |? (failure => { error: failure })"#,
+        ] {
+            let recovered =
+                evaluate_expression(source, &Environment::new(), Limits::default()).unwrap_err();
+            assert_eq!(
+                recovered
+                    .canonical_error()
+                    .expect("nested deliberate identity")
+                    .encode()
+                    .expect("canonical encoding"),
+                expected,
+                "{source}",
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_reemits_the_selected_cause_byte_identically() {
+        let selected = r#"error(code: "selected", message: "selected")"#;
+        let expected = evaluate_expression(selected, &Environment::new(), Limits::default())
+            .unwrap_err()
+            .canonical_error()
+            .expect("selected cause identity")
+            .encode()
+            .expect("canonical encoding");
+        let recovered = evaluate_expression(
+            r#"fail(error(code: "outer", message: "outer", cause: error(code: "selected", message: "selected"))) |? (failure => fail(failure.causes[0]))"#,
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            recovered
+                .canonical_error()
+                .expect("selected cause re-emission")
+                .encode()
+                .expect("canonical encoding"),
+            expected,
+        );
+    }
+
+    #[test]
+    fn nested_errors_propagate_through_every_canonical_container() {
+        let ordinary =
+            evaluate_expression("1 / 0", &Environment::new(), Limits::default()).unwrap_err();
+        let deliberate = EvaluationError::from_canonical(
+            CanonicalErrorValue::new("nested.code", "nested message", [], BTreeMap::new())
+                .expect("deliberate error is canonical"),
+        );
+        let containers = |failure: EvaluationError| {
+            vec![
+                Value::List(vec![Value::Error(failure.clone())]),
+                Value::Tuple(vec![Value::Error(failure.clone())]),
+                Value::Record(BTreeMap::from([(
+                    "error".into(),
+                    Value::Error(failure.clone()),
+                )])),
+                Value::NominalRecord {
+                    type_id: Raw::Text("Example".into()),
+                    fields: vec![(Raw::Text("error".into()), Value::Error(failure.clone()))],
+                },
+                Value::Enum {
+                    type_id: Raw::Text("Example".into()),
+                    variant_id: Raw::Text("Failure".into()),
+                    payload: Some(Box::new(Value::Error(failure.clone()))),
+                },
+                Value::Option(Some(Box::new(Value::Error(failure.clone())))),
+                Value::Range {
+                    lower: Some(Box::new(Value::Error(failure))),
+                    upper: None,
+                    upper_inclusive: false,
+                },
+            ]
+        };
+
+        for value in containers(ordinary.clone()) {
+            assert_eq!(value.canonical().unwrap_err(), ordinary);
+        }
+
+        let expected = deliberate
+            .canonical_error()
+            .expect("deliberate identity")
+            .encode()
+            .expect("canonical error encoding");
+        for value in containers(deliberate.clone()) {
+            let propagated = value.canonical().unwrap_err();
+            assert_eq!(propagated, deliberate);
+            assert_eq!(
+                propagated
+                    .canonical_error()
+                    .expect("deliberate identity")
+                    .encode()
+                    .expect("canonical error encoding"),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_handlers_can_inspect_error_fields() {
+        assert_eq!(
+            evaluate_recovery("(1 / 0) |? (failure => failure.code)"),
+            text("ORNA-EVAL-DIVIDE-BY-ZERO"),
+        );
+        assert_eq!(
+            evaluate_recovery("(1 / 0) |? (failure => failure.message)"),
+            text("<redacted>"),
+        );
+        assert_eq!(
+            evaluate_recovery(
+                r#"fail(error(code: "outer", message: "outer", cause: error(code: "inner", message: "inner"))) |? (failure => failure.causes[0].code)"#,
+            ),
+            text("inner"),
+        );
+    }
+
+    #[test]
+    fn error_intrinsic_rejects_invalid_arguments_and_respects_shadowing() {
+        for source in [
+            r#"error("code", "message")"#,
+            r#"error(code: "only code")"#,
+            r#"error(code: "x", message: 1)"#,
+            r#"error(code: "x", message: "y", cause: 1)"#,
+            r#"error(code: "x", message: "y", extra: "z")"#,
+            r#"error(code: "x", message: "y", code: "duplicate")"#,
+            r#"1 | error(code: "x", message: "y")"#,
+        ] {
+            assert!(
+                matches!(
+                    evaluate_expression(source, &Environment::new(), Limits::default())
+                        .unwrap_err()
+                        .code(),
+                    "ORNA-EVAL-ARGUMENT" | "ORNA-EVAL-TYPE"
+                ),
+                "{source}"
+            );
+        }
+
+        assert_eq!(
+            evaluate_expression(
+                r#"error(code: "x", message: (1 / 0))"#,
+                &Environment::new(),
+                Limits::default(),
+            )
+            .unwrap_err()
+            .code(),
+            "ORNA-EVAL-DIVIDE-BY-ZERO",
+        );
+
+        let parsed = orna_syntax_v1::parse_module(
+            "fn error(code: Str, message: Str): Int = 7; fn run() = error(code: \"x\", message: \"y\");",
+        );
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+        let functions = parsed
+            .value
+            .items
+            .into_iter()
+            .map(|item| {
+                let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration
+                else {
+                    panic!("function expected")
+                };
+                (
+                    signature.name,
+                    PureFunction {
+                        parameters: signature.parameters,
+                        body,
+                        environment: Environment::new(),
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(
+            invoke_named("run", &functions, &Environment::new(), Limits::default()).unwrap(),
+            integer(7),
+        );
+    }
+
+    fn evaluate_handler_value(
+        source: &str,
+        failure: EvaluationError,
+    ) -> Result<Value, EvaluationError> {
+        let parsed = parse_expression(source);
+        assert!(parsed.is_ok(), "{source} should parse");
+        let functions = Functions::new();
+        let mut context = Context {
+            limits: Limits::default(),
+            steps: 0,
+            functions: &functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: false,
+            restrict_function_names: false,
+            reject_unhandled_field_calls: false,
+            effects: None,
+            namespace: None,
+            transfer: None,
+            cancellation: None,
+        };
+        let mut scope = Scope(BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
+        scope.0.insert("failure".into(), Value::Error(failure));
+        context.evaluate(&parsed.value, &mut scope, 0)
+    }
+
+    #[test]
+    fn recovery_handlers_expose_bounded_safe_details_and_fail_closed() {
+        let canonical = CanonicalErrorValue::new(
+            "detail.error",
+            "private",
+            [],
+            BTreeMap::from([
+                ("attempt".into(), orna_value_v1::Value::int(3.into())),
+                (
+                    "label".into(),
+                    orna_value_v1::Value::new(Raw::Text("safe".into())).unwrap(),
+                ),
+            ]),
+        )
+        .unwrap();
+        let value = evaluate_handler_value(
+            "failure.safe_details.attempt",
+            EvaluationError::from_canonical(canonical),
+        )
+        .unwrap();
+        assert_eq!(value.canonical().unwrap(), integer(3));
+
+        let nested = CanonicalErrorValue::new("nested", "private", [], BTreeMap::new()).unwrap();
+        let canonical = CanonicalErrorValue::new(
+            "detail.error",
+            "private",
+            [],
+            BTreeMap::from([("nested".into(), nested.value().clone())]),
+        )
+        .unwrap();
+        assert_eq!(
+            evaluate_handler_value(
+                "failure.safe_details.nested",
+                EvaluationError::from_canonical(canonical),
+            )
+            .unwrap_err()
+            .code(),
+            "ORNA-EVAL-UNSUPPORTED",
+        );
+    }
+
+    fn evaluate_with_safe_details_effects(
+        source: &str,
+        effects: &mut SafeDetailsEffects,
+    ) -> Result<Value, EvaluationError> {
+        let parsed = parse_expression(source);
+        assert!(parsed.is_ok(), "{source} should parse");
+        let functions = Functions::new();
+        let mut context = Context {
+            limits: Limits::default(),
+            steps: 0,
+            functions: &functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: false,
+            restrict_function_names: false,
+            reject_unhandled_field_calls: false,
+            effects: Some(effects),
+            namespace: None,
+            transfer: None,
+            cancellation: None,
+        };
+        let mut scope = Scope(BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
+        context.evaluate(&parsed.value, &mut scope, 0)
+    }
+
+    #[test]
+    fn recovery_reads_safe_details_through_an_actual_effect_boundary() {
+        let scalar = CanonicalErrorValue::new(
+            "detail.error",
+            "private",
+            [],
+            BTreeMap::from([("attempt".into(), orna_value_v1::Value::int(3.into()))]),
+        )
+        .unwrap();
+        let mut effects = SafeDetailsEffects {
+            failure: EvaluationError::from_canonical(scalar),
+        };
+        let value = evaluate_with_safe_details_effects(
+            "probe.error() |? (failure => failure.safe_details.attempt)",
+            &mut effects,
+        )
+        .expect("safe scalar detail should be readable");
+        assert_eq!(value.canonical().unwrap(), integer(3));
+
+        let nested = CanonicalErrorValue::new("nested", "private", [], BTreeMap::new()).unwrap();
+        let canonical = CanonicalErrorValue::new(
+            "detail.error",
+            "private",
+            [],
+            BTreeMap::from([("nested".into(), nested.value().clone())]),
+        )
+        .unwrap();
+        let mut effects = SafeDetailsEffects {
+            failure: EvaluationError::from_canonical(canonical),
+        };
+        let error = evaluate_with_safe_details_effects(
+            "probe.error() |? (failure => failure.safe_details.nested)",
+            &mut effects,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "ORNA-EVAL-UNSUPPORTED");
+    }
+
+    #[test]
+    fn error_field_access_rejects_missing_and_unknown_fields() {
+        let failure = EvaluationError::from_canonical(
+            CanonicalErrorValue::new("code", "message", [], BTreeMap::new()).unwrap(),
+        );
+        for source in ["failure.cause", "failure.unknown"] {
+            assert_eq!(
+                evaluate_handler_value(source, failure.clone())
+                    .unwrap_err()
+                    .code(),
+                "ORNA-EVAL-FIELD",
+                "{source}"
+            );
+        }
     }
 
     #[test]
@@ -4567,6 +5165,23 @@ mod tests {
                 }
                 _ => Ok(None),
             }
+        }
+    }
+
+    struct SafeDetailsEffects {
+        failure: EvaluationError,
+    }
+
+    impl EffectHandler for SafeDetailsEffects {
+        fn handle(
+            &mut self,
+            callee: &Expr,
+            _: &[CanonicalValue],
+        ) -> Result<Option<CanonicalValue>, EvaluationError> {
+            if function_name(callee).as_deref() == Some("probe.error") {
+                return Err(self.failure.clone());
+            }
+            Ok(None)
         }
     }
 
@@ -4622,8 +5237,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.code(), "ORNA-EVAL-UNSUPPORTED");
+        assert_eq!(error.code(), "ORNA-EVAL-DIVIDE-BY-ZERO");
         assert_eq!(error.diagnostic().message(), "<redacted>");
+        assert!(error.canonical_error().is_none());
     }
 
     #[test]
