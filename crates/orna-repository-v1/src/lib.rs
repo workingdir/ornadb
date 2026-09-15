@@ -3873,6 +3873,34 @@ impl Repository {
         })
     }
 
+    /// Hydrates only the promised segment blobs declared by a verified
+    /// compact manifest. The complete manifest and shard witness is checked
+    /// before any fetch is attempted; materialized segments are checked for
+    /// their physical identity and promised segments are fetched through the
+    /// exact-object transport boundary. A final verification prevents a
+    /// partially hydrated or mismatched segment from being reported as ready.
+    ///
+    /// Git refs, `HEAD`, `FETCH_HEAD`, the index, worktree, runtime files and
+    /// objects outside this manifest are not installation targets of this
+    /// operation. Hydration may add the requested immutable object bytes to
+    /// the local object store, but it never changes logical repository state.
+    pub fn hydrate_compact_manifest_segments(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+    ) -> Result<BTreeMap<String, GitObjectState>, FetchError> {
+        let plan = self
+            .plan_compact_manifest_hydration(commit, table)
+            .map_err(FetchError::Repository)?;
+        for (object_id, state) in &plan {
+            if matches!(state, GitObjectState::Promised) {
+                self.hydrate_promised_object(object_id)?;
+            }
+        }
+        self.plan_compact_manifest_hydration(commit, table)
+            .map_err(FetchError::Repository)
+    }
+
     fn local_config_value(&self, key: &str) -> Result<ConfigValue, RepositoryError> {
         self.config_value("--local", key)
     }

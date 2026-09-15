@@ -2989,6 +2989,70 @@ fn compact_manifest_observation_keeps_a_declared_promised_segment_unhydrated() {
 }
 
 #[test]
+fn compact_manifest_hydration_is_manifest_bound_and_preserves_git_state() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0044);
+    let plan = compact_plan(
+        &repo,
+        table,
+        [44; 16],
+        &[compact_segment(
+            table,
+            44,
+            b"manifest-bound-hydration".to_vec(),
+        )],
+    );
+    publish_compact_repository_boundary(&repo, plan).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
+    let object = manifest.entries()[0].git_object_id().to_owned();
+    let object_path = root
+        .path()
+        .join(".git/objects")
+        .join(&object[..2])
+        .join(&object[2..]);
+
+    let _remote = continuity_remote(root.path());
+    git(
+        root.path(),
+        &["config", "extensions.partialClone", "origin"],
+    );
+    git(root.path(), &["config", "remote.origin.promisor", "true"]);
+    git(
+        root.path(),
+        &["config", "remote.origin.partialclonefilter", "blob:none"],
+    );
+    assert!(object_path.is_file());
+    fs::remove_file(&object_path).unwrap();
+    assert_eq!(
+        repo.observe_git_object(&object).unwrap(),
+        GitObjectState::Promised
+    );
+
+    let fetch_head = root
+        .path()
+        .join(git(root.path(), &["rev-parse", "--git-path", "FETCH_HEAD"]));
+    fs::write(&fetch_head, b"sentinel\n").unwrap();
+    let before = git_state(&repo, root.path());
+    let fetch_head_before = fs::read(&fetch_head).unwrap();
+    let hydrated = repo
+        .hydrate_compact_manifest_segments(&head, table)
+        .unwrap();
+
+    assert!(matches!(
+        hydrated.get(&object),
+        Some(GitObjectState::Materialized {
+            kind: GitObjectKind::Blob,
+            ..
+        })
+    ));
+    assert_eq!(repo.observe_git_object(&object).unwrap(), hydrated[&object]);
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert_eq!(fs::read(&fetch_head).unwrap(), fetch_head_before);
+}
+
+#[test]
 fn observes_combined_sparse_and_partial_capabilities() {
     let root = repository();
     with_partial_clone(root.path());
