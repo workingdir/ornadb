@@ -387,7 +387,7 @@ impl LiveApplication for PureEvalApplication {
         request: [u8; 16],
         message: &Message,
     ) -> Result<Envelope> {
-        self.eval_with_cancellation(session, request, message, None)
+        self.eval_with_cancellation(session, request, message, None, None)
     }
 
     fn dispatch_with_work<'a>(
@@ -411,9 +411,13 @@ impl LiveApplication for PureEvalApplication {
         Box::pin(async move {
             work.check_active()?;
             let response = match message {
-                Message::Eval { .. } => {
-                    self.eval_with_cancellation(session, request, message, Some(&cancellation))
-                }
+                Message::Eval { .. } => self.eval_with_cancellation(
+                    session,
+                    request,
+                    message,
+                    Some(fingerprint),
+                    Some(&cancellation),
+                ),
                 Message::Subscribe { .. } => self.subscribe(session, request, message),
                 Message::Resync => self.resync(
                     session,
@@ -448,6 +452,7 @@ impl PureEvalApplication {
         session: [u8; 16],
         request: [u8; 16],
         message: &Message,
+        admitted_fingerprint: Option<[u8; 32]>,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Envelope> {
         let Message::Eval {
@@ -459,8 +464,12 @@ impl PureEvalApplication {
         else {
             return Err(Error::InvalidMessage);
         };
+        let operation_fingerprint = admitted_fingerprint.unwrap_or(*fingerprint);
+        if operation_fingerprint != *fingerprint {
+            return Err(Error::RequestMismatch);
+        }
         let session_id = SessionId::new(session);
-        if let Some(response) = self.replay(session_id, request, *fingerprint)? {
+        if let Some(response) = self.replay(session_id, request, operation_fingerprint)? {
             // The durable transport normally returns a terminal outcome
             // before reaching this callback. This local fence covers a
             // duplicate callback during the same retained session without
@@ -471,12 +480,12 @@ impl PureEvalApplication {
             let (state, _) = match self.session(session, database, presentation) {
                 Ok(state) => state,
                 Err(code) => {
-                    let response = self.failure(request, *fingerprint, code)?;
+                    let response = self.failure(request, operation_fingerprint, code)?;
                     // A session that was already admitted can retain this
                     // terminal rejection just like an evaluator failure. The
                     // matching request must replay the original outcome
                     // rather than re-admitting against a later CWD capture.
-                    self.retain_terminal(session_id, request, *fingerprint, &response);
+                    self.retain_terminal(session_id, request, operation_fingerprint, &response);
                     return Ok(response);
                 }
             };
@@ -485,11 +494,18 @@ impl PureEvalApplication {
                     let input = match parse_admitted_repl(source, Limits::default()) {
                         Ok(input) => input,
                         Err(error) => {
-                            return self.failure_diagnostic(
+                            let response = self.failure_diagnostic(
                                 request,
-                                *fingerprint,
+                                operation_fingerprint,
                                 error.diagnostic().clone(),
+                            )?;
+                            self.retain_terminal(
+                                session_id,
+                                request,
+                                operation_fingerprint,
+                                &response,
                             );
+                            return Ok(response);
                         }
                     };
                     state
@@ -506,7 +522,7 @@ impl PureEvalApplication {
                 message: Message::Result {
                     status: ResultStatus::Success,
                     value: Some(value),
-                    fingerprint: *fingerprint,
+                    fingerprint: operation_fingerprint,
                     diagnostic: None,
                 },
                 extensions: BTreeMap::new(),
@@ -517,16 +533,16 @@ impl PureEvalApplication {
                 message: Message::Result {
                     status: ResultStatus::RetainedWithoutValue,
                     value: None,
-                    fingerprint: *fingerprint,
+                    fingerprint: operation_fingerprint,
                     diagnostic: None,
                 },
                 extensions: BTreeMap::new(),
             }),
             Err(error) => {
-                self.failure_diagnostic(request, *fingerprint, error.diagnostic().clone())
+                self.failure_diagnostic(request, operation_fingerprint, error.diagnostic().clone())
             }
         }?;
-        self.retain_terminal(session_id, request, *fingerprint, &response);
+        self.retain_terminal(session_id, request, operation_fingerprint, &response);
         Ok(response)
     }
 
@@ -1034,6 +1050,82 @@ mod tests {
                 .terminal
                 .contains_key(&request)
         );
+    }
+
+    #[test]
+    fn preparse_eval_failure_replays_without_readmission() {
+        let (
+            mut application,
+            expiries,
+            database_id,
+            current_capture,
+            capture_admissions,
+            repl_admissions,
+        ) = application();
+        let session = [60; 16];
+        let request = [61; 16];
+        let fingerprint = [62; 32];
+        expiries.borrow_mut().insert(SessionId::new(session), 100);
+        let message = eval_message(database_id, "let broken: Int =", fingerprint);
+        let supervisor = orna_live_v1::LiveApplicationWorkSupervisor::new();
+
+        let mismatched_fingerprint = [63; 32];
+        let mut work = supervisor.admit(session, request).unwrap();
+        assert_eq!(
+            futures::executor::block_on(application.dispatch_with_work(
+                session,
+                request,
+                &message,
+                None,
+                mismatched_fingerprint,
+                &mut work,
+            )),
+            Err(Error::RequestMismatch)
+        );
+        assert_eq!(capture_admissions.get(), 0);
+        assert_eq!(repl_admissions.get(), 0);
+        assert!(application.sessions.is_empty());
+        assert!(application.rejected_terminals.is_empty());
+
+        let mut work = supervisor.admit(session, request).unwrap();
+        let first = futures::executor::block_on(application.dispatch_with_work(
+            session,
+            request,
+            &message,
+            None,
+            fingerprint,
+            &mut work,
+        ))
+        .unwrap();
+        assert!(matches!(
+            first.message,
+            Message::Result {
+                status: ResultStatus::Failure,
+                value: None,
+                diagnostic: Some(_),
+                ..
+            }
+        ));
+        let diagnostic = response_diagnostic(&first);
+        assert_eq!(diagnostic.code(), "ORNA-EVAL-PARSE");
+        assert_eq!(diagnostic.message(), "<redacted>");
+        let captures_after_failure = capture_admissions.get();
+        let repls_after_failure = repl_admissions.get();
+
+        *current_capture.borrow_mut() = capture(database_id, 1);
+        let mut work = supervisor.admit(session, request).unwrap();
+        let replay = futures::executor::block_on(application.dispatch_with_work(
+            session,
+            request,
+            &message,
+            None,
+            fingerprint,
+            &mut work,
+        ))
+        .unwrap();
+        assert_eq!(replay, first);
+        assert_eq!(capture_admissions.get(), captures_after_failure);
+        assert_eq!(repl_admissions.get(), repls_after_failure);
     }
 
     #[test]
