@@ -3230,7 +3230,7 @@ impl Context<'_, '_> {
             }));
         }
         let temporal_kind = values.first().and_then(range_endpoint_kind);
-        if matches!(temporal_kind, Some("Date" | "Instant"))
+        if matches!(temporal_kind, Some("Date" | "Instant" | "Duration"))
             && values
                 .iter()
                 .all(|value| range_endpoint_kind(value) == temporal_kind)
@@ -4153,6 +4153,7 @@ fn range_endpoint_kind(value: &Value) -> Option<&'static str> {
         Value::Float(_) => Some("Float"),
         Value::Date(_) => Some("Date"),
         Value::Instant { .. } => Some("Instant"),
+        Value::Duration { .. } => Some("Duration"),
         _ => None,
     }
 }
@@ -4237,6 +4238,18 @@ fn compare_values(left: &Value, right: &Value) -> Result<std::cmp::Ordering, Eva
             .cmp(right_seconds)
             .then(left_nanosecond.cmp(right_nanosecond))),
         (
+            Value::Duration {
+                seconds: left_seconds,
+                nanosecond: left_nanosecond,
+            },
+            Value::Duration {
+                seconds: right_seconds,
+                nanosecond: right_nanosecond,
+            },
+        ) => Ok(left_seconds
+            .cmp(right_seconds)
+            .then(left_nanosecond.cmp(right_nanosecond))),
+        (
             Value::Range {
                 lower: left_lower,
                 upper: left_upper,
@@ -4311,7 +4324,8 @@ fn lawful_sort_key(value: &Value) -> Result<(), EvaluationError> {
         | Value::Float(_)
         | Value::String(_)
         | Value::Date(_)
-        | Value::Instant { .. } => Ok(()),
+        | Value::Instant { .. }
+        | Value::Duration { .. } => Ok(()),
         Value::Range { .. } => Ok(()),
         Value::Tuple(values) => values.iter().try_for_each(lawful_sort_key),
         _ => Err(error("ORNA-EVAL-TYPE")),
@@ -4329,6 +4343,18 @@ fn compare_sort_keys(left: &Value, right: &Value) -> Result<std::cmp::Ordering, 
             },
             Value::Instant {
                 unix_seconds: right_seconds,
+                nanosecond: right_nanosecond,
+            },
+        ) => Ok(left_seconds
+            .cmp(right_seconds)
+            .then(left_nanosecond.cmp(right_nanosecond))),
+        (
+            Value::Duration {
+                seconds: left_seconds,
+                nanosecond: left_nanosecond,
+            },
+            Value::Duration {
+                seconds: right_seconds,
                 nanosecond: right_nanosecond,
             },
         ) => Ok(left_seconds
