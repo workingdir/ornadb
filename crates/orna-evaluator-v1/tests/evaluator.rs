@@ -3955,6 +3955,59 @@ fn instant_range(
     .unwrap()
 }
 
+fn duration(seconds: i64, nanosecond: u32) -> Value {
+    duration_big(seconds.into(), nanosecond)
+}
+
+fn duration_big(seconds: BigInt, nanosecond: u32) -> Value {
+    Value::new(Raw::Tag(
+        60005,
+        Box::new(Raw::Array(vec![
+            Raw::Int(seconds),
+            Raw::Int(nanosecond.into()),
+        ])),
+    ))
+    .unwrap()
+}
+
+fn duration_range(
+    lower: Option<(i64, u32)>,
+    upper: Option<(i64, u32)>,
+    upper_inclusive: bool,
+) -> Value {
+    duration_range_big(
+        lower.map(|(seconds, nanosecond)| (seconds.into(), nanosecond)),
+        upper.map(|(seconds, nanosecond)| (seconds.into(), nanosecond)),
+        upper_inclusive,
+    )
+}
+
+fn duration_range_big(
+    lower: Option<(BigInt, u32)>,
+    upper: Option<(BigInt, u32)>,
+    upper_inclusive: bool,
+) -> Value {
+    let endpoint = |value: Option<(BigInt, u32)>| match value {
+        Some((seconds, nanosecond)) => Raw::Tag(
+            60013,
+            Box::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                duration_big(seconds, nanosecond).raw().clone(),
+            ])),
+        ),
+        None => Raw::Tag(60013, Box::new(Raw::Array(vec![Raw::Int(0.into())]))),
+    };
+    Value::new(Raw::Tag(
+        60019,
+        Box::new(Raw::Array(vec![
+            endpoint(lower),
+            endpoint(upper),
+            Raw::Bool(upper_inclusive),
+        ])),
+    ))
+    .unwrap()
+}
+
 #[test]
 fn decimal_ranges_are_canonical_membership_values_with_optional_bounds_and_ordering() {
     let half_open = decimal_range(Some((125, -2)), Some((25, -1)), false);
@@ -4316,6 +4369,172 @@ fn instant_ranges_allow_empty_values_but_reject_mixed_types_and_iteration() {
         )),
         "ORNA-EVAL-TYPE"
     );
+}
+
+#[test]
+fn canonical_duration_ranges_support_membership_ordering_and_stable_collections() {
+    let earlier = duration(-1, 500_000_000);
+    let equal = duration(0, 0);
+    let later = duration(0, 1);
+    let huge_seconds = BigInt::from(i64::MAX) + BigInt::from(1);
+    let huge = duration_big(huge_seconds.clone(), 0);
+    let membership_range = duration_range_big(
+        Some((BigInt::from(-1), 500_000_000)),
+        Some((huge_seconds.clone(), 0)),
+        true,
+    );
+    let lower_first = duration_range(Some((-1, 500_000_000)), Some((1, 0)), false);
+    let lower_second = duration_range(Some((0, 0)), Some((1, 0)), false);
+    let upper_first = duration_range(Some((0, 0)), Some((0, 1)), false);
+    let upper_second = duration_range(Some((0, 0)), Some((1, 0)), false);
+    let exclusive = duration_range(Some((0, 0)), Some((1, 0)), false);
+    let inclusive = duration_range(Some((0, 0)), Some((1, 0)), true);
+    let rows = Value::new(Raw::Array(vec![
+        Raw::Map(vec![
+            (Raw::Text("key".into()), later.raw().clone()),
+            (Raw::Text("label".into()), Raw::Text("later".into())),
+        ]),
+        Raw::Map(vec![
+            (Raw::Text("key".into()), equal.raw().clone()),
+            (Raw::Text("label".into()), Raw::Text("first".into())),
+        ]),
+        Raw::Map(vec![
+            (Raw::Text("key".into()), equal.raw().clone()),
+            (Raw::Text("label".into()), Raw::Text("second".into())),
+        ]),
+        Raw::Map(vec![
+            (Raw::Text("key".into()), earlier.raw().clone()),
+            (Raw::Text("label".into()), Raw::Text("earlier".into())),
+        ]),
+        Raw::Map(vec![
+            (Raw::Text("key".into()), huge.raw().clone()),
+            (Raw::Text("label".into()), Raw::Text("huge".into())),
+        ]),
+    ]))
+    .unwrap();
+    let environment = Environment::from([
+        ("earlier".into(), earlier.clone()),
+        ("equal".into(), equal.clone()),
+        ("later".into(), later.clone()),
+        ("huge".into(), huge.clone()),
+        ("range".into(), membership_range),
+        ("lower_first".into(), lower_first),
+        ("lower_second".into(), lower_second),
+        ("upper_first".into(), upper_first),
+        ("upper_second".into(), upper_second),
+        ("exclusive".into(), exclusive),
+        ("inclusive".into(), inclusive),
+        (
+            "values".into(),
+            Value::new(Raw::Array(vec![
+                later.raw().clone(),
+                equal.raw().clone(),
+                earlier.raw().clone(),
+                huge.raw().clone(),
+            ]))
+            .unwrap(),
+        ),
+        ("rows".into(), rows),
+    ]);
+
+    for (source, expected) in [
+        ("earlier in range", Value::new(Raw::Bool(true)).unwrap()),
+        ("equal in range", Value::new(Raw::Bool(true)).unwrap()),
+        ("later in range", Value::new(Raw::Bool(true)).unwrap()),
+        ("min(values)", Value::option(Some(earlier.clone())).unwrap()),
+        ("max(values)", Value::option(Some(huge.clone())).unwrap()),
+        ("huge in range", Value::new(Raw::Bool(true)).unwrap()),
+        (
+            "lower_first < lower_second",
+            Value::new(Raw::Bool(true)).unwrap(),
+        ),
+        (
+            "upper_first < upper_second",
+            Value::new(Raw::Bool(true)).unwrap(),
+        ),
+        (
+            "exclusive < inclusive",
+            Value::new(Raw::Bool(true)).unwrap(),
+        ),
+    ] {
+        assert_eq!(
+            evaluate_expression(source, &environment, Limits::default()).unwrap(),
+            expected,
+            "{source}"
+        );
+    }
+    assert_eq!(
+        evaluate_expression(
+            "sort_by(rows, row => row.key)",
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
+        Value::new(Raw::Array(vec![
+            Raw::Map(vec![
+                (Raw::Text("key".into()), earlier.raw().clone()),
+                (Raw::Text("label".into()), Raw::Text("earlier".into())),
+            ]),
+            Raw::Map(vec![
+                (Raw::Text("key".into()), equal.raw().clone()),
+                (Raw::Text("label".into()), Raw::Text("first".into())),
+            ]),
+            Raw::Map(vec![
+                (Raw::Text("key".into()), equal.raw().clone()),
+                (Raw::Text("label".into()), Raw::Text("second".into())),
+            ]),
+            Raw::Map(vec![
+                (Raw::Text("key".into()), later.raw().clone()),
+                (Raw::Text("label".into()), Raw::Text("later".into())),
+            ]),
+            Raw::Map(vec![
+                (Raw::Text("key".into()), huge.raw().clone()),
+                (Raw::Text("label".into()), Raw::Text("huge".into())),
+            ]),
+        ]))
+        .unwrap()
+    );
+}
+
+#[test]
+fn canonical_duration_ranges_reject_mixed_endpoint_and_member_types() {
+    let duration = duration(0, 0);
+    let mixed_range = Value::new(Raw::Tag(
+        60019,
+        Box::new(Raw::Array(vec![
+            Raw::Tag(
+                60013,
+                Box::new(Raw::Array(vec![Raw::Int(1.into()), duration.raw().clone()])),
+            ),
+            Raw::Tag(
+                60013,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(1.into()),
+                    Raw::Tag(
+                        60002,
+                        Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Int(0.into())])),
+                    ),
+                ])),
+            ),
+            Raw::Bool(false),
+        ])),
+    ))
+    .unwrap();
+    let environment = Environment::from([
+        ("duration".into(), duration),
+        (
+            "date_range".into(),
+            date_range(Some("2024-01-01"), Some("2024-01-02"), false),
+        ),
+        ("mixed_range".into(), mixed_range),
+    ]);
+    for source in ["duration in date_range", "mixed_range"] {
+        assert_eq!(
+            code(evaluate_expression(source, &environment, Limits::default())),
+            "ORNA-EVAL-TYPE",
+            "{source}"
+        );
+    }
 }
 
 #[test]
