@@ -22,8 +22,8 @@ use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     FaultInjector, ListStreamSource, NoFault, RequestIdentity, RequestStatus,
     RunObservationRegistration, RunningTableRequestContinuation, RuntimeError, RuntimeIdentity,
-    RuntimeState, StreamHandler, StreamHandlerResult, StreamItem, StreamRunOutcome,
-    StreamTableCandidateValidator, StreamValidatedTableMutationBatch,
+    RuntimeState, StreamHandler, StreamHandlerResult, StreamItem, StreamObservationRegistration,
+    StreamRunOutcome, StreamTableCandidateValidator, StreamValidatedTableMutationBatch,
     TableActivationCandidateValidator, TableActivationError, TableMutation, TerminalOutcome,
     ValidatedTableActivationCommit, ValidatedTableRequestActivationCommit, WriterLease,
 };
@@ -1718,13 +1718,140 @@ impl DurableTransactionalEvaluator {
             Ok(value) => value,
             Err(outcome) => return Ok(*outcome),
         };
-        let mut bridge = match admit_project_list_stream(project, admitted, root_entry, identity) {
+        let bridge = match admit_project_list_stream(project, admitted, root_entry, identity) {
             Ok(bridge) => bridge,
             Err(outcome) => return Ok(*outcome),
         };
-        let state = RuntimeState::open(repository, identity, initial_digest).await?;
-        let writer = state.acquire_lease(owner_id).await?;
         let key = bridge.checkpoint_key()?;
+        let (request, fingerprint) =
+            project_stream_compat_request(identity, initial_digest, root_entry, &key);
+        self.execute_admitted_project_stream(
+            repository,
+            identity,
+            owner_id,
+            initial_digest,
+            request,
+            fingerprint,
+            bridge,
+            key,
+        )
+        .await
+    }
+
+    /// Executes an admitted finite-list project stream under a caller-owned
+    /// durable request identity and fingerprint. Matching terminal requests
+    /// replay without acquiring a writer or consuming the source again.
+    /// Callers that do not carry a protocol request use
+    /// [`Self::execute_project_stream`], whose compatibility identity is
+    /// derived from the complete stream key and pinned runtime generation.
+    pub async fn execute_project_stream_request(
+        &self,
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        owner_id: [u8; 16],
+        initial_digest: [u8; 32],
+        request: RequestIdentity,
+        fingerprint: [u8; 32],
+        project: &ProjectUnit,
+        root_entry: &str,
+    ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+        // Replay and fingerprint validation belong to the request boundary,
+        // before source admission. A caller retrying a terminal request must
+        // not need the current project source to remain admissible.
+        let state = RuntimeState::open(repository, identity, initial_digest).await?;
+        if let Some(status) = state.request_status(request, fingerprint).await? {
+            return replay_or_fence_request(status);
+        }
+        drop(state);
+        if !root_entry.contains('.') {
+            return Ok(StageOutcome::Skipped {
+                reason: "project stream roots must be namespace-qualified".into(),
+            });
+        }
+        let admitted = match admit_transaction_project(project, self.limits, root_entry) {
+            Ok(value) => value,
+            Err(outcome) => return Ok(*outcome),
+        };
+        let bridge = match admit_project_list_stream(project, admitted, root_entry, identity) {
+            Ok(bridge) => bridge,
+            Err(outcome) => return Ok(*outcome),
+        };
+        let key = bridge.checkpoint_key()?;
+        self.execute_admitted_project_stream(
+            repository,
+            identity,
+            owner_id,
+            initial_digest,
+            request,
+            fingerprint,
+            bridge,
+            key,
+        )
+        .await
+    }
+
+    async fn execute_admitted_project_stream(
+        &self,
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        owner_id: [u8; 16],
+        initial_digest: [u8; 32],
+        request: RequestIdentity,
+        fingerprint: [u8; 32],
+        mut bridge: ListStreamBridge,
+        key: CheckpointKey,
+    ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+        let state = RuntimeState::open(repository, identity, initial_digest).await?;
+        if let Some(status) = state.request_status(request, fingerprint).await? {
+            return replay_or_fence_request(status);
+        }
+        let writer = state.acquire_lease(owner_id).await?;
+        let (status, capability) = state
+            .reserve_request_with_admission(request, fingerprint)
+            .await?;
+        if status.state.is_terminal() {
+            return replay_or_fence_request(status);
+        }
+        let capability = capability.ok_or(RuntimeError::RequestStateConflict)?;
+        let registration = RunObservationRegistration {
+            request,
+            consumer_identity: key.consumer.clone(),
+            function: bridge.entry.clone(),
+            source_identity: Some(key.source.as_str().to_owned()),
+            invocation_id: request.request_id,
+        };
+        let start = state
+            .begin_observed_request_with_admission(registration, fingerprint, writer, capability)
+            .await?;
+        if !start.admitted {
+            return replay_or_fence_request(start.request);
+        }
+        let registration = state
+            .register_stream_observation_with_owner(
+                writer,
+                StreamObservationRegistration {
+                    run: start.run.ok_or(RuntimeError::RecoveryInvalid)?.id,
+                    producer: bridge.producer_entry.clone(),
+                    consumer: Some(bridge.entry.clone()),
+                    checkpoint: key.clone(),
+                },
+            )
+            .await;
+        if let Err(error) = registration {
+            // Registration is a second fenced boundary in the current
+            // runtime API. If it rejects after Run admission, close the
+            // admitted request while this owner still holds the lease. The
+            // registration error remains the externally relevant failure.
+            let _ = fail_observed_request_outcome(
+                &state,
+                request,
+                fingerprint,
+                writer,
+                StageOutcome::Failed(request_runtime_failure_diagnostic()),
+            )
+            .await;
+            return Err(error);
+        }
         let mut source = ListStreamSource::new(key.clone(), std::mem::take(&mut bridge.payloads));
         let mut handler = ListTableHandler::new(bridge, self.limits);
         match state
@@ -1737,14 +1864,70 @@ impl DurableTransactionalEvaluator {
             )
             .await
         {
-            Ok(StreamRunOutcome::Exhausted { .. }) => Ok(StageOutcome::Passed),
-            Ok(StreamRunOutcome::Failed { .. }) => {
-                Ok(StageOutcome::Failed(stream_delivery_failure_diagnostic()))
+            Ok(StreamRunOutcome::Exhausted { .. }) => {
+                terminalize_observed_outcome(
+                    &state,
+                    request,
+                    fingerprint,
+                    writer,
+                    StageOutcome::Passed,
+                )
+                .await
             }
-            Ok(_) => Ok(StageOutcome::Skipped {
-                reason: "project literal list stream did not exhaust".into(),
-            }),
-            Err(error) => Ok(StageOutcome::Failed(stream_error_diagnostic(error))),
+            Ok(StreamRunOutcome::Failed { .. }) => {
+                fail_observed_request_outcome(
+                    &state,
+                    request,
+                    fingerprint,
+                    writer,
+                    StageOutcome::Failed(stream_delivery_failure_diagnostic()),
+                )
+                .await
+            }
+            Ok(StreamRunOutcome::Cancelled { .. }) => {
+                cancel_observed_request_outcome(
+                    &state,
+                    request,
+                    fingerprint,
+                    writer,
+                    StageOutcome::Failed(stream_cancelled_diagnostic()),
+                )
+                .await
+            }
+            Ok(_) => {
+                state
+                    .fail_stream_observation_with_owner(
+                        writer,
+                        &key,
+                        unexpected_stream_boundary_safe_diagnostic(),
+                    )
+                    .await?;
+                fail_observed_request_outcome(
+                    &state,
+                    request,
+                    fingerprint,
+                    writer,
+                    StageOutcome::Failed(unexpected_stream_boundary_diagnostic()),
+                )
+                .await
+            }
+            Err(error) => {
+                state
+                    .fail_stream_observation_with_owner(
+                        writer,
+                        &key,
+                        stream_runtime_safe_diagnostic(),
+                    )
+                    .await?;
+                fail_observed_request_outcome(
+                    &state,
+                    request,
+                    fingerprint,
+                    writer,
+                    StageOutcome::Failed(stream_error_diagnostic(error)),
+                )
+                .await
+            }
         }
     }
 
@@ -1986,6 +2169,20 @@ async fn fail_observed_request_outcome(
     Ok(outcome)
 }
 
+async fn cancel_observed_request_outcome(
+    state: &RuntimeState,
+    request: RequestIdentity,
+    fingerprint: [u8; 32],
+    lease: WriterLease,
+    outcome: StageOutcome<Diagnostic>,
+) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+    let terminal = request_terminal(&outcome)?;
+    state
+        .cancel_observed_request_with_owner(request, fingerprint, lease, terminal)
+        .await?;
+    Ok(outcome)
+}
+
 async fn fail_observed_request_runtime(
     state: &RuntimeState,
     request: RequestIdentity,
@@ -2083,6 +2280,7 @@ impl DurableTransactionalEvaluator {
 struct ListStreamBridge {
     source_identity: String,
     entry: String,
+    producer_entry: String,
     consumer_principal: String,
     consumer_root: String,
     consumer_binding: String,
@@ -2262,21 +2460,21 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
         let mut budget = StepBudget::new(self.limits.max_steps);
         for assertion in &self.assertions {
             let (kind, binding, predicate) = table_assertion_predicate(&assertion.expression)
-                .map_err(|_| stream_handler_diagnostic())?;
+                .map_err(|_| table_assertion_diagnostic())?;
             let mut projections = BTreeSet::new();
             let mut candidate_rows = 0usize;
             for (_, encoded) in rows
                 .get(&self.table)
-                .ok_or_else(stream_handler_diagnostic)?
+                .ok_or_else(table_assertion_diagnostic)?
             {
-                debit_host_step(&mut budget).map_err(|_| stream_handler_diagnostic())?;
+                debit_host_step(&mut budget).map_err(|_| table_assertion_diagnostic())?;
                 candidate_rows = candidate_rows
                     .checked_add(1)
-                    .ok_or_else(stream_handler_diagnostic)?;
+                    .ok_or_else(table_assertion_diagnostic)?;
                 self.limits
                     .check_items(candidate_rows)
-                    .map_err(|_| stream_handler_diagnostic())?;
-                let row = Value::decode(encoded).map_err(|_| stream_handler_diagnostic())?;
+                    .map_err(|_| table_assertion_diagnostic())?;
+                let row = Value::decode(encoded).map_err(|_| table_assertion_diagnostic())?;
                 let environment = Environment::from([(binding.to_owned(), row)]);
                 let value = evaluate_with_functions_and_budget(
                     predicate,
@@ -2285,14 +2483,15 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
                     self.limits,
                     &mut budget,
                 )
-                .map_err(|_| stream_handler_diagnostic())?;
+                .map_err(|_| table_assertion_diagnostic())?;
                 match kind {
                     TableAssertionKind::Every if matches!(value.raw(), OvbRaw::Bool(true)) => {}
-                    TableAssertionKind::Every => return Err(stream_handler_diagnostic()),
+                    TableAssertionKind::Every => return Err(table_assertion_diagnostic()),
                     TableAssertionKind::AllUnique => {
-                        let projection = value.encode().map_err(|_| stream_handler_diagnostic())?;
+                        let projection =
+                            value.encode().map_err(|_| table_assertion_diagnostic())?;
                         if !projections.insert(projection) {
-                            return Err(stream_handler_diagnostic());
+                            return Err(table_assertion_diagnostic());
                         }
                     }
                 }
@@ -2307,9 +2506,9 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
                 self.limits,
                 &mut budget,
             )
-            .map_err(|_| stream_handler_diagnostic())?;
+            .map_err(|_| table_assertion_diagnostic())?;
             if !matches!(value.raw(), OvbRaw::Bool(true)) {
-                return Err(stream_handler_diagnostic());
+                return Err(table_assertion_diagnostic());
             }
         }
         Ok(())
@@ -2414,6 +2613,41 @@ fn stream_delivery_failure_diagnostic() -> Diagnostic {
     .redacted()
 }
 
+fn stream_cancelled_diagnostic() -> Diagnostic {
+    Diagnostic::new(
+        SafeText::new("ORNA-LIST-STREAM-CANCELLED").expect("static code"),
+        DiagnosticSeverity::Error,
+        SafeText::new("literal list stream delivery was cancelled").expect("static message"),
+    )
+    .expect("valid diagnostic")
+    .redacted()
+}
+
+fn unexpected_stream_boundary_diagnostic() -> Diagnostic {
+    Diagnostic::new(
+        SafeText::new("ORNA-LIST-STREAM-BOUNDARY").expect("static code"),
+        DiagnosticSeverity::Error,
+        SafeText::new("literal list stream ended at an unexpected runner boundary")
+            .expect("static message"),
+    )
+    .expect("valid diagnostic")
+    .redacted()
+}
+
+fn unexpected_stream_boundary_safe_diagnostic() -> SafeDiagnostic {
+    SafeDiagnostic {
+        code: DiagnosticCode::ExecutionRejected,
+        class: DiagnosticClass::Permanent,
+    }
+}
+
+fn stream_runtime_safe_diagnostic() -> SafeDiagnostic {
+    SafeDiagnostic {
+        code: DiagnosticCode::Internal,
+        class: DiagnosticClass::Transient,
+    }
+}
+
 fn admit_list_stream_source(
     unit: &SourceUnit,
     limits: EvaluatorLimits,
@@ -2488,6 +2722,7 @@ fn admit_list_stream_source(
     Ok(ListStreamBridge {
         source_identity: list_source_identity(&source_identity, &payloads),
         entry: entry.into(),
+        producer_entry: entry.into(),
         consumer_principal: "conformance".into(),
         consumer_root: unit.source_id.clone(),
         consumer_binding: "from_list".into(),
@@ -2626,6 +2861,7 @@ fn admit_project_list_stream(
     Ok(ListStreamBridge {
         source_identity: list_source_identity(&source_identity, &payloads),
         entry: root_entry.into(),
+        producer_entry,
         consumer_principal: format!("database:{database}"),
         consumer_root: "public-function".into(),
         consumer_binding: "arguments:[]".into(),
@@ -2766,6 +3002,73 @@ fn list_source_identity(name: &str, payloads: &[Vec<u8>]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("{name}:{suffix}")
+}
+
+fn project_stream_compat_request(
+    identity: RuntimeIdentity,
+    initial_digest: [u8; 32],
+    root_entry: &str,
+    key: &CheckpointKey,
+) -> (RequestIdentity, [u8; 32]) {
+    fn update_text(digest: &mut Sha256, value: &str) {
+        digest.update(
+            u64::try_from(value.len())
+                .expect("compatibility identity text length fits u64")
+                .to_be_bytes(),
+        );
+        digest.update(value.as_bytes());
+    }
+
+    fn update_material(
+        digest: &mut Sha256,
+        identity: RuntimeIdentity,
+        initial_digest: [u8; 32],
+        root_entry: &str,
+        key: &CheckpointKey,
+    ) {
+        digest.update(identity.database_id);
+        digest.update(identity.repository_id);
+        digest.update(initial_digest);
+        update_text(digest, root_entry);
+        update_text(digest, key.consumer.canonical().as_str());
+        update_text(digest, key.source_format.as_str());
+        update_text(digest, key.source.as_str());
+        update_text(digest, key.partition_format.as_str());
+        if let Some(partition) = &key.partition {
+            digest.update([1]);
+            update_text(digest, partition.as_str());
+        } else {
+            digest.update([0]);
+        }
+        update_text(digest, key.position_format.as_str());
+    }
+
+    let mut request_digest = Sha256::new();
+    request_digest.update(b"orna-conformance/project-stream-request/v1\0");
+    update_material(
+        &mut request_digest,
+        identity,
+        initial_digest,
+        root_entry,
+        key,
+    );
+    let request_bytes: [u8; 32] = request_digest.finalize().into();
+    let mut request_id = [0; 16];
+    request_id.copy_from_slice(&request_bytes[..16]);
+    if request_id == [0; 16] {
+        request_id[0] = 1;
+    }
+
+    let mut fingerprint = Sha256::new();
+    fingerprint.update(b"orna-conformance/project-stream-fingerprint/v1\0");
+    update_material(&mut fingerprint, identity, initial_digest, root_entry, key);
+    (
+        RequestIdentity {
+            session_id: identity.database_id,
+            request_id,
+        },
+        fingerprint.finalize().into(),
+    )
 }
 
 fn literal_stream_pipeline(body: &Expr) -> Option<(&[Expr], String, String, String, &Expr)> {
