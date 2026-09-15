@@ -5402,6 +5402,12 @@ fn infer(
             {
                 return infer_fail_call(arguments, scope, local, diagnostics);
             }
+            if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "error")
+                && !local.contains_key("error")
+                && !scope.names.contains_key("error")
+            {
+                return infer_error_call(arguments, scope, local, diagnostics);
+            }
             if qualified_path(callee)
                 .as_deref()
                 .is_some_and(|path| path == ["work", "Contact", "insert"])
@@ -9595,6 +9601,54 @@ fn infer_fail_call(
     Inferred {
         ty: if valid_shape && valid_type {
             Type::Bottom
+        } else {
+            Type::Error
+        },
+        effects,
+    }
+}
+
+fn infer_error_call(
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let mut effects = EffectSummary::default();
+    let values = arguments
+        .iter()
+        .map(|argument| {
+            let value = infer(&argument.value, scope, local, diagnostics);
+            effects.join(&value.effects);
+            value.ty
+        })
+        .collect::<Vec<_>>();
+
+    if arguments.iter().any(|argument| argument.name.is_none()) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "error requires named code, message, and optional cause arguments",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+
+    let before = diagnostics.len();
+    check_call_arguments(
+        &[Type::Text, Type::Text, error_value_type()],
+        Some(&["code".into(), "message".into(), "cause".into()]),
+        &BTreeSet::from([2]),
+        arguments,
+        &values,
+        None,
+        diagnostics,
+    );
+
+    Inferred {
+        ty: if diagnostics.len() == before {
+            error_value_type()
         } else {
             Type::Error
         },
