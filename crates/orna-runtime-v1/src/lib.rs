@@ -3986,6 +3986,14 @@ impl RuntimeState {
             (lease, failure_payload)
         };
 
+        // DELIVERY-1 admits each item as one activation. Capture that
+        // activation's CWD generation before user code runs, then use the
+        // same fence for either delivery commit path. A concurrent activation
+        // that advances the generation while the handler executes must make
+        // this delivery fail closed rather than rebasing its writes or
+        // checkpoint movement onto the newer CWD.
+        let capture = self.capture().await.map_err(StreamStepError::Runtime)?;
+
         let (handler_result, handler_panicked) =
             match catch_unwind(AssertUnwindSafe(|| handler.handle(&item))) {
                 Ok(result) => (result, false),
@@ -4014,10 +4022,9 @@ impl RuntimeState {
 
         match handler_result {
             StreamHandlerResult::Commit(batch) => {
-                let capture = self.capture().await.map_err(StreamStepError::Runtime)?;
                 let faults = NoFault;
                 let lease_for_cleanup = lease.clone();
-                let result = self
+                let result = match self
                     .commit_stream_delivery(StreamDeliveryCommit {
                         writer,
                         expected_capture: &capture,
@@ -4028,8 +4035,14 @@ impl RuntimeState {
                         faults: &faults,
                     })
                     .await
-                    .map_err(StreamStepError::Runtime)?
-                    .1;
+                {
+                    Ok((_, result)) => result,
+                    Err(error @ RuntimeError::StaleCapture { .. }) => {
+                        self.release_stream_lease(writer, lease_for_cleanup).await?;
+                        return Err(StreamStepError::Runtime(error));
+                    }
+                    Err(error) => return Err(StreamStepError::Runtime(error)),
+                };
                 match result {
                     CommitResult::CheckpointAdvanced { checkpoint } => {
                         Ok(StreamStep::Committed { checkpoint })
@@ -4067,7 +4080,6 @@ impl RuntimeState {
                 }
             }
             StreamHandlerResult::CommitValidatedTable(mut batch) => {
-                let capture = self.capture().await.map_err(StreamStepError::Runtime)?;
                 let faults = NoFault;
                 let lease_for_cleanup = lease.clone();
                 let result = self
@@ -4091,6 +4103,12 @@ impl RuntimeState {
                         Ok(StreamStep::Rejected(reason))
                     }
                     Ok(_) => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                    Err(StreamTableDeliveryError::Runtime(
+                        error @ RuntimeError::StaleCapture { .. },
+                    )) => {
+                        self.release_stream_lease(writer, lease_for_cleanup).await?;
+                        Err(StreamStepError::Runtime(error))
+                    }
                     Err(StreamTableDeliveryError::ValidationFailed(diagnostic)) => {
                         if is_cancellation_diagnostic(diagnostic) {
                             let result = self
@@ -13620,6 +13638,134 @@ mod tests {
                 next_digest: digest(3),
             })
         }
+    }
+
+    /// Advances the shared CWD generation while a delivery handler is open.
+    /// The separate local runtime connection makes the admission/handler race
+    /// deterministic without exposing a production-only test hook.
+    struct CaptureAdvancingCommitHandler {
+        worktree: PathBuf,
+        calls: usize,
+    }
+
+    impl StreamHandler for CaptureAdvancingCommitHandler {
+        fn handle(&mut self, _: &StreamItem) -> StreamHandlerResult {
+            self.calls += 1;
+            let worktree = self.worktree.clone();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("worker runtime");
+                runtime.block_on(async move {
+                    let repository = Repository::discover(worktree).expect("worker repository");
+                    let state = open_state(&repository).await;
+                    let writer = state.acquire_lease(id(4)).await.expect("worker writer");
+                    let capture = state.capture().await.expect("worker capture");
+                    state
+                        .commit(writer, &capture, &mutation(77), digest(78), &NoFault)
+                        .await
+                        .expect("worker commit");
+                });
+            })
+            .join()
+            .expect("generation-advancing worker must not panic");
+            StreamHandlerResult::Commit(StreamMutationBatch {
+                mutations: vec![mutation(79)],
+                next_digest: digest(80),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_admission_capture_fences_generation_advanced_by_handler() {
+        let (_temp, repo) = repository();
+        let worktree = repo.worktree().to_path_buf();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("admission-capture", "admission-capture-next");
+        let key = delivery.checkpoint_key();
+        let mut source = TestSource {
+            key: key.clone(),
+            item: Some(StreamItem {
+                delivery: delivery.clone(),
+                payload: vec![1],
+            }),
+            polls: 0,
+        };
+        let mut handler = CaptureAdvancingCommitHandler { worktree, calls: 0 };
+
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await,
+            Err(StreamStepError::Runtime(RuntimeError::StaleCapture { .. }))
+        ));
+        assert_eq!(handler.calls, 1);
+        assert_eq!(source.polls, 1);
+        let current_capture = state.capture().await.unwrap();
+        assert_eq!(current_capture.generation(), &BigInt::from(1));
+        assert_eq!(current_capture.generation_digest(), digest(78));
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&key)
+                .await
+                .unwrap(),
+            StreamCheckpoint {
+                key: key.clone(),
+                version: 0,
+                committed: None,
+            }
+        );
+        let mut rows = state
+            .connection
+            .query(
+                "SELECT mutation_id FROM pending_mutation ORDER BY sequence",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<Vec<u8>>(0).unwrap(), id(77));
+        assert!(rows.next().await.unwrap().is_none());
+
+        let mut retry_source = TestSource {
+            key: key.clone(),
+            item: Some(StreamItem {
+                delivery,
+                payload: vec![1],
+            }),
+            polls: 0,
+        };
+        let mut retry_handler = TestHandler {
+            result: Some(StreamHandlerResult::Commit(StreamMutationBatch {
+                mutations: Vec::new(),
+                next_digest: digest(78),
+            })),
+            calls: 0,
+        };
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut retry_source, &mut retry_handler)
+                .await,
+            Ok(StreamStep::Committed { .. })
+        ));
+        assert_eq!(retry_handler.calls, 1);
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&key)
+                .await
+                .unwrap(),
+            StreamCheckpoint {
+                key,
+                version: 1,
+                committed: Some(Position {
+                    token: Component::new("admission-capture-next").unwrap(),
+                }),
+            }
+        );
     }
 
     struct PanickingHandler {
