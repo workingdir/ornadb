@@ -1140,9 +1140,33 @@ async fn run_host_actor(
                 worker_id,
                 reply,
             } => {
-                if state.delivering_upgrades.get(&worker_id) != Some(&upgrade)
-                    || !registry.borrow().may_commit(worker_id)
-                {
+                if state.delivering_upgrades.get(&worker_id) != Some(&upgrade) {
+                    let _ = reply.send(Err(()));
+                    continue;
+                }
+                // The delivery barrier keeps a post-flush reservation from
+                // being replaced, expired, or deleted. A deadline/owner
+                // cancellation can still revoke the worker's commit right
+                // while its Commit command is queued. Consume that exact
+                // barrier through the ordinary abort-and-retirement path
+                // before reporting failure; merely rejecting the command
+                // would leave the candidate pending until a later worker-exit
+                // turn.
+                if !registry.borrow().may_commit(worker_id) {
+                    state.delivering_upgrades.remove(&worker_id);
+                    let _ = state.transport.finish_websocket_upgrade_delivery(&upgrade);
+                    state.transport.abort_websocket_upgrade(&upgrade);
+                    let Ok(retirement) = capture_retirement_gates(
+                        &registry,
+                        state.transport.take_retired_attachments(),
+                    ) else {
+                        let _ = reply.send(Err(()));
+                        return;
+                    };
+                    if retirement_gates.unbounded_send(retirement).is_err() {
+                        let _ = reply.send(Err(()));
+                        return;
+                    }
                     let _ = reply.send(Err(()));
                     continue;
                 }
@@ -3254,6 +3278,12 @@ mod tests {
             "DELETE /orna/session/15151515-1515-1515-1515-151515151515 HTTP/1.1\r\nHost: app.example\r\nOrigin: {}\r\nAuthorization: Bearer {token_text}\r\n\r\n",
             "https://app.example"
         );
+        let resume_body =
+            format!(r#"{{"resume_token":"{token_text}","protocol":"orna.present.v1"}}"#);
+        let resume_request = format!(
+            "POST /orna/session/15151515-1515-1515-1515-151515151515/resume HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{resume_body}",
+            resume_body.len(),
+        );
         super::shutdown_tests::run_local(async move {
             let registry = Rc::new(RefCell::new(super::WorkerRegistry::default()));
             let (worker_id, cancellation) = registry.borrow_mut().register();
@@ -3284,8 +3314,10 @@ mod tests {
                 retirement_gate_sender,
             ));
             let worker_actor = actor_sender.clone();
+            let (allow_exit_sender, allow_exit) = futures::channel::oneshot::channel();
             let task = workers.spawn_local(async move {
                 cancellation.await.unwrap();
+                allow_exit.await.unwrap();
                 super::actor_worker_exited(&worker_actor, worker_id).await;
                 worker_id
             });
@@ -3309,6 +3341,35 @@ mod tests {
                 .await
                 .unwrap();
 
+            let encoded = upgrade
+                .response()
+                .encode_http(TransportLimits::default())
+                .unwrap();
+            let mut writer = futures::io::Cursor::new(Vec::new());
+            let mut delivery_cancellation = futures::future::pending();
+            assert_eq!(
+                super::deliver_websocket_upgrade_response(
+                    &mut writer,
+                    &encoded,
+                    &mut delivery_cancellation,
+                )
+                .await,
+                Ok(())
+            );
+            assert_eq!(writer.into_inner(), encoded);
+
+            let mut cancellation = futures::future::pending();
+            let (_, responses, retirement) = super::actor_http(
+                &actor_sender,
+                HttpConnection::new(TransportLimits::default()),
+                resume_request.as_bytes(),
+                &mut cancellation,
+            )
+            .await
+            .unwrap();
+            assert_eq!(responses, vec![unavailable.clone()]);
+            assert!(retirement.is_empty());
+
             let mut cancellation = futures::future::pending();
             let (_, responses, retirement) = super::actor_http(
                 &actor_sender,
@@ -3321,7 +3382,12 @@ mod tests {
             assert_eq!(responses, vec![unavailable.clone()]);
             assert!(retirement.is_empty());
 
-            super::actor_abort(&actor_sender, upgrade, worker_id).await;
+            registry.borrow_mut().cancel(worker_id);
+            assert!(
+                super::actor_commit(&actor_sender, upgrade, worker_id)
+                    .await
+                    .is_err()
+            );
             let retirement = loop {
                 let retirement = retirement_gate_receiver
                     .next()
@@ -3334,6 +3400,7 @@ mod tests {
             };
             assert_eq!(retirement.len(), 1);
             assert_eq!(retirement[0].attachment, attachment);
+            allow_exit_sender.send(()).unwrap();
             let joined = workers
                 .join_next_with_id()
                 .await
