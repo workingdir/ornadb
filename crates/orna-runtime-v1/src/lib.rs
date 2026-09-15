@@ -4038,7 +4038,7 @@ impl RuntimeState {
                 {
                     Ok((_, result)) => result,
                     Err(error @ RuntimeError::StaleCapture { .. }) => {
-                        self.release_stream_lease(writer, lease_for_cleanup).await?;
+                        let _ = self.release_stream_lease(writer, lease_for_cleanup).await;
                         return Err(StreamStepError::Runtime(error));
                     }
                     Err(error) => return Err(StreamStepError::Runtime(error)),
@@ -4106,7 +4106,7 @@ impl RuntimeState {
                     Err(StreamTableDeliveryError::Runtime(
                         error @ RuntimeError::StaleCapture { .. },
                     )) => {
-                        self.release_stream_lease(writer, lease_for_cleanup).await?;
+                        let _ = self.release_stream_lease(writer, lease_for_cleanup).await;
                         Err(StreamStepError::Runtime(error))
                     }
                     Err(StreamTableDeliveryError::ValidationFailed(diagnostic)) => {
@@ -13643,6 +13643,23 @@ mod tests {
     /// Advances the shared CWD generation while a delivery handler is open.
     /// The separate local runtime connection makes the admission/handler race
     /// deterministic without exposing a production-only test hook.
+    fn advance_generation(worktree: PathBuf) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("worker runtime");
+        runtime.block_on(async move {
+            let repository = Repository::discover(worktree).expect("worker repository");
+            let state = open_state(&repository).await;
+            let writer = state.acquire_lease(id(4)).await.expect("worker writer");
+            let capture = state.capture().await.expect("worker capture");
+            state
+                .commit(writer, &capture, &mutation(77), digest(78), &NoFault)
+                .await
+                .expect("worker commit");
+        });
+    }
+
     struct CaptureAdvancingCommitHandler {
         worktree: PathBuf,
         calls: usize,
@@ -13652,27 +13669,35 @@ mod tests {
         fn handle(&mut self, _: &StreamItem) -> StreamHandlerResult {
             self.calls += 1;
             let worktree = self.worktree.clone();
-            std::thread::spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("worker runtime");
-                runtime.block_on(async move {
-                    let repository = Repository::discover(worktree).expect("worker repository");
-                    let state = open_state(&repository).await;
-                    let writer = state.acquire_lease(id(4)).await.expect("worker writer");
-                    let capture = state.capture().await.expect("worker capture");
-                    state
-                        .commit(writer, &capture, &mutation(77), digest(78), &NoFault)
-                        .await
-                        .expect("worker commit");
-                });
-            })
-            .join()
-            .expect("generation-advancing worker must not panic");
+            std::thread::spawn(move || advance_generation(worktree))
+                .join()
+                .expect("generation-advancing worker must not panic");
             StreamHandlerResult::Commit(StreamMutationBatch {
                 mutations: vec![mutation(79)],
                 next_digest: digest(80),
+            })
+        }
+    }
+
+    struct CaptureAdvancingValidatedTableHandler {
+        worktree: PathBuf,
+        calls: usize,
+    }
+
+    impl StreamHandler for CaptureAdvancingValidatedTableHandler {
+        fn handle(&mut self, _: &StreamItem) -> StreamHandlerResult {
+            self.calls += 1;
+            let worktree = self.worktree.clone();
+            std::thread::spawn(move || advance_generation(worktree))
+                .join()
+                .expect("generation-advancing worker must not panic");
+            StreamHandlerResult::CommitValidatedTable(StreamValidatedTableMutationBatch {
+                mutations: vec![table_mutation(79, 1, Some(9))],
+                next_digest: digest(80),
+                validator: Box::new(TablesOnlyValidator {
+                    tables: vec!["books".into()],
+                    calls: 0,
+                }),
             })
         }
     }
@@ -13763,6 +13788,84 @@ mod tests {
                 version: 1,
                 committed: Some(Position {
                     token: Component::new("admission-capture-next").unwrap(),
+                }),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_admission_capture_fences_validated_table_generation() {
+        let (_temp, repo) = repository();
+        let worktree = repo.worktree().to_path_buf();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("validated-admission-capture", "validated-next");
+        let key = delivery.checkpoint_key();
+        let mut source = TestSource {
+            key: key.clone(),
+            item: Some(StreamItem {
+                delivery: delivery.clone(),
+                payload: vec![1],
+            }),
+            polls: 0,
+        };
+        let mut handler = CaptureAdvancingValidatedTableHandler { worktree, calls: 0 };
+
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await,
+            Err(StreamStepError::Runtime(RuntimeError::StaleCapture { .. }))
+        ));
+        assert_eq!(handler.calls, 1);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&key)
+                .await
+                .unwrap(),
+            StreamCheckpoint {
+                key: key.clone(),
+                version: 0,
+                committed: None,
+            }
+        );
+
+        let mut retry_source = TestSource {
+            key: key.clone(),
+            item: Some(StreamItem {
+                delivery,
+                payload: vec![1],
+            }),
+            polls: 0,
+        };
+        let mut retry_handler = TableCommitHandler { calls: 0 };
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut retry_source, &mut retry_handler)
+                .await,
+            Ok(StreamStep::Committed { .. })
+        ));
+        assert_eq!(retry_handler.calls, 1);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&key)
+                .await
+                .unwrap(),
+            StreamCheckpoint {
+                key,
+                version: 1,
+                committed: Some(Position {
+                    token: Component::new("validated-next").unwrap(),
                 }),
             }
         );
