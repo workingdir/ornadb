@@ -28,10 +28,10 @@ pub(super) fn sealed_rows_preservation_is_supported(
             .catalogue_hash_context()
             .standard()
             .is_some_and(|standard| {
-                let revision = standard.revision();
-                revision == STANDARD_LIBRARY_V8_REVISION_ID
-                    || revision == STANDARD_LIBRARY_V9_REVISION_ID
-                    || revision == STANDARD_LIBRARY_V9_REVISION_ID
+                matches!(
+                    standard.revision(),
+                    STANDARD_LIBRARY_V8_REVISION_ID | STANDARD_LIBRARY_V9_REVISION_ID
+                )
             })
 }
 
