@@ -360,7 +360,7 @@ CREATE TABLE IF NOT EXISTS runtime_catalogue_parameter (
 CREATE TABLE IF NOT EXISTS sys_stream_observation (
     stream_id BLOB PRIMARY KEY CHECK (length(stream_id) = 16),
     run_id BLOB NOT NULL REFERENCES sys_run_observation(run_id),
-    checkpoint_key_id TEXT NOT NULL UNIQUE CHECK (length(checkpoint_key_id) > 0),
+    checkpoint_key_id TEXT NOT NULL CHECK (length(checkpoint_key_id) > 0),
     producer TEXT NOT NULL CHECK (length(producer) > 0),
     consumer_name TEXT,
     consumer_identity TEXT NOT NULL CHECK (length(consumer_identity) > 0),
@@ -2036,6 +2036,7 @@ impl RuntimeState {
         state.migrate_stream_failure_payloads().await?;
         state.migrate_stream_failure_assertion_details().await?;
         state.migrate_nullable_stream_partitions().await?;
+        state.migrate_stream_observation_checkpoint_reuse().await?;
         state.migrate_catalogue_identity_schema().await?;
         state.validate_recovery().await?;
         Ok(state)
@@ -2344,9 +2345,9 @@ impl RuntimeState {
         })
     }
 
-    /// Registers exactly one durable `sys.Stream` observation for a runtime
-    /// checkpoint key. The unique checkpoint binding prevents a stream row
-    /// from being paired with a different consumer/source/partition later.
+    /// Registers exactly one durable `sys.Stream` observation for this run.
+    /// A terminal predecessor may retain the same durable checkpoint, but a
+    /// live predecessor remains an identity conflict.
     pub async fn register_stream_observation(
         &self,
         registration: StreamObservationRegistration,
@@ -2372,12 +2373,15 @@ impl RuntimeState {
         let key_id = stream_key_id(&registration.checkpoint);
         let mut existing = tx
             .query(
-                "SELECT run_id FROM sys_stream_observation WHERE checkpoint_key_id = ?1",
+                "SELECT observation.run_id, run.status, run.ended_ms
+                 FROM sys_stream_observation AS observation
+                 JOIN sys_run_observation AS run ON run.run_id = observation.run_id
+                 WHERE observation.checkpoint_key_id = ?1",
                 params![key_id.clone()],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if let Some(row) = existing
+        while let Some(row) = existing
             .next()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?
@@ -2385,11 +2389,17 @@ impl RuntimeState {
             let existing_run = RunObservationId(fixed(
                 row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?);
-            return if existing_run == registration.run {
-                Err(RuntimeError::RequestStateConflict)
-            } else {
-                Err(RuntimeError::StreamIdentityMismatch)
-            };
+            let status = decode_run_status(
+                row.get::<i64>(1)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
+            let ended_ms: Option<i64> = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if existing_run == registration.run {
+                return Err(RuntimeError::RequestStateConflict);
+            }
+            if !status.is_terminal() || ended_ms.is_none() {
+                return Err(RuntimeError::StreamIdentityMismatch);
+            }
         }
         let partition = registration
             .checkpoint
@@ -4499,6 +4509,73 @@ impl RuntimeState {
                 "INSERT OR IGNORE INTO runtime_schema_migration (migration)
                  VALUES ('observation-projection-v1')",
                 (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Separates retained per-run stream observations from durable checkpoint
+    /// identity. Older databases made `checkpoint_key_id` globally unique,
+    /// preventing a completed run from being observed after restart.
+    async fn migrate_stream_observation_checkpoint_reuse(&self) -> Result<(), RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let applied = transaction
+            .execute(
+                "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                 VALUES ('stream-observation-checkpoint-reuse-v1')",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if applied == 0 {
+            return transaction
+                .commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable);
+        }
+        transaction
+            .execute_batch(
+                "CREATE TABLE sys_stream_observation_reusable_checkpoint (
+                    stream_id BLOB PRIMARY KEY CHECK (length(stream_id) = 16),
+                    run_id BLOB NOT NULL REFERENCES sys_run_observation(run_id),
+                    checkpoint_key_id TEXT NOT NULL CHECK (length(checkpoint_key_id) > 0),
+                    producer TEXT NOT NULL CHECK (length(producer) > 0),
+                    consumer_name TEXT,
+                    consumer_identity TEXT NOT NULL CHECK (length(consumer_identity) > 0),
+                    source_identity TEXT NOT NULL CHECK (length(source_identity) > 0),
+                    partition TEXT CHECK (partition IS NULL OR length(partition) > 0),
+                    status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 8),
+                    items_seen INTEGER NOT NULL DEFAULT 0 CHECK (items_seen >= 0),
+                    items_committed INTEGER NOT NULL DEFAULT 0 CHECK (items_committed >= 0),
+                    items_failed INTEGER NOT NULL DEFAULT 0 CHECK (items_failed >= 0),
+                    checkpoint_version INTEGER,
+                    last_failure_identity TEXT,
+                    last_item_ms INTEGER,
+                    diagnostic_code INTEGER,
+                    diagnostic_class INTEGER,
+                    observed_ms INTEGER NOT NULL,
+                    UNIQUE(run_id, source_identity, partition),
+                    CHECK ((diagnostic_code IS NULL) = (diagnostic_class IS NULL))
+                );
+                INSERT INTO sys_stream_observation_reusable_checkpoint
+                    SELECT * FROM sys_stream_observation;
+                DROP TABLE sys_stream_observation;
+                ALTER TABLE sys_stream_observation_reusable_checkpoint
+                    RENAME TO sys_stream_observation;
+                CREATE UNIQUE INDEX sys_stream_observation_null_natural_key
+                    ON sys_stream_observation (run_id, source_identity)
+                    WHERE partition IS NULL;
+                CREATE UNIQUE INDEX sys_stream_observation_present_natural_key
+                    ON sys_stream_observation (run_id, source_identity, partition)
+                    WHERE partition IS NOT NULL;",
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -8865,8 +8942,18 @@ async fn sync_stream_observation_tx(
         connection
             .execute(
                 "UPDATE sys_run_observation SET checkpoint_count = checkpoint_count + 1
-                 WHERE run_id = (SELECT run_id FROM sys_stream_observation WHERE checkpoint_key_id = ?1)",
-                params![stream_key_id(&key)],
+                 WHERE run_id IN (
+                     SELECT observation.run_id
+                     FROM sys_stream_observation AS observation
+                     JOIN sys_run_observation AS run ON run.run_id = observation.run_id
+                     WHERE observation.checkpoint_key_id = ?1
+                       AND run.status IN (?2, ?3) AND run.ended_ms IS NULL
+                 )",
+                params![
+                    stream_key_id(&key),
+                    run_status_code(RunObservationStatus::Starting),
+                    run_status_code(RunObservationStatus::Running),
+                ],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
