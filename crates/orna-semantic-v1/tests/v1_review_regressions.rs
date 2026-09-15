@@ -529,6 +529,113 @@ fn table_display_and_present_writes_require_type_diagnostics() {
 }
 
 #[test]
+fn presentation_direct_return_terminates_write_scan() {
+    for (protocol, member) in [("Display", "display"), ("Present", "present")] {
+        let accepted = format!(
+            r#"
+                pub protocol {protocol} {{
+                    fn {member}(self): Str;
+                }}
+                pub table Audit {{ message: Str, }}
+                pub table Note(id: Int) {{
+                    value: Str,
+                    impl {protocol} {{
+                        fn {member}(self): Str {{
+                            return self.value;
+                            Audit.insert({{ message: "unreachable" }});
+                        }}
+                    }}
+                }}
+            "#,
+        );
+        expect_accepted(&analyze_main(&accepted));
+
+        let rejected = format!(
+            r#"
+                pub protocol {protocol} {{
+                    fn {member}(self): Str;
+                }}
+                pub table Audit {{ message: Str, }}
+                pub table Note(id: Int) {{
+                    value: Str,
+                    impl {protocol} {{
+                        fn {member}(self): Str {{
+                            Audit.insert({{ message: "before return" }});
+                            return self.value;
+                        }}
+                    }}
+                }}
+            "#,
+        );
+        expect_diagnostics(&analyze_main(&rejected), &[DIAG_TYPE]);
+    }
+}
+
+#[test]
+fn presentation_nested_control_return_does_not_terminate_write_scan() {
+    let result = analyze_main(
+        r#"
+            pub protocol Display {
+                fn display(self): Str;
+            }
+            pub table Audit { message: Str, }
+            pub table Note(id: Int) {
+                value: Str,
+                impl Display {
+                    fn display(self): Str {
+                        if true {
+                            return self.value;
+                            Audit.insert({ message: "after nested return" });
+                        }
+                        self.value
+                    }
+                }
+            }
+        "#,
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "nested control-flow write must retain the type diagnostic: {:#?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn presentation_lambda_block_return_does_not_terminate_write_scan() {
+    let result = analyze_main(
+        r#"
+            pub protocol Display {
+                fn display(self): Str;
+            }
+            pub table Audit { message: Str, }
+            pub table Note(id: Int) {
+                value: Str,
+                impl Display {
+                    fn display(self): Str {
+                        let render = () => {
+                            return self.value;
+                            Audit.insert({ message: "after lambda return" });
+                        };
+                        render()
+                    }
+                }
+            }
+        "#,
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "nested lambda write must retain the type diagnostic: {:#?}",
+        result.diagnostics
+    );
+}
+
+#[test]
 fn presentation_effect_summaries_propagate_through_helpers() {
     let indirect_write = analyze_main(
         r#"

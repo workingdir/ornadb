@@ -3705,7 +3705,7 @@ fn implementation_has_write(
                     _ => None,
                 })
                 .collect();
-            expr_has_write(body, scope, &local)
+            expr_has_write_in_implementation_body(body, scope, &local)
         }
         orna_syntax_v1::ImplMember::Static { value: body, .. } => {
             expr_has_write(body, scope, &BTreeMap::new())
@@ -3764,6 +3764,23 @@ fn call_may_write(callee: &Expr, scope: &Scope, local: &BTreeMap<String, Symbol>
 }
 
 fn expr_has_write(expr: &Expr, scope: &Scope, local: &BTreeMap<String, Symbol>) -> bool {
+    expr_has_write_with_return_termination(expr, scope, local, false)
+}
+
+fn expr_has_write_in_implementation_body(
+    expr: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> bool {
+    expr_has_write_with_return_termination(expr, scope, local, true)
+}
+
+fn expr_has_write_with_return_termination(
+    expr: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    terminate_after_direct_return: bool,
+) -> bool {
     match expr {
         Expr::Call {
             callee, arguments, ..
@@ -3805,12 +3822,16 @@ fn expr_has_write(expr: &Expr, scope: &Scope, local: &BTreeMap<String, Symbol>) 
         Expr::Block {
             statements, tail, ..
         } => {
-            statements
-                .iter()
-                .any(|statement| statement_has_write(statement, scope, local))
-                || tail
-                    .as_deref()
-                    .is_some_and(|tail| expr_has_write(tail, scope, local))
+            for statement in statements {
+                if statement_has_write(statement, scope, local) {
+                    return true;
+                }
+                if terminate_after_direct_return && matches!(statement, Statement::Return { .. }) {
+                    return false;
+                }
+            }
+            tail.as_deref()
+                .is_some_and(|tail| expr_has_write(tail, scope, local))
         }
         Expr::Control {
             condition,
