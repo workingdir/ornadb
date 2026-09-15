@@ -752,6 +752,63 @@ fn sealed_standard_active_revision(
     )
     .expect("sealed standard active revision")
 }
+
+#[test]
+fn sealed_rows_preservation_is_closed_to_accepted_v8_and_v9_standards() {
+    let pair = RevisionPair::new(
+        SourceRevisionId::from_bytes([0xdb; 16]),
+        CatalogueRevisionId::from_bytes([0xdc; 16]),
+    );
+    let rows = FunctionReturn::Rows(Vec::new());
+    let v7 = sealed_standard_active_revision(
+        pair,
+        orna_standard::verify_standard_library_v7_snapshot(
+            orna_standard::retained_standard_library_v7_snapshot().expect("retained V7 standard"),
+        )
+        .expect("verified V7 standard"),
+    );
+    let v8 = sealed_standard_active_revision(
+        pair,
+        orna_standard::verify_standard_library_v8_snapshot(
+            orna_standard::retained_standard_library_v8_snapshot().expect("retained V8 standard"),
+        )
+        .expect("verified V8 standard"),
+    );
+    let v9 = sealed_standard_active_revision(
+        pair,
+        orna_standard::verify_standard_library_v9_snapshot(
+            orna_standard::retained_standard_library_v9_snapshot().expect("retained V9 standard"),
+        )
+        .expect("verified V9 standard"),
+    );
+    let v10 = sealed_standard_active_revision(
+        pair,
+        orna_standard::verify_standard_library_v10_snapshot(
+            orna_standard::retained_standard_library_v10_snapshot().expect("retained V10 standard"),
+        )
+        .expect("verified V10 standard"),
+    );
+    let v11 = sealed_standard_active_revision(
+        pair,
+        orna_standard::verify_standard_library_v11_snapshot(
+            orna_standard::retained_standard_library_v11_snapshot().expect("retained V11 standard"),
+        )
+        .expect("verified V11 standard"),
+    );
+
+    assert!(
+        !super::sealed_server_contract::sealed_rows_preservation_is_supported(
+            &sealed_test_active_revision(pair),
+            &rows,
+        )
+    );
+    assert!(!super::sealed_server_contract::sealed_rows_preservation_is_supported(&v7, &rows,));
+    assert!(super::sealed_server_contract::sealed_rows_preservation_is_supported(&v8, &rows,));
+    assert!(super::sealed_server_contract::sealed_rows_preservation_is_supported(&v9, &rows,));
+    assert!(!super::sealed_server_contract::sealed_rows_preservation_is_supported(&v10, &rows,));
+    assert!(!super::sealed_server_contract::sealed_rows_preservation_is_supported(&v11, &rows,));
+}
+
 fn sealed_test_request(function: FunctionId) -> orna_core::invocation::InvokeRequest {
     use orna_core::invocation::{
         InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
