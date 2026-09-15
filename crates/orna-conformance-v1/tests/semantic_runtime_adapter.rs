@@ -6,8 +6,12 @@ use orna_conformance_v1::{
 use orna_evaluator_v1::Limits;
 use orna_foundation_v1::{Diagnostic, OvbRaw, Value};
 use orna_repository_v1::Repository;
-use orna_runtime_v1::{NoFault, RuntimeIdentity, RuntimeState, TableMutation};
+use orna_runtime_v1::{
+    NoFault, RunObservationStatus, RuntimeIdentity, RuntimeState, StreamObservationStatus,
+    TableMutation,
+};
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
+use orna_stream_v1::{DiagnosticClass, DiagnosticCode};
 use sha2::Digest;
 use std::{collections::BTreeMap, process::Command};
 use tempfile::TempDir;
@@ -233,6 +237,51 @@ async fn project_stream_ignores_unrelated_false_module_assertion() {
         state.committed_table_rows("Reading").await.unwrap().len(),
         2
     );
+
+    let runs = state.run_observations().await.expect("completed runs");
+    assert_eq!(runs.len(), 1, "one durable Run must retain the ingest");
+    let run = &runs[0];
+    assert_eq!(run.status, RunObservationStatus::Completed);
+    assert_eq!(run.checkpoint_count, 2);
+    assert!(run.ended_ms.is_some());
+
+    let streams = state
+        .stream_observations()
+        .await
+        .expect("completed streams");
+    assert_eq!(
+        streams.len(),
+        1,
+        "one durable Stream must retain the ingest"
+    );
+    let stream = &streams[0];
+    assert_eq!(stream.run, run.id);
+    assert_eq!(stream.status, StreamObservationStatus::Completed);
+    assert_eq!(
+        (
+            stream.items_seen,
+            stream.items_committed,
+            stream.items_failed
+        ),
+        (2, 2, 0)
+    );
+    let checkpoint = state
+        .latest_checkpoint()
+        .await
+        .expect("latest checkpoint")
+        .expect("completed stream checkpoint");
+    // The unrelated seeded row is the first durable mutation; the two stream
+    // deliveries advance the same runtime generation and mutation sequence.
+    assert_eq!(checkpoint.generation, 3);
+    assert_eq!(checkpoint.mutation_sequence, 3);
+    assert_eq!(
+        stream.checkpoint_reference.as_row_ref().snapshot,
+        run.snapshot.snapshot().clone()
+    );
+    assert!(
+        stream.reference(run).is_ok(),
+        "Stream must link to its retained Run"
+    );
 }
 
 #[tokio::test]
@@ -330,6 +379,41 @@ async fn project_stream_rolls_back_when_affected_module_assertion_fails() {
             .expect("latest checkpoint")
             .is_none(),
         "failed affected assertion must not advance the durable checkpoint"
+    );
+
+    let runs = state.run_observations().await.expect("failed runs");
+    assert_eq!(
+        runs.len(),
+        1,
+        "one durable Run must retain the failed ingest"
+    );
+    let run = &runs[0];
+    assert_eq!(run.status, RunObservationStatus::Failed);
+    assert!(run.ended_ms.is_some());
+
+    let streams = state.stream_observations().await.expect("failed streams");
+    assert_eq!(
+        streams.len(),
+        1,
+        "one durable Stream must retain the failure"
+    );
+    let stream = &streams[0];
+    assert_eq!(stream.run, run.id);
+    assert_eq!(stream.status, StreamObservationStatus::Failed);
+    assert_eq!(stream.items_seen, 1);
+    assert_eq!(stream.items_committed, 0);
+    assert_eq!(stream.items_failed, 1);
+    assert!(stream.last_failure.is_some());
+    assert_eq!(
+        stream.diagnostic,
+        Some(orna_stream_v1::SafeDiagnostic {
+            code: DiagnosticCode::TableAssertionFalse,
+            class: DiagnosticClass::Permanent,
+        })
+    );
+    assert!(
+        stream.reference(run).is_ok(),
+        "failed Stream must retain its Run/checkpoint linkage"
     );
 }
 
