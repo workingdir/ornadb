@@ -395,6 +395,14 @@ fn legacy_assertion_aliases_remain_rejected_in_their_removed_shapes() {
             }
         }
     }
+
+    let parsed = parse_module("on value; fn later() { item => item }");
+    assert_ne!(
+        parsed.diagnostics.first().map(|diagnostic| diagnostic.code),
+        Some("E1005"),
+        "on must not inspect a later unrelated lambda: {:?}",
+        parsed.diagnostics
+    );
 }
 
 #[test]
@@ -435,6 +443,34 @@ fn where_remains_an_ordinary_name_after_a_closed_type_refinement() {
         "where should remain ordinary after a complete refinement: {:?}",
         parsed.diagnostics
     );
+}
+
+#[test]
+fn legacy_declaration_words_are_scoped_to_removed_module_shapes() {
+    for name in ["ingest", "log", "store", "view", "transaction", "on"] {
+        accepted_body(&format!(
+            "type {name} {{ {name}: {name}, }} \
+             table {name}({name}: {name}) {{ {name}: {name}, }} \
+             fn {name}({name}: {name}) = {name};"
+        ));
+    }
+
+    for (source, expected) in [
+        ("pub ingest google = google.mail() | into(Email);", "E1004"),
+        ("pub log Reading { time: Instant }", "E1001"),
+        ("pub store daily = Reading | count();", "E1003"),
+        ("pub view daily = Reading | count();", "E1002"),
+        ("transaction { Note.insert({ text: \"x\" }); }", "E1007"),
+        ("on google.mail() { mail => Email.insert(mail); }", "E1005"),
+    ] {
+        let parsed = parse_module(source);
+        assert_eq!(
+            parsed.diagnostics.first().map(|diagnostic| diagnostic.code),
+            Some(expected),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
+    }
 }
 
 // `match` is a contextual identifier in Orna 1.0.0. The removed expression
