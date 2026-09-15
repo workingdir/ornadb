@@ -2024,6 +2024,98 @@ impl Repository {
         commit: &GitCommitRef,
         table: Uuid,
     ) -> Result<BTreeMap<String, crate::GitObjectState>, RepositoryError> {
+        let manifest = self.observed_compact_manifest(commit, table)?;
+
+        let mut plan = BTreeMap::new();
+        for entry in manifest.entries() {
+            let Some((mode, object)) = self.observed_tree_entry_at(commit, &entry.relative_path)?
+            else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            if !matches!(mode.as_str(), "100644" | "100755") || object != entry.git_object_id {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let state = self.observe_git_object(&object)?;
+            match state {
+                crate::GitObjectState::Materialized {
+                    kind: crate::GitObjectKind::Blob,
+                    ..
+                } => {
+                    let bytes = self.observed_git_blob_bytes(&object)?;
+                    verify_manifest_segment_bytes(table, entry, &object, &bytes)?;
+                }
+                crate::GitObjectState::Promised => {}
+                crate::GitObjectState::Materialized { .. }
+                | crate::GitObjectState::Unavailable
+                | crate::GitObjectState::Malformed => {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+            plan.insert(object, state);
+        }
+        Ok(plan)
+    }
+
+    /// Plans the exact compact-segment objects whose inclusive key bounds
+    /// overlap `[lower_key, upper_key]` at `commit`, without fetching or
+    /// changing any local Git state. The interval and every selected segment
+    /// are validated with the same canonical manifest, Git identity, digest,
+    /// size, and physical-Parquet checks as full-manifest planning.
+    ///
+    /// An invalid or reversed canonical interval fails closed. Segments whose
+    /// manifest bounds cannot overlap the interval are not observed or
+    /// hydrated, so a promised non-overlapping segment remains unselected.
+    pub fn plan_compact_manifest_hydration_for_key_range(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+        lower_key: &[u8],
+        upper_key: &[u8],
+    ) -> Result<BTreeMap<String, crate::GitObjectState>, RepositoryError> {
+        if canonical_key_order(lower_key, upper_key)? == Ordering::Greater {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let manifest = self.observed_compact_manifest(commit, table)?;
+        let mut plan = BTreeMap::new();
+        for entry in manifest.entries() {
+            if canonical_key_order(entry.min_key(), upper_key)? == Ordering::Greater
+                || canonical_key_order(entry.max_key(), lower_key)? == Ordering::Less
+            {
+                continue;
+            }
+            let Some((mode, object)) = self.observed_tree_entry_at(commit, &entry.relative_path)?
+            else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            if !matches!(mode.as_str(), "100644" | "100755") || object != entry.git_object_id {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let state = self.observe_git_object(&object)?;
+            match state {
+                crate::GitObjectState::Materialized {
+                    kind: crate::GitObjectKind::Blob,
+                    ..
+                } => {
+                    let bytes = self.observed_git_blob_bytes(&object)?;
+                    verify_manifest_segment_bytes(table, entry, &object, &bytes)?;
+                }
+                crate::GitObjectState::Promised => {}
+                crate::GitObjectState::Materialized { .. }
+                | crate::GitObjectState::Unavailable
+                | crate::GitObjectState::Malformed => {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+            plan.insert(object, state);
+        }
+        Ok(plan)
+    }
+
+    fn observed_compact_manifest(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+    ) -> Result<CompactManifest, RepositoryError> {
         if !matches!(
             self.observe_git_object(commit.as_str())?,
             crate::GitObjectState::Materialized {
@@ -2075,35 +2167,7 @@ impl Repository {
         };
         manifest.validate(Some(self.native_object_id_length()?))?;
         verify_canonical_manifest_files(&manifest, &manifest_bytes, &shard_bytes_by_path)?;
-
-        let mut plan = BTreeMap::new();
-        for entry in manifest.entries() {
-            let Some((mode, object)) = self.observed_tree_entry_at(commit, &entry.relative_path)?
-            else {
-                return Err(RepositoryError::InvalidCompactManifest);
-            };
-            if !matches!(mode.as_str(), "100644" | "100755") || object != entry.git_object_id {
-                return Err(RepositoryError::InvalidCompactManifest);
-            }
-            let state = self.observe_git_object(&object)?;
-            match state {
-                crate::GitObjectState::Materialized {
-                    kind: crate::GitObjectKind::Blob,
-                    ..
-                } => {
-                    let bytes = self.observed_git_blob_bytes(&object)?;
-                    verify_manifest_segment_bytes(table, entry, &object, &bytes)?;
-                }
-                crate::GitObjectState::Promised => {}
-                crate::GitObjectState::Materialized { .. }
-                | crate::GitObjectState::Unavailable
-                | crate::GitObjectState::Malformed => {
-                    return Err(RepositoryError::InvalidCompactManifest);
-                }
-            }
-            plan.insert(object, state);
-        }
-        Ok(plan)
+        Ok(manifest)
     }
 
     fn observed_committed_file_bytes(
