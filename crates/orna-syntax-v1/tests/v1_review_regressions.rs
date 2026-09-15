@@ -252,7 +252,7 @@ fn legacy_var_declarations_remain_rejected_at_statement_boundaries() {
 // targeted diagnostics apply only to the removed top-level declaration forms.
 #[test]
 fn opaque_and_currency_are_accepted_in_ordinary_identifier_positions() {
-    for name in ["opaque", "currency"] {
+    for name in ["opaque", "currency", "check", "unique", "where"] {
         accepted_body(&format!(
             "type {name} {{ {name}: {name}, }} \
              table {name}({name}: {name}) {{ {name}: {name}, }} \
@@ -297,7 +297,7 @@ fn legacy_opaque_and_currency_declarations_remain_rejected() {
 
 #[test]
 fn assertion_aliases_are_accepted_in_ordinary_identifier_positions() {
-    for name in ["ensure", "fact", "constraints"] {
+    for name in ["ensure", "fact", "constraint", "constraints"] {
         accepted_body(&format!(
             "type {name} {{ {name}: {name}, }} \
              table {name}({name}: {name}) {{ {name}: {name}, }} \
@@ -327,8 +327,13 @@ fn legacy_assertion_aliases_remain_rejected_in_their_removed_shapes() {
             "pub fn bad(amount: Int) { fact amount > 0; }",
             "ORNA-A091-010",
         ),
+        (
+            "pub fn bad(amount: Int) { constraint amount > 0; }",
+            "ORNA-A091-010",
+        ),
         ("pub ensure amount > 0;", "ORNA-A091-010"),
         ("pub fact amount > 0;", "ORNA-A091-010"),
+        ("pub constraint amount > 0;", "ORNA-A091-010"),
         (
             "pub table User(id: Uuid) { name: Str, constraints { unique(name); } }",
             "ORNA-A091-010",
@@ -339,6 +344,20 @@ fn legacy_assertion_aliases_remain_rejected_in_their_removed_shapes() {
         ),
         ("constraints { unique(id); }", "ORNA-A091-010"),
         ("pub constraints { unique(id); }", "ORNA-A091-010"),
+        (
+            "pub table User(id: Uuid) { username: Str unique, }",
+            "ORNA091-E-FIELD-CONSTRAINT",
+        ),
+        (
+            "pub table User(id: Uuid) { age: Int check(age >= 0), }",
+            "ORNA091-E-FIELD-CONSTRAINT",
+        ),
+        (
+            "pub table User(id: Uuid) { callback: fn(Int): Str check(value > 0), }",
+            "ORNA091-E-FIELD-CONSTRAINT",
+        ),
+        ("type Port = Int where self >= 1;", "ORNA-A091-001"),
+        ("pub type Port = Int where self >= 1;", "ORNA-A091-001"),
     ] {
         let parsed = parse_module(source);
         assert_eq!(
@@ -388,6 +407,32 @@ fn constraints_remains_an_ordinary_nominal_constructor_in_nested_impl() {
     assert!(
         parsed.diagnostics.is_empty(),
         "nested nominal construction should remain valid: {:?}",
+        parsed.diagnostics
+    );
+}
+
+#[test]
+fn field_constraint_names_remain_ordinary_outside_removed_modifiers() {
+    let parsed = parse_module(
+        "table T(id: Int) { \
+            check: Str, \
+            unique: Str, \
+            impl P { fn make() { check(raw); unique(raw); where; } } \
+         }",
+    );
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "ordinary check/unique/where uses should remain valid: {:?}",
+        parsed.diagnostics
+    );
+}
+
+#[test]
+fn where_remains_an_ordinary_name_after_a_closed_type_refinement() {
+    let parsed = parse_module("type T = Int { assert self > 0; } fn where() = 1;");
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "where should remain ordinary after a complete refinement: {:?}",
         parsed.diagnostics
     );
 }
