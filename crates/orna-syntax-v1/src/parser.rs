@@ -1633,17 +1633,21 @@ impl Parser {
                     "database writes are transactional by activation; `transaction` is not syntax",
                 )),
                 "on" if i == 0 => Some(("E1005", "`on` is not a declaration")),
-                "check" => Some((
+                "check" if self.is_legacy_field_constraint(i) => Some((
                     "ORNA091-E-FIELD-CONSTRAINT",
                     "field `check` syntax was removed; use a table assertion",
                 )),
-                "unique" => Some((
+                "unique" if self.is_legacy_field_constraint(i) => Some((
                     "ORNA091-E-FIELD-CONSTRAINT",
                     "field `unique` syntax was removed; use all_unique in the table body",
                 )),
-                "where" => Some((
+                "where" if self.is_legacy_refinement_where(i) => Some((
                     "ORNA-A091-001",
                     "use a brace-delimited refined-type assertion block",
+                )),
+                "constraint" if self.is_legacy_assertion_statement(i) => Some((
+                    "ORNA-A091-010",
+                    "`constraint` is not an assertion alias; use `assert`",
                 )),
                 "constraints" if self.is_legacy_constraints_block(i) => Some((
                     "ORNA-A091-010",
@@ -1934,6 +1938,157 @@ impl Parser {
         );
         assertion_expression_starts && Self::has_terminated_initializer(tokens, at + 1)
     }
+    fn is_legacy_field_constraint(&self, at: usize) -> bool {
+        let tokens = &self.tokens;
+        let Some(table_open) = Self::table_body_open(tokens, at) else {
+            return false;
+        };
+        if !Self::is_table_declaration_body(tokens, table_open) {
+            return false;
+        }
+        let Some(previous) = at.checked_sub(1) else {
+            return false;
+        };
+        if !matches!(
+            tokens.get(previous).map(|token| &token.kind),
+            Some(
+                TokenKind::Identifier { .. }
+                    | TokenKind::Keyword(_)
+                    | TokenKind::Punct("?" | ")" | "]" | "}" | ">"),
+            )
+        ) {
+            return false;
+        }
+
+        let mut parentheses = 0usize;
+        let mut brackets = 0usize;
+        let mut braces = 0usize;
+        let mut angles = 0usize;
+        for index in (table_open + 1..at).rev() {
+            match tokens[index].kind {
+                TokenKind::Punct(")") => parentheses += 1,
+                TokenKind::Punct("(") if parentheses > 0 => parentheses -= 1,
+                TokenKind::Punct("]") => brackets += 1,
+                TokenKind::Punct("[") if brackets > 0 => brackets -= 1,
+                TokenKind::Punct("}") => braces += 1,
+                TokenKind::Punct("{") if braces > 0 => braces -= 1,
+                TokenKind::Punct(">") => angles += 1,
+                TokenKind::Punct("<") if angles > 0 => angles -= 1,
+                TokenKind::Punct(",")
+                    if parentheses == 0 && brackets == 0 && braces == 0 && angles == 0 =>
+                {
+                    return false;
+                }
+                TokenKind::Punct("=" | "=>")
+                    if parentheses == 0 && brackets == 0 && braces == 0 && angles == 0 =>
+                {
+                    return false;
+                }
+                TokenKind::Punct(":")
+                    if parentheses == 0 && brackets == 0 && braces == 0 && angles == 0 =>
+                {
+                    let Some(field) = index.checked_sub(1) else {
+                        return false;
+                    };
+                    let Some(member_start) = field.checked_sub(1) else {
+                        return false;
+                    };
+                    if Self::token_is_contextual(tokens, field)
+                        && matches!(
+                            tokens.get(member_start).map(|token| &token.kind),
+                            Some(TokenKind::Punct("," | "{"))
+                        )
+                    {
+                        return match tokens.get(at).map(|token| token.text.as_str()) {
+                            Some("unique") => {
+                                matches!(
+                                    tokens.get(at + 1).map(|token| &token.kind),
+                                    Some(TokenKind::Punct("," | "}"))
+                                )
+                            }
+                            Some("check") => {
+                                if !Self::token_is_punct(tokens, at + 1, "(") {
+                                    return false;
+                                }
+                                let Some(close) = Self::delimited_end(tokens, at + 1, "(", ")")
+                                else {
+                                    return false;
+                                };
+                                matches!(
+                                    tokens.get(close + 1).map(|token| &token.kind),
+                                    Some(TokenKind::Punct("," | "}"))
+                                )
+                            }
+                            _ => false,
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    fn is_legacy_refinement_where(&self, at: usize) -> bool {
+        let tokens = &self.tokens;
+        if !Self::is_module_scope(tokens, at) {
+            return false;
+        }
+        let mut parentheses = 0usize;
+        let mut brackets = 0usize;
+        let mut braces = 0usize;
+        let mut angles = 0usize;
+        let mut type_declaration = false;
+        let mut type_has_equals = false;
+        let mut type_refinement_body = false;
+        for (index, token) in tokens.iter().take(at).enumerate() {
+            match token.kind {
+                TokenKind::Punct("(") => parentheses += 1,
+                TokenKind::Punct(")") => parentheses = parentheses.saturating_sub(1),
+                TokenKind::Punct("[") => brackets += 1,
+                TokenKind::Punct("]") => brackets = brackets.saturating_sub(1),
+                TokenKind::Punct("{") => {
+                    if braces == 0
+                        && type_declaration
+                        && type_has_equals
+                        && !Self::token_is_punct(tokens, index.saturating_sub(1), "=")
+                    {
+                        type_refinement_body = true;
+                    }
+                    braces += 1;
+                }
+                TokenKind::Punct("}") => {
+                    braces = braces.saturating_sub(1);
+                    if braces == 0 && type_declaration {
+                        if type_refinement_body || !type_has_equals {
+                            type_declaration = false;
+                            type_has_equals = false;
+                            type_refinement_body = false;
+                        }
+                    }
+                }
+                TokenKind::Punct("<") if braces == 0 => angles += 1,
+                TokenKind::Punct(">") if angles > 0 => angles -= 1,
+                _ => {}
+            }
+            if parentheses != 0 || brackets != 0 || braces != 0 || angles != 0 {
+                continue;
+            }
+            match token.kind {
+                TokenKind::Keyword(Keyword::Type) => {
+                    type_declaration = true;
+                    type_has_equals = false;
+                }
+                TokenKind::Punct("=") if type_declaration => type_has_equals = true,
+                TokenKind::Punct(";") => {
+                    type_declaration = false;
+                    type_has_equals = false;
+                    type_refinement_body = false;
+                }
+                _ => {}
+            }
+        }
+        type_declaration && type_has_equals
+    }
     fn is_legacy_constraints_block(&self, at: usize) -> bool {
         let tokens = &self.tokens;
         if !Self::token_is_punct(tokens, at + 1, "{") {
@@ -1949,8 +2104,14 @@ impl Parser {
     }
     fn is_table_body_member_context(&self, at: usize) -> bool {
         let tokens = &self.tokens;
+        let Some(table_open) = Self::table_body_open(tokens, at) else {
+            return false;
+        };
+        Self::is_table_declaration_body(tokens, table_open)
+    }
+    fn table_body_open(tokens: &[Token], at: usize) -> Option<usize> {
         let mut nested_braces = 0usize;
-        let table_open = (0..at).rev().find_map(|index| match tokens[index].kind {
+        (0..at).rev().find_map(|index| match tokens[index].kind {
             TokenKind::Punct("}") => {
                 nested_braces += 1;
                 None
@@ -1961,10 +2122,9 @@ impl Parser {
                 None
             }
             _ => None,
-        });
-        let Some(table_open) = table_open else {
-            return false;
-        };
+        })
+    }
+    fn is_table_declaration_body(tokens: &[Token], table_open: usize) -> bool {
         let Some(previous) = table_open.checked_sub(1) else {
             return false;
         };
@@ -2006,7 +2166,26 @@ impl Parser {
                 Some(TokenKind::Keyword(Keyword::Table))
             )
     }
-    fn is_legacy_module_declaration_start(tokens: &[Token], at: usize) -> bool {
+    fn delimited_end(
+        tokens: &[Token],
+        open: usize,
+        open_punct: &str,
+        close_punct: &str,
+    ) -> Option<usize> {
+        let mut depth = 0usize;
+        for index in open..tokens.len() {
+            if Self::token_is_punct(tokens, index, open_punct) {
+                depth += 1;
+            } else if Self::token_is_punct(tokens, index, close_punct) {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+        }
+        None
+    }
+    fn is_module_scope(tokens: &[Token], at: usize) -> bool {
         let mut braces = 0usize;
         for token in &tokens[..at] {
             match token.kind {
@@ -2016,6 +2195,9 @@ impl Parser {
             }
         }
         braces == 0
+    }
+    fn is_legacy_module_declaration_start(tokens: &[Token], at: usize) -> bool {
+        Self::is_module_scope(tokens, at)
             && (at == 0
                 || matches!(
                     tokens.get(at.saturating_sub(1)).map(|token| &token.kind),
