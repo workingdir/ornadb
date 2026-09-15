@@ -268,7 +268,7 @@ fn decode_inspect_carrier_row_payload(
 /// payload as malformed. A non-empty row must carry the common provenance
 /// prefix emitted by the installed provider; accepting an unrecognised row
 /// would let a custom provider bypass target/revision binding.
-fn inspect_projection_target_from_envelope(
+pub(super) fn inspect_projection_target_from_envelope(
     active: &ActiveDatabaseRevision,
     envelope: &InspectCarrierEnvelope,
     expected_kind: InspectCarrierKind,
