@@ -3092,6 +3092,132 @@ fn compact_manifest_hydration_range_selects_only_overlapping_segments() {
 }
 
 #[test]
+fn compact_manifest_range_hydration_materializes_selected_promises_only() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0046);
+    let plan = compact_plan(
+        &repo,
+        table,
+        [46; 16],
+        &[
+            compact_segment(table, 45, b"range-before-promised".to_vec()),
+            compact_segment(table, 46, b"range-selected-promised".to_vec()),
+        ],
+    );
+    publish_compact_repository_boundary(&repo, plan).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
+    let selected_key = CanonicalValue::new(OvbRaw::Int(46.into()))
+        .unwrap()
+        .encode()
+        .unwrap();
+    let selected = manifest
+        .entries()
+        .iter()
+        .find(|entry| entry.min_key() == selected_key.as_slice())
+        .unwrap();
+    let unselected = manifest
+        .entries()
+        .iter()
+        .find(|entry| entry.min_key() != selected_key.as_slice())
+        .unwrap();
+    let selected_object = selected.git_object_id().to_owned();
+    let unselected_object = unselected.git_object_id().to_owned();
+    let selected_path = root
+        .path()
+        .join(".git/objects")
+        .join(&selected_object[..2])
+        .join(&selected_object[2..]);
+    let unselected_path = root
+        .path()
+        .join(".git/objects")
+        .join(&unselected_object[..2])
+        .join(&unselected_object[2..]);
+
+    let remote = continuity_remote(root.path());
+    let remote_unselected_path = remote
+        .path()
+        .join("objects")
+        .join(&unselected_object[..2])
+        .join(&unselected_object[2..]);
+    assert!(remote_unselected_path.is_file());
+    fs::remove_file(remote_unselected_path).unwrap();
+    git(
+        root.path(),
+        &["config", "extensions.partialClone", "origin"],
+    );
+    git(root.path(), &["config", "remote.origin.promisor", "true"]);
+    git(
+        root.path(),
+        &["config", "remote.origin.partialclonefilter", "blob:none"],
+    );
+    assert!(selected_path.is_file());
+    assert!(unselected_path.is_file());
+    let before = git_state(&repo, root.path());
+    let index_before = fs::read(root.path().join(".git/index")).unwrap();
+    let worktree_before = fs::read(root.path().join("main.orna")).unwrap();
+    let fetch_head = root
+        .path()
+        .join(git(root.path(), &["rev-parse", "--git-path", "FETCH_HEAD"]));
+    fs::write(&fetch_head, b"range-hydration-sentinel\n").unwrap();
+    let fetch_head_before = fs::read(&fetch_head).unwrap();
+    fs::remove_file(&selected_path).unwrap();
+    fs::remove_file(&unselected_path).unwrap();
+    assert_eq!(
+        repo.observe_git_object(&selected_object).unwrap(),
+        GitObjectState::Promised
+    );
+    assert_eq!(
+        repo.observe_git_object(&unselected_object).unwrap(),
+        GitObjectState::Promised
+    );
+
+    let hydrated = repo
+        .hydrate_compact_manifest_segments_for_key_range(&head, table, &selected_key, &selected_key)
+        .unwrap();
+
+    assert_eq!(hydrated.len(), 1);
+    assert!(matches!(
+        hydrated.get(&selected_object),
+        Some(GitObjectState::Materialized {
+            kind: GitObjectKind::Blob,
+            ..
+        })
+    ));
+    assert_eq!(
+        repo.observe_git_object(&selected_object).unwrap(),
+        hydrated[&selected_object]
+    );
+    assert_eq!(
+        repo.observe_git_object(&unselected_object).unwrap(),
+        GitObjectState::Promised
+    );
+    assert!(!unselected_path.exists());
+    assert_eq!(repo.head().unwrap(), before.0);
+    assert_eq!(
+        git(
+            root.path(),
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+        ),
+        before.3
+    );
+    assert_eq!(
+        git(root.path(), &["config", "--local", "--null", "--list"]),
+        before.4
+    );
+    assert_eq!(
+        fs::read(root.path().join(".git/index")).unwrap(),
+        index_before
+    );
+    assert_eq!(
+        fs::read(root.path().join("main.orna")).unwrap(),
+        worktree_before
+    );
+    assert_eq!(fs::read(&fetch_head).unwrap(), fetch_head_before);
+}
+
+#[test]
 fn compact_manifest_hydration_is_manifest_bound_and_preserves_git_state() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();

@@ -3901,6 +3901,35 @@ impl Repository {
             .map_err(FetchError::Repository)
     }
 
+    /// Hydrates only the promised compact-segment blobs whose verified
+    /// manifest bounds overlap the inclusive key range. The range planner is
+    /// the authority for selection and validation; each selected promise is
+    /// materialized through the exact-object transport boundary, then the
+    /// same range is planned again to verify the postcondition.
+    ///
+    /// This operation may add selected immutable object bytes to the local
+    /// object store, but it never installs refs, changes `HEAD`, writes
+    /// `FETCH_HEAD`, updates the index or worktree, or considers segments
+    /// outside the requested range.
+    pub fn hydrate_compact_manifest_segments_for_key_range(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+        lower_key: &[u8],
+        upper_key: &[u8],
+    ) -> Result<BTreeMap<String, GitObjectState>, FetchError> {
+        let plan = self
+            .plan_compact_manifest_hydration_for_key_range(commit, table, lower_key, upper_key)
+            .map_err(FetchError::Repository)?;
+        for (object_id, state) in &plan {
+            if matches!(state, GitObjectState::Promised) {
+                self.hydrate_promised_object(object_id)?;
+            }
+        }
+        self.plan_compact_manifest_hydration_for_key_range(commit, table, lower_key, upper_key)
+            .map_err(FetchError::Repository)
+    }
+
     fn local_config_value(&self, key: &str) -> Result<ConfigValue, RepositoryError> {
         self.config_value("--local", key)
     }
