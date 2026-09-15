@@ -100,6 +100,7 @@ pub enum EvidenceClass {
 pub enum EvidenceStatus {
     Passed,
     Failed,
+    Cancelled,
     Skipped,
     Specified,
 }
@@ -110,6 +111,7 @@ pub enum StageOutcome<D> {
     /// The adapter's native structured diagnostic; the harness serializes it
     /// unchanged rather than defining a second diagnostic representation.
     Failed(D),
+    Cancelled(D),
     Skipped {
         reason: String,
     },
@@ -139,6 +141,7 @@ impl<D> StageOutcome<D> {
         match self {
             Self::Passed => EvidenceStatus::Passed,
             Self::Failed(_) => EvidenceStatus::Failed,
+            Self::Cancelled(_) => EvidenceStatus::Cancelled,
             Self::Skipped { .. } => EvidenceStatus::Skipped,
         }
     }
@@ -963,6 +966,7 @@ fn expect_pass(
     match outcome {
         StageOutcome::Passed => Ok(()),
         StageOutcome::Failed(_) => Err(format!("reference invocation failed: {entry}")),
+        StageOutcome::Cancelled(_) => Err(format!("reference invocation was cancelled: {entry}")),
         StageOutcome::Skipped { .. } => Err(format!("reference invocation was skipped: {entry}")),
     }
 }
@@ -1934,6 +1938,7 @@ impl Harness {
             let detail = match &outcome {
                 StageOutcome::Passed => "scenario execution satisfied its adapter contract".into(),
                 StageOutcome::Failed(_) => "scenario execution failed its adapter contract".into(),
+                StageOutcome::Cancelled(_) => "scenario execution was cancelled".into(),
                 StageOutcome::Skipped { reason } => format!("scenario execution skipped: {reason}"),
             };
             report.scenarios.push(ScenarioResult {
@@ -2329,6 +2334,7 @@ impl Harness {
                 StageOutcome::Passed => false,
                 StageOutcome::Skipped { .. } if expected == "not-run" => false,
                 StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => true,
+                StageOutcome::Cancelled(_) => true,
             };
             if should_halt {
                 halted = true;
@@ -2420,8 +2426,9 @@ impl Harness {
 /// any of those would let a source-bearing adapter bypass the logical-only
 /// conformance boundary.
 fn failed_diagnostic<D: Serialize>(outcome: &StageOutcome<D>) -> Option<Value> {
-    let StageOutcome::Failed(diagnostic) = outcome else {
-        return None;
+    let diagnostic = match outcome {
+        StageOutcome::Failed(diagnostic) | StageOutcome::Cancelled(diagnostic) => diagnostic,
+        _ => return None,
     };
     let code = serde_json::to_value(diagnostic)
         .ok()
