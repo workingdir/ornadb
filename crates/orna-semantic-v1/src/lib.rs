@@ -219,6 +219,21 @@ impl Namespace {
     }
 }
 
+/// Compiler-local identity for a nominal declaration.
+///
+/// This is intentionally a qualified semantic key, not the durable object
+/// identity assigned by the catalogue/revision layer. It keeps source-level
+/// names from unrelated modules distinct while preserving the existing public
+/// `Type::Named` representation.
+fn nominal_identity(namespace: &Namespace, name: &str) -> String {
+    let prefix = namespace.display();
+    if prefix.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{prefix}.{name}")
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Type {
     Int,
@@ -1246,6 +1261,9 @@ pub fn analyze_with_catalogue(inputs: &[ModuleInput], catalogue: &Catalogue) -> 
             &mut result.diagnostics,
         );
         let mut symbols = header.symbols.clone();
+        for symbol in symbols.values_mut() {
+            canonicalize_symbol(symbol, &scope.nominal_identities);
+        }
         let table_rows = tree
             .items
             .iter()
@@ -1317,6 +1335,9 @@ fn stabilize_function_summaries(
                 &mut discarded,
             );
             let mut symbols = header.symbols;
+            for symbol in symbols.values_mut() {
+                canonicalize_symbol(symbol, &scope.nominal_identities);
+            }
             for item in &tree.items {
                 if matches!(item.declaration, Declaration::Function { .. }) {
                     check_function(item, &mut symbols, &scope, &mut discarded);
@@ -1387,9 +1408,18 @@ fn collect_header(
 ) -> ModuleHeader {
     let mut symbols = BTreeMap::new();
     for item in &tree.items {
-        let Some((name, kind, ty)) = declared_symbol(item) else {
+        let Some((name, kind, mut ty)) = declared_symbol(item) else {
             continue;
         };
+        if matches!(
+            &item.declaration,
+            Declaration::Type {
+                representation: TypeRepresentation::Nominal { .. },
+                ..
+            }
+        ) {
+            ty = Type::Named(nominal_identity(namespace, &name));
+        }
         // The published `sys` table diagnostic belongs to typechecking. Do
         // not admit this invalid declaration into the header, however: it
         // must not shadow the portable root while its declaration check runs.
@@ -1581,7 +1611,8 @@ fn type_of(ty: &TypeExpr) -> Type {
 
 fn resolved_type_of(ty: &TypeExpr, scope: &Scope) -> Type {
     let mut resolving = BTreeSet::new();
-    resolve_type_aliases(&type_of(ty), &scope.type_aliases, &mut resolving)
+    let resolved = resolve_type_aliases(&type_of(ty), &scope.type_aliases, &mut resolving);
+    canonicalize_type(&resolved, scope)
 }
 
 fn resolve_type_aliases(
@@ -1671,6 +1702,254 @@ fn resolve_type_aliases(
         | Type::Error => ty.clone(),
     }
 }
+
+fn canonicalize_type(ty: &Type, scope: &Scope) -> Type {
+    canonicalize_type_with_identities(ty, &scope.nominal_identities)
+}
+
+fn canonicalize_type_with_identities(ty: &Type, identities: &BTreeMap<String, String>) -> Type {
+    match ty {
+        Type::Named(name) => identities
+            .get(name)
+            .map(|identity| Type::Named(identity.clone()))
+            .unwrap_or_else(|| ty.clone()),
+        Type::List(inner) => Type::List(Box::new(canonicalize_type_with_identities(
+            inner, identities,
+        ))),
+        Type::Range(inner) => Type::Range(Box::new(canonicalize_type_with_identities(
+            inner, identities,
+        ))),
+        Type::Relation(inner) => Type::Relation(Box::new(canonicalize_type_with_identities(
+            inner, identities,
+        ))),
+        Type::Stream(inner) => Type::Stream(Box::new(canonicalize_type_with_identities(
+            inner, identities,
+        ))),
+        Type::Record(fields) => Type::Record(
+            fields
+                .iter()
+                .map(|(name, field)| {
+                    (
+                        name.clone(),
+                        canonicalize_type_with_identities(field, identities),
+                    )
+                })
+                .collect(),
+        ),
+        Type::Tuple(elements) => Type::Tuple(
+            elements
+                .iter()
+                .map(|element| canonicalize_type_with_identities(element, identities))
+                .collect(),
+        ),
+        Type::Optional(inner) => Type::Optional(Box::new(canonicalize_type_with_identities(
+            inner, identities,
+        ))),
+        Type::Applied { base, arguments } => Type::Applied {
+            base: base.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| canonicalize_type_with_identities(argument, identities))
+                .collect(),
+        },
+        Type::MoneyPerUnit { currency, unit } => Type::MoneyPerUnit {
+            currency: Box::new(canonicalize_type_with_identities(currency, identities)),
+            unit: Box::new(canonicalize_type_with_identities(unit, identities)),
+        },
+        Type::Function {
+            parameters,
+            parameter_names,
+            default_parameters,
+            result,
+        } => Type::Function {
+            parameters: parameters
+                .iter()
+                .map(|parameter| canonicalize_type_with_identities(parameter, identities))
+                .collect(),
+            parameter_names: parameter_names.clone(),
+            default_parameters: default_parameters.clone(),
+            result: Box::new(canonicalize_type_with_identities(result, identities)),
+        },
+        Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Bottom
+        | Type::Error => ty.clone(),
+    }
+}
+
+fn is_nominal_symbol(symbol: &Symbol) -> bool {
+    symbol.kind == SymbolKind::Type && symbol.table_schema.is_some()
+}
+
+fn canonical_nominal_name(name: &str, scope: &Scope) -> String {
+    scope
+        .nominal_identities
+        .get(name)
+        .cloned()
+        .unwrap_or_else(|| name.to_owned())
+}
+
+fn populate_nominal_identities(scope: &mut Scope, namespace: &Namespace, tree: &SyntaxTree) {
+    for item in &tree.items {
+        if let Declaration::Type {
+            name,
+            representation: TypeRepresentation::Nominal { .. },
+            ..
+        } = &item.declaration
+        {
+            scope
+                .nominal_identities
+                .insert(name.clone(), nominal_identity(namespace, name));
+        }
+    }
+    let named_symbols = scope
+        .names
+        .iter()
+        .filter_map(|(name, symbol)| {
+            (is_nominal_symbol(symbol))
+                .then(|| match &symbol.ty {
+                    Type::Named(identity) => Some((name.clone(), identity.clone())),
+                    _ => None,
+                })
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    for (name, identity) in named_symbols {
+        scope.nominal_identities.insert(name, identity);
+    }
+    let module_nominals = scope
+        .available_modules
+        .iter()
+        .flat_map(|(module_namespace, module)| {
+            module.exports.iter().filter_map(|(name, symbol)| {
+                is_nominal_symbol(symbol).then(|| {
+                    (
+                        module_namespace.clone(),
+                        name.clone(),
+                        nominal_identity(module_namespace, name),
+                    )
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    for (module_namespace, name, identity) in module_nominals {
+        scope
+            .nominal_identities
+            .insert(format!("{}.{}", module_namespace.display(), name), identity);
+    }
+    let aliases = scope
+        .modules
+        .iter()
+        .map(|(alias, target)| (alias.clone(), target.clone()))
+        .collect::<Vec<_>>();
+    let aliased_nominals = aliases
+        .into_iter()
+        .flat_map(|(alias, target)| {
+            let target_len = target.0.len();
+            let target_prefix = target.0.clone();
+            scope
+                .available_modules
+                .iter()
+                .filter(move |(module_namespace, _)| {
+                    module_namespace.0.len() >= target_len
+                        && module_namespace.0[..target_len] == target_prefix[..]
+                })
+                .flat_map(move |(module_namespace, module)| {
+                    let suffix = &module_namespace.0[target_len..];
+                    module.exports.iter().filter_map({
+                        let alias = alias.clone();
+                        move |(name, symbol)| {
+                            is_nominal_symbol(symbol).then(|| {
+                                let mut path = vec![alias.clone()];
+                                path.extend(suffix.iter().cloned());
+                                path.push(name.clone());
+                                (path.join("."), nominal_identity(module_namespace, name))
+                            })
+                        }
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+    for (path, identity) in aliased_nominals {
+        scope.nominal_identities.insert(path, identity);
+    }
+}
+
+fn canonicalize_symbol(symbol: &mut Symbol, identities: &BTreeMap<String, String>) {
+    symbol.ty = canonicalize_type_with_identities(&symbol.ty, identities);
+    if let Some(schema) = &mut symbol.table_schema {
+        for field in schema.fields.values_mut() {
+            *field = canonicalize_type_with_identities(field, identities);
+        }
+        if let Some(admission) = &mut schema.admission {
+            for (_, field) in &mut admission.keys {
+                *field = canonicalize_type_with_identities(field, identities);
+            }
+        }
+    }
+}
+
+fn canonicalize_scope_metadata(scope: &mut Scope, namespace: &Namespace, tree: &SyntaxTree) {
+    populate_nominal_identities(scope, namespace, tree);
+    let identities = scope.nominal_identities.clone();
+    for module in scope.available_modules.values_mut() {
+        for symbol in module.symbols.values_mut() {
+            canonicalize_symbol(symbol, &identities);
+        }
+        for symbol in module.exports.values_mut() {
+            canonicalize_symbol(symbol, &identities);
+        }
+    }
+    for symbol in scope.names.values_mut() {
+        canonicalize_symbol(symbol, &identities);
+    }
+    for row in scope.table_rows.values_mut() {
+        *row = canonicalize_type_with_identities(row, &identities);
+    }
+    let mut nominal_rows = BTreeMap::new();
+    for item in &tree.items {
+        if let Some((name, row)) = nominal_row_type(item) {
+            nominal_rows.insert(
+                nominal_identity(namespace, &name),
+                canonicalize_type_with_identities(&row, &identities),
+            );
+        }
+    }
+    for module in scope.available_modules.values() {
+        for symbol in module.exports.values() {
+            if !is_nominal_symbol(symbol) {
+                continue;
+            }
+            if let Some(fields) = symbol.table_fields()
+                && let Type::Named(identity) = &symbol.ty
+            {
+                nominal_rows.entry(identity.clone()).or_insert_with(|| {
+                    canonicalize_type_with_identities(&Type::Record(fields.clone()), &identities)
+                });
+            }
+        }
+    }
+    scope.nominal_rows = nominal_rows;
+    for value in scope.refined_types.values_mut() {
+        *value = canonicalize_type_with_identities(value, &identities);
+    }
+    for value in scope.type_aliases.values_mut() {
+        *value = canonicalize_type_with_identities(value, &identities);
+    }
+    for variants in scope.enum_variants.values_mut() {
+        for fields in variants.values_mut() {
+            for value in fields.values_mut() {
+                *value = canonicalize_type_with_identities(value, &identities);
+            }
+        }
+    }
+}
 fn primitive(name: &str) -> Option<Type> {
     Some(match name {
         "Int" => Type::Int,
@@ -1709,6 +1988,10 @@ fn primitive(name: &str) -> Option<Type> {
 struct Scope {
     names: BTreeMap<String, Symbol>,
     ambiguous: BTreeSet<String>,
+    /// Source spellings mapped to compiler-local nominal identities. The
+    /// values are qualified by defining module and are never a substitute for
+    /// catalogue/revision object identity.
+    nominal_identities: BTreeMap<String, String>,
     /// Direct `use module [as alias]` bindings. These are deliberately kept
     /// apart from ordinary values so only explicitly imported module roots can
     /// begin qualified module-member lookup.
@@ -1773,6 +2056,7 @@ fn resolve_imports(
     let mut scope = Scope {
         names: header.symbols.clone(),
         ambiguous: BTreeSet::new(),
+        nominal_identities: BTreeMap::new(),
         modules: BTreeMap::new(),
         available_modules: modules.clone(),
         table_rows: tree
@@ -1889,61 +2173,6 @@ fn resolve_imports(
         generic_type_bounds: BTreeMap::new(),
         protocol_implementations: BTreeMap::new(),
     };
-    for item in &tree.items {
-        let (target, members) = match &item.declaration {
-            Declaration::Type {
-                name,
-                representation: TypeRepresentation::Nominal { members },
-                ..
-            } => (
-                name,
-                members
-                    .iter()
-                    .filter_map(|member| match member {
-                        TypeMember::Implementation { implementation, .. } => Some(implementation),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            Declaration::Type {
-                name,
-                representation: TypeRepresentation::Alias { refinements, .. },
-                ..
-            } => (
-                name,
-                refinements
-                    .iter()
-                    .filter_map(|member| match member {
-                        TypeMember::Implementation { implementation, .. } => Some(implementation),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            Declaration::Table { name, members, .. } => (
-                name,
-                members
-                    .iter()
-                    .filter_map(|member| match member {
-                        orna_syntax_v1::TableMember::Implementation { implementation, .. } => {
-                            Some(implementation)
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            _ => continue,
-        };
-        let protocols = members
-            .into_iter()
-            .map(|implementation| resolved_type_of(&implementation.protocol, &scope))
-            .filter(|protocol| *protocol != Type::Error)
-            .collect::<Vec<_>>();
-        scope
-            .protocol_implementations
-            .entry(target.clone())
-            .or_default()
-            .extend(protocols);
-    }
     for (name, symbol) in attached_symbols {
         scope
             .names
@@ -2158,7 +2387,62 @@ fn resolve_imports(
             scope.ambiguous.insert(name);
         }
     }
-    let _ = namespace;
+    canonicalize_scope_metadata(&mut scope, namespace, tree);
+    for item in &tree.items {
+        let (target, members) = match &item.declaration {
+            Declaration::Type {
+                name,
+                representation: TypeRepresentation::Nominal { members },
+                ..
+            } => (
+                name,
+                members
+                    .iter()
+                    .filter_map(|member| match member {
+                        TypeMember::Implementation { implementation, .. } => Some(implementation),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            Declaration::Type {
+                name,
+                representation: TypeRepresentation::Alias { refinements, .. },
+                ..
+            } => (
+                name,
+                refinements
+                    .iter()
+                    .filter_map(|member| match member {
+                        TypeMember::Implementation { implementation, .. } => Some(implementation),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            Declaration::Table { name, members, .. } => (
+                name,
+                members
+                    .iter()
+                    .filter_map(|member| match member {
+                        orna_syntax_v1::TableMember::Implementation { implementation, .. } => {
+                            Some(implementation)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => continue,
+        };
+        let protocols = members
+            .into_iter()
+            .map(|implementation| resolved_type_of(&implementation.protocol, &scope))
+            .filter(|protocol| *protocol != Type::Error)
+            .collect::<Vec<_>>();
+        scope
+            .protocol_implementations
+            .entry(canonical_nominal_name(target, &scope))
+            .or_default()
+            .extend(protocols);
+    }
     scope
 }
 fn insert_explicit(
@@ -2189,7 +2473,10 @@ fn check_item(
             annotation,
             value,
         } => {
-            if let Some(expected) = annotation.as_ref().map(type_of) {
+            if let Some(expected) = annotation
+                .as_ref()
+                .map(|annotation| resolved_type_of(annotation, scope))
+            {
                 let inferred =
                     infer_contextual(value, &expected, scope, &BTreeMap::new(), diagnostics);
                 require_same(&expected, &inferred.ty, diagnostics);
@@ -2332,7 +2619,7 @@ fn check_item(
                             FieldInitializer::Default(value)
                             | FieldInitializer::Computed(value) => value,
                         };
-                        let expected = type_of(ty);
+                        let expected = resolved_type_of(ty, scope);
                         let inferred =
                             infer_contextual(value, &expected, scope, &row_locals, diagnostics);
                         if matches!(initializer, FieldInitializer::Computed(_))
@@ -2400,11 +2687,15 @@ fn check_item(
             representation: TypeRepresentation::Nominal { members },
             ..
         } => {
-            let target = Type::Named(name.clone());
+            let target = Type::Named(canonical_nominal_name(name, scope));
+            let target_name = match &target {
+                Type::Named(name) => name,
+                _ => unreachable!(),
+            };
             let target_shape = scope
                 .nominal_rows
-                .get(name)
-                .or_else(|| scope.table_rows.get(name));
+                .get(target_name)
+                .or_else(|| scope.table_rows.get(target_name));
             validate_non_overlapping_implementations(
                 members.iter().filter_map(|member| match member {
                     TypeMember::Implementation { implementation, .. } => Some(implementation),
@@ -2809,9 +3100,10 @@ fn infer_from_nominal_target(
 /// nominal constructor. Blocks and branch expressions preserve the supported
 /// source forms without inferring nominal identity from a same-shaped record.
 fn expr_constructs_nominal_target(expression: &Expr, target_name: &str) -> bool {
+    let short_target = target_name.rsplit('.').next().unwrap_or(target_name);
     match expression {
         Expr::Group { inner, .. } => expr_constructs_nominal_target(inner, target_name),
-        Expr::Nominal { path, .. } => path.len() == 1 && path[0].text == target_name,
+        Expr::Nominal { path, .. } => path.len() == 1 && path[0].text == short_target,
         Expr::Block {
             tail: Some(tail), ..
         } => expr_constructs_nominal_target(tail, target_name),
@@ -2872,6 +3164,7 @@ fn static_type_is_known(ty: &Type, scope: &Scope) -> bool {
                     | "Error"
             ) || system_api::embedded_system_api().describes_type(name)
                 || scope.generic_type_parameters.contains(name)
+                || scope.nominal_rows.contains_key(name)
                 || scope.names.get(name).is_some_and(|symbol| {
                     matches!(
                         symbol.kind,
@@ -4166,7 +4459,7 @@ fn infer_function_body(
             } => {
                 let inferred = if let Some(annotation) = annotation {
                     validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
-                    let expected = type_of(annotation);
+                    let expected = resolved_type_of(annotation, scope);
                     let inferred = infer_contextual(value, &expected, scope, &locals, diagnostics);
                     require_same(&expected, &inferred.ty, diagnostics);
                     inferred
@@ -4260,7 +4553,7 @@ fn check_function(
         let ty = parameter
             .annotation
             .as_ref()
-            .map(type_of)
+            .map(|annotation| resolved_type_of(annotation, &function_scope))
             .or_else(|| inferred_function_parameter_type(body, parameter));
         if ty.is_none() {
             diagnostics.push(diag(
@@ -4290,7 +4583,11 @@ fn check_function(
             diagnostics,
         );
     }
-    if let Some(expected) = signature.result.as_ref().map(type_of) {
+    if let Some(expected) = signature
+        .result
+        .as_ref()
+        .map(|result| resolved_type_of(result, &function_scope))
+    {
         let FunctionBodyInference {
             mut inferred,
             direct_return,
@@ -5696,7 +5993,8 @@ fn infer(
             {
                 return inferred;
             }
-            if let Some(currency) = money_generic_constructor_currency(callee, type_arguments)
+            if let Some(currency) =
+                money_generic_constructor_currency(callee, type_arguments, scope)
                 && let Some(inferred) =
                     infer_money_constructor(currency, arguments, scope, local, diagnostics)
             {
@@ -5962,7 +6260,7 @@ fn infer(
                                 &BTreeSet::new(),
                                 diagnostics,
                             );
-                            let expected = type_of(annotation);
+                            let expected = resolved_type_of(annotation, scope);
                             let x = infer_contextual(value, &expected, scope, &locals, diagnostics);
                             require_same(&expected, &x.ty, diagnostics);
                             x
@@ -7171,7 +7469,8 @@ fn infer_nominal(
             .names
             .get(&name.text)
             .filter(|symbol| symbol.kind == SymbolKind::Type);
-        let local_expected = scope.nominal_rows.get(&name.text).and_then(|ty| match ty {
+        let identity = canonical_nominal_name(&name.text, scope);
+        let local_expected = scope.nominal_rows.get(&identity).and_then(|ty| match ty {
             Type::Record(fields) => Some(fields),
             _ => None,
         });
@@ -7181,7 +7480,7 @@ fn infer_nominal(
         } else {
             exported_expected.or(local_expected)
         };
-        (symbol, expected, Type::Named(name.text.clone()))
+        (symbol, expected, Type::Named(identity))
     } else {
         let symbol = if path_text
             .first()
@@ -7816,7 +8115,11 @@ fn infer_finite_list_sort_key(
         && let [lambda_parameter] = parameters.as_slice()
         && let Some(annotation) = &lambda_parameter.annotation
     {
-        require_same(&parameter, &type_of(annotation), diagnostics);
+        require_same(
+            &parameter,
+            &resolved_type_of(annotation, scope),
+            diagnostics,
+        );
     }
     infer_finite_list_callback(
         expression,
@@ -8235,7 +8538,11 @@ fn infer_finite_list_predicate(
             };
         };
         if let Some(annotation) = &lambda_parameter.annotation {
-            require_same(&parameter, &type_of(annotation), diagnostics);
+            require_same(
+                &parameter,
+                &resolved_type_of(annotation, scope),
+                diagnostics,
+            );
         }
         let Pattern::Name(name, _) = &lambda_parameter.pattern else {
             diagnostics.push(diag(
@@ -10052,7 +10359,7 @@ fn infer_generic_pipeline_stage(
             effects,
         };
     }
-    if let Some(currency) = money_generic_constructor_currency(callee, type_arguments) {
+    if let Some(currency) = money_generic_constructor_currency(callee, type_arguments, scope) {
         if arguments.is_empty() {
             let stage = infer_money_constructor_type(currency, &input.ty, diagnostics);
             effects.join(&stage.effects);
@@ -11689,7 +11996,7 @@ fn infer_numeric_postfix(base: &Type, name: &str, scope: &Scope) -> Option<Type>
         {
             Some(Type::Applied {
                 base: "Money".into(),
-                arguments: vec![Type::Named(name.into())],
+                arguments: vec![Type::Named(canonical_nominal_name(name, scope))],
             })
         }
         Type::Int | Type::Decimal | Type::Float if name == "decimal" => Some(Type::Decimal),
@@ -11806,11 +12113,15 @@ fn money_constructor_currency(expr: &Expr) -> Option<&str> {
     (!currency.is_empty() && !currency.contains(',')).then_some(currency)
 }
 
-fn money_generic_constructor_currency(expr: &Expr, type_arguments: &[TypeExpr]) -> Option<Type> {
+fn money_generic_constructor_currency(
+    expr: &Expr,
+    type_arguments: &[TypeExpr],
+    scope: &Scope,
+) -> Option<Type> {
     if !matches!(expr, Expr::Name { text, .. } if text == "Money") || type_arguments.len() != 1 {
         return None;
     }
-    match type_of(&type_arguments[0]) {
+    match resolved_type_of(&type_arguments[0], scope) {
         Type::Named(currency) if !currency.is_empty() => Some(Type::Named(currency)),
         _ => None,
     }
