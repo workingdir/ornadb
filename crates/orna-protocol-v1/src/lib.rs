@@ -379,6 +379,15 @@ impl Message {
         {
             return Err(Error::InvalidMessage);
         }
+        if let Self::RequestStatusResult {
+            state,
+            result: Some(_),
+            ..
+        } = self
+            && !matches!(*state, RequestState::Terminal)
+        {
+            return Err(Error::InvalidMessage);
+        }
         Ok(())
     }
     fn body(&self, extensions: &BTreeMap<u16, ValueNode>) -> Result<Node> {
