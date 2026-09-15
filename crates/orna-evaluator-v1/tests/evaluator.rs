@@ -3429,6 +3429,67 @@ fn malformed_instant_literals_and_canonical_components_fail_closed() {
 }
 
 #[test]
+fn canonical_duration_environment_values_round_trip_and_compare() {
+    let duration = Raw::Tag(
+        60005,
+        Box::new(Raw::Array(vec![
+            Raw::Int((-1).into()),
+            Raw::Int(500_000_000.into()),
+        ])),
+    );
+    let later = Raw::Tag(
+        60005,
+        Box::new(Raw::Array(vec![
+            Raw::Int("9223372036854775808".parse().unwrap()),
+            Raw::Int(0.into()),
+        ])),
+    );
+    let environment = Environment::from([
+        ("duration".into(), Value::new(duration.clone()).unwrap()),
+        ("same".into(), Value::new(duration.clone()).unwrap()),
+        ("later".into(), Value::new(later).unwrap()),
+    ]);
+
+    assert_eq!(
+        evaluate_expression("duration", &environment, Limits::default())
+            .unwrap()
+            .raw(),
+        &duration
+    );
+    assert_eq!(
+        evaluate_expression("duration == same", &environment, Limits::default()).unwrap(),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate_expression("duration < later", &environment, Limits::default()).unwrap(),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+}
+
+#[test]
+fn malformed_canonical_duration_components_fail_closed() {
+    for raw in [
+        Raw::Tag(60005, Box::new(Raw::Array(vec![Raw::Int(0.into())]))),
+        Raw::Tag(
+            60005,
+            Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Int((-1).into())])),
+        ),
+        Raw::Tag(
+            60005,
+            Box::new(Raw::Array(vec![
+                Raw::Int(0.into()),
+                Raw::Int(1_000_000_000.into()),
+            ])),
+        ),
+    ] {
+        assert!(
+            Value::new(raw).is_err(),
+            "invalid Duration tag must fail closed"
+        );
+    }
+}
+
+#[test]
 fn uses_environment_and_short_circuiting_deterministically() {
     let mut environment = BTreeMap::new();
     environment.insert("count".into(), Value::int(41.into()));
