@@ -1309,6 +1309,12 @@ pub enum StreamTableDeliveryError {
     ValidationFailed(SafeDiagnostic),
 }
 
+#[derive(Debug)]
+pub enum TableActivationError {
+    Runtime(RuntimeError),
+    ValidationFailed(SafeDiagnostic),
+}
+
 pub struct RuntimeState {
     connection: Connection,
     compact_receipt_signing_key: SigningKey,
@@ -1448,6 +1454,17 @@ pub struct StreamValidatedTableDeliveryCommit<'a> {
     pub faults: &'a dyn FaultInjector,
 }
 
+/// An ordinary table activation that validates its post-mutation candidate
+/// before publishing rows, the mutation ledger, and the CWD checkpoint.
+pub struct ValidatedTableActivationCommit<'a> {
+    pub writer: WriterLease,
+    pub context: &'a RuntimeActivationContext,
+    pub mutations: &'a [TableMutation],
+    pub next_digest: [u8; 32],
+    pub validator: &'a mut dyn TableActivationCandidateValidator,
+    pub faults: &'a dyn FaultInjector,
+}
+
 struct StreamDeliveryParts<'a> {
     writer: WriterLease,
     expected_capture: &'a CwdCapture,
@@ -1546,6 +1563,18 @@ pub struct StreamTableMutationBatch {
 /// checkpoint commit.
 pub trait StreamTableCandidateValidator {
     /// Table relations required to validate this delivery.
+    fn tables(&self) -> &[String];
+
+    /// Returns a safe failure diagnostic when the candidate cannot commit.
+    fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic>;
+}
+
+/// Validates the candidate relations produced by an ordinary table
+/// activation. The rows are read from the same transaction that applies the
+/// mutations, and remain private until validation and checkpoint append
+/// succeed.
+pub trait TableActivationCandidateValidator {
+    /// Table relations required to validate this activation.
     fn tables(&self) -> &[String];
 
     /// Returns a safe failure diagnostic when the candidate cannot commit.
@@ -3045,6 +3074,79 @@ impl RuntimeState {
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(next)
+    }
+
+    /// Atomically publishes an ordinary table activation only after a
+    /// validator accepts the exact post-mutation candidate read inside the
+    /// writer transaction. Validation failure drops the transaction, so no
+    /// table row, mutation record, or checkpoint capture becomes visible.
+    pub async fn commit_validated_table_activation(
+        &self,
+        request: ValidatedTableActivationCommit<'_>,
+    ) -> Result<CwdCapture, TableActivationError> {
+        let ValidatedTableActivationCommit {
+            writer,
+            context,
+            mutations,
+            next_digest,
+            validator,
+            faults,
+        } = request;
+        if mutations.is_empty() {
+            return Err(TableActivationError::Runtime(
+                RuntimeError::EmptyMutationBatch,
+            ));
+        }
+        let encoded = mutations
+            .iter()
+            .map(TableMutation::runtime_mutation)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(TableActivationError::Runtime)?;
+        validate_id(writer.owner_id).map_err(TableActivationError::Runtime)?;
+        validate_mutations(&encoded, next_digest).map_err(TableActivationError::Runtime)?;
+        validate_table_candidate_scope(mutations, validator.tables())
+            .map_err(TableActivationError::Runtime)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| TableActivationError::Runtime(RuntimeError::StorageUnavailable))?;
+        let current = capture_tx(&transaction)
+            .await
+            .map_err(TableActivationError::Runtime)?;
+        if &current != context.capture() {
+            return Err(TableActivationError::Runtime(RuntimeError::StaleCapture {
+                current: Box::new(current),
+            }));
+        }
+        self.require_owner(&transaction, writer)
+            .await
+            .map_err(TableActivationError::Runtime)?;
+        for mutation in mutations {
+            apply_table_mutation_tx(&transaction, mutation)
+                .await
+                .map_err(TableActivationError::Runtime)?;
+        }
+        let rows = table_rows_tx(&transaction, validator.tables())
+            .await
+            .map_err(TableActivationError::Runtime)?;
+        validator
+            .validate(&rows)
+            .map_err(TableActivationError::ValidationFailed)?;
+        let next = append_mutations_tx(
+            &transaction,
+            context.capture(),
+            &encoded,
+            next_digest,
+            faults,
+        )
+        .await
+        .map_err(TableActivationError::Runtime)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| TableActivationError::Runtime(RuntimeError::StorageUnavailable))?;
         Ok(next)
     }
 
@@ -5206,7 +5308,7 @@ impl RuntimeState {
         validate_id(writer.owner_id).map_err(StreamTableDeliveryError::Runtime)?;
         validate_stream_mutations(&encoded, next_digest)
             .map_err(StreamTableDeliveryError::Runtime)?;
-        validate_stream_table_candidate_scope(mutations, validator.tables())
+        validate_table_candidate_scope(mutations, validator.tables())
             .map_err(StreamTableDeliveryError::Runtime)?;
         let current = self
             .capture()
@@ -5415,7 +5517,7 @@ impl RuntimeState {
         validate_id(writer.owner_id).map_err(StreamTableDeliveryError::Runtime)?;
         validate_stream_mutations(&encoded, next_digest)
             .map_err(StreamTableDeliveryError::Runtime)?;
-        validate_stream_table_candidate_scope(mutations, validator.tables())
+        validate_table_candidate_scope(mutations, validator.tables())
             .map_err(StreamTableDeliveryError::Runtime)?;
         let current = self
             .capture()
@@ -11510,7 +11612,7 @@ async fn table_rows_tx(
     Ok(result)
 }
 
-fn validate_stream_table_candidate_scope(
+fn validate_table_candidate_scope(
     mutations: &[TableMutation],
     tables: &[String],
 ) -> Result<(), RuntimeError> {
@@ -12089,6 +12191,84 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn validated_table_activation_commits_candidate_and_checkpoint_together() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mut validator = ObservingTableActivationValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+            seen: None,
+        };
+
+        let next = state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                mutations: &[table_mutation(5, 1, Some(9))],
+                next_digest: digest(6),
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(validator.calls, 1);
+        assert_eq!(
+            validator.seen.as_ref().and_then(|rows| rows.get("books")),
+            Some(&vec![(vec![1], vec![9])])
+        );
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+        let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
+        assert_eq!(checkpoint.generation, 1);
+        assert_eq!(checkpoint.digest, digest(6));
+        assert_eq!(state.capture().await.unwrap(), next);
+    }
+
+    #[tokio::test]
+    async fn rejected_validated_table_activation_rolls_back_candidate_and_checkpoint() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let before = state.capture().await.unwrap();
+        let mut validator = RejectingValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+        };
+
+        let result = state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                mutations: &[table_mutation(5, 1, Some(9))],
+                next_digest: digest(6),
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(TableActivationError::ValidationFailed(SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Permanent,
+            }))
+        ));
+        assert_eq!(validator.calls, 1);
+        assert_eq!(state.capture().await.unwrap(), before);
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
         assert_eq!(
             state.committed_table_row("books", &[1]).await.unwrap(),
             None
@@ -13355,12 +13535,55 @@ mod tests {
         }
     }
 
+    impl TableActivationCandidateValidator for TablesOnlyValidator {
+        fn tables(&self) -> &[String] {
+            &self.tables
+        }
+
+        fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+            self.calls += 1;
+            Ok(())
+        }
+    }
+
+    struct ObservingTableActivationValidator {
+        tables: Vec<String>,
+        calls: usize,
+        seen: Option<RuntimeTableRows>,
+    }
+
+    impl TableActivationCandidateValidator for ObservingTableActivationValidator {
+        fn tables(&self) -> &[String] {
+            &self.tables
+        }
+
+        fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+            self.calls += 1;
+            self.seen = Some(rows.clone());
+            Ok(())
+        }
+    }
+
     struct RejectingValidator {
         tables: Vec<String>,
         calls: usize,
     }
 
     impl StreamTableCandidateValidator for RejectingValidator {
+        fn tables(&self) -> &[String] {
+            &self.tables
+        }
+
+        fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+            self.calls += 1;
+            Err(SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Permanent,
+            })
+        }
+    }
+
+    impl TableActivationCandidateValidator for RejectingValidator {
         fn tables(&self) -> &[String] {
             &self.tables
         }
