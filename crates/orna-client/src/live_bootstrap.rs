@@ -129,6 +129,7 @@ pub struct BootstrappedLiveAttachment<I> {
     transport: PrefetchedBinaryTransport<I>,
     watch: [u8; 16],
     limits: Limits,
+    initial_snapshot_request: Option<[u8; 16]>,
 }
 
 impl<I> BootstrappedLiveAttachment<I>
@@ -173,6 +174,7 @@ where
             transport: PrefetchedBinaryTransport::new(io, first),
             watch: response.watch.expect("checked above"),
             limits,
+            initial_snapshot_request: request.request,
         })
     }
 
@@ -202,6 +204,7 @@ where
             transport: PrefetchedBinaryTransport::new(io, first),
             watch,
             limits,
+            initial_snapshot_request: None,
         })
     }
 
@@ -223,12 +226,13 @@ where
         R: PresentRenderer,
         A: RequestIdAllocator,
     {
-        LiveSessionDriver::new(
+        LiveSessionDriver::new_with_expected_snapshot_request(
             self.transport,
             self.watch,
             self.limits,
             renderer,
             request_ids,
+            self.initial_snapshot_request,
         )
     }
 
@@ -247,7 +251,11 @@ where
             return Err(LiveBootstrapError::UnexpectedResponse);
         }
         driver
-            .replace_authenticated_attachment_with_watch(self.transport, self.watch)
+            .replace_authenticated_attachment_with_watch(
+                self.transport,
+                self.watch,
+                self.initial_snapshot_request,
+            )
             .map_err(|_| LiveBootstrapError::WatchIdentity)
     }
 

@@ -109,6 +109,17 @@ where
         renderer: R,
         request_ids: A,
     ) -> Result<Self, LiveSessionError<I::Error, R::Error>> {
+        Self::new_with_expected_snapshot_request(io, watch, limits, renderer, request_ids, None)
+    }
+
+    pub(crate) fn new_with_expected_snapshot_request(
+        io: I,
+        watch: [u8; 16],
+        limits: Limits,
+        renderer: R,
+        request_ids: A,
+        expected_snapshot_request: Option<[u8; 16]>,
+    ) -> Result<Self, LiveSessionError<I::Error, R::Error>> {
         let presentation =
             WatchPresentation::new(watch, limits).map_err(LiveSessionError::Presentation)?;
         Ok(Self {
@@ -119,7 +130,7 @@ where
             renderer,
             request_ids,
             pending_resync: None,
-            expected_resync_request: None,
+            expected_resync_request: expected_snapshot_request,
             pending_publication: None,
         })
     }
@@ -155,6 +166,7 @@ where
             .receive_binary(self.limits.max_message_bytes)
             .await
             .map_err(LiveSessionError::Io)?;
+        self.validate_snapshot_request(&encoded)?;
         self.validate_resync_response(&encoded)?;
         let update = if encoded.len() > self.limits.max_message_bytes {
             // Do not pass an adapter-oversized payload to the decoder.
@@ -199,6 +211,7 @@ where
         &mut self,
         io: I,
         watch: [u8; 16],
+        expected_snapshot_request: Option<[u8; 16]>,
     ) -> Result<(), ()> {
         if watch == self.watch {
             return Err(());
@@ -209,7 +222,7 @@ where
         self.presentation = presentation;
         self.presentation.begin_resubscription();
         self.pending_resync = None;
-        self.expected_resync_request = None;
+        self.expected_resync_request = expected_snapshot_request;
         self.pending_publication = None;
         Ok(())
     }
@@ -256,6 +269,25 @@ where
                 ));
             }
             self.expected_resync_request = None;
+        }
+        Ok(())
+    }
+
+    fn validate_snapshot_request(
+        &self,
+        encoded: &[u8],
+    ) -> Result<(), LiveSessionError<I::Error, R::Error>> {
+        let Ok(frame) = Envelope::decode(encoded, self.limits) else {
+            return Ok(());
+        };
+        if frame.watch == Some(self.watch)
+            && matches!(frame.message, Message::Snapshot { .. })
+            && self.expected_resync_request.is_none()
+            && frame.request.is_some()
+        {
+            return Err(LiveSessionError::Protocol(
+                orna_protocol_v1::Error::InvalidMessage,
+            ));
         }
         Ok(())
     }
@@ -675,6 +707,20 @@ mod tests {
             block_on(driver.receive_once()),
             Ok(LiveSessionEvent::SnapshotPublished { revision: 2 })
         ));
+
+        driver.io.incoming.push_back(snapshot_with_request(
+            3,
+            "unexpected-request",
+            Some([4; 16]),
+        ));
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Err(LiveSessionError::Protocol(
+                orna_protocol_v1::Error::InvalidMessage
+            ))
+        ));
+        assert_eq!(driver.presentation().published().unwrap().revision(), 2);
+        assert_eq!(driver.renderer.revisions, vec![0, 1, 2]);
     }
 
     #[test]
