@@ -2113,6 +2113,9 @@ impl Repository {
             return Err(RepositoryError::RuntimeCompletionRequired);
         }
         if journal.stage() == PublicationJournalStage::WorktreeReconciled {
+            if self.head()?.as_ref() != Some(journal.new_head()) {
+                return Err(RepositoryError::StaleHead);
+            }
             return Err(RepositoryError::RuntimeCompletionRequired);
         }
         if journal.compact_manifest().is_some()
@@ -7047,6 +7050,80 @@ mod tests {
         assert_eq!(
             fs::read(root.path().join(path.as_path())).unwrap(),
             b"second\n"
+        );
+    }
+
+    #[test]
+    fn recovery_fences_runtime_completion_after_head_moves() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        git(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(root.path(), &["config", "user.name", "Repository test"]);
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        fs::write(root.path().join("ordinary.txt"), "base\n").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        let old_head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let candidate = repository
+            .build_private_commit(
+                &old_head,
+                &[ManagedFileChange::new(
+                    path.clone(),
+                    Some(b"published\n".to_vec()),
+                )],
+                "orna: publish runtime data",
+            )
+            .unwrap();
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            old_head,
+            candidate.commit().clone(),
+            index.tree().unwrap().clone(),
+            [33; 16],
+            vec![PublicationJournalEntry::new(
+                path,
+                None,
+                Some(b"published\n".to_vec()),
+            )],
+        )
+        .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        repository
+            .advance_current_ref(&journal.old_head().clone(), &candidate)
+            .unwrap();
+        journal
+            .advance(PublicationJournalStage::RefAdvanced)
+            .unwrap();
+        journal
+            .advance(PublicationJournalStage::IndexReconciled)
+            .unwrap();
+        journal
+            .advance(PublicationJournalStage::WorktreeReconciled)
+            .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+
+        fs::write(root.path().join("ordinary.txt"), "later\n").unwrap();
+        git(root.path(), &["add", "ordinary.txt"]);
+        git(root.path(), &["commit", "-m", "ordinary follow-up"]);
+
+        assert!(matches!(
+            repository.recover_publication(),
+            Err(RepositoryError::StaleHead)
+        ));
+        assert_eq!(
+            repository
+                .read_publication_journal()
+                .unwrap()
+                .unwrap()
+                .stage(),
+            PublicationJournalStage::WorktreeReconciled
         );
     }
 
