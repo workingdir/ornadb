@@ -49,6 +49,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Bound,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 pub struct SemanticAdapter {
@@ -886,6 +887,7 @@ pub struct TransactionalEvaluator {
     entry: String,
     limits: EvaluatorLimits,
     database: TransactionDatabase,
+    activation_time: Option<SystemTime>,
 }
 
 impl TransactionalEvaluator {
@@ -895,7 +897,13 @@ impl TransactionalEvaluator {
             entry: entry.into(),
             limits,
             database: TransactionDatabase::default(),
+            activation_time: None,
         }
+    }
+
+    fn with_activation_time(mut self, activation_time: SystemTime) -> Self {
+        self.activation_time = Some(activation_time);
+        self
     }
 
     /// Returns a committed row by its canonical encoded key.
@@ -1076,6 +1084,7 @@ impl TransactionalEvaluator {
                 mutations: &mut mutations,
                 next_mutation: 0,
                 limits,
+                activation_time: self.activation_time,
             };
             let mut budget = StepBudget::new(limits.max_steps);
             let result = invoke_named_with_effects_and_budget(
@@ -1129,6 +1138,8 @@ impl TransactionalEvaluator {
 pub struct DurableTransactionalEvaluator {
     entry: String,
     limits: EvaluatorLimits,
+    #[cfg(test)]
+    activation_time_observer: Option<std::sync::Arc<std::sync::Mutex<Option<SystemTime>>>>,
 }
 
 /// The outcome of attempting to continue an already-admitted table request.
@@ -1156,7 +1167,18 @@ impl DurableTransactionalEvaluator {
         Self {
             entry: entry.into(),
             limits,
+            #[cfg(test)]
+            activation_time_observer: None,
         }
+    }
+
+    fn record_activation_time(&self, activation_time: SystemTime) {
+        #[cfg(test)]
+        if let Some(observer) = &self.activation_time_observer {
+            *observer.lock().expect("activation observer lock") = Some(activation_time);
+        }
+        #[cfg(not(test))]
+        let _ = activation_time;
     }
 
     /// Executes one admitted source activation against durable committed rows.
@@ -1193,7 +1215,9 @@ impl DurableTransactionalEvaluator {
         let tables = key_fields.keys().map(String::as_str).collect::<Vec<_>>();
         let snapshot = state.begin_table_activation(&tables).await?;
         let context = snapshot.context();
-        let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits);
+        self.record_activation_time(context.activation_time());
+        let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits)
+            .with_activation_time(context.activation_time());
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = Value::decode(row).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -1373,7 +1397,9 @@ impl DurableTransactionalEvaluator {
             }
         };
         let context = snapshot.context();
-        let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits);
+        self.record_activation_time(context.activation_time());
+        let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits)
+            .with_activation_time(context.activation_time());
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = match Value::decode(row) {
@@ -1538,7 +1564,8 @@ impl DurableTransactionalEvaluator {
                 current: Box::new(snapshot.context().capture().clone()),
             });
         }
-        let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits);
+        let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits)
+            .with_activation_time(continuation.context().activation_time());
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = match Value::decode(row) {
@@ -2014,7 +2041,9 @@ impl DurableTransactionalEvaluator {
         let tables = key_fields.keys().map(String::as_str).collect::<Vec<_>>();
         let snapshot = state.begin_table_activation(&tables).await?;
         let context = snapshot.context();
-        let mut evaluator = TransactionalEvaluator::new(entry, self.limits);
+        self.record_activation_time(context.activation_time());
+        let mut evaluator = TransactionalEvaluator::new(entry, self.limits)
+            .with_activation_time(context.activation_time());
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = Value::decode(row).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -3421,6 +3450,7 @@ struct TableEffectHandler<'activation, 'runtime> {
     mutations: &'activation mut Vec<TableMutation>,
     next_mutation: u64,
     limits: EvaluatorLimits,
+    activation_time: Option<SystemTime>,
 }
 
 impl EffectHandler for TableEffectHandler<'_, '_> {
@@ -3515,6 +3545,15 @@ impl TableEffectHandler<'_, '_> {
         arguments: &[Value],
         mut budget: Option<&mut StepBudget>,
     ) -> Result<Option<Value>, EvaluationError> {
+        if matches!(callee, Expr::Name { text, .. } if text == "now") {
+            if !arguments.is_empty() {
+                return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+            }
+            let Some(activation_time) = self.activation_time else {
+                return Ok(None);
+            };
+            return Ok(Some(canonical_instant(activation_time)?));
+        }
         if matches!(
             callee,
             Expr::Field {
@@ -5940,6 +5979,32 @@ fn canonical_bool(value: bool) -> Result<Value, EvaluationError> {
     Value::new(OvbRaw::Bool(value)).map_err(|_| transaction_error("ORNA-EVAL-MODULE-ASSERT"))
 }
 
+fn canonical_instant(value: SystemTime) -> Result<Value, EvaluationError> {
+    let (seconds, nanosecond) = match value.duration_since(UNIX_EPOCH) {
+        Ok(duration) => (i128::from(duration.as_secs()), duration.subsec_nanos()),
+        Err(error) => {
+            let duration = error.duration();
+            if duration.subsec_nanos() == 0 {
+                (-(i128::from(duration.as_secs())), 0)
+            } else {
+                (
+                    -(i128::from(duration.as_secs())) - 1,
+                    1_000_000_000 - duration.subsec_nanos(),
+                )
+            }
+        }
+    };
+    let seconds = i64::try_from(seconds).map_err(|_| transaction_error("ORNA-EVAL-TABLE-VALUE"))?;
+    Value::new(OvbRaw::Tag(
+        60002,
+        Box::new(OvbRaw::Array(vec![
+            OvbRaw::Int(seconds.into()),
+            OvbRaw::Int(nanosecond.into()),
+        ])),
+    ))
+    .map_err(|_| transaction_error("ORNA-EVAL-TABLE-VALUE"))
+}
+
 #[derive(Clone, Copy)]
 enum ModuleAssertionKind {
     Every,
@@ -6926,7 +6991,11 @@ mod durable_tests {
     };
     use orna_stream_v1::{AssertionOwnerKind, DiagnosticClass, DiagnosticCode, SafeDiagnostic};
     use orna_syntax_v1::{Expr, parse_expression, parse_module};
-    use std::{path::Path, process::Command};
+    use std::{
+        path::Path,
+        process::Command,
+        sync::{Arc, Mutex},
+    };
     use tempfile::TempDir;
 
     fn git(path: &Path, args: &[&str]) {
@@ -6947,6 +7016,45 @@ mod durable_tests {
             parse_as: "module_unit".into(),
             source: format!("pub table Note(id: Int) {{ text: Str, }} fn main() {{ {body} }}"),
         }
+    }
+
+    fn instant_source(body: &str) -> SourceUnit {
+        SourceUnit {
+            fixture_id: "durable-txn-instant".into(),
+            source_id: "durable-txn-instant.orna".into(),
+            parse_as: "module_unit".into(),
+            source: format!(
+                "pub table Note(id: Int) {{ first: Instant, second: Instant, text: Str, }} fn main() {{ {body} }}"
+            ),
+        }
+    }
+
+    fn shadowed_now_source() -> SourceUnit {
+        SourceUnit {
+            fixture_id: "durable-txn-shadowed-now".into(),
+            source_id: "durable-txn-shadowed-now.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "pub table Note(id: Int) { value: Int, } fn now() = 7; fn main() { Note.insert({ id: 1, value: now() }); }".into(),
+        }
+    }
+
+    fn assert_repeated_now(row: &Value, expected: &Value) {
+        let OvbRaw::Map(fields) = row.raw() else {
+            panic!("table row must be a canonical map")
+        };
+        let first = fields
+            .iter()
+            .find(|(key, _)| key == &OvbRaw::Text("first".into()))
+            .map(|(_, value)| value)
+            .expect("first timestamp");
+        let second = fields
+            .iter()
+            .find(|(key, _)| key == &OvbRaw::Text("second".into()))
+            .map(|(_, value)| value)
+            .expect("second timestamp");
+        assert_eq!(first, second);
+        assert!(matches!(first, OvbRaw::Tag(60002, _)));
+        assert_eq!(first, expected.raw());
     }
 
     struct FailAt(FaultPoint);
@@ -7125,6 +7233,100 @@ mod durable_tests {
     }
 
     #[tokio::test]
+    async fn ordinary_activation_reuses_one_captured_now_for_repeated_writes() {
+        let temp = TempDir::new().expect("temporary repository");
+        git(temp.path(), &["init"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "user.name", "test"]);
+        let repository = Repository::discover(temp.path()).expect("repository");
+        let identity = RuntimeIdentity {
+            database_id: [121; 16],
+            repository_id: [122; 16],
+        };
+        let observed = Arc::new(Mutex::new(None));
+        let mut evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+        evaluator.activation_time_observer = Some(observed.clone());
+
+        assert!(matches!(
+            evaluator
+                .execute_source(
+                    &repository,
+                    identity,
+                    [123; 16],
+                    [124; 32],
+                    &instant_source(
+                        r#"Note.insert({ id: 1, first: now(), second: now(), text: "captured" });"#
+                    ),
+                )
+                .await,
+            Ok(StageOutcome::Passed)
+        ));
+        let state = RuntimeState::open(&repository, identity, [124; 32])
+            .await
+            .expect("reopened runtime");
+        let row = state
+            .committed_table_row("Note", &Value::int(1.into()).encode().unwrap())
+            .await
+            .unwrap()
+            .map(|bytes| Value::decode(&bytes).expect("canonical row"))
+            .expect("committed row");
+        let activation_time = observed
+            .lock()
+            .expect("activation observer lock")
+            .expect("captured activation time");
+        let expected = super::canonical_instant(activation_time).expect("canonical instant");
+        assert_repeated_now(&row, &expected);
+    }
+
+    #[tokio::test]
+    async fn semantically_admitted_user_now_shadows_activation_intrinsic() {
+        let temp = TempDir::new().expect("temporary repository");
+        git(temp.path(), &["init"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "user.name", "test"]);
+        let repository = Repository::discover(temp.path()).expect("repository");
+        let identity = RuntimeIdentity {
+            database_id: [125; 16],
+            repository_id: [126; 16],
+        };
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+
+        assert!(matches!(
+            evaluator
+                .execute_source(
+                    &repository,
+                    identity,
+                    [127; 16],
+                    [128; 32],
+                    &shadowed_now_source(),
+                )
+                .await,
+            Ok(StageOutcome::Passed)
+        ));
+        let state = RuntimeState::open(&repository, identity, [128; 32])
+            .await
+            .expect("reopened runtime");
+        let row = state
+            .committed_table_row("Note", &Value::int(1.into()).encode().unwrap())
+            .await
+            .unwrap()
+            .map(|bytes| Value::decode(&bytes).expect("canonical row"))
+            .expect("committed row");
+        assert!(matches!(
+            row.raw(),
+            OvbRaw::Map(fields)
+                if fields.iter().any(|(key, value)| key == &OvbRaw::Text("value".into())
+                    && value == &OvbRaw::Int(7.into()))
+        ));
+    }
+
+    #[tokio::test]
     async fn request_source_activation_commits_row_and_terminal_together() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
@@ -7143,7 +7345,9 @@ mod durable_tests {
             request_id: [64; 16],
         };
         let fingerprint = [65; 32];
-        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+        let observed = Arc::new(Mutex::new(None));
+        let mut evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+        evaluator.activation_time_observer = Some(observed.clone());
 
         assert!(matches!(
             evaluator
@@ -7154,7 +7358,9 @@ mod durable_tests {
                     [67; 32],
                     request,
                     fingerprint,
-                    &source(r#"Note.insert({ id: 7, text: "request" });"#),
+                    &instant_source(
+                        r#"Note.insert({ id: 7, first: now(), second: now(), text: "request" });"#
+                    ),
                 )
                 .await,
             Ok(StageOutcome::Passed)
@@ -7189,6 +7395,18 @@ mod durable_tests {
                 .unwrap()
                 .is_some()
         );
+        let row = state
+            .committed_table_row("Note", &Value::int(7.into()).encode().unwrap())
+            .await
+            .unwrap()
+            .map(|bytes| Value::decode(&bytes).expect("canonical row"))
+            .expect("request row");
+        let activation_time = observed
+            .lock()
+            .expect("activation observer lock")
+            .expect("captured activation time");
+        let expected = super::canonical_instant(activation_time).expect("canonical instant");
+        assert_repeated_now(&row, &expected);
         drop(state);
 
         assert!(matches!(
@@ -7260,7 +7478,9 @@ mod durable_tests {
             .execute_running_table_request_with_success_terminal(
                 &state,
                 continuation.clone(),
-                &source(r#"Note.insert({ id: 17, text: "continued" });"#),
+                &instant_source(
+                    r#"Note.insert({ id: 17, first: now(), second: now(), text: "continued" });"#,
+                ),
                 retained,
             )
             .await;
@@ -7286,6 +7506,24 @@ mod durable_tests {
                 .expect("committed row")
                 .is_some()
         );
+        let row = state
+            .committed_table_row("Note", &key)
+            .await
+            .expect("committed row")
+            .map(|bytes| Value::decode(&bytes).expect("canonical row"))
+            .expect("continuation row");
+        let expected = super::canonical_instant(continuation.context().activation_time())
+            .expect("continuation canonical instant");
+        assert_repeated_now(&row, &expected);
+        let OvbRaw::Map(fields) = row.raw() else {
+            panic!("continuation row must be a canonical map")
+        };
+        let first = fields
+            .iter()
+            .find(|(key, _)| key == &OvbRaw::Text("first".into()))
+            .map(|(_, value)| value)
+            .expect("continuation timestamp");
+        assert_eq!(first, expected.raw());
 
         // A completed capability is rejected before source evaluation, so a
         // later source cannot create a second row under the retained request.
@@ -7858,6 +8096,9 @@ mod durable_tests {
         {
             Ok(StageOutcome::Passed) => {}
             Ok(StageOutcome::Failed(diagnostic)) => panic!("seed failed: {}", diagnostic.code()),
+            Ok(StageOutcome::Cancelled(diagnostic)) => {
+                panic!("seed cancelled: {}", diagnostic.code())
+            }
             Ok(StageOutcome::Skipped { reason }) => panic!("seed skipped: {reason}"),
             Err(error) => panic!("seed runtime error: {error}"),
         }
@@ -7918,6 +8159,9 @@ mod durable_tests {
                 Ok(StageOutcome::Passed) => {}
                 Ok(StageOutcome::Failed(diagnostic)) => {
                     panic!("{entry} failed: {}", diagnostic.code())
+                }
+                Ok(StageOutcome::Cancelled(diagnostic)) => {
+                    panic!("{entry} cancelled: {}", diagnostic.code())
                 }
                 Ok(StageOutcome::Skipped { reason }) => panic!("{entry} skipped: {reason}"),
                 Err(error) => panic!("{entry} runtime error: {error}"),
