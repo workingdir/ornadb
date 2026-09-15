@@ -23,9 +23,10 @@ use orna_runtime_v1::{
     FaultInjector, ListStreamSource, NoFault, RequestIdentity, RequestStatus,
     RunObservationRegistration, RunningTableRequestContinuation, RuntimeError, RuntimeIdentity,
     RuntimeState, StreamHandler, StreamHandlerResult, StreamItem, StreamObservationRegistration,
-    StreamRunOutcome, StreamTableCandidateValidator, StreamValidatedTableMutationBatch,
-    TableActivationCandidateValidator, TableActivationError, TableMutation, TerminalOutcome,
-    ValidatedTableActivationCommit, ValidatedTableRequestActivationCommit, WriterLease,
+    StreamRunControl, StreamRunOutcome, StreamTableCandidateValidator,
+    StreamValidatedTableMutationBatch, TableActivationCandidateValidator, TableActivationError,
+    TableMutation, TerminalOutcome, ValidatedTableActivationCommit,
+    ValidatedTableRequestActivationCommit, WriterLease,
 };
 use orna_semantic_v1::{
     AssertionOwner, AssertionPlan, Catalogue, EffectSummary, ModuleInput, Namespace,
@@ -1709,6 +1710,34 @@ impl DurableTransactionalEvaluator {
         project: &ProjectUnit,
         root_entry: &str,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+        self.execute_project_stream_with_control(
+            repository,
+            identity,
+            owner_id,
+            initial_digest,
+            project,
+            root_entry,
+            &orna_runtime_v1::NeverCancelled,
+        )
+        .await
+    }
+
+    /// Runs the finite-list project stream with a caller-owned cancellation
+    /// control. Existing callers should use [`Self::execute_project_stream`]
+    /// unless they need to coordinate cancellation with the source boundary.
+    pub async fn execute_project_stream_with_control<C>(
+        &self,
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        owner_id: [u8; 16],
+        initial_digest: [u8; 32],
+        project: &ProjectUnit,
+        root_entry: &str,
+        control: &C,
+    ) -> Result<StageOutcome<Diagnostic>, RuntimeError>
+    where
+        C: StreamRunControl,
+    {
         if !root_entry.contains('.') {
             return Ok(StageOutcome::Skipped {
                 reason: "project stream roots must be namespace-qualified".into(),
@@ -1734,6 +1763,7 @@ impl DurableTransactionalEvaluator {
             fingerprint,
             bridge,
             key,
+            control,
         )
         .await
     }
@@ -1755,6 +1785,37 @@ impl DurableTransactionalEvaluator {
         project: &ProjectUnit,
         root_entry: &str,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+        self.execute_project_stream_request_with_control(
+            repository,
+            identity,
+            owner_id,
+            initial_digest,
+            request,
+            fingerprint,
+            project,
+            root_entry,
+            &orna_runtime_v1::NeverCancelled,
+        )
+        .await
+    }
+
+    /// Executes an admitted finite-list project stream under a caller-owned
+    /// durable request identity, fingerprint, and cancellation control.
+    pub async fn execute_project_stream_request_with_control<C>(
+        &self,
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        owner_id: [u8; 16],
+        initial_digest: [u8; 32],
+        request: RequestIdentity,
+        fingerprint: [u8; 32],
+        project: &ProjectUnit,
+        root_entry: &str,
+        control: &C,
+    ) -> Result<StageOutcome<Diagnostic>, RuntimeError>
+    where
+        C: StreamRunControl,
+    {
         // Replay and fingerprint validation belong to the request boundary,
         // before source admission. A caller retrying a terminal request must
         // not need the current project source to remain admissible.
@@ -1786,11 +1847,12 @@ impl DurableTransactionalEvaluator {
             fingerprint,
             bridge,
             key,
+            control,
         )
         .await
     }
 
-    async fn execute_admitted_project_stream(
+    async fn execute_admitted_project_stream<C>(
         &self,
         repository: &Repository,
         identity: RuntimeIdentity,
@@ -1800,7 +1862,11 @@ impl DurableTransactionalEvaluator {
         fingerprint: [u8; 32],
         mut bridge: ListStreamBridge,
         key: CheckpointKey,
-    ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+        control: &C,
+    ) -> Result<StageOutcome<Diagnostic>, RuntimeError>
+    where
+        C: StreamRunControl,
+    {
         let state = RuntimeState::open(repository, identity, initial_digest).await?;
         if let Some(status) = state.request_status(request, fingerprint).await? {
             return replay_or_fence_request(status);
@@ -1855,13 +1921,7 @@ impl DurableTransactionalEvaluator {
         let mut source = ListStreamSource::new(key.clone(), std::mem::take(&mut bridge.payloads));
         let mut handler = ListTableHandler::new(bridge, self.limits);
         match state
-            .run_stream(
-                writer,
-                &key,
-                &mut source,
-                &mut handler,
-                &orna_runtime_v1::NeverCancelled,
-            )
+            .run_stream(writer, &key, &mut source, &mut handler, control)
             .await
         {
             Ok(StreamRunOutcome::Exhausted { .. }) => {
