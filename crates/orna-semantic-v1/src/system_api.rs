@@ -22,6 +22,7 @@ pub(crate) struct SystemApi {
     grouped_relations: BTreeMap<String, String>,
     removed: BTreeMap<String, RemovedName>,
     enums: BTreeMap<String, BTreeSet<String>>,
+    failure_codes: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -451,6 +452,7 @@ impl SystemApi {
             grouped_relations,
             removed,
             enums,
+            failure_codes,
         })
     }
 
@@ -466,6 +468,15 @@ impl SystemApi {
 
     pub(crate) fn function(&self, name: &str) -> Option<&[FunctionDescriptor]> {
         self.functions.get(name).map(Vec::as_slice)
+    }
+
+    /// The portable failure-code vocabulary declared by `api/sys.json`.
+    ///
+    /// Retaining this descriptor metadata permits later diagnostic validation;
+    /// it does not make any failure operationally implemented.
+    #[allow(dead_code)]
+    pub(crate) fn failure_codes(&self) -> &BTreeSet<String> {
+        &self.failure_codes
     }
 
     pub(crate) fn relation(&self, path: &str) -> Option<&RelationDescriptor> {
@@ -1880,6 +1891,12 @@ mod tests {
             raw.functions.len()
         );
         assert_eq!(api.inventory.failure_codes, raw.failure_codes.len());
+        assert_eq!(
+            api.failure_codes(),
+            &raw.failure_codes.iter().cloned().collect::<BTreeSet<_>>(),
+        );
+        assert!(api.failure_codes().contains("sys.admin.assertion_failed"));
+        assert!(!api.failure_codes().contains("sys.failure.not_declared"));
         assert_eq!(
             api.singletons.keys().cloned().collect::<BTreeSet<_>>(),
             raw.singletons
