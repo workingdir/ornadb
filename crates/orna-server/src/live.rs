@@ -35,7 +35,7 @@ use std::{
     rc::Rc,
     task::{Context, Poll},
     time::Duration,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 /// Stable failures from the executable-owned live boundary.
@@ -556,6 +556,7 @@ impl LiveOnceHost {
                 deletion,
                 application_workers,
                 application_work,
+                admitted_upgrades: BTreeMap::new(),
                 delivering_upgrades: BTreeMap::new(),
             },
             Rc::clone(&registry),
@@ -816,10 +817,25 @@ struct ConcurrentHostState {
     deletion: HostDeletion,
     application_workers: ApplicationWorkerRegistry,
     application_work: LiveApplicationWorkSupervisor,
+    // A successful Begin is actor-owned before the worker enters the
+    // delivery barrier. Retain that exact reservation so worker exit can
+    // serialize an abort even when no provisional 101 was attempted.
+    admitted_upgrades: BTreeMap<u64, AdmittedUpgrade>,
     // This is the executable half of the handshake linearization barrier.
     // It pairs the worker that may write a provisional 101 with the exact
     // transport reservation until commit or serialized abort.
-    delivering_upgrades: BTreeMap<u64, orna_live_v1::WebSocketUpgrade>,
+    delivering_upgrades: BTreeMap<u64, DeliveryStart>,
+}
+
+struct DeliveryStart {
+    upgrade: orna_live_v1::WebSocketUpgrade,
+    accepted_wall_start: u64,
+    accepted_instant: Instant,
+}
+
+struct AdmittedUpgrade {
+    upgrade: orna_live_v1::WebSocketUpgrade,
+    begun_wall_start: u64,
 }
 
 fn schedule_application(
@@ -861,6 +877,7 @@ enum ActorCommand {
     Commit {
         upgrade: orna_live_v1::WebSocketUpgrade,
         worker_id: u64,
+        delivered_at_instant: Instant,
         reply: futures::channel::oneshot::Sender<
             Result<(orna_live_v1::WireResponse, RetirementGates), ()>,
         >,
@@ -959,7 +976,9 @@ async fn run_host_actor(
                 let overdue = state
                     .delivering_upgrades
                     .iter()
-                    .filter_map(|(worker, upgrade)| (now >= upgrade.deadline()).then_some(*worker))
+                    .filter_map(|(worker, delivery)| {
+                        (now >= delivery.upgrade.deadline()).then_some(*worker)
+                    })
                     .collect::<Vec<_>>();
                 for worker in overdue {
                     registry.borrow_mut().cancel(worker);
@@ -1095,19 +1114,29 @@ async fn run_host_actor(
                 // authoritative for active, pending, and retiring attachment
                 // state. A duplicate registry key must therefore fail closed
                 // without replacing its incumbent worker association.
-                if !registry.borrow_mut().attach(attachment, worker_id) {
+                if state.admitted_upgrades.contains_key(&worker_id)
+                    || !registry.borrow_mut().attach(attachment, worker_id)
+                {
                     let _ = reply.send(Err(temporary_unavailable_response()));
                     continue;
                 }
-                let result = state.transport.begin_websocket_upgrade(
-                    &request,
-                    attachment,
-                    system_milliseconds(),
-                );
+                let begun_wall_start = system_milliseconds();
+                let result =
+                    state
+                        .transport
+                        .begin_websocket_upgrade(&request, attachment, begun_wall_start);
                 if result.is_err() {
                     registry
                         .borrow_mut()
                         .unregister_candidate(attachment, worker_id);
+                } else if let Ok(upgrade) = &result {
+                    state.admitted_upgrades.insert(
+                        worker_id,
+                        AdmittedUpgrade {
+                            upgrade: upgrade.clone(),
+                            begun_wall_start,
+                        },
+                    );
                 }
                 let Ok(retirement) =
                     capture_retirement_gates(&registry, state.transport.take_retired_attachments())
@@ -1126,77 +1155,91 @@ async fn run_host_actor(
                 worker_id,
                 reply,
             } => {
-                let accepted = !state.delivering_upgrades.contains_key(&worker_id)
+                let accepted_wall_start = system_milliseconds();
+                let accepted = state
+                    .admitted_upgrades
+                    .get(&worker_id)
+                    .is_some_and(|admitted| {
+                        admitted.upgrade == upgrade
+                            && accepted_wall_start >= admitted.begun_wall_start
+                    })
+                    && !state.delivering_upgrades.contains_key(&worker_id)
                     && state
                         .transport
-                        .begin_websocket_upgrade_delivery(&upgrade, system_milliseconds());
+                        .begin_websocket_upgrade_delivery(&upgrade, accepted_wall_start);
                 if accepted {
-                    state.delivering_upgrades.insert(worker_id, upgrade);
+                    state.delivering_upgrades.insert(
+                        worker_id,
+                        DeliveryStart {
+                            upgrade,
+                            accepted_wall_start,
+                            accepted_instant: Instant::now(),
+                        },
+                    );
                 }
                 let _ = reply.send(accepted.then_some(()).ok_or(()));
             }
             ActorCommand::Commit {
                 upgrade,
                 worker_id,
+                delivered_at_instant,
                 reply,
             } => {
-                if state.delivering_upgrades.get(&worker_id) != Some(&upgrade) {
+                if !state
+                    .admitted_upgrades
+                    .get(&worker_id)
+                    .is_some_and(|admitted| admitted.upgrade == upgrade)
+                    || state
+                        .delivering_upgrades
+                        .get(&worker_id)
+                        .is_none_or(|delivery| delivery.upgrade != upgrade)
+                {
                     let _ = reply.send(Err(()));
                     continue;
                 }
-                // The delivery barrier keeps a post-flush reservation from
-                // being replaced, expired, or deleted. A deadline/owner
-                // cancellation can still revoke the worker's commit right
-                // while its Commit command is queued. Consume that exact
-                // barrier through the ordinary abort-and-retirement path
-                // before reporting failure; merely rejecting the command
-                // would leave the candidate pending until a later worker-exit
-                // turn.
-                if !registry.borrow().may_commit(worker_id) {
-                    state.delivering_upgrades.remove(&worker_id);
-                    let _ = state.transport.finish_websocket_upgrade_delivery(&upgrade);
+                let delivery = state
+                    .delivering_upgrades
+                    .get(&worker_id)
+                    .expect("delivery identity was checked above");
+                // The worker captured the monotonic timestamp immediately
+                // after the successful write and flush. The actor samples
+                // the current wall and monotonic times here, so a stale
+                // worker wall timestamp cannot bypass either deadline.
+                // Cancellation observed after that delivery is intentionally
+                // ignored at this commit point; pre-flush cancellation still
+                // returns through Abort.
+                let begun_wall_start = state
+                    .admitted_upgrades
+                    .get(&worker_id)
+                    .expect("admission identity was checked above")
+                    .begun_wall_start;
+                let monotonic_window = delivery_window(
+                    begun_wall_start,
+                    delivery.accepted_wall_start,
+                    delivery.upgrade.deadline(),
+                );
+                let committed_at = system_milliseconds();
+                let committed_at_instant = Instant::now();
+                let delivered_within_window = monotonic_window.is_some_and(|window| {
+                    commit_within_delivery_window(
+                        committed_at,
+                        upgrade.deadline(),
+                        delivery.accepted_instant,
+                        delivered_at_instant,
+                        committed_at_instant,
+                        window,
+                    )
+                });
+                let result = if delivered_within_window {
+                    state
+                        .transport
+                        .commit_websocket_upgrade(upgrade.clone(), committed_at)
+                        .await
+                } else {
                     state.transport.abort_websocket_upgrade(&upgrade);
-                    let Ok(retirement) = capture_retirement_gates(
-                        &registry,
-                        state.transport.take_retired_attachments(),
-                    ) else {
-                        let _ = reply.send(Err(()));
-                        return;
-                    };
-                    if retirement_gates.unbounded_send(retirement).is_err() {
-                        let _ = reply.send(Err(()));
-                        return;
-                    }
-                    let _ = reply.send(Err(()));
-                    continue;
-                }
-                let now = system_milliseconds();
-                // The timer is only a backstop. A Commit is itself a
-                // linearization point, so it must fence an expired delivery
-                // even when it was queued just before the next ticker turn.
-                if upgrade.is_expired(now) {
-                    registry.borrow_mut().cancel(worker_id);
-                    state.delivering_upgrades.remove(&worker_id);
-                    let _ = state.transport.finish_websocket_upgrade_delivery(&upgrade);
-                    state.transport.abort_websocket_upgrade(&upgrade);
-                    let Ok(retirement) = capture_retirement_gates(
-                        &registry,
-                        state.transport.take_retired_attachments(),
-                    ) else {
-                        let _ = reply.send(Err(()));
-                        return;
-                    };
-                    if retirement_gates.unbounded_send(retirement).is_err() {
-                        let _ = reply.send(Err(()));
-                        return;
-                    }
-                    let _ = reply.send(Err(()));
-                    continue;
-                }
-                let result = state
-                    .transport
-                    .commit_websocket_upgrade(upgrade.clone(), now)
-                    .await;
+                    Err(orna_live_v1::Error::Closed)
+                };
+                state.admitted_upgrades.remove(&worker_id);
                 state.delivering_upgrades.remove(&worker_id);
                 let _ = state.transport.finish_websocket_upgrade_delivery(&upgrade);
                 let Ok(retirement) =
@@ -1225,9 +1268,27 @@ async fn run_host_actor(
                 worker_id,
                 reply,
             } => {
-                if state.delivering_upgrades.get(&worker_id) == Some(&upgrade) {
-                    state.delivering_upgrades.remove(&worker_id);
-                    let _ = state.transport.finish_websocket_upgrade_delivery(&upgrade);
+                if !state
+                    .admitted_upgrades
+                    .get(&worker_id)
+                    .is_some_and(|admitted| admitted.upgrade == upgrade)
+                {
+                    let _ = reply.send(());
+                    continue;
+                }
+                state.admitted_upgrades.remove(&worker_id);
+                if state
+                    .delivering_upgrades
+                    .get(&worker_id)
+                    .is_some_and(|delivery| delivery.upgrade == upgrade)
+                {
+                    let delivery = state
+                        .delivering_upgrades
+                        .remove(&worker_id)
+                        .expect("delivery identity was checked above");
+                    let _ = state
+                        .transport
+                        .finish_websocket_upgrade_delivery(&delivery.upgrade);
                 }
                 state.transport.abort_websocket_upgrade(&upgrade);
                 let Ok(retirement) =
@@ -1241,8 +1302,17 @@ async fn run_host_actor(
                 let _ = reply.send(());
             }
             ActorCommand::WorkerExited { worker_id, reply } => {
-                if let Some(upgrade) = state.delivering_upgrades.remove(&worker_id) {
-                    let _ = state.transport.finish_websocket_upgrade_delivery(&upgrade);
+                let admitted = state.admitted_upgrades.remove(&worker_id);
+                let delivery = state.delivering_upgrades.remove(&worker_id);
+                if let Some(delivery) = &delivery {
+                    let _ = state
+                        .transport
+                        .finish_websocket_upgrade_delivery(&delivery.upgrade);
+                }
+                if let Some(upgrade) = admitted
+                    .map(|admitted| admitted.upgrade)
+                    .or_else(|| delivery.map(|d| d.upgrade))
+                {
                     state.transport.abort_websocket_upgrade(&upgrade);
                     let Ok(retirement) = capture_retirement_gates(
                         &registry,
@@ -1734,16 +1804,13 @@ mod shutdown_tests {
     }
 
     #[test]
-    fn deadline_cancelled_worker_cannot_commit_and_preserves_the_join_gate() {
+    fn deadline_cancellation_preserves_the_join_gate() {
         let mut registry = WorkerRegistry::default();
         let (worker_id, cancellation) = registry.register();
         let attachment = [17; 16];
         assert!(registry.attach(attachment, worker_id));
-        assert!(registry.may_commit(worker_id));
-
         registry.cancel(worker_id);
         assert_eq!(cancellation.now_or_never(), Some(Ok(())));
-        assert!(!registry.may_commit(worker_id));
         assert!(registry.take_retired(vec![attachment]).is_ok());
     }
 
@@ -2127,15 +2194,6 @@ impl WorkerRegistry {
             let _ = cancellation.send(());
         }
     }
-
-    /// A consumed cancellation sender is the actor's fencing record: a
-    /// deadline-cancelled worker may clean up its reservation, but cannot
-    /// commit it from an already queued command.
-    fn may_commit(&self, id: u64) -> bool {
-        self.workers
-            .get(&id)
-            .is_some_and(|slot| slot.cancellation.is_some())
-    }
 }
 
 /// Records a worker's actual JoinSet result. This is deliberately the sole
@@ -2475,6 +2533,14 @@ async fn serve_websocket_worker<C>(
         actor_abort(&actor, prepared, worker_id).await;
         return;
     }
+    #[cfg(test)]
+    if !matches!(
+        await_delivery_test_gate(worker_id, cancellation).await,
+        Ok(DeliveryTestGateOutcome::Released)
+    ) {
+        actor_abort(&actor, prepared, worker_id).await;
+        return;
+    }
     if deliver_websocket_upgrade_response(&mut writer, &encoded, cancellation)
         .await
         .is_err()
@@ -2482,6 +2548,7 @@ async fn serve_websocket_worker<C>(
         actor_abort(&actor, prepared, worker_id).await;
         return;
     }
+    let delivered_at_instant = Instant::now();
     if response.status != 101 {
         actor_abort(&actor, prepared, worker_id).await;
         return;
@@ -2489,7 +2556,7 @@ async fn serve_websocket_worker<C>(
     // Commit deliberately cannot be interrupted. Once the 101 response has
     // crossed the delivery boundary, abandoning its actor turn could leave an
     // attachment without a socket owner.
-    let retirement = match actor_commit(&actor, prepared, worker_id).await {
+    let retirement = match actor_commit(&actor, prepared, worker_id, delivered_at_instant).await {
         Ok(retirement) => retirement,
         Err(()) => {
             registry.borrow_mut().detach(attachment, worker_id);
@@ -2541,6 +2608,117 @@ async fn serve_websocket_worker<C>(
     close_worker_attachment(&actor, &registry, attachment, worker_id, cancellation).await;
 }
 
+#[cfg(test)]
+struct DeliveryTestGate {
+    worker_id: u64,
+    entered: futures::channel::oneshot::Sender<()>,
+    release: futures::channel::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+enum DeliveryTestGateOutcome {
+    Released,
+    Cancelled,
+}
+
+#[cfg(test)]
+thread_local! {
+    static DELIVERY_TEST_GATE: RefCell<Option<DeliveryTestGate>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct DeliveryTestGateGuard {
+    worker_id: u64,
+    release: Option<futures::channel::oneshot::Sender<()>>,
+}
+
+#[cfg(test)]
+impl DeliveryTestGateGuard {
+    fn install(worker_id: u64) -> (Self, futures::channel::oneshot::Receiver<()>) {
+        let (entered, entered_receiver) = futures::channel::oneshot::channel();
+        let (release, release_receiver) = futures::channel::oneshot::channel();
+        DELIVERY_TEST_GATE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(
+                slot.is_none(),
+                "delivery test gate must not already be installed"
+            );
+            *slot = Some(DeliveryTestGate {
+                worker_id,
+                entered,
+                release: release_receiver,
+            });
+        });
+        (
+            Self {
+                worker_id,
+                release: Some(release),
+            },
+            entered_receiver,
+        )
+    }
+
+    fn release(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for DeliveryTestGateGuard {
+    fn drop(&mut self) {
+        self.release();
+        DELIVERY_TEST_GATE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot
+                .as_ref()
+                .is_some_and(|gate| gate.worker_id == self.worker_id)
+            {
+                let _ = slot.take();
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+async fn await_delivery_test_gate<C>(
+    worker_id: u64,
+    cancellation: &mut C,
+) -> Result<DeliveryTestGateOutcome, ()>
+where
+    C: Future<Output = ()> + Unpin,
+{
+    let gate = DELIVERY_TEST_GATE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        slot.as_ref()
+            .is_some_and(|gate| gate.worker_id == worker_id)
+            .then(|| slot.take())
+            .flatten()
+    });
+    if let Some(gate) = gate {
+        let _ = gate.entered.send(());
+        let mut release = gate.release;
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            futures::future::poll_fn(|context| {
+                if Pin::new(&mut *cancellation).poll(context).is_ready() {
+                    return Poll::Ready(Ok(DeliveryTestGateOutcome::Cancelled));
+                }
+                match Pin::new(&mut release).poll(context) {
+                    Poll::Ready(Ok(())) => Poll::Ready(Ok(DeliveryTestGateOutcome::Released)),
+                    Poll::Ready(Err(_)) => Poll::Ready(Err(())),
+                    Poll::Pending => Poll::Pending,
+                }
+            }),
+        )
+        .await
+        .map_err(|_| ())?
+    } else {
+        Ok(DeliveryTestGateOutcome::Released)
+    }
+}
+
 async fn actor_begin(
     actor: &futures::channel::mpsc::UnboundedSender<ActorCommand>,
     request: orna_live_v1::WireRequest,
@@ -2563,12 +2741,14 @@ async fn actor_commit(
     actor: &futures::channel::mpsc::UnboundedSender<ActorCommand>,
     upgrade: orna_live_v1::WebSocketUpgrade,
     worker_id: u64,
+    delivered_at_instant: Instant,
 ) -> Result<RetirementGates, ()> {
     let (sender, receiver) = futures::channel::oneshot::channel();
     actor
         .unbounded_send(ActorCommand::Commit {
             upgrade,
             worker_id,
+            delivered_at_instant,
             reply: sender,
         })
         .map_err(|_| ())?;
@@ -3103,6 +3283,36 @@ fn system_milliseconds() -> u64 {
         .map_or(0, duration_milliseconds)
 }
 
+fn delivery_window(
+    begun_wall_start: u64,
+    accepted_wall_start: u64,
+    deadline: u64,
+) -> Option<Duration> {
+    (accepted_wall_start >= begun_wall_start)
+        .then(|| deadline.checked_sub(accepted_wall_start))
+        .flatten()
+        .map(Duration::from_millis)
+}
+
+fn commit_within_delivery_window(
+    committed_at: u64,
+    deadline: u64,
+    accepted_instant: Instant,
+    delivered_at_instant: Instant,
+    committed_at_instant: Instant,
+    window: Duration,
+) -> bool {
+    committed_at_instant
+        .checked_duration_since(accepted_instant)
+        .is_some_and(|elapsed| {
+            committed_at < deadline
+                && elapsed < window
+                && delivered_at_instant
+                    .checked_duration_since(accepted_instant)
+                    .is_some_and(|elapsed| elapsed < window)
+        })
+}
+
 fn duration_milliseconds(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
@@ -3112,7 +3322,8 @@ mod tests {
     use super::{
         ActorCommand, ApplicationJob, ApplicationWorkerRecipe, ApplicationWorkerRegistry,
         DeletedLeaseIndex, HostApplicationChildren, HostDeletion, SharedApplication,
-        duration_milliseconds, expired_delete_response, runtime_identity, subscribe_payload,
+        commit_within_delivery_window, delivery_window, duration_milliseconds,
+        expired_delete_response, runtime_identity, subscribe_payload,
     };
     use crate::live_eval::PureEvalApplication;
     use futures::StreamExt;
@@ -3132,11 +3343,12 @@ mod tests {
         Origin, OriginPolicy, SessionBoundary, SessionDeletionAdapter, SessionId,
     };
     use orna_serving_v1::Serving;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use std::{
         cell::RefCell,
         collections::BTreeMap,
-        fs,
+        fs, io,
+        net::TcpListener,
         path::PathBuf,
         rc::Rc,
         sync::{
@@ -3145,10 +3357,80 @@ mod tests {
         },
         thread,
     };
+    use tokio::io::{AsyncReadExt as TokioAsyncReadExt, AsyncWriteExt as TokioAsyncWriteExt};
+
+    async fn bounded_test_wait<T>(future: impl Future<Output = T>, operation: &str) -> T {
+        tokio::time::timeout(Duration::from_secs(2), future)
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {operation}"))
+    }
+
+    async fn read_http_headers(
+        stream: &mut tokio::net::TcpStream,
+        mut readiness: Option<futures::channel::oneshot::Sender<()>>,
+    ) -> io::Result<Vec<u8>> {
+        let mut response = Vec::new();
+        let mut byte = [0; 1];
+        while !response.ends_with(b"\r\n\r\n") {
+            if let Some(readiness) = readiness.take() {
+                let _ = readiness.send(());
+            }
+            bounded_test_wait(stream.read_exact(&mut byte), "HTTP response header byte").await?;
+            response.extend_from_slice(&byte);
+        }
+        Ok(response)
+    }
+
+    #[test]
+    fn delivery_test_gate_install_preserves_an_existing_gate_on_panic() {
+        let (guard, _entered) = super::DeliveryTestGateGuard::install(61);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = super::DeliveryTestGateGuard::install(62);
+        }));
+        assert!(result.is_err());
+        drop(guard);
+    }
 
     #[test]
     fn live_clock_uses_milliseconds_for_the_advertised_lease() {
         assert_eq!(duration_milliseconds(Duration::from_secs(30)), 30_000);
+    }
+
+    #[test]
+    fn delivery_window_rejects_wall_clock_rollback() {
+        assert_eq!(
+            delivery_window(1_000, 900, 2_000),
+            None,
+            "a Deliver timestamp earlier than Begin must fail closed"
+        );
+        assert_eq!(
+            delivery_window(1_000, 1_100, 2_000),
+            Some(Duration::from_millis(900))
+        );
+    }
+
+    #[test]
+    fn commit_window_rejects_actor_turn_after_admission_deadline() {
+        let accepted = Instant::now();
+        let delivered = accepted.checked_add(Duration::from_millis(99)).unwrap();
+        let committed = accepted.checked_add(Duration::from_millis(101)).unwrap();
+
+        assert!(!commit_within_delivery_window(
+            1_099,
+            1_100,
+            accepted,
+            delivered,
+            committed,
+            Duration::from_millis(100)
+        ));
+        assert!(commit_within_delivery_window(
+            1_099,
+            1_100,
+            accepted,
+            delivered,
+            delivered,
+            Duration::from_millis(100)
+        ));
     }
 
     #[test]
@@ -3195,7 +3477,7 @@ mod tests {
     }
 
     #[test]
-    fn same_session_delete_during_deliver_preserves_reservation_until_abort_and_join() {
+    fn post_flush_cancellation_commits_the_delivered_upgrade() {
         let repository = worker_repository();
         let session = [21; 16];
         let attachment = [22; 16];
@@ -3316,6 +3598,7 @@ mod tests {
                     deletion,
                     application_workers,
                     application_work,
+                    admitted_upgrades: BTreeMap::new(),
                     delivering_upgrades: BTreeMap::new(),
                 },
                 Rc::clone(&registry),
@@ -3323,10 +3606,20 @@ mod tests {
                 retirement_gate_sender,
             ));
             let worker_actor = actor_sender.clone();
+            let worker_registry = Rc::clone(&registry);
             let (allow_exit_sender, allow_exit) = futures::channel::oneshot::channel();
             let task = workers.spawn_local(async move {
                 cancellation.await.unwrap();
                 allow_exit.await.unwrap();
+                let mut cleanup_cancellation = futures::future::pending();
+                super::close_worker_attachment(
+                    &worker_actor,
+                    &worker_registry,
+                    attachment,
+                    worker_id,
+                    &mut cleanup_cancellation,
+                )
+                .await;
                 super::actor_worker_exited(&worker_actor, worker_id).await;
                 worker_id
             });
@@ -3341,11 +3634,20 @@ mod tests {
             ]
             .concat();
 
+            let duplicate_request = upgrade.clone();
             let upgrade = super::actor_begin(&actor_sender, upgrade, attachment, worker_id)
                 .await
                 .unwrap()
                 .unwrap();
             assert_eq!(retirement_gate_receiver.next().await.unwrap().len(), 0);
+            let duplicate = bounded_test_wait(
+                super::actor_begin(&actor_sender, duplicate_request, [23; 16], worker_id),
+                "duplicate admitted upgrade",
+            )
+            .await
+            .expect("duplicate admitted upgrade request must reach the actor")
+            .expect_err("duplicate admitted upgrade must fail closed");
+            assert_eq!(duplicate.status, 503);
             super::actor_deliver(&actor_sender, &upgrade, worker_id)
                 .await
                 .unwrap();
@@ -3356,15 +3658,14 @@ mod tests {
                 .unwrap();
             let mut writer = futures::io::Cursor::new(Vec::new());
             let mut delivery_cancellation = futures::future::pending();
-            assert_eq!(
-                super::deliver_websocket_upgrade_response(
-                    &mut writer,
-                    &encoded,
-                    &mut delivery_cancellation,
-                )
-                .await,
-                Ok(())
-            );
+            let delivery = super::deliver_websocket_upgrade_response(
+                &mut writer,
+                &encoded,
+                &mut delivery_cancellation,
+            )
+            .await;
+            let delivered_at_instant = super::Instant::now();
+            assert_eq!(delivery, Ok(()));
             assert_eq!(writer.into_inner(), encoded);
 
             let mut cancellation = futures::future::pending();
@@ -3392,16 +3693,34 @@ mod tests {
             assert!(retirement.is_empty());
 
             registry.borrow_mut().cancel(worker_id);
-            assert!(
-                super::actor_commit(&actor_sender, upgrade, worker_id)
+            // The cursor above completed the write and flush, so this models
+            // the worker's matching Commit after cancellation was injected.
+            let stale_upgrade = upgrade.clone();
+            let retirement =
+                super::actor_commit(&actor_sender, upgrade, worker_id, delivered_at_instant)
                     .await
-                    .is_err()
+                    .expect("a delivered upgrade must commit after cancellation");
+            assert!(retirement.is_empty());
+            assert!(
+                bounded_test_wait(
+                    super::actor_deliver(&actor_sender, &stale_upgrade, worker_id),
+                    "stale delivery operation",
+                )
+                .await
+                .is_err()
             );
+            allow_exit_sender.send(()).unwrap();
+            let joined = workers
+                .join_next_with_id()
+                .await
+                .expect("committed worker must be joined");
+            assert!(!super::acknowledge_worker_join(&registry, joined));
+
             let retirement = loop {
                 let retirement = retirement_gate_receiver
                     .next()
                     .await
-                    .expect("aborted delivery must publish its retirement gate");
+                    .expect("closed attachment must publish its retirement gate");
                 if retirement.iter().any(|gate| gate.attachment == attachment) {
                     break retirement;
                 }
@@ -3409,12 +3728,6 @@ mod tests {
             };
             assert_eq!(retirement.len(), 1);
             assert_eq!(retirement[0].attachment, attachment);
-            allow_exit_sender.send(()).unwrap();
-            let joined = workers
-                .join_next_with_id()
-                .await
-                .expect("aborted worker must be joined");
-            assert!(!super::acknowledge_worker_join(&registry, joined));
 
             let mut cancellation = futures::future::pending();
             let (_, responses, retirement_before_ack) = super::actor_http(
@@ -3449,6 +3762,389 @@ mod tests {
                 .unbounded_send(super::ActorCommand::Shutdown)
                 .unwrap();
             actor.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn real_worker_exit_during_delivery_aborts_and_preserves_active_upgrade() {
+        let repository = worker_repository();
+        let session = [51; 16];
+        let now = super::system_milliseconds();
+        let expires_at = now.saturating_add(60_000);
+        let origin = Origin::parse("https://app.example").unwrap();
+        let expiries = Rc::new(RefCell::new(BTreeMap::from([(
+            SessionId::new(session),
+            expires_at,
+        )])));
+        let mut host = LiveHost::new(
+            Limits::default(),
+            SessionBoundary::new(OriginPolicy::new([origin.clone()], []), 60_000),
+            Serving::new(orna_serving_v1::Limits::default()).unwrap(),
+        )
+        .unwrap();
+        let mut issuer = SystemCredentialIssuer::default();
+        futures::executor::block_on(host.create(
+            CreateRequest {
+                id: session,
+                origin,
+                expires_at,
+                now,
+                subscribe: &subscribe_payload(),
+            },
+            &mut issuer,
+        ))
+        .unwrap();
+        let token = issuer.last_issued().unwrap();
+        let mut token_text = String::with_capacity(43);
+        const BASE64URL: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        for chunk in token.chunks(3) {
+            token_text.push(BASE64URL[(chunk[0] >> 2) as usize] as char);
+            token_text.push(
+                BASE64URL
+                    [(((chunk[0] & 3) << 4) | (chunk.get(1).copied().unwrap_or(0) >> 4)) as usize]
+                    as char,
+            );
+            if chunk.len() > 1 {
+                token_text.push(
+                    BASE64URL[(((chunk[1] & 15) << 2) | (chunk.get(2).copied().unwrap_or(0) >> 6))
+                        as usize] as char,
+                );
+            }
+            if chunk.len() > 2 {
+                token_text.push(BASE64URL[(chunk[2] & 63) as usize] as char);
+            }
+        }
+        let transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+        let application = PureEvalApplication::from_repository_with_project(
+            &repository.recipe.repository,
+            repository.recipe.database_id,
+            repository.recipe.identity,
+            repository.recipe.initial_digest,
+            repository.recipe.runtime_owner,
+            Rc::clone(&expiries),
+            Some(repository.recipe.project.clone()),
+            Some(repository.recipe.capture.clone()),
+        )
+        .unwrap();
+        let application_work = transport.application_work_supervisor();
+        let application_workers = ApplicationWorkerRegistry::new(repository.recipe.clone());
+        let deletion = HostDeletion {
+            expiries: Rc::clone(&expiries),
+            deleted_leases: Rc::new(RefCell::new(BTreeMap::new())),
+            application: Rc::new(RefCell::new(Some(application))),
+            application_workers: Some(application_workers.clone()),
+        };
+        super::shutdown_tests::run_local(async move {
+            let registry = Rc::new(RefCell::new(super::WorkerRegistry::default()));
+            let (actor_sender, actor_receiver) = futures::channel::mpsc::unbounded();
+            let (retirement_acknowledgements, retirement_acknowledgement_receiver) =
+                futures::channel::mpsc::unbounded();
+            let (retirement_gate_sender, mut retirement_gates) =
+                futures::channel::mpsc::unbounded();
+            let actor = tokio::task::spawn_local(super::run_host_actor(
+                actor_receiver,
+                actor_sender.clone(),
+                super::ConcurrentHostState {
+                    transport,
+                    authority: super::HostAuthority {
+                        database_id: repository.recipe.database_id,
+                        runtime_id: [54; 16],
+                        expiries,
+                    },
+                    issuer: SystemCredentialIssuer::default(),
+                    deletion,
+                    application_workers,
+                    application_work,
+                    admitted_upgrades: BTreeMap::new(),
+                    delivering_upgrades: BTreeMap::new(),
+                },
+                Rc::clone(&registry),
+                retirement_acknowledgement_receiver,
+                retirement_gate_sender,
+            ));
+
+            let socket = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            socket.set_nonblocking(true).unwrap();
+            let address = socket.local_addr().unwrap();
+            let listener = tokio::net::TcpListener::from_std(socket).unwrap();
+            let mut workers = tokio::task::JoinSet::<u64>::new();
+
+            let (first_worker, first_cancellation) = registry.borrow_mut().register();
+            let (first_client, first_accept) = tokio::join!(
+                bounded_test_wait(
+                    tokio::net::TcpStream::connect(address),
+                    "first socket connect"
+                ),
+                bounded_test_wait(listener.accept(), "first socket accept")
+            );
+            let mut first_client = first_client.expect("first socket connect must succeed");
+            let (first_server, _) = first_accept.expect("first socket accept must succeed");
+            let first_actor = actor_sender.clone();
+            let first_acknowledgements = retirement_acknowledgements.clone();
+            let first_registry = Rc::clone(&registry);
+            let first_task = workers.spawn_local(async move {
+                super::serve_socket_worker(
+                    first_server,
+                    first_actor.clone(),
+                    first_acknowledgements,
+                    first_registry,
+                    first_worker,
+                    first_cancellation,
+                )
+                .await;
+                super::actor_worker_exited(&first_actor, first_worker).await;
+                first_worker
+            });
+            registry
+                .borrow_mut()
+                .bind_task(first_worker, first_task.id());
+
+            let handshake = format!(
+                "GET /orna/live/33333333-3333-3333-3333-333333333333 HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: orna.present.v1\r\nCookie: orna_session={token_text}\r\n\r\n"
+            );
+            let delete_request = format!(
+                "DELETE /orna/session/33333333-3333-3333-3333-333333333333 HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nAuthorization: Bearer {token_text}\r\n\r\n"
+            );
+            bounded_test_wait(
+                first_client.write_all(handshake.as_bytes()),
+                "first WebSocket handshake write",
+            )
+            .await
+            .expect("first WebSocket handshake write must succeed");
+            let first_response = bounded_test_wait(
+                read_http_headers(&mut first_client, None),
+                "first WebSocket response headers",
+            )
+            .await
+            .expect("first WebSocket response headers must be readable");
+            assert!(first_response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
+            assert!(
+                bounded_test_wait(retirement_gates.next(), "first retirement response")
+                    .await
+                    .expect("first retirement response channel must remain open")
+                    .is_empty()
+            );
+
+            let (second_worker, second_cancellation) = registry.borrow_mut().register();
+            let (mut delivery_gate, entered_receiver) =
+                super::DeliveryTestGateGuard::install(second_worker);
+            let (second_client, second_accept) = tokio::join!(
+                bounded_test_wait(
+                    tokio::net::TcpStream::connect(address),
+                    "second socket connect"
+                ),
+                bounded_test_wait(listener.accept(), "second socket accept")
+            );
+            let mut second_client = second_client.expect("second socket connect must succeed");
+            let (second_server, _) = second_accept.expect("second socket accept must succeed");
+            let second_actor = actor_sender.clone();
+            let second_acknowledgements = retirement_acknowledgements.clone();
+            let second_registry = Rc::clone(&registry);
+            let second_task = workers.spawn_local(async move {
+                super::serve_socket_worker(
+                    second_server,
+                    second_actor.clone(),
+                    second_acknowledgements,
+                    second_registry,
+                    second_worker,
+                    second_cancellation,
+                )
+                .await;
+                super::actor_worker_exited(&second_actor, second_worker).await;
+                second_worker
+            });
+            registry
+                .borrow_mut()
+                .bind_task(second_worker, second_task.id());
+            bounded_test_wait(
+                second_client.write_all(handshake.as_bytes()),
+                "second WebSocket handshake write",
+            )
+            .await
+            .expect("second WebSocket handshake write must succeed");
+            bounded_test_wait(entered_receiver, "delivery gate entry")
+                .await
+                .expect("delivery gate must be reached after actor_deliver")
+                .expect("delivery gate must signal its entry");
+            assert_eq!(
+                bounded_test_wait(retirement_gates.next(), "second retirement response")
+                    .await
+                    .expect("second retirement response channel must remain open")
+                    .len(),
+                0
+            );
+            assert_eq!(registry.borrow().attachments.len(), 2);
+
+            let unavailable_body = br#"{"code":"live.unavailable","message":"request rejected"}"#;
+            let unavailable = [
+                b"HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\nContent-Length: ".as_slice(),
+                unavailable_body.len().to_string().as_bytes(),
+                b"\r\n\r\n".as_slice(),
+                unavailable_body,
+            ]
+            .concat();
+            let mut cancellation = futures::future::pending::<()>();
+            let (_, responses, retirement) = bounded_test_wait(
+                super::actor_http(
+                    &actor_sender,
+                    HttpConnection::new(TransportLimits::default()),
+                    delete_request.as_bytes(),
+                    &mut cancellation,
+                ),
+                "candidate DELETE actor response",
+            )
+            .await
+            .expect("candidate DELETE actor response must succeed");
+            assert_eq!(responses, vec![unavailable]);
+            assert!(retirement.is_empty());
+
+            // Release the gate and revoke the candidate. The worker observes
+            // cancellation, aborts its delivered reservation, and then sends
+            // its own WorkerExited command before returning to the JoinSet.
+            delivery_gate.release();
+            registry.borrow_mut().cancel(second_worker);
+            let joined = bounded_test_wait(
+                workers.join_next_with_id(),
+                "candidate worker JoinSet result",
+            )
+            .await
+            .expect("candidate worker must be joined");
+            assert!(!super::acknowledge_worker_join(&registry, joined));
+            let retirement =
+                bounded_test_wait(retirement_gates.next(), "candidate retirement gate")
+                    .await
+                    .expect("candidate retirement gate must be published");
+            assert_eq!(retirement.len(), 1);
+            assert_eq!(
+                bounded_test_wait(
+                    super::retire_and_join(&retirement_acknowledgements, retirement),
+                    "candidate retirement acknowledgement",
+                )
+                .await,
+                Ok(())
+            );
+
+            let mut second_bytes = Vec::new();
+            bounded_test_wait(
+                second_client.read_to_end(&mut second_bytes),
+                "candidate socket EOF",
+            )
+            .await
+            .expect("candidate socket must reach EOF");
+            assert!(second_bytes.is_empty());
+
+            // The incumbent completed handshake remains owned and usable
+            // after the failed candidate's cancellation and supervisor join.
+            bounded_test_wait(
+                first_client.write_all(&[0x89, 0x82, 1, 2, 3, 4, b'o' ^ 1, b'k' ^ 2]),
+                "incumbent ping write",
+            )
+            .await
+            .expect("incumbent ping write must succeed");
+            let mut pong = [0; 4];
+            bounded_test_wait(first_client.read_exact(&mut pong), "incumbent pong read")
+                .await
+                .expect("incumbent pong must be readable");
+            assert_eq!(pong, [0x8a, 0x02, b'o', b'k']);
+
+            // The real HTTP worker routes this response through
+            // write_http_after_retirement, which joins the incumbent worker
+            // and acknowledges its retirement before writing the 204 bytes.
+            let (http_worker, http_cancellation) = registry.borrow_mut().register();
+            let (http_client, http_accept) = tokio::join!(
+                bounded_test_wait(
+                    tokio::net::TcpStream::connect(address),
+                    "final HTTP socket connect"
+                ),
+                bounded_test_wait(listener.accept(), "final HTTP socket accept")
+            );
+            let mut http_client = http_client.expect("final HTTP socket connect must succeed");
+            let (http_server, _) = http_accept.expect("final HTTP socket accept must succeed");
+            let http_actor = actor_sender.clone();
+            let http_acknowledgements = retirement_acknowledgements.clone();
+            let http_registry = Rc::clone(&registry);
+            let http_task = workers.spawn_local(async move {
+                super::serve_socket_worker(
+                    http_server,
+                    http_actor.clone(),
+                    http_acknowledgements,
+                    http_registry,
+                    http_worker,
+                    http_cancellation,
+                )
+                .await;
+                super::actor_worker_exited(&http_actor, http_worker).await;
+                http_worker
+            });
+            registry.borrow_mut().bind_task(http_worker, http_task.id());
+            bounded_test_wait(
+                http_client.write_all(delete_request.as_bytes()),
+                "final DELETE request write",
+            )
+            .await
+            .expect("final DELETE request write must succeed");
+            let (header_readiness_sender, header_readiness_receiver) =
+                futures::channel::oneshot::channel();
+            let final_response_reader = tokio::task::spawn_local(async move {
+                let response = bounded_test_wait(
+                    read_http_headers(&mut http_client, Some(header_readiness_sender)),
+                    "final DELETE response headers",
+                )
+                .await;
+                (http_client, response)
+            });
+            bounded_test_wait(header_readiness_receiver, "final response reader readiness")
+                .await
+                .expect("final response reader must enter the header-read path");
+            assert!(
+                !final_response_reader.is_finished(),
+                "final response must wait for incumbent retirement acknowledgement"
+            );
+
+            // Model the real host supervisor: the incumbent only releases
+            // this response after its actual JoinSet result is consumed and
+            // acknowledged by the worker registry.
+            let joined = bounded_test_wait(
+                workers.join_next_with_id(),
+                "incumbent worker JoinSet result",
+            )
+            .await
+            .expect("incumbent worker must be joined");
+            assert!(!super::acknowledge_worker_join(&registry, joined));
+
+            let (mut http_client, final_response) =
+                bounded_test_wait(final_response_reader, "final DELETE response reader")
+                    .await
+                    .expect("final DELETE response reader must finish");
+            let final_response =
+                final_response.expect("final DELETE response headers must be readable");
+            assert_eq!(final_response, b"HTTP/1.1 204 No Content\r\n\r\n");
+
+            bounded_test_wait(http_client.shutdown(), "final HTTP client write shutdown")
+                .await
+                .expect("final HTTP client write shutdown must succeed");
+            let joined = bounded_test_wait(
+                workers.join_next_with_id(),
+                "final HTTP worker JoinSet result",
+            )
+            .await
+            .expect("final HTTP worker must be joined");
+            assert!(!super::acknowledge_worker_join(&registry, joined));
+
+            let mut first_bytes = Vec::new();
+            bounded_test_wait(
+                first_client.read_to_end(&mut first_bytes),
+                "incumbent socket EOF",
+            )
+            .await
+            .expect("incumbent socket must reach EOF");
+            assert!(first_bytes.is_empty());
+
+            actor_sender.unbounded_send(ActorCommand::Shutdown).unwrap();
+            bounded_test_wait(actor, "actor shutdown")
+                .await
+                .expect("actor must shut down");
         });
     }
 
@@ -3597,6 +4293,7 @@ mod tests {
                     deletion,
                     application_workers,
                     application_work,
+                    admitted_upgrades: BTreeMap::new(),
                     delivering_upgrades: BTreeMap::new(),
                 },
                 Rc::clone(&registry),
@@ -3911,6 +4608,7 @@ mod tests {
                     deletion,
                     application_workers,
                     application_work,
+                    admitted_upgrades: BTreeMap::new(),
                     delivering_upgrades: BTreeMap::new(),
                 },
                 registry,
