@@ -201,6 +201,7 @@ struct ApplicationSessionWork {
     phase: ApplicationWorkPhase,
     work: BTreeMap<u64, ApplicationWorkEntry>,
     failed: bool,
+    failed_requests: BTreeSet<[u8; 16]>,
     waiters: Vec<Waker>,
 }
 
@@ -212,9 +213,31 @@ enum ApplicationWorkPhase {
 }
 
 struct ApplicationWorkEntry {
+    request: [u8; 16],
     parent: Option<u64>,
     cancellation: Option<oneshot::Sender<()>>,
     cancelled: Arc<AtomicBool>,
+}
+
+fn request_work_ids(session_work: &ApplicationSessionWork, request: [u8; 16]) -> BTreeSet<u64> {
+    let mut pending = session_work
+        .work
+        .iter()
+        .filter_map(|(id, entry)| (entry.request == request).then_some(*id))
+        .collect::<Vec<_>>();
+    let mut owned = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !owned.insert(id) {
+            continue;
+        }
+        pending.extend(
+            session_work
+                .work
+                .iter()
+                .filter_map(|(child, entry)| (entry.parent == Some(id)).then_some(*child)),
+        );
+    }
+    owned
 }
 
 const MAX_APPLICATION_SESSIONS: usize = 4096;
@@ -225,6 +248,7 @@ const MAX_APPLICATION_JOIN_WAITERS: usize = 8;
 pub struct LiveApplicationWorkLease {
     supervisor: LiveApplicationWorkSupervisor,
     session: [u8; 16],
+    request: [u8; 16],
     id: u64,
     cancellation: oneshot::Receiver<()>,
     cancelled: Arc<AtomicBool>,
@@ -248,13 +272,14 @@ impl LiveApplicationWorkSupervisor {
     ///
     /// Returns [`Error::Closed`] after deletion admission has stopped new
     /// application work.
-    pub fn admit(&self, session: [u8; 16], _: [u8; 16]) -> Result<LiveApplicationWorkLease> {
-        self.admit_with_parent(session, None)
+    pub fn admit(&self, session: [u8; 16], request: [u8; 16]) -> Result<LiveApplicationWorkLease> {
+        self.admit_with_parent(session, request, None)
     }
 
     fn admit_with_parent(
         &self,
         session: [u8; 16],
+        request: [u8; 16],
         parent: Option<u64>,
     ) -> Result<LiveApplicationWorkLease> {
         let mut state = self.state.lock().expect("application work state poisoned");
@@ -273,10 +298,16 @@ impl LiveApplicationWorkSupervisor {
                     phase: ApplicationWorkPhase::Open,
                     work: BTreeMap::new(),
                     failed: false,
+                    failed_requests: BTreeSet::new(),
                     waiters: Vec::new(),
                 });
         if session_work.phase != ApplicationWorkPhase::Open
-            || parent.is_some_and(|parent| !session_work.work.contains_key(&parent))
+            || parent.is_some_and(|parent| {
+                !session_work
+                    .work
+                    .get(&parent)
+                    .is_some_and(|entry| !entry.cancelled.load(Ordering::Acquire))
+            })
         {
             return Err(Error::Closed);
         }
@@ -288,6 +319,7 @@ impl LiveApplicationWorkSupervisor {
         session_work.work.insert(
             id,
             ApplicationWorkEntry {
+                request,
                 parent,
                 cancellation: Some(sender),
                 cancelled: Arc::clone(&cancelled),
@@ -296,11 +328,83 @@ impl LiveApplicationWorkSupervisor {
         Ok(LiveApplicationWorkLease {
             supervisor: self.clone(),
             session,
+            request,
             id,
             cancellation,
             cancelled,
             completed: false,
         })
+    }
+
+    /// Requests cancellation for one in-band request and its recursively
+    /// owned application children without draining the rest of the session.
+    /// The request identity is retained on every lease so a protocol cancel
+    /// can signal the exact running or queued target.
+    pub fn cancel_request(&self, session: [u8; 16], request: [u8; 16]) -> bool {
+        self.begin_request_cancellation(session, request)
+    }
+
+    /// Requests cancellation for one request tree, then waits until every
+    /// matching lease has released its activation-owned resources. This is a
+    /// targeted join: unrelated application work in the same session remains
+    /// admitted and running.
+    pub fn cancel_and_join_request(
+        &self,
+        session: [u8; 16],
+        request: [u8; 16],
+    ) -> Pin<Box<dyn Future<Output = Result<bool>>>> {
+        let found = self.begin_request_cancellation(session, request);
+        let state = Arc::clone(&self.state);
+        Box::pin(async move {
+            if !found {
+                return Ok(false);
+            }
+            futures::future::poll_fn(move |context| {
+                let mut state = state.lock().expect("application work state poisoned");
+                let Some(session_work) = state.sessions.get_mut(&session) else {
+                    return std::task::Poll::Ready(Err(Error::Closed));
+                };
+                if request_work_ids(session_work, request).is_empty() {
+                    return std::task::Poll::Ready(
+                        (!session_work.failed_requests.contains(&request))
+                            .then_some(true)
+                            .ok_or(Error::DeletionFailed),
+                    );
+                }
+                if !session_work
+                    .waiters
+                    .iter()
+                    .any(|waiter| waiter.will_wake(context.waker()))
+                {
+                    if session_work.waiters.len() >= MAX_APPLICATION_JOIN_WAITERS {
+                        return std::task::Poll::Ready(Err(Error::Limit));
+                    }
+                    session_work.waiters.push(context.waker().clone());
+                }
+                std::task::Poll::Pending
+            })
+            .await
+        })
+    }
+
+    fn begin_request_cancellation(&self, session: [u8; 16], request: [u8; 16]) -> bool {
+        let mut state = self.state.lock().expect("application work state poisoned");
+        let Some(session_work) = state.sessions.get_mut(&session) else {
+            return false;
+        };
+        let pending = request_work_ids(session_work, request);
+        if pending.is_empty() {
+            return false;
+        }
+        for id in pending {
+            if let Some(entry) = session_work.work.get_mut(&id) {
+                entry.cancelled.store(true, Ordering::Release);
+                if let Some(cancellation) = entry.cancellation.take() {
+                    let _ = cancellation.send(());
+                }
+            }
+        }
+        true
     }
 
     /// Prevents new work, recursively requests cancellation, and joins every
@@ -351,6 +455,7 @@ impl LiveApplicationWorkSupervisor {
                     phase: ApplicationWorkPhase::Open,
                     work: BTreeMap::new(),
                     failed: false,
+                    failed_requests: BTreeSet::new(),
                     waiters: Vec::new(),
                 });
         if session_work.phase == ApplicationWorkPhase::Deleted {
@@ -406,6 +511,7 @@ impl LiveApplicationWorkSupervisor {
                     phase: ApplicationWorkPhase::Open,
                     work: BTreeMap::new(),
                     failed: false,
+                    failed_requests: BTreeSet::new(),
                     waiters: Vec::new(),
                 });
         if session_work.work.is_empty() && !session_work.failed {
@@ -501,6 +607,9 @@ impl Drop for LiveApplicationWorkLease {
                 .expect("application work state poisoned");
             if let Some(session_work) = state.sessions.get_mut(&self.session) {
                 session_work.failed = true;
+                if let Some(entry) = session_work.work.get(&self.id) {
+                    session_work.failed_requests.insert(entry.request);
+                }
             }
         }
         self.supervisor.release(self.session, self.id);
@@ -563,7 +672,7 @@ impl LiveApplicationWorkLease {
     /// admitted.
     pub fn spawn_child(&self) -> Result<LiveApplicationWorkLease> {
         self.supervisor
-            .admit_with_parent(self.session, Some(self.id))
+            .admit_with_parent(self.session, self.request, Some(self.id))
     }
 }
 
@@ -1863,18 +1972,8 @@ impl LiveHost {
                 TargetKind::Watch => self.watches.contains(&(session, *target)),
             };
             let durable_request = *target_kind == TargetKind::Request && self.runtime.is_some();
-            let target_cancelled = if target_active && durable_request {
-                self.cancel_target_request(session, *target).await?
-            } else {
-                false
-            };
-            invoke_callback = target_active
-                && (*target_kind == TargetKind::Watch
-                    || if durable_request {
-                        target_cancelled
-                    } else {
-                        true
-                    });
+            invoke_callback =
+                target_active && (*target_kind == TargetKind::Watch || !durable_request);
             cancel_target = Some((*target, *target_kind, target_active, durable_request));
         } else if let Message::Unsubscribe = &envelope.message {
             let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
@@ -1891,6 +1990,37 @@ impl LiveHost {
             work.complete();
             self.retain_failure(session, request, fingerprint).await?;
             return Err(error);
+        }
+        if let Some((target, target_kind, target_active, durable_request)) = cancel_target
+            && target_active
+        {
+            let target_cancelled = if target_kind == TargetKind::Request {
+                if let Err(error) = self
+                    .application_work
+                    .cancel_and_join_request(session, target)
+                    .await
+                {
+                    work.complete();
+                    self.retain_failure(session, request, fingerprint).await?;
+                    return Err(error);
+                }
+                match self.cancel_target_request(session, target).await {
+                    Ok(cancelled) => cancelled,
+                    Err(error) => {
+                        work.complete();
+                        self.retain_failure(session, request, fingerprint).await?;
+                        return Err(error);
+                    }
+                }
+            } else {
+                false
+            };
+            invoke_callback = target_kind == TargetKind::Watch
+                || if durable_request {
+                    target_cancelled
+                } else {
+                    true
+                };
         }
         self.application_sessions.insert(session);
         Ok(ApplicationPreparation::Work(LiveApplicationTicket {
@@ -1951,7 +2081,6 @@ impl LiveHost {
         };
         let mut open_watch = None;
         let mut close_watch = None;
-        let mut cancel_request = None;
         let outcome = match &message {
             Message::Subscribe { .. } => {
                 let outcome =
@@ -2021,13 +2150,6 @@ impl LiveHost {
                 {
                     close_watch = Some(*target);
                 }
-                if let Some((_, TargetKind::Request, target_active, durable_request)) =
-                    cancel_target
-                    && target_active
-                    && !durable_request
-                {
-                    cancel_request = Some(*target);
-                }
                 DispatchOutcome {
                     outcome: FrameOutcome::Cancelled,
                     response: outcome.response,
@@ -2052,9 +2174,6 @@ impl LiveHost {
                     .close_watch(session, watch)
                     .map_err(map_serving)?;
                 self.watches.remove(&(ticket.session, watch));
-            }
-            if let Some(request) = cancel_request {
-                self.cancel_target_request(session, request).await?;
             }
         }
         Ok(outcome)
@@ -3180,6 +3299,7 @@ impl LiveHost {
         request: [u8; 16],
         fingerprint: [u8; 32],
     ) -> Result<()> {
+        let locally_admitted = self.requests.contains_key(&(session, request));
         let failure = DispatchOutcome {
             outcome: FrameOutcome::Accepted,
             response: Some(Envelope {
@@ -3213,6 +3333,9 @@ impl LiveHost {
                 )
                 .await
                 .map_err(|error| map_runtime(&error))?;
+        }
+        if !locally_admitted {
+            return Ok(());
         }
         if self.serving.complete_request(session, request).is_ok()
             && let Some(record) = self.requests.get_mut(&(session, request))
@@ -7097,6 +7220,149 @@ mod tests {
             supervisor.admit(session, [2; 16]),
             Err(Error::Closed)
         ));
+    }
+
+    #[test]
+    fn application_work_in_band_cancel_targets_one_request_tree() {
+        let session = [43; 16];
+        let target = [7; 16];
+        let supervisor = LiveApplicationWorkSupervisor::new();
+        let mut root = supervisor.admit(session, target).unwrap();
+        let mut child = root.spawn_child().unwrap();
+        let mut unrelated = supervisor.admit(session, [8; 16]).unwrap();
+
+        assert!(supervisor.cancel_request(session, target));
+        assert!(root.is_cancelled());
+        assert!(child.is_cancelled());
+        assert!(!unrelated.is_cancelled());
+        assert!(futures::executor::block_on(root.cancellation()).is_ok());
+        assert!(futures::executor::block_on(child.cancellation()).is_ok());
+
+        root.complete();
+        child.complete();
+        unrelated.complete();
+        assert!(!supervisor.cancel_request(session, target));
+    }
+
+    #[test]
+    fn application_work_targeted_join_waits_before_terminal_publication() {
+        let session = [44; 16];
+        let target = [7; 16];
+        let supervisor = LiveApplicationWorkSupervisor::new();
+        let mut root = supervisor.admit(session, target).unwrap();
+        let mut child = root.spawn_child().unwrap();
+        let mut unrelated = supervisor.admit(session, [8; 16]).unwrap();
+        let mut join = supervisor.cancel_and_join_request(session, target);
+
+        futures::executor::block_on(futures::future::poll_fn(|context| {
+            match Pin::new(&mut join).poll(context) {
+                Poll::Pending => Poll::Ready(()),
+                Poll::Ready(result) => {
+                    panic!("target join completed before lease acknowledgement: {result:?}")
+                }
+            }
+        }));
+        assert!(root.is_cancelled());
+        assert!(child.is_cancelled());
+        assert!(!unrelated.is_cancelled());
+        assert!(matches!(root.spawn_child(), Err(Error::Closed)));
+
+        child.complete();
+        root.complete();
+        assert_eq!(futures::executor::block_on(join), Ok(true));
+        assert!(!unrelated.is_cancelled());
+        unrelated.complete();
+    }
+
+    #[test]
+    fn prepared_cancel_signals_the_target_application_ticket() {
+        let mut host = subscribed_host(None);
+        let mut target = match futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            1,
+            Frame::Binary(eval_frame([5; 16])),
+        ))
+        .unwrap()
+        {
+            ApplicationPreparation::Work(ticket) => ticket,
+            ApplicationPreparation::Completed(_) => panic!("target work was not admitted"),
+        };
+        let supervisor = host.application_work_supervisor();
+        let mut unrelated = supervisor.admit([1; 16], [8; 16]).unwrap();
+        let cancel = Envelope {
+            request: Some([6; 16]),
+            watch: None,
+            message: Message::Cancel {
+                target_kind: TargetKind::Request,
+                target: [5; 16],
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap();
+        let prepare = host.prepare_application_frame([4; 16], 1, Frame::Binary(cancel));
+        let release_target = async {
+            assert!(target.cancellation().await.is_ok());
+            assert!(target.is_cancelled());
+            let _ = target.reject(Error::Closed);
+        };
+        let (cancellation, ()) =
+            futures::executor::block_on(async { futures::join!(prepare, release_target) });
+        let cancellation = cancellation.unwrap();
+        assert!(matches!(cancellation, ApplicationPreparation::Work(_)));
+        assert!(!unrelated.is_cancelled());
+        assert_eq!(
+            host.serving.request_state([1; 16], [5; 16]),
+            Ok(orna_serving_v1::RequestState::Cancelled)
+        );
+
+        if let ApplicationPreparation::Work(ticket) = cancellation {
+            let _ = ticket.reject(Error::Closed);
+        }
+        unrelated.complete();
+    }
+
+    #[test]
+    fn rejected_reused_cancel_request_does_not_cancel_target() {
+        let mut host = subscribed_host(None);
+        let target = match futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            1,
+            Frame::Binary(eval_frame([5; 16])),
+        ))
+        .unwrap()
+        {
+            ApplicationPreparation::Work(ticket) => ticket,
+            ApplicationPreparation::Completed(_) => panic!("target work was not admitted"),
+        };
+
+        host.reserve_request([1; 16], [6; 16]).unwrap();
+        host.start_request([1; 16], [6; 16]).unwrap();
+        let cancel = Envelope {
+            request: Some([6; 16]),
+            watch: None,
+            message: Message::Cancel {
+                target_kind: TargetKind::Request,
+                target: [5; 16],
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap();
+
+        let rejection = futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            1,
+            Frame::Binary(cancel),
+        ));
+        assert!(matches!(rejection, Err(Error::Denied)));
+        assert!(!target.is_cancelled());
+        assert_eq!(
+            host.serving.request_state([1; 16], [6; 16]),
+            Ok(orna_serving_v1::RequestState::Running)
+        );
+
+        let _ = target.reject(Error::Closed);
     }
 
     #[test]
