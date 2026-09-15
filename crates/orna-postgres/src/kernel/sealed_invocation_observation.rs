@@ -238,16 +238,11 @@ impl SealedInvocationObservation {
                 ));
             }
             if let Some(type_reference) = &argument.type_reference {
-                let expected_type = match &argument.type_kind {
-                    SealedInvocationArgumentTypeKind::Named(id) => Some(id.to_bytes()),
-                    SealedInvocationArgumentTypeKind::Reference(_)
-                    | SealedInvocationArgumentTypeKind::Value(_)
-                    | SealedInvocationArgumentTypeKind::Scalar(_) => None,
-                };
+                let expected_type = argument_type_reference_target(&argument.type_kind, &record)?;
                 validate_catalogue_type_reference(
                     type_reference,
                     &self.admission_capture,
-                    expected_type,
+                    Some(expected_type),
                     &record,
                 )?;
             }
@@ -879,17 +874,15 @@ fn decode_argument_observation(
         observation_optional_id(row, record, "target_type_id")?,
         record,
     )?;
-    let type_reference = decode_catalogue_type_reference(
-        observation_optional_bytes(row, record, "type_reference")?,
-        capture,
-        match &type_kind {
-            SealedInvocationArgumentTypeKind::Named(type_id) => Some(type_id.to_bytes()),
-            SealedInvocationArgumentTypeKind::Reference(_)
-            | SealedInvocationArgumentTypeKind::Value(_)
-            | SealedInvocationArgumentTypeKind::Scalar(_) => None,
-        },
-        record,
-    )?;
+    let type_reference = match observation_optional_bytes(row, record, "type_reference")? {
+        Some(encoded) => decode_catalogue_type_reference(
+            Some(encoded),
+            capture,
+            Some(argument_type_reference_target(&type_kind, record)?),
+            record,
+        )?,
+        None => None,
+    };
     let digest: Vec<u8> = observation_column(row, record, "value_digest")?;
     let value_digest: [u8; 32] = digest
         .try_into()
@@ -958,6 +951,24 @@ fn decode_argument_type_kind(
         _ => Err(observation_invariant(
             record,
             "argument type metadata has an invalid shape",
+        )),
+    }
+}
+
+/// Returns the exact catalogue identity a retained argument type witness must
+/// prove. Only named arguments have an authoritative type witness at this
+/// boundary; all other retained type families stay unavailable.
+fn argument_type_reference_target(
+    type_kind: &SealedInvocationArgumentTypeKind,
+    record: &str,
+) -> Result<[u8; 16], PostgresKernelError> {
+    match type_kind {
+        SealedInvocationArgumentTypeKind::Named(type_id) => Ok(type_id.to_bytes()),
+        SealedInvocationArgumentTypeKind::Reference(_)
+        | SealedInvocationArgumentTypeKind::Value(_)
+        | SealedInvocationArgumentTypeKind::Scalar(_) => Err(observation_invariant(
+            record,
+            "argument type witness requires an authoritative named type",
         )),
     }
 }
@@ -1099,22 +1110,19 @@ fn object_id_from_object_reference(
     object: &RowRef,
     record: &str,
 ) -> Result<[u8; 16], PostgresKernelError> {
-    let OvbRaw::Tag(37, bytes) = &object.key else {
+    let OvbRaw::Array(fields) = &object.key else {
         return Err(observation_invariant(
             record,
             "witness object key is malformed",
         ));
     };
-    let OvbRaw::Bytes(bytes) = bytes.as_ref() else {
+    let [object_id, _snapshot] = fields.as_slice() else {
         return Err(observation_invariant(
             record,
-            "witness object key is malformed",
+            "witness object key has the wrong arity",
         ));
     };
-    bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| observation_invariant(record, "witness object identity must be 16 bytes"))
+    reference_uuid(object_id, record)
 }
 
 fn sealed_scalar_type_is_closed(scalar: &str) -> bool {
@@ -1282,7 +1290,7 @@ mod tests {
     use super::*;
     use orna_foundation_v1::{
         CanonicalSnapshot, OvbRaw, RowRef, SYS_INVOCATION_ARGUMENT_TABLE_ID,
-        SYS_INVOCATION_TABLE_ID, SystemReferenceError, Value,
+        SYS_INVOCATION_TABLE_ID, SystemReferenceError, Value, object_reference, type_reference,
         validate_invocation_argument_reference, validate_invocation_reference,
     };
     use sha2::{Digest, Sha256};
@@ -1457,6 +1465,18 @@ mod tests {
         }
     }
 
+    fn retained_type_reference(capture: &CwdCapture, type_id: orna_core::TypeId) -> TypeRef {
+        type_reference(
+            object_reference(
+                capture.database_id(),
+                type_id.to_bytes(),
+                capture.snapshot().clone(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn retained_collection_requires_valid_admission_capture_for_rows_and_arguments() {
         let current = capture(1);
@@ -1498,6 +1518,56 @@ mod tests {
         );
         assert_eq!(projection.arguments[0].digest, None);
         assert!(projection.arguments[0].redacted);
+    }
+
+    #[test]
+    fn durable_sys_projection_retains_matching_named_argument_type_witness() {
+        let admitted = capture(1);
+        let type_id = orna_core::TypeId::from_bytes([8; 16]);
+        let mut internal = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
+        internal.arguments[0].type_kind = SealedInvocationArgumentTypeKind::Named(type_id);
+        internal.arguments[0].type_reference = Some(retained_type_reference(&admitted, type_id));
+
+        let projection = internal.durable_sys_projection().unwrap();
+
+        assert_eq!(
+            projection.arguments[0].type_reference,
+            internal.arguments[0].type_reference
+        );
+    }
+
+    #[test]
+    fn durable_sys_projection_rejects_type_witness_for_reference_argument() {
+        let admitted = capture(1);
+        let type_id = orna_core::TypeId::from_bytes([8; 16]);
+        let mut internal = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
+        internal.arguments[0].type_kind = SealedInvocationArgumentTypeKind::Reference(type_id);
+        internal.arguments[0].type_reference = Some(retained_type_reference(&admitted, type_id));
+
+        assert!(internal.durable_sys_projection().is_err());
+    }
+
+    #[test]
+    fn durable_sys_projection_rejects_type_witness_for_value_argument() {
+        let admitted = capture(1);
+        let type_id = orna_core::TypeId::from_bytes([8; 16]);
+        let mut internal = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
+        internal.arguments[0].type_kind = SealedInvocationArgumentTypeKind::Value(type_id);
+        internal.arguments[0].type_reference = Some(retained_type_reference(&admitted, type_id));
+
+        assert!(internal.durable_sys_projection().is_err());
+    }
+
+    #[test]
+    fn durable_sys_projection_rejects_type_witness_for_scalar_argument() {
+        let admitted = capture(1);
+        let type_id = orna_core::TypeId::from_bytes([8; 16]);
+        let mut internal = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
+        internal.arguments[0].type_kind =
+            SealedInvocationArgumentTypeKind::Scalar("integer".to_owned());
+        internal.arguments[0].type_reference = Some(retained_type_reference(&admitted, type_id));
+
+        assert!(internal.durable_sys_projection().is_err());
     }
 
     #[test]
