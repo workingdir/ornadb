@@ -41,6 +41,7 @@ struct Diagnostic {
     title: &'static str,
     help: &'static str,
     exit: Exit,
+    detail: Option<String>,
 }
 impl Diagnostic {
     const fn usage(code: &'static str, title: &'static str, help: &'static str) -> Self {
@@ -49,6 +50,7 @@ impl Diagnostic {
             title,
             help,
             exit: Exit::Usage,
+            detail: None,
         }
     }
     const fn target(code: &'static str, title: &'static str, help: &'static str) -> Self {
@@ -57,6 +59,21 @@ impl Diagnostic {
             title,
             help,
             exit: Exit::Target,
+            detail: None,
+        }
+    }
+    fn target_with_detail(
+        code: &'static str,
+        title: &'static str,
+        help: &'static str,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            code,
+            title,
+            help,
+            exit: Exit::Target,
+            detail: Some(detail.into()),
         }
     }
     const fn unavailable(title: &'static str, help: &'static str) -> Self {
@@ -65,11 +82,11 @@ impl Diagnostic {
 }
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "error[{}]: {}\nhelp: {}",
-            self.code, self.title, self.help
-        )
+        write!(f, "error[{}]: {}", self.code, self.title)?;
+        if let Some(detail) = &self.detail {
+            write!(f, "\n  {detail}")?;
+        }
+        write!(f, "\nhelp: {}", self.help)
     }
 }
 
@@ -706,10 +723,15 @@ fn check_project(endpoint: &Endpoint) -> Result<(), Diagnostic> {
         println!("project valid");
         Ok(())
     } else {
-        Err(Diagnostic::target(
+        let first = analysis
+            .diagnostics
+            .first()
+            .expect("non-empty diagnostics when semantic analysis fails");
+        Err(Diagnostic::target_with_detail(
             "E2101",
             "project semantic analysis failed",
             "fix the first reported source contract error, then run check again",
+            format!("{}: {}", first.code(), first.message()),
         ))
     }
 }
@@ -1793,7 +1815,11 @@ mod tests {
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
         let error = check_project(&endpoint).expect_err("semantic error");
+        let rendered = error.to_string();
         assert_eq!((error.code, error.exit), ("E2101", Exit::Target));
+        assert!(rendered.contains("ORNA-S021-TYPE"));
+        assert!(rendered.contains("static types are incompatible"));
+        assert!(rendered.contains("fix the first reported source contract error"));
     }
     #[test]
     fn endpoints_reject_secrets() {
