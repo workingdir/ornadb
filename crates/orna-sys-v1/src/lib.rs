@@ -9,10 +9,10 @@ use std::{
     fmt,
     marker::PhantomData,
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    thread,
+    thread::{self, ThreadId},
     time::{Duration, Instant},
 };
 
@@ -603,6 +603,14 @@ impl Runtime {
         let result = match result {
             InvocationResult::Success(value) => {
                 if value.static_type() != handle.result_type() {
+                    self.store_terminal(
+                        handle,
+                        RetainedInvocationResult::OrdinaryFailure(Diagnostic {
+                            code: "sys.invoke.return_type",
+                            message: "invocation returned a value with an incompatible type",
+                            fields: BTreeMap::new(),
+                        }),
+                    )?;
                     return Err(AdmissionError::ReturnType);
                 }
                 RetainedInvocationResult::Success(RetainedValue::new(value))
@@ -786,7 +794,179 @@ impl Runtime {
 pub struct RuntimeSupervisor {
     runtime: Arc<Mutex<Runtime>>,
     workers: Arc<Mutex<BTreeMap<InvocationId, thread::JoinHandle<()>>>>,
-    control: Arc<Mutex<()>>,
+    lifecycle: Arc<Lifecycle>,
+    synchronous: Arc<SynchronousExecutions>,
+}
+
+#[derive(Debug, Default)]
+struct Lifecycle {
+    state: Mutex<LifecycleState>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct LifecycleState {
+    restarting: bool,
+}
+
+#[derive(Debug, Default)]
+struct SynchronousExecutions {
+    state: Mutex<SynchronousExecutionState>,
+    completed: Condvar,
+    #[cfg(test)]
+    enter_hook: Mutex<Option<Arc<(Mutex<(bool, bool)>, Condvar)>>>,
+}
+
+#[derive(Debug, Default)]
+struct SynchronousExecutionState {
+    active: Vec<ThreadId>,
+    pending: usize,
+}
+
+impl SynchronousExecutions {
+    fn contains(&self, thread: ThreadId) -> Result<bool, AdmissionError> {
+        self.state
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)
+            .map(|state| state.active.contains(&thread))
+    }
+
+    fn enter(self: &Arc<Self>) -> Result<SynchronousExecution, AdmissionError> {
+        self.state
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)?
+            .active
+            .push(thread::current().id());
+        #[cfg(test)]
+        if let Some(hook) = self
+            .enter_hook
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)?
+            .clone()
+        {
+            let (state, wake) = &*hook;
+            let mut state = state
+                .lock()
+                .map_err(|_| AdmissionError::RuntimeUnavailable)?;
+            state.0 = true;
+            wake.notify_all();
+            while !state.1 {
+                state = wake
+                    .wait(state)
+                    .map_err(|_| AdmissionError::RuntimeUnavailable)?;
+            }
+        }
+        Ok(SynchronousExecution {
+            executions: Arc::clone(self),
+        })
+    }
+
+    fn wait_empty(&self) -> Result<(), AdmissionError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)?;
+        while !state.active.is_empty() || state.pending != 0 {
+            state = self
+                .completed
+                .wait(state)
+                .map_err(|_| AdmissionError::RuntimeUnavailable)?;
+        }
+        Ok(())
+    }
+
+    fn reserve(self: &Arc<Self>) -> Result<SynchronousReservation, AdmissionError> {
+        self.state
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)?
+            .pending += 1;
+        Ok(SynchronousReservation {
+            executions: Arc::clone(self),
+            reserved: true,
+        })
+    }
+
+    fn leave(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            let current = thread::current().id();
+            if let Some(index) = state.active.iter().position(|thread| *thread == current) {
+                state.active.remove(index);
+            }
+            self.completed.notify_all();
+        }
+    }
+
+    #[cfg(test)]
+    fn set_enter_hook(&self, hook: Option<Arc<(Mutex<(bool, bool)>, Condvar)>>) {
+        *self.enter_hook.lock().unwrap() = hook;
+    }
+
+    #[cfg(test)]
+    fn pending(&self) -> usize {
+        self.state.lock().unwrap().pending
+    }
+}
+
+struct SynchronousReservation {
+    executions: Arc<SynchronousExecutions>,
+    reserved: bool,
+}
+
+impl SynchronousReservation {
+    fn begin(mut self) -> Result<SynchronousExecution, AdmissionError> {
+        let mut state = self
+            .executions
+            .state
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)?;
+        state.pending = state
+            .pending
+            .checked_sub(1)
+            .ok_or(AdmissionError::RuntimeUnavailable)?;
+        state.active.push(thread::current().id());
+        self.reserved = false;
+        self.executions.completed.notify_all();
+        Ok(SynchronousExecution {
+            executions: Arc::clone(&self.executions),
+        })
+    }
+}
+
+impl Drop for SynchronousReservation {
+    fn drop(&mut self) {
+        if !self.reserved {
+            return;
+        }
+        if let Ok(mut state) = self.executions.state.lock() {
+            if let Some(pending) = state.pending.checked_sub(1) {
+                state.pending = pending;
+                self.executions.completed.notify_all();
+            }
+        }
+    }
+}
+
+struct SynchronousExecution {
+    executions: Arc<SynchronousExecutions>,
+}
+
+impl Drop for SynchronousExecution {
+    fn drop(&mut self) {
+        self.executions.leave();
+    }
+}
+
+struct RestartFence {
+    lifecycle: Arc<Lifecycle>,
+}
+
+impl Drop for RestartFence {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.lifecycle.state.lock() {
+            state.restarting = false;
+            self.lifecycle.changed.notify_all();
+        }
+    }
 }
 
 impl RuntimeSupervisor {
@@ -794,7 +974,8 @@ impl RuntimeSupervisor {
         Self {
             runtime: Arc::new(Mutex::new(Runtime::new(id))),
             workers: Arc::new(Mutex::new(BTreeMap::new())),
-            control: Arc::new(Mutex::new(())),
+            lifecycle: Arc::new(Lifecycle::default()),
+            synchronous: Arc::new(SynchronousExecutions::default()),
         }
     }
 
@@ -813,10 +994,28 @@ impl RuntimeSupervisor {
     }
 
     pub fn restart(&self) -> Result<RuntimeId, AdmissionError> {
-        let _control = self
-            .control
+        if self.synchronous.contains(thread::current().id())? {
+            return Err(AdmissionError::RuntimeUnavailable);
+        }
+
+        let mut lifecycle = self
+            .lifecycle
+            .state
             .lock()
             .map_err(|_| AdmissionError::RuntimeUnavailable)?;
+        while lifecycle.restarting {
+            lifecycle = self
+                .lifecycle
+                .changed
+                .wait(lifecycle)
+                .map_err(|_| AdmissionError::RuntimeUnavailable)?;
+        }
+        lifecycle.restarting = true;
+        drop(lifecycle);
+        let _fence = RestartFence {
+            lifecycle: Arc::clone(&self.lifecycle),
+        };
+
         let workers = {
             let mut runtime = self
                 .runtime
@@ -833,10 +1032,13 @@ impl RuntimeSupervisor {
         for (_, worker) in workers {
             let _ = worker.join();
         }
-        self.runtime
+        self.synchronous.wait_empty()?;
+        let result = self
+            .runtime
             .lock()
             .map_err(|_| AdmissionError::RuntimeUnavailable)
-            .map(|mut runtime| runtime.restart())
+            .map(|mut runtime| runtime.restart());
+        result
     }
 
     /// Runs one admitted invocation synchronously under this owner's lifecycle
@@ -850,14 +1052,59 @@ impl RuntimeSupervisor {
     where
         E: InvocationExecutor,
     {
-        let _control = self
-            .control
+        let lifecycle = self
+            .lifecycle
+            .state
             .lock()
             .map_err(|_| AdmissionError::RuntimeUnavailable)?;
-        self.runtime
+        if lifecycle.restarting {
+            return Err(AdmissionError::RuntimeUnavailable);
+        }
+        let _execution = self.synchronous.enter()?;
+        let admission = self
+            .runtime
             .lock()
             .map_err(|_| AdmissionError::RuntimeUnavailable)?
-            .run(request, executor)
+            .admit(request)?;
+        match admission {
+            Admission::New { boundary, handle } => {
+                let cancellation = self
+                    .runtime
+                    .lock()
+                    .map_err(|_| AdmissionError::RuntimeUnavailable)?
+                    .cancellation_token(&handle)?;
+                drop(lifecycle);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    executor.execute_controlled(&boundary, &cancellation)
+                }))
+                .unwrap_or_else(|_| {
+                    InvocationResult::Orphaned(Some(Diagnostic {
+                        code: "sys.invoke.orphaned",
+                        message: "invocation executor panicked",
+                        fields: BTreeMap::new(),
+                    }))
+                });
+                let mut runtime = self
+                    .runtime
+                    .lock()
+                    .map_err(|_| AdmissionError::RuntimeUnavailable)?;
+                runtime.retain_terminal(&handle, result)?;
+                let state = runtime.invocation_state(&handle);
+                drop(runtime);
+                drop(_execution);
+                state
+            }
+            Admission::Active { .. } => {
+                drop(lifecycle);
+                drop(_execution);
+                Ok(InvocationState::Active)
+            }
+            Admission::Terminal { result, .. } => {
+                drop(lifecycle);
+                drop(_execution);
+                Ok(InvocationState::Terminal(result))
+            }
+        }
     }
 
     /// Admits a separate invocation and schedules exactly one worker for a new
@@ -871,10 +1118,14 @@ impl RuntimeSupervisor {
     where
         E: InvocationExecutor + Send + 'static,
     {
-        let _control = self
-            .control
+        let lifecycle = self
+            .lifecycle
+            .state
             .lock()
             .map_err(|_| AdmissionError::RuntimeUnavailable)?;
+        if lifecycle.restarting {
+            return Err(AdmissionError::RuntimeUnavailable);
+        }
         if request.mode != InvocationMode::Start {
             return Err(AdmissionError::StartMode);
         }
@@ -896,24 +1147,48 @@ impl RuntimeSupervisor {
 
         if let Some((boundary, worker_handle, cancellation)) = boundary {
             let runtime = Arc::clone(&self.runtime);
-            let worker = thread::spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    executor.execute_controlled(&boundary, &cancellation)
-                }))
-                .unwrap_or_else(|_| {
-                    InvocationResult::Orphaned(Some(Diagnostic {
-                        code: "sys.invoke.orphaned",
-                        message: "invocation executor panicked",
-                        fields: BTreeMap::new(),
+            let synchronous = Arc::clone(&self.synchronous);
+            let reservation = synchronous.reserve()?;
+            let worker_handle_for_worker = worker_handle.clone();
+            let worker = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                thread::spawn(move || {
+                    let execution = match reservation.begin() {
+                        Ok(execution) => execution,
+                        Err(_) => return,
+                    };
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        executor.execute_controlled(&boundary, &cancellation)
                     }))
-                });
-                let Ok(mut runtime) = runtime.lock() else {
-                    return;
-                };
-                if runtime.retain_terminal(&worker_handle, result).is_err() {
-                    let _ = runtime.classify_terminal(&worker_handle, TerminalClass::Orphaned);
+                    .unwrap_or_else(|_| {
+                        InvocationResult::Orphaned(Some(Diagnostic {
+                            code: "sys.invoke.orphaned",
+                            message: "invocation executor panicked",
+                            fields: BTreeMap::new(),
+                        }))
+                    });
+                    let Ok(mut runtime) = runtime.lock() else {
+                        return;
+                    };
+                    if runtime
+                        .retain_terminal(&worker_handle_for_worker, result)
+                        .is_err()
+                    {
+                        let _ = runtime
+                            .classify_terminal(&worker_handle_for_worker, TerminalClass::Orphaned);
+                    }
+                    drop(execution);
+                })
+            })) {
+                Ok(worker) => worker,
+                Err(_) => {
+                    let mut runtime = self
+                        .runtime
+                        .lock()
+                        .map_err(|_| AdmissionError::RuntimeUnavailable)?;
+                    runtime.classify_terminal(&worker_handle, TerminalClass::Orphaned)?;
+                    return Ok(handle);
                 }
-            });
+            };
             self.workers
                 .lock()
                 .map_err(|_| AdmissionError::RuntimeUnavailable)?
@@ -937,10 +1212,6 @@ impl RuntimeSupervisor {
         });
         loop {
             let terminal = {
-                let _control = self
-                    .control
-                    .lock()
-                    .map_err(|_| AwaitError::Admission(AdmissionError::RuntimeUnavailable))?;
                 let runtime = self
                     .runtime
                     .lock()
@@ -979,10 +1250,6 @@ impl RuntimeSupervisor {
         handle: &InvocationHandle<T>,
         reason: Option<Diagnostic>,
     ) -> Result<bool, AdmissionError> {
-        let _control = self
-            .control
-            .lock()
-            .map_err(|_| AdmissionError::RuntimeUnavailable)?;
         self.runtime
             .lock()
             .map_err(|_| AdmissionError::RuntimeUnavailable)?
@@ -993,10 +1260,6 @@ impl RuntimeSupervisor {
         &self,
         handle: &InvocationHandle<T>,
     ) -> Result<InvocationState, AdmissionError> {
-        let _control = self
-            .control
-            .lock()
-            .map_err(|_| AdmissionError::RuntimeUnavailable)?;
         self.runtime
             .lock()
             .map_err(|_| AdmissionError::RuntimeUnavailable)?
@@ -1228,6 +1491,7 @@ pub enum DiagnosticField {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
     use std::sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -1339,6 +1603,26 @@ mod tests {
             }
             self.observed.store(true, Ordering::SeqCst);
             InvocationResult::Cancelled(None)
+        }
+    }
+    struct ReentrantExecutor {
+        supervisor: RuntimeSupervisor,
+        restarted: Arc<AtomicBool>,
+    }
+    impl InvocationExecutor for ReentrantExecutor {
+        fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+            self.restarted
+                .store(self.supervisor.restart().is_err(), Ordering::SeqCst);
+            InvocationResult::Success(value("Str", "stale"))
+        }
+    }
+    struct PanicExecutor {
+        calls: Arc<AtomicUsize>,
+    }
+    impl InvocationExecutor for PanicExecutor {
+        fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            panic!("executor panic")
         }
     }
     fn diagnostic(code: &'static str) -> Diagnostic {
@@ -1647,6 +1931,377 @@ mod tests {
         ));
         assert_eq!(after_restart.calls, 0);
     }
+
+    #[test]
+    fn supervised_run_does_not_block_cancel_or_timeout_observation() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("owner"));
+        let mut active_request = request(Some(value("Int", "1")), ArgumentMap::default());
+        active_request.mode = InvocationMode::Start;
+        active_request.transaction = TransactionMode::Separate;
+        let active_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let active_handle = supervisor
+            .start(
+                active_request,
+                BlockingExecutor {
+                    gate: Arc::clone(&active_gate),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    result: InvocationResult::Success(value("Str", "active")),
+                },
+            )
+            .unwrap();
+
+        let run_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let run_calls = Arc::new(AtomicUsize::new(0));
+        let run_thread = {
+            let supervisor = supervisor.clone();
+            let run_gate = Arc::clone(&run_gate);
+            let run_calls = Arc::clone(&run_calls);
+            thread::spawn(move || {
+                let mut executor = BlockingExecutor {
+                    gate: run_gate,
+                    calls: run_calls,
+                    result: InvocationResult::Success(value("Str", "run")),
+                };
+                supervisor.run(
+                    request(Some(value("Int", "2")), ArgumentMap::default()),
+                    &mut executor,
+                )
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while run_calls.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(run_calls.load(Ordering::SeqCst), 1);
+
+        let (await_sender, await_receiver) = mpsc::channel();
+        let await_supervisor = supervisor.clone();
+        let await_handle = active_handle.clone();
+        let await_thread = thread::spawn(move || {
+            let result =
+                await_supervisor.await_invocation(&await_handle, Some(Duration::from_millis(20)));
+            await_sender.send(result).unwrap();
+        });
+        assert!(matches!(
+            await_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Err(AwaitError::Timeout))
+        ));
+
+        let (cancel_sender, cancel_receiver) = mpsc::channel();
+        let cancel_supervisor = supervisor.clone();
+        let cancel_handle = active_handle.clone();
+        let cancel_thread = thread::spawn(move || {
+            cancel_sender
+                .send(cancel_supervisor.cancel(&cancel_handle, Some(diagnostic("cancelled"))))
+                .unwrap();
+        });
+        assert_eq!(
+            cancel_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(true))
+        );
+
+        let (active_open, active_wake) = &*active_gate;
+        *active_open.lock().unwrap() = true;
+        active_wake.notify_one();
+        let (run_open, run_wake) = &*run_gate;
+        *run_open.lock().unwrap() = true;
+        run_wake.notify_one();
+        await_thread.join().unwrap();
+        cancel_thread.join().unwrap();
+        assert!(matches!(
+            supervisor.await_invocation(&active_handle, Some(Duration::from_secs(1))),
+            Ok(RetainedInvocationResult::Cancelled(Some(_)))
+        ));
+        let run_result = run_thread.join().unwrap();
+        assert!(matches!(run_result, Ok(InvocationState::Terminal(_))));
+    }
+
+    #[test]
+    fn supervised_run_rejects_reentrant_restart_without_rotating_owner() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("owner"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.idempotency_key = Some("reentrant".into());
+        let restarted = Arc::new(AtomicBool::new(false));
+
+        let result = supervisor.run(
+            request.clone(),
+            &mut ReentrantExecutor {
+                supervisor: supervisor.clone(),
+                restarted: Arc::clone(&restarted),
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::Success(_)
+            ))
+        ));
+        assert!(restarted.load(Ordering::SeqCst));
+        assert_eq!(supervisor.generation(), Ok(1));
+    }
+
+    #[test]
+    fn supervised_run_fences_restart_before_admission_and_execution() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("owner"));
+        let hook = Arc::new((Mutex::new((false, false)), Condvar::new()));
+        supervisor
+            .synchronous
+            .set_enter_hook(Some(Arc::clone(&hook)));
+        let run_supervisor = supervisor.clone();
+        let run_thread = thread::spawn(move || {
+            let mut executor = Executor {
+                calls: 0,
+                result: InvocationResult::Success(value("Str", "done")),
+            };
+            run_supervisor.run(
+                request(Some(value("Int", "1")), ArgumentMap::default()),
+                &mut executor,
+            )
+        });
+        {
+            let (state, wake) = &*hook;
+            let mut state = state.lock().unwrap();
+            while !state.0 {
+                state = wake.wait(state).unwrap();
+            }
+        }
+        let (restart_sender, restart_receiver) = mpsc::channel();
+        let restart_supervisor = supervisor.clone();
+        let restart_thread = thread::spawn(move || {
+            restart_sender.send(restart_supervisor.restart()).unwrap();
+        });
+        assert!(
+            restart_receiver
+                .recv_timeout(Duration::from_millis(20))
+                .is_err()
+        );
+        {
+            let (state, wake) = &*hook;
+            state.lock().unwrap().1 = true;
+            wake.notify_all();
+        }
+        supervisor.synchronous.set_enter_hook(None);
+        assert!(matches!(
+            run_thread.join().unwrap(),
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::Success(_)
+            ))
+        ));
+        assert_eq!(
+            restart_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(RuntimeId::new("owner@2")))
+        );
+        restart_thread.join().unwrap();
+    }
+
+    #[test]
+    fn supervised_run_replays_one_orphaned_result_after_executor_panic() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("owner"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.idempotency_key = Some("panic".into());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut first = PanicExecutor {
+            calls: Arc::clone(&calls),
+        };
+        assert!(matches!(
+            supervisor.run(request.clone(), &mut first),
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::Orphaned(Some(_))
+            ))
+        ));
+        let mut replay = PanicExecutor {
+            calls: Arc::clone(&calls),
+        };
+        assert!(matches!(
+            supervisor.run(request, &mut replay),
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::Orphaned(Some(_))
+            ))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn restart_waits_for_a_running_synchronous_callback() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("owner"));
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let run_thread = {
+            let supervisor = supervisor.clone();
+            let gate = Arc::clone(&gate);
+            let calls = Arc::clone(&calls);
+            thread::spawn(move || {
+                let mut executor = BlockingExecutor {
+                    gate,
+                    calls,
+                    result: InvocationResult::Success(value("Str", "done")),
+                };
+                supervisor.run(
+                    request(Some(value("Int", "1")), ArgumentMap::default()),
+                    &mut executor,
+                )
+            })
+        };
+        while calls.load(Ordering::SeqCst) == 0 {
+            thread::yield_now();
+        }
+
+        let (restart_sender, restart_receiver) = mpsc::channel();
+        let restart_supervisor = supervisor.clone();
+        let restart_thread = thread::spawn(move || {
+            restart_sender.send(restart_supervisor.restart()).unwrap();
+        });
+        assert!(
+            restart_receiver
+                .recv_timeout(Duration::from_millis(20))
+                .is_err()
+        );
+
+        let (open, wake) = &*gate;
+        *open.lock().unwrap() = true;
+        wake.notify_one();
+        assert!(matches!(
+            run_thread.join().unwrap(),
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::Cancelled(_)
+            ))
+        ));
+        assert_eq!(
+            restart_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(RuntimeId::new("owner@2")))
+        );
+        restart_thread.join().unwrap();
+    }
+
+    #[test]
+    fn restart_pending_does_not_block_callback_cancel_or_await() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("owner"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.mode = InvocationMode::Start;
+        request.transaction = TransactionMode::Separate;
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handle = supervisor
+            .start(
+                request,
+                BlockingExecutor {
+                    gate: Arc::clone(&gate),
+                    calls: Arc::clone(&calls),
+                    result: InvocationResult::Success(value("Str", "done")),
+                },
+            )
+            .unwrap();
+        while calls.load(Ordering::SeqCst) == 0 {
+            thread::yield_now();
+        }
+
+        let (restart_sender, restart_receiver) = mpsc::channel();
+        let restart_supervisor = supervisor.clone();
+        let restart_thread = thread::spawn(move || {
+            restart_sender.send(restart_supervisor.restart()).unwrap();
+        });
+        assert!(
+            restart_receiver
+                .recv_timeout(Duration::from_millis(20))
+                .is_err()
+        );
+
+        assert_eq!(
+            supervisor.await_invocation(&handle, Some(Duration::ZERO)),
+            Err(AwaitError::Timeout)
+        );
+        assert_eq!(
+            supervisor.cancel(&handle, Some(diagnostic("cancelled"))),
+            Ok(true)
+        );
+        let (open, wake) = &*gate;
+        *open.lock().unwrap() = true;
+        wake.notify_one();
+
+        assert_eq!(
+            restart_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(RuntimeId::new("owner@2")))
+        );
+        assert_eq!(
+            supervisor.state(&handle),
+            Err(AdmissionError::ForeignRuntime)
+        );
+        restart_thread.join().unwrap();
+    }
+
+    #[test]
+    fn synchronous_reservation_rolls_back_when_worker_is_not_started() {
+        let executions = Arc::new(SynchronousExecutions::default());
+        {
+            let _reservation = executions.reserve().unwrap();
+            assert_eq!(executions.pending(), 1);
+        }
+        assert_eq!(executions.pending(), 0);
+        executions.wait_empty().unwrap();
+    }
+
+    #[test]
+    fn restart_fences_admission_before_a_new_callback_can_begin() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("owner"));
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook = Arc::new((Mutex::new((false, false)), Condvar::new()));
+        supervisor
+            .synchronous
+            .set_enter_hook(Some(Arc::clone(&hook)));
+
+        let run_supervisor = supervisor.clone();
+        let run_gate = Arc::clone(&gate);
+        let run_calls = Arc::clone(&calls);
+        let run_thread = thread::spawn(move || {
+            let mut executor = BlockingExecutor {
+                gate: run_gate,
+                calls: run_calls,
+                result: InvocationResult::Success(value("Str", "unexpected")),
+            };
+            run_supervisor.run(
+                request(Some(value("Int", "1")), ArgumentMap::default()),
+                &mut executor,
+            )
+        });
+
+        {
+            let (entered, wake) = &*hook;
+            let mut state = entered.lock().unwrap();
+            while !state.0 {
+                state = wake.wait(state).unwrap();
+            }
+        }
+        let (restart_sender, restart_receiver) = mpsc::channel();
+        let restart_supervisor = supervisor.clone();
+        let restart_thread = thread::spawn(move || {
+            restart_sender.send(restart_supervisor.restart()).unwrap();
+        });
+        assert!(
+            restart_receiver
+                .recv_timeout(Duration::from_millis(20))
+                .is_err()
+        );
+
+        {
+            let (entered, wake) = &*hook;
+            entered.lock().unwrap().1 = true;
+            wake.notify_all();
+        }
+        supervisor.synchronous.set_enter_hook(None);
+        let (open, wake) = &*gate;
+        *open.lock().unwrap() = true;
+        wake.notify_one();
+        assert!(run_thread.join().unwrap().is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            restart_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(RuntimeId::new("owner@2")))
+        );
+        restart_thread.join().unwrap();
+    }
+
     #[test]
     fn supervised_start_timeout_does_not_cancel_or_duplicate_work() {
         let supervisor = RuntimeSupervisor::new(RuntimeId::new("r"));
@@ -2287,10 +2942,12 @@ mod tests {
             ),
             Err(AdmissionError::ReturnType)
         );
-        assert_eq!(
+        assert!(matches!(
             runtime.invocation_state(&handle),
-            Ok(InvocationState::Active)
-        );
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::OrdinaryFailure(_)
+            ))
+        ));
     }
     #[test]
     fn failure_cancellation_and_orphan_are_complete_terminal_results() {
