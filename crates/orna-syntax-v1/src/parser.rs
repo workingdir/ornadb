@@ -1584,11 +1584,11 @@ impl Parser {
                     "ORNA091-E-CURRENCY",
                     "declare an ordinary nominal type with a nested Currency implementation",
                 )),
-                "ensure" => Some((
+                "ensure" if self.is_legacy_assertion_statement(i) => Some((
                     "ORNA-A091-010",
                     "`ensure` is not an assertion alias; use `assert`",
                 )),
-                "fact" => Some((
+                "fact" if self.is_legacy_assertion_statement(i) => Some((
                     "ORNA-A091-010",
                     "`fact` is not an assertion alias; use `assert`",
                 )),
@@ -1645,7 +1645,7 @@ impl Parser {
                     "ORNA-A091-001",
                     "use a brace-delimited refined-type assertion block",
                 )),
-                "constraints" => Some((
+                "constraints" if self.is_legacy_constraints_block(i) => Some((
                     "ORNA-A091-010",
                     "`constraints` is not a declaration; use owner-local `assert`",
                 )),
@@ -1891,6 +1891,120 @@ impl Parser {
                 Some(TokenKind::Identifier { .. })
             )
             && Self::token_is_punct(tokens, at + 2, "{")
+    }
+    fn is_legacy_assertion_statement(&self, at: usize) -> bool {
+        let tokens = &self.tokens;
+        let statement_boundary = at == 0
+            || matches!(
+                tokens.get(at.saturating_sub(1)).map(|token| &token.kind),
+                Some(TokenKind::Punct(";" | "{" | "}")) | Some(TokenKind::Keyword(Keyword::Pub))
+            )
+            || (Self::token_is_punct(tokens, at.saturating_sub(1), ",")
+                && self.is_table_body_member_context(at));
+        if !statement_boundary {
+            return false;
+        }
+        let Some(next) = tokens.get(at + 1) else {
+            return false;
+        };
+        let assertion_expression_starts = matches!(
+            next.kind,
+            TokenKind::Identifier { .. }
+                | TokenKind::Integer
+                | TokenKind::Decimal
+                | TokenKind::Float
+                | TokenKind::Date
+                | TokenKind::Instant
+                | TokenKind::String
+                | TokenKind::StringStart
+                | TokenKind::ReplBinding
+                | TokenKind::Keyword(
+                    Keyword::SelfValue
+                        | Keyword::True
+                        | Keyword::False
+                        | Keyword::Null
+                        | Keyword::If
+                        | Keyword::Case
+                        | Keyword::For
+                        | Keyword::While
+                        | Keyword::Loop,
+                )
+                | TokenKind::Keyword(Keyword::In)
+                | TokenKind::Punct("<" | "<=" | ">" | ">=" | "==" | "!=" | "!" | "-" | "+",)
+        );
+        assertion_expression_starts && Self::has_terminated_initializer(tokens, at + 1)
+    }
+    fn is_legacy_constraints_block(&self, at: usize) -> bool {
+        let tokens = &self.tokens;
+        if !Self::token_is_punct(tokens, at + 1, "{") {
+            return false;
+        }
+        if Self::is_legacy_module_declaration_start(tokens, at) {
+            return true;
+        }
+        matches!(
+            tokens.get(at.saturating_sub(1)).map(|token| &token.kind),
+            Some(TokenKind::Punct("," | ";" | "{" | "}"))
+        ) && self.is_table_body_member_context(at)
+    }
+    fn is_table_body_member_context(&self, at: usize) -> bool {
+        let tokens = &self.tokens;
+        let mut nested_braces = 0usize;
+        let table_open = (0..at).rev().find_map(|index| match tokens[index].kind {
+            TokenKind::Punct("}") => {
+                nested_braces += 1;
+                None
+            }
+            TokenKind::Punct("{") if nested_braces == 0 => Some(index),
+            TokenKind::Punct("{") => {
+                nested_braces -= 1;
+                None
+            }
+            _ => None,
+        });
+        let Some(table_open) = table_open else {
+            return false;
+        };
+        let Some(previous) = table_open.checked_sub(1) else {
+            return false;
+        };
+        if Self::token_is_contextual(tokens, previous) {
+            return matches!(
+                tokens
+                    .get(previous.saturating_sub(1))
+                    .map(|token| &token.kind),
+                Some(TokenKind::Keyword(Keyword::Table))
+            );
+        }
+        if !Self::token_is_punct(tokens, previous, ")") {
+            return false;
+        }
+        let mut parentheses = 0usize;
+        let Some(parameters_open) = (0..=previous)
+            .rev()
+            .find(|&index| match tokens[index].kind {
+                TokenKind::Punct(")") => {
+                    parentheses += 1;
+                    false
+                }
+                TokenKind::Punct("(") if parentheses == 1 => true,
+                TokenKind::Punct("(") if parentheses > 1 => {
+                    parentheses -= 1;
+                    false
+                }
+                _ => false,
+            })
+        else {
+            return false;
+        };
+        let Some(name) = parameters_open.checked_sub(1) else {
+            return false;
+        };
+        Self::token_is_contextual(tokens, name)
+            && matches!(
+                tokens.get(name.saturating_sub(1)).map(|token| &token.kind),
+                Some(TokenKind::Keyword(Keyword::Table))
+            )
     }
     fn is_legacy_module_declaration_start(tokens: &[Token], at: usize) -> bool {
         let mut braces = 0usize;

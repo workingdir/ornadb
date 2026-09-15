@@ -295,6 +295,103 @@ fn legacy_opaque_and_currency_declarations_remain_rejected() {
     }
 }
 
+#[test]
+fn assertion_aliases_are_accepted_in_ordinary_identifier_positions() {
+    for name in ["ensure", "fact", "constraints"] {
+        accepted_body(&format!(
+            "type {name} {{ {name}: {name}, }} \
+             table {name}({name}: {name}) {{ {name}: {name}, }} \
+             protocol {name} {{ static {name}: {name}; fn {name}({name}: {name}): {name}; }} \
+             enum {name} {{ {name} {{ {name}: {name} }}, }} \
+             fn {name}({name}: {name}): {name} {{ \
+                 let {name}: {name} = {name}; \
+                 {name} = replacement; \
+                 {{ {name}: {name} }}; \
+                 {name}.member; \
+                 namespace.{name}; \
+                 call({name}: {name}); \
+                 {name} \
+             }}"
+        ));
+    }
+}
+
+#[test]
+fn legacy_assertion_aliases_remain_rejected_in_their_removed_shapes() {
+    for (source, expected) in [
+        (
+            "pub fn bad(amount: Int) { ensure amount > 0; }",
+            "ORNA-A091-010",
+        ),
+        (
+            "pub fn bad(amount: Int) { fact amount > 0; }",
+            "ORNA-A091-010",
+        ),
+        ("pub ensure amount > 0;", "ORNA-A091-010"),
+        ("pub fact amount > 0;", "ORNA-A091-010"),
+        (
+            "pub table User(id: Uuid) { name: Str, constraints { unique(name); } }",
+            "ORNA-A091-010",
+        ),
+        (
+            "pub table User(id: Uuid) { assert id > 0; constraints { unique(id); } }",
+            "ORNA-A091-010",
+        ),
+        ("constraints { unique(id); }", "ORNA-A091-010"),
+        ("pub constraints { unique(id); }", "ORNA-A091-010"),
+    ] {
+        let parsed = parse_module(source);
+        assert_eq!(
+            parsed.diagnostics.first().map(|diagnostic| diagnostic.code),
+            Some(expected),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
+    }
+
+    for alias in ["ensure", "fact"] {
+        for operator in [
+            "<",
+            "<=",
+            ">",
+            ">=",
+            "==",
+            "!=",
+            "in",
+            "-amount >",
+            "+amount >",
+        ] {
+            for source in [
+                format!("pub fn bad(amount: Int) {{ {alias} {operator} 0; }}"),
+                format!("pub table User(id: Uuid) {{ name: Str, {alias} {operator} 0; }}"),
+                format!("pub table User(id: Uuid) {{ assert id > 0; {alias} {operator} 0; }}"),
+            ] {
+                let parsed = parse_module(&source);
+                assert_eq!(
+                    parsed.diagnostics.first().map(|diagnostic| diagnostic.code),
+                    Some("ORNA-A091-010"),
+                    "{source}: {:?}",
+                    parsed.diagnostics
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn constraints_remains_an_ordinary_nominal_constructor_in_nested_impl() {
+    let parsed = parse_module(
+        "table T(id: Int) { \
+            impl P { fn make() { constraints { value: raw } } } \
+         }",
+    );
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "nested nominal construction should remain valid: {:?}",
+        parsed.diagnostics
+    );
+}
+
 // `match` is a contextual identifier in Orna 1.0.0. The removed expression
 // form is recognized only when its statement/function-body shape includes
 // legacy `=>` arms.
