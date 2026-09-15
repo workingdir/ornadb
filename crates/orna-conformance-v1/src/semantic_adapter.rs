@@ -25,7 +25,7 @@ use orna_runtime_v1::{
     RuntimeState, StreamHandler, StreamHandlerResult, StreamItem, StreamRunOutcome,
     StreamTableCandidateValidator, StreamValidatedTableMutationBatch,
     TableActivationCandidateValidator, TableActivationError, TableMutation, TerminalOutcome,
-    ValidatedTableActivationCommit, WriterLease,
+    ValidatedTableActivationCommit, ValidatedTableRequestActivationCommit, WriterLease,
 };
 use orna_semantic_v1::{
     AssertionOwner, AssertionPlan, Catalogue, EffectSummary, ModuleInput, Namespace,
@@ -1413,18 +1413,41 @@ impl DurableTransactionalEvaluator {
         }
         let next_digest =
             durable_activation_digest(context.capture().generation_digest(), &mutations);
-        state
-            .commit_table_request_activation(
-                lease,
-                request,
+        let mut validator = TransactionalTableCandidateValidator::new(
+            &functions,
+            &key_fields,
+            &float_fields,
+            &table_fields,
+            &table_assertions,
+            &module_assertions,
+            self.limits,
+        );
+        match state
+            .commit_validated_table_request_activation(ValidatedTableRequestActivationCommit {
+                writer: lease,
+                identity: request,
                 fingerprint,
                 context,
-                &mutations,
+                mutations: &mutations,
                 next_digest,
-                success_terminal.unwrap_or(request_terminal(&StageOutcome::Passed)?),
-                &NoFault,
-            )
-            .await?;
+                outcome: success_terminal.unwrap_or(request_terminal(&StageOutcome::Passed)?),
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await
+        {
+            Ok(_) => {}
+            Err(TableActivationError::Runtime(error)) => return Err(error),
+            Err(TableActivationError::ValidationFailed(_)) => {
+                let outcome = StageOutcome::Failed(
+                    transaction_error("ORNA-EVAL-TABLE-ASSERT")
+                        .diagnostic()
+                        .clone(),
+                );
+                return fail_observed_request_outcome(&state, request, fingerprint, lease, outcome)
+                    .await;
+            }
+        }
         Ok(StageOutcome::Passed)
     }
 
@@ -1554,21 +1577,52 @@ impl DurableTransactionalEvaluator {
             continuation.context().capture().generation_digest(),
             &mutations,
         );
+        let mut validator = TransactionalTableCandidateValidator::new(
+            &functions,
+            &key_fields,
+            &float_fields,
+            &table_fields,
+            &table_assertions,
+            &module_assertions,
+            self.limits,
+        );
         match state
-            .commit_table_request_activation(
-                continuation.writer_lease(),
-                continuation.identity(),
-                continuation.fingerprint(),
-                continuation.context(),
-                &mutations,
+            .commit_validated_table_request_activation(ValidatedTableRequestActivationCommit {
+                writer: continuation.writer_lease(),
+                identity: continuation.identity(),
+                fingerprint: continuation.fingerprint(),
+                context: continuation.context(),
+                mutations: &mutations,
                 next_digest,
-                success_terminal,
+                outcome: success_terminal,
+                validator: &mut validator,
                 faults,
-            )
+            })
             .await
         {
             Ok(_) => RunningTableRequestDisposition::Committed,
-            Err(error) => RunningTableRequestDisposition::Fenced(error),
+            Err(TableActivationError::Runtime(error)) => {
+                RunningTableRequestDisposition::Fenced(error)
+            }
+            Err(TableActivationError::ValidationFailed(_)) => {
+                let outcome = StageOutcome::Failed(
+                    transaction_error("ORNA-EVAL-TABLE-ASSERT")
+                        .diagnostic()
+                        .clone(),
+                );
+                match fail_observed_request_outcome(
+                    state,
+                    continuation.identity(),
+                    continuation.fingerprint(),
+                    continuation.writer_lease(),
+                    outcome.clone(),
+                )
+                .await
+                {
+                    Ok(_) => RunningTableRequestDisposition::Semantic(outcome),
+                    Err(error) => RunningTableRequestDisposition::Fenced(error),
+                }
+            }
         }
     }
 
