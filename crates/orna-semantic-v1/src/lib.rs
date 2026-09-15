@@ -267,6 +267,10 @@ pub enum Type {
         result: Box<Type>,
     },
     Named(String),
+    /// An expression that cannot complete successfully.  This is a valid
+    /// successful-result subtype for contextual checking, unlike `Error`,
+    /// which records that semantic analysis already emitted a diagnostic.
+    Bottom,
     /// A diagnostic has already been emitted; this is never a dynamic `Any`.
     Error,
 }
@@ -1659,6 +1663,7 @@ fn resolve_type_aliases(
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Bottom
         | Type::Error => ty.clone(),
     }
 }
@@ -1679,6 +1684,7 @@ fn primitive(name: &str) -> Option<Type> {
         "TEXT" => Type::Text,
         "DATE" => Type::Date,
         "TIMESTAMP" => Type::Instant,
+        "Error" => Type::Named("Error".into()),
         "Duration" => Type::Named("std.DURATION".into()),
         "VOID" => Type::Null,
         "UUID" => Type::Named("std.UUID".into()),
@@ -2845,6 +2851,7 @@ fn static_type_is_known(ty: &Type, scope: &Scope) -> bool {
                     | "std.Document"
                     | "std.ByteStream"
                     | "std.UI"
+                    | "Error"
             ) || system_api::embedded_system_api().describes_type(name)
                 || scope.generic_type_parameters.contains(name)
                 || scope.names.get(name).is_some_and(|symbol| {
@@ -2885,7 +2892,7 @@ fn static_type_is_known(ty: &Type, scope: &Scope) -> bool {
                 .all(|parameter| static_type_is_known(parameter, scope))
                 && static_type_is_known(result, scope)
         }
-        Type::Error => false,
+        Type::Bottom | Type::Error => false,
     }
 }
 
@@ -4142,6 +4149,7 @@ fn type_contains_named(ty: &Type, name: &str) -> bool {
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Bottom
         | Type::Error => false,
     }
 }
@@ -4268,6 +4276,7 @@ fn type_mentions_generic(ty: &Type, generic_names: &BTreeSet<String>) -> bool {
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Bottom
         | Type::Error => false,
     }
 }
@@ -4334,6 +4343,7 @@ fn substitute_generic_type(ty: &Type, substitutions: &BTreeMap<String, Type>) ->
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Bottom
         | Type::Error => ty.clone(),
     }
 }
@@ -5386,6 +5396,12 @@ fn infer(
         Expr::Call {
             callee, arguments, ..
         } => {
+            if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "fail")
+                && !local.contains_key("fail")
+                && !scope.names.contains_key("fail")
+            {
+                return infer_fail_call(arguments, scope, local, diagnostics);
+            }
             if qualified_path(callee)
                 .as_deref()
                 .is_some_and(|path| path == ["work", "Contact", "insert"])
@@ -7627,6 +7643,7 @@ fn infer_finite_list_sort_key(
 fn is_sort_key_type(ty: &Type) -> bool {
     match ty {
         Type::Error
+        | Type::Bottom
         | Type::Int
         | Type::Decimal
         | Type::Float
@@ -9525,20 +9542,68 @@ fn infer_recovery_pipeline(
         };
     };
     let mut callback_locals = local.clone();
-    insert_local_binding(name, Type::Error, &mut callback_locals, diagnostics);
+    insert_local_binding(name, error_value_type(), &mut callback_locals, diagnostics);
     let recovered = infer(body, scope, &callback_locals, diagnostics);
     let mut effects = input.effects;
     effects
         .effects
         .extend(recovered.effects.effects.iter().cloned());
     effects.may_fail = recovered.effects.may_fail;
-    let ty = if types_match(&input.ty, &recovered.ty) {
+    let ty = if recovered.ty == Type::Bottom {
+        input.ty
+    } else if input.ty == Type::Bottom || types_match(&input.ty, &recovered.ty) {
         recovered.ty
     } else {
         require_same(&input.ty, &recovered.ty, diagnostics);
         Type::Error
     };
     Inferred { ty, effects }
+}
+
+fn infer_fail_call(
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let mut effects = EffectSummary {
+        may_fail: true,
+        ..EffectSummary::default()
+    };
+    let values = arguments
+        .iter()
+        .map(|argument| {
+            let value = infer(&argument.value, scope, local, diagnostics);
+            effects.join(&value.effects);
+            value.ty
+        })
+        .collect::<Vec<_>>();
+    let valid_shape = arguments.len() == 1
+        && arguments[0]
+            .name
+            .as_deref()
+            .is_none_or(|name| name == "error_value");
+    if !valid_shape {
+        diagnostics.push(diag(DIAG_TYPE, "fail requires exactly one Error argument"));
+    }
+    let valid_type = values
+        .first()
+        .is_some_and(|value| types_match(&error_value_type(), value));
+    if valid_shape && !valid_type {
+        diagnostics.push(diag(DIAG_TYPE, "fail argument must have type Error"));
+    }
+    Inferred {
+        ty: if valid_shape && valid_type {
+            Type::Bottom
+        } else {
+            Type::Error
+        },
+        effects,
+    }
+}
+
+fn error_value_type() -> Type {
+    Type::Named("Error".into())
 }
 
 fn pipeline_lambda(expression: &Expr) -> Option<&Expr> {
@@ -10357,6 +10422,12 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
 fn types_match(expected: &Type, actual: &Type) -> bool {
     if expected == actual {
         return true;
+    }
+    if matches!(actual, Type::Bottom) {
+        return true;
+    }
+    if matches!(expected, Type::Bottom) {
+        return false;
     }
     if matches!(expected, Type::Error) || matches!(actual, Type::Error) {
         return true;
