@@ -429,6 +429,33 @@ fn imported_nominal_constructor_accepts_complete_public_fields_and_defaults() {
     assert!(admission.private_required);
 }
 
+#[test]
+fn nominal_field_defaults_use_earlier_owner_local_fields() {
+    let result = analyze_main(
+        r#"
+            pub type Vault {
+                seed: Int = 1,
+                total: Int = seed + 1,
+            }
+            pub fn forge(): Vault = Vault {};
+        "#,
+    );
+    expect_accepted(&result);
+}
+
+#[test]
+fn incompatible_nominal_field_default_requires_type_diagnostic() {
+    let result = analyze_main(
+        r#"
+            pub type Vault {
+                seed: Int = 1,
+                label: Str = seed + 1,
+            }
+        "#,
+    );
+    expect_diagnostics(&result, &[DIAG_TYPE]);
+}
+
 // ORNA-NOMINAL-002 and ORNA-IMPORT-001/-004: distinct declarations remain
 // distinct even when their short source names and public representations match.
 #[test]
