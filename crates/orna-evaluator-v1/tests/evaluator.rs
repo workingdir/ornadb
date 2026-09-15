@@ -1579,6 +1579,126 @@ fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
 }
 
 #[test]
+fn std_collection_date_min_and_max_accept_all_call_forms_and_preserve_order() {
+    let values = "[2024-02-29, 2024-01-01, 2024-12-31]";
+    let expected_min = Value::option(Some(evaluate("2024-01-01"))).unwrap();
+    let expected_max = Value::option(Some(evaluate("2024-12-31"))).unwrap();
+    for (name, expected) in [("min", expected_min), ("max", expected_max)] {
+        for expression in [
+            format!("{name}({values})"),
+            format!("std.collection.{name}({values})"),
+            format!("{name}(rows: {values})"),
+            format!("std.collection.{name}(rows: {values})"),
+            format!("{values} | {name}"),
+            format!("{values} | {name}()"),
+            format!("{values} | std.collection.{name}"),
+            format!("{values} | std.collection.{name}()"),
+        ] {
+            assert_eq!(evaluate(&expression), expected, "{expression}");
+        }
+    }
+
+    let source = "fn earliest(rows: [Date]) = min(rows); fn latest(rows: [Date]) = std.collection.max(rows);";
+    assert_eq!(
+        call_module(
+            source,
+            "earliest([2024-03-01, 2024-02-01])",
+            Limits::default()
+        )
+        .unwrap(),
+        Value::option(Some(evaluate("2024-02-01"))).unwrap()
+    );
+    assert_eq!(
+        call_module(
+            source,
+            "latest([2024-03-01, 2024-02-01])",
+            Limits::default()
+        )
+        .unwrap(),
+        Value::option(Some(evaluate("2024-03-01"))).unwrap()
+    );
+}
+
+#[test]
+fn std_collection_instant_min_and_max_use_normalized_utc_order() {
+    let values =
+        "[2024-02-29T05:30:00+05:30, 2024-02-29T00:00:00Z, 2024-02-28T23:59:59.999999999Z]";
+    let expected_min = Value::option(Some(evaluate("2024-02-28T23:59:59.999999999Z"))).unwrap();
+    let expected_max = Value::option(Some(evaluate("2024-02-29T05:30:00+05:30"))).unwrap();
+    for (name, expected) in [("min", expected_min), ("max", expected_max)] {
+        for expression in [
+            format!("{name}({values})"),
+            format!("std.collection.{name}({values})"),
+            format!("{name}(rows: {values})"),
+            format!("std.collection.{name}(rows: {values})"),
+            format!("{values} | {name}"),
+            format!("{values} | {name}()"),
+            format!("{values} | std.collection.{name}"),
+            format!("{values} | std.collection.{name}()"),
+        ] {
+            assert_eq!(evaluate(&expression), expected, "{expression}");
+        }
+    }
+
+    let source =
+        "fn earliest(rows: [Instant]) = min(rows); fn latest(rows: [Instant]) = max(rows);";
+    assert_eq!(
+        call_module(
+            source,
+            "earliest([1970-01-01T00:00:01Z, 1970-01-01T00:00:00Z])",
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::option(Some(evaluate("1970-01-01T00:00:00Z"))).unwrap()
+    );
+    assert_eq!(
+        call_module(
+            source,
+            "latest([1970-01-01T00:00:00Z, 1970-01-01T01:00:00+01:00])",
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::option(Some(evaluate("1970-01-01T00:00:00Z"))).unwrap()
+    );
+}
+
+#[test]
+fn std_collection_temporal_min_and_max_keep_empty_null_and_reject_mixed_types() {
+    for expression in [
+        "min([])",
+        "max([])",
+        "std.collection.min(rows: [])",
+        "std.collection.max(rows: [])",
+        "[] | min()",
+        "[] | max()",
+    ] {
+        assert_eq!(
+            evaluate(expression),
+            Value::new(Raw::Null).unwrap(),
+            "{expression}"
+        );
+    }
+
+    for expression in [
+        "min([2024-01-01, 1])",
+        "max([1, 2024-01-01])",
+        "std.collection.min([1970-01-01T00:00:00Z, 1])",
+        "std.collection.max([1, 1970-01-01T00:00:00Z])",
+        "min([2024-01-01, 1970-01-01T00:00:00Z])",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default()
+            )),
+            "ORNA-EVAL-UNSUPPORTED",
+            "{expression}"
+        );
+    }
+}
+
+#[test]
 fn std_collection_min_and_max_accept_integer_lists_in_all_call_forms() {
     let values = "[9007199254740993, -9007199254740993, 7, -9007199254740993]";
     let expected_min = Value::option(Some(Value::int((-9007199254740993_i64).into()))).unwrap();
