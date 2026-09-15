@@ -429,6 +429,192 @@ fn imported_nominal_constructor_accepts_complete_public_fields_and_defaults() {
     assert!(admission.private_required);
 }
 
+// ORNA-NOMINAL-002 and ORNA-IMPORT-001/-004: distinct declarations remain
+// distinct even when their short source names and public representations match.
+#[test]
+fn same_short_name_nominals_from_distinct_modules_are_incompatible() {
+    let result = analyze(&[
+        ModuleInput::new(
+            "alpha.orna",
+            "pub type Vault { pub value: Int, } pub fn make(): Vault = Vault { value: 1 };",
+        ),
+        ModuleInput::new(
+            "beta.orna",
+            "pub type Vault { pub value: Int, } pub fn make(): Vault = Vault { value: 2 };",
+        ),
+        ModuleInput::new(
+            "main.orna",
+            "use alpha; use beta; pub fn bad(value: alpha.Vault): alpha.Vault = beta.make();",
+        ),
+    ]);
+    expect_diagnostics(&result, &[DIAG_TYPE]);
+}
+
+// ORNA-NOMINAL-002 and ORNA-IMPORT-001/-004: named, qualified, and aliased
+// references to one exported declaration share one compiler-local identity.
+#[test]
+fn named_qualified_and_aliased_nominal_references_agree() {
+    let result = analyze(&[
+        ModuleInput::new("alpha.orna", "pub type Vault { pub value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            r#"
+                use alpha.{Vault};
+                use alpha as a;
+                pub fn named_to_qualified(value: Vault): a.Vault = value;
+                pub fn qualified_to_named(value: a.Vault): Vault = value;
+                pub fn named_constructor(): Vault = Vault { value: 1 };
+                pub fn qualified_constructor(): a.Vault = a.Vault { value: 2 };
+                pub fn aliased_constructor(): Vault = a.Vault { value: 3 };
+            "#,
+        ),
+    ]);
+    expect_accepted(&result);
+}
+
+// ORNA-SYNTAX-001 and ORNA-NOMINAL-002: a qualified constructor produces the
+// declaration selected by the same qualified spelling in its result annotation.
+#[test]
+fn qualified_nominal_constructor_satisfies_qualified_annotation() {
+    let result = analyze(&[
+        ModuleInput::new("vault.orna", "pub type Vault { pub value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use vault; pub fn forge(): vault.Vault = vault.Vault { value: 1 };",
+        ),
+    ]);
+    expect_accepted(&result);
+}
+
+// ORNA-INFER-011 and ORNA-NOMINAL-002: an inferred factory retains the
+// defining module's nominal identity and cannot satisfy another module's type.
+#[test]
+fn inferred_nominal_factory_identity_cannot_cross_assign() {
+    let result = analyze(&[
+        ModuleInput::new(
+            "alpha.orna",
+            "pub type Vault { pub value: Int, } pub fn make() = Vault { value: 1 };",
+        ),
+        ModuleInput::new(
+            "beta.orna",
+            "pub type Vault { pub value: Int, } pub fn make() = Vault { value: 2 };",
+        ),
+        ModuleInput::new(
+            "main.orna",
+            "use alpha; use beta; pub fn bad(): alpha.Vault = beta.make();",
+        ),
+    ]);
+    expect_diagnostics(&result, &[DIAG_TYPE]);
+}
+
+// ORNA-NOMINAL-002 and ORNA-IMPORT-004: same-short-name imports keep their
+// declaration-specific row metadata instead of selecting the first row seen.
+#[test]
+fn same_short_name_nominal_rows_do_not_mix_between_modules() {
+    let accepted = analyze(&[
+        ModuleInput::new("alpha.orna", "pub type Vault { pub alpha: Int, }"),
+        ModuleInput::new("beta.orna", "pub type Vault { pub beta: Str, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use alpha; use beta; pub fn forge(): beta.Vault = beta.Vault { beta: \"ok\" };",
+        ),
+    ]);
+    expect_accepted(&accepted);
+
+    let mixed = analyze(&[
+        ModuleInput::new("alpha.orna", "pub type Vault { pub alpha: Int, }"),
+        ModuleInput::new("beta.orna", "pub type Vault { pub beta: Str, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use alpha; use beta; pub fn forge(): beta.Vault = beta.Vault { alpha: 1 };",
+        ),
+    ]);
+    expect_diagnostics(&mixed, &[DIAG_TYPE]);
+}
+
+// ORNA-IMPL-005: a local protocol implementation belongs to its canonical
+// nominal owner and must not satisfy the same-short-name imported type.
+#[test]
+fn protocol_ownership_uses_canonical_nominal_identity() {
+    let result = analyze(&[
+        ModuleInput::new("foreign.orna", "pub type Box { pub value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            r#"
+                use foreign;
+                pub protocol P { fn value(self): Int; }
+                pub type Box {
+                    pub value: Int,
+                    impl P { fn value(self): Int = self.value; }
+                }
+                pub fn accept<T impl P>(value: T): T = value;
+                pub fn own() = accept(Box { value: 1 });
+                pub fn bad() = accept(foreign.Box { value: 1 });
+            "#,
+        ),
+    ]);
+    expect_diagnostics(&result, &[DIAG_TYPE]);
+}
+
+// ORNA-INFER-011: block-local annotations use the same identity resolver as
+// function signatures and nominal constructors.
+#[test]
+fn block_local_nominal_annotations_use_canonical_identity() {
+    let result = analyze(&[
+        ModuleInput::new("vault.orna", "pub type Vault { pub value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            r#"
+                use vault.{Vault};
+                use vault as v;
+                pub fn named() {
+                    let value: Vault = Vault { value: 1 };
+                    value
+                }
+                pub fn aliased() {
+                    let value: v.Vault = v.Vault { value: 2 };
+                    value
+                }
+            "#,
+        ),
+    ]);
+    expect_accepted(&result);
+}
+
+// ORNA-INFER-011: finite-list callback annotations agree with the resolved
+// element identity in both named and aliased forms.
+#[test]
+fn finite_list_callback_annotations_use_canonical_identity() {
+    let result = analyze(&[
+        ModuleInput::new("vault.orna", "pub type Vault { pub value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            r#"
+                use vault.{Vault};
+                use vault as v;
+                pub fn named(values: [Vault]) = values | map((value: Vault) => value);
+                pub fn aliased(values: [v.Vault]) =
+                    values | map((value: v.Vault) => value);
+            "#,
+        ),
+    ]);
+    expect_accepted(&result);
+}
+
+// ORNA-INFER-011: generic money constructor arguments use the same canonical
+// nominal currency identity as their contextual result type.
+#[test]
+fn generic_money_constructor_uses_canonical_currency_identity() {
+    let result = analyze(&[
+        ModuleInput::new("currency.orna", "pub type GBP { pub value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use currency as c; pub fn amount(): Money<c.GBP> = Money<c.GBP>(12.34);",
+        ),
+    ]);
+    expect_accepted(&result);
+}
+
 #[test]
 fn nominal_constructor_rejects_duplicate_fields() {
     let result = analyze_main("type T { value: Int, } fn forge() = T { value: 1, value: 2 };");
