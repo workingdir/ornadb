@@ -1983,6 +1983,7 @@ fn resolve_imports(
                 .or_insert_with(|| module_namespace.clone());
         }
     }
+    let mut implicit_roots = scope.modules.keys().cloned().collect::<BTreeSet<_>>();
     let mut explicit = BTreeMap::<String, Symbol>::new();
     let mut glob = BTreeMap::<String, Vec<Symbol>>::new();
     for item in &tree.items {
@@ -2026,10 +2027,21 @@ fn resolve_imports(
                     diagnostics.push(diag(DIAG_IMPORT, "root namespace requires an alias"));
                     continue;
                 };
-                scope
-                    .modules
-                    .entry(name.clone())
-                    .or_insert_with(|| target.clone());
+                if scope.names.contains_key(name)
+                    || explicit.contains_key(name)
+                    || scope.modules.get(name).is_some_and(|root| root != &target)
+                {
+                    diagnostics.push(diag(
+                        DIAG_AMBIGUOUS,
+                        "module import conflicts with an existing binding",
+                    ));
+                    if implicit_roots.remove(name) {
+                        scope.modules.remove(name);
+                    }
+                    continue;
+                }
+                scope.modules.insert(name.clone(), target.clone());
+                implicit_roots.remove(name);
                 insert_explicit(
                     &mut explicit,
                     name.clone(),
@@ -2056,10 +2068,21 @@ fn resolve_imports(
                 if rejects_portable_sys_shadow(name, diagnostics) {
                     continue;
                 }
-                scope
-                    .modules
-                    .entry(name.clone())
-                    .or_insert_with(|| target.clone());
+                if scope.names.contains_key(name)
+                    || explicit.contains_key(name)
+                    || scope.modules.get(name).is_some_and(|root| root != &target)
+                {
+                    diagnostics.push(diag(
+                        DIAG_AMBIGUOUS,
+                        "module import conflicts with an existing binding",
+                    ));
+                    if implicit_roots.remove(name) {
+                        scope.modules.remove(name);
+                    }
+                    continue;
+                }
+                scope.modules.insert(name.clone(), target.clone());
+                implicit_roots.remove(name);
                 insert_explicit(
                     &mut explicit,
                     name.clone(),
