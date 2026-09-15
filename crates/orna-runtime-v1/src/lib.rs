@@ -1323,6 +1323,7 @@ pub struct RuntimeState {
 enum RequestActivationTransactionError {
     Runtime(RuntimeError),
     RolledBack(RuntimeError),
+    RolledBackValidation(SafeDiagnostic),
 }
 
 impl From<RuntimeError> for RequestActivationTransactionError {
@@ -1461,6 +1462,20 @@ pub struct ValidatedTableActivationCommit<'a> {
     pub context: &'a RuntimeActivationContext,
     pub mutations: &'a [TableMutation],
     pub next_digest: [u8; 32],
+    pub validator: &'a mut dyn TableActivationCandidateValidator,
+    pub faults: &'a dyn FaultInjector,
+}
+
+/// A table-backed request activation that validates its post-mutation
+/// candidate before publishing rows, its checkpoint, or terminal success.
+pub struct ValidatedTableRequestActivationCommit<'a> {
+    pub writer: WriterLease,
+    pub identity: RequestIdentity,
+    pub fingerprint: [u8; 32],
+    pub context: &'a RuntimeActivationContext,
+    pub mutations: &'a [TableMutation],
+    pub next_digest: [u8; 32],
+    pub outcome: TerminalOutcome,
     pub validator: &'a mut dyn TableActivationCandidateValidator,
     pub faults: &'a dyn FaultInjector,
 }
@@ -3184,6 +3199,7 @@ impl RuntimeState {
                 next_digest,
                 outcome,
                 faults,
+                None,
             )
             .await
         {
@@ -3197,10 +3213,65 @@ impl RuntimeState {
             }
             Ok(committed) => Ok(committed),
             Err(RequestActivationTransactionError::Runtime(error)) => Err(error),
+            Err(RequestActivationTransactionError::RolledBackValidation(_)) => {
+                unreachable!("unvalidated request activation cannot reject a candidate")
+            }
         }
     }
 
-    /// Performs the validated bounded terminal outcome commit in one
+    /// Atomically finalizes one table-backed request only after its validator
+    /// accepts the exact post-mutation candidate read from the immediate
+    /// writer transaction. Rejection rolls back table rows, mutation and
+    /// checkpoint state, and terminal success before it becomes visible.
+    pub async fn commit_validated_table_request_activation(
+        &self,
+        request: ValidatedTableRequestActivationCommit<'_>,
+    ) -> Result<RequestActivationCommit, TableActivationError> {
+        let ValidatedTableRequestActivationCommit {
+            writer,
+            identity,
+            fingerprint,
+            context,
+            mutations,
+            next_digest,
+            outcome,
+            validator,
+            faults,
+        } = request;
+        match self
+            .commit_table_request_activation_tx(
+                writer,
+                identity,
+                fingerprint,
+                context,
+                mutations,
+                next_digest,
+                outcome,
+                faults,
+                Some(validator),
+            )
+            .await
+        {
+            Err(RequestActivationTransactionError::RolledBack(error)) => {
+                self.record_controlled_rollback_proof(identity, fingerprint, writer)
+                    .await
+                    .map_err(TableActivationError::Runtime)?;
+                Err(TableActivationError::Runtime(error))
+            }
+            Err(RequestActivationTransactionError::RolledBackValidation(diagnostic)) => {
+                self.record_controlled_rollback_proof(identity, fingerprint, writer)
+                    .await
+                    .map_err(TableActivationError::Runtime)?;
+                Err(TableActivationError::ValidationFailed(diagnostic))
+            }
+            Ok(committed) => Ok(committed),
+            Err(RequestActivationTransactionError::Runtime(error)) => {
+                Err(TableActivationError::Runtime(error))
+            }
+        }
+    }
+
+    /// Performs the bounded terminal outcome commit in one
     /// writer-fenced transaction. Any validation, cancellation, fault, or
     /// owner-loss error
     /// rolls the complete transaction back. A matching terminal request is
@@ -3223,6 +3294,7 @@ impl RuntimeState {
         next_digest: [u8; 32],
         outcome: TerminalOutcome,
         faults: &dyn FaultInjector,
+        mut validator: Option<&mut dyn TableActivationCandidateValidator>,
     ) -> Result<RequestActivationCommit, RequestActivationTransactionError> {
         validate_request_identity(identity)?;
         let transaction = self
@@ -3268,6 +3340,9 @@ impl RuntimeState {
             .map(TableMutation::runtime_mutation)
             .collect::<Result<Vec<_>, _>>()?;
         validate_mutations(&encoded, next_digest)?;
+        if let Some(validator) = &mut validator {
+            validate_table_candidate_scope(mutations, validator.tables())?;
+        }
         let current_capture = capture_tx(&transaction).await?;
         if &current_capture != context.capture() {
             return Err(RuntimeError::StaleCapture {
@@ -3286,6 +3361,15 @@ impl RuntimeState {
         }
         if let Err(error) = faults.check(FaultPoint::AfterTableWrite) {
             return Err(request_activation_rollback(transaction, error).await?);
+        }
+        if let Some(validator) = validator {
+            let rows = match table_rows_tx(&transaction, validator.tables()).await {
+                Ok(rows) => rows,
+                Err(error) => return Err(request_activation_rollback(transaction, error).await?),
+            };
+            if let Err(diagnostic) = validator.validate(&rows) {
+                return Err(request_activation_validation_rollback(transaction, diagnostic).await?);
+            }
         }
         let capture = match append_mutations_tx(
             &transaction,
@@ -11973,6 +12057,19 @@ async fn request_activation_rollback(
     Ok(RequestActivationTransactionError::RolledBack(error))
 }
 
+async fn request_activation_validation_rollback(
+    transaction: libsql::Transaction,
+    diagnostic: SafeDiagnostic,
+) -> Result<RequestActivationTransactionError, RuntimeError> {
+    transaction
+        .rollback()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(RequestActivationTransactionError::RolledBackValidation(
+        diagnostic,
+    ))
+}
+
 fn controlled_rollback_proof(marker: [u8; 32]) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"orna.runtime.controlled-rollback.v2");
@@ -18645,6 +18742,146 @@ mod tests {
         assert_eq!(
             state.committed_table_row("books", &[1]).await.unwrap(),
             Some(vec![9])
+        );
+    }
+
+    #[tokio::test]
+    async fn validated_table_request_activation_commits_candidate_checkpoint_and_terminal_success()
+    {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let (identity, fingerprint, run) =
+            begin_continuable_request(&state, owner, 46, 47, 48).await;
+        let continuation = state
+            .continue_running_table_request(identity, fingerprint, owner)
+            .await
+            .unwrap();
+        let mut validator = ObservingTableActivationValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+            seen: None,
+        };
+
+        let committed = state
+            .commit_validated_table_request_activation(ValidatedTableRequestActivationCommit {
+                writer: continuation.writer_lease(),
+                identity: continuation.identity(),
+                fingerprint: continuation.fingerprint(),
+                context: continuation.context(),
+                mutations: &[table_mutation(49, 1, Some(9))],
+                next_digest: digest(50),
+                outcome: outcome(51),
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(validator.calls, 1);
+        assert_eq!(
+            validator.seen.as_ref().and_then(|rows| rows.get("books")),
+            Some(&vec![(vec![1], vec![9])])
+        );
+        assert_eq!(committed.request.state, RequestState::Completed);
+        assert_eq!(committed.request.terminal_outcome, Some(outcome(51)));
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+        assert_eq!(
+            state.latest_checkpoint().await.unwrap().unwrap().digest,
+            digest(50)
+        );
+        assert_eq!(
+            state.run_observation(run.id).await.unwrap().unwrap().status,
+            RunObservationStatus::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_validated_table_request_activation_leaks_no_candidate_checkpoint_or_success()
+    {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let (identity, fingerprint, run) =
+            begin_continuable_request(&state, owner, 52, 53, 54).await;
+        let continuation = state
+            .continue_running_table_request(identity, fingerprint, owner)
+            .await
+            .unwrap();
+        let before = state.capture().await.unwrap();
+        let mut validator = RejectingValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+        };
+
+        let result = state
+            .commit_validated_table_request_activation(ValidatedTableRequestActivationCommit {
+                writer: continuation.writer_lease(),
+                identity: continuation.identity(),
+                fingerprint: continuation.fingerprint(),
+                context: continuation.context(),
+                mutations: &[table_mutation(55, 1, Some(9))],
+                next_digest: digest(56),
+                outcome: outcome(57),
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(TableActivationError::ValidationFailed(SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Permanent,
+            }))
+        ));
+        assert_eq!(validator.calls, 1);
+        assert_eq!(state.capture().await.unwrap(), before);
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        let status = state
+            .request_status(identity, fingerprint)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.state, RequestState::Running);
+        assert_eq!(status.terminal_outcome, None);
+        assert_eq!(
+            state.run_observation(run.id).await.unwrap().unwrap().status,
+            RunObservationStatus::Running
+        );
+
+        drop(state);
+        let reopened = open_state(&repo).await;
+        assert_eq!(reopened.capture().await.unwrap(), before);
+        assert!(reopened.pending().await.unwrap().is_empty());
+        assert_eq!(reopened.latest_checkpoint().await.unwrap(), None);
+        assert_eq!(
+            reopened.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        let reopened_status = reopened
+            .request_status(identity, fingerprint)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened_status.state, RequestState::Running);
+        assert_eq!(reopened_status.terminal_outcome, None);
+        assert_eq!(
+            reopened
+                .run_observation(run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            RunObservationStatus::Running
         );
     }
 
