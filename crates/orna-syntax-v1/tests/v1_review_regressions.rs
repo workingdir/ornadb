@@ -211,6 +211,43 @@ fn legacy_empty_pipe_closure_is_rejected() {
     rejected("fn f() = || true;");
 }
 
+// `var` is a contextual identifier in Orna 1.0.0. Only the removed mutable
+// declaration form remains reserved, including destructuring patterns.
+#[test]
+fn var_is_accepted_in_ordinary_identifier_positions() {
+    accepted_body(
+        "type var { var: var, } \
+         table var(var: var) { var: var, } \
+         protocol var { static var: var; fn var(var: var): var; } \
+         enum var { var { var: var }, } \
+         fn var(var: var): var { \
+             let var: var = var; \
+             var = replacement; \
+             { var: var }; \
+             var.member; \
+             namespace.var; \
+             call(var: var); \
+             var \
+         }",
+    );
+}
+
+#[test]
+fn legacy_var_declarations_remain_rejected_at_statement_boundaries() {
+    for source in [
+        "fn f() { var value = 1; }",
+        "fn f() { var (left, [right], { field: nested }, Variant { payload: value }) = source; }",
+    ] {
+        let parsed = parse_module(source);
+        assert_eq!(
+            parsed.diagnostics.first().map(|diagnostic| diagnostic.code),
+            Some("ORNA091-E-VAR"),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
+    }
+}
+
 // grammar/orna.ebnf: qualified_name and nominal_constructor (optional fields);
 // source/04-lexical.md: Contextual names and construction;
 // source/06-expressions.md: ORNA-ENUM-003 requires explicit payload fields.
