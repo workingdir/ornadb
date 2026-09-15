@@ -24,11 +24,11 @@ use std::{
 
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    RuntimeError, RuntimeIdentity, RuntimeState, RuntimeTableRows, StreamCheckpoint,
-    StreamFailurePayloadFuture, StreamFailurePayloadProvider, StreamHandler, StreamHandlerResult,
-    StreamItem, StreamMutationBatch, StreamRunGate, StreamSource, StreamSourceDescriptor,
-    StreamSourceKind, StreamSourcePoll, StreamStepError, StreamTableCandidateValidator,
-    StreamValidatedTableMutationBatch, TableMutation, WriterLease,
+    ListStreamSource, RuntimeError, RuntimeIdentity, RuntimeState, RuntimeTableRows,
+    StreamCheckpoint, StreamFailurePayloadFuture, StreamFailurePayloadProvider, StreamHandler,
+    StreamHandlerResult, StreamItem, StreamMutationBatch, StreamRunGate, StreamSource,
+    StreamSourceDescriptor, StreamSourceKind, StreamSourcePoll, StreamStep, StreamStepError,
+    StreamTableCandidateValidator, StreamValidatedTableMutationBatch, TableMutation, WriterLease,
 };
 use orna_stream_v1::{
     AsyncCheckpointBackend, Checkpoint, CommitIntent, CommitResult, Component, ConsumerIdentity,
@@ -351,6 +351,21 @@ impl StreamHandler for CountingHandler {
         self.result
             .take()
             .expect("only one handler call is expected")
+    }
+}
+
+struct RecordingCommitHandler {
+    payloads: Vec<Vec<u8>>,
+    next_digest: [u8; 32],
+}
+
+impl StreamHandler for RecordingCommitHandler {
+    fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult {
+        self.payloads.push(item.payload.clone());
+        StreamHandlerResult::Commit(StreamMutationBatch {
+            mutations: Vec::new(),
+            next_digest: self.next_digest,
+        })
     }
 }
 
@@ -725,6 +740,93 @@ async fn replay_cancel_counts_one_attempt_without_moving_checkpoint() {
     assert_eq!(cancelled.diagnostic, fixture.skipped.diagnostic);
     assert_eq!(fixture.state.capture().await.unwrap(), capture);
     fixture.assert_one_replay_attempt(&cancelled);
+}
+
+#[tokio::test]
+async fn list_stream_restart_recovers_at_the_durable_successor() {
+    let (directory, repository) = repository();
+    let state = RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [21; 16],
+            repository_id: [22; 16],
+        },
+        [23; 32],
+    )
+    .await
+    .expect("open restart-recovery fixture");
+    let writer = state.acquire_lease([24; 16]).await.expect("acquire writer");
+    let key = delivery().checkpoint_key();
+    let payloads = vec![vec![1], vec![2]];
+    let mut source = ListStreamSource::new(key.clone(), payloads.clone());
+    let mut first_activation = RecordingCommitHandler {
+        payloads: Vec::new(),
+        next_digest: state.capture().await.unwrap().generation_digest(),
+    };
+
+    assert!(matches!(
+        state
+            .run_stream_once(writer, &key, &mut source, &mut first_activation)
+            .await
+            .expect("commit first list item"),
+        StreamStep::Committed {
+            checkpoint: StreamCheckpoint {
+                version: 1,
+                committed: Some(Position { .. }),
+                ..
+            }
+        }
+    ));
+    assert_eq!(first_activation.payloads, vec![vec![1]]);
+    drop(state);
+
+    let reopened = RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [21; 16],
+            repository_id: [22; 16],
+        },
+        [23; 32],
+    )
+    .await
+    .expect("reopen durable runtime");
+    let reopened_writer = reopened
+        .acquire_lease([24; 16])
+        .await
+        .expect("acquire reopened writer");
+    let mut fresh_source = ListStreamSource::new(key.clone(), payloads);
+    let mut successor_activation = RecordingCommitHandler {
+        payloads: Vec::new(),
+        next_digest: reopened.capture().await.unwrap().generation_digest(),
+    };
+
+    assert!(matches!(
+        reopened
+            .run_stream_once(
+                reopened_writer,
+                &key,
+                &mut fresh_source,
+                &mut successor_activation,
+            )
+            .await
+            .expect("commit successor list item after restart"),
+        StreamStep::Committed {
+            checkpoint: StreamCheckpoint {
+                version: 2,
+                committed: Some(Position { .. }),
+                ..
+            }
+        }
+    ));
+    assert_eq!(
+        successor_activation.payloads,
+        vec![vec![2]],
+        "ORNA-CP-007: restart must deliver the successor without repeating the committed item"
+    );
+
+    drop(reopened);
+    drop(repository);
+    drop(directory);
 }
 
 #[tokio::test]
