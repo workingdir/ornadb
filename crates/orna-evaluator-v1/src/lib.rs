@@ -745,6 +745,10 @@ enum Value {
         unix_seconds: i64,
         nanosecond: u32,
     },
+    Duration {
+        seconds: BigInt,
+        nanosecond: u32,
+    },
     Error(EvaluationError),
     Range {
         lower: Option<Box<Value>>,
@@ -928,6 +932,16 @@ impl Value {
                     Raw::Int(nanosecond.into()),
                 ])),
             ),
+            Self::Duration {
+                seconds,
+                nanosecond,
+            } => Raw::Tag(
+                60005,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(seconds),
+                    Raw::Int(nanosecond.into()),
+                ])),
+            ),
             Self::Range {
                 lower,
                 upper,
@@ -1023,6 +1037,7 @@ impl Value {
                 context.string(value.clone()).map(Self::Date)
             }
             Raw::Tag(60002, boxed) => Self::instant_from_raw(boxed, context),
+            Raw::Tag(60005, boxed) => Self::duration_from_raw(boxed, context),
             Raw::Array(values) => {
                 context.items(values.len())?;
                 values
@@ -1087,6 +1102,24 @@ impl Value {
             .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
         Ok(Self::Instant {
             unix_seconds,
+            nanosecond,
+        })
+    }
+    fn duration_from_raw(raw: &Raw, context: &mut Context) -> Result<Self, EvaluationError> {
+        let Raw::Array(parts) = raw else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        let [Raw::Int(seconds), Raw::Int(nanosecond)] = parts.as_slice() else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        context.integer(seconds.clone())?;
+        context.integer(nanosecond.clone())?;
+        let nanosecond = nanosecond
+            .to_u32()
+            .filter(|nanosecond| *nanosecond < 1_000_000_000)
+            .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+        Ok(Self::Duration {
+            seconds: seconds.clone(),
             nanosecond,
         })
     }
@@ -1850,6 +1883,21 @@ impl Context<'_, '_> {
                 },
                 Value::Instant {
                     unix_seconds: b_seconds,
+                    nanosecond: b_nanosecond,
+                },
+            ) => compare(
+                op,
+                a_seconds
+                    .cmp(&b_seconds)
+                    .then(a_nanosecond.cmp(&b_nanosecond)),
+            ),
+            (
+                Value::Duration {
+                    seconds: a_seconds,
+                    nanosecond: a_nanosecond,
+                },
+                Value::Duration {
+                    seconds: b_seconds,
                     nanosecond: b_nanosecond,
                 },
             ) => compare(
