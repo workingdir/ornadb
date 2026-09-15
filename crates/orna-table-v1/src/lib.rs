@@ -54,6 +54,7 @@ where
             overlay: BTreeMap::new(),
             state: ActivationState::Open,
             activation_id: next_activation_id(),
+            helper_managed: false,
         }
     }
 
@@ -65,9 +66,10 @@ where
         F: FnOnce(&mut Activation<'_, Key, Row>) -> Result<T, E>,
     {
         let mut activation = self.begin();
+        activation.helper_managed = true;
         match operation(&mut activation) {
             Ok(value) => activation
-                .commit()
+                .publish()
                 .map(|()| value)
                 .map_err(ActivationError::Commit),
             Err(error) => {
@@ -167,6 +169,8 @@ pub enum TableError {
     MissingRow,
     /// A nested ordinary call tried to publish an activation it does not own.
     ChildCannotCommit,
+    /// A helper-managed root can only publish after its operation returns.
+    HelperManagedCommit,
     /// The root activation has already committed.
     DoubleCommit,
     /// A mutation or read was attempted after the activation closed.
@@ -548,6 +552,7 @@ pub struct Activation<'runtime, Key, Row> {
     overlay: BTreeMap<Key, Option<Row>>,
     state: ActivationState,
     activation_id: u64,
+    helper_managed: bool,
 }
 
 impl<'runtime, Key, Row> Activation<'runtime, Key, Row>
@@ -673,6 +678,13 @@ where
 
     /// Publishes every staged change together. Nested scopes cannot call this.
     pub fn commit(&mut self) -> Result<(), TableError> {
+        if self.helper_managed {
+            return Err(TableError::HelperManagedCommit);
+        }
+        self.publish()
+    }
+
+    fn publish(&mut self) -> Result<(), TableError> {
         match self.state {
             ActivationState::Committed => return Err(TableError::DoubleCommit),
             ActivationState::RolledBack => return Err(TableError::UseAfterClose),
@@ -829,6 +841,7 @@ where
             overlay: BTreeMap::new(),
             state: ActivationState::Open,
             activation_id: next_activation_id(),
+            helper_managed: false,
         }
     }
 
@@ -839,9 +852,10 @@ where
         F: FnOnce(&mut DatabaseActivation<'_, Table, Key, Row>) -> Result<T, E>,
     {
         let mut activation = self.begin();
+        activation.helper_managed = true;
         match operation(&mut activation) {
             Ok(value) => activation
-                .commit()
+                .publish()
                 .map(|()| value)
                 .map_err(ActivationError::Commit),
             Err(error) => {
@@ -971,6 +985,7 @@ pub struct DatabaseActivation<'runtime, Table, Key, Row> {
     overlay: BTreeMap<Table, BTreeMap<Key, Option<Row>>>,
     state: ActivationState,
     activation_id: u64,
+    helper_managed: bool,
 }
 
 impl<'runtime, Table, Key, Row> DatabaseActivation<'runtime, Table, Key, Row>
@@ -1135,6 +1150,13 @@ where
 
     /// Publishes the overlays of every changed relation together.
     pub fn commit(&mut self) -> Result<(), TableError> {
+        if self.helper_managed {
+            return Err(TableError::HelperManagedCommit);
+        }
+        self.publish()
+    }
+
+    fn publish(&mut self) -> Result<(), TableError> {
         match self.state {
             ActivationState::Committed => return Err(TableError::DoubleCommit),
             ActivationState::RolledBack => return Err(TableError::UseAfterClose),
@@ -1368,6 +1390,21 @@ mod tests {
     }
 
     #[test]
+    fn helper_managed_table_root_cannot_publish_before_an_error() {
+        let mut table = TableRuntime::<u64, &'static str>::default();
+
+        assert_eq!(
+            table.activate(|root| {
+                root.insert(1, "unpublished")?;
+                assert_eq!(root.commit(), Err(TableError::HelperManagedCommit));
+                Err::<(), _>(TableError::UseAfterClose)
+            }),
+            Err(ActivationError::Operation(TableError::UseAfterClose))
+        );
+        assert_eq!(table.committed(&1), None);
+    }
+
+    #[test]
     fn activation_helper_does_not_publish_when_operation_panics() {
         let mut table = TableRuntime::<u64, String>::default();
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -1542,6 +1579,23 @@ mod tests {
             Err(ActivationError::Operation(TableError::UseAfterClose))
         );
 
+        assert_eq!(database.committed(&"orders", &1), None);
+        assert_eq!(database.committed(&"audits", &1), None);
+    }
+
+    #[test]
+    fn helper_managed_database_root_cannot_publish_before_an_error() {
+        let mut database = DatabaseRuntime::<&str, u64, &'static str>::default();
+
+        assert_eq!(
+            database.activate(|root| {
+                root.insert("orders", 1, "unpublished")?;
+                root.insert("audits", 1, "unpublished")?;
+                assert_eq!(root.commit(), Err(TableError::HelperManagedCommit));
+                Err::<(), _>(TableError::UseAfterClose)
+            }),
+            Err(ActivationError::Operation(TableError::UseAfterClose))
+        );
         assert_eq!(database.committed(&"orders", &1), None);
         assert_eq!(database.committed(&"audits", &1), None);
     }
