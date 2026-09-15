@@ -1,4 +1,4 @@
-use orna_syntax_v1::{TokenKind, lex};
+use orna_syntax_v1::{Expr, LiteralKind, TokenKind, lex, parse_expression};
 
 fn kinds(source: &str) -> Vec<TokenKind> {
     lex(source)
@@ -200,6 +200,33 @@ fn calendar_literals_preserve_complete_forms_and_spans() {
 }
 
 #[test]
+fn calendar_ast_preserves_literal_text_and_byte_spans() {
+    for (source, kind) in [
+        ("2026-09-01", LiteralKind::Date),
+        ("2026-09-01T14:30:00.123456789+05:30", LiteralKind::Instant),
+    ] {
+        let parsed = parse_expression(source);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
+        let Expr::Literal {
+            kind: actual_kind,
+            text,
+            span,
+        } = parsed.value
+        else {
+            panic!("expected a calendar literal for {source}");
+        };
+        assert_eq!(actual_kind, kind, "{source}");
+        assert_eq!(text, source, "{source}");
+        assert_eq!(span.start, 0, "{source}");
+        assert_eq!(span.end, source.len(), "{source}");
+    }
+}
+
+#[test]
 fn malformed_instant_tail_is_one_literal_diagnostic() {
     let source = "2024-01-01T12:xx:00Z";
     let errors = lex(source).expect_err("a malformed instant tail must be rejected as one literal");
@@ -209,4 +236,30 @@ fn malformed_instant_tail_is_one_literal_diagnostic() {
         .expect("expected invalid-instant diagnostic");
     assert_eq!(error.span.start, 0);
     assert_eq!(error.span.end, source.len());
+}
+
+#[test]
+fn malformed_instant_offsets_are_one_full_span_diagnostic() {
+    for source in [
+        "2024-01-01T12:30:00+xx:00",
+        "2024-01-01T12:30:00+01:xx",
+        "2024-01-01T12:30:00+24:00",
+        "2024-01-01T12:30:00+01:60",
+    ] {
+        let errors = lex(source).expect_err("a malformed offset must be rejected");
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|error| error.code == "ORNA-LEX-008")
+                .count(),
+            1,
+            "{source}: {errors:?}"
+        );
+        let error = errors
+            .iter()
+            .find(|error| error.code == "ORNA-LEX-008")
+            .expect("expected invalid-instant diagnostic");
+        assert_eq!(error.span.start, 0, "{source}");
+        assert_eq!(error.span.end, source.len(), "{source}");
+    }
 }
