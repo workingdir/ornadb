@@ -1592,47 +1592,30 @@ impl Parser {
                     "ORNA-A091-010",
                     "`fact` is not an assertion alias; use `assert`",
                 )),
-                "ingest"
-                    if i == 0
-                        || matches!(
-                            tokens.get(i.saturating_sub(1)).map(|t| &t.kind),
-                            Some(TokenKind::Keyword(Keyword::Pub))
-                        ) =>
-                {
+                "ingest" if self.is_legacy_named_declaration(i, "=") => {
                     Some(("E1004", "`ingest` is not a declaration"))
                 }
-                "log"
-                    if i == 0
-                        || matches!(
-                            tokens.get(i.saturating_sub(1)).map(|t| &t.kind),
-                            Some(TokenKind::Keyword(Keyword::Pub))
-                        ) =>
-                {
+                "log" if self.is_legacy_named_declaration(i, "{") => {
                     Some(("E1001", "`log` is not a declaration in Orna 1.0"))
                 }
-                "store"
-                    if i == 0
-                        || matches!(
-                            tokens.get(i.saturating_sub(1)).map(|t| &t.kind),
-                            Some(TokenKind::Keyword(Keyword::Pub))
-                        ) =>
-                {
+                "store" if self.is_legacy_named_declaration(i, "=") => {
                     Some(("E1003", "`store` is not a logical declaration"))
                 }
-                "view"
-                    if i == 0
-                        || matches!(
-                            tokens.get(i.saturating_sub(1)).map(|t| &t.kind),
-                            Some(TokenKind::Keyword(Keyword::Pub))
-                        ) =>
-                {
+                "view" if self.is_legacy_named_declaration(i, "=") => {
                     Some(("E1002", "`view` is replaced by an ordinary function"))
                 }
-                "transaction" if i == 0 => Some((
-                    "E1007",
-                    "database writes are transactional by activation; `transaction` is not syntax",
-                )),
-                "on" if i == 0 => Some(("E1005", "`on` is not a declaration")),
+                "transaction"
+                    if Self::is_legacy_module_declaration_start(tokens, i)
+                        && Self::token_is_punct(tokens, i + 1, "{") =>
+                {
+                    Some((
+                        "E1007",
+                        "database writes are transactional by activation; `transaction` is not syntax",
+                    ))
+                }
+                "on" if self.is_legacy_on_declaration(i) => {
+                    Some(("E1005", "`on` is not a declaration"))
+                }
                 "check" if self.is_legacy_field_constraint(i) => Some((
                     "ORNA091-E-FIELD-CONSTRAINT",
                     "field `check` syntax was removed; use a table assertion",
@@ -1937,6 +1920,61 @@ impl Parser {
                 | TokenKind::Punct("<" | "<=" | ">" | ">=" | "==" | "!=" | "!" | "-" | "+",)
         );
         assertion_expression_starts && Self::has_terminated_initializer(tokens, at + 1)
+    }
+    fn is_legacy_named_declaration(&self, at: usize, continuation: &str) -> bool {
+        let tokens = &self.tokens;
+        Self::is_legacy_module_declaration_start(tokens, at)
+            && matches!(
+                tokens.get(at + 1).map(|token| &token.kind),
+                Some(TokenKind::Identifier { .. })
+            )
+            && Self::token_is_punct(tokens, at + 2, continuation)
+            && (continuation != "=" || Self::has_terminated_initializer(tokens, at + 3))
+    }
+    fn is_legacy_on_declaration(&self, at: usize) -> bool {
+        let tokens = &self.tokens;
+        if !Self::is_legacy_module_declaration_start(tokens, at)
+            || !Self::token_is_contextual(tokens, at + 1)
+        {
+            return false;
+        }
+        let mut parentheses = 0usize;
+        let mut brackets = 0usize;
+        let mut body_open = None;
+        for index in (at + 1)..tokens.len() {
+            match tokens[index].kind {
+                TokenKind::Punct("(") => parentheses += 1,
+                TokenKind::Punct(")") if parentheses > 0 => parentheses -= 1,
+                TokenKind::Punct("[") => brackets += 1,
+                TokenKind::Punct("]") if brackets > 0 => brackets -= 1,
+                TokenKind::Punct("{") if parentheses == 0 && brackets == 0 => {
+                    body_open = Some(index);
+                    break;
+                }
+                TokenKind::Punct(";" | "}") if parentheses == 0 && brackets == 0 => return false,
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+        }
+        let Some(body_open) = body_open else {
+            return false;
+        };
+        let mut braces = 0usize;
+        for token in &tokens[body_open..] {
+            match token.kind {
+                TokenKind::Punct("{") => braces += 1,
+                TokenKind::Punct("}") => {
+                    braces = braces.saturating_sub(1);
+                    if braces == 0 {
+                        return false;
+                    }
+                }
+                TokenKind::Punct("=>") if braces == 1 => return true,
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+        }
+        false
     }
     fn is_legacy_field_constraint(&self, at: usize) -> bool {
         let tokens = &self.tokens;
