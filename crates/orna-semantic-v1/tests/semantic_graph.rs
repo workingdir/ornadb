@@ -717,6 +717,48 @@ fn graph_resolution_keeps_explicit_imports_over_globs_and_rejects_module_asserti
 }
 
 #[test]
+fn conflicting_module_imports_do_not_install_hidden_qualified_roots() {
+    let catalogue = Catalogue::authoritative_fixture();
+    let direct = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "main.orna",
+            "use contacts; fn names() = contacts.Contact.one().name;",
+        )],
+        &catalogue,
+    );
+    assert!(direct.is_ok(), "{:?}", direct.diagnostics);
+
+    for source in [
+        "use contacts; fn contacts(): Int = 2; fn misuse() = contacts.Contact.one();",
+        "use contacts as mail; fn mail(): Int = 2; fn misuse() = mail.Email.one();",
+    ] {
+        let result = analyze_with_catalogue(&[ModuleInput::new("main.orna", source)], &catalogue);
+        assert!(
+            has(&result, DIAG_AMBIGUOUS),
+            "{source}: {:?}",
+            result.diagnostics
+        );
+        assert!(
+            has(&result, DIAG_TYPE),
+            "{source}: {:?}",
+            result.diagnostics
+        );
+    }
+
+    let ordered = analyze(&[
+        ModuleInput::new("contacts.orna", "pub table Contact(id: Str) { name: Str, }"),
+        ModuleInput::new("energy.orna", "pub table Reading(id: Str) { value: Int, }"),
+        ModuleInput::new(
+            "main.orna",
+            "use contacts as mail; use energy as mail; fn misuse() = mail.Contact.one();",
+        ),
+    ]);
+    assert!(has(&ordered, DIAG_AMBIGUOUS), "{:?}", ordered.diagnostics);
+    assert!(!has(&ordered, DIAG_UNRESOLVED), "{:?}", ordered.diagnostics);
+    assert!(!has(&ordered, DIAG_TYPE), "{:?}", ordered.diagnostics);
+}
+
+#[test]
 fn qualified_module_member_calls_resolve_only_public_imported_exports() {
     let result = analyze(&[
         ModuleInput::new(
