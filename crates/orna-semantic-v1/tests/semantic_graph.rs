@@ -2175,6 +2175,86 @@ fn recovery_pipeline_replaces_handled_failure_effect() {
 }
 
 #[test]
+fn fail_has_bottom_success_type_and_accepts_error_values() {
+    let result = analyze(&[ModuleInput::new(
+        "fail-bottom.orna",
+        "pub fn abort(failure: Error) = fail(failure);",
+    )]);
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "fail-bottom")
+        .expect("fail bottom module");
+    assert!(matches!(
+        &module.symbols["abort"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Bottom
+    ));
+    assert!(module.symbols["abort"].effects.may_fail);
+}
+
+#[test]
+fn fail_bottom_is_compatible_with_expected_results_and_recovery() {
+    let result = analyze(&[ModuleInput::new(
+        "fail-recovery.orna",
+        r#"
+            pub fn abort(failure: Error): Int = fail(failure);
+            pub fn reemit(value: Int): Int = value |? (failure => fail(failure));
+        "#,
+    )]);
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "fail-recovery")
+        .expect("fail recovery module");
+    assert!(matches!(
+        &module.symbols["abort"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Int
+    ));
+    assert!(matches!(
+        &module.symbols["reemit"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Int
+    ));
+    assert!(module.symbols["reemit"].effects.may_fail);
+}
+
+#[test]
+fn fail_rejects_wrong_argument_shape_and_type() {
+    for source in [
+        "pub fn wrong() = fail();",
+        "pub fn wrong() = fail(1);",
+        "pub fn wrong(failure: Error) = fail(failure, failure);",
+    ] {
+        let result = analyze(&[ModuleInput::new("fail-invalid.orna", source)]);
+        assert!(
+            has(&result, DIAG_TYPE),
+            "{source}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn user_defined_fail_shadows_the_intrinsic() {
+    let result = analyze(&[ModuleInput::new(
+        "fail-shadow.orna",
+        "fn fail(value: Int): Int = value; pub fn call() = fail(1);",
+    )]);
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "fail-shadow")
+        .expect("fail shadow module");
+    assert!(matches!(
+        &module.symbols["call"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Int
+    ));
+    assert!(!module.symbols["call"].effects.may_fail);
+}
+
+#[test]
 fn root_relation_and_stream_intrinsics_cover_reference_pipelines_without_execution() {
     let source = r#"
             pub table Book(id: Int) { title: Str, }
