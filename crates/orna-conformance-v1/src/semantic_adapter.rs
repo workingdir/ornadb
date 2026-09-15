@@ -23,8 +23,9 @@ use orna_runtime_v1::{
     FaultInjector, ListStreamSource, NoFault, RequestIdentity, RequestStatus,
     RunObservationRegistration, RunningTableRequestContinuation, RuntimeError, RuntimeIdentity,
     RuntimeState, StreamHandler, StreamHandlerResult, StreamItem, StreamRunOutcome,
-    StreamTableCandidateValidator, StreamValidatedTableMutationBatch, TableMutation,
-    TerminalOutcome, WriterLease,
+    StreamTableCandidateValidator, StreamValidatedTableMutationBatch,
+    TableActivationCandidateValidator, TableActivationError, TableMutation, TerminalOutcome,
+    ValidatedTableActivationCommit, WriterLease,
 };
 use orna_semantic_v1::{
     AssertionOwner, AssertionPlan, Catalogue, EffectSummary, ModuleInput, Namespace,
@@ -1214,9 +1215,36 @@ impl DurableTransactionalEvaluator {
         }
         let next_digest =
             durable_activation_digest(context.capture().generation_digest(), &mutations);
-        state
-            .commit_table_activation(lease, context, &mutations, next_digest, &NoFault)
-            .await?;
+        let mut validator = TransactionalTableCandidateValidator::new(
+            &functions,
+            &key_fields,
+            &float_fields,
+            &table_fields,
+            &table_assertions,
+            &module_assertions,
+            self.limits,
+        );
+        match state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context,
+                mutations: &mutations,
+                next_digest,
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await
+        {
+            Ok(_) => {}
+            Err(TableActivationError::Runtime(error)) => return Err(error),
+            Err(TableActivationError::ValidationFailed(_)) => {
+                return Ok(StageOutcome::Failed(
+                    transaction_error("ORNA-EVAL-TABLE-ASSERT")
+                        .diagnostic()
+                        .clone(),
+                ));
+            }
+        }
         Ok(StageOutcome::Passed)
     }
 
@@ -1713,9 +1741,36 @@ impl DurableTransactionalEvaluator {
         }
         let next_digest =
             durable_activation_digest(context.capture().generation_digest(), &mutations);
-        state
-            .commit_table_activation(lease, context, &mutations, next_digest, &NoFault)
-            .await?;
+        let mut validator = TransactionalTableCandidateValidator::new(
+            &functions,
+            &key_fields,
+            &float_fields,
+            &table_fields,
+            &table_assertions,
+            &module_assertions,
+            self.limits,
+        );
+        match state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context,
+                mutations: &mutations,
+                next_digest,
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await
+        {
+            Ok(_) => {}
+            Err(TableActivationError::Runtime(error)) => return Err(error),
+            Err(TableActivationError::ValidationFailed(_)) => {
+                return Ok(StageOutcome::Failed(
+                    transaction_error("ORNA-EVAL-TABLE-ASSERT")
+                        .diagnostic()
+                        .clone(),
+                ));
+            }
+        }
         Ok(StageOutcome::Passed)
     }
 
@@ -2016,6 +2071,106 @@ struct ListTableHandler {
     digest: [u8; 32],
 }
 
+struct TransactionalTableCandidateValidator {
+    table_assertions: TableAssertions,
+    module_assertions: ModuleAssertions,
+    functions: Functions,
+    limits: EvaluatorLimits,
+    tables: Vec<String>,
+}
+
+impl TransactionalTableCandidateValidator {
+    fn new(
+        functions: &Functions,
+        key_fields: &TableKeys,
+        float_fields: &TableFloatFields,
+        table_fields: &TableFields,
+        table_assertions: &TableAssertions,
+        module_assertions: &ModuleAssertions,
+        limits: EvaluatorLimits,
+    ) -> Self {
+        let mut tables = key_fields.keys().cloned().collect::<BTreeSet<_>>();
+        for assertions in table_assertions.values() {
+            for assertion in assertions {
+                tables.extend(assertion.dependencies.iter().cloned());
+            }
+        }
+        for assertion in module_assertions {
+            tables.extend(assertion.dependencies.iter().cloned());
+        }
+        Self {
+            table_assertions: table_assertions.clone(),
+            module_assertions: module_assertions.clone(),
+            functions: lower_relation_bindings(functions, key_fields, float_fields, table_fields),
+            limits,
+            tables: tables.into_iter().collect(),
+        }
+    }
+}
+
+impl TableActivationCandidateValidator for TransactionalTableCandidateValidator {
+    fn tables(&self) -> &[String] {
+        &self.tables
+    }
+
+    fn validate(&mut self, rows: &orna_runtime_v1::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+        let mut budget = StepBudget::new(self.limits.max_steps);
+        for (table, assertions) in &self.table_assertions {
+            for assertion in assertions {
+                let (kind, binding, predicate) = table_assertion_predicate(&assertion.expression)
+                    .map_err(|_| table_assertion_diagnostic())?;
+                let mut projections = BTreeSet::new();
+                let mut candidate_rows = 0usize;
+                for (_, encoded) in rows.get(table).ok_or_else(table_assertion_diagnostic)? {
+                    debit_host_step(&mut budget).map_err(|_| table_assertion_diagnostic())?;
+                    candidate_rows = candidate_rows
+                        .checked_add(1)
+                        .ok_or_else(table_assertion_diagnostic)?;
+                    self.limits
+                        .check_items(candidate_rows)
+                        .map_err(|_| table_assertion_diagnostic())?;
+                    let row = Value::decode(encoded).map_err(|_| table_assertion_diagnostic())?;
+                    let environment = Environment::from([(binding.to_owned(), row)]);
+                    let value = evaluate_with_functions_and_budget(
+                        predicate,
+                        &environment,
+                        &self.functions,
+                        self.limits,
+                        &mut budget,
+                    )
+                    .map_err(|_| table_assertion_diagnostic())?;
+                    match kind {
+                        TableAssertionKind::Every if matches!(value.raw(), OvbRaw::Bool(true)) => {}
+                        TableAssertionKind::Every => return Err(table_assertion_diagnostic()),
+                        TableAssertionKind::AllUnique => {
+                            let projection =
+                                value.encode().map_err(|_| table_assertion_diagnostic())?;
+                            if !projections.insert(projection) {
+                                return Err(table_assertion_diagnostic());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for assertion in &self.module_assertions {
+            let value = evaluate_module_assertion_rows(
+                rows,
+                &assertion.expression,
+                &Environment::new(),
+                &self.functions,
+                self.limits,
+                &mut budget,
+            )
+            .map_err(|_| table_assertion_diagnostic())?;
+            if !matches!(value.raw(), OvbRaw::Bool(true)) {
+                return Err(table_assertion_diagnostic());
+            }
+        }
+        Ok(())
+    }
+}
+
 struct ListTableCandidateValidator {
     table: String,
     assertions: Vec<AdmittedAssertion>,
@@ -2172,6 +2327,13 @@ impl StreamHandler for ListTableHandler {
 fn stream_handler_diagnostic() -> SafeDiagnostic {
     SafeDiagnostic {
         code: DiagnosticCode::DecodeRejected,
+        class: DiagnosticClass::Permanent,
+    }
+}
+
+fn table_assertion_diagnostic() -> SafeDiagnostic {
+    SafeDiagnostic {
+        code: DiagnosticCode::TableAssertionFalse,
         class: DiagnosticClass::Permanent,
     }
 }
