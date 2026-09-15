@@ -11,7 +11,9 @@
 //! Inputs are in-memory modules with logical paths: no files, temp directories,
 //! environment changes, fixture catalogues, or runtime evaluation are needed.
 
-use orna_semantic_v1::{Analysis, DIAG_TYPE, DIAG_UNRESOLVED, ModuleInput, Type, analyze};
+use orna_semantic_v1::{
+    Analysis, DIAG_ANNOTATION, DIAG_TYPE, DIAG_UNRESOLVED, ModuleInput, Namespace, Type, analyze,
+};
 use orna_syntax_v1::parse_module_with_file;
 
 fn analyze_main(source: &str) -> Analysis {
@@ -70,6 +72,38 @@ fn compatible_local_annotated_initializers_are_accepted() {
         "#,
     );
     expect_accepted(&result);
+}
+
+// ORNA-INFER-002/-007 and ORNA-S020-ANNOTATION: a field shape inferred only
+// from an unconstrained lambda body cannot export an internal Type::Error.
+#[test]
+fn underconstrained_lambda_field_inference_requires_annotation() {
+    let underconstrained = analyze_main("pub fn getter() = x => x.value;");
+    expect_diagnostics(&underconstrained, &[DIAG_ANNOTATION]);
+    assert_eq!(
+        underconstrained
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_ANNOTATION)
+            .count(),
+        1
+    );
+    assert!(
+        !underconstrained
+            .modules
+            .get(&Namespace(Vec::new()))
+            .expect("main module")
+            .exports
+            .contains_key("getter")
+    );
+
+    let constrained = analyze_main("pub fn increment() = x => x + 1;");
+    expect_accepted(&constrained);
+
+    let known_row = analyze_main(
+        "pub table Reading(id: Int) { value: Int, } pub fn values() = Reading | map(row => row.value);",
+    );
+    expect_accepted(&known_row);
 }
 
 // ORNA-INFER-002 and -007: an unsupported annotation must reject at its
