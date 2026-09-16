@@ -72,9 +72,6 @@ pub struct SealedInvocationArgumentObservation {
     pub type_kind: SealedInvocationArgumentTypeKind,
     /// Checked `sys.TypeRef` witness, when trusted admission retained one.
     pub type_reference: Option<TypeRef>,
-    /// SHA-256 of the canonical typed value encoding; no value bytes are
-    /// retained by this observation.
-    pub value_digest: [u8; 32],
     /// Explicit retained marker proving that this metadata may cross the
     /// public system-value boundary.
     redacted: bool,
@@ -883,10 +880,12 @@ fn decode_argument_observation(
         )?,
         None => None,
     };
+    // This private storage digest supports neither observation identity nor a
+    // public projection. It is an unsalted hash of an argument value, so even
+    // a low-entropy value is dictionary-testable. Validate the retained
+    // storage shape, then discard it before constructing any observation.
     let digest: Vec<u8> = observation_column(row, record, "value_digest")?;
-    let value_digest: [u8; 32] = digest
-        .try_into()
-        .map_err(|_| observation_invariant(record, "argument digest must be 32 bytes"))?;
+    validate_retained_argument_digest(&digest, record)?;
     Ok(SealedInvocationArgumentObservation {
         reference: invocation_argument_observation_reference(
             capture, invocation, position, record,
@@ -896,9 +895,24 @@ fn decode_argument_observation(
         name,
         type_kind,
         type_reference,
-        value_digest,
         redacted,
     })
+}
+
+/// Checks the shape of private retained storage without admitting the digest
+/// into the observable invocation model.
+fn validate_retained_argument_digest(
+    digest: &[u8],
+    record: &str,
+) -> Result<(), PostgresKernelError> {
+    if digest.len() == 32 {
+        Ok(())
+    } else {
+        Err(observation_invariant(
+            record,
+            "argument digest must be 32 bytes",
+        ))
+    }
 }
 
 fn invocation_observation_reference(
@@ -1352,7 +1366,6 @@ mod tests {
             name: "value".to_owned(),
             type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
             type_reference: None,
-            value_digest: [0; 32],
             redacted: true,
         };
         assert!(validate_argument_order(&[argument(0), argument(1)], "test").is_ok());
@@ -1459,7 +1472,6 @@ mod tests {
                 name: "value".to_owned(),
                 type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
                 type_reference: None,
-                value_digest: [7; 32],
                 redacted: true,
             }],
         }
@@ -1571,17 +1583,27 @@ mod tests {
     }
 
     #[test]
-    fn redacted_projection_never_exposes_low_entropy_candidate_digest() {
-        let mut internal = observation(&capture(1), 2, SealedInvocationObservationStatus::Running);
+    fn retained_observation_discards_low_entropy_candidate_digest() {
+        let internal = observation(&capture(1), 2, SealedInvocationObservationStatus::Running);
         let pin_digest: [u8; 32] = Sha256::digest(b"0000").into();
         let alternate_pin_digest: [u8; 32] = Sha256::digest(b"1234").into();
-        internal.arguments[0].value_digest = pin_digest;
+        assert!(validate_retained_argument_digest(&pin_digest, "test").is_ok());
 
         let projection = internal.durable_sys_projection().unwrap();
+        let retained_debug = format!("{internal:?}");
 
         assert_eq!(projection.arguments[0].digest, None);
         assert_ne!(projection.arguments[0].digest, Some(pin_digest));
         assert_ne!(projection.arguments[0].digest, Some(alternate_pin_digest));
+        assert!(!retained_debug.contains("value_digest"));
+        assert!(!retained_debug.contains(&format!("{pin_digest:?}")));
+        assert!(!retained_debug.contains(&format!("{alternate_pin_digest:?}")));
+    }
+
+    #[test]
+    fn retained_observation_rejects_malformed_private_digest_shape() {
+        assert!(validate_retained_argument_digest(&[0; 31], "test").is_err());
+        assert!(validate_retained_argument_digest(&[0; 33], "test").is_err());
     }
 
     #[test]
@@ -1663,7 +1685,6 @@ mod tests {
             name: "next".to_owned(),
             type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
             type_reference: None,
-            value_digest: [9; 32],
             redacted: true,
         });
         let retained = vec![
@@ -1850,7 +1871,6 @@ mod tests {
                 name: "later".to_owned(),
                 type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
                 type_reference: None,
-                value_digest: [3; 32],
                 redacted: true,
             });
         internal.arguments.swap(0, 1);
@@ -1878,7 +1898,6 @@ mod tests {
                 name: "same-parameter".to_owned(),
                 type_kind: first.type_kind,
                 type_reference: None,
-                value_digest: [3; 32],
                 redacted: true,
             });
 
