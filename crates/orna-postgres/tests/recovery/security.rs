@@ -44,6 +44,249 @@ fn sealed_no_argument_request(
     })?)
 }
 
+#[cfg(feature = "test-hooks")]
+fn sealed_integer_echo_request() -> TestResult<orna_core::invocation::InvokeRequest> {
+    use orna_core::invocation::{
+        InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
+        InvocationOutputRequirement, InvocationParameterSelector,
+        InvocationTarget as RequestTarget, InvocationTracePolicy, InvokeRequest,
+        InvokeRequestInput, InvokeValue,
+    };
+
+    Ok(InvokeRequest::new(InvokeRequestInput {
+        target: RequestTarget::qualified_name(orna_core::catalogue::QualifiedSemanticName::new(
+            ["std", "invoke", "echo"],
+        )?)?,
+        arguments: vec![InvocationArgument::new(
+            InvocationParameterSelector::parameter_id(STD_INVOKE_ECHO_PARAMETER_ID),
+            InvokeValue::new(RuntimeValue::Integer(41))?,
+        )],
+        caller_context: InvocationCallerContext::new(
+            InvocationCallerKind::TestRunner,
+            false,
+            false,
+            None,
+            None,
+            "en-GB",
+            "UTC",
+            None,
+        )?,
+        client_offer: InvocationClientOffer::new(
+            5,
+            "en-GB",
+            "UTC",
+            Vec::new(),
+            Vec::new(),
+            1_024,
+            0,
+            None,
+            None,
+        )?,
+        output_requirement: Option::<InvocationOutputRequirement>::None,
+        state_profile: None,
+        trace_policy: InvocationTracePolicy::Off,
+        idempotency_key: None,
+        parent_invocation_id: None,
+        observer_context: None,
+    })?)
+}
+
+/// ORNA-SYS-102 Compose regression: a retained protected argument may retain
+/// private storage evidence, but both durable and current observation routes
+/// must expose only safe redacted metadata and no dictionary-testable digest.
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service; ORNA-SYS-102 environment-gated evidence"]
+async fn protected_argument_observations_withhold_retained_digest_and_fail_closed() -> TestResult<()>
+{
+    use orna_foundation_v1::{CanonicalSnapshot, CwdCapture};
+
+    const USER: PrincipalId = PrincipalId::from_bytes([0x81; 16]);
+    const DATABASE: [u8; 16] = [0x82; 16];
+    const RUNTIME: [u8; 16] = [0x83; 16];
+    const OWNER: [u8; 16] = [0x84; 16];
+
+    with_test_database(|database| async move {
+        let fixture = install_v2_standard_fixture(&database).await?;
+        let kernel = kernel(&database)?;
+        let executable = fixture
+            .standard
+            .executables()
+            .iter()
+            .find(|candidate| candidate.function() == STD_INVOKE_ECHO_FUNCTION_ID)
+            .ok_or_else(|| failure("standard echo executable fixture is missing"))?;
+        let security = SecuritySnapshot::new_with_function_targets(
+            fixture.active.pair(),
+            vec![SecurityFunctionTarget::verified_standard(
+                STD_INVOKE_ECHO_FUNCTION_ID,
+                fixture.standard.revision(),
+                executable.revision().id(),
+            )],
+            vec![Principal::new(
+                USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(USER, STD_INVOKE_ECHO_FUNCTION_ID)],
+        )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let session = security.bind_authenticated_session(USER, vec![])?;
+        let registry = orna_standard::registered_opaque_codecs(&fixture.standard)?;
+        let request = sealed_integer_echo_request()?;
+        let retained =
+            orna_protocol::encode_invoke_request(&fixture.active, &registry, &request)?;
+        let capture = CwdCapture::new(
+            CanonicalSnapshot::cwd(DATABASE, RUNTIME, 1.into())?,
+            [0x85; 32],
+        )?;
+        let context = orna_postgres::SealedInvocationAdmissionContext::from_runtime_capture_with_writer_lease(
+            capture.clone(),
+            OWNER,
+            1,
+        )?;
+        let preflight = kernel
+            .validate_sealed_sys_invoke(&session, 5, &retained)
+            .await?
+            .bind_admission_context(context);
+        let continuation = match preflight {
+            orna_postgres::SealedInvocationPreflight::Accepted(continuation) => continuation,
+            orna_postgres::SealedInvocationPreflight::Rejected { failure: call_failure } => {
+                return Err(failure(format!(
+                    "protected echo invocation was rejected before admission: {call_failure:?}"
+                )));
+            }
+        };
+        let invocation = continuation.invocation();
+        let mut operation = continuation
+            .prepare_sealed_sys_invoke_after_accept()
+            .await?;
+        let mut state = orna_client::ClientStateStore::new();
+        let mut capability_audit_appended = false;
+        let cancellation = orna_postgres::ResourceCancellation::new();
+        let execution = operation
+            .execute_after_started(
+                None,
+                &mut state,
+                &mut capability_audit_appended,
+                &cancellation,
+                tokio::runtime::Handle::current(),
+            )
+            .await?;
+        require(
+            matches!(
+                execution,
+                orna_postgres::SealedInvocationExecution::Result(
+                    orna_postgres::SealedInvocationResult::Completed { invocation: actual, .. }
+                ) if actual == invocation
+            ),
+            "protected echo invocation did not complete through sealed admission",
+        )?;
+
+        let durable = kernel
+            .load_durable_sys_invocation_observation(invocation)
+            .await?
+            .ok_or_else(|| failure("durable protected invocation observation is missing"))?;
+        let current = kernel
+            .load_current_runtime_sys_invocation_observations(&capture)
+            .await?;
+        let durable_arguments = kernel
+            .load_durable_sys_invocation_argument_observations()
+            .await?;
+        let current_arguments = kernel
+            .load_current_runtime_sys_invocation_argument_observations(&capture)
+            .await?;
+        require(
+            durable.id == invocation
+                && durable.arguments.len() == 1
+                && current.len() == 1
+                && current[0] == durable
+                && durable_arguments == durable.arguments
+                && current_arguments == durable.arguments,
+            "durable and current protected observation routes disagree",
+        )?;
+        let argument = &durable.arguments[0];
+        require(
+            argument.name == "p_value"
+                && argument.position == 0
+                && argument.redacted
+                && argument.digest.is_none(),
+            "ORNA-SYS-102 protected argument observation exposed unsafe metadata",
+        )?;
+
+        let database_session = database.open().await?;
+        let mutation: TestResult<()> = async {
+            let retained_digest: Vec<u8> = database_session
+                .client()
+                .query_one(
+                    "SELECT value_digest
+                       FROM _orna_kernel.sealed_invocation_argument_metadata
+                      WHERE invocation_id = $1 AND position = 0",
+                    &[&invocation.to_bytes().to_vec()],
+                )
+                .await?
+                .try_get(0)?;
+            require(
+                retained_digest.len() == 32,
+                "protected argument fixture did not retain its private digest row",
+            )?;
+            database_session
+                .client()
+                .execute(
+                    "ALTER TABLE _orna_kernel.sealed_invocation_argument_metadata
+                         DROP CONSTRAINT sealed_invocation_argument_metadata_value_digest_check",
+                    &[],
+                )
+                .await?;
+            database_session
+                .client()
+                .execute(
+                    "UPDATE _orna_kernel.sealed_invocation_argument_metadata
+                        SET value_digest = decode(repeat('ab', 31), 'hex')
+                      WHERE invocation_id = $1",
+                    &[&invocation.to_bytes().to_vec()],
+                )
+                .await?;
+            Ok(())
+        }
+        .await;
+        finish_session(
+            mutation,
+            database_session.shutdown().await,
+            "ORNA-SYS-102 protected argument digest mutation",
+        )?;
+
+        let durable_error = kernel
+            .load_durable_sys_invocation_observation(invocation)
+            .await
+            .expect_err("malformed private digest must fail durable observation loading");
+        let current_error = kernel
+            .load_current_runtime_sys_invocation_observations(&capture)
+            .await
+            .expect_err("malformed private digest must fail current observation loading");
+        require(
+            matches!(
+                durable_error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "sealed invocation observation",
+                    rule: "argument digest must be 32 bytes",
+                    ..
+                }
+            ) && matches!(
+                current_error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "sealed invocation observation",
+                    rule: "argument digest must be 32 bytes",
+                    ..
+                }
+            ),
+            "malformed private digest did not fail closed through both observation routes",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn executes_sealed_security_definer_denial_before_target_dispatch() -> TestResult<()> {
