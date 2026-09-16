@@ -22,8 +22,8 @@ use orna_core::{
 };
 
 use crate::{
-    CheckReport, PrepareError, PrepareStandardApplicationError, StandardApplicationCheckReport,
-    prepare, prepare_standard_application,
+    CheckReport, CheckedBundle, CheckedObjectType, PrepareError, PrepareStandardApplicationError,
+    StandardApplicationCheckReport, prepare, prepare_standard_application,
 };
 
 /// One signature slot whose exact resolved type may be projected by a runtime
@@ -105,6 +105,11 @@ pub enum ResolvedSourceCatalogueError {
         /// The immutable revision identity that could not be handed off.
         revision: FunctionRevisionId,
     },
+    /// The checked resolver facts needed for candidate metadata were absent.
+    ///
+    /// A runtime admission layer must never reconstruct these facts from
+    /// source spelling or from runtime catalogue identities.
+    MissingCheckedBundle,
     /// Constructing the digest-bound artifact provenance envelope failed.
     ArtifactProvenance(ArtifactProvenanceError),
 }
@@ -149,6 +154,9 @@ impl fmt::Display for ResolvedSourceCatalogueError {
                 formatter,
                 "candidate has no function {function} for newly compiled revision {revision}"
             ),
+            Self::MissingCheckedBundle => {
+                formatter.write_str("candidate has no checked resolver bundle")
+            }
             Self::ArtifactProvenance(error) => error.fmt(formatter),
         }
     }
@@ -165,6 +173,7 @@ impl Error for ResolvedSourceCatalogueError {
             | Self::MissingFunctionRevision { .. }
             | Self::InvalidFunctionArtifactDigest { .. }
             | Self::MissingCandidateFunction { .. } => None,
+            Self::MissingCheckedBundle => None,
             Self::ArtifactProvenance(error) => Some(error),
         }
     }
@@ -244,6 +253,7 @@ pub struct ResolvedSourceCatalogue {
     candidate: DeployableRevision,
     diff: CatalogueSemanticDiff,
     function_artifacts: Vec<FunctionArtifactEntry>,
+    checked_nominal_types: Vec<CheckedObjectType>,
 }
 
 impl ResolvedSourceCatalogue {
@@ -265,6 +275,17 @@ impl ResolvedSourceCatalogue {
     /// Returns the identity-preserving diff from `base` to `candidate`.
     pub fn diff(&self) -> &CatalogueSemanticDiff {
         &self.diff
+    }
+
+    /// Returns checked candidate object/nominal declarations in source order.
+    ///
+    /// These are compiler identities and checked source facts only. They are
+    /// not runtime object references and do not allocate or derive runtime
+    /// `ObjectId` values. The current object-type grammar has no separate
+    /// visibility field; consumers must therefore not infer private-member
+    /// authority from this view.
+    pub fn checked_nominal_types(&self) -> &[CheckedObjectType] {
+        &self.checked_nominal_types
     }
 
     /// Returns the expected active source/catalogue pair.
@@ -419,7 +440,8 @@ pub fn materialize_resolved_source_catalogue(
     active: &ActiveDatabaseRevision,
 ) -> Result<ResolvedSourceCatalogue, ResolvedSourceCatalogueError> {
     let candidate = prepare(report, expected_base, active)?;
-    materialize_prepared_source_catalogue(candidate, active)
+    let checked_nominal_types = checked_nominal_types(report.checked_bundle())?;
+    materialize_prepared_source_catalogue(candidate, active, checked_nominal_types)
 }
 
 /// Materializes a complete compiler candidate for artifact-provenance handoff.
@@ -435,7 +457,8 @@ pub fn materialize_provenance_source_catalogue(
     active: &ActiveDatabaseRevision,
 ) -> Result<ResolvedSourceCatalogue, ResolvedSourceCatalogueError> {
     let candidate = prepare(report, expected_base, active)?;
-    materialize_prepared_provenance_catalogue(candidate, active)
+    let checked_nominal_types = checked_nominal_types(report.checked_bundle())?;
+    materialize_prepared_provenance_catalogue(candidate, active, checked_nominal_types)
 }
 
 /// Materializes a complete core candidate from a successful standard-authorized
@@ -452,20 +475,27 @@ pub fn materialize_standard_resolved_source_catalogue(
     active: &ActiveDatabaseRevision,
 ) -> Result<ResolvedSourceCatalogue, ResolvedSourceCatalogueError> {
     let candidate = prepare_standard_application(report, expected_base, active)?;
-    materialize_prepared_source_catalogue(candidate, active)
+    let checked_nominal_types = checked_nominal_types(
+        report
+            .checked_bundle()
+            .map(|bundle| bundle.checked_bundle()),
+    )?;
+    materialize_prepared_source_catalogue(candidate, active, checked_nominal_types)
 }
 
 fn materialize_prepared_source_catalogue(
     candidate: DeployableRevision,
     active: &ActiveDatabaseRevision,
+    checked_nominal_types: Vec<CheckedObjectType>,
 ) -> Result<ResolvedSourceCatalogue, ResolvedSourceCatalogueError> {
     validate_invocation_projection(&candidate)?;
-    materialize_prepared_provenance_catalogue(candidate, active)
+    materialize_prepared_provenance_catalogue(candidate, active, checked_nominal_types)
 }
 
 fn materialize_prepared_provenance_catalogue(
     candidate: DeployableRevision,
     active: &ActiveDatabaseRevision,
+    checked_nominal_types: Vec<CheckedObjectType>,
 ) -> Result<ResolvedSourceCatalogue, ResolvedSourceCatalogueError> {
     let function_artifacts = materialize_function_artifacts(&candidate, active)?;
     let diff = catalogue_diff(active.catalogue(), candidate.candidate());
@@ -474,7 +504,16 @@ fn materialize_prepared_provenance_catalogue(
         candidate,
         diff,
         function_artifacts,
+        checked_nominal_types,
     })
+}
+
+fn checked_nominal_types(
+    checked: Option<&CheckedBundle>,
+) -> Result<Vec<CheckedObjectType>, ResolvedSourceCatalogueError> {
+    checked
+        .map(|bundle| bundle.object_types().to_vec())
+        .ok_or(ResolvedSourceCatalogueError::MissingCheckedBundle)
 }
 
 fn materialize_function_artifacts(
@@ -691,6 +730,7 @@ fn validate_signature_type(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ConstantValue;
     use orna_core::{
         CatalogueRevisionId, FunctionId, FunctionRevisionId, SourceBundleId, SourceRevisionId,
         SourceUnitId,
@@ -784,6 +824,57 @@ mod tests {
                 .new_function_artifact_handoffs(&test_compatibility())
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn materialization_retains_checked_nominal_order_constraints_and_defaults() {
+        let active = empty_active();
+        let source = SourceBundle::new([SourceUnit::new(
+            "types.orna",
+            "CREATE SCHEMA app; CREATE TYPE app.item AS OBJECT (count INT DEFAULT 7, label TEXT NOT NULL);",
+        )])
+        .unwrap();
+        let report = crate::check(&source, active.catalogue());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+
+        let resolved = materialize_provenance_source_catalogue(&report, active.pair(), &active)
+            .expect("checked object declarations remain available to admission");
+        let [item] = resolved.checked_nominal_types() else {
+            panic!(
+                "expected one checked nominal declaration, got {}",
+                resolved.checked_nominal_types().len()
+            );
+        };
+
+        assert_eq!(item.name().to_string(), "app.item");
+        assert!(item.id().is_provisional());
+        let fields = item.fields();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name(), "count");
+        assert_eq!(fields[0].ordinal(), 0);
+        assert_eq!(
+            fields[0].default().unwrap().value(),
+            &ConstantValue::Integer(7)
+        );
+        assert_eq!(fields[1].name(), "label");
+        assert_eq!(fields[1].ordinal(), 1);
+        assert!(!fields[1].nullable());
+        assert!(fields.iter().all(|field| field.id().is_provisional()));
+
+        // The checked view carries resolver identities only; runtime identity
+        // allocation remains an admission responsibility.
+        assert!(
+            resolved
+                .candidate()
+                .object_type_by_name(
+                    &orna_core::catalogue::QualifiedSemanticName::new(["app", "item"]).unwrap()
+                )
+                .is_some()
         );
     }
 
@@ -924,7 +1015,8 @@ mod tests {
                 artifact_payload_digest(&[0x01, 0x02]).unwrap(),
             )],
         );
-        let resolved = materialize_prepared_source_catalogue(candidate, &active).unwrap();
+        let resolved =
+            materialize_prepared_source_catalogue(candidate, &active, Vec::new()).unwrap();
         let compatibility = test_compatibility();
 
         let handoffs = resolved
@@ -1103,6 +1195,7 @@ mod tests {
             candidate,
             diff,
             function_artifacts,
+            checked_nominal_types: Vec::new(),
         }
     }
 
