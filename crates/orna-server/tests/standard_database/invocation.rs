@@ -1274,7 +1274,8 @@ async fn proves_standard_invocation_dogfooding_through_sealed_sys_invoke_inner()
 /// - name invocation (`std.invoke.echo`, parameter name `p_value`) and
 ///   identity invocation (canonical `FunctionId ...10` / `ParameterId ...10`)
 ///   both complete, with stdout carrying exactly the canonical ORV5 value
-///   record and stderr carrying the progress diagnostics;
+///   record and dynamic progress, when enabled by the host terminal, staying
+///   on stderr;
 /// - `--no-progress` keeps the value on stdout and writes no progress lines;
 /// - usage and conversion failures (unknown parameter, invalid value,
 ///   unknown flag, unresolvable target, extra positional) return the exit-2
@@ -1384,11 +1385,7 @@ async fn proves_installed_orna_invoke_end_to_end_against_postgres() -> TestResul
         )?;
         let name_stderr = String::from_utf8(name_stderr)
             .map_err(|_| failure("the name-addressed stderr was not UTF-8 text"))?;
-        require(
-            name_stderr.contains("orna: invoke: invocation started")
-                && name_stderr.contains("orna: invoke: invocation completed in"),
-            "the name-addressed stderr did not carry the progress diagnostics",
-        )?;
+        require_optional_invoke_progress(name_stderr.as_bytes(), "name-addressed")?;
 
         // Invoke by the canonical function and parameter identities
         // (`FunctionId ...10` with `--arg parameter:<...10>=42`).
@@ -1415,11 +1412,7 @@ async fn proves_installed_orna_invoke_end_to_end_against_postgres() -> TestResul
         )?;
         let identity_stderr = String::from_utf8(identity_stderr)
             .map_err(|_| failure("the identity-addressed stderr was not UTF-8 text"))?;
-        require(
-            identity_stderr.contains("orna: invoke: invocation started")
-                && identity_stderr.contains("orna: invoke: invocation completed in"),
-            "the identity-addressed stderr did not carry the progress diagnostics",
-        )?;
+        require_optional_invoke_progress(identity_stderr.as_bytes(), "identity-addressed")?;
 
         // `--no-progress` keeps the value on stdout and suppresses every
         // progress diagnostic.
@@ -2444,8 +2437,9 @@ async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> 
         // `--output json` resolves the `json` alias to std.json.encode, which
         // wraps the canonical INTEGER 41 in an `application/json` ByteStream.
         // The tty runtime writes the raw stream bytes to stdout: exactly `41`
-        // with no envelope and no progress interleave; the progress
-        // diagnostics stay on stderr (ADR 0057 steps 7-10).
+        // with no envelope or progress interleave. When enabled by a terminal
+        // stderr, the progress diagnostics remain on stderr (ADR 0057 steps
+        // 7-10).
         let (json_outcome, json_stdout, json_stderr) = installed_invoke_run(
             &database,
             echo_invoke_request(ECHO_JSON, Some("json".to_owned()))?,
@@ -2461,17 +2455,14 @@ async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> 
         )?;
         let json_stderr = String::from_utf8(json_stderr)
             .map_err(|_| failure("the --output json stderr was not UTF-8 text"))?;
-        require(
-            json_stderr.contains("orna: invoke: invocation started")
-                && json_stderr.contains("orna: invoke: invocation completed in"),
-            "the --output json stderr did not carry the progress diagnostics",
-        )?;
+        require_optional_invoke_progress(json_stderr.as_bytes(), "--output json")?;
 
         // `--output table` resolves the `table` alias to
         // std.terminal.present_table, which renders the one-column `result`
         // row set as a terminal Document. The tty runtime writes the document
         // text to stdout: exactly the header, separator, aligned row, trailing
-        // count, and final newline; the progress diagnostics stay on stderr.
+        // count, and final newline; terminal-enabled dynamic progress remains
+        // on stderr.
         let (table_outcome, table_stdout, table_stderr) = installed_invoke_run(
             &database,
             echo_invoke_request(ECHO_TABLE, Some("table".to_owned()))?,
@@ -2487,19 +2478,15 @@ async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> 
         )?;
         let table_stderr = String::from_utf8(table_stderr)
             .map_err(|_| failure("the --output table stderr was not UTF-8 text"))?;
-        require(
-            table_stderr.contains("orna: invoke: invocation started")
-                && table_stderr.contains("orna: invoke: invocation completed in"),
-            "the --output table stderr did not carry the progress diagnostics",
-        )?;
+        require_optional_invoke_progress(table_stderr.as_bytes(), "--output table")?;
 
         // `--output csv` resolves the `csv` alias to std.csv.encode (work
         // ADR 0067), which wraps the canonical INTEGER 43 in a `text/csv`
         // ByteStream: the one-column `result` row set renders as the header
         // row, the value row, and the final newline. The tty runtime writes
         // the raw stream bytes to stdout: exactly `result\n43\n` with no
-        // envelope and no progress interleave; the progress diagnostics stay
-        // on stderr.
+        // envelope or progress interleave. Terminal-enabled dynamic progress
+        // remains on stderr.
         let (csv_outcome, csv_stdout, csv_stderr) = installed_invoke_run(
             &database,
             echo_invoke_request(ECHO_CSV, Some("csv".to_owned()))?,
@@ -2515,11 +2502,7 @@ async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> 
         )?;
         let csv_stderr = String::from_utf8(csv_stderr)
             .map_err(|_| failure("the --output csv stderr was not UTF-8 text"))?;
-        require(
-            csv_stderr.contains("orna: invoke: invocation started")
-                && csv_stderr.contains("orna: invoke: invocation completed in"),
-            "the --output csv stderr did not carry the progress diagnostics",
-        )?;
+        require_optional_invoke_progress(csv_stderr.as_bytes(), "--output csv")?;
 
         // An unmatchable requirement (`application/xml` has no registered
         // presenter) fails closed as the accepted redacted internal Event
@@ -2545,7 +2528,8 @@ async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> 
         )?;
 
         // The no-requirement path is unchanged: the canonical value record on
-        // stdout and the progress diagnostics on stderr (milestone 5).
+        // stdout and, when enabled by a terminal, dynamic progress on stderr
+        // (milestone 5).
         let (bare_outcome, bare_stdout, bare_stderr) =
             installed_invoke_run(&database, echo_invoke_request(ECHO_JSON, None)?).await?;
         require(
@@ -2558,11 +2542,7 @@ async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> 
         )?;
         let bare_stderr = String::from_utf8(bare_stderr)
             .map_err(|_| failure("the no-requirement stderr was not UTF-8 text"))?;
-        require(
-            bare_stderr.contains("orna: invoke: invocation started")
-                && bare_stderr.contains("orna: invoke: invocation completed in"),
-            "the no-requirement stderr did not carry the progress diagnostics",
-        )?;
+        require_optional_invoke_progress(bare_stderr.as_bytes(), "no-requirement")?;
 
         // The four completed invocations (json, table, csv, bare) each
         // appended one authentication event, one allowed EXECUTE decision
@@ -2694,6 +2674,35 @@ pub(super) async fn installed_invoke_run(
     let outcome =
         run_invoke_with_kernel(kernel(database)?, request, &mut stdout, &mut stderr).await;
     Ok((outcome, stdout, stderr))
+}
+
+fn require_optional_invoke_progress(stderr: &[u8], label: &str) -> TestResult<()> {
+    let stderr = std::str::from_utf8(stderr)
+        .map_err(|_| failure(format!("{label} stderr was not UTF-8 text")))?;
+    let valid = if stderr.is_empty() {
+        true
+    } else if let Some(without_final_newline) = stderr.strip_suffix('\n') {
+        if let Some((started, completed)) = without_final_newline.split_once('\n') {
+            let duration = completed
+                .strip_prefix("orna: invoke: invocation completed in ")
+                .and_then(|value| value.strip_suffix("ns"));
+            started == "orna: invoke: invocation started"
+                && duration.is_some_and(|value| {
+                    !value.is_empty() && value.chars().all(|character| character.is_ascii_digit())
+                })
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(failure(format!(
+            "{label} stderr contained unexpected invoke progress: {stderr:?}"
+        )))
+    }
 }
 
 #[cfg(feature = "test-hooks")]
