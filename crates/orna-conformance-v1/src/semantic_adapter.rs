@@ -14,8 +14,10 @@ use crate::{
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
     EffectHandler, Environment, EvaluationError, Functions, Limits as EvaluatorLimits,
-    PureFunction as RetainedFunction, RelationPage, StepBudget, evaluate_expression_with_functions,
-    evaluate_with_functions_and_budget, invoke_named, invoke_named_with_effects_and_budget,
+    NominalDefinition, NominalDefinitions, NominalField, PureFunction as RetainedFunction,
+    RelationPage, StepBudget, evaluate_expression_with_functions,
+    evaluate_with_functions_and_budget, evaluate_with_functions_and_nominals,
+    invoke_named_with_effects_and_budget, invoke_named_with_nominals,
 };
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
 use orna_repository_v1::Repository;
@@ -38,7 +40,8 @@ use orna_stream_v1::{
     DiagnosticCode, SafeDiagnostic,
 };
 use orna_syntax_v1::{
-    Declaration, Expr, Pattern, Statement, SyntaxSpan, parse_expression, parse_module,
+    Declaration, Expr, Pattern, Statement, SyntaxSpan, TypeMember, TypeRepresentation,
+    parse_expression, parse_module,
 };
 use orna_sys_v1::{
     AdmissionError, AdmissionRequest, ExecutionBoundary, FunctionDescriptor, InvocationExecutor,
@@ -314,10 +317,12 @@ pub struct BoundedEvaluator {
     environment: Environment,
     limits: EvaluatorLimits,
     functions: BTreeMap<String, RetainedFunction>,
+    nominal_definitions: NominalDefinitions,
 }
 
 struct BoundedSourceExecutor {
     functions: BTreeMap<String, RetainedFunction>,
+    nominal_definitions: NominalDefinitions,
     limits: EvaluatorLimits,
     descriptor: FunctionDescriptor,
     evaluator_name: String,
@@ -344,10 +349,11 @@ impl InvocationExecutor for BoundedSourceExecutor {
             };
             arguments.insert(name.into(), value);
         }
-        match invoke_named(
+        match invoke_named_with_nominals(
             &self.evaluator_name,
             &self.functions,
             &arguments,
+            &self.nominal_definitions,
             self.limits,
         ) {
             Ok(value) => match value.encode() {
@@ -383,6 +389,7 @@ impl BoundedEvaluator {
         }
         let mut executor = BoundedSourceExecutor {
             functions: self.functions.clone(),
+            nominal_definitions: self.nominal_definitions.clone(),
             limits: self.limits,
             descriptor: descriptor.clone(),
             evaluator_name: evaluator_name.into(),
@@ -405,6 +412,7 @@ impl BoundedEvaluator {
         }
         let executor = BoundedSourceExecutor {
             functions: self.functions.clone(),
+            nominal_definitions: self.nominal_definitions.clone(),
             limits: self.limits,
             descriptor: descriptor.clone(),
             evaluator_name: evaluator_name.into(),
@@ -418,8 +426,25 @@ impl BoundedEvaluator {
         environment: &Environment,
         expected: &Value,
     ) -> StageOutcome<Diagnostic> {
-        match evaluate_expression_with_functions(source, environment, &self.functions, self.limits)
-        {
+        let parsed = parse_expression(source);
+        if !parsed.is_ok() {
+            return match evaluate_expression_with_functions(
+                source,
+                environment,
+                &self.functions,
+                self.limits,
+            ) {
+                Ok(_) => scenario_mismatch(),
+                Err(error) => StageOutcome::Failed(error.diagnostic().clone()),
+            };
+        }
+        match evaluate_with_functions_and_nominals(
+            &parsed.value,
+            environment,
+            &self.functions,
+            &self.nominal_definitions,
+            self.limits,
+        ) {
             Ok(actual) if &actual == expected => StageOutcome::Passed,
             Ok(_) => scenario_mismatch(),
             Err(error) => StageOutcome::Failed(error.diagnostic().clone()),
@@ -569,6 +594,7 @@ impl BoundedEvaluator {
             environment: BTreeMap::new(),
             limits,
             functions: BTreeMap::new(),
+            nominal_definitions: NominalDefinitions::new(),
         }
     }
 
@@ -578,6 +604,7 @@ impl BoundedEvaluator {
             environment,
             limits,
             functions: BTreeMap::new(),
+            nominal_definitions: NominalDefinitions::new(),
         }
     }
 
@@ -605,7 +632,13 @@ impl BoundedEvaluator {
                 reason: "function is not retained by the bounded evaluator".into(),
             };
         }
-        match invoke_named(function, &self.functions, arguments, self.limits) {
+        match invoke_named_with_nominals(
+            function,
+            &self.functions,
+            arguments,
+            &self.nominal_definitions,
+            self.limits,
+        ) {
             Ok(_) => StageOutcome::Passed,
             Err(error) => StageOutcome::Failed(error.diagnostic().clone()),
         }
@@ -619,8 +652,14 @@ impl BoundedEvaluator {
         function: &str,
         arguments: &Environment,
     ) -> Result<Value, Box<Diagnostic>> {
-        invoke_named(function, &self.functions, arguments, self.limits)
-            .map_err(|error| Box::new(error.diagnostic().clone()))
+        invoke_named_with_nominals(
+            function,
+            &self.functions,
+            arguments,
+            &self.nominal_definitions,
+            self.limits,
+        )
+        .map_err(|error| Box::new(error.diagnostic().clone()))
     }
 
     /// Loads pure standard-library source only after every module is verified
@@ -657,10 +696,23 @@ impl BoundedEvaluator {
     fn evaluate_unit(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
         match unit.parse_as.as_str() {
             "row_unit" | "expression_unit" | "repl_unit" => {
-                match evaluate_expression_with_functions(
-                    &unit.source,
+                let parsed = parse_expression(&unit.source);
+                if !parsed.is_ok() {
+                    return match evaluate_expression_with_functions(
+                        &unit.source,
+                        &self.environment,
+                        &self.functions,
+                        self.limits,
+                    ) {
+                        Ok(_) => scenario_mismatch(),
+                        Err(error) => StageOutcome::Failed(error.diagnostic().clone()),
+                    };
+                }
+                match evaluate_with_functions_and_nominals(
+                    &parsed.value,
                     &self.environment,
                     &self.functions,
+                    &self.nominal_definitions,
                     self.limits,
                 ) {
                     Ok(_) => StageOutcome::Passed,
@@ -714,6 +766,7 @@ impl BoundedEvaluator {
             return StageOutcome::Failed(error.diagnostic().clone());
         }
         let mut functions = self.functions.clone();
+        let mut nominal_definitions = self.nominal_definitions.clone();
         for item in parsed.value.items {
             match item.declaration {
                 Declaration::Function { signature, body } => {
@@ -729,11 +782,56 @@ impl BoundedEvaluator {
                         },
                     );
                 }
+                Declaration::Type {
+                    name,
+                    representation: TypeRepresentation::Nominal { members },
+                    ..
+                } => {
+                    let identity = qualified_nominal_name(namespace, &name);
+                    let fields = members
+                        .into_iter()
+                        .filter_map(|member| match member {
+                            TypeMember::Field {
+                                visibility,
+                                name,
+                                initializer,
+                                ..
+                            } => Some(match (visibility, initializer) {
+                                (true, Some(default)) => NominalField::public_with_default(
+                                    nominal_field_id(&identity, &name),
+                                    name,
+                                    default,
+                                ),
+                                (true, None) => {
+                                    NominalField::public(nominal_field_id(&identity, &name), name)
+                                }
+                                (false, Some(default)) => NominalField::private_with_default(
+                                    nominal_field_id(&identity, &name),
+                                    name,
+                                    default,
+                                ),
+                                (false, None) => {
+                                    NominalField::private(nominal_field_id(&identity, &name), name)
+                                }
+                            }),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    nominal_definitions.insert(
+                        identity.clone(),
+                        NominalDefinition::new(
+                            nominal_type_id(&identity),
+                            namespace.clone().map(str::to_owned),
+                            fields,
+                        ),
+                    );
+                }
                 Declaration::Use { .. } => {}
                 _ => return Self::unsupported_module(),
             }
         }
         self.functions = functions;
+        self.nominal_definitions = nominal_definitions;
         StageOutcome::Passed
     }
 
@@ -743,11 +841,15 @@ impl BoundedEvaluator {
     }
 
     fn supports_pure_declarations(items: &[orna_syntax_v1::Item]) -> bool {
-        items.iter().all(|item| {
-            matches!(
-                &item.declaration,
-                Declaration::Function { .. } | Declaration::Use { .. }
-            )
+        items.iter().all(|item| match &item.declaration {
+            Declaration::Function { .. } | Declaration::Use { .. } => true,
+            Declaration::Type {
+                representation: TypeRepresentation::Nominal { members },
+                ..
+            } => members
+                .iter()
+                .all(|member| matches!(member, TypeMember::Field { .. })),
+            _ => false,
         })
     }
 
@@ -872,6 +974,29 @@ fn module_namespace(unit: &SourceUnit) -> Option<String> {
     }
     components.push(stem);
     Some(components.join("."))
+}
+
+fn qualified_nominal_name(namespace: Option<&str>, name: &str) -> String {
+    namespace
+        .filter(|namespace| !namespace.is_empty())
+        .map(|namespace| format!("{namespace}.{name}"))
+        .unwrap_or_else(|| name.to_owned())
+}
+
+fn nominal_type_id(identity: &str) -> [u8; 16] {
+    Sha256::digest(identity.as_bytes())[..16]
+        .try_into()
+        .expect("truncated digest has the ObjectId width")
+}
+
+fn nominal_field_id(identity: &str, name: &str) -> [u8; 16] {
+    let mut input = Vec::with_capacity(identity.len() + name.len() + 1);
+    input.extend_from_slice(identity.as_bytes());
+    input.push(0);
+    input.extend_from_slice(name.as_bytes());
+    Sha256::digest(input)[..16]
+        .try_into()
+        .expect("truncated digest has the ObjectId width")
 }
 
 type TransactionDatabase = DatabaseRuntime<String, Vec<u8>, Value>;
