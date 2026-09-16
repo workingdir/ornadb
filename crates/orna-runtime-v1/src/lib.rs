@@ -15116,6 +15116,173 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_delivery_failures_coalesce_one_durable_failure_after_reopen() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("fail-10000", "after-fail-10000");
+        let identity = FailureIdentity(delivery.clone());
+        let key = delivery.checkpoint_key();
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let diagnostic = SafeDiagnostic {
+            code: DiagnosticCode::ExecutionRejected,
+            class: DiagnosticClass::Permanent,
+        };
+        let initial_checkpoint = state
+            .stream_backend(writer)
+            .checkpoint_async(&key)
+            .await
+            .unwrap();
+        assert_eq!(initial_checkpoint.version, expected.version);
+        assert_eq!(initial_checkpoint.committed, expected.committed);
+
+        let first_failure = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected initial delivery admission: {other:?}"),
+            };
+            match stream
+                .fail_async(lease, diagnostic, StreamFailurePayload::Plaintext(vec![1]))
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected initial delivery failure: {other:?}"),
+            }
+        };
+        assert_eq!(first_failure.identity, identity);
+        assert_eq!(first_failure.attempts, 1);
+        assert_eq!(first_failure.status, FailureStatus::Failed);
+        assert_eq!(first_failure.diagnostic, diagnostic);
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&key)
+                .await
+                .unwrap(),
+            initial_checkpoint
+        );
+
+        let first_failure_version = first_failure.version;
+        let mut previous = first_failure;
+        for expected_attempts in 2..=10_000 {
+            let mut stream = state.stream_backend(writer);
+            let retrying = match stream
+                .apply_async(CommitIntent::Retry {
+                    failure: identity.clone(),
+                    expected_version: previous.version,
+                    expected: expected.clone(),
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::RetryScheduled { failure } => failure,
+                other => panic!("unexpected retry admission: {other:?}"),
+            };
+            assert_eq!(retrying.version, previous.version + 1);
+            assert_eq!(retrying.identity, identity);
+            assert_eq!(retrying.attempts, expected_attempts);
+            assert_eq!(retrying.status, FailureStatus::Retrying);
+
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected retry delivery admission: {other:?}"),
+            };
+            previous = match stream
+                .fail_async(
+                    lease,
+                    diagnostic,
+                    StreamFailurePayload::Plaintext(vec![expected_attempts as u8]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected failed retry: {other:?}"),
+            };
+            assert_eq!(previous.identity, identity);
+            assert_eq!(previous.attempts, expected_attempts);
+            assert_eq!(previous.status, FailureStatus::Failed);
+            assert_eq!(previous.diagnostic, diagnostic);
+            assert_eq!(previous.version, retrying.version + 1);
+        }
+
+        assert_eq!(previous.attempts, 10_000);
+        assert_eq!(previous.version, first_failure_version + 2 * (10_000 - 1));
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&key)
+                .await
+                .unwrap(),
+            initial_checkpoint
+        );
+        let mut rows = state
+            .connection
+            .query("SELECT COUNT(*) FROM stream_failure", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            1
+        );
+
+        drop(state);
+        let reopened = open_state(&repo).await;
+        let reopened_writer = reopened.acquire_lease(id(4)).await.unwrap();
+        let reopened_stream = reopened.stream_backend(reopened_writer);
+        assert_eq!(
+            reopened_stream.checkpoint_async(&key).await.unwrap(),
+            initial_checkpoint
+        );
+        let reopened_failure = reopened_stream
+            .failure_async(&identity)
+            .await
+            .unwrap()
+            .expect("coalesced failure after reopen");
+        assert_eq!(reopened_failure.identity, identity);
+        assert_eq!(reopened_failure.attempts, 10_000);
+        assert_eq!(reopened_failure.version, previous.version);
+        assert_eq!(reopened_failure.status, FailureStatus::Failed);
+        assert_eq!(reopened_failure.diagnostic, diagnostic);
+        let mut reopened_rows = reopened
+            .connection
+            .query("SELECT COUNT(*) FROM stream_failure", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened_rows
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<i64>(0)
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn provider_failures_survive_reopen_until_the_checkpoint_is_admitted() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
