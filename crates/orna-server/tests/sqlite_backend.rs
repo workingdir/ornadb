@@ -784,6 +784,29 @@ fn local_sqlite_invoke_formats_results_and_persists_inspectable_evidence() {
         assert!(result.stderr.is_empty(), "no-progress invoke stderr");
     }
 
+    let captured = run_orna(
+        directory.path(),
+        &[
+            OsString::from("--db"),
+            database.as_os_str().to_os_string(),
+            OsString::from("invoke"),
+            OsString::from("dogfood.read"),
+            OsString::from("--output"),
+            OsString::from("json"),
+        ],
+    )
+    .expect("captured local SQLite invoke");
+    assert_eq!(
+        captured.status.code(),
+        Some(0),
+        "captured invoke: {captured:?}"
+    );
+    assert_eq!(captured.stdout, b"[]\n", "captured invoke output");
+    assert!(
+        captured.stderr.is_empty(),
+        "piped stderr must suppress dynamic invoke progress"
+    );
+
     let (_, audit) = local_principal_and_latest_invocation(&database);
     assert_eq!(audit.outcome, "completed");
     assert_eq!(audit.function, Some(function));
