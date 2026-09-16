@@ -80,6 +80,21 @@ impl Diagnostic {
         Self::target("E2000", title, help)
     }
 }
+
+fn cancellation_diagnostic(diagnostic: &orna_foundation_v1::Diagnostic) -> Diagnostic {
+    let code = match diagnostic.code() {
+        "ORNA-LIST-STREAM-CANCELLED" => "ORNA-LIST-STREAM-CANCELLED",
+        _ => "E2200",
+    };
+    Diagnostic {
+        code,
+        title: "operation was cancelled",
+        help: "inspect the durable operation state before retrying",
+        exit: Exit::Cancelled,
+        detail: (code == "E2200").then(|| format!("cancellation code: {}", diagnostic.code())),
+    }
+}
+
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "error[{}]: {}", self.code, self.title)?;
@@ -926,6 +941,7 @@ fn run_project_invocation_with_arguments(
             "durable project invocation was rejected",
             "the project transaction failed atomically; no partial changes were committed",
         )),
+        StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "durable project invocation is not available",
             "use a supported table transaction; stream roots require the explicit stream runtime",
@@ -992,6 +1008,7 @@ fn run_project_stream_invocation(endpoint: &Endpoint, root_entry: &str) -> Resul
             "durable project stream delivery failed",
             "the failed delivery was rolled back; prior committed deliveries and their checkpoint progress remain; inspect the recorded failure before retrying the stream",
         )),
+        StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "durable project stream invocation is not available",
             "use a supported finite-list stream root",
@@ -1014,6 +1031,7 @@ fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnost
     let mut evaluator = BoundedEvaluator::default();
     match evaluator.evaluate_project(&execution_project(&project)) {
         StageOutcome::Passed => {}
+        StageOutcome::Cancelled(diagnostic) => return Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => {
             return Err(Diagnostic::unavailable(
                 "one-shot invocation requires an executable function-only project",
@@ -1026,6 +1044,7 @@ fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnost
             println!("invocation completed");
             Ok(())
         }
+        StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "requested invocation is not available",
             "define a reachable zero-argument pure function with the requested name",
@@ -1837,6 +1856,21 @@ mod tests {
         );
         assert!(rendered.contains("inspect the recorded failure before retrying the stream"));
         assert!(!rendered.contains("failed atomically"));
+    }
+
+    #[test]
+    fn cancellation_mapping_retains_safe_identity_and_cancelled_exit() {
+        let diagnostic = orna_foundation_v1::Diagnostic::new(
+            orna_foundation_v1::SafeText::new("ORNA-LIST-STREAM-CANCELLED").unwrap(),
+            orna_foundation_v1::DiagnosticSeverity::Error,
+            orna_foundation_v1::SafeText::redacted(),
+        )
+        .unwrap();
+        let mapped = cancellation_diagnostic(&diagnostic);
+
+        assert_eq!(mapped.code, "ORNA-LIST-STREAM-CANCELLED");
+        assert_eq!(mapped.exit, Exit::Cancelled);
+        assert!(mapped.detail.is_none());
     }
 
     #[test]
