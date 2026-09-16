@@ -276,6 +276,16 @@ CREATE TABLE IF NOT EXISTS stream_pause_reason (
     key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
     reason TEXT NOT NULL CHECK (length(reason) <= 16777216)
 );
+CREATE TABLE IF NOT EXISTS stream_checkpoint_reset_audit (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_id TEXT NOT NULL CHECK (length(key_id) > 0),
+    old_version INTEGER NOT NULL CHECK (old_version >= 0),
+    old_position TEXT,
+    new_version INTEGER NOT NULL CHECK (new_version >= 0),
+    new_position TEXT NOT NULL CHECK (length(new_position) > 0),
+    reason TEXT NOT NULL CHECK (length(reason) <= 16777216),
+    redacted INTEGER NOT NULL CHECK (redacted IN (0, 1))
+);
 CREATE TABLE IF NOT EXISTS sys_run_observation (
     run_id BLOB PRIMARY KEY CHECK (length(run_id) = 16),
     session_id BLOB NOT NULL CHECK (length(session_id) = 16),
@@ -2021,6 +2031,21 @@ pub enum StreamAdministrationOutcome {
     BlockingFailure,
 }
 
+/// The redaction-safe durable record written with a successful checkpoint
+/// reset. Positions remain provider-defined opaque values; the reason is
+/// retained only when it passes the safe-text boundary and otherwise becomes
+/// the explicit redaction marker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointResetAudit {
+    pub key: CheckpointKey,
+    pub old_version: u64,
+    pub old_position: Option<Position>,
+    pub new_version: u64,
+    pub new_position: Position,
+    pub reason: String,
+    pub redacted: bool,
+}
+
 impl RuntimeState {
     /// Opens the `state.db` path resolved by Git for this exact worktree.
     pub async fn open(
@@ -2895,6 +2920,106 @@ impl RuntimeState {
         key: &CheckpointKey,
     ) -> Result<Option<String>, RuntimeError> {
         load_stream_pause_reason(&self.connection, key).await
+    }
+
+    /// Performs the public runtime boundary for
+    /// `sys.admin.reset_checkpoint`.
+    ///
+    /// The checkpoint, failure cleanup, and redaction-safe audit are admitted
+    /// in one writer-fenced transaction. The expected version and opaque
+    /// position are compared before any progress movement.
+    pub async fn reset_checkpoint(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+        expected: CheckpointPrecondition,
+        to: Position,
+        reason: String,
+    ) -> Result<StreamCheckpoint, RuntimeError> {
+        self.reset_checkpoint_at_capture(lease, key, expected, to, reason, None)
+            .await
+    }
+
+    /// Capture-fenced form of [`Self::reset_checkpoint`]. Hosts use this when
+    /// the checkpoint was resolved from a pinned CWD observation.
+    pub async fn reset_checkpoint_at_capture(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+        expected: CheckpointPrecondition,
+        to: Position,
+        reason: String,
+        expected_capture: Option<&CwdCapture>,
+    ) -> Result<StreamCheckpoint, RuntimeError> {
+        let audit_reason = redact_reset_reason(reason)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&transaction, lease).await?;
+        if let Some(expected_capture) = expected_capture {
+            let current_capture = capture_tx(&transaction).await?;
+            if &current_capture != expected_capture {
+                return Err(RuntimeError::StaleCapture {
+                    current: Box::new(current_capture),
+                });
+            }
+        }
+        let result = apply_stream_intent_tx(
+            &transaction,
+            CommitIntent::Reset {
+                key: key.clone(),
+                expected: expected.clone(),
+                to,
+            },
+        )
+        .await?;
+        let checkpoint = match result {
+            CommitResult::CheckpointReset { checkpoint } => checkpoint,
+            CommitResult::Rejected(RejectReason::StreamNotPaused) => {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            CommitResult::Rejected(RejectReason::StreamBusy) => {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            CommitResult::Rejected(RejectReason::BlockingFailure) => {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            CommitResult::Rejected(RejectReason::StaleCheckpoint) => {
+                return Err(RuntimeError::StreamCheckpointStale);
+            }
+            _ => return Err(RuntimeError::RecoveryInvalid),
+        };
+        store_stream_checkpoint_reset_audit(
+            &transaction,
+            &key,
+            &expected,
+            &checkpoint,
+            &audit_reason,
+        )
+        .await?;
+        sync_stream_observation_tx(
+            &transaction,
+            &CommitResult::CheckpointReset {
+                checkpoint: checkpoint.clone(),
+            },
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(checkpoint)
+    }
+
+    /// Reads reset audits in admission order. This is intentionally a
+    /// redaction-safe projection and never exposes the runtime connection.
+    pub async fn checkpoint_reset_audits(
+        &self,
+        key: &CheckpointKey,
+    ) -> Result<Vec<CheckpointResetAudit>, RuntimeError> {
+        load_stream_checkpoint_reset_audits(&self.connection, key).await
     }
 
     /// Applies a writer-fenced durable resume transition for one resolved
@@ -9379,6 +9504,14 @@ fn decode_u64(value: i64) -> Result<u64, RuntimeError> {
     u64::try_from(value).map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
+fn decode_bool(value: i64) -> Result<bool, RuntimeError> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
 fn decode_u32(value: i64) -> Result<u32, RuntimeError> {
     u32::try_from(value).map_err(|_| RuntimeError::RecoveryInvalid)
 }
@@ -9639,6 +9772,104 @@ async fn store_stream_pause_reason(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     Ok(())
+}
+
+fn redact_reset_reason(reason: String) -> Result<(String, bool), RuntimeError> {
+    if reason.len() > 16_777_216 {
+        return Err(RuntimeError::InvalidIdentity);
+    }
+    match SafeText::new(reason) {
+        Ok(reason) => Ok((reason.as_str().to_owned(), false)),
+        Err(_) => Ok((SafeText::redacted().as_str().to_owned(), true)),
+    }
+}
+
+async fn store_stream_checkpoint_reset_audit(
+    connection: &Connection,
+    key: &CheckpointKey,
+    expected: &CheckpointPrecondition,
+    checkpoint: &StreamCheckpoint,
+    audit_reason: &(String, bool),
+) -> Result<(), RuntimeError> {
+    connection
+        .execute(
+            "INSERT INTO stream_checkpoint_reset_audit
+             (key_id, old_version, old_position, new_version, new_position,
+              reason, redacted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                stream_key_id(key),
+                i64::try_from(expected.version).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                expected
+                    .committed
+                    .as_ref()
+                    .map(|position| position.token.as_str().to_owned()),
+                i64::try_from(checkpoint.version).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                checkpoint
+                    .committed
+                    .as_ref()
+                    .ok_or(RuntimeError::RecoveryInvalid)?
+                    .token
+                    .as_str()
+                    .to_owned(),
+                audit_reason.0.clone(),
+                if audit_reason.1 { 1 } else { 0 },
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
+}
+
+async fn load_stream_checkpoint_reset_audits(
+    connection: &Connection,
+    key: &CheckpointKey,
+) -> Result<Vec<CheckpointResetAudit>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT old_version, old_position, new_version, new_position,
+                    reason, redacted
+             FROM stream_checkpoint_reset_audit
+             WHERE key_id = ?1 ORDER BY sequence",
+            params![stream_key_id(key)],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut audits = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let old_position = row
+            .get::<Option<String>>(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?
+            .map(decode_position)
+            .transpose()?;
+        let new_position = decode_position(
+            row.get::<String>(3)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        audits.push(CheckpointResetAudit {
+            key: key.clone(),
+            old_version: decode_u64(
+                row.get::<i64>(0)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
+            old_position,
+            new_version: decode_u64(
+                row.get::<i64>(2)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
+            new_position,
+            reason: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            redacted: decode_bool(
+                row.get::<i64>(5)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
+        });
+    }
+    Ok(audits)
 }
 
 fn stream_pause_changed(result: &CommitResult) -> bool {
@@ -15706,6 +15937,315 @@ mod tests {
                 .unwrap(),
             CommitResult::Acquired { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn public_checkpoint_reset_records_redacted_audit_and_reopens() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("audit-old", "audit-next").checkpoint_key();
+        assert_eq!(
+            state.pause_stream(writer, key.clone()).await.unwrap(),
+            StreamAdministrationOutcome::Paused { changed: true }
+        );
+        let reset_position = Position {
+            token: Component::new("opaque/provider-position").unwrap(),
+        };
+        let checkpoint = state
+            .reset_checkpoint(
+                writer,
+                key.clone(),
+                CheckpointPrecondition {
+                    version: 0,
+                    committed: None,
+                },
+                reset_position.clone(),
+                "operator rewind".into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(checkpoint.version, 1);
+        assert_eq!(checkpoint.committed, Some(reset_position.clone()));
+        assert_eq!(
+            state.checkpoint_reset_audits(&key).await.unwrap(),
+            vec![CheckpointResetAudit {
+                key: key.clone(),
+                old_version: 0,
+                old_position: None,
+                new_version: 1,
+                new_position: reset_position.clone(),
+                reason: "operator rewind".into(),
+                redacted: false,
+            }]
+        );
+        let redacted_position = Position {
+            token: Component::new("opaque/provider-position-two").unwrap(),
+        };
+        let redacted_checkpoint = state
+            .reset_checkpoint(
+                writer,
+                key.clone(),
+                CheckpointPrecondition {
+                    version: checkpoint.version,
+                    committed: Some(reset_position),
+                },
+                redacted_position.clone(),
+                "operator\0secret".into(),
+            )
+            .await
+            .unwrap();
+        let audits = state.checkpoint_reset_audits(&key).await.unwrap();
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[1].new_position, redacted_position);
+        assert_eq!(audits[1].reason, "<redacted>");
+        assert!(audits[1].redacted);
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened.stream_checkpoint(&key).await.unwrap(),
+            redacted_checkpoint
+        );
+        assert_eq!(
+            reopened.checkpoint_reset_audits(&key).await.unwrap().len(),
+            2
+        );
+        assert_eq!(
+            reopened.checkpoint_reset_audits(&key).await.unwrap()[0].new_position,
+            Position {
+                token: Component::new("opaque/provider-position").unwrap(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reset_stale_version_and_position_do_not_mutate() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("stale-old", "stale-next").checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let initial = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        state
+            .reset_checkpoint(
+                writer,
+                key.clone(),
+                initial.clone(),
+                Position {
+                    token: Component::new("first-reset").unwrap(),
+                },
+                "first reset".into(),
+            )
+            .await
+            .unwrap();
+        let current = state.stream_checkpoint(&key).await.unwrap();
+        assert_eq!(
+            state
+                .reset_checkpoint(
+                    writer,
+                    key.clone(),
+                    initial,
+                    Position {
+                        token: Component::new("stale-version").unwrap(),
+                    },
+                    "stale version".into(),
+                )
+                .await,
+            Err(RuntimeError::StreamCheckpointStale)
+        );
+        assert_eq!(
+            state
+                .reset_checkpoint(
+                    writer,
+                    key.clone(),
+                    CheckpointPrecondition {
+                        version: current.version,
+                        committed: Some(Position {
+                            token: Component::new("wrong-position").unwrap(),
+                        }),
+                    },
+                    Position {
+                        token: Component::new("stale-position").unwrap(),
+                    },
+                    "stale position".into(),
+                )
+                .await,
+            Err(RuntimeError::StreamCheckpointStale)
+        );
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap(), current);
+        assert_eq!(state.checkpoint_reset_audits(&key).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reset_rejects_active_delivery_and_blocking_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+
+        let active_delivery = stream_delivery("active-reset", "active-next");
+        let active_key = active_delivery.checkpoint_key();
+        let active_lease = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Acquire {
+                delivery: active_delivery,
+                expected: CheckpointPrecondition {
+                    version: 0,
+                    committed: None,
+                },
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected active delivery result: {other:?}"),
+        };
+        store_stream_status(&state.connection, &active_key, StreamStatus::Paused)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .reset_checkpoint(
+                    writer,
+                    active_key.clone(),
+                    CheckpointPrecondition {
+                        version: 0,
+                        committed: None,
+                    },
+                    Position {
+                        token: Component::new("active-rejected").unwrap(),
+                    },
+                    "active delivery".into(),
+                )
+                .await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        assert_eq!(
+            state.stream_checkpoint(&active_key).await.unwrap().version,
+            0
+        );
+        assert!(
+            state
+                .checkpoint_reset_audits(&active_key)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Cancel {
+                lease: active_lease,
+            })
+            .await
+            .unwrap();
+
+        let mut failed_delivery = stream_delivery("blocking-reset", "blocking-next");
+        failed_delivery.source = Component::new("blocking-source").unwrap();
+        let failed_key = failed_delivery.checkpoint_key();
+        let failure_lease = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Acquire {
+                delivery: failed_delivery,
+                expected: CheckpointPrecondition {
+                    version: 0,
+                    committed: None,
+                },
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected failure delivery result: {other:?}"),
+        };
+        state
+            .stream_backend(writer)
+            .fail_async(
+                failure_lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+                StreamFailurePayload::Plaintext(vec![1, 2, 3]),
+            )
+            .await
+            .unwrap();
+        state
+            .pause_stream(writer, failed_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .reset_checkpoint(
+                    writer,
+                    failed_key.clone(),
+                    CheckpointPrecondition {
+                        version: 0,
+                        committed: None,
+                    },
+                    Position {
+                        token: Component::new("blocking-rejected").unwrap(),
+                    },
+                    "blocking failure".into(),
+                )
+                .await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        assert_eq!(
+            state.stream_checkpoint(&failed_key).await.unwrap().version,
+            0
+        );
+        assert!(
+            state
+                .checkpoint_reset_audits(&failed_key)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reset_capture_fence_rejects_without_audit() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("capture-reset", "capture-next").checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let expected_capture = state.capture().await.unwrap();
+        state
+            .commit(writer, &expected_capture, &mutation(5), digest(6), &NoFault)
+            .await
+            .unwrap();
+        assert!(matches!(
+            state
+                .reset_checkpoint_at_capture(
+                    writer,
+                    key.clone(),
+                    CheckpointPrecondition {
+                        version: 0,
+                        committed: None,
+                    },
+                    Position {
+                        token: Component::new("capture-rejected").unwrap(),
+                    },
+                    "stale capture".into(),
+                    Some(&expected_capture),
+                )
+                .await,
+            Err(RuntimeError::StaleCapture { .. })
+        ));
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap().version, 0);
+        assert!(
+            state
+                .checkpoint_reset_audits(&key)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
