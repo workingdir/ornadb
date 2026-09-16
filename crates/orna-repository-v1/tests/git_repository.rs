@@ -2826,6 +2826,310 @@ fn empty_compact_manifest_is_a_valid_committed_snapshot() {
 }
 
 #[test]
+fn compact_manifest_inventory_discovers_every_table_without_mutating_repository_or_runtime_state() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let signing_key = compact_receipt_signing_key();
+    provision_compact_receipt_trust_root(&repo, &signing_key);
+    let first_table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0604);
+    let first = compact_plan(
+        &repo,
+        first_table,
+        [60; 16],
+        &[compact_segment(
+            first_table,
+            60,
+            b"first compact table".to_vec(),
+        )],
+    );
+    let first_pending = repo.publish_compact_repository_boundary(first).unwrap();
+    repo.finish_compact_with_receipt(&compact_runtime_receipt(&first_pending, &signing_key))
+        .unwrap();
+
+    let second_table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0605);
+    let second = compact_plan(
+        &repo,
+        second_table,
+        [61; 16],
+        &[compact_segment(
+            second_table,
+            61,
+            b"second compact table".to_vec(),
+        )],
+    );
+    let second_pending = repo.publish_compact_repository_boundary(second).unwrap();
+    repo.finish_compact_with_receipt(&compact_runtime_receipt(&second_pending, &signing_key))
+        .unwrap();
+
+    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
+    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let before = git_state(&repo, root.path());
+    let index_before = fs::read(root.path().join(".git/index")).unwrap();
+    let worktree_before = fs::read(root.path().join("main.orna")).unwrap();
+    let runtime = RuntimeGeneration::new(604);
+    let runtime_before = repo.cwd_generation(runtime).unwrap();
+    let journal_before = repo.read_publication_journal().unwrap();
+
+    let inventory = repo.read_compact_manifest_inventory(&head).unwrap();
+
+    assert_eq!(inventory.len(), 2);
+    assert_eq!(inventory[&first_table].table(), first_table);
+    assert_eq!(inventory[&first_table].entries().len(), 1);
+    assert_eq!(inventory[&second_table].table(), second_table);
+    assert_eq!(inventory[&second_table].entries().len(), 1);
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert_eq!(
+        fs::read(root.path().join(".git/index")).unwrap(),
+        index_before
+    );
+    assert_eq!(
+        fs::read(root.path().join("main.orna")).unwrap(),
+        worktree_before
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
+        "untracked ordinary\n"
+    );
+    assert_eq!(repo.cwd_generation(runtime).unwrap(), runtime_before);
+    assert_eq!(repo.read_publication_journal().unwrap(), journal_before);
+}
+
+#[test]
+fn compact_manifest_inventory_ignores_policy_only_table_roots() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0606);
+    let head = repo.head().unwrap().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                ManagedPath::new(format!(".orna/storage/{table}/policy.orna")).unwrap(),
+                Some(b"{placement: \"automatic\"}\n".to_vec()),
+            )],
+            "test: commit policy-only compact root",
+        )
+        .unwrap();
+    repo.advance_current_ref(&head, &candidate).unwrap();
+
+    assert!(
+        repo.read_compact_manifest_inventory(candidate.commit())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn compact_manifest_inventory_rejects_unreferenced_shard_or_segment_artifacts() {
+    for artifact in [
+        "shards/00000001.orna".to_owned(),
+        format!(
+            "data/01/{}.parquet",
+            Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0609)
+        ),
+    ] {
+        let root = repository();
+        let repo = Repository::discover(root.path()).unwrap();
+        let signing_key = compact_receipt_signing_key();
+        provision_compact_receipt_trust_root(&repo, &signing_key);
+        let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0608);
+        let plan = compact_plan(
+            &repo,
+            table,
+            [64; 16],
+            &[compact_segment(
+                table,
+                64,
+                b"declared compact segment".to_vec(),
+            )],
+        );
+        let pending = repo.publish_compact_repository_boundary(plan).unwrap();
+        repo.finish_compact_with_receipt(&compact_runtime_receipt(&pending, &signing_key))
+            .unwrap();
+        let head = repo.head().unwrap().unwrap();
+        let orphan = repo
+            .build_private_commit(
+                &head,
+                &[orna_repository_v1::ManagedFileChange::new(
+                    ManagedPath::new(format!(".orna/storage/{table}/{artifact}")).unwrap(),
+                    Some(b"unreferenced compact artifact".to_vec()),
+                )],
+                "test: commit orphan compact inventory artifact",
+            )
+            .unwrap();
+        repo.advance_current_ref(&head, &orphan).unwrap();
+
+        assert!(matches!(
+            repo.read_compact_manifest_inventory(orphan.commit()),
+            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
+        ));
+    }
+}
+
+#[test]
+fn compact_manifest_inventory_rejects_symlinked_manifest_shard_and_segment_entries() {
+    for entry in ["manifest", "shard", "segment"] {
+        let root = repository();
+        let repo = Repository::discover(root.path()).unwrap();
+        let signing_key = compact_receipt_signing_key();
+        provision_compact_receipt_trust_root(&repo, &signing_key);
+        let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0607);
+        let plan = compact_plan(
+            &repo,
+            table,
+            [63; 16],
+            &[compact_segment(table, 63, b"symlink witness".to_vec())],
+        );
+        let pending = repo.publish_compact_repository_boundary(plan).unwrap();
+        repo.finish_compact_with_receipt(&compact_runtime_receipt(&pending, &signing_key))
+            .unwrap();
+        let head = repo.head().unwrap().unwrap();
+        let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
+        let path = match entry {
+            "manifest" => format!(".orna/storage/{table}/manifest.orna"),
+            "shard" => format!(".orna/storage/{table}/shards/00000000.orna"),
+            "segment" => manifest
+                .entries()
+                .first()
+                .unwrap()
+                .relative_path()
+                .as_path()
+                .to_str()
+                .unwrap()
+                .to_owned(),
+            _ => unreachable!(),
+        };
+        let symlink_source = root.path().join("compact-inventory-symlink-source");
+        fs::write(&symlink_source, "not-a-compact-file").unwrap();
+        let object = git(
+            root.path(),
+            &[
+                "hash-object",
+                "-w",
+                "--",
+                symlink_source.file_name().unwrap().to_str().unwrap(),
+            ],
+        );
+        git(root.path(), &["read-tree", head.as_str()]);
+        let cacheinfo = format!("120000,{object},{path}");
+        git(
+            root.path(),
+            &["update-index", "--add", "--cacheinfo", &cacheinfo],
+        );
+        let tree = git(root.path(), &["write-tree"]);
+        let commit = git(
+            root.path(),
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                head.as_str(),
+                "-m",
+                "test: symlink compact inventory entry",
+            ],
+        );
+        git(
+            root.path(),
+            &["update-ref", "refs/heads/main", &commit, head.as_str()],
+        );
+        let corrupted = repo.head().unwrap().unwrap();
+
+        assert!(matches!(
+            repo.read_compact_manifest_inventory(&corrupted),
+            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
+        ));
+    }
+}
+
+#[test]
+fn compact_manifest_inventory_rejects_missing_or_malformed_manifest_closure_without_mutation() {
+    for missing_manifest in [true, false] {
+        let root = repository();
+        let repo = Repository::discover(root.path()).unwrap();
+        let table = Uuid::new_v4();
+        let plan = compact_plan(
+            &repo,
+            table,
+            [62; 16],
+            &[compact_segment(table, 62, b"closure witness".to_vec())],
+        );
+        let manifest = repo
+            .read_compact_manifest(plan.candidate_commit(), table)
+            .unwrap()
+            .unwrap();
+        let segment = manifest.entries().first().unwrap();
+        let segment_bytes = git_bytes(
+            root.path(),
+            &[
+                "show",
+                &format!(
+                    "{}:{}",
+                    plan.candidate_commit(),
+                    segment.relative_path().as_path().display()
+                ),
+            ],
+        );
+        let head = repo.head().unwrap().unwrap();
+        let mut changes = vec![orna_repository_v1::ManagedFileChange::new(
+            segment.relative_path().clone(),
+            Some(segment_bytes),
+        )];
+        if !missing_manifest {
+            let manifest_path =
+                ManagedPath::new(format!(".orna/storage/{table}/manifest.orna")).unwrap();
+            let manifest_bytes = git_bytes(
+                root.path(),
+                &[
+                    "show",
+                    &format!(
+                        "{}:{}",
+                        plan.candidate_commit(),
+                        manifest_path.as_path().display()
+                    ),
+                ],
+            );
+            changes.push(orna_repository_v1::ManagedFileChange::new(
+                manifest_path,
+                Some(manifest_bytes),
+            ));
+        }
+        let malformed = repo
+            .build_private_commit(&head, &changes, "test: commit incomplete compact closure")
+            .unwrap();
+        repo.advance_current_ref(&head, &malformed).unwrap();
+
+        fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+        git(root.path(), &["add", "ordinary.txt"]);
+        fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
+        let before = git_state(&repo, root.path());
+        let index_before = fs::read(root.path().join(".git/index")).unwrap();
+        let worktree_before = fs::read(root.path().join("main.orna")).unwrap();
+        let runtime = RuntimeGeneration::new(605);
+        let runtime_before = repo.cwd_generation(runtime).unwrap();
+        let journal_before = repo.read_publication_journal().unwrap();
+
+        assert!(matches!(
+            repo.read_compact_manifest_inventory(malformed.commit()),
+            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
+        ));
+        assert_eq!(git_state(&repo, root.path()), before);
+        assert_eq!(
+            fs::read(root.path().join(".git/index")).unwrap(),
+            index_before
+        );
+        assert_eq!(
+            fs::read(root.path().join("main.orna")).unwrap(),
+            worktree_before
+        );
+        assert_eq!(repo.cwd_generation(runtime).unwrap(), runtime_before);
+        assert_eq!(repo.read_publication_journal().unwrap(), journal_before);
+    }
+}
+
+#[test]
 fn compact_publication_accepts_a_valid_date_parquet_fixture() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();

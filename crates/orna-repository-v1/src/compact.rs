@@ -1662,9 +1662,12 @@ impl Repository {
         table: Uuid,
         entry: &CompactManifestEntry,
     ) -> Result<Vec<u8>, RepositoryError> {
-        let Some((_mode, object)) = self.tree_entry_at(commit, &entry.relative_path)? else {
+        let Some((mode, object)) = self.tree_entry_at(commit, &entry.relative_path)? else {
             return Err(RepositoryError::InvalidCompactManifest);
         };
+        if !is_regular_git_file_mode(&mode) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
         let bytes = self.git_bytes(["cat-file", "blob", &object])?;
         verify_manifest_segment_bytes(table, entry, &object, &bytes)?;
         Ok(bytes)
@@ -1982,6 +1985,122 @@ impl Repository {
 }
 
 impl Repository {
+    /// Reads every compact manifest tracked by `commit` as one committed
+    /// snapshot inventory.
+    ///
+    /// A table root which contains only `policy.orna` has no compact state and
+    /// is not included. Every manifest, shard, or data entry is otherwise
+    /// validated against the compact layout: manifests and policy are regular
+    /// files, and shard or segment entries without a manifest are rejected.
+    /// Each discovered manifest is read through the ordinary committed-manifest
+    /// boundary, so its shards, segment object identities, checksums, sizes,
+    /// and physical Parquet witnesses are verified before the inventory is
+    /// returned.
+    pub fn read_compact_manifest_inventory(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<BTreeMap<Uuid, CompactManifest>, RepositoryError> {
+        let mut command = self.command();
+        command.args([
+            "ls-tree",
+            "-rz",
+            "--full-tree",
+            commit.as_str(),
+            "--",
+            ".orna/storage",
+        ]);
+        let output = self.run(command)?.stdout;
+        let mut manifests = BTreeSet::new();
+        let mut compact_paths = BTreeMap::<Uuid, BTreeSet<String>>::new();
+        for record in output
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
+            let Some(separator) = record.iter().position(|byte| *byte == b'\t') else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            let fields = &record[..separator];
+            let mut fields = fields.split(|byte| *byte == b' ');
+            let mode = fields
+                .next()
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            let kind = fields.next();
+            let object = fields.next();
+            if kind != Some(b"blob")
+                || object.is_none()
+                || fields.next().is_some()
+                || !matches!(mode, b"100644" | b"100755")
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let path = &record[separator + 1..];
+            let path =
+                std::str::from_utf8(path).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let Some((table_name, entry)) = path
+                .strip_prefix(".orna/storage/")
+                .and_then(|path| path.split_once('/'))
+            else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            let table =
+                Uuid::parse_str(table_name).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            if table.to_string() != table_name {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            match entry {
+                "policy.orna" => {}
+                "manifest.orna" => {
+                    if !manifests.insert(table) {
+                        return Err(RepositoryError::InvalidCompactManifest);
+                    }
+                }
+                entry if entry.starts_with("shards/") || entry.starts_with("data/") => {
+                    if !compact_paths
+                        .entry(table)
+                        .or_default()
+                        .insert(path.to_owned())
+                    {
+                        return Err(RepositoryError::InvalidCompactManifest);
+                    }
+                }
+                _ => return Err(RepositoryError::InvalidCompactManifest),
+            }
+        }
+
+        if !compact_paths.keys().all(|table| manifests.contains(table)) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+
+        let mut inventory = BTreeMap::new();
+        for table in manifests {
+            let manifest = self
+                .read_compact_manifest(commit, table)?
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            let mut declared_paths = BTreeSet::new();
+            for number in 0..manifest
+                .entries()
+                .len()
+                .div_ceil(COMPACT_MANIFEST_SHARD_LIMIT)
+            {
+                let number =
+                    u64::try_from(number).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                if !declared_paths.insert(path_key(&shard_path(table, number)?)?) {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+            for entry in manifest.entries() {
+                if !declared_paths.insert(path_key(entry.relative_path())?) {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+            if compact_paths.remove(&table).unwrap_or_default() != declared_paths {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            inventory.insert(table, manifest);
+        }
+        Ok(inventory)
+    }
+
     /// Reads and verifies the canonical compact manifest at `commit`.  A
     /// missing manifest is represented by `None`; malformed or incomplete
     /// committed state is never treated as an empty table.
@@ -2108,12 +2227,12 @@ impl Repository {
             return Ok(crate::GitDeclaredObjectSetState::Malformed);
         }
         for entry in manifest.entries() {
-            let Ok(Some((_mode, object))) =
+            let Ok(Some((mode, object))) =
                 self.observed_tree_entry_at(commit, &entry.relative_path)
             else {
                 return Ok(crate::GitDeclaredObjectSetState::Malformed);
             };
-            if object != entry.git_object_id {
+            if !is_regular_git_file_mode(&mode) || object != entry.git_object_id {
                 return Ok(crate::GitDeclaredObjectSetState::Malformed);
             }
         }
@@ -2290,9 +2409,12 @@ impl Repository {
         commit: &GitCommitRef,
         path: &ManagedPath,
     ) -> Result<Option<Vec<u8>>, RepositoryError> {
-        let Some((_mode, object)) = self.observed_tree_entry_at(commit, path)? else {
+        let Some((mode, object)) = self.observed_tree_entry_at(commit, path)? else {
             return Ok(None);
         };
+        if !is_regular_git_file_mode(&mode) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
         Ok(Some(self.observed_git_blob_bytes(&object)?))
     }
 
@@ -2564,9 +2686,12 @@ impl Repository {
             }
         }
         for entry in &manifest.entries {
-            let Some((_mode, object)) = self.tree_entry_at(commit, &entry.relative_path)? else {
+            let Some((mode, object)) = self.tree_entry_at(commit, &entry.relative_path)? else {
                 return Err(RepositoryError::InvalidCompactManifest);
             };
+            if !is_regular_git_file_mode(&mode) {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
             let bytes = self.git_bytes(["cat-file", "blob", &object])?;
             verify_manifest_segment_bytes(manifest.table, entry, &object, &bytes)?;
         }
@@ -2608,9 +2733,12 @@ impl Repository {
         commit: &GitCommitRef,
         path: &ManagedPath,
     ) -> Result<Option<Vec<u8>>, RepositoryError> {
-        let Some((_mode, object)) = self.tree_entry_at(commit, path)? else {
+        let Some((mode, object)) = self.tree_entry_at(commit, path)? else {
             return Ok(None);
         };
+        if !is_regular_git_file_mode(&mode) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
         Ok(Some(self.git_bytes(["cat-file", "blob", &object])?))
     }
 
@@ -2619,9 +2747,12 @@ impl Repository {
         candidate: &PrivateCommit,
         path: &ManagedPath,
     ) -> Result<Option<Vec<u8>>, RepositoryError> {
-        let Some((_mode, object)) = self.candidate_tree_entry(candidate, path)? else {
+        let Some((mode, object)) = self.candidate_tree_entry(candidate, path)? else {
             return Ok(None);
         };
+        if !is_regular_git_file_mode(&mode) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
         Ok(Some(self.git_bytes(["cat-file", "blob", &object])?))
     }
 
@@ -2738,6 +2869,10 @@ fn parse_tree_entry(
         return Err(RepositoryError::GitOperationFailed);
     }
     Ok(Some((mode, object)))
+}
+
+fn is_regular_git_file_mode(mode: &str) -> bool {
+    matches!(mode, "100644" | "100755")
 }
 
 fn compact_root(table: Uuid) -> ManagedPath {
