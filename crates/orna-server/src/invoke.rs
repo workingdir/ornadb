@@ -4733,7 +4733,12 @@ mod daemon_session_tests {
         },
         value::FunctionArgument,
     };
-    use std::{str::FromStr, thread};
+    use std::{
+        str::FromStr,
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
 
     fn active_and_standard() -> (ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot) {
         let standard = orna_standard::verify_standard_library_v11_snapshot(
@@ -5207,5 +5212,110 @@ mod daemon_session_tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn installed_cli_repl_bridge_cancellation_wakes_pending_input_without_publishing_ui() {
+        let (active, standard) = active_and_standard();
+        let repl = standard
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.id() == orna_standard::STD_CLI_REPL_FUNCTION_ID)
+            .expect("the retained standard exposes std.cli.repl");
+        let principal = PrincipalId::from_bytes([0x99; 16]);
+        let security = SecuritySnapshot::new_with_function_targets(
+            active.pair(),
+            vec![SecurityFunctionTarget::verified_standard(
+                repl.id(),
+                standard.revision(),
+                repl.current_revision(),
+            )],
+            vec![Principal::new(
+                principal,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            Vec::new(),
+            vec![ExecuteGrant::new(principal, repl.id())],
+        )
+        .expect("standard security snapshot");
+        let session = security
+            .bind_authenticated_session(principal, Vec::new())
+            .expect("authenticated session");
+        let authorisation = match security
+            .authorise_execute(&session, InvocationTarget::new(repl.id(), active.pair()))
+        {
+            orna_core::security::ExecuteDecision::Allowed(authorisation) => authorisation,
+            decision => panic!("repl must authorise: {decision:?}"),
+        };
+        let root = InvocationId::from_bytes([0x99; 16]);
+        let call_stream = 21;
+        let broker = SharedInvokeBroker::session_only();
+        let bridge = broker
+            .install_session_bridge(root, call_stream)
+            .expect("session bridge installs");
+        broker.bind_dynamic_context(active.clone(), security, session.clone(), root);
+        let mut executor = InstalledClientResourceExecutor::new_with_broker(
+            PostgresKernel::from_str("host=127.0.0.1 port=1 dbname=absent").expect("kernel config"),
+            session,
+            active.clone(),
+            broker,
+            ResourceCancellation::new(),
+        );
+        executor.bind_current_invocation(root);
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            result_sender
+                .send(orna_client::evaluate_client_function_with_executor(
+                    &active,
+                    &authorisation,
+                    &mut executor,
+                ))
+                .expect("cancelled repl result receiver remains available");
+        });
+
+        let prompt_deadline = Instant::now() + Duration::from_secs(1);
+        let request = loop {
+            match bridge.try_take_outbound() {
+                Some(SessionServerFrame::InputRequested(request))
+                    if request.root_invocation_id == root
+                        && request.call_stream == call_stream
+                        && request.prompt == TERMINAL_REPL_PROMPT =>
+                {
+                    break request;
+                }
+                Some(frame) => panic!("unexpected outbound session frame: {frame:?}"),
+                None if Instant::now() < prompt_deadline => thread::yield_now(),
+                None => panic!("timed out waiting for the repl input prompt"),
+            }
+        };
+        bridge.cancel_stream(call_stream);
+
+        let result = result_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("bridge cancellation wakes the repl worker");
+        worker.join().expect("cancelled repl worker joins");
+        assert!(matches!(
+            result,
+            Err(orna_client::ClientExecutionError::ExpressionEvaluation {
+                source: orna_client::ClientExpressionError::InputUnavailable,
+                ..
+            })
+        ));
+        assert_eq!(
+            bridge.accept_response(SessionClientFrame::InputLine {
+                root_invocation_id: root,
+                call_stream,
+                request_invocation_id: request.request_invocation_id,
+                line: "std.ui.text --text=late".to_owned(),
+            }),
+            Err(SessionStateError::WrongState),
+            "late input must be rejected after cancellation"
+        );
+        assert!(
+            bridge.try_take_outbound().is_none(),
+            "bridge cancellation must not publish another input prompt"
+        );
     }
 }
