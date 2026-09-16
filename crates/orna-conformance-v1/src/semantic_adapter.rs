@@ -12,7 +12,7 @@ use crate::{
     StageOutcome, SyntaxAdapter,
     row_admission::{admit_project_rows, preflight_project_rows},
 };
-use num_bigint::BigInt;
+use num_bigint::{BigInt, Sign};
 use orna_evaluator_v1::{
     EffectHandler, Environment, EvaluationError, Functions, Limits as EvaluatorLimits,
     NominalDefinition, NominalDefinitions, NominalField, PureFunction as RetainedFunction,
@@ -53,6 +53,7 @@ use orna_sys_v1::{
 use orna_table_v1::{ActivationError, DatabaseActivation, DatabaseRuntime, TableError};
 use sha2::{Digest, Sha256};
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     ops::Bound,
     time::{SystemTime, UNIX_EPOCH},
@@ -1002,8 +1003,135 @@ fn nominal_field_id(identity: &str, name: &str) -> [u8; 16] {
         .expect("truncated digest has the ObjectId width")
 }
 
-type TransactionDatabase = DatabaseRuntime<String, Vec<u8>, Value>;
-type TransactionActivation<'runtime> = DatabaseActivation<'runtime, String, Vec<u8>, Value>;
+/// An encoded primary key with the scalar signed-integer ordering required by
+/// ORNA-ORDER-001. Other key forms retain their existing byte ordering until
+/// their complete logical ordering boundary is implemented.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TransactionKey(Vec<u8>);
+
+impl TransactionKey {
+    fn new(encoded: Vec<u8>) -> Self {
+        Self(encoded)
+    }
+
+    fn into_encoded(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+impl AsRef<[u8]> for TransactionKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Ord for TransactionKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (Value::decode(&self.0), Value::decode(&other.0)) {
+            (Ok(left), Ok(right)) => match (left.raw(), right.raw()) {
+                (OvbRaw::Int(left), OvbRaw::Int(right)) => left.cmp(right),
+                (OvbRaw::Int(_), _) => Ordering::Less,
+                (_, OvbRaw::Int(_)) => Ordering::Greater,
+                _ => self.0.cmp(&other.0),
+            },
+            _ => self.0.cmp(&other.0),
+        }
+    }
+}
+
+impl PartialOrd for TransactionKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// Relation cursors are source-owned and intentionally separate from the OVB
+// bytes retained by storage, mutations, and public row boundaries. The
+// evaluator requires a continuation cursor to increase lexicographically,
+// while canonical OVB encodings of negative integers do not have that
+// property in numeric order.
+const TRANSACTION_INT_CURSOR_PREFIX: &[u8] = b"ORNA-TXN-INT-CURSOR\0";
+
+fn transaction_int_cursor(key: &TransactionKey) -> Option<Vec<u8>> {
+    let value = Value::decode(key.as_ref()).ok()?;
+    let OvbRaw::Int(value) = value.raw() else {
+        return None;
+    };
+    let (sign, magnitude) = value.to_bytes_be();
+    let length = u64::try_from(magnitude.len()).ok()?.to_be_bytes();
+    let mut cursor = Vec::from(TRANSACTION_INT_CURSOR_PREFIX);
+    match sign {
+        // Complementing both the fixed-width length and magnitude reverses
+        // the magnitude order within the negative partition.
+        Sign::Minus => {
+            cursor.push(0);
+            cursor.extend(length.map(|byte| !byte));
+            cursor.extend(magnitude.into_iter().map(|byte| !byte));
+        }
+        Sign::NoSign => cursor.push(1),
+        Sign::Plus => {
+            cursor.push(2);
+            cursor.extend_from_slice(&length);
+            cursor.extend_from_slice(&magnitude);
+        }
+    }
+    Some(cursor)
+}
+
+fn transaction_cursor_key(cursor: &[u8]) -> Result<TransactionKey, EvaluationError> {
+    let Some(encoded) = cursor.strip_prefix(TRANSACTION_INT_CURSOR_PREFIX) else {
+        return Ok(TransactionKey::new(cursor.to_vec()));
+    };
+    let Some((&kind, encoded)) = encoded.split_first() else {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    };
+    let value = match kind {
+        0 | 2 => {
+            let Some((encoded_length, encoded_magnitude)) = encoded.split_at_checked(8) else {
+                return Err(transaction_error("ORNA-EVAL-VALUE"));
+            };
+            let encoded_length: [u8; 8] = encoded_length
+                .try_into()
+                .expect("split cursor length is exactly eight bytes");
+            let length = if kind == 0 {
+                u64::from_be_bytes(encoded_length.map(|byte| !byte))
+            } else {
+                u64::from_be_bytes(encoded_length)
+            };
+            // Zero has exactly one canonical cursor representation: kind 1
+            // with no payload. Accepting an empty magnitude here would let a
+            // forged negative or positive cursor alias zero.
+            if length == 0 {
+                return Err(transaction_error("ORNA-EVAL-VALUE"));
+            }
+            if usize::try_from(length).ok() != Some(encoded_magnitude.len()) {
+                return Err(transaction_error("ORNA-EVAL-VALUE"));
+            }
+            let magnitude = if kind == 0 {
+                encoded_magnitude.iter().map(|byte| !byte).collect()
+            } else {
+                encoded_magnitude.to_vec()
+            };
+            if magnitude.first() == Some(&0) {
+                return Err(transaction_error("ORNA-EVAL-VALUE"));
+            }
+            BigInt::from_bytes_be(if kind == 0 { Sign::Minus } else { Sign::Plus }, &magnitude)
+        }
+        1 if encoded.is_empty() => BigInt::from(0),
+        _ => return Err(transaction_error("ORNA-EVAL-VALUE")),
+    };
+    Value::int(value)
+        .encode()
+        .map(TransactionKey::new)
+        .map_err(|_| transaction_error("ORNA-EVAL-VALUE"))
+}
+
+fn transaction_continuation_cursor(key: &TransactionKey) -> Vec<u8> {
+    transaction_int_cursor(key).unwrap_or_else(|| key.as_ref().to_vec())
+}
+
+type TransactionDatabase = DatabaseRuntime<String, TransactionKey, Value>;
+type TransactionActivation<'runtime> = DatabaseActivation<'runtime, String, TransactionKey, Value>;
 
 /// A bounded source executor for the first real table-transaction slice.
 ///
@@ -1036,7 +1164,7 @@ impl TransactionalEvaluator {
 
     /// Returns a committed row by its canonical encoded key.
     pub fn committed_row(&self, table: &str, key: &Value) -> Option<&Value> {
-        let encoded = key.encode().ok()?;
+        let encoded = TransactionKey::new(key.encode().ok()?);
         let table = table.to_owned();
         self.database.committed(&table, &encoded)
     }
@@ -1256,7 +1384,7 @@ impl TransactionalEvaluator {
         row: Value,
     ) -> Result<(), RuntimeError> {
         self.database
-            .activate(|activation| activation.insert(table, key, row))
+            .activate(|activation| activation.insert(table, TransactionKey::new(key), row))
             .map_err(|_| RuntimeError::InvalidTableMutation)
     }
 }
@@ -4060,27 +4188,30 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
         }
         let table = source.to_owned();
         let range = match after {
-            Some(after) => (Bound::Excluded(after.to_vec()), Bound::Unbounded),
+            Some(after) => (
+                Bound::Excluded(transaction_cursor_key(after)?),
+                Bound::Unbounded,
+            ),
             None => (Bound::Unbounded, Bound::Unbounded),
         };
-        let mut rows = Vec::with_capacity(max_rows);
-        let mut next = None;
-        for (key, row) in self
+        let mut candidates = self
             .activation
             .candidate_scan_range(&table, range)
-            .map_err(|error| transaction_error(table_error_code(error)))?
-        {
+            .map_err(|error| transaction_error(table_error_code(error)))?;
+        let mut rows = Vec::with_capacity(max_rows);
+        let mut last_key = None;
+        for (key, row) in candidates.by_ref().take(max_rows) {
             budget.debit(1)?;
-            next = Some(key.clone());
+            last_key = Some(key);
             rows.push(row);
-            if rows.len() == max_rows {
-                break;
-            }
         }
-        let has_next = rows.len() == max_rows;
         Ok(Some(RelationPage {
             rows,
-            next: has_next.then_some(next).flatten(),
+            next: candidates
+                .next()
+                .is_some()
+                .then(|| last_key.as_ref().map(transaction_continuation_cursor))
+                .flatten(),
         }))
     }
 
@@ -4410,7 +4541,7 @@ impl TableEffectHandler<'_, '_> {
                 if arguments.len() != key_fields.len() {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 }
-                let key = encoded_table_key(arguments)?;
+                let key = TransactionKey::new(encoded_table_key(arguments)?);
                 self.activation
                     .read(table, &key)
                     .map_err(|error| transaction_error(table_error_code(error)))?
@@ -4422,7 +4553,7 @@ impl TableEffectHandler<'_, '_> {
                 let [row] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
-                let key = table_key(row, key_fields)?;
+                let key = TransactionKey::new(table_key(row, key_fields)?);
                 self.activation
                     .insert(table.clone(), key.clone(), row.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
@@ -4433,7 +4564,7 @@ impl TableEffectHandler<'_, '_> {
                 let [row] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
-                let key = table_key(row, key_fields)?;
+                let key = TransactionKey::new(table_key(row, key_fields)?);
                 if let Some(existing) = self
                     .activation
                     .read(table, &key)
@@ -4459,14 +4590,14 @@ impl TableEffectHandler<'_, '_> {
                 let [key, patch] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
+                let key = TransactionKey::new(encoded_key(key)?);
                 let existing = self
                     .activation
-                    .read(table, &encoded_key(key)?)
+                    .read(table, &key)
                     .map_err(|error| transaction_error(table_error_code(error)))?
                     .cloned()
                     .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-MISSING"))?;
                 let row = merge_row(&existing, patch, key_fields)?;
-                let key = encoded_key(key)?;
                 self.activation
                     .update(table.clone(), key.clone(), row.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
@@ -4477,7 +4608,7 @@ impl TableEffectHandler<'_, '_> {
                 let [key] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
-                let key = encoded_key(key)?;
+                let key = TransactionKey::new(encoded_key(key)?);
                 self.activation
                     .delete(table.clone(), key.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
@@ -4488,8 +4619,8 @@ impl TableEffectHandler<'_, '_> {
                 let [old_key, new_key] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
-                let old_key = encoded_key(old_key)?;
-                let new_key = encoded_key(new_key)?;
+                let old_key = TransactionKey::new(encoded_key(old_key)?);
+                let new_key = TransactionKey::new(encoded_key(new_key)?);
                 let existing = self
                     .activation
                     .read(table, &old_key)
@@ -4499,7 +4630,7 @@ impl TableEffectHandler<'_, '_> {
                 if old_key == new_key {
                     return Err(transaction_error("ORNA-EVAL-TABLE-DUPLICATE"));
                 }
-                let new_components = table_key_components(new_key.as_slice(), key_fields.len())?;
+                let new_components = table_key_components(new_key.as_ref(), key_fields.len())?;
                 if key_fields.is_empty() {
                     return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
                 }
@@ -4521,9 +4652,10 @@ impl TableEffectHandler<'_, '_> {
     fn record(
         &mut self,
         table: &str,
-        key: Vec<u8>,
+        key: TransactionKey,
         value: Option<Value>,
     ) -> Result<(), EvaluationError> {
+        let key = key.into_encoded();
         let encoded = value
             .as_ref()
             .map(Value::encode)
@@ -7081,10 +7213,16 @@ impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
 
 #[cfg(test)]
 mod transaction_admission_tests {
-    use super::{SourceUnit, StageOutcome, TransactionalEvaluator, admit_transaction_project};
+    use super::{
+        SourceUnit, StageOutcome, TableEffectHandler, TransactionDatabase, TransactionKey,
+        TRANSACTION_INT_CURSOR_PREFIX, TransactionalEvaluator, admit_transaction_project,
+        transaction_continuation_cursor, transaction_cursor_key,
+    };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
-    use orna_evaluator_v1::Limits;
+    use num_bigint::BigInt;
+    use orna_evaluator_v1::{EffectHandler, Limits, StepBudget};
     use orna_foundation_v1::Value;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn source(body: &str) -> SourceUnit {
         SourceUnit {
@@ -7115,6 +7253,151 @@ mod transaction_admission_tests {
                 .committed_row("Note", &Value::int(7.into()))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn signed_integer_committed_relation_scan_continues_across_pages() {
+        let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
+        let negative_large = -(BigInt::from(1_u8) << 256_usize);
+        let positive_large = BigInt::from(1_u8) << 256_usize;
+        assert!(matches!(
+            evaluator.execute_source(&source(&format!(
+                r#"Note.insert({{ id: {negative_large}, text: "negative-large" }}); Note.insert({{ id: -2, text: "negative-two" }}); Note.insert({{ id: -1, text: "negative-one" }}); Note.insert({{ id: 0, text: "zero" }}); Note.insert({{ id: 1, text: "positive-one" }}); Note.insert({{ id: {positive_large}, text: "positive-large" }});"#,
+            ))),
+            StageOutcome::Passed
+        ));
+        assert!(matches!(
+            evaluator.execute_source(&source(r#"assert (Note | count) == 6;"#)),
+            StageOutcome::Passed
+        ));
+    }
+
+    #[test]
+    fn signed_integer_staged_relation_scan_continues_across_pages() {
+        let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
+        let negative_large = -(BigInt::from(1_u8) << 256_usize);
+        let positive_large = BigInt::from(1_u8) << 256_usize;
+        assert!(matches!(
+            evaluator.execute_source(&source(&format!(
+                r#"Note.insert({{ id: {negative_large}, text: "negative-large" }}); Note.insert({{ id: -1, text: "negative-one" }}); Note.insert({{ id: 1, text: "positive-one" }}); Note.insert({{ id: {positive_large}, text: "positive-large" }});"#,
+            ))),
+            StageOutcome::Passed
+        ));
+        assert!(matches!(
+            evaluator.execute_source(&source(
+                r#"Note.insert({ id: -2, text: "negative-two" }); Note.insert({ id: 0, text: "zero" }); Note.insert({ id: 2, text: "positive-two" }); assert (Note | count) == 7;"#,
+            )),
+            StageOutcome::Passed
+        ));
+    }
+
+    #[test]
+    fn signed_integer_relation_cursor_is_numeric_and_reversible() {
+        let large = BigInt::from(1_u8) << 256_usize;
+        let values = [
+            -large.clone(),
+            BigInt::from(-65_535),
+            BigInt::from(-255),
+            BigInt::from(-2),
+            BigInt::from(-1),
+            BigInt::from(0),
+            BigInt::from(1),
+            BigInt::from(2),
+            BigInt::from(255),
+            BigInt::from(65_535),
+            large,
+        ];
+        let mut previous = None;
+
+        for value in values {
+            let key = TransactionKey::new(Value::int(value).encode().expect("encoded integer"));
+            let cursor = transaction_continuation_cursor(&key);
+            assert_ne!(cursor, key.as_ref());
+            assert_eq!(
+                transaction_cursor_key(&cursor).expect("decoded cursor"),
+                key
+            );
+            if let Some(previous) = previous {
+                assert!(previous < cursor);
+            }
+            previous = Some(cursor);
+        }
+
+        for (kind, length) in [(0, [u8::MAX; 8]), (2, [0; 8])] {
+            let mut cursor = Vec::from(TRANSACTION_INT_CURSOR_PREFIX);
+            cursor.push(kind);
+            cursor.extend_from_slice(&length);
+            assert!(transaction_cursor_key(&cursor).is_err());
+        }
+    }
+
+    #[test]
+    fn table_effect_handler_scan_relation_page_advances_integer_cursors() {
+        let mut database = TransactionDatabase::default();
+        database
+            .activate(|activation| {
+                for value in [-255_i64, 0, 255] {
+                    let row = Value::int(value.into());
+                    activation
+                        .insert(
+                            "Note".into(),
+                            TransactionKey::new(row.encode().expect("encoded integer")),
+                            row,
+                        )
+                        .expect("unique integer key");
+                }
+
+                let key_fields = BTreeMap::from([("Note".into(), vec!["id".into()])]);
+                let table_fields = BTreeMap::from([("Note".into(), BTreeSet::from(["id".into()]))]);
+                let mut mutations = Vec::new();
+                let limits = Limits::default();
+                let mut handler = TableEffectHandler {
+                    activation,
+                    key_fields: &key_fields,
+                    table_fields: &table_fields,
+                    mutations: &mut mutations,
+                    next_mutation: 0,
+                    limits,
+                    activation_time: None,
+                };
+                let mut budget = StepBudget::new(limits.max_steps);
+
+                let first = handler
+                    .scan_relation_page("Note", None, 1, &mut budget)
+                    .expect("first scan succeeds")
+                    .expect("declared table is scanable");
+                let first_cursor = first.next.clone().expect("first cursor");
+                assert_eq!(first.rows, vec![Value::int((-255).into())]);
+
+                let second = handler
+                    .scan_relation_page("Note", Some(&first_cursor), 1, &mut budget)
+                    .expect("second scan succeeds")
+                    .expect("declared table is scanable");
+                let second_cursor = second.next.clone().expect("second cursor");
+                assert_eq!(second.rows, vec![Value::int(0.into())]);
+
+                let third = handler
+                    .scan_relation_page("Note", Some(&second_cursor), 1, &mut budget)
+                    .expect("third scan succeeds")
+                    .expect("declared table is scanable");
+                assert_eq!(third.rows, vec![Value::int(255.into())]);
+                assert_eq!(third.next, None);
+                assert!(first_cursor < second_cursor);
+
+                let third_cursor = transaction_continuation_cursor(&TransactionKey::new(
+                    Value::int(255.into()).encode().expect("encoded integer"),
+                ));
+                assert!(second_cursor < third_cursor);
+
+                let exhausted = handler
+                    .scan_relation_page("Note", Some(&third_cursor), 1, &mut budget)
+                    .expect("exhaustion scan succeeds")
+                    .expect("declared table is scanable");
+                assert!(exhausted.rows.is_empty());
+                assert_eq!(exhausted.next, None);
+                Ok::<_, orna_evaluator_v1::EvaluationError>(())
+            })
+            .expect("handler scan activation commits");
     }
 
     #[test]
