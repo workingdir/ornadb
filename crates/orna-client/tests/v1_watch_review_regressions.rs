@@ -13,6 +13,7 @@
 //! They do not exercise HTTP, authentication, server request retention, or token
 //! rotation/cancellation. No filesystem or temporary directories are used.
 
+use orna_client::live_presentation::{LivePresentationUpdate, WatchPresentation};
 use orna_client::{
     AuthenticatedLiveTransport, BootstrappedLiveAttachment, LiveByteDriver, LiveSessionDriver,
     LiveSessionEvent, PrefetchedBinaryTransport, PresentRenderer, RequestIdAllocator,
@@ -419,4 +420,61 @@ fn existing_watch_rev5_to_rev0_requires_resync_control() {
     assert!(resync.request.is_some());
     assert_ne!(resync.request, Some(REQUEST_A));
     assert_ne!(resync.request, Some(REQUEST_B));
+}
+
+#[test]
+fn revision_gap_keeps_last_published_tree_until_matching_snapshot() {
+    // ORNA-PROTO-003, ORNA-LIVE-003/004, and ORNA-WIRE-002 require a complete
+    // resynchronization snapshot before a watch may publish a new visible tree.
+    let mut state = WatchPresentation::new(WATCH_A, Limits::default()).unwrap();
+    let initial = Envelope::decode(
+        &snapshot(WATCH_A, Some(REQUEST_A), 5, "visible"),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        state.receive(&initial).unwrap(),
+        LivePresentationUpdate::SnapshotInstalled
+    );
+    let visible = state.published().cloned().expect("initial tree published");
+
+    let gap =
+        Envelope::decode(&delta(WATCH_A, 6, 7, "must-not-publish"), Limits::default()).unwrap();
+    assert_eq!(
+        state.receive(&gap).unwrap(),
+        LivePresentationUpdate::ResyncRequired
+    );
+    assert!(state.awaiting_snapshot());
+    assert_eq!(state.published(), Some(&visible));
+    assert!(state.take_resync_request().is_some());
+
+    let lower = Envelope::decode(&snapshot(WATCH_A, None, 4, "stale"), Limits::default()).unwrap();
+    assert_eq!(
+        state.receive(&lower).unwrap(),
+        LivePresentationUpdate::ResyncRequired
+    );
+    assert!(state.awaiting_snapshot());
+    assert_eq!(state.published(), Some(&visible));
+
+    let conflicting = Envelope::decode(
+        &snapshot(WATCH_A, None, 5, "conflicting"),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        state.receive(&conflicting).unwrap(),
+        LivePresentationUpdate::ResyncRequired
+    );
+    assert!(state.awaiting_snapshot());
+    assert_eq!(state.published(), Some(&visible));
+
+    let recovery =
+        Envelope::decode(&snapshot(WATCH_A, None, 5, "visible"), Limits::default()).unwrap();
+    assert_eq!(
+        state.receive(&recovery).unwrap(),
+        LivePresentationUpdate::SnapshotInstalled
+    );
+    assert_eq!(state.published(), Some(&visible));
+    assert!(!state.awaiting_snapshot());
+    assert!(state.take_resync_request().is_none());
 }
