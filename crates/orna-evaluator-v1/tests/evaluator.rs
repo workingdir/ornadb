@@ -86,23 +86,39 @@ fn parsed_expression(source: &str) -> Expr {
 
 fn nominal_field(name: &str, public: bool, default: Option<&str>) -> NominalField {
     match (public, default) {
-        (true, Some(default)) => {
-            NominalField::public_with_default(name, parsed_expression(default))
-        }
-        (true, None) => NominalField::public(name),
-        (false, Some(default)) => {
-            NominalField::private_with_default(name, parsed_expression(default))
-        }
-        (false, None) => NominalField::private(name),
+        (true, Some(default)) => NominalField::public_with_default(
+            field_id_bytes(name),
+            name,
+            parsed_expression(default),
+        ),
+        (true, None) => NominalField::public(field_id_bytes(name), name),
+        (false, Some(default)) => NominalField::private_with_default(
+            field_id_bytes(name),
+            name,
+            parsed_expression(default),
+        ),
+        (false, None) => NominalField::private(field_id_bytes(name), name),
     }
 }
 
-fn type_id_raw(name: &str) -> Raw {
-    let mut bytes = vec![0; 16];
+fn object_id_bytes(name: &str) -> [u8; 16] {
+    let mut bytes = [0; 16];
     for (index, byte) in name.bytes().take(16).enumerate() {
         bytes[index] = byte;
     }
-    Raw::Tag(37, Box::new(Raw::Bytes(bytes)))
+    bytes
+}
+
+fn field_id_bytes(name: &str) -> [u8; 16] {
+    object_id_bytes(&format!("field:{name}"))
+}
+
+fn type_id_raw(name: &str) -> Raw {
+    Raw::Tag(37, Box::new(Raw::Bytes(object_id_bytes(name).to_vec())))
+}
+
+fn field_id_raw(name: &str) -> Raw {
+    Raw::Tag(37, Box::new(Raw::Bytes(field_id_bytes(name).to_vec())))
 }
 
 fn nominal_definitions(
@@ -113,7 +129,7 @@ fn nominal_definitions(
 ) -> NominalDefinitions {
     NominalDefinitions::from([(
         path.into(),
-        NominalDefinition::new(type_id_raw(type_id), owner.map(str::to_owned), fields),
+        NominalDefinition::new(object_id_bytes(type_id), owner.map(str::to_owned), fields),
     )])
 }
 
@@ -155,9 +171,9 @@ fn nominal_construction_materializes_supplied_and_default_fields_in_declaration_
     assert_eq!(
         fields,
         &[
-            Raw::Array(vec![Raw::Text("left".into()), Raw::Int(3.into())]),
-            Raw::Array(vec![Raw::Text("tail".into()), Raw::Int(5.into())]),
-            Raw::Array(vec![Raw::Text("right".into()), Raw::Int(4.into())]),
+            Raw::Array(vec![field_id_raw("left"), Raw::Int(3.into())]),
+            Raw::Array(vec![field_id_raw("right"), Raw::Int(4.into())]),
+            Raw::Array(vec![field_id_raw("tail"), Raw::Int(5.into())]),
         ]
     );
 }
@@ -256,10 +272,14 @@ fn nominal_supplied_fields_evaluate_in_written_order_before_canonical_serializat
             let Raw::Array(parts) = field else {
                 panic!("expected nominal field entry");
             };
-            let [Raw::Text(name), value] = parts.as_slice() else {
-                panic!("expected named nominal field entry");
+            let [key, value] = parts.as_slice() else {
+                panic!("expected nominal field entry");
             };
-            (name.clone(), value.clone())
+            let name = ["first", "second"]
+                .into_iter()
+                .find(|name| field_id_raw(name) == *key)
+                .expect("known nominal field id");
+            (name.to_owned(), value.clone())
         })
         .collect::<BTreeMap<_, _>>();
     assert_eq!(values.get("first"), Some(&Raw::Int(1.into())));
@@ -284,10 +304,7 @@ fn nominal_supplied_values_bypass_omitted_defaults() {
     let (_, fields) = nominal_parts(&result);
     assert_eq!(
         fields,
-        &[Raw::Array(vec![
-            Raw::Text("value".into()),
-            Raw::Int(9.into())
-        ])]
+        &[Raw::Array(vec![field_id_raw("value"), Raw::Int(9.into())])]
     );
 }
 
@@ -318,10 +335,7 @@ fn external_nominal_public_default_runs_in_declaration_owner_namespace() {
     let (_, fields) = nominal_parts(&result);
     assert_eq!(
         fields,
-        &[Raw::Array(vec![
-            Raw::Text("value".into()),
-            Raw::Int(7.into())
-        ])]
+        &[Raw::Array(vec![field_id_raw("value"), Raw::Int(7.into())])]
     );
 }
 
@@ -350,8 +364,8 @@ fn nominal_defaults_run_once_in_declaration_order() {
     assert_eq!(
         fields,
         &[
-            Raw::Array(vec![Raw::Text("first".into()), Raw::Int(1.into())]),
-            Raw::Array(vec![Raw::Text("second".into()), Raw::Int(2.into())]),
+            Raw::Array(vec![field_id_raw("first"), Raw::Int(1.into())]),
+            Raw::Array(vec![field_id_raw("second"), Raw::Int(2.into())]),
         ]
     );
 }
@@ -443,17 +457,14 @@ fn external_nominal_construction_rejects_private_fields_but_owner_namespace_can_
     assert_eq!(type_id, &type_id_raw("stable.Defaulted"));
     assert_eq!(
         fields,
-        &[Raw::Array(vec![
-            Raw::Text("secret".into()),
-            Raw::Int(7.into())
-        ])]
+        &[Raw::Array(vec![field_id_raw("secret"), Raw::Int(7.into())])]
     );
 
     let mut definitions = definitions;
     definitions.insert(
         "Vault".into(),
         NominalDefinition::new(
-            type_id_raw("stable.ShortVault"),
+            object_id_bytes("stable.ShortVault"),
             None,
             vec![nominal_field("other", true, Some("1"))],
         ),
@@ -489,10 +500,7 @@ fn external_nominal_construction_rejects_private_fields_but_owner_namespace_can_
     assert_eq!(type_id, &type_id_raw("stable.Vault"));
     assert_eq!(
         fields,
-        &[Raw::Array(vec![
-            Raw::Text("secret".into()),
-            Raw::Int(7.into())
-        ])]
+        &[Raw::Array(vec![field_id_raw("secret"), Raw::Int(7.into())])]
     );
 
     let root_owned = nominal_definitions(
