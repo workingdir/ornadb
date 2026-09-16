@@ -269,6 +269,154 @@ fn is_object_id_raw(value: &Raw) -> bool {
     )
 }
 
+fn object_id_key(value: &Raw) -> Option<[u8; 16]> {
+    let Raw::Tag(37, bytes) = value else {
+        return None;
+    };
+    let Raw::Bytes(bytes) = bytes.as_ref() else {
+        return None;
+    };
+    bytes.as_slice().try_into().ok()
+}
+
+fn validate_nominal_definition(
+    definition: &NominalDefinition,
+    limits: Limits,
+) -> Result<BTreeSet<[u8; 16]>, EvaluationError> {
+    if !is_object_id_raw(&definition.type_id) {
+        return Err(error("ORNA-EVAL-VALUE"));
+    }
+    limits.check_items(definition.fields.len())?;
+    let name_bytes = definition.owner.as_ref().map_or(0, String::len);
+    let name_bytes = definition
+        .fields
+        .iter()
+        .try_fold(name_bytes, |total, field| {
+            total
+                .checked_add(field.name.len())
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))
+        })?;
+    if name_bytes > limits.max_string_bytes {
+        return Err(error("ORNA-EVAL-LIMIT"));
+    }
+    let mut names = BTreeSet::new();
+    let mut field_ids = BTreeSet::new();
+    for field in &definition.fields {
+        let Some(field_id) = object_id_key(&field.field_id) else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        if !names.insert(field.name.clone()) || !field_ids.insert(field_id) {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+    }
+    Ok(field_ids)
+}
+
+fn validate_nominal_definitions(
+    definitions: &NominalDefinitions,
+    limits: Limits,
+) -> Result<(), EvaluationError> {
+    limits.check_items(definitions.len())?;
+    let mut total_fields = 0usize;
+    let mut total_name_bytes = 0usize;
+    for (name, definition) in definitions {
+        total_fields = total_fields
+            .checked_add(definition.fields.len())
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        total_name_bytes = total_name_bytes
+            .checked_add(name.len())
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        total_name_bytes = total_name_bytes
+            .checked_add(definition.owner.as_ref().map_or(0, String::len))
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        total_name_bytes = total_name_bytes
+            .checked_add(definition.fields.iter().try_fold(0usize, |total, field| {
+                total
+                    .checked_add(field.name.len())
+                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))
+            })?)
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+    }
+    limits.check_items(total_fields)?;
+    if total_name_bytes > limits.max_string_bytes {
+        return Err(error("ORNA-EVAL-LIMIT"));
+    }
+    let mut type_ids = BTreeSet::new();
+    for definition in definitions.values() {
+        let Some(type_id) = object_id_key(&definition.type_id) else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        if !type_ids.insert(type_id) {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        validate_nominal_definition(definition, limits)?;
+    }
+    Ok(())
+}
+
+fn validate_admitted_nominals(
+    value: &Value,
+    definitions: &NominalDefinitions,
+    limits: Limits,
+) -> Result<(), EvaluationError> {
+    match value {
+        Value::List(values) | Value::Tuple(values) => {
+            for value in values {
+                validate_admitted_nominals(value, definitions, limits)?;
+            }
+        }
+        Value::Record(fields) => {
+            for value in fields.values() {
+                validate_admitted_nominals(value, definitions, limits)?;
+            }
+        }
+        Value::NominalRecord { type_id, fields } => {
+            let mut definition = None;
+            for candidate in definitions.values() {
+                if candidate.type_id == *type_id {
+                    if definition.is_some() {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
+                    definition = Some(candidate);
+                }
+            }
+            if let Some(definition) = definition {
+                let definition_field_ids = validate_nominal_definition(definition, limits)?;
+                let mut field_ids = BTreeSet::new();
+                for (key, _) in fields {
+                    let Some(field_id) = object_id_key(key) else {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    };
+                    if !field_ids.insert(field_id) {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
+                }
+                if field_ids != definition_field_ids {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+            }
+            for (_, value) in fields {
+                validate_admitted_nominals(value, definitions, limits)?;
+            }
+        }
+        Value::Enum { payload, .. } | Value::Option(payload) => {
+            if let Some(value) = payload {
+                validate_admitted_nominals(value, definitions, limits)?;
+            }
+        }
+        Value::Range { lower, upper, .. } => {
+            if let Some(value) = lower {
+                validate_admitted_nominals(value, definitions, limits)?;
+            }
+            if let Some(value) = upper {
+                validate_admitted_nominals(value, definitions, limits)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// An admitted pure function and its lexical immutable value environment.
 #[derive(Clone, Debug)]
 pub struct PureFunction {
@@ -574,7 +722,7 @@ pub fn evaluate_function(
         transfer: None,
         cancellation: None,
     };
-    let supplied = supplied_arguments(arguments, &mut context)?;
+    let supplied = supplied_arguments(arguments, &NominalDefinitions::new(), &mut context)?;
     let captured = Scope::from_environment(environment, &mut context)?;
     invoke_pure(&mut context, parameters, body, captured, supplied, 0).and_then(Value::canonical)
 }
@@ -623,7 +771,7 @@ pub fn invoke_named_with_nominals(
     };
     context.items(functions.len())?;
     let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
-    let supplied = supplied_arguments(arguments, &mut context)?;
+    let supplied = supplied_arguments(arguments, nominal_definitions, &mut context)?;
     let captured = Scope::from_environment_with_nominals(
         &function.environment,
         nominal_definitions,
@@ -669,7 +817,7 @@ pub fn invoke_named_with_effects_and_budget(
     let result = (|| {
         context.items(functions.len())?;
         let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
-        let supplied = supplied_arguments(arguments, &mut context)?;
+        let supplied = supplied_arguments(arguments, &NominalDefinitions::new(), &mut context)?;
         let captured = Scope::from_environment(&function.environment, &mut context)?;
         invoke_pure(
             &mut context,
@@ -713,13 +861,16 @@ fn parameter_key(parameter: &Parameter, index: usize) -> ArgumentKey {
 
 fn supplied_arguments(
     arguments: &Environment,
+    nominal_definitions: &NominalDefinitions,
     context: &mut Context,
 ) -> Result<BTreeMap<ArgumentKey, Value>, EvaluationError> {
-    Ok(Scope::from_environment(arguments, context)?
-        .0
-        .into_iter()
-        .map(|(name, value)| (ArgumentKey::Name(name), value))
-        .collect())
+    Ok(
+        Scope::from_environment_with_nominals(arguments, nominal_definitions, context)?
+            .0
+            .into_iter()
+            .map(|(name, value)| (ArgumentKey::Name(name), value))
+            .collect(),
+    )
 }
 
 fn invoke_pure(
@@ -989,7 +1140,10 @@ enum Value {
         payload: Option<Box<Value>>,
     },
     Option(Option<Box<Value>>),
-    Function(String),
+    Function {
+        name: String,
+        nominal_definitions: NominalDefinitions,
+    },
     Closure(Rc<Closure>),
 }
 
@@ -998,6 +1152,7 @@ struct Closure {
     parameters: Vec<Parameter>,
     body: Expr,
     captured: Scope,
+    namespace: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1091,7 +1246,7 @@ impl DecimalValue {
 impl Value {
     fn contains_callable(&self) -> bool {
         match self {
-            Self::Function(_) | Self::Closure(_) => true,
+            Self::Function { .. } | Self::Closure(_) => true,
             Self::List(values) | Self::Tuple(values) => values.iter().any(Self::contains_callable),
             Self::Record(values) => values.values().any(Self::contains_callable),
             Self::NominalRecord { fields, .. } => {
@@ -1126,7 +1281,9 @@ impl Value {
     }
     fn raw(self) -> Result<Raw, EvaluationError> {
         Ok(match self {
-            Self::Function(_) | Self::Closure(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+            Self::Function { .. } | Self::Closure(_) => {
+                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+            }
             Self::Relation(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
             // Error values are only available to the handling side of `|?`.
             // They must not cross the successful canonical-value boundary,
@@ -1400,6 +1557,7 @@ impl Value {
             return Err(error("ORNA-EVAL-VALUE"));
         }
         context.items(raw_fields.len())?;
+        let mut field_ids = BTreeSet::new();
         let mut fields = Vec::with_capacity(raw_fields.len());
         for field in raw_fields {
             let Raw::Array(parts) = field else {
@@ -1409,7 +1567,10 @@ impl Value {
                 return Err(error("ORNA-EVAL-VALUE"));
             };
             if nominal {
-                if !is_object_id_raw(key) {
+                let Some(field_id) = object_id_key(key) else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                };
+                if !field_ids.insert(field_id) {
                     return Err(error("ORNA-EVAL-VALUE"));
                 }
             } else if let Raw::Text(name) = key {
@@ -1482,6 +1643,7 @@ impl Scope {
         nominal_definitions: &NominalDefinitions,
         context: &mut Context,
     ) -> Result<Self, EvaluationError> {
+        validate_nominal_definitions(nominal_definitions, context.limits)?;
         context.items(environment.len())?;
         context.items(nominal_definitions.len())?;
         let mut values = BTreeMap::new();
@@ -1489,7 +1651,9 @@ impl Scope {
             if name.len() > context.limits.max_string_bytes {
                 return Err(error("ORNA-EVAL-LIMIT"));
             }
-            values.insert(name.clone(), Value::from_canonical(value, context, 0)?);
+            let value = Value::from_canonical(value, context, 0)?;
+            validate_admitted_nominals(&value, nominal_definitions, context.limits)?;
+            values.insert(name.clone(), value);
         }
         Ok(Self(
             values,
@@ -1633,22 +1797,32 @@ impl Context<'_, '_> {
                 .get(text)
                 .cloned()
                 .or_else(|| {
-                    (!self.restrict_function_names && self.functions.contains_key(text))
-                        .then(|| Value::Function(text.clone()))
+                    (!self.restrict_function_names && self.functions.contains_key(text)).then(
+                        || Value::Function {
+                            name: text.clone(),
+                            nominal_definitions: scope.3.clone(),
+                        },
+                    )
                 })
                 .or_else(|| {
                     self.aliases
                         .and_then(|aliases| aliases.get(text))
                         .filter(|name| self.functions.contains_key(*name))
                         .cloned()
-                        .map(Value::Function)
+                        .map(|name| Value::Function {
+                            name,
+                            nominal_definitions: scope.3.clone(),
+                        })
                 })
                 .or_else(|| {
                     let namespace = self.namespace.as_deref()?;
                     let qualified = format!("{namespace}.{text}");
                     self.functions
                         .contains_key(&qualified)
-                        .then_some(Value::Function(qualified))
+                        .then_some(Value::Function {
+                            name: qualified,
+                            nominal_definitions: scope.3.clone(),
+                        })
                 })
                 .ok_or_else(|| error("ORNA-EVAL-NAME")),
             Expr::Lambda {
@@ -1670,6 +1844,7 @@ impl Context<'_, '_> {
                         .collect(),
                     body: body.as_ref().clone(),
                     captured,
+                    namespace: self.namespace.clone(),
                 })))
             }
             Expr::Literal { text, kind, .. } => self.literal(text, *kind),
@@ -1746,6 +1921,9 @@ impl Context<'_, '_> {
                     .get(name)
                     .cloned()
                     .ok_or_else(|| error("ORNA-EVAL-FIELD")),
+                Value::NominalRecord { type_id, fields } => {
+                    self.nominal_field(&type_id, &fields, name, scope)
+                }
                 Value::Error(failure) => self.error_field(&failure, name, depth + 1),
                 _ if self.transfer.is_some() => Ok(Value::Null),
                 _ => Err(error("ORNA-EVAL-TYPE")),
@@ -1854,6 +2032,7 @@ impl Context<'_, '_> {
         if path.is_empty() {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
+        validate_nominal_definitions(&scope.3, self.limits)?;
         let spelling = path
             .iter()
             .map(|segment| segment.text.as_str())
@@ -1958,6 +2137,55 @@ impl Context<'_, '_> {
             type_id: definition.type_id,
             fields,
         })
+    }
+    fn nominal_field(
+        &mut self,
+        type_id: &Raw,
+        fields: &[(Raw, Value)],
+        name: &str,
+        scope: &Scope,
+    ) -> Result<Value, EvaluationError> {
+        if !is_object_id_raw(type_id) {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        validate_nominal_definitions(&scope.3, self.limits)?;
+        let mut definition = None;
+        for candidate in scope.3.values() {
+            if candidate.type_id == *type_id {
+                if definition.is_some() {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                definition = Some(candidate);
+            }
+        }
+        let Some(definition) = definition else {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        };
+        let definition_field_ids = validate_nominal_definition(definition, self.limits)?;
+        self.items(definition.fields.len())?;
+        let mut field_ids = BTreeSet::new();
+        for (key, _) in fields {
+            let Some(field_id) = object_id_key(key) else {
+                return Err(error("ORNA-EVAL-VALUE"));
+            };
+            if !field_ids.insert(field_id) {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+        }
+        if field_ids != definition_field_ids {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        let Some(field) = definition.fields.iter().find(|field| field.name == name) else {
+            return Err(error("ORNA-EVAL-FIELD"));
+        };
+        if !field.public && definition.owner.as_deref() != self.namespace.as_deref() {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        let selected = fields
+            .iter()
+            .find(|(key, _)| key == &field.field_id)
+            .map(|(_, value)| value);
+        selected.cloned().ok_or_else(|| error("ORNA-EVAL-FIELD"))
     }
     fn literal(&self, text: &str, kind: LiteralKind) -> Result<Value, EvaluationError> {
         match kind {
@@ -3156,7 +3384,10 @@ impl Context<'_, '_> {
             // explicitly admitted in the function environment; ordinary
             // record fields retain their existing semantics.
             let callable = if let Some(name) = self.resolve_function_name(callee, scope) {
-                Value::Function(name)
+                Value::Function {
+                    name,
+                    nominal_definitions: scope.3.clone(),
+                }
             } else {
                 self.evaluate(callee, scope, depth + 1)?
             };
@@ -3164,15 +3395,23 @@ impl Context<'_, '_> {
                 return Ok(Value::Null);
             }
             let functions = self.functions;
-            let (parameters, body, mut captured, session_owned) = match &callable {
-                Value::Function(name) => {
+            let (parameters, body, mut captured, session_owned, namespace) = match &callable {
+                Value::Function {
+                    name,
+                    nominal_definitions,
+                } => {
                     let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
                     (
                         &function.parameters,
                         &function.body,
-                        Scope::from_environment(&function.environment, self)?,
+                        Scope::from_environment_with_nominals(
+                            &function.environment,
+                            nominal_definitions,
+                            self,
+                        )?,
                         self.session_functions
                             .is_some_and(|functions| functions.contains(name)),
+                        function_namespace(name),
                     )
                 }
                 Value::Closure(closure) => (
@@ -3180,6 +3419,7 @@ impl Context<'_, '_> {
                     &closure.body,
                     closure.captured.clone(),
                     self.repl_bindings,
+                    closure.namespace.clone(),
                 ),
                 _ => return Err(error("ORNA-EVAL-TYPE")),
             };
@@ -3235,11 +3475,7 @@ impl Context<'_, '_> {
             let previous_repl_bindings = self.repl_bindings;
             self.repl_bindings = session_owned;
             let previous_namespace = self.namespace.clone();
-            self.namespace = match &callable {
-                Value::Function(name) => function_namespace(name),
-                Value::Closure(_) => None,
-                _ => unreachable!("callable was validated above"),
-            };
+            self.namespace = namespace;
             let result = invoke_pure(self, parameters, body, captured, supplied, depth + 1);
             self.namespace = previous_namespace;
             self.repl_bindings = previous_repl_bindings;
@@ -4037,7 +4273,10 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         let (parameters, body, captured, session_owned, namespace) = match callable {
-            Value::Function(name) => {
+            Value::Function {
+                name,
+                nominal_definitions,
+            } => {
                 let function = self
                     .functions
                     .get(name)
@@ -4045,7 +4284,11 @@ impl Context<'_, '_> {
                 (
                     function.parameters.clone(),
                     function.body.clone(),
-                    Scope::from_environment(&function.environment, self)?,
+                    Scope::from_environment_with_nominals(
+                        &function.environment,
+                        nominal_definitions,
+                        self,
+                    )?,
                     self.session_functions
                         .is_some_and(|functions| functions.contains(name)),
                     function_namespace(name),
@@ -4056,7 +4299,7 @@ impl Context<'_, '_> {
                 closure.body.clone(),
                 closure.captured.clone(),
                 self.repl_bindings,
-                None,
+                closure.namespace.clone(),
             ),
             _ => return Err(error("ORNA-EVAL-TYPE")),
         };
@@ -5019,6 +5262,84 @@ mod tests {
 
     fn text(value: &str) -> CanonicalValue {
         CanonicalValue::new(Raw::Text(value.into())).expect("text is canonical")
+    }
+
+    fn test_context<'functions>(functions: &'functions Functions) -> Context<'functions, 'static> {
+        Context {
+            limits: Limits::default(),
+            steps: 0,
+            functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: false,
+            restrict_function_names: false,
+            reject_unhandled_field_calls: false,
+            effects: None,
+            namespace: None,
+            transfer: None,
+            cancellation: None,
+        }
+    }
+
+    #[test]
+    fn nominal_decode_rejects_duplicate_selected_and_unselected_field_keys() {
+        let functions = Functions::new();
+        for fields in [
+            vec![
+                Raw::Array(vec![object_id_raw([2; 16]), Raw::Int(1.into())]),
+                Raw::Array(vec![object_id_raw([2; 16]), Raw::Int(2.into())]),
+            ],
+            vec![
+                Raw::Array(vec![object_id_raw([2; 16]), Raw::Int(1.into())]),
+                Raw::Array(vec![object_id_raw([3; 16]), Raw::Int(2.into())]),
+                Raw::Array(vec![object_id_raw([3; 16]), Raw::Int(3.into())]),
+            ],
+        ] {
+            let raw = Raw::Tag(
+                60009,
+                Box::new(Raw::Array(vec![object_id_raw([1; 16]), Raw::Array(fields)])),
+            );
+            let mut context = test_context(&functions);
+            assert_eq!(
+                Value::from_raw(&raw, &mut context, 0)
+                    .expect_err("duplicate nominal field keys must fail closed")
+                    .code(),
+                "ORNA-EVAL-VALUE"
+            );
+        }
+    }
+
+    #[test]
+    fn nominal_selection_rejects_duplicate_keys_even_when_unselected() {
+        let functions = Functions::new();
+        let mut context = test_context(&functions);
+        let definition = NominalDefinition::new(
+            [1; 16],
+            None,
+            vec![
+                NominalField::public([2; 16], "value"),
+                NominalField::public([3; 16], "other"),
+            ],
+        );
+        let scope = Scope(
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            NominalDefinitions::from([("Thing".into(), definition)]),
+        );
+        let fields = vec![
+            (object_id_raw([2; 16]), Value::Int(1.into())),
+            (object_id_raw([3; 16]), Value::Int(2.into())),
+            (object_id_raw([3; 16]), Value::Int(3.into())),
+        ];
+
+        assert_eq!(
+            context
+                .nominal_field(&object_id_raw([1; 16]), &fields, "value", &scope)
+                .expect_err("all nominal payload keys must be unique")
+                .code(),
+            "ORNA-EVAL-VALUE"
+        );
     }
 
     struct FixedNow {
