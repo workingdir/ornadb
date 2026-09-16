@@ -530,7 +530,7 @@ async fn durable_source_publication_projects_the_frozen_prefix_into_git() {
 }
 
 #[test]
-fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses() {
+fn published_report_declares_bounded_runtime_adapter_scenarios_without_an_orna_engine_witness() {
     let output = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
         .output()
         .expect("conformance binary runs");
@@ -552,11 +552,14 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
             "REPL-001",
             "TXN-001",
             "TXN-002",
+            "CP-001",
             "LIVE-001",
             "LIVE-002",
             "LIVE-003",
             "LIVE-004",
             "SYS-RT-RENAME-100",
+            "ASSERT-CHECKPOINT-091",
+            "FAIL-001",
             "EVAL-003"
         ]
     );
@@ -571,11 +574,14 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
                 "REPL-001"
                     | "TXN-001"
                     | "TXN-002"
+                    | "CP-001"
                     | "LIVE-001"
                     | "LIVE-002"
                     | "LIVE-003"
                     | "LIVE-004"
                     | "SYS-RT-RENAME-100"
+                    | "ASSERT-CHECKPOINT-091"
+                    | "FAIL-001"
                     | "EVAL-003"
             )
         ) {
@@ -595,6 +601,8 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
                 Some("LET-REBIND-091" | "PIPE-001" | "PIPE-002")
             ) {
                 "scenario execution skipped: no compiler-produced executable artifact crosses the semantic-to-runtime adapter; the bounded evaluator reinterprets source"
+            } else if result["scenario"] == "CP-002" {
+                "scenario execution skipped: the available bounded witness exercises assertion-validation rollback, not CP-002's immutable handler-inserts-then-errors path; no CP-002 pass is claimed"
             } else if result["scenario"] == "EVAL-001" {
                 "scenario execution skipped: production remote Eval admits pure source but rejects table mutations, so it cannot satisfy ORNA-EVAL-003's required served-CWD activation transaction"
             } else {
@@ -671,7 +679,7 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
     assert_eq!(durable_eval["status"], "passed");
     assert_eq!(
         report["implementation_claim"]["environment"]["runtime-stages"],
-        "pure row/expression units, the authoritative duplicate-key fixture, SYS-RT-RENAME-100 system-name resolution, the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, LIVE-004 universal subtree replacement, and EVAL-003 durable request replay contracts execute through bounded runtime witnesses; these scenario results remain implementation-scenario evidence and are not Orna-engine execution"
+        "pure row/expression units, the authoritative duplicate-key fixture, SYS-RT-RENAME-100 system-name resolution, the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, LIVE-004 universal subtree replacement, the CP-001 durable checkpoint atomicity contract, the ASSERT-CHECKPOINT-091 durable assertion/checkpoint rollback contract, the FAIL-001 stable failure-identity and attempts contract, and EVAL-003 durable request replay contracts execute through bounded runtime witnesses; CP-002's handler-failure retry contract remains explicitly skipped; these scenario results remain runtime-adapter evidence and are not compiler-produced or full Orna-engine execution"
     );
 }
 
