@@ -1003,39 +1003,302 @@ fn nominal_field_id(identity: &str, name: &str) -> [u8; 16] {
         .expect("truncated digest has the ObjectId width")
 }
 
-/// An encoded primary key with the scalar signed-integer ordering required by
-/// ORNA-ORDER-001. Other key forms retain their existing byte ordering until
-/// their complete logical ordering boundary is implemented.
+/// The subset of v1 key types the transactional relation seam can materialize
+/// and compare without delegating ordering to an OVB byte representation.
+///
+/// `Float` is deliberately absent: ORNA-KEY-003 forbids it as a primary-key
+/// component. More elaborate nominal key forms remain outside this bounded
+/// transaction seam until their runtime representations are available here.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct TransactionKey(Vec<u8>);
+enum TransactionKeyType {
+    Bool,
+    Int,
+    Decimal,
+    Str,
+}
+
+impl TransactionKeyType {
+    fn from_syntax(ty: &orna_syntax_v1::TypeExpr) -> Result<Self, String> {
+        let orna_syntax_v1::TypeExpr::Name {
+            path, arguments, ..
+        } = ty
+        else {
+            return Err(
+                "transactional source seam supports only scalar Bool, Int, Decimal, and Str primary-key components".into(),
+            );
+        };
+        if path.len() != 1 || !arguments.is_empty() {
+            return Err(
+                "transactional source seam supports only scalar Bool, Int, Decimal, and Str primary-key components".into(),
+            );
+        }
+        match path[0].as_str() {
+            "Bool" => Ok(Self::Bool),
+            "Int" => Ok(Self::Int),
+            "Decimal" => Ok(Self::Decimal),
+            "Str" => Ok(Self::Str),
+            _ => Err(
+                "transactional source seam supports only scalar Bool, Int, Decimal, and Str primary-key components".into(),
+            ),
+        }
+    }
+
+    fn write_schema_bytes(&self, output: &mut Vec<u8>) {
+        output.extend_from_slice(match self {
+            Self::Bool => b"Bool",
+            Self::Int => b"Int",
+            Self::Decimal => b"Decimal",
+            Self::Str => b"Str",
+        });
+        output.push(0);
+    }
+
+    fn validate(&self, value: &Value) -> Result<(), EvaluationError> {
+        let valid = match (self, value.raw()) {
+            (Self::Bool, OvbRaw::Bool(_))
+            | (Self::Int, OvbRaw::Int(_))
+            | (Self::Str, OvbRaw::Text(_)) => true,
+            (Self::Decimal, OvbRaw::Tag(60000, value)) => {
+                matches!(value.as_ref(), OvbRaw::Array(parts) if matches!(parts.as_slice(), [OvbRaw::Int(_), OvbRaw::Int(_)]))
+            }
+            _ => false,
+        };
+        valid
+            .then_some(())
+            .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-KEY"))
+    }
+
+    fn compare(&self, left: &Value, right: &Value) -> Ordering {
+        match (self, left.raw(), right.raw()) {
+            (Self::Bool, OvbRaw::Bool(left), OvbRaw::Bool(right)) => left.cmp(right),
+            (Self::Int, OvbRaw::Int(left), OvbRaw::Int(right)) => left.cmp(right),
+            (Self::Str, OvbRaw::Text(left), OvbRaw::Text(right)) => left.cmp(right),
+            (Self::Decimal, OvbRaw::Tag(60000, left), OvbRaw::Tag(60000, right)) => {
+                decimal_key_cmp(left, right)
+            }
+            _ => unreachable!("validated transaction key component has its declared type"),
+        }
+    }
+}
+
+/// Declared table key metadata retained after transaction admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TransactionTableKey {
+    table: String,
+    fields: Vec<String>,
+    types: Vec<TransactionKeyType>,
+}
+
+impl TransactionTableKey {
+    fn new(
+        table: String,
+        fields: Vec<String>,
+        types: Vec<TransactionKeyType>,
+    ) -> Result<Self, String> {
+        if fields.is_empty() || fields.len() != types.len() {
+            return Err("transactional source seam requires a typed explicit table key".into());
+        }
+        Ok(Self {
+            table,
+            fields,
+            types,
+        })
+    }
+
+    fn cursor_schema_digest(&self) -> [u8; 32] {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"ORNA-TXN-CURSOR-SCHEMA\0");
+        bytes.extend_from_slice(self.table.as_bytes());
+        bytes.push(0);
+        for (field, ty) in self.fields.iter().zip(&self.types) {
+            bytes.extend_from_slice(field.as_bytes());
+            bytes.push(0);
+            ty.write_schema_bytes(&mut bytes);
+        }
+        Sha256::digest(bytes).into()
+    }
+
+    fn values_from_encoded(&self, encoded: &[u8]) -> Result<Vec<Value>, EvaluationError> {
+        let values = table_key_components(encoded, self.fields.len())?;
+        for (value, ty) in values.iter().zip(&self.types) {
+            ty.validate(value)?;
+        }
+        Ok(values)
+    }
+
+    fn key_from_values(&self, values: &[Value]) -> Result<TransactionKey, EvaluationError> {
+        if values.len() != self.types.len() {
+            return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
+        }
+        for (value, ty) in values.iter().zip(&self.types) {
+            ty.validate(value)?;
+        }
+        Ok(TransactionKey::typed(
+            encoded_table_key(values)?,
+            values.to_vec(),
+            self.types.clone(),
+        ))
+    }
+
+    fn key_from_encoded(&self, encoded: &[u8]) -> Result<TransactionKey, EvaluationError> {
+        let values = self.values_from_encoded(encoded)?;
+        Ok(TransactionKey::typed(
+            encoded.to_vec(),
+            values,
+            self.types.clone(),
+        ))
+    }
+
+    fn key_from_row(&self, row: &Value) -> Result<TransactionKey, EvaluationError> {
+        let values = self
+            .fields
+            .iter()
+            .map(|field| {
+                record_field(row, field).ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-KEY"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.key_from_values(&values)
+    }
+}
+
+impl std::ops::Deref for TransactionTableKey {
+    type Target = [String];
+
+    fn deref(&self) -> &Self::Target {
+        &self.fields
+    }
+}
+
+/// An encoded key plus its admitted primary-key component types. The latter is
+/// private transaction metadata, not part of the stored OVB value.
+#[derive(Clone, Debug)]
+struct TransactionKey {
+    encoded: Vec<u8>,
+    components: Option<Vec<Value>>,
+    types: Option<Vec<TransactionKeyType>>,
+}
 
 impl TransactionKey {
     fn new(encoded: Vec<u8>) -> Self {
-        Self(encoded)
+        Self {
+            encoded,
+            components: None,
+            types: None,
+        }
+    }
+
+    fn typed(encoded: Vec<u8>, components: Vec<Value>, types: Vec<TransactionKeyType>) -> Self {
+        Self {
+            encoded,
+            components: Some(components),
+            types: Some(types),
+        }
     }
 
     fn into_encoded(self) -> Vec<u8> {
-        self.0
+        self.encoded
     }
 }
 
 impl AsRef<[u8]> for TransactionKey {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.encoded
     }
 }
 
+impl PartialEq for TransactionKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.encoded == other.encoded
+    }
+}
+
+impl Eq for TransactionKey {}
+
 impl Ord for TransactionKey {
     fn cmp(&self, other: &Self) -> Ordering {
-        match (Value::decode(&self.0), Value::decode(&other.0)) {
+        if let (Some(left), Some(right), Some(types)) =
+            (&self.components, &other.components, &self.types)
+            && self.types == other.types
+        {
+            return left
+                .iter()
+                .zip(right)
+                .zip(types)
+                .map(|((left, right), ty)| ty.compare(left, right))
+                .find(|ordering| *ordering != Ordering::Equal)
+                .unwrap_or(Ordering::Equal);
+        }
+        match (Value::decode(&self.encoded), Value::decode(&other.encoded)) {
             (Ok(left), Ok(right)) => match (left.raw(), right.raw()) {
                 (OvbRaw::Int(left), OvbRaw::Int(right)) => left.cmp(right),
                 (OvbRaw::Int(_), _) => Ordering::Less,
                 (_, OvbRaw::Int(_)) => Ordering::Greater,
-                _ => self.0.cmp(&other.0),
+                _ => self.encoded.cmp(&other.encoded),
             },
-            _ => self.0.cmp(&other.0),
+            _ => self.encoded.cmp(&other.encoded),
         }
+    }
+}
+
+fn decimal_key_cmp(left: &OvbRaw, right: &OvbRaw) -> Ordering {
+    let (OvbRaw::Array(left), OvbRaw::Array(right)) = (left, right) else {
+        unreachable!("validated Decimal has coefficient and exponent");
+    };
+    let (OvbRaw::Int(left_coefficient), OvbRaw::Int(left_exponent)) = (&left[0], &left[1]) else {
+        unreachable!("validated Decimal has integer coefficient and exponent");
+    };
+    let (OvbRaw::Int(right_coefficient), OvbRaw::Int(right_exponent)) = (&right[0], &right[1])
+    else {
+        unreachable!("validated Decimal has integer coefficient and exponent");
+    };
+    match left_coefficient.sign().cmp(&right_coefficient.sign()) {
+        Ordering::Equal => {}
+        ordering => return ordering,
+    }
+    if left_coefficient.sign() == Sign::NoSign {
+        return Ordering::Equal;
+    }
+    let left_digits = BigInt::from(
+        left_coefficient
+            .to_str_radix(10)
+            .trim_start_matches('-')
+            .len(),
+    );
+    let right_digits = BigInt::from(
+        right_coefficient
+            .to_str_radix(10)
+            .trim_start_matches('-')
+            .len(),
+    );
+    let left_magnitude = left_exponent + left_digits;
+    let right_magnitude = right_exponent + right_digits;
+    let magnitude = left_magnitude.cmp(&right_magnitude);
+    if magnitude != Ordering::Equal {
+        return if left_coefficient.sign() == Sign::Minus {
+            magnitude.reverse()
+        } else {
+            magnitude
+        };
+    }
+    let exponent = if left_exponent < right_exponent {
+        left_exponent
+    } else {
+        right_exponent
+    };
+    let left_shift = (left_exponent - exponent)
+        .to_string()
+        .parse::<usize>()
+        .expect("equal Decimal magnitudes bound scale adjustment by coefficient digits");
+    let right_shift = (right_exponent - exponent)
+        .to_string()
+        .parse::<usize>()
+        .expect("equal Decimal magnitudes bound scale adjustment by coefficient digits");
+    let ordering = (left_coefficient * BigInt::from(10_u8).pow(left_shift as u32))
+        .cmp(&(right_coefficient * BigInt::from(10_u8).pow(right_shift as u32)));
+    if left_coefficient.sign() == Sign::Minus {
+        ordering.reverse()
+    } else {
+        ordering
     }
 }
 
@@ -1051,6 +1314,7 @@ impl PartialOrd for TransactionKey {
 // while canonical OVB encodings of negative integers do not have that
 // property in numeric order.
 const TRANSACTION_INT_CURSOR_PREFIX: &[u8] = b"ORNA-TXN-INT-CURSOR\0";
+const TRANSACTION_CURSOR_PREFIX: &[u8] = b"ORNA-TXN-CURSOR\0";
 
 fn transaction_int_cursor(key: &TransactionKey) -> Option<Vec<u8>> {
     let value = Value::decode(key.as_ref()).ok()?;
@@ -1078,9 +1342,9 @@ fn transaction_int_cursor(key: &TransactionKey) -> Option<Vec<u8>> {
     Some(cursor)
 }
 
-fn transaction_cursor_key(cursor: &[u8]) -> Result<TransactionKey, EvaluationError> {
+fn transaction_int_cursor_key(cursor: &[u8]) -> Result<TransactionKey, EvaluationError> {
     let Some(encoded) = cursor.strip_prefix(TRANSACTION_INT_CURSOR_PREFIX) else {
-        return Ok(TransactionKey::new(cursor.to_vec()));
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
     };
     let Some((&kind, encoded)) = encoded.split_first() else {
         return Err(transaction_error("ORNA-EVAL-VALUE"));
@@ -1126,8 +1390,41 @@ fn transaction_cursor_key(cursor: &[u8]) -> Result<TransactionKey, EvaluationErr
         .map_err(|_| transaction_error("ORNA-EVAL-VALUE"))
 }
 
-fn transaction_continuation_cursor(key: &TransactionKey) -> Vec<u8> {
-    transaction_int_cursor(key).unwrap_or_else(|| key.as_ref().to_vec())
+fn transaction_cursor_key(
+    cursor: &[u8],
+    key_schema: &TransactionTableKey,
+) -> Result<TransactionKey, EvaluationError> {
+    let encoded = cursor
+        .strip_prefix(TRANSACTION_CURSOR_PREFIX)
+        .ok_or_else(|| transaction_error("ORNA-EVAL-VALUE"))?;
+    let Some((schema, encoded)) = encoded.split_at_checked(32) else {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    };
+    if schema != key_schema.cursor_schema_digest() {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    }
+    let encoded = if key_schema.types.as_slice() == [TransactionKeyType::Int] {
+        transaction_int_cursor_key(encoded)?.into_encoded()
+    } else {
+        encoded.to_vec()
+    };
+    key_schema.key_from_encoded(&encoded)
+}
+
+fn transaction_continuation_cursor(
+    key: &TransactionKey,
+    key_schema: &TransactionTableKey,
+) -> Vec<u8> {
+    let mut cursor = Vec::from(TRANSACTION_CURSOR_PREFIX);
+    cursor.extend_from_slice(&key_schema.cursor_schema_digest());
+    if key_schema.types.as_slice() == [TransactionKeyType::Int] {
+        cursor.extend_from_slice(
+            &transaction_int_cursor(key).expect("typed Int key has a signed integer cursor"),
+        );
+    } else {
+        cursor.extend_from_slice(key.as_ref());
+    }
+    cursor
 }
 
 type TransactionDatabase = DatabaseRuntime<String, TransactionKey, Value>;
@@ -1213,7 +1510,15 @@ impl TransactionalEvaluator {
                 Ok(value) => value,
                 Err(outcome) => return Some(*outcome),
             };
-        let key_fields = BTreeMap::from([(String::from("Contact"), vec![String::from("id")])]);
+        let key_fields = BTreeMap::from([(
+            String::from("Contact"),
+            TransactionTableKey::new(
+                String::from("Contact"),
+                vec![String::from("id")],
+                vec![TransactionKeyType::Int],
+            )
+            .expect("valid Contact key schema"),
+        )]);
         let outcome = match evaluator.execute_admitted(
             &functions,
             &key_fields,
@@ -3551,7 +3856,7 @@ fn admit_list_stream_source(
         consumer_binding: "from_list".into(),
         partition: None,
         table: table_name,
-        key_fields,
+        key_fields: key_fields.fields.clone(),
         parameter,
         insert_row: insert_row.clone(),
         table_assertions,
@@ -3690,7 +3995,7 @@ fn admit_project_list_stream(
         consumer_binding: "arguments:[]".into(),
         partition: None,
         table,
-        key_fields: keys.clone(),
+        key_fields: keys.fields.clone(),
         parameter,
         insert_row: insert_row.clone(),
         table_assertions,
@@ -4189,7 +4494,12 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
         let table = source.to_owned();
         let range = match after {
             Some(after) => (
-                Bound::Excluded(transaction_cursor_key(after)?),
+                Bound::Excluded(transaction_cursor_key(
+                    after,
+                    self.key_fields
+                        .get(source)
+                        .expect("declared table key checked above"),
+                )?),
                 Bound::Unbounded,
             ),
             None => (Bound::Unbounded, Bound::Unbounded),
@@ -4210,7 +4520,16 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
             next: candidates
                 .next()
                 .is_some()
-                .then(|| last_key.as_ref().map(transaction_continuation_cursor))
+                .then(|| {
+                    last_key.as_ref().map(|key| {
+                        transaction_continuation_cursor(
+                            key,
+                            self.key_fields
+                                .get(source)
+                                .expect("declared table key checked above"),
+                        )
+                    })
+                })
                 .flatten(),
         }))
     }
@@ -4541,7 +4860,7 @@ impl TableEffectHandler<'_, '_> {
                 if arguments.len() != key_fields.len() {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 }
-                let key = TransactionKey::new(encoded_table_key(arguments)?);
+                let key = key_fields.key_from_values(arguments)?;
                 self.activation
                     .read(table, &key)
                     .map_err(|error| transaction_error(table_error_code(error)))?
@@ -4553,7 +4872,7 @@ impl TableEffectHandler<'_, '_> {
                 let [row] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
-                let key = TransactionKey::new(table_key(row, key_fields)?);
+                let key = key_fields.key_from_row(row)?;
                 self.activation
                     .insert(table.clone(), key.clone(), row.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
@@ -4564,7 +4883,7 @@ impl TableEffectHandler<'_, '_> {
                 let [row] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
-                let key = TransactionKey::new(table_key(row, key_fields)?);
+                let key = key_fields.key_from_row(row)?;
                 if let Some(existing) = self
                     .activation
                     .read(table, &key)
@@ -4590,7 +4909,7 @@ impl TableEffectHandler<'_, '_> {
                 let [key, patch] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
-                let key = TransactionKey::new(encoded_key(key)?);
+                let key = key_fields.key_from_encoded(&encoded_key(key)?)?;
                 let existing = self
                     .activation
                     .read(table, &key)
@@ -4608,7 +4927,7 @@ impl TableEffectHandler<'_, '_> {
                 let [key] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
-                let key = TransactionKey::new(encoded_key(key)?);
+                let key = key_fields.key_from_encoded(&encoded_key(key)?)?;
                 self.activation
                     .delete(table.clone(), key.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
@@ -4619,8 +4938,8 @@ impl TableEffectHandler<'_, '_> {
                 let [old_key, new_key] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
-                let old_key = TransactionKey::new(encoded_key(old_key)?);
-                let new_key = TransactionKey::new(encoded_key(new_key)?);
+                let old_key = key_fields.key_from_encoded(&encoded_key(old_key)?)?;
+                let new_key = key_fields.key_from_encoded(&encoded_key(new_key)?)?;
                 let existing = self
                     .activation
                     .read(table, &old_key)
@@ -4630,7 +4949,7 @@ impl TableEffectHandler<'_, '_> {
                 if old_key == new_key {
                     return Err(transaction_error("ORNA-EVAL-TABLE-DUPLICATE"));
                 }
-                let new_components = table_key_components(new_key.as_ref(), key_fields.len())?;
+                let new_components = key_fields.values_from_encoded(new_key.as_ref())?;
                 if key_fields.is_empty() {
                     return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
                 }
@@ -4697,7 +5016,7 @@ struct AdmittedAssertion {
 
 type TableAssertions = BTreeMap<String, Vec<AdmittedAssertion>>;
 type ModuleAssertions = Vec<AdmittedAssertion>;
-type TableKeys = BTreeMap<String, Vec<String>>;
+type TableKeys = BTreeMap<String, TransactionTableKey>;
 type TableFloatFields = BTreeMap<String, BTreeSet<String>>;
 type TableFields = BTreeMap<String, BTreeSet<String>>;
 type AdmittedTransaction = (
@@ -5072,10 +5391,24 @@ fn admitted_transaction_module(
                         _ => Err("transactional source seam requires named table keys".into()),
                     })
                     .collect::<Result<Vec<_>, String>>()?;
+                let key_types = keys
+                    .iter()
+                    .map(|key| {
+                        key.annotation
+                            .as_ref()
+                            .ok_or_else(|| {
+                                "transactional source seam requires typed table keys".to_owned()
+                            })
+                            .and_then(TransactionKeyType::from_syntax)
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
                 if fields.is_empty() {
                     return Err("transactional source seam requires an explicit table key".into());
                 }
-                key_fields.insert(name.clone(), fields);
+                key_fields.insert(
+                    name.clone(),
+                    TransactionTableKey::new(name.clone(), fields, key_types)?,
+                );
                 table_fields.insert(
                     name.clone(),
                     members
@@ -6426,7 +6759,7 @@ fn relation_lookup(
     if fields.len() != declared_keys.len()
         || fields
             .iter()
-            .zip(declared_keys)
+            .zip(&declared_keys.fields)
             .any(|((field, _), declared)| field != declared)
     {
         return None;
@@ -7214,14 +7547,15 @@ impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
 #[cfg(test)]
 mod transaction_admission_tests {
     use super::{
-        SourceUnit, StageOutcome, TableEffectHandler, TransactionDatabase, TransactionKey,
-        TRANSACTION_INT_CURSOR_PREFIX, TransactionalEvaluator, admit_transaction_project,
+        SourceUnit, StageOutcome, TRANSACTION_CURSOR_PREFIX, TRANSACTION_INT_CURSOR_PREFIX,
+        TableEffectHandler, TransactionDatabase, TransactionKey, TransactionKeyType,
+        TransactionTableKey, TransactionalEvaluator, admit_transaction_project, record_field,
         transaction_continuation_cursor, transaction_cursor_key,
     };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use num_bigint::BigInt;
     use orna_evaluator_v1::{EffectHandler, Limits, StepBudget};
-    use orna_foundation_v1::Value;
+    use orna_foundation_v1::{OvbRaw, Value};
     use std::collections::{BTreeMap, BTreeSet};
 
     fn source(body: &str) -> SourceUnit {
@@ -7307,14 +7641,20 @@ mod transaction_admission_tests {
             BigInt::from(65_535),
             large,
         ];
+        let schema = super::TransactionTableKey::new(
+            String::from("Note"),
+            vec![String::from("id")],
+            vec![super::TransactionKeyType::Int],
+        )
+        .expect("valid Note key schema");
         let mut previous = None;
 
         for value in values {
             let key = TransactionKey::new(Value::int(value).encode().expect("encoded integer"));
-            let cursor = transaction_continuation_cursor(&key);
+            let cursor = transaction_continuation_cursor(&key, &schema);
             assert_ne!(cursor, key.as_ref());
             assert_eq!(
-                transaction_cursor_key(&cursor).expect("decoded cursor"),
+                transaction_cursor_key(&cursor, &schema).expect("decoded cursor"),
                 key
             );
             if let Some(previous) = previous {
@@ -7327,7 +7667,7 @@ mod transaction_admission_tests {
             let mut cursor = Vec::from(TRANSACTION_INT_CURSOR_PREFIX);
             cursor.push(kind);
             cursor.extend_from_slice(&length);
-            assert!(transaction_cursor_key(&cursor).is_err());
+            assert!(transaction_cursor_key(&cursor, &schema).is_err());
         }
     }
 
@@ -7347,7 +7687,15 @@ mod transaction_admission_tests {
                         .expect("unique integer key");
                 }
 
-                let key_fields = BTreeMap::from([("Note".into(), vec!["id".into()])]);
+                let key_fields = BTreeMap::from([(
+                    "Note".into(),
+                    super::TransactionTableKey::new(
+                        "Note".into(),
+                        vec!["id".into()],
+                        vec![super::TransactionKeyType::Int],
+                    )
+                    .expect("valid Note key schema"),
+                )]);
                 let table_fields = BTreeMap::from([("Note".into(), BTreeSet::from(["id".into()]))]);
                 let mut mutations = Vec::new();
                 let limits = Limits::default();
@@ -7384,9 +7732,16 @@ mod transaction_admission_tests {
                 assert_eq!(third.next, None);
                 assert!(first_cursor < second_cursor);
 
-                let third_cursor = transaction_continuation_cursor(&TransactionKey::new(
-                    Value::int(255.into()).encode().expect("encoded integer"),
-                ));
+                let schema = super::TransactionTableKey::new(
+                    "Note".into(),
+                    vec!["id".into()],
+                    vec![super::TransactionKeyType::Int],
+                )
+                .expect("valid Note key schema");
+                let third_cursor = transaction_continuation_cursor(
+                    &TransactionKey::new(Value::int(255.into()).encode().expect("encoded integer")),
+                    &schema,
+                );
                 assert!(second_cursor < third_cursor);
 
                 let exhausted = handler
@@ -7545,6 +7900,184 @@ mod transaction_admission_tests {
                 "row {id} escaped the assertion-limit rollback"
             );
         }
+    }
+    #[test]
+    fn typed_composite_scan_orders_components_and_rejects_invalid_cursors() {
+        let schema = TransactionTableKey::new(
+            "Stock".into(),
+            vec!["location".into(), "sku".into()],
+            vec![TransactionKeyType::Str, TransactionKeyType::Str],
+        )
+        .expect("valid composite key schema");
+        let key_fields = BTreeMap::from([("Stock".into(), schema.clone())]);
+        let table_fields = BTreeMap::from([(
+            "Stock".into(),
+            BTreeSet::from(["location".into(), "sku".into()]),
+        )]);
+        let rows = [
+            (
+                vec![
+                    Value::new(OvbRaw::Text("z".into())).expect("z"),
+                    Value::new(OvbRaw::Text("last".into())).expect("last"),
+                ],
+                "z-last",
+            ),
+            (
+                vec![
+                    Value::new(OvbRaw::Text("a".into())).expect("a"),
+                    Value::new(OvbRaw::Text("second".into())).expect("second"),
+                ],
+                "a-second",
+            ),
+            (
+                vec![
+                    Value::new(OvbRaw::Text("a".into())).expect("a"),
+                    Value::new(OvbRaw::Text("first".into())).expect("first"),
+                ],
+                "a-first",
+            ),
+        ];
+        let mut database = TransactionDatabase::default();
+        database
+            .activate(|activation| {
+                for (values, label) in rows {
+                    let key = schema.key_from_values(&values).expect("typed key");
+                    let row = Value::new(OvbRaw::Map(vec![
+                        (OvbRaw::Text("sku".into()), values[1].raw().clone()),
+                        (OvbRaw::Text("label".into()), OvbRaw::Text(label.into())),
+                        (OvbRaw::Text("location".into()), values[0].raw().clone()),
+                    ]))
+                    .expect("canonical row");
+                    activation
+                        .insert("Stock".into(), key, row)
+                        .expect("unique composite key");
+                }
+
+                let mut mutations = Vec::new();
+                let limits = Limits::default();
+                let mut handler = TableEffectHandler {
+                    activation,
+                    key_fields: &key_fields,
+                    table_fields: &table_fields,
+                    mutations: &mut mutations,
+                    next_mutation: 0,
+                    limits,
+                    activation_time: None,
+                };
+                let mut budget = StepBudget::new(limits.max_steps);
+                let first = handler
+                    .scan_relation_page("Stock", None, 2, &mut budget)
+                    .expect("first scan succeeds")
+                    .expect("declared table is scanable");
+                assert_eq!(
+                    record_field(&first.rows[0], "label")
+                        .expect("first label")
+                        .raw(),
+                    &OvbRaw::Text("a-first".into())
+                );
+                assert_eq!(
+                    record_field(&first.rows[1], "label")
+                        .expect("second label")
+                        .raw(),
+                    &OvbRaw::Text("a-second".into())
+                );
+                let cursor = first.next.clone().expect("non-terminal cursor");
+
+                let second = handler
+                    .scan_relation_page("Stock", Some(&cursor), 2, &mut budget)
+                    .expect("continuation succeeds")
+                    .expect("declared table is scanable");
+                assert_eq!(second.rows.len(), 1);
+                assert_eq!(
+                    record_field(&second.rows[0], "label")
+                        .expect("terminal label")
+                        .raw(),
+                    &OvbRaw::Text("z-last".into())
+                );
+                assert_eq!(second.next, None);
+
+                let cursor_for = |payload: Vec<u8>| {
+                    let mut cursor = Vec::from(TRANSACTION_CURSOR_PREFIX);
+                    cursor.extend_from_slice(&schema.cursor_schema_digest());
+                    cursor.extend(payload);
+                    cursor
+                };
+                assert!(transaction_cursor_key(&cursor, &schema).is_ok());
+                assert!(
+                    transaction_cursor_key(
+                        &cursor_for(
+                            Value::new(OvbRaw::Array(vec![OvbRaw::Text("a".into())]))
+                                .expect("canonical one-component value")
+                                .encode()
+                                .expect("encoded one-component value")
+                        ),
+                        &schema,
+                    )
+                    .is_err()
+                );
+                assert!(
+                    transaction_cursor_key(
+                        &cursor_for(
+                            Value::new(OvbRaw::Array(vec![
+                                OvbRaw::Int(1.into()),
+                                OvbRaw::Int(2.into())
+                            ]))
+                            .expect("canonical wrong-type value")
+                            .encode()
+                            .expect("encoded wrong-type value"),
+                        ),
+                        &schema,
+                    )
+                    .is_err()
+                );
+                assert!(
+                    transaction_cursor_key(&cursor_for(vec![0x82, 0x18, 0x01, 0x01]), &schema,)
+                        .is_err()
+                );
+                let other_schema = TransactionTableKey::new(
+                    "Other".into(),
+                    vec!["location".into(), "sku".into()],
+                    vec![TransactionKeyType::Str, TransactionKeyType::Str],
+                )
+                .expect("valid alternate schema");
+                assert!(transaction_cursor_key(&cursor, &other_schema).is_err());
+                Ok::<_, orna_evaluator_v1::EvaluationError>(())
+            })
+            .expect("typed composite scan activation commits");
+    }
+
+    #[test]
+    fn decimal_typed_keys_compare_by_exact_numeric_value() {
+        let schema = TransactionTableKey::new(
+            "Reading".into(),
+            vec!["value".into()],
+            vec![TransactionKeyType::Decimal],
+        )
+        .expect("valid decimal key schema");
+        let negative = schema
+            .key_from_values(&[Value::decimal((-15).into(), (-1).into()).expect("-1.5")])
+            .expect("negative decimal key");
+        let zero = schema
+            .key_from_values(&[Value::decimal(0.into(), 0.into()).expect("zero")])
+            .expect("zero decimal key");
+        let one_tenth = schema
+            .key_from_values(&[Value::decimal(1.into(), (-1).into()).expect("0.1")])
+            .expect("small decimal key");
+        let one = schema
+            .key_from_values(&[Value::decimal(1.into(), 0.into()).expect("one")])
+            .expect("one decimal key");
+        let two = schema
+            .key_from_values(&[Value::decimal(2.into(), 0.into()).expect("two")])
+            .expect("two decimal key");
+        assert!(negative < zero);
+        assert!(zero < one_tenth);
+        assert!(one_tenth < one);
+        assert!(one < two);
+        let cursor = transaction_continuation_cursor(&one, &schema);
+        assert_eq!(
+            transaction_cursor_key(&cursor, &schema).expect("decimal cursor"),
+            one
+        );
     }
 }
 
@@ -9061,7 +9594,15 @@ mod durable_tests {
     fn relation_lowering_requires_exact_declared_key_order() {
         let keys = std::collections::BTreeMap::from([(
             String::from("Stock"),
-            vec![String::from("location"), String::from("sku")],
+            super::TransactionTableKey::new(
+                String::from("Stock"),
+                vec![String::from("location"), String::from("sku")],
+                vec![
+                    super::TransactionKeyType::Str,
+                    super::TransactionKeyType::Str,
+                ],
+            )
+            .expect("valid Stock key schema"),
         )]);
         let ordered = orna_syntax_v1::parse_expression(
             r#"Stock | filter(stock => stock.location == "north" && stock.sku == "pencil") | one()"#,
@@ -9133,7 +9674,15 @@ mod durable_tests {
         let mut expression = parsed.value;
         let keys = std::collections::BTreeMap::from([(
             String::from("Stock"),
-            vec![String::from("location"), String::from("sku")],
+            super::TransactionTableKey::new(
+                String::from("Stock"),
+                vec![String::from("location"), String::from("sku")],
+                vec![
+                    super::TransactionKeyType::Str,
+                    super::TransactionKeyType::Str,
+                ],
+            )
+            .expect("valid Stock key schema"),
         )]);
 
         super::lower_relation_expression_with_resolution(
