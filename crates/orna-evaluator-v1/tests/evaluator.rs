@@ -4,8 +4,9 @@ use num_bigint::BigInt;
 use orna_evaluator_v1::{
     EffectHandler, Environment, EvaluationError, Limits, NominalDefinition, NominalDefinitions,
     NominalField, PureFunction, StepBudget, evaluate_expression, evaluate_function,
-    evaluate_parsed, evaluate_parsed_with_nominals, evaluate_repl, invoke_named,
-    invoke_named_with_effects, invoke_named_with_nominals,
+    evaluate_parsed, evaluate_parsed_with_nominals, evaluate_repl,
+    evaluate_with_functions_and_nominals, invoke_named, invoke_named_with_effects,
+    invoke_named_with_nominals,
 };
 use orna_syntax_v1::{
     AssignmentOperator, AssignmentTarget, Expr, NameSegment, Pattern, RecordField, Statement,
@@ -286,6 +287,40 @@ fn nominal_supplied_values_bypass_omitted_defaults() {
         &[Raw::Array(vec![
             Raw::Text("value".into()),
             Raw::Int(9.into())
+        ])]
+    );
+}
+
+#[test]
+fn external_nominal_public_default_runs_in_declaration_owner_namespace() {
+    let definitions = nominal_definitions(
+        "vault.Vault",
+        "stable.Vault",
+        Some("vault"),
+        vec![nominal_field("value", true, Some("helper()"))],
+    );
+    let functions = BTreeMap::from([(
+        "vault.helper".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: parsed_expression("7"),
+            environment: Environment::new(),
+        },
+    )]);
+    let result = evaluate_with_functions_and_nominals(
+        &parsed_expression("vault.Vault {}"),
+        &Environment::new(),
+        &functions,
+        &definitions,
+        Limits::default(),
+    )
+    .expect("public defaults must execute in their declaration namespace");
+    let (_, fields) = nominal_parts(&result);
+    assert_eq!(
+        fields,
+        &[Raw::Array(vec![
+            Raw::Text("value".into()),
+            Raw::Int(7.into())
         ])]
     );
 }

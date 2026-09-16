@@ -1893,9 +1893,7 @@ impl Context<'_, '_> {
                 continue;
             }
             let previous_namespace = self.namespace.clone();
-            if !field.public && !private_allowed {
-                self.namespace = definition.owner.clone();
-            }
+            self.namespace = definition.owner.clone();
             let result = self.evaluate(
                 field
                     .default
