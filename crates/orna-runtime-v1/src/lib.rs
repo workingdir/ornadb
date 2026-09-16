@@ -910,6 +910,11 @@ pub struct StreamObservation {
     /// The most recent retained delivery failure for this stream, when one
     /// exists. Cancellation and activation failures do not manufacture it.
     pub last_failure: Option<FailureRef>,
+    // Loader-owned causal evidence for `last_failure`. A valid FailureRef
+    // shape alone does not establish that it belongs to this stream's durable
+    // delivery identity, so public field mutation must not rebind the
+    // projection to another failure in the same snapshot.
+    last_failure_evidence: Option<FailureRef>,
     pub status: StreamObservationStatus,
     pub items_seen: u64,
     pub items_committed: u64,
@@ -1097,6 +1102,9 @@ impl SysStreamProjection {
         if observation.status == StreamObservationStatus::Failed
             && (observation.last_failure.is_none() || observation.diagnostic.is_none())
         {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        if observation.last_failure != observation.last_failure_evidence {
             return Err(RuntimeError::RecoveryInvalid);
         }
         let run_reference = run.reference()?;
@@ -3726,6 +3734,30 @@ impl RuntimeState {
         key: &CheckpointKey,
     ) -> Result<StreamCheckpoint, RuntimeError> {
         load_stream_checkpoint(&self.connection, key).await
+    }
+
+    /// Counts private durable stream-failure rows for bounded implementation
+    /// evidence only.
+    ///
+    /// This is not a `sys.Failure` relation, is not authorized observation
+    /// surface, and must not be used to construct or publish public system
+    /// rows. It exists so isolated conformance witnesses can prove that a
+    /// retry sequence coalesces one delivery identity into one stored row.
+    pub async fn stream_failure_row_count_for_evidence(&self) -> Result<u64, RuntimeError> {
+        let mut rows = self
+            .connection
+            .query("SELECT COUNT(*) FROM stream_failure", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        decode_u64(
+            row.get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )
     }
 
     async fn record_stream_provider_failure(
@@ -9148,7 +9180,8 @@ async fn load_stream_observation_tx(
         parent_capture,
         checkpoint_reference,
         checkpoint,
-        last_failure,
+        last_failure: last_failure.clone(),
+        last_failure_evidence: last_failure,
         status,
         items_seen,
         items_committed,
@@ -25546,15 +25579,35 @@ mod tests {
             projection.checkpoint,
             Some(failed.checkpoint_reference.clone())
         );
-        let failure_reference = failed
+        let retained_failure_reference = failed
             .last_failure
             .clone()
             .expect("retained failure reference");
-        assert_eq!(projection.last_failure, Some(failure_reference.clone()));
+        assert_eq!(
+            projection.last_failure,
+            Some(retained_failure_reference.clone())
+        );
         let mut missing_failure = failed.clone();
         missing_failure.last_failure = None;
         assert_eq!(
             SysStreamProjection::try_from_observation(&missing_failure, &retained_run),
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        let capture = state.capture().await.unwrap();
+        let unrelated_failure = failure_reference(
+            capture.database_id(),
+            capture.snapshot().clone(),
+            key.consumer.canonical(),
+            "another-source".into(),
+            None,
+            key.position_format.as_str().to_owned(),
+            "another-position".into(),
+        )
+        .unwrap();
+        let mut rebound_failure = failed.clone();
+        rebound_failure.last_failure = Some(unrelated_failure);
+        assert_eq!(
+            SysStreamProjection::try_from_observation(&rebound_failure, &retained_run),
             Err(RuntimeError::RecoveryInvalid)
         );
         let mut missing_diagnostic = failed.clone();
@@ -25568,7 +25621,7 @@ mod tests {
             SYS_CHECKPOINT_TABLE_ID
         );
         assert_eq!(
-            failure_reference.as_row_ref().table_id,
+            retained_failure_reference.as_row_ref().table_id,
             SYS_FAILURE_TABLE_ID
         );
         let fence = state.runtime_observation_fence(writer).await.unwrap();
@@ -25581,7 +25634,7 @@ mod tests {
         );
         assert_eq!(
             current.streams[0].last_failure,
-            Some(failure_reference.clone())
+            Some(retained_failure_reference.clone())
         );
         let retry = match state
             .stream_backend(writer)
@@ -25604,7 +25657,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .last_failure,
-            Some(failure_reference.clone())
+            Some(retained_failure_reference.clone())
         );
         drop(state);
         let reopened = open_state(&repo).await;
@@ -25614,7 +25667,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(restored.partition, None);
-        assert_eq!(restored.last_failure, Some(failure_reference));
+        assert_eq!(restored.last_failure, Some(retained_failure_reference));
         let mut rows = reopened
             .connection
             .query(
