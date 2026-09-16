@@ -2831,14 +2831,8 @@ fn cancellation_decision_only_returns_cancelled_when_request_wins() {
 fn values_go_to_stdout_and_progress_to_stderr_without_interleave() {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    let outcome = render_event_stream(
-        &echo_events(),
-        false,
-        &mut stdout,
-        &mut stderr,
-        &mut encoder,
-    )
-    .expect("rendering succeeds");
+    let outcome = render_event_stream(&echo_events(), true, &mut stdout, &mut stderr, &mut encoder)
+        .expect("rendering succeeds");
     assert_eq!(outcome, InstalledInvokeOutcome::Completed);
     assert_eq!(stdout, encoded_record());
     let stderr = String::from_utf8(stderr).expect("stderr is text");
@@ -2850,8 +2844,14 @@ fn values_go_to_stdout_and_progress_to_stderr_without_interleave() {
 fn no_progress_suppresses_diagnostics_but_keeps_values() {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    let outcome = render_event_stream(&echo_events(), true, &mut stdout, &mut stderr, &mut encoder)
-        .expect("rendering succeeds");
+    let outcome = render_event_stream(
+        &echo_events(),
+        false,
+        &mut stdout,
+        &mut stderr,
+        &mut encoder,
+    )
+    .expect("rendering succeeds");
     assert_eq!(outcome, InstalledInvokeOutcome::Completed);
     assert_eq!(stdout, encoded_record());
     assert!(stderr.is_empty());
@@ -2877,7 +2877,7 @@ fn each_value_writes_one_canonical_record() {
         .expect("event batch");
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    let outcome = render_event_stream(&batch, false, &mut stdout, &mut stderr, &mut encoder)
+    let outcome = render_event_stream(&batch, true, &mut stdout, &mut stderr, &mut encoder)
         .expect("rendering succeeds");
     assert_eq!(outcome, InstalledInvokeOutcome::Completed);
     assert_eq!(stdout, [encoded_record(), encoded_record()].concat());
@@ -2929,14 +2929,90 @@ fn failed_event_prints_one_redacted_line_and_exits_target_failure() {
     ])
     .expect("event batch");
     let result = SealedInvocationResult::Failed { invocation, events };
-    let outcome = render_result(&result, false, &mut stdout, &mut stderr, &mut encoder)
-        .expect("rendering succeeds");
+    let outcome = super::presentation::render_result_with_terminal_capability(
+        &result,
+        false,
+        true,
+        &mut stdout,
+        &mut stderr,
+        &mut encoder,
+    )
+    .expect("rendering succeeds");
     assert_eq!(outcome, InstalledInvokeOutcome::TargetFailure);
     assert!(stdout.is_empty());
     assert_eq!(
         String::from_utf8(stderr).expect("stderr is text"),
         "orna: invoke: invocation started\norna: invoke: invocation failed\n"
     );
+}
+
+#[test]
+fn installed_result_suppresses_dynamic_progress_for_non_terminal_stderr() {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let result = SealedInvocationResult::Completed {
+        invocation: InvocationId::new(),
+        events: echo_events(),
+    };
+    let outcome = super::presentation::render_result_with_terminal_capability(
+        &result,
+        false,
+        false,
+        &mut stdout,
+        &mut stderr,
+        &mut encoder,
+    )
+    .expect("rendering succeeds");
+    assert_eq!(outcome, InstalledInvokeOutcome::Completed);
+    assert_eq!(stdout, encoded_record());
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn installed_result_renders_dynamic_progress_for_terminal_stderr() {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let result = SealedInvocationResult::Completed {
+        invocation: InvocationId::new(),
+        events: echo_events(),
+    };
+    let outcome = super::presentation::render_result_with_terminal_capability(
+        &result,
+        false,
+        true,
+        &mut stdout,
+        &mut stderr,
+        &mut encoder,
+    )
+    .expect("rendering succeeds");
+    assert_eq!(outcome, InstalledInvokeOutcome::Completed);
+    assert_eq!(stdout, encoded_record());
+    assert_eq!(
+        String::from_utf8(stderr).expect("stderr is text"),
+        "orna: invoke: invocation started\norna: invoke: invocation completed in 7ns\n"
+    );
+}
+
+#[test]
+fn no_progress_suppresses_dynamic_progress_even_for_terminal_stderr() {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let result = SealedInvocationResult::Completed {
+        invocation: InvocationId::new(),
+        events: echo_events(),
+    };
+    let outcome = super::presentation::render_result_with_terminal_capability(
+        &result,
+        true,
+        true,
+        &mut stdout,
+        &mut stderr,
+        &mut encoder,
+    )
+    .expect("rendering succeeds");
+    assert_eq!(outcome, InstalledInvokeOutcome::Completed);
+    assert_eq!(stdout, encoded_record());
+    assert!(stderr.is_empty());
 }
 
 #[test]
@@ -3033,7 +3109,7 @@ fn opaque_terminal_values_render_through_event_stream_to_clean_channels() {
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    let outcome = render_event_stream(&events, false, &mut stdout, &mut stderr, &mut encoder)
+    let outcome = render_event_stream(&events, true, &mut stdout, &mut stderr, &mut encoder)
         .expect("rendering succeeds");
 
     assert_eq!(outcome, InstalledInvokeOutcome::Completed);
