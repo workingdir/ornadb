@@ -168,6 +168,87 @@ impl StepBudget {
 /// its enum type and variant identities are matched before payload fields bind.
 pub type Environment = BTreeMap<String, CanonicalValue>;
 
+/// A declaration-owned nominal field admitted to the evaluator.
+///
+/// The semantic layer remains responsible for checking the field's static
+/// type. The evaluator only receives the already-admitted expression and its
+/// visibility/default plan, preserving the runtime ownership boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NominalField {
+    name: String,
+    public: bool,
+    default: Option<Expr>,
+}
+
+impl NominalField {
+    /// Create a public required field.
+    #[must_use]
+    pub fn public(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            public: true,
+            default: None,
+        }
+    }
+
+    /// Create a public field with its declaration-owned default expression.
+    #[must_use]
+    pub fn public_with_default(name: impl Into<String>, default: Expr) -> Self {
+        Self {
+            name: name.into(),
+            public: true,
+            default: Some(default),
+        }
+    }
+
+    /// Create a private required field.
+    #[must_use]
+    pub fn private(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            public: false,
+            default: None,
+        }
+    }
+
+    /// Create a private field with its declaration-owned default expression.
+    #[must_use]
+    pub fn private_with_default(name: impl Into<String>, default: Expr) -> Self {
+        Self {
+            name: name.into(),
+            public: false,
+            default: Some(default),
+        }
+    }
+}
+
+/// A declaration-owned nominal construction plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NominalDefinition {
+    /// The canonical OVB identity retained in tag 60009.
+    type_id: Raw,
+    /// The module namespace which may construct private fields.
+    owner: Option<String>,
+    /// Declaration order is significant for defaults and output fields.
+    fields: Vec<NominalField>,
+}
+
+impl NominalDefinition {
+    /// Create an admitted declaration plan without exposing its private
+    /// field names or default expressions through public field access.
+    #[must_use]
+    pub fn new(type_id: Raw, owner: Option<String>, fields: Vec<NominalField>) -> Self {
+        Self {
+            type_id,
+            owner,
+            fields,
+        }
+    }
+}
+
+/// Trusted evaluator definitions keyed by admitted source spellings.
+pub type NominalDefinitions = BTreeMap<String, NominalDefinition>;
+
 /// An admitted pure function and its lexical immutable value environment.
 #[derive(Clone, Debug)]
 pub struct PureFunction {
@@ -334,6 +415,24 @@ pub fn evaluate_parsed(
     evaluate_with_functions(expression, environment, &Functions::new(), limits)
 }
 
+/// Evaluate a parsed expression with declaration-owned nominal construction
+/// plans. Definitions must have already passed semantic admission; this
+/// boundary does not infer fields, types, or visibility from source text.
+pub fn evaluate_parsed_with_nominals(
+    expression: &Expr,
+    environment: &Environment,
+    nominal_definitions: &NominalDefinitions,
+    limits: Limits,
+) -> Result<CanonicalValue, EvaluationError> {
+    evaluate_with_functions_and_nominals(
+        expression,
+        environment,
+        &Functions::new(),
+        nominal_definitions,
+        limits,
+    )
+}
+
 /// Evaluate a parsed expression with an explicit pure-function namespace.
 /// Nested calls share the same limits and cannot access the caller's locals.
 pub fn evaluate_with_functions(
@@ -342,8 +441,33 @@ pub fn evaluate_with_functions(
     functions: &Functions,
     limits: Limits,
 ) -> Result<CanonicalValue, EvaluationError> {
+    evaluate_with_functions_and_nominals(
+        expression,
+        environment,
+        functions,
+        &NominalDefinitions::new(),
+        limits,
+    )
+}
+
+/// Evaluate a parsed expression with explicit functions and admitted nominal
+/// construction plans.
+pub fn evaluate_with_functions_and_nominals(
+    expression: &Expr,
+    environment: &Environment,
+    functions: &Functions,
+    nominal_definitions: &NominalDefinitions,
+    limits: Limits,
+) -> Result<CanonicalValue, EvaluationError> {
     let mut budget = StepBudget::new(limits.max_steps);
-    evaluate_with_functions_and_budget(expression, environment, functions, limits, &mut budget)
+    evaluate_with_functions_and_nominals_and_budget(
+        expression,
+        environment,
+        functions,
+        nominal_definitions,
+        limits,
+        &mut budget,
+    )
 }
 
 /// Evaluate a parsed expression while consuming a caller-owned activation
@@ -353,6 +477,24 @@ pub fn evaluate_with_functions_and_budget(
     expression: &Expr,
     environment: &Environment,
     functions: &Functions,
+    limits: Limits,
+    budget: &mut StepBudget,
+) -> Result<CanonicalValue, EvaluationError> {
+    evaluate_with_functions_and_nominals_and_budget(
+        expression,
+        environment,
+        functions,
+        &NominalDefinitions::new(),
+        limits,
+        budget,
+    )
+}
+
+fn evaluate_with_functions_and_nominals_and_budget(
+    expression: &Expr,
+    environment: &Environment,
+    functions: &Functions,
+    nominal_definitions: &NominalDefinitions,
     limits: Limits,
     budget: &mut StepBudget,
 ) -> Result<CanonicalValue, EvaluationError> {
@@ -373,7 +515,8 @@ pub fn evaluate_with_functions_and_budget(
     };
     let result = (|| {
         context.items(functions.len())?;
-        let mut scope = Scope::from_environment(environment, &mut context)?;
+        let mut scope =
+            Scope::from_environment_with_nominals(environment, nominal_definitions, &mut context)?;
         let value = context.evaluate(expression, &mut scope, 0)?;
         if context.transfer.is_some() {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
@@ -424,6 +567,25 @@ pub fn invoke_named(
     arguments: &Environment,
     limits: Limits,
 ) -> Result<CanonicalValue, EvaluationError> {
+    invoke_named_with_nominals(
+        name,
+        functions,
+        arguments,
+        &NominalDefinitions::new(),
+        limits,
+    )
+}
+
+/// Invoke an admitted named function with declaration-owned nominal
+/// construction plans. The plans are retained by the initial lexical scope
+/// and propagated through nested named calls and closures.
+pub fn invoke_named_with_nominals(
+    name: &str,
+    functions: &Functions,
+    arguments: &Environment,
+    nominal_definitions: &NominalDefinitions,
+    limits: Limits,
+) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
     let mut context = Context {
         limits,
@@ -442,7 +604,11 @@ pub fn invoke_named(
     context.items(functions.len())?;
     let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
     let supplied = supplied_arguments(arguments, &mut context)?;
-    let captured = Scope::from_environment(&function.environment, &mut context)?;
+    let captured = Scope::from_environment_with_nominals(
+        &function.environment,
+        nominal_definitions,
+        &mut context,
+    )?;
     invoke_pure(
         &mut context,
         &function.parameters,
@@ -1013,20 +1179,33 @@ impl Value {
                         .collect::<Result<_, _>>()?,
                 )
             }
-            Self::NominalRecord { type_id, fields } => Raw::Tag(
-                60009,
-                Box::new(Raw::Array(vec![
-                    type_id,
-                    Raw::Array(
-                        fields
-                            .into_iter()
-                            .map(|(key, value)| {
-                                value.raw().map(|value| Raw::Array(vec![key, value]))
-                            })
-                            .collect::<Result<_, _>>()?,
-                    ),
-                ])),
-            ),
+            Self::NominalRecord {
+                type_id,
+                mut fields,
+            } => {
+                // The runtime value preserves declaration order. OVB requires
+                // canonical field-key order only at the serialization edge.
+                fields.sort_by(|(left, _), (right, _)| match (left, right) {
+                    (Raw::Text(left), Raw::Text(right)) => {
+                        left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+                    }
+                    _ => std::cmp::Ordering::Equal,
+                });
+                Raw::Tag(
+                    60009,
+                    Box::new(Raw::Array(vec![
+                        type_id,
+                        Raw::Array(
+                            fields
+                                .into_iter()
+                                .map(|(key, value)| {
+                                    value.raw().map(|value| Raw::Array(vec![key, value]))
+                                })
+                                .collect::<Result<_, _>>()?,
+                        ),
+                    ])),
+                )
+            }
             Self::Enum {
                 type_id,
                 variant_id,
@@ -1252,13 +1431,27 @@ impl Value {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct Scope(BTreeMap<String, Value>, BTreeSet<String>, BTreeSet<String>);
+struct Scope(
+    BTreeMap<String, Value>,
+    BTreeSet<String>,
+    BTreeSet<String>,
+    NominalDefinitions,
+);
 impl Scope {
     fn from_environment(
         environment: &Environment,
         context: &mut Context,
     ) -> Result<Self, EvaluationError> {
+        Self::from_environment_with_nominals(environment, &NominalDefinitions::new(), context)
+    }
+
+    fn from_environment_with_nominals(
+        environment: &Environment,
+        nominal_definitions: &NominalDefinitions,
+        context: &mut Context,
+    ) -> Result<Self, EvaluationError> {
         context.items(environment.len())?;
+        context.items(nominal_definitions.len())?;
         let mut values = BTreeMap::new();
         for (name, value) in environment {
             if name.len() > context.limits.max_string_bytes {
@@ -1266,7 +1459,12 @@ impl Scope {
             }
             values.insert(name.clone(), Value::from_canonical(value, context, 0)?);
         }
-        Ok(Self(values, BTreeSet::new(), BTreeSet::new()))
+        Ok(Self(
+            values,
+            BTreeSet::new(),
+            BTreeSet::new(),
+            nominal_definitions.clone(),
+        ))
     }
 }
 
@@ -1493,6 +1691,7 @@ impl Context<'_, '_> {
                 }
                 Ok(Value::Record(result))
             }
+            Expr::Nominal { path, fields, .. } => self.nominal(path, fields, scope, depth),
             Expr::Block {
                 statements, tail, ..
             } => self.block(statements, tail.as_deref(), scope, depth),
@@ -1611,6 +1810,124 @@ impl Context<'_, '_> {
         } else {
             result
         }
+    }
+    fn nominal(
+        &mut self,
+        path: &[orna_syntax_v1::NameSegment],
+        supplied: &[orna_syntax_v1::RecordField],
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(path.len().saturating_add(supplied.len()))?;
+        if path.is_empty() {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        let spelling = path
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        let qualified = (path.len() == 1)
+            .then(|| {
+                self.namespace
+                    .as_deref()
+                    .map(|namespace| format!("{namespace}.{spelling}"))
+            })
+            .flatten();
+        let definition = scope
+            .3
+            .get(qualified.as_deref().unwrap_or_default())
+            .or_else(|| scope.3.get(&spelling))
+            .cloned()
+            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+        self.items(definition.fields.len())?;
+
+        let private_allowed = definition.owner.as_deref() == self.namespace.as_deref();
+        let mut indexes = BTreeMap::new();
+        for (index, field) in definition.fields.iter().enumerate() {
+            if field.name.len() > self.limits.max_string_bytes
+                || indexes.insert(field.name.clone(), index).is_some()
+            {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+        }
+        let mut supplied_names = BTreeSet::new();
+        for field in supplied {
+            let Some(&index) = indexes.get(&field.name) else {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            };
+            if !supplied_names.insert(field.name.clone()) {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+            if !definition.fields[index].public && !private_allowed {
+                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+            }
+        }
+        for field in &definition.fields {
+            if supplied_names.contains(&field.name) {
+                continue;
+            }
+            if field.default.is_none() {
+                return Err(if field.public {
+                    error("ORNA-EVAL-ARGUMENT")
+                } else {
+                    error("ORNA-EVAL-UNSUPPORTED")
+                });
+            }
+        }
+
+        let mut construction_scope = scope.clone();
+        let mut values = BTreeMap::new();
+        for field in supplied {
+            let value = self.evaluate(&field.value, &mut construction_scope, depth + 1)?;
+            if self.transfer.is_some() {
+                return Ok(Value::Null);
+            }
+            construction_scope
+                .0
+                .insert(field.name.clone(), value.clone());
+            values.insert(field.name.clone(), value);
+        }
+        for field in &definition.fields {
+            if supplied_names.contains(&field.name) {
+                continue;
+            }
+            let previous_namespace = self.namespace.clone();
+            if !field.public && !private_allowed {
+                self.namespace = definition.owner.clone();
+            }
+            let result = self.evaluate(
+                field
+                    .default
+                    .as_ref()
+                    .expect("omitted defaults were admitted above"),
+                &mut construction_scope,
+                depth + 1,
+            );
+            self.namespace = previous_namespace;
+            let value = result?;
+            if self.transfer.is_some() {
+                return Ok(Value::Null);
+            }
+            construction_scope
+                .0
+                .insert(field.name.clone(), value.clone());
+            values.insert(field.name.clone(), value);
+        }
+        let fields = definition
+            .fields
+            .into_iter()
+            .map(|field| {
+                let value = values
+                    .remove(&field.name)
+                    .expect("all admitted nominal fields are materialized");
+                (Raw::Text(field.name), value)
+            })
+            .collect::<Vec<_>>();
+        Ok(Value::NominalRecord {
+            type_id: definition.type_id,
+            fields,
+        })
     }
     fn literal(&self, text: &str, kind: LiteralKind) -> Result<Value, EvaluationError> {
         match kind {
@@ -2843,6 +3160,12 @@ impl Context<'_, '_> {
                     .filter(|name| captured.0.contains_key(*name))
                     .cloned(),
             );
+            for (name, definition) in &scope.3 {
+                captured
+                    .3
+                    .entry(name.clone())
+                    .or_insert_with(|| definition.clone());
+            }
             self.depth(depth + 1)?;
             self.items(arguments.len() + usize::from(input.is_some()))?;
             let mut supplied = BTreeMap::new();
@@ -5135,7 +5458,12 @@ mod tests {
             transfer: None,
             cancellation: None,
         };
-        let mut scope = Scope(BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
+        let mut scope = Scope(
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            NominalDefinitions::new(),
+        );
         scope.0.insert("failure".into(), Value::Error(failure));
         context.evaluate(&parsed.value, &mut scope, 0)
     }
@@ -5202,7 +5530,12 @@ mod tests {
             transfer: None,
             cancellation: None,
         };
-        let mut scope = Scope(BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
+        let mut scope = Scope(
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            NominalDefinitions::new(),
+        );
         context.evaluate(&parsed.value, &mut scope, 0)
     }
 
@@ -5345,7 +5678,12 @@ mod tests {
             transfer: None,
             cancellation,
         };
-        let mut scope = Scope(BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
+        let mut scope = Scope(
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            NominalDefinitions::new(),
+        );
         context.evaluate(&parsed.value, &mut scope, 0)
     }
 
@@ -5483,7 +5821,12 @@ mod tests {
             transfer: None,
             cancellation: None,
         };
-        let mut scope = Scope(BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
+        let mut scope = Scope(
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            NominalDefinitions::new(),
+        );
 
         assert_eq!(
             context.evaluate(&expression, &mut scope, 0).unwrap(),

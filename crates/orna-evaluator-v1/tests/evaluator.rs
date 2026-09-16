@@ -2,10 +2,15 @@ use std::collections::BTreeMap;
 
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
-    EffectHandler, Environment, EvaluationError, Limits, StepBudget, evaluate_expression,
-    evaluate_function, evaluate_parsed, evaluate_repl, invoke_named, invoke_named_with_effects,
+    EffectHandler, Environment, EvaluationError, Limits, NominalDefinition, NominalDefinitions,
+    NominalField, PureFunction, StepBudget, evaluate_expression, evaluate_function,
+    evaluate_parsed, evaluate_parsed_with_nominals, evaluate_repl, invoke_named,
+    invoke_named_with_effects, invoke_named_with_nominals,
 };
-use orna_syntax_v1::{Expr, Pattern, RecordField, Statement, SyntaxSpan, TokenKind, lex};
+use orna_syntax_v1::{
+    AssignmentOperator, AssignmentTarget, Expr, NameSegment, Pattern, RecordField, Statement,
+    SyntaxSpan, TokenKind, lex,
+};
 use orna_value_v1::{CANONICAL_NAN_BITS, Raw, Value};
 
 fn evaluate(source: &str) -> Value {
@@ -70,6 +75,404 @@ fn call_module(source: &str, expression: &str, limits: Limits) -> Result<Value, 
         &functions,
         limits,
     )
+}
+
+fn parsed_expression(source: &str) -> Expr {
+    let parsed = orna_syntax_v1::parse_expression(source);
+    assert!(parsed.is_ok(), "{source}: {:?}", parsed.diagnostics);
+    parsed.value
+}
+
+fn nominal_field(name: &str, public: bool, default: Option<&str>) -> NominalField {
+    match (public, default) {
+        (true, Some(default)) => {
+            NominalField::public_with_default(name, parsed_expression(default))
+        }
+        (true, None) => NominalField::public(name),
+        (false, Some(default)) => {
+            NominalField::private_with_default(name, parsed_expression(default))
+        }
+        (false, None) => NominalField::private(name),
+    }
+}
+
+fn type_id_raw(name: &str) -> Raw {
+    let mut bytes = vec![0; 16];
+    for (index, byte) in name.bytes().take(16).enumerate() {
+        bytes[index] = byte;
+    }
+    Raw::Tag(37, Box::new(Raw::Bytes(bytes)))
+}
+
+fn nominal_definitions(
+    path: &str,
+    type_id: &str,
+    owner: Option<&str>,
+    fields: Vec<NominalField>,
+) -> NominalDefinitions {
+    NominalDefinitions::from([(
+        path.into(),
+        NominalDefinition::new(type_id_raw(type_id), owner.map(str::to_owned), fields),
+    )])
+}
+
+fn nominal_parts(value: &orna_foundation_v1::CanonicalValue) -> (&Raw, &[Raw]) {
+    let Raw::Tag(60009, body) = value.raw() else {
+        panic!("expected nominal value, got {value:?}");
+    };
+    let Raw::Array(parts) = body.as_ref() else {
+        panic!("expected nominal payload");
+    };
+    let [type_id, Raw::Array(fields)] = parts.as_slice() else {
+        panic!("expected nominal identity and fields");
+    };
+    (type_id, fields.as_slice())
+}
+
+#[test]
+fn nominal_construction_materializes_supplied_and_default_fields_in_declaration_order() {
+    let definitions = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![
+            nominal_field("left", true, None),
+            nominal_field("right", true, Some("left + 1")),
+            nominal_field("tail", true, Some("right + 1")),
+        ],
+    );
+    let result = evaluate_parsed_with_nominals(
+        &parsed_expression("Thing { left: 3, right: left + 1 }"),
+        &Environment::new(),
+        &definitions,
+        Limits::default(),
+    )
+    .expect("nominal construction should evaluate");
+    let (type_id, fields) = nominal_parts(&result);
+
+    assert_eq!(type_id, &type_id_raw("stable.Thing"));
+    assert_eq!(
+        fields,
+        &[
+            Raw::Array(vec![Raw::Text("left".into()), Raw::Int(3.into())]),
+            Raw::Array(vec![Raw::Text("tail".into()), Raw::Int(5.into())]),
+            Raw::Array(vec![Raw::Text("right".into()), Raw::Int(4.into())]),
+        ]
+    );
+}
+
+#[test]
+fn nominal_supplied_fields_evaluate_in_written_order_before_canonical_serialization() {
+    let definitions = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![
+            nominal_field("second", true, None),
+            nominal_field("first", true, None),
+        ],
+    );
+    let span = SyntaxSpan::new(0, 0);
+    let counter = || Expr::Name {
+        text: "counter".into(),
+        span: span.clone(),
+    };
+    let increment = || Expr::Binary {
+        lhs: Box::new(counter()),
+        op: "+".into(),
+        rhs: Box::new(Expr::Literal {
+            text: "1".into(),
+            kind: orna_syntax_v1::LiteralKind::Integer,
+            span: span.clone(),
+        }),
+        span: span.clone(),
+    };
+    let counted = || Expr::Block {
+        statements: vec![Statement::Assignment {
+            target: AssignmentTarget::Name {
+                name: "counter".into(),
+                span: span.clone(),
+            },
+            operator: AssignmentOperator::Set,
+            value: increment(),
+            span: span.clone(),
+        }],
+        tail: Some(Box::new(counter())),
+        span: span.clone(),
+    };
+    let body = Expr::Block {
+        statements: vec![Statement::Let {
+            pattern: Pattern::Name("counter".into(), span.clone()),
+            annotation: None,
+            value: Expr::Literal {
+                text: "0".into(),
+                kind: orna_syntax_v1::LiteralKind::Integer,
+                span: span.clone(),
+            },
+            span: span.clone(),
+        }],
+        tail: Some(Box::new(Expr::Nominal {
+            path: vec![NameSegment {
+                text: "Thing".into(),
+                span: span.clone(),
+            }],
+            fields: vec![
+                RecordField {
+                    name: "first".into(),
+                    value: counted(),
+                    span: span.clone(),
+                },
+                RecordField {
+                    name: "second".into(),
+                    value: counted(),
+                    span: span.clone(),
+                },
+            ],
+            span: span.clone(),
+        })),
+        span,
+    };
+    let functions = BTreeMap::from([(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body,
+            environment: Environment::new(),
+        },
+    )]);
+    let result = invoke_named_with_nominals(
+        "run",
+        &functions,
+        &Environment::new(),
+        &definitions,
+        Limits::default(),
+    )
+    .expect("supplied fields should evaluate in source order");
+    let (_, fields) = nominal_parts(&result);
+    let values = fields
+        .iter()
+        .map(|field| {
+            let Raw::Array(parts) = field else {
+                panic!("expected nominal field entry");
+            };
+            let [Raw::Text(name), value] = parts.as_slice() else {
+                panic!("expected named nominal field entry");
+            };
+            (name.clone(), value.clone())
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(values.get("first"), Some(&Raw::Int(1.into())));
+    assert_eq!(values.get("second"), Some(&Raw::Int(2.into())));
+}
+
+#[test]
+fn nominal_supplied_values_bypass_omitted_defaults() {
+    let definitions = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![nominal_field("value", true, Some("1 / 0"))],
+    );
+    let result = evaluate_parsed_with_nominals(
+        &parsed_expression("Thing { value: 9 }"),
+        &Environment::new(),
+        &definitions,
+        Limits::default(),
+    )
+    .expect("a supplied field must not evaluate its default");
+    let (_, fields) = nominal_parts(&result);
+    assert_eq!(
+        fields,
+        &[Raw::Array(vec![
+            Raw::Text("value".into()),
+            Raw::Int(9.into())
+        ])]
+    );
+}
+
+#[test]
+fn nominal_defaults_run_once_in_declaration_order() {
+    let definitions = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![
+            nominal_field("first", true, Some("1")),
+            nominal_field("second", true, Some("first + 1")),
+        ],
+    );
+    let result = evaluate_parsed_with_nominals(
+        &parsed_expression("Thing {}"),
+        &Environment::new(),
+        &definitions,
+        Limits {
+            max_steps: 5,
+            ..Limits::default()
+        },
+    )
+    .expect("each declaration default should execute once");
+    let (_, fields) = nominal_parts(&result);
+    assert_eq!(
+        fields,
+        &[
+            Raw::Array(vec![Raw::Text("first".into()), Raw::Int(1.into())]),
+            Raw::Array(vec![Raw::Text("second".into()), Raw::Int(2.into())]),
+        ]
+    );
+}
+
+#[test]
+fn nominal_construction_rejects_duplicate_unknown_missing_and_failing_fields() {
+    let definitions = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![
+            nominal_field("required", true, None),
+            nominal_field("failing", true, Some("1 / 0")),
+        ],
+    );
+    for source in ["Thing { required: 1, required: 2 }", "Thing { unknown: 1 }"] {
+        assert_eq!(
+            evaluate_parsed_with_nominals(
+                &parsed_expression(source),
+                &Environment::new(),
+                &definitions,
+                Limits::default(),
+            )
+            .unwrap_err()
+            .code(),
+            "ORNA-EVAL-ARGUMENT",
+            "{source}"
+        );
+    }
+    assert_eq!(
+        evaluate_parsed_with_nominals(
+            &parsed_expression("Thing {}"),
+            &Environment::new(),
+            &definitions,
+            Limits::default(),
+        )
+        .unwrap_err()
+        .code(),
+        "ORNA-EVAL-ARGUMENT"
+    );
+    assert_eq!(
+        evaluate_parsed_with_nominals(
+            &parsed_expression("Thing { required: 1 }"),
+            &Environment::new(),
+            &definitions,
+            Limits::default(),
+        )
+        .unwrap_err()
+        .code(),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
+    );
+}
+
+#[test]
+fn external_nominal_construction_rejects_private_fields_but_owner_namespace_can_construct() {
+    let definitions = nominal_definitions(
+        "vault.Vault",
+        "stable.Vault",
+        Some("vault"),
+        vec![nominal_field("secret", false, None)],
+    );
+    let expression = parsed_expression("vault.Vault { secret: 7 }");
+    assert_eq!(
+        evaluate_parsed_with_nominals(
+            &expression,
+            &Environment::new(),
+            &definitions,
+            Limits::default(),
+        )
+        .unwrap_err()
+        .code(),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
+
+    let defaulted_private = nominal_definitions(
+        "vault.Defaulted",
+        "stable.Defaulted",
+        Some("vault"),
+        vec![nominal_field("secret", false, Some("7"))],
+    );
+    let result = evaluate_parsed_with_nominals(
+        &parsed_expression("vault.Defaulted {}"),
+        &Environment::new(),
+        &defaulted_private,
+        Limits::default(),
+    )
+    .expect("an omitted private field with a declaration default is admissible");
+    let (type_id, fields) = nominal_parts(&result);
+    assert_eq!(type_id, &type_id_raw("stable.Defaulted"));
+    assert_eq!(
+        fields,
+        &[Raw::Array(vec![
+            Raw::Text("secret".into()),
+            Raw::Int(7.into())
+        ])]
+    );
+
+    let mut definitions = definitions;
+    definitions.insert(
+        "Vault".into(),
+        NominalDefinition::new(
+            type_id_raw("stable.ShortVault"),
+            None,
+            vec![nominal_field("other", true, Some("1"))],
+        ),
+    );
+
+    let functions = std::collections::BTreeMap::from([
+        (
+            "vault.make".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: parsed_expression("vault.inner()"),
+                environment: Environment::new(),
+            },
+        ),
+        (
+            "vault.inner".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: parsed_expression("Vault { secret: 7 }"),
+                environment: Environment::new(),
+            },
+        ),
+    ]);
+    let result = invoke_named_with_nominals(
+        "vault.make",
+        &functions,
+        &Environment::new(),
+        &definitions,
+        Limits::default(),
+    )
+    .expect("the owning namespace may construct private fields");
+    let (type_id, fields) = nominal_parts(&result);
+    assert_eq!(type_id, &type_id_raw("stable.Vault"));
+    assert_eq!(
+        fields,
+        &[Raw::Array(vec![
+            Raw::Text("secret".into()),
+            Raw::Int(7.into())
+        ])]
+    );
+
+    let root_owned = nominal_definitions(
+        "RootThing",
+        "stable.RootThing",
+        None,
+        vec![nominal_field("secret", false, None)],
+    );
+    evaluate_parsed_with_nominals(
+        &parsed_expression("RootThing { secret: 7 }"),
+        &Environment::new(),
+        &root_owned,
+        Limits::default(),
+    )
+    .expect("root-owned construction uses the root namespace");
 }
 
 #[derive(Default)]
