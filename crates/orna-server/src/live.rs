@@ -3965,8 +3965,7 @@ mod tests {
             .expect("second WebSocket handshake write must succeed");
             bounded_test_wait(entered_receiver, "delivery gate entry")
                 .await
-                .expect("delivery gate must be reached after actor_deliver")
-                .expect("delivery gate must signal its entry");
+                .expect("delivery gate must be reached after actor_deliver");
             assert_eq!(
                 bounded_test_wait(retirement_gates.next(), "second retirement response")
                     .await
