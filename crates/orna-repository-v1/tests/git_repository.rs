@@ -17,7 +17,7 @@ use orna_repository_v1::{
 use parquet::{
     basic::{Compression, Encoding, PageType},
     column::reader::ColumnReader,
-    data_type::{Int32Type, Int64Type},
+    data_type::{BoolType, Int32Type, Int64Type},
     file::{
         metadata::{KeyValue, ParquetMetaDataWriter},
         properties::{WriterProperties, WriterVersion},
@@ -432,6 +432,170 @@ fn compact_columns_for_mapping(field_id: Uuid, type_name: &str, encoding: &str) 
     ])]))
     .unwrap()
     .encode()
+    .unwrap()
+}
+
+fn compact_schema_with_roles(table: Uuid, fields: &[(Uuid, &str, u8)]) -> SchemaDescriptor {
+    let mut fields = fields.to_vec();
+    fields.sort_by_key(|(field, _, _)| *field);
+    SchemaDescriptor::new(OvbRaw::Map(vec![
+        (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+        (
+            OvbRaw::Int(1.into()),
+            OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(table.as_bytes().to_vec()))),
+        ),
+        (
+            OvbRaw::Int(2.into()),
+            OvbRaw::Array(
+                fields
+                    .iter()
+                    .filter(|(_, _, role)| *role == 0)
+                    .map(|(field, _, _)| {
+                        OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())))
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            OvbRaw::Int(3.into()),
+            OvbRaw::Array(
+                fields
+                    .into_iter()
+                    .map(|(field, name, role)| {
+                        OvbRaw::Array(vec![
+                            OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(field.as_bytes().to_vec()))),
+                            OvbRaw::Text(name.to_owned()),
+                            OvbRaw::Array(vec![
+                                OvbRaw::Int(0.into()),
+                                OvbRaw::Text("Int".to_owned()),
+                            ]),
+                            OvbRaw::Int(role.into()),
+                            if role == 2 {
+                                OvbRaw::Array(vec![
+                                    OvbRaw::Int(2.into()),
+                                    OvbRaw::Bytes(vec![0; 32]),
+                                ])
+                            } else {
+                                OvbRaw::Array(vec![OvbRaw::Int(0.into())])
+                            },
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+    ]))
+    .unwrap()
+}
+
+fn compact_primitive_parquet(
+    table: Uuid,
+    schema: &SchemaDescriptor,
+    physical_field: Uuid,
+    type_name: &str,
+    columns: &[u8],
+) -> Vec<u8> {
+    let (physical_type, write_value) = match type_name {
+        "Int" => ("INT64", false),
+        "Bool" => ("BOOLEAN", true),
+        _ => panic!("test fixture supports only Int and Bool"),
+    };
+    let schema_descriptor = Arc::new(
+        parse_message_type(&format!(
+            "message schema {{ REQUIRED {physical_type} f_{}; }}",
+            physical_field.simple()
+        ))
+        .unwrap(),
+    );
+    let metadata = vec![
+        KeyValue::new(
+            "orna.profile".to_owned(),
+            Some("compact-storage-v1".to_owned()),
+        ),
+        KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
+        KeyValue::new(
+            "orna.schema.sha256".to_owned(),
+            Some(hex_digest(&schema_fingerprint(schema))),
+        ),
+        KeyValue::new(
+            "orna.schema.ovb".to_owned(),
+            Some(base64(&schema.encode().unwrap())),
+        ),
+        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
+        KeyValue::new(
+            "orna.encoder".to_owned(),
+            Some("test-encoder-v1".to_owned()),
+        ),
+    ];
+    let properties = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::ZSTD(Default::default()))
+            .set_dictionary_enabled(false)
+            .set_encoding(Encoding::PLAIN)
+            .set_writer_version(WriterVersion::PARQUET_2_0)
+            .set_key_value_metadata(Some(metadata))
+            .build(),
+    );
+    let mut bytes = Vec::new();
+    let mut writer = SerializedFileWriter::new(&mut bytes, schema_descriptor, properties).unwrap();
+    let mut row_group = writer.next_row_group().unwrap();
+    let mut column = row_group.next_column().unwrap().unwrap();
+    if write_value {
+        column
+            .typed::<BoolType>()
+            .write_batch(&[true], None, None)
+            .unwrap();
+    } else {
+        column
+            .typed::<Int64Type>()
+            .write_batch(&[1], None, None)
+            .unwrap();
+    }
+    column.close().unwrap();
+    row_group.close().unwrap();
+    writer.close().unwrap();
+
+    let footer_length =
+        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
+    let footer = bytes.len() - 8 - footer_length;
+    assert_eq!(&bytes[footer..footer + 2], &[0x15, 0x04]);
+    bytes[footer + 1] = 0x02;
+    with_page_checksums(bytes)
+}
+
+fn compact_segment_for_schema(
+    table: Uuid,
+    ordinal: u64,
+    role: CompactSegmentRole,
+    schema: &SchemaDescriptor,
+    physical_field: Uuid,
+    type_name: &str,
+    columns: Vec<u8>,
+) -> CompactSegment {
+    let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, ordinal | 0x8000_0000_0000_0000);
+    let path = ManagedPath::new(format!(
+        ".orna/storage/{table}/data/{}/{segment_id}.parquet",
+        &segment_id.to_string()[..2]
+    ))
+    .unwrap();
+    let key = CanonicalValue::new(OvbRaw::Int(ordinal.into()))
+        .unwrap()
+        .encode()
+        .unwrap();
+    CompactSegment::new(
+        segment_id,
+        role,
+        schema_fingerprint(schema),
+        "test-encoder-v1",
+        path,
+        compact_primitive_parquet(table, schema, physical_field, type_name, &columns),
+        key.clone(),
+        key,
+        1,
+        columns,
+        true,
+        false,
+    )
     .unwrap()
 }
 
@@ -5109,6 +5273,217 @@ fn recovery_preserves_post_ref_external_conflict_and_can_resume() {
     let mut journal = repo.read_publication_journal().unwrap().unwrap();
     repo.mark_runtime_complete([3; 16], &mut journal).unwrap();
     assert_eq!(repo.read_publication_journal().unwrap(), None);
+}
+
+#[test]
+fn compact_publication_rejects_schema_identity_and_type_substitution() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    let key = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0701);
+    let substituted = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0702);
+    let schema = compact_schema_with_roles(table, &[(key, "key", 0)]);
+    let head = repo.head().unwrap().unwrap();
+
+    for (ordinal, physical_field, type_name, columns) in [
+        (
+            701,
+            substituted,
+            "Int",
+            compact_columns_for_mapping(substituted, "Int", "int64"),
+        ),
+        (
+            702,
+            key,
+            "Bool",
+            compact_columns_for_mapping(key, "Bool", "bool"),
+        ),
+    ] {
+        let segment = compact_segment_for_schema(
+            table,
+            ordinal,
+            CompactSegmentRole::Data,
+            &schema,
+            physical_field,
+            type_name,
+            columns,
+        );
+        assert!(matches!(
+            repo.prepare_compact_publication(
+                &head,
+                repo.index_generation().unwrap(),
+                CompactManifest::empty(table, schema_fingerprint(&schema)),
+                [ordinal as u8; 16],
+                [ordinal as u8; 32],
+                &[segment],
+                "reject compact schema substitution",
+            ),
+            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
+        ));
+    }
+}
+
+#[test]
+fn compact_publication_rejects_a_schema_owned_by_another_table() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    let schema_table = Uuid::new_v4();
+    let key = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0703);
+    let schema = compact_schema_with_roles(schema_table, &[(key, "key", 0)]);
+    let segment = compact_segment_for_schema(
+        table,
+        703,
+        CompactSegmentRole::Data,
+        &schema,
+        key,
+        "Int",
+        compact_columns_for_mapping(key, "Int", "int64"),
+    );
+    let head = repo.head().unwrap().unwrap();
+
+    assert!(matches!(
+        repo.prepare_compact_publication(
+            &head,
+            repo.index_generation().unwrap(),
+            CompactManifest::empty(table, schema_fingerprint(&schema)),
+            [70; 16],
+            [70; 32],
+            &[segment],
+            "reject compact foreign-table schema",
+        ),
+        Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
+    ));
+}
+
+#[test]
+fn compact_publication_requires_complete_unique_known_stored_mappings() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    let key = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0711);
+    let stored = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0712);
+    let unknown = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0713);
+    let schema = compact_schema_with_roles(table, &[(key, "key", 0), (stored, "stored", 1)]);
+    let head = repo.head().unwrap().unwrap();
+
+    for (ordinal, physical_field, columns) in [
+        (711, key, compact_columns_for_mapping(key, "Int", "int64")),
+        (
+            712,
+            unknown,
+            compact_columns_for_mapping(unknown, "Int", "int64"),
+        ),
+        (
+            713,
+            key,
+            CanonicalValue::new(OvbRaw::Array(vec![
+                OvbRaw::Array(vec![
+                    OvbRaw::Array(vec![OvbRaw::Tag(
+                        37,
+                        Box::new(OvbRaw::Bytes(key.as_bytes().to_vec())),
+                    )]),
+                    OvbRaw::Array(vec![OvbRaw::Text(format!("f_{}", key.simple()))]),
+                    OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]),
+                    OvbRaw::Text("int64".to_owned()),
+                    OvbRaw::Array(Vec::new()),
+                ]),
+                OvbRaw::Array(vec![
+                    OvbRaw::Array(vec![OvbRaw::Tag(
+                        37,
+                        Box::new(OvbRaw::Bytes(key.as_bytes().to_vec())),
+                    )]),
+                    OvbRaw::Array(vec![OvbRaw::Text(format!("f_{}", key.simple()))]),
+                    OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]),
+                    OvbRaw::Text("int64".to_owned()),
+                    OvbRaw::Array(Vec::new()),
+                ]),
+            ]))
+            .unwrap()
+            .encode()
+            .unwrap(),
+        ),
+    ] {
+        let segment = compact_segment_for_schema(
+            table,
+            ordinal,
+            CompactSegmentRole::Data,
+            &schema,
+            physical_field,
+            "Int",
+            columns,
+        );
+        assert!(matches!(
+            repo.prepare_compact_publication(
+                &head,
+                repo.index_generation().unwrap(),
+                CompactManifest::empty(table, schema_fingerprint(&schema)),
+                [ordinal as u8; 16],
+                [ordinal as u8; 32],
+                &[segment],
+                "reject incomplete compact descriptor",
+            ),
+            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
+        ));
+    }
+}
+
+#[test]
+fn compact_publication_excludes_computed_fields_and_deletion_non_keys() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    let key = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0721);
+    let computed = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0722);
+    let computed_schema =
+        compact_schema_with_roles(table, &[(key, "key", 0), (computed, "computed", 2)]);
+    let head = repo.head().unwrap().unwrap();
+    let accepted = compact_segment_for_schema(
+        table,
+        721,
+        CompactSegmentRole::Data,
+        &computed_schema,
+        key,
+        "Int",
+        compact_columns_for_mapping(key, "Int", "int64"),
+    );
+    assert!(
+        repo.prepare_compact_publication(
+            &head,
+            repo.index_generation().unwrap(),
+            CompactManifest::empty(table, schema_fingerprint(&computed_schema)),
+            [72; 16],
+            [72; 32],
+            &[accepted],
+            "accept compact computed omission",
+        )
+        .is_ok()
+    );
+
+    let stored = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0723);
+    let deletion_schema =
+        compact_schema_with_roles(table, &[(key, "key", 0), (stored, "stored", 1)]);
+    let deletion = compact_segment_for_schema(
+        table,
+        722,
+        CompactSegmentRole::Deletion,
+        &deletion_schema,
+        stored,
+        "Int",
+        compact_columns_for_mapping(stored, "Int", "int64"),
+    );
+    assert!(matches!(
+        repo.prepare_compact_publication(
+            &head,
+            repo.index_generation().unwrap(),
+            CompactManifest::empty(table, schema_fingerprint(&deletion_schema)),
+            [73; 16],
+            [73; 32],
+            &[deletion],
+            "reject compact deletion stored field",
+        ),
+        Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
+    ));
 }
 
 #[test]
