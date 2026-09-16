@@ -24,7 +24,7 @@ use serde_json::Value as JsonValue;
 use std::{
     error::Error,
     fmt, fs,
-    io::{self, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     time::Instant,
@@ -374,6 +374,7 @@ pub fn run_sqlite_invoke(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> Result<InstalledInvokeOutcome, InstalledInvokeError> {
+    let stderr_is_terminal = io::stderr().is_terminal();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -388,6 +389,7 @@ pub fn run_sqlite_invoke(
         request,
         stdout,
         stderr,
+        stderr_is_terminal,
     ))
 }
 
@@ -396,6 +398,7 @@ async fn run_sqlite_invoke_async(
     request: InstalledInvokeRequest,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
+    stderr_is_terminal: bool,
 ) -> Result<InstalledInvokeOutcome, InstalledInvokeError> {
     if matches!(request.runtime, Some(crate::RuntimeFamily::Qt)) {
         return Err(sqlite_invoke_error(
@@ -467,7 +470,7 @@ async fn run_sqlite_invoke_async(
         .collect::<Result<Vec<_>, InstalledInvokeError>>()?;
 
     let started = Instant::now();
-    if !request.no_progress {
+    if sqlite_invoke_progress_enabled(request.no_progress, stderr_is_terminal) {
         writeln!(stderr, "orna: invoke: invocation started").map_err(|error| {
             sqlite_invoke_error(
                 InstalledInvokeErrorKind::Presentation,
@@ -502,7 +505,7 @@ async fn run_sqlite_invoke_async(
         }
     };
     render_sqlite_values(function, &values, output, stdout)?;
-    if !request.no_progress {
+    if sqlite_invoke_progress_enabled(request.no_progress, stderr_is_terminal) {
         writeln!(
             stderr,
             "orna: invoke: invocation completed in {}ns",
@@ -516,6 +519,10 @@ async fn run_sqlite_invoke_async(
         })?;
     }
     Ok(InstalledInvokeOutcome::Completed)
+}
+
+fn sqlite_invoke_progress_enabled(no_progress: bool, stderr_is_terminal: bool) -> bool {
+    stderr_is_terminal && !no_progress
 }
 
 fn resolve_sqlite_function<'a>(
@@ -1211,5 +1218,17 @@ mod tests {
             error.to_string().contains("enum type"),
             "unsupported diff error should identify the rejected capability: {error}"
         );
+    }
+
+    #[test]
+    fn sqlite_invoke_progress_requires_terminal_stderr() {
+        assert!(!sqlite_invoke_progress_enabled(false, false));
+        assert!(sqlite_invoke_progress_enabled(false, true));
+    }
+
+    #[test]
+    fn sqlite_invoke_no_progress_overrides_terminal_stderr() {
+        assert!(!sqlite_invoke_progress_enabled(true, false));
+        assert!(!sqlite_invoke_progress_enabled(true, true));
     }
 }
