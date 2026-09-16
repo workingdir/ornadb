@@ -175,6 +175,7 @@ pub type Environment = BTreeMap<String, CanonicalValue>;
 /// visibility/default plan, preserving the runtime ownership boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NominalField {
+    field_id: Raw,
     name: String,
     public: bool,
     default: Option<Expr>,
@@ -183,8 +184,9 @@ pub struct NominalField {
 impl NominalField {
     /// Create a public required field.
     #[must_use]
-    pub fn public(name: impl Into<String>) -> Self {
+    pub fn public(field_id: [u8; 16], name: impl Into<String>) -> Self {
         Self {
+            field_id: object_id_raw(field_id),
             name: name.into(),
             public: true,
             default: None,
@@ -193,8 +195,9 @@ impl NominalField {
 
     /// Create a public field with its declaration-owned default expression.
     #[must_use]
-    pub fn public_with_default(name: impl Into<String>, default: Expr) -> Self {
+    pub fn public_with_default(field_id: [u8; 16], name: impl Into<String>, default: Expr) -> Self {
         Self {
+            field_id: object_id_raw(field_id),
             name: name.into(),
             public: true,
             default: Some(default),
@@ -203,8 +206,9 @@ impl NominalField {
 
     /// Create a private required field.
     #[must_use]
-    pub fn private(name: impl Into<String>) -> Self {
+    pub fn private(field_id: [u8; 16], name: impl Into<String>) -> Self {
         Self {
+            field_id: object_id_raw(field_id),
             name: name.into(),
             public: false,
             default: None,
@@ -213,8 +217,13 @@ impl NominalField {
 
     /// Create a private field with its declaration-owned default expression.
     #[must_use]
-    pub fn private_with_default(name: impl Into<String>, default: Expr) -> Self {
+    pub fn private_with_default(
+        field_id: [u8; 16],
+        name: impl Into<String>,
+        default: Expr,
+    ) -> Self {
         Self {
+            field_id: object_id_raw(field_id),
             name: name.into(),
             public: false,
             default: Some(default),
@@ -237,9 +246,9 @@ impl NominalDefinition {
     /// Create an admitted declaration plan without exposing its private
     /// field names or default expressions through public field access.
     #[must_use]
-    pub fn new(type_id: Raw, owner: Option<String>, fields: Vec<NominalField>) -> Self {
+    pub fn new(type_id: [u8; 16], owner: Option<String>, fields: Vec<NominalField>) -> Self {
         Self {
-            type_id,
+            type_id: object_id_raw(type_id),
             owner,
             fields,
         }
@@ -248,6 +257,17 @@ impl NominalDefinition {
 
 /// Trusted evaluator definitions keyed by admitted source spellings.
 pub type NominalDefinitions = BTreeMap<String, NominalDefinition>;
+
+fn object_id_raw(object_id: [u8; 16]) -> Raw {
+    Raw::Tag(37, Box::new(Raw::Bytes(object_id.to_vec())))
+}
+
+fn is_object_id_raw(value: &Raw) -> bool {
+    matches!(
+        value,
+        Raw::Tag(37, bytes) if matches!(bytes.as_ref(), Raw::Bytes(bytes) if bytes.len() == 16)
+    )
+}
 
 /// An admitted pure function and its lexical immutable value environment.
 #[derive(Clone, Debug)]
@@ -1179,26 +1199,28 @@ impl Value {
                         .collect::<Result<_, _>>()?,
                 )
             }
-            Self::NominalRecord {
-                type_id,
-                mut fields,
-            } => {
+            Self::NominalRecord { type_id, fields } => {
                 // The runtime value preserves declaration order. OVB requires
                 // canonical field-key order only at the serialization edge.
-                fields.sort_by(|(left, _), (right, _)| match (left, right) {
-                    (Raw::Text(left), Raw::Text(right)) => {
-                        left.len().cmp(&right.len()).then_with(|| left.cmp(right))
-                    }
-                    _ => std::cmp::Ordering::Equal,
-                });
+                let mut encoded = fields
+                    .into_iter()
+                    .map(|(key, value)| {
+                        let encoded_key = CanonicalValue::new(key.clone())
+                            .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                            .encode()
+                            .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                        Ok((encoded_key, key, value))
+                    })
+                    .collect::<Result<Vec<_>, EvaluationError>>()?;
+                encoded.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
                 Raw::Tag(
                     60009,
                     Box::new(Raw::Array(vec![
                         type_id,
                         Raw::Array(
-                            fields
+                            encoded
                                 .into_iter()
-                                .map(|(key, value)| {
+                                .map(|(_, key, value)| {
                                     value.raw().map(|value| Raw::Array(vec![key, value]))
                                 })
                                 .collect::<Result<_, _>>()?,
@@ -1373,6 +1395,10 @@ impl Value {
         let [type_id, Raw::Array(raw_fields)] = parts.as_slice() else {
             return Err(error("ORNA-EVAL-VALUE"));
         };
+        let nominal = !matches!(type_id, Raw::Null);
+        if nominal && !is_object_id_raw(type_id) {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
         context.items(raw_fields.len())?;
         let mut fields = Vec::with_capacity(raw_fields.len());
         for field in raw_fields {
@@ -1382,8 +1408,14 @@ impl Value {
             let [key, value] = parts.as_slice() else {
                 return Err(error("ORNA-EVAL-VALUE"));
             };
-            if let Raw::Text(name) = key {
+            if nominal {
+                if !is_object_id_raw(key) {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+            } else if let Raw::Text(name) = key {
                 context.string(name.clone())?;
+            } else {
+                return Err(error("ORNA-EVAL-VALUE"));
             }
             fields.push((key.clone(), Self::from_raw(value, context, depth + 1)?));
         }
@@ -1919,7 +1951,7 @@ impl Context<'_, '_> {
                 let value = values
                     .remove(&field.name)
                     .expect("all admitted nominal fields are materialized");
-                (Raw::Text(field.name), value)
+                (field.field_id, value)
             })
             .collect::<Vec<_>>();
         Ok(Value::NominalRecord {
