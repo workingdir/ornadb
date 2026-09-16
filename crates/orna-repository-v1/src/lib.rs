@@ -2118,12 +2118,10 @@ impl Repository {
             }
             return Err(RepositoryError::RuntimeCompletionRequired);
         }
-        if journal.compact_manifest().is_some()
-            && matches!(
-                journal.stage(),
-                PublicationJournalStage::RuntimeCompleted | PublicationJournalStage::Complete
-            )
-            && self.head()?.as_ref() != Some(journal.new_head())
+        if matches!(
+            journal.stage(),
+            PublicationJournalStage::RuntimeCompleted | PublicationJournalStage::Complete
+        ) && self.head()?.as_ref() != Some(journal.new_head())
         {
             return Err(RepositoryError::StaleHead);
         }
@@ -7206,6 +7204,9 @@ mod tests {
         journal
             .advance(PublicationJournalStage::WorktreeReconciled)
             .unwrap();
+        journal
+            .advance(PublicationJournalStage::RuntimeCompleted)
+            .unwrap();
         repository.write_publication_journal(&journal).unwrap();
 
         fs::write(root.path().join("ordinary.txt"), "later\n").unwrap();
@@ -7222,7 +7223,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .stage(),
-            PublicationJournalStage::WorktreeReconciled
+            PublicationJournalStage::RuntimeCompleted
         );
     }
 
