@@ -25,9 +25,9 @@ use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     FaultInjector, ListStreamSource, NoFault, RequestIdentity, RequestStatus,
     RunObservationRegistration, RunningTableRequestContinuation, RuntimeError, RuntimeIdentity,
-    RuntimeState, StreamHandler, StreamHandlerResult, StreamItem, StreamObservationRegistration,
-    StreamRunControl, StreamRunOutcome, StreamSource, StreamSourcePoll,
-    StreamTableCandidateValidator, StreamValidatedTableMutationBatch,
+    RuntimeState, StreamFailurePayload, StreamHandler, StreamHandlerResult, StreamItem,
+    StreamObservationRegistration, StreamRunControl, StreamRunOutcome, StreamSource,
+    StreamSourcePoll, StreamTableCandidateValidator, StreamValidatedTableMutationBatch,
     TableActivationCandidateValidator, TableActivationError, TableMutation, TerminalOutcome,
     ValidatedTableActivationCommit, ValidatedTableRequestActivationCommit, WriterLease,
 };
@@ -37,8 +37,9 @@ use orna_semantic_v1::{
 };
 use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
 use orna_stream_v1::{
-    AssertionOwnerKind, AsyncCheckpointBackend, CheckpointKey, Component, ConsumerIdentity,
-    DeliveryIdentity, DiagnosticClass, DiagnosticCode, FailureIdentity, Position, SafeDiagnostic,
+    AssertionOwnerKind, AsyncCheckpointBackend, CheckpointKey, CheckpointPrecondition,
+    CommitIntent, CommitResult, Component, ConsumerIdentity, DeliveryIdentity, DiagnosticClass,
+    DiagnosticCode, FailureIdentity, FailureStatus, LeasePurpose, Position, SafeDiagnostic,
 };
 use orna_syntax_v1::{
     Declaration, Expr, Pattern, Statement, SyntaxSpan, TypeMember, TypeRepresentation,
@@ -1268,6 +1269,21 @@ pub struct DurableTransactionalEvaluator {
     activation_time_observer: Option<std::sync::Arc<std::sync::Mutex<Option<SystemTime>>>>,
 }
 
+/// Runtime-adapter evidence returned by the bounded FAIL-001 witness.
+///
+/// The witness keeps one delivery identity for every retry and verifies the
+/// same durable record, its private-table cardinality, and redacted payload
+/// metadata before and after reopening. The row count is non-normative
+/// runtime evidence, not a public `sys.Failure` projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Fail001Witness {
+    pub attempts: u32,
+    pub durable_failure_rows: u64,
+    pub single_failure_identity: bool,
+    pub checkpoint_unchanged: bool,
+    pub reopened: bool,
+}
+
 /// The outcome of attempting to continue an already-admitted table request.
 ///
 /// `Committed` records controlled table writes and the supplied terminal in
@@ -2000,6 +2016,221 @@ impl DurableTransactionalEvaluator {
             attempts,
             replayable_payload,
         ))
+    }
+
+    /// Executes the immutable FAIL-001 contract through the durable stream
+    /// adapter: one delivery is failed 10,000 times, retry transitions are
+    /// fenced by the unchanged checkpoint, and the stable natural identity is
+    /// read back after reopening. This is runtime-adapter implementation
+    /// evidence, not compiler-produced or full Orna-engine execution.
+    pub async fn execute_fail_001(
+        &self,
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        owner_id: [u8; 16],
+        initial_digest: [u8; 32],
+    ) -> Result<Fail001Witness, RuntimeError> {
+        const ATTEMPTS: u32 = 10_000;
+        let state = RuntimeState::open(repository, identity, initial_digest).await?;
+        let writer = state.acquire_lease(owner_id).await?;
+        let delivery = DeliveryIdentity {
+            consumer: ConsumerIdentity {
+                principal: Component::new("fixture").map_err(|_| RuntimeError::RecoveryInvalid)?,
+                root: Component::new("main").map_err(|_| RuntimeError::RecoveryInvalid)?,
+                function: Component::new("fail").map_err(|_| RuntimeError::RecoveryInvalid)?,
+                binding: Component::new("item").map_err(|_| RuntimeError::RecoveryInvalid)?,
+            },
+            source_format: Component::new("list").map_err(|_| RuntimeError::RecoveryInvalid)?,
+            source: Component::new("fixture:fail-001")
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            partition_format: Component::new("none").map_err(|_| RuntimeError::RecoveryInvalid)?,
+            partition: None,
+            position_format: Component::new("index").map_err(|_| RuntimeError::RecoveryInvalid)?,
+            position: Position {
+                token: Component::new("0").map_err(|_| RuntimeError::RecoveryInvalid)?,
+            },
+            successor: Position {
+                token: Component::new("1").map_err(|_| RuntimeError::RecoveryInvalid)?,
+            },
+        };
+        let failure_identity = FailureIdentity(delivery.clone());
+        let checkpoint_key = delivery.checkpoint_key();
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let initial_checkpoint = state
+            .stream_backend(writer)
+            .checkpoint_async(&checkpoint_key)
+            .await?;
+        if initial_checkpoint.version != expected.version
+            || initial_checkpoint.committed != expected.committed
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let diagnostic = SafeDiagnostic {
+            code: DiagnosticCode::ExecutionRejected,
+            class: DiagnosticClass::Permanent,
+        };
+        let payload_bytes = b"fail-001-item".to_vec();
+        let payload = StreamFailurePayload::Plaintext(payload_bytes.clone());
+
+        let mut previous = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await?
+            {
+                CommitResult::Acquired { lease } => lease,
+                _ => return Err(RuntimeError::RecoveryInvalid),
+            };
+            match stream
+                .fail_async(lease, diagnostic, payload.clone())
+                .await?
+            {
+                CommitResult::Failed { failure } => failure,
+                _ => return Err(RuntimeError::RecoveryInvalid),
+            }
+        };
+        if previous.identity != failure_identity
+            || previous.version != 1
+            || previous.attempts != 1
+            || previous.status != FailureStatus::Failed
+            || previous.diagnostic != diagnostic
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+
+        for attempts in 2..=ATTEMPTS {
+            let mut stream = state.stream_backend(writer);
+            let retrying = match stream
+                .apply_async(CommitIntent::Retry {
+                    failure: failure_identity.clone(),
+                    expected_version: previous.version,
+                    expected: expected.clone(),
+                })
+                .await?
+            {
+                CommitResult::RetryScheduled { failure } => failure,
+                _ => return Err(RuntimeError::RecoveryInvalid),
+            };
+            if retrying.identity != failure_identity
+                || retrying.version
+                    != previous
+                        .version
+                        .checked_add(1)
+                        .ok_or(RuntimeError::RecoveryInvalid)?
+                || retrying.attempts != attempts
+                || retrying.status != FailureStatus::Retrying
+                || retrying.diagnostic != diagnostic
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await?
+            {
+                CommitResult::Acquired { lease } => lease,
+                _ => return Err(RuntimeError::RecoveryInvalid),
+            };
+            previous = match stream
+                .fail_async(lease, diagnostic, payload.clone())
+                .await?
+            {
+                CommitResult::Failed { failure } => failure,
+                _ => return Err(RuntimeError::RecoveryInvalid),
+            };
+            if previous.identity != failure_identity
+                || previous.version
+                    != retrying
+                        .version
+                        .checked_add(1)
+                        .ok_or(RuntimeError::RecoveryInvalid)?
+                || previous.attempts != attempts
+                || previous.status != FailureStatus::Failed
+                || previous.diagnostic != diagnostic
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+        }
+
+        let checkpoint_unchanged = state
+            .stream_backend(writer)
+            .checkpoint_async(&checkpoint_key)
+            .await?
+            == initial_checkpoint;
+        let durable_failure = state
+            .stream_backend(writer)
+            .failure_async(&failure_identity)
+            .await?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let durable_failure_rows = state.stream_failure_row_count_for_evidence().await?;
+        let payload_metadata = state
+            .stream_backend(writer)
+            .failure_payload_metadata_async(&failure_identity)
+            .await?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let single_failure_identity = durable_failure.identity == failure_identity
+            && durable_failure == previous
+            && durable_failure.attempts == ATTEMPTS
+            && durable_failure.status == FailureStatus::Failed
+            && durable_failure.diagnostic == diagnostic
+            && payload_metadata.plaintext_bytes == Some(payload_bytes.len() as u64)
+            && !payload_metadata.protected_reference
+            && payload_metadata.redacted;
+        if !single_failure_identity || durable_failure_rows != 1 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        drop(state);
+
+        let reopened_state = RuntimeState::open(repository, identity, initial_digest).await?;
+        let reopened_writer = reopened_state.acquire_lease(owner_id).await?;
+        let reopened_stream = reopened_state.stream_backend(reopened_writer);
+        let reopened_failure_rows = reopened_state
+            .stream_failure_row_count_for_evidence()
+            .await?;
+        let reopened = reopened_stream.checkpoint_async(&checkpoint_key).await?
+            == initial_checkpoint
+            && reopened_stream
+                .failure_async(&failure_identity)
+                .await?
+                .is_some_and(|failure| {
+                    failure == previous
+                        && failure.attempts == ATTEMPTS
+                        && failure.status == FailureStatus::Failed
+                        && failure.diagnostic == diagnostic
+                })
+            && reopened_stream
+                .failure_payload_metadata_async(&failure_identity)
+                .await?
+                .is_some_and(|metadata| {
+                    metadata.plaintext_bytes == Some(payload_bytes.len() as u64)
+                        && !metadata.protected_reference
+                        && metadata.redacted
+                });
+        if !checkpoint_unchanged
+            || durable_failure_rows != 1
+            || reopened_failure_rows != 1
+            || !reopened
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+
+        Ok(Fail001Witness {
+            attempts: ATTEMPTS,
+            durable_failure_rows,
+            single_failure_identity,
+            checkpoint_unchanged,
+            reopened,
+        })
     }
 
     /// Runs the finite-list project stream with a caller-owned cancellation
