@@ -1053,10 +1053,11 @@ def check_alter_rename_highlights(
 
 def check_type_reference_highlights(
     tree_sitter: str,
+    zed_directory: Path,
     tree_sitter_directory: Path,
     repository: Path,
 ) -> bool:
-    """Check qualified type captures and namespace-only expression references."""
+    """Check both shipped queries capture qualified types but not namespace members."""
     if not check_highlight_fixture(
         tree_sitter,
         tree_sitter_directory,
@@ -1066,11 +1067,14 @@ def check_type_reference_highlights(
     ):
         return False
 
-    highlights_path = tree_sitter_directory / "queries" / "highlights.scm"
     fixture_path = (
         tree_sitter_directory / "test" / "highlight" / TYPE_REFERENCE_HIGHLIGHT_FIXTURE_NAME
     )
-    for path in (highlights_path, fixture_path):
+    query_paths = (
+        ("tree-sitter", tree_sitter_directory / "queries" / "highlights.scm"),
+        ("Zed", zed_directory / "languages" / "orna" / "highlights.scm"),
+    )
+    for path in (fixture_path, *(path for _, path in query_paths)):
         if not path.is_file():
             log(
                 f"required type-reference highlight input is missing: "
@@ -1079,67 +1083,68 @@ def check_type_reference_highlights(
             )
             return False
 
-    result = run_command(
-        [
-            tree_sitter,
-            "query",
-            "--grammar-path",
-            str(tree_sitter_directory),
-            "--captures",
-            str(highlights_path),
-            str(fixture_path),
-        ],
-        cwd=tree_sitter_directory,
-        label="tree-sitter qualified type highlight query",
-    )
-    if result is None or result.returncode != 0:
-        status = "could not start" if result is None else f"exited with status {result.returncode}"
-        log(f"qualified type highlight query failed ({status})", error=True)
-        return False
-
     capture_line = re.compile(
         r"capture:\s+\d+\s+-\s+(?P<name>[^,]+),.*text: `(?P<text>[^`]*)`"
     )
-    captures = [
-        (match.group("name"), match.group("text"))
-        for line in result.stdout.splitlines()
-        if (match := capture_line.search(line)) is not None
-    ]
-    for capture_name, expected_texts in TYPE_REFERENCE_HIGHLIGHT_EXPECTATIONS.items():
-        observed = [text for name, text in captures if name == capture_name]
-        if capture_name == "type":
-            if observed != list(expected_texts):
-                log(
-                    "qualified type highlight query did not capture type references in order: "
-                    f"expected {expected_texts!r}, observed {observed!r}",
-                    error=True,
-                )
-                return False
-        else:
-            missing = [text for text in expected_texts if text not in observed]
-            if missing:
-                log(
-                    "qualified type highlight query did not capture namespace references: "
-                    f"missing {missing!r}, observed {observed!r}",
-                    error=True,
-                )
-                return False
-
-    for capture_name, forbidden_texts in TYPE_REFERENCE_HIGHLIGHT_FORBIDDEN.items():
-        observed = [
-            text
-            for name, text in captures
-            if name == capture_name and text in forbidden_texts
-        ]
-        if observed:
-            log(
-                "qualified type highlight query over-captured ordinary namespace references: "
-                f"{capture_name} {observed!r}",
-                error=True,
-            )
+    for label, highlights_path in query_paths:
+        result = run_command(
+            [
+                tree_sitter,
+                "query",
+                "--grammar-path",
+                str(tree_sitter_directory),
+                "--captures",
+                str(highlights_path),
+                str(fixture_path),
+            ],
+            cwd=tree_sitter_directory,
+            label=f"tree-sitter {label} qualified type highlight query",
+        )
+        if result is None or result.returncode != 0:
+            status = "could not start" if result is None else f"exited with status {result.returncode}"
+            log(f"{label} qualified type highlight query failed ({status})", error=True)
             return False
 
-    log("qualified type captures and namespace-only expression references passed")
+        captures = [
+            (match.group("name"), match.group("text"))
+            for line in result.stdout.splitlines()
+            if (match := capture_line.search(line)) is not None
+        ]
+        for capture_name, expected_texts in TYPE_REFERENCE_HIGHLIGHT_EXPECTATIONS.items():
+            observed = [text for name, text in captures if name == capture_name]
+            if capture_name == "type":
+                if observed != list(expected_texts):
+                    log(
+                        f"{label} qualified type highlight query did not capture type references in order: "
+                        f"expected {expected_texts!r}, observed {observed!r}",
+                        error=True,
+                    )
+                    return False
+            else:
+                missing = [text for text in expected_texts if text not in observed]
+                if missing:
+                    log(
+                        f"{label} qualified type highlight query did not capture namespace references: "
+                        f"missing {missing!r}, observed {observed!r}",
+                        error=True,
+                    )
+                    return False
+
+        for capture_name, forbidden_texts in TYPE_REFERENCE_HIGHLIGHT_FORBIDDEN.items():
+            observed = [
+                text
+                for name, text in captures
+                if name == capture_name and text in forbidden_texts
+            ]
+            if observed:
+                log(
+                    f"{label} qualified type highlight query over-captured ordinary namespace references: "
+                    f"{capture_name} {observed!r}",
+                    error=True,
+                )
+                return False
+
+        log(f"{label} qualified type captures and namespace-only expression references passed")
     return True
 
 
@@ -2605,7 +2610,7 @@ def main() -> int:
     ):
         return 1
     if not check_type_reference_highlights(
-        tree_sitter, tree_sitter_directory, repository
+        tree_sitter, zed_directory, tree_sitter_directory, repository
     ):
         return 1
     if not check_qualified_name_highlights(
