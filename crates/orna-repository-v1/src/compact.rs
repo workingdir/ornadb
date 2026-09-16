@@ -101,6 +101,125 @@ where
     })
 }
 
+fn validate_event_time_bounds(
+    min_event_time: Option<&str>,
+    max_event_time: Option<&str>,
+) -> Result<(), RepositoryError> {
+    let (Some(min_event_time), Some(max_event_time)) = (min_event_time, max_event_time) else {
+        return if min_event_time.is_none() && max_event_time.is_none() {
+            Ok(())
+        } else {
+            Err(RepositoryError::InvalidCompactManifest)
+        };
+    };
+    let min = parse_canonical_utc_instant(min_event_time)?;
+    let max = parse_canonical_utc_instant(max_event_time)?;
+    if min > max {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    Ok(())
+}
+
+fn parse_canonical_utc_instant(value: &str) -> Result<(i64, u32), RepositoryError> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20
+        || !bytes.is_ascii()
+        || bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || bytes.get(10) != Some(&b'T')
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+    {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let component = |start: usize, end: usize| {
+        bytes
+            .get(start..end)
+            .filter(|part| part.iter().all(u8::is_ascii_digit))
+            .and_then(|part| std::str::from_utf8(part).ok())
+            .and_then(|part| part.parse::<u32>().ok())
+    };
+    let (year, month, day, hour, minute, second) = (
+        component(0, 4),
+        component(5, 7),
+        component(8, 10),
+        component(11, 13),
+        component(14, 16),
+        component(17, 19),
+    );
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) =
+        (year, month, day, hour, minute, second)
+    else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    if !(1..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || hour >= 24
+        || minute >= 60
+        || second >= 60
+    {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let maximum_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return Err(RepositoryError::InvalidCompactManifest),
+    };
+    if !(1..=maximum_day).contains(&day) {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+
+    let mut at = 19;
+    let nanosecond = if bytes.get(at) == Some(&b'.') {
+        at += 1;
+        let start = at;
+        while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+            at += 1;
+        }
+        let digits = at - start;
+        if !(1..=9).contains(&digits) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let fraction = component(start, at).ok_or(RepositoryError::InvalidCompactManifest)?;
+        fraction * 10_u32.pow((9 - digits) as u32)
+    } else {
+        0
+    };
+    if bytes.get(at..).is_none_or(|tail| tail != b"Z") {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+
+    let year = i64::from(year);
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let years_before = year - 1;
+    let days_before_year =
+        years_before * 365 + years_before / 4 - years_before / 100 + years_before / 400;
+    let days_before_epoch = 1969 * 365 + 1969 / 4 - 1969 / 100 + 1969 / 400;
+    let days_before_month = match month {
+        1 => 0,
+        2 => 31,
+        3 => 59,
+        4 => 90,
+        5 => 120,
+        6 => 151,
+        7 => 181,
+        8 => 212,
+        9 => 243,
+        10 => 273,
+        11 => 304,
+        12 => 334,
+        _ => unreachable!("month validated above"),
+    } + i64::from(month > 2 && leap);
+    let days = days_before_year + days_before_month + day - 1 - days_before_epoch;
+    let seconds =
+        days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
+    Ok((seconds, nanosecond))
+}
+
 /// The compact role of one immutable segment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompactSegmentRole {
@@ -208,15 +327,13 @@ impl CompactSegment {
                 .extension()
                 .and_then(|value| value.to_str())
                 != Some("parquet")
-            || self.min_event_time.is_some() != self.max_event_time.is_some()
-            || self
-                .min_event_time
-                .iter()
-                .chain(self.max_event_time.iter())
-                .any(|value| value.is_empty() || !value.bytes().all(is_safe_atom))
         {
             return Err(RepositoryError::InvalidCompactManifest);
         }
+        validate_event_time_bounds(
+            self.min_event_time.as_deref(),
+            self.max_event_time.as_deref(),
+        )?;
         Ok(())
     }
 }
@@ -332,12 +449,6 @@ impl CompactManifestEntry {
             || canonical_key_order(&self.min_key, &self.max_key)? == Ordering::Greater
             || self.row_count == 0
             || self.compressed_bytes == 0
-            || self.min_event_time.is_some() != self.max_event_time.is_some()
-            || self
-                .min_event_time
-                .iter()
-                .chain(self.max_event_time.iter())
-                .any(|value| value.is_empty() || !value.bytes().all(is_safe_atom))
             || !self.git_object_id.bytes().all(is_hex)
             || object_id_length.is_some_and(|length| self.git_object_id.len() != length)
             || self.relative_path != compact_segment_path(table, self.segment_id)?
@@ -350,6 +461,10 @@ impl CompactManifestEntry {
         {
             return Err(RepositoryError::InvalidCompactManifest);
         }
+        validate_event_time_bounds(
+            self.min_event_time.as_deref(),
+            self.max_event_time.as_deref(),
+        )?;
         Ok(())
     }
 }
@@ -3526,6 +3641,137 @@ mod tests {
     }
 
     #[test]
+    fn compact_event_time_bounds_reject_malformed_instants() {
+        assert!(
+            validate_event_time_bounds(Some("2026-02-30T00:00:00Z"), Some("2026-03-01T00:00:00Z"),)
+                .is_err()
+        );
+        assert!(
+            validate_event_time_bounds(Some("2026-03-01T00:00:00"), Some("2026-03-01T00:00:01Z"),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn compact_event_time_bounds_reject_non_canonical_offsets() {
+        for offset in ["+00:00", "+05:30", "-04:00"] {
+            let min = format!("2026-03-01T00:00:00{offset}");
+            assert!(validate_event_time_bounds(Some(&min), Some("2026-03-01T00:00:01Z"),).is_err());
+        }
+    }
+
+    #[test]
+    fn compact_event_time_bounds_reject_unpaired_bounds() {
+        assert!(validate_event_time_bounds(Some("2026-03-01T00:00:00Z"), None).is_err());
+        assert!(validate_event_time_bounds(None, Some("2026-03-01T00:00:00Z")).is_err());
+    }
+
+    #[test]
+    fn compact_event_time_bounds_reject_reverse_bounds() {
+        assert!(
+            validate_event_time_bounds(Some("2026-03-01T00:00:01Z"), Some("2026-03-01T00:00:00Z"),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn compact_event_time_bounds_accept_equal_bounds() {
+        assert!(
+            validate_event_time_bounds(
+                Some("2026-03-01T00:00:00.1Z"),
+                Some("2026-03-01T00:00:00.100000000Z"),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn compact_event_time_bounds_accept_ascending_bounds() {
+        assert!(
+            validate_event_time_bounds(
+                Some("2026-03-01T00:00:00.999999999Z"),
+                Some("2026-03-01T00:00:01Z"),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn compact_event_time_bounds_cover_gregorian_boundaries() {
+        assert!(
+            validate_event_time_bounds(Some("2000-02-29T00:00:00Z"), Some("2000-03-01T00:00:00Z"),)
+                .is_ok()
+        );
+        assert!(
+            validate_event_time_bounds(Some("1900-02-29T00:00:00Z"), Some("1900-03-01T00:00:00Z"),)
+                .is_err()
+        );
+        assert!(
+            validate_event_time_bounds(Some("0001-01-01T00:00:00Z"), Some("9999-12-31T23:59:59Z"),)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn compact_event_time_bounds_cover_fraction_boundaries() {
+        assert!(validate_event_time_bounds(
+            Some("2026-03-01T00:00:00.Z"),
+            Some("2026-03-01T00:00:01Z"),
+        )
+        .is_err());
+        assert!(
+            validate_event_time_bounds(
+                Some("2026-03-01T00:00:00.123456789Z"),
+                Some("2026-03-01T00:00:01Z"),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_event_time_bounds(
+                Some("2026-03-01T00:00:00.1234567890Z"),
+                Some("2026-03-01T00:00:01Z"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn compact_event_time_bounds_order_across_epoch_boundary() {
+        assert!(
+            validate_event_time_bounds(
+                Some("1969-12-31T23:59:59.999999999Z"),
+                Some("1970-01-01T00:00:00Z"),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn compact_segment_validation_invokes_event_time_bound_validator() {
+        let segment_id = Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 1]);
+        let segment = CompactSegment::new(
+            segment_id,
+            CompactSegmentRole::Data,
+            [0; 32],
+            "test-encoder-v1",
+            ManagedPath::new("segment.parquet").unwrap(),
+            vec![1],
+            vec![0],
+            vec![1],
+            1,
+            Vec::new(),
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(
+            segment
+                .with_event_time_bounds("2026-03-01T00:00:01Z", "2026-03-01T00:00:00Z",)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn compact_manifest_entry_exposes_validated_role_and_row_count() {
         let table = Uuid::from_bytes([0x11; 16]);
         let segment_id = Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 1]);
@@ -3552,6 +3798,121 @@ mod tests {
         assert_eq!(entry.role(), CompactSegmentRole::Replacement);
         assert_eq!(entry.generation(), 9);
         assert_eq!(entry.row_count(), 37);
+    }
+
+    #[test]
+    fn compact_manifest_entry_rejects_invalid_event_time_bounds() {
+        let table = Uuid::from_bytes([0x11; 16]);
+        let segment_id = Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 1]);
+        let mut entry = CompactManifestEntry {
+            segment_id,
+            role: CompactSegmentRole::Data,
+            generation: 9,
+            schema: [0x42; 32],
+            encoder_version: "test".to_owned(),
+            relative_path: compact_segment_path(table, segment_id).unwrap(),
+            git_object_id: "a".repeat(40),
+            sha256: [0x43; 32],
+            min_key: vec![0],
+            max_key: vec![1],
+            min_event_time: Some("2026-03-01T00:00:00Z".to_owned()),
+            max_event_time: Some("2026-03-01T00:00:01Z".to_owned()),
+            row_count: 37,
+            compressed_bytes: 1,
+            columns: Vec::new(),
+            row_group_index: true,
+            bloom: true,
+        };
+        entry.validate(table, Some(40)).unwrap();
+
+        let invalid_bounds = [
+            (Some("2026-02-30T00:00:00Z"), Some("2026-03-01T00:00:00Z")),
+            (Some("2026-03-01T00:00:00Z"), None),
+            (None, Some("2026-03-01T00:00:00Z")),
+            (Some("2026-03-01T00:00:01Z"), Some("2026-03-01T00:00:00Z")),
+        ];
+        for (min_event_time, max_event_time) in invalid_bounds {
+            entry.min_event_time = min_event_time.map(str::to_owned);
+            entry.max_event_time = max_event_time.map(str::to_owned);
+            assert!(matches!(
+                entry.validate(table, Some(40)),
+                Err(RepositoryError::InvalidCompactManifest)
+            ));
+        }
+    }
+
+    #[test]
+    fn compact_parsed_consumer_rejects_invalid_event_time_bounds() {
+        let table = Uuid::from_bytes([0x11; 16]);
+        let segment_id = Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 1]);
+        let shard_path = shard_path(table, 0).unwrap();
+        let manifest_path = managed_child(&compact_root(table), "manifest.orna").unwrap();
+        let mut entry = CompactManifestEntry {
+            segment_id,
+            role: CompactSegmentRole::Data,
+            generation: 1,
+            schema: [0x42; 32],
+            encoder_version: "test".to_owned(),
+            relative_path: compact_segment_path(table, segment_id).unwrap(),
+            git_object_id: "a".repeat(40),
+            sha256: [0x43; 32],
+            min_key: vec![0],
+            max_key: vec![1],
+            min_event_time: None,
+            max_event_time: None,
+            row_count: 1,
+            compressed_bytes: 1,
+            columns: Vec::new(),
+            row_group_index: false,
+            bloom: false,
+        };
+        let invalid_bounds = [
+            (Some("2026-02-30T00:00:00Z"), Some("2026-03-01T00:00:00Z")),
+            (Some("2026-03-01T00:00:00Z"), None),
+            (None, Some("2026-03-01T00:00:00Z")),
+            (Some("2026-03-01T00:00:01Z"), Some("2026-03-01T00:00:00Z")),
+        ];
+        let (root, repository) = test_repository();
+        let head = repository.head().unwrap().unwrap();
+        for (min_event_time, max_event_time) in invalid_bounds {
+            entry.min_event_time = min_event_time.map(str::to_owned);
+            entry.max_event_time = max_event_time.map(str::to_owned);
+            let shard_bytes = canonical_shard(&[&entry]).unwrap();
+            let shard = ShardDescriptor {
+                number: 0,
+                min_key: entry.min_key.clone(),
+                max_key: entry.max_key.clone(),
+                entries: 1,
+                file: shard_path.clone(),
+                hash: Sha256::digest(&shard_bytes).into(),
+                bytes: shard_bytes.clone(),
+            };
+            let manifest_bytes = canonical_manifest(
+                &CompactManifest {
+                    table,
+                    schema: entry.schema,
+                    next_generation: 2,
+                    entries: vec![entry.clone()],
+                },
+                &[shard],
+            )
+            .unwrap();
+            let candidate = repository
+                .build_private_commit(
+                    &head,
+                    &[
+                        ManagedFileChange::new(shard_path.clone(), Some(shard_bytes)),
+                        ManagedFileChange::new(manifest_path.clone(), Some(manifest_bytes.clone())),
+                    ],
+                    "invalid compact event-time consumer regression",
+                )
+                .unwrap();
+            assert!(matches!(
+                repository.read_compact_manifest_from_candidate(&candidate, &manifest_bytes),
+                Err(RepositoryError::InvalidCompactManifest)
+            ));
+        }
+        drop(root);
     }
 
     #[test]
