@@ -1495,6 +1495,102 @@ fn bounded_evaluator_defers_invalid_function_bodies_until_explicit_invocation() 
 }
 
 #[test]
+fn bounded_project_retains_owner_scoped_nominal_plans_for_functions_and_expressions() {
+    let project = pure_project(vec![
+        SourceUnit {
+            fixture_id: "nominal-project".into(),
+            source_id: "nominal/owner.orna".into(),
+            parse_as: "module_unit".into(),
+            source: r#"
+                fn private_seed() = 7;
+                pub type Box {
+                    pub value: Int = private_seed(),
+                    secret: Int = private_seed(),
+                }
+                pub type Required { pub value: Int, }
+                pub fn omitted() = Box { };
+                pub fn missing_required() = Required { };
+            "#
+            .into(),
+        },
+        SourceUnit {
+            fixture_id: "nominal-project".into(),
+            source_id: "nominal/caller.orna".into(),
+            parse_as: "module_unit".into(),
+            source: r#"
+                use nominal.owner;
+                pub fn external() = nominal.owner.Box { value: 3 };
+                pub fn external_omitted() = nominal.owner.Box { };
+            "#
+            .into(),
+        },
+    ]);
+    let mut evaluator = BoundedEvaluator::default();
+    assert_eq!(evaluator.evaluate_project(&project), StageOutcome::Passed);
+
+    let expected_omitted = OvbRaw::Tag(
+        60009,
+        Box::new(OvbRaw::Array(vec![
+            nominal_type_raw("nominal.owner.Box"),
+            OvbRaw::Array(vec![
+                OvbRaw::Array(vec![
+                    nominal_field_raw("nominal.owner.Box", "value"),
+                    OvbRaw::Int(7.into()),
+                ]),
+                OvbRaw::Array(vec![
+                    nominal_field_raw("nominal.owner.Box", "secret"),
+                    OvbRaw::Int(7.into()),
+                ]),
+            ]),
+        ])),
+    );
+    let actual_omitted = evaluator
+        .invoke_value_with("nominal.owner.omitted", &BTreeMap::new())
+        .expect("omitted defaults construct the nominal");
+    assert_eq!(actual_omitted.raw(), &expected_omitted);
+
+    let actual_external_omitted = evaluator
+        .invoke_value_with("nominal.caller.external_omitted", &BTreeMap::new())
+        .expect("external construction may omit both defaults");
+    assert_eq!(actual_external_omitted.raw(), &expected_omitted);
+
+    let expected_external = OvbRaw::Tag(
+        60009,
+        Box::new(OvbRaw::Array(vec![
+            nominal_type_raw("nominal.owner.Box"),
+            OvbRaw::Array(vec![
+                OvbRaw::Array(vec![
+                    nominal_field_raw("nominal.owner.Box", "value"),
+                    OvbRaw::Int(3.into()),
+                ]),
+                OvbRaw::Array(vec![
+                    nominal_field_raw("nominal.owner.Box", "secret"),
+                    OvbRaw::Int(7.into()),
+                ]),
+            ]),
+        ])),
+    );
+    let actual_external = evaluator
+        .invoke_value_with("nominal.caller.external", &BTreeMap::new())
+        .expect("external construction may omit a private default");
+    assert_eq!(actual_external.raw(), &expected_external);
+
+    let expression = SourceUnit {
+        fixture_id: "nominal-expression".into(),
+        source_id: "nominal/expression.orna".into(),
+        parse_as: "expression_unit".into(),
+        source: "nominal.owner.Box { value: 9 }".into(),
+    };
+    assert_eq!(evaluator.evaluate(&expression), StageOutcome::Passed);
+
+    let diagnostic = evaluator
+        .invoke_value_with("nominal.owner.missing_required", &BTreeMap::new())
+        .expect_err("missing public construction fields must fail");
+    assert_eq!(diagnostic.code(), "ORNA-EVAL-ARGUMENT");
+    assert_eq!(diagnostic.message(), "<redacted>");
+}
+
+#[test]
 fn bounded_evaluator_invokes_a_function_with_its_earlier_immutable_binding() {
     let pure_module = SourceUnit {
         fixture_id: "test-module".into(),
@@ -1509,6 +1605,36 @@ fn bounded_evaluator_invokes_a_function_with_its_earlier_immutable_binding() {
 
 fn value(raw: OvbRaw) -> Value {
     Value::new(raw).expect("test values are canonical")
+}
+
+fn nominal_type_raw(identity: &str) -> OvbRaw {
+    OvbRaw::Tag(
+        37,
+        Box::new(OvbRaw::Bytes(nominal_type_id(identity).to_vec())),
+    )
+}
+
+fn nominal_field_raw(identity: &str, name: &str) -> OvbRaw {
+    OvbRaw::Tag(
+        37,
+        Box::new(OvbRaw::Bytes(nominal_field_id(identity, name).to_vec())),
+    )
+}
+
+fn nominal_type_id(identity: &str) -> [u8; 16] {
+    sha2::Sha256::digest(identity.as_bytes())[..16]
+        .try_into()
+        .expect("truncated digest has the ObjectId width")
+}
+
+fn nominal_field_id(identity: &str, name: &str) -> [u8; 16] {
+    let mut input = Vec::with_capacity(identity.len() + name.len() + 1);
+    input.extend_from_slice(identity.as_bytes());
+    input.push(0);
+    input.extend_from_slice(name.as_bytes());
+    sha2::Sha256::digest(input)[..16]
+        .try_into()
+        .expect("truncated digest has the ObjectId width")
 }
 
 #[test]
