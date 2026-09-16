@@ -2599,16 +2599,10 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
         "fn unknown() = sys.meta<Missing>(1);",
         "fn too_many() = sys.meta<Int, Str>(1);",
         "fn incompatible_pipeline() = 1 | sys.meta<Str>();",
-        "fn unsupported_cancel(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(job);",
     ] {
         let rejected = analyze(&[ModuleInput::new("invalid-explicit-metadata.orna", source)]);
-        let code = if source.contains("unsupported_") {
-            DIAG_UNSUPPORTED
-        } else {
-            DIAG_TYPE
-        };
         assert!(
-            has(&rejected, code),
+            has(&rejected, DIAG_TYPE),
             "{source}: {:#?}",
             rejected.diagnostics
         );
@@ -2733,20 +2727,12 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
         "fn wrong_label(failure: sys.Failure) = sys.await(job: sys.admin.replay_failure(failure.reference, expected_version: failure.version));",
         "fn wrong_timeout(failure: sys.Failure) = sys.await(sys.admin.replay_failure(failure.reference, expected_version: failure.version), deadline: null);",
         "fn positional_after_named(job: sys.InvocationHandle<Int>) = sys.await(invocation: job, null);",
-        "fn unknown(failure: sys.Failure) = sys.cancel(sys.admin.replay_failure(failure.reference, expected_version: failure.version));",
         "fn extra_generic(job: sys.InvocationHandle<Int>) = sys.await<Int, Str>(job);",
         "fn mismatched_generic(job: sys.InvocationHandle<Int>) = sys.await<Str>(job);",
     ] {
         let rejected = analyze(&[ModuleInput::new("await-generic-invalid.orna", source)]);
         assert!(
-            has(
-                &rejected,
-                if source.contains("unknown") {
-                    DIAG_UNSUPPORTED
-                } else {
-                    DIAG_TYPE
-                }
-            ),
+            has(&rejected, DIAG_TYPE),
             "{source}: {:#?}",
             rejected.diagnostics
         );
@@ -2772,23 +2758,20 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
         unknown_generic.diagnostics
     );
 
-    let unsupported_generic = analyze(&[ModuleInput::new(
-        "await-generic-unsupported.orna",
+    let malformed_cancel = analyze(&[ModuleInput::new(
+        "cancel-generic-invalid.orna",
         "fn unsupported(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(missing);",
     )]);
     assert!(
-        has(&unsupported_generic, DIAG_UNSUPPORTED),
+        has(&malformed_cancel, DIAG_UNRESOLVED),
         "{:#?}",
-        unsupported_generic.diagnostics
+        malformed_cancel.diagnostics
     );
-    assert!(
-        has(&unsupported_generic, DIAG_UNRESOLVED),
-        "{:#?}",
-        unsupported_generic.diagnostics
-    );
-    let unsupported = &unsupported_generic.modules.values().next().unwrap().symbols["unsupported"];
-    assert!(unsupported.effects.effects.contains("invoke"));
-    assert!(unsupported.effects.may_fail);
+    let malformed = &malformed_cancel.modules.values().next().unwrap().symbols["unsupported"];
+    assert!(matches!(
+        &malformed.ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Error
+    ));
 
     let mismatched_generic = analyze(&[ModuleInput::new(
         "await-generic-unsupported.orna",
@@ -2796,11 +2779,6 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
     )]);
     assert!(
         has(&mismatched_generic, DIAG_TYPE),
-        "{:#?}",
-        mismatched_generic.diagnostics
-    );
-    assert!(
-        has(&mismatched_generic, DIAG_UNSUPPORTED),
         "{:#?}",
         mismatched_generic.diagnostics
     );
@@ -2819,6 +2797,106 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
         &invalid.ty,
         Type::Function { result, .. } if result.as_ref() == &Type::Error
     ));
+}
+
+#[test]
+fn sys_cancel_infers_and_validates_the_invocation_handle_result_type() {
+    let valid = analyze(&[ModuleInput::new(
+        "cancel-generic.orna",
+        r#"
+            pub fn inferred(job: sys.InvocationHandle<Int>) = sys.cancel(job);
+            pub fn positional(job: sys.InvocationHandle<Int>) = sys.cancel(job, "stop");
+            pub fn positional_null(job: sys.InvocationHandle<Int>) = sys.cancel(job, null);
+            pub fn positional_explicit(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(job, "stop");
+            pub fn explicit(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(job, reason: "stop");
+            pub fn named(job: sys.InvocationHandle<Int>) = sys.cancel(invocation: job, reason: null);
+            pub fn local_generic<T>(job: sys.InvocationHandle<T>) = sys.cancel<T>(job);
+            pub fn piped(job: sys.InvocationHandle<Int>) = job | sys.cancel();
+            pub fn piped_positional(job: sys.InvocationHandle<Int>) = job | sys.cancel("stop");
+            pub fn piped_positional_null(job: sys.InvocationHandle<Int>) = job | sys.cancel(null);
+            pub fn piped_positional_explicit(job: sys.InvocationHandle<Int>) = job | sys.cancel<Int>("stop");
+            pub fn piped_explicit(job: sys.InvocationHandle<Int>) = job | sys.cancel<Int>(reason: "stop");
+        "#,
+    )]);
+    assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
+    let module = valid.modules.values().next().unwrap();
+    for name in [
+        "inferred",
+        "positional",
+        "positional_null",
+        "positional_explicit",
+        "explicit",
+        "named",
+        "local_generic",
+        "piped",
+        "piped_positional",
+        "piped_positional_null",
+        "piped_positional_explicit",
+        "piped_explicit",
+    ] {
+        let symbol = &module.exports[name];
+        assert!(matches!(
+            &symbol.ty,
+            Type::Function { result, .. } if result.as_ref() == &Type::Bool
+        ));
+        assert_eq!(
+            symbol.effects.effects,
+            std::collections::BTreeSet::from(["invoke".into()])
+        );
+        assert!(symbol.effects.may_fail);
+    }
+
+    for (name, source) in [
+        (
+            "missing",
+            "fn missing(job: sys.InvocationHandle<Int>) = sys.cancel(reason: \"stop\");",
+        ),
+        ("wrong_handle", "fn wrong_handle() = sys.cancel(1);"),
+        (
+            "wrong_reason",
+            "fn wrong_reason(job: sys.InvocationHandle<Int>) = sys.cancel(job, 1);",
+        ),
+        (
+            "mismatched_generic",
+            "fn mismatched_generic(job: sys.InvocationHandle<Int>) = sys.cancel<Str>(job);",
+        ),
+        (
+            "unknown_generic",
+            "fn unknown_generic(job: sys.InvocationHandle<Int>) = sys.cancel<Missing>(job);",
+        ),
+        (
+            "extra_generic",
+            "fn extra_generic(job: sys.InvocationHandle<Int>) = sys.cancel<Int, Str>(job);",
+        ),
+        (
+            "duplicate",
+            "fn duplicate(job: sys.InvocationHandle<Int>) = sys.cancel(job, invocation: job);",
+        ),
+        (
+            "unknown_label",
+            "fn unknown_label(job: sys.InvocationHandle<Int>) = sys.cancel(job, why: \"stop\");",
+        ),
+        (
+            "positional_after_named",
+            "fn positional_after_named(job: sys.InvocationHandle<Int>) = sys.cancel(invocation: job, null);",
+        ),
+        (
+            "pipeline_positional_after_named",
+            "fn pipeline_positional_after_named(job: sys.InvocationHandle<Int>) = job | sys.cancel(reason: \"stop\", null);",
+        ),
+    ] {
+        let rejected = analyze(&[ModuleInput::new("cancel-generic-invalid.orna", source)]);
+        assert!(
+            has(&rejected, DIAG_TYPE),
+            "{name}: {:#?}",
+            rejected.diagnostics
+        );
+        let symbol = &rejected.modules.values().next().unwrap().symbols[name];
+        assert!(matches!(
+            &symbol.ty,
+            Type::Function { result, .. } if result.as_ref() == &Type::Error
+        ));
+    }
 }
 
 #[test]

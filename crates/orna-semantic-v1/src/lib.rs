@@ -9353,6 +9353,30 @@ fn infer_success_pipeline(
             diagnostics,
         );
     }
+    if let Expr::Call {
+        callee, arguments, ..
+    } = rhs
+        && qualified_path(callee).as_deref() == Some(["sys", "cancel"].as_slice())
+    {
+        let functions = system_api::embedded_system_api()
+            .function("sys.cancel")
+            .expect("descriptor-driven sys.cancel path has a descriptor");
+        let stage = infer_cancel_system_call(
+            functions,
+            arguments,
+            None,
+            Some(&input.ty),
+            scope,
+            local,
+            diagnostics,
+        );
+        let mut effects = input.effects;
+        effects.join(&stage.effects);
+        return Inferred {
+            ty: stage.ty,
+            effects,
+        };
+    }
     if diagnostics.iter().any(|diagnostic| {
         diagnostic.message()
             == "a durable consumer function may own only one checkpointed source root"
@@ -10370,7 +10394,11 @@ fn infer_generic_pipeline_stage(
             effects,
         };
     };
-    if path == ["sys", "meta"] || path == ["sys", "await"] || path == ["sys", "start"] {
+    if path == ["sys", "meta"]
+        || path == ["sys", "await"]
+        || path == ["sys", "cancel"]
+        || path == ["sys", "start"]
+    {
         let stage = infer_descriptor_system_call_with_input(
             &path,
             arguments,
@@ -11312,6 +11340,17 @@ fn infer_descriptor_system_call(
             diagnostics,
         ));
     }
+    if path == ["sys", "cancel"] {
+        return Some(infer_cancel_system_call(
+            functions,
+            arguments,
+            type_arguments,
+            None,
+            scope,
+            local,
+            diagnostics,
+        ));
+    }
     if path == ["sys", "start"]
         && (type_arguments.is_some()
             || arguments
@@ -11902,6 +11941,15 @@ fn infer_descriptor_system_call_with_input(
             local,
             diagnostics,
         )),
+        ["sys", "cancel"] => Some(infer_cancel_system_call(
+            functions,
+            arguments,
+            Some(type_arguments),
+            Some(input),
+            scope,
+            local,
+            diagnostics,
+        )),
         ["sys", "start"] => Some(infer_start_system_call(
             functions,
             arguments,
@@ -11915,9 +11963,171 @@ fn infer_descriptor_system_call_with_input(
     }
 }
 
-/// `sys.await<T>` binds its result type from the typed invocation handle.  No
-/// other generic system function is admitted here: those calls still require
-/// an explicit semantic/runtime bridge rather than a guessed type argument.
+fn cancel_descriptor(function: &system_api::FunctionDescriptor) -> bool {
+    function.name == "sys.cancel"
+        && function.effect == system_api::SystemEffect::Invoke
+        && function.type_parameters == BTreeSet::from(["T".to_owned()])
+        && function.parameters.len() == 2
+        && function.parameters[0].name == "invocation"
+        && function.parameters[0].ty
+            == system_api::SystemType::Applied {
+                base: "sys.InvocationHandle".into(),
+                arguments: vec![system_api::SystemType::Named("T".into())],
+            }
+        && !function.parameters[0].has_default
+        && function.parameters[1].name == "reason"
+        && function.parameters[1].ty
+            == system_api::SystemType::Optional(Box::new(system_api::SystemType::Named(
+                "Str".into(),
+            )))
+        && function.parameters[1].has_default
+        && function.result == system_api::SystemType::Named("Bool".into())
+}
+
+/// `sys.cancel<T>` infers `T` from its invocation handle and optionally checks
+/// an explicit witness. The descriptor is matched exactly so a future JSON
+/// overload cannot silently acquire this semantic admission path.
+fn infer_cancel_system_call(
+    functions: &[system_api::FunctionDescriptor],
+    arguments: &[orna_syntax_v1::Argument],
+    type_arguments: Option<&[TypeExpr]>,
+    input: Option<&Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let mut effects = EffectSummary::default();
+    let has_input = input.is_some();
+    let input_offset = usize::from(has_input);
+    let mut values = input.into_iter().cloned().collect::<Vec<_>>();
+    values.extend(arguments.iter().map(|argument| {
+        let value = infer(&argument.value, scope, local, diagnostics);
+        effects.join(&value.effects);
+        value.ty
+    }));
+    let Some(function) = functions
+        .iter()
+        .find(|function| cancel_descriptor(function))
+    else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "portable generic system function is described but not implemented by this semantic slice",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    if values.iter().any(|value| matches!(value, Type::Error)) {
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+
+    let mut used = vec![false; function.parameters.len()];
+    let mut next_positional = 0usize;
+    let mut named_started = false;
+    let mut invocation_type = None;
+    let mut valid = true;
+    let supplied = input.into_iter().map(|value| (None, value)).chain(
+        arguments
+            .iter()
+            .zip(values.iter().skip(input_offset))
+            .map(|(argument, value)| (argument.name.as_deref(), value)),
+    );
+    for (name, value) in supplied {
+        let index = if let Some(name) = name {
+            named_started = true;
+            function
+                .parameters
+                .iter()
+                .position(|parameter| parameter.name == name)
+        } else if named_started {
+            None
+        } else {
+            while used.get(next_positional) == Some(&true) {
+                next_positional += 1;
+            }
+            let index = (next_positional < function.parameters.len()).then_some(next_positional);
+            next_positional += 1;
+            index
+        };
+        let Some(index) = index else {
+            valid = false;
+            continue;
+        };
+        if used[index] {
+            valid = false;
+            continue;
+        }
+        used[index] = true;
+        match index {
+            0 => match value {
+                Type::Applied { base, arguments }
+                    if base == "sys.InvocationHandle" && arguments.len() == 1 =>
+                {
+                    invocation_type = arguments.first().cloned();
+                }
+                _ => valid = false,
+            },
+            1 => {
+                let expected = descriptor_type(&function.parameters[index].ty);
+                if !types_match(&expected, value)
+                    && !matches!(&expected, Type::Optional(inner) if inner.as_ref() == value)
+                {
+                    valid = false;
+                }
+            }
+            _ => valid = false,
+        }
+    }
+    if !used[0] || !valid {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "arguments do not match a portable system function overload",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+    let result_type = invocation_type.expect("valid invocation handle supplies its type");
+    if let Some(type_arguments) = type_arguments {
+        let Some(type_argument) = type_arguments
+            .iter()
+            .map(|type_argument| valid_static_type(type_argument, scope))
+            .collect::<Option<Vec<_>>>()
+            .and_then(|arguments| (arguments.len() == 1).then(|| arguments[0].clone()))
+        else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "sys.cancel requires exactly one explicit type argument when generic arguments are supplied",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        };
+        if type_argument != result_type {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "sys.cancel explicit type argument must match the invocation handle result type",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        }
+    }
+    effects.join(&descriptor_effects(function.effect));
+    Inferred {
+        ty: substitute_descriptor_type(&function.result, "T", &result_type).unwrap_or(Type::Error),
+        effects,
+    }
+}
+
+/// `sys.await<T>` binds its result type from the typed invocation handle.
 fn infer_await_system_call(
     functions: &[system_api::FunctionDescriptor],
     arguments: &[orna_syntax_v1::Argument],
