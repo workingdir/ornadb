@@ -24,6 +24,7 @@ use std::{
 };
 
 const FAIL_001_RUNTIME_CLAIM: &str = "FAIL-001 observes one stable keyed failure record accumulating attempts and verifies private row cardinality through the bounded runtime adapter; this is non-normative evidence, not a public sys.Failure projection";
+const CHECKPOINT_ATOMICITY_RUNTIME_CLAIM: &str = "CP-001 observes durable finite-list row/checkpoint atomicity through the bounded runtime adapter; CP-002 remains an explicit skip because the available witness exercises assertion validation rather than the immutable handler-inserts-then-errors path; this is implementation evidence, not compiler-produced Orna-engine execution or a public sys.Checkpoint projection";
 
 /// Routes each conformance surface to the evaluator that actually owns it.
 /// Fixture and project stages stay on the bounded evaluator; the authoritative
@@ -88,6 +89,9 @@ impl RuntimeEvaluator for CompositeEvaluator {
         }
         if transaction_contract(scenario) {
             return run_durable_transaction_scenario(scenario);
+        }
+        if cp_001_contract(scenario) || cp_002_contract(scenario) {
+            return run_checkpoint_atomicity_scenario(scenario);
         }
         if assertion_checkpoint_091_contract(scenario) {
             return run_assertion_checkpoint_091_scenario();
@@ -518,6 +522,102 @@ fn run_durable_transaction_scenario(scenario: &Scenario) -> StageOutcome<Diagnos
     })();
     let _ = fs::remove_dir_all(&root);
     result.unwrap_or_else(durable_scenario_failure)
+}
+
+fn cp_001_contract(scenario: &Scenario) -> bool {
+    scenario.id == "CP-001"
+        && scenario.title == "Rows and checkpoint are atomic"
+        && scenario.given == ["checkpoint is 41", "source delivers item 42"]
+        && scenario.when == ["handler inserts Email and succeeds"]
+        && scenario.then == ["Email row and checkpoint 42 commit together"]
+        && scenario.requirements == ["ORNA-CP-001", "ORNA-CP-006"]
+        && scenario.evidence_level == "implementation scenario, not executed by an Orna engine"
+}
+
+fn cp_002_contract(scenario: &Scenario) -> bool {
+    scenario.id == "CP-002"
+        && scenario.title == "Failed item repeats safely"
+        && scenario.given == ["checkpoint is 41", "source delivers item 42"]
+        && scenario.when == ["handler inserts then errors"]
+        && scenario.then
+            == [
+                "insert rolls back",
+                "checkpoint remains 41",
+                "item 42 may retry",
+            ]
+        && scenario.requirements == ["ORNA-CP-006"]
+        && scenario.evidence_level == "implementation scenario, not executed by an Orna engine"
+}
+
+fn run_checkpoint_atomicity_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
+    if cp_002_contract(scenario) {
+        return StageOutcome::Skipped {
+            reason: "the available bounded witness exercises assertion-validation rollback, not CP-002's immutable handler-inserts-then-errors path; no CP-002 pass is claimed".into(),
+        };
+    }
+    if !cp_001_contract(scenario) {
+        return checkpoint_atomicity_scenario_failure();
+    }
+    let root = conformance_scratch_root("orna-conformance-checkpoint-atomicity");
+    if fs::create_dir(&root).is_err() {
+        return checkpoint_atomicity_scenario_failure();
+    }
+    let result = (|| {
+        let status = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .ok()?;
+        if !status.success() {
+            return None;
+        }
+        let repository = Repository::discover(&root).ok()?;
+        let evaluator = DurableTransactionalEvaluator::new("main", Default::default());
+        let witness = block_on(evaluator.execute_checkpoint_atomicity_cp_001(
+            &repository,
+            RuntimeIdentity {
+                database_id: [101; 16],
+                repository_id: [102; 16],
+            },
+            [103; 16],
+            [104; 32],
+        ))
+        .ok();
+        witness
+            .filter(|witness| {
+                witness.faulted_commit_rolls_back_rows_and_checkpoint
+                    && witness.rows_and_checkpoint_commit_together
+                    && witness.complete_committed_email_row
+            })
+            .map(|_| StageOutcome::Passed)
+    })();
+    finish_checkpoint_atomicity_scenario(&root, result)
+}
+
+fn finish_checkpoint_atomicity_scenario(
+    root: &Path,
+    result: Option<StageOutcome<Diagnostic>>,
+) -> StageOutcome<Diagnostic> {
+    if fs::remove_dir_all(root).is_err() {
+        return checkpoint_atomicity_scenario_failure();
+    }
+    result.unwrap_or_else(checkpoint_atomicity_scenario_failure)
+}
+
+fn checkpoint_atomicity_scenario_failure() -> StageOutcome<Diagnostic> {
+    StageOutcome::Failed(
+        Diagnostic::new(
+            SafeText::new("ORNA-CONFORMANCE-CP-001-CP-002").expect("static code"),
+            DiagnosticSeverity::Error,
+            SafeText::new(
+                "durable checkpoint atomicity scenarios did not satisfy their exact contract",
+            )
+            .expect("static message"),
+        )
+        .expect("valid diagnostic"),
+    )
 }
 
 fn assertion_checkpoint_091_contract(scenario: &Scenario) -> bool {
@@ -1214,9 +1314,13 @@ fn run_profile(corpus: Corpus, profile: RunnerProfile) -> orna_conformance_v1::R
                         ),
                         (
                             "runtime-stages".into(),
-                            "pure row/expression units, the authoritative duplicate-key fixture, SYS-RT-RENAME-100 system-name resolution, the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, LIVE-004 universal subtree replacement, the ASSERT-CHECKPOINT-091 durable assertion/checkpoint rollback contract, the FAIL-001 stable failure-identity and attempts contract, and EVAL-003 durable request replay contracts execute through bounded runtime witnesses; these scenario results remain runtime-adapter evidence and are not compiler-produced or full Orna-engine execution".into(),
+                            "pure row/expression units, the authoritative duplicate-key fixture, SYS-RT-RENAME-100 system-name resolution, the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, LIVE-004 universal subtree replacement, the CP-001 durable checkpoint atomicity contract, the ASSERT-CHECKPOINT-091 durable assertion/checkpoint rollback contract, the FAIL-001 stable failure-identity and attempts contract, and EVAL-003 durable request replay contracts execute through bounded runtime witnesses; CP-002's handler-failure retry contract remains explicitly skipped; these scenario results remain runtime-adapter evidence and are not compiler-produced or full Orna-engine execution".into(),
                         ),
                         ("FAIL-001".into(), FAIL_001_RUNTIME_CLAIM.into()),
+                        (
+                            "CP-001/CP-002".into(),
+                            CHECKPOINT_ATOMICITY_RUNTIME_CLAIM.into(),
+                        ),
                     ]
                     .into_iter()
                     .collect(),
@@ -1224,6 +1328,7 @@ fn run_profile(corpus: Corpus, profile: RunnerProfile) -> orna_conformance_v1::R
                         "REPL-001".into(),
                         "TXN-001".into(),
                         "TXN-002".into(),
+                        "CP-001".into(),
                         "LIVE-001".into(),
                         "LIVE-002".into(),
                         "LIVE-003".into(),
@@ -1301,11 +1406,12 @@ fn report_exit_code(report: &orna_conformance_v1::RunReport) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompositeEvaluator, Corpus, FAIL_001_RUNTIME_CLAIM, Harness, RunnerCommand, RunnerProfile,
-        RuntimeAdapter, Scenario, StageOutcome, assertion_checkpoint_091_contract,
-        conformance_scratch_root, fail_001_contract, finish_assertion_checkpoint_091_scenario,
-        finish_fail_001_scenario, parse_runner_command, report_exit_code,
-        run_assertion_checkpoint_091_scenario, run_live_fallback_scenario,
+        CHECKPOINT_ATOMICITY_RUNTIME_CLAIM, CompositeEvaluator, Corpus, FAIL_001_RUNTIME_CLAIM,
+        Harness, RunnerCommand, RunnerProfile, RuntimeAdapter, RuntimeEvaluator, Scenario,
+        StageOutcome, assertion_checkpoint_091_contract, conformance_scratch_root,
+        fail_001_contract, finish_assertion_checkpoint_091_scenario, finish_fail_001_scenario,
+        parse_runner_command, report_exit_code, run_assertion_checkpoint_091_scenario,
+        run_checkpoint_atomicity_scenario, run_live_fallback_scenario,
         run_live_keyed_update_scenario, run_live_resync_scenario, run_live_unkeyed_update_scenario,
         run_profile, run_sys_rt_rename_scenario,
     };
@@ -1450,6 +1556,48 @@ mod tests {
                 if diagnostic.code() == "ORNA-CONFORMANCE-ASSERT-CHECKPOINT-091"
         ));
         fs::remove_file(root).expect("remove cleanup regression target");
+    }
+
+    #[test]
+    fn checkpoint_atomicity_scenarios_are_exactly_wired_to_durable_runtime_evidence() {
+        let corpus = Corpus::load_default().expect("reference corpus loads");
+        let scenarios = corpus.scenarios["scenarios"]
+            .as_array()
+            .expect("scenario array");
+        let cp_001 = scenarios
+            .iter()
+            .find(|value| value["id"] == "CP-001")
+            .cloned()
+            .map(|value| serde_json::from_value::<Scenario>(value).expect("CP-001 shape"))
+            .expect("CP-001 scenario");
+        let cp_002 = scenarios
+            .iter()
+            .find(|value| value["id"] == "CP-002")
+            .cloned()
+            .map(|value| serde_json::from_value::<Scenario>(value).expect("CP-002 shape"))
+            .expect("CP-002 scenario");
+
+        assert!(super::cp_001_contract(&cp_001));
+        assert!(super::cp_002_contract(&cp_002));
+        assert!(matches!(
+            run_checkpoint_atomicity_scenario(&cp_001),
+            StageOutcome::Passed
+        ));
+        assert!(matches!(
+            run_checkpoint_atomicity_scenario(&cp_002),
+            StageOutcome::Skipped { .. }
+        ));
+
+        let mut evaluator = CompositeEvaluator::default();
+        assert!(matches!(
+            evaluator.run_scenario(&cp_001),
+            StageOutcome::Passed
+        ));
+        assert!(matches!(
+            evaluator.run_scenario(&cp_002),
+            StageOutcome::Skipped { .. }
+        ));
+        assert!(CHECKPOINT_ATOMICITY_RUNTIME_CLAIM.contains("CP-002 remains an explicit skip"));
     }
 
     #[test]
