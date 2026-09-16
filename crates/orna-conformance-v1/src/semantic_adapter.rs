@@ -23,11 +23,12 @@ use orna_evaluator_v1::{
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    FaultInjector, ListStreamSource, NoFault, RequestIdentity, RequestStatus,
+    FaultInjector, FaultPoint, ListStreamSource, NoFault, RequestIdentity, RequestStatus,
     RunObservationRegistration, RunningTableRequestContinuation, RuntimeError, RuntimeIdentity,
     RuntimeState, StreamFailurePayload, StreamHandler, StreamHandlerResult, StreamItem,
     StreamObservationRegistration, StreamRunControl, StreamRunOutcome, StreamSource,
-    StreamSourcePoll, StreamTableCandidateValidator, StreamValidatedTableMutationBatch,
+    StreamSourcePoll, StreamStep, StreamTableCandidateValidator, StreamTableDeliveryError,
+    StreamValidatedTableDeliveryCommit, StreamValidatedTableMutationBatch,
     TableActivationCandidateValidator, TableActivationError, TableMutation, TerminalOutcome,
     ValidatedTableActivationCommit, ValidatedTableRequestActivationCommit, WriterLease,
 };
@@ -1284,6 +1285,19 @@ pub struct Fail001Witness {
     pub reopened: bool,
 }
 
+/// Runtime-adapter evidence returned by the bounded CP-001 witness.
+///
+/// The witnesses use the durable list-stream delivery boundary with the
+/// immutable scenario's opaque `41` checkpoint and `42` item. They are not
+/// compiler-produced engine evidence and do not claim the public
+/// `sys.Checkpoint` projection or publication contract.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointAtomicityWitness {
+    pub faulted_commit_rolls_back_rows_and_checkpoint: bool,
+    pub rows_and_checkpoint_commit_together: bool,
+    pub complete_committed_email_row: bool,
+}
+
 /// The outcome of attempting to continue an already-admitted table request.
 ///
 /// `Committed` records controlled table writes and the supplied terminal in
@@ -2230,6 +2244,96 @@ impl DurableTransactionalEvaluator {
             single_failure_identity,
             checkpoint_unchanged,
             reopened,
+        })
+    }
+
+    /// Executes the immutable CP-001 finite-list contract through the
+    /// validated table-delivery boundary. The setup preserves the scenario's
+    /// opaque checkpoint `41`; the finite source supplies item `42` and its
+    /// provider-defined successor without interpreting either position as an
+    /// ordered integer.
+    ///
+    /// CP-002 is deliberately not claimed here: the immutable scenario needs
+    /// a handler that inserts and then errors, which the existing handler
+    /// result API cannot express as one activation. Assertion-validation
+    /// rollback is likewise separate evidence, not CP-002 handler-failure
+    /// evidence.
+    pub async fn execute_checkpoint_atomicity_cp_001(
+        &self,
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        owner_id: [u8; 16],
+        initial_digest: [u8; 32],
+    ) -> Result<CheckpointAtomicityWitness, RuntimeError> {
+        let successful_project = checkpoint_atomicity_project("CP-001");
+        let successful_bridge =
+            checkpoint_atomicity_bridge(&successful_project, self.limits, identity)?;
+        let fault_bridge = checkpoint_atomicity_bridge(&successful_project, self.limits, identity)?;
+        let successful_key = successful_bridge.checkpoint_key()?;
+        let successful_state = RuntimeState::open(repository, identity, initial_digest).await?;
+        let successful_writer = successful_state.acquire_lease(owner_id).await?;
+        let successful_checkpoint =
+            checkpoint_atomicity_prepare(&successful_state, successful_writer, &successful_key)
+                .await?;
+        let email_key = Value::int(42.into())
+            .encode()
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let expected_email = checkpoint_atomicity_email_row()?;
+        let faulted_commit_rolls_back_rows_and_checkpoint = checkpoint_atomicity_fault_rolls_back(
+            &successful_state,
+            successful_writer,
+            &successful_key,
+            &successful_checkpoint,
+            fault_bridge,
+            self.limits,
+            &email_key,
+        )
+        .await?;
+        if !faulted_commit_rolls_back_rows_and_checkpoint {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let mut successful_source =
+            ListStreamSource::new(successful_key.clone(), successful_bridge.payloads.clone());
+        let mut successful_handler = ListTableHandler::new(successful_bridge, self.limits);
+        let successful_step = successful_state
+            .run_stream_once(
+                successful_writer,
+                &successful_key,
+                &mut successful_source,
+                &mut successful_handler,
+            )
+            .await
+            .map_err(checkpoint_atomicity_stream_error)?;
+        let successful_after = successful_state.stream_checkpoint(&successful_key).await?;
+        let complete_committed_email_row = successful_state
+            .committed_table_row("Email", &email_key)
+            .await?
+            == Some(expected_email);
+        let rows_and_checkpoint_commit_together =
+            matches!(successful_step, StreamStep::Committed { .. })
+                && complete_committed_email_row
+                && successful_checkpoint
+                    .committed
+                    .as_ref()
+                    .is_some_and(|position| position.token.as_str() == "41")
+                && successful_after.version
+                    == successful_checkpoint
+                        .version
+                        .checked_add(1)
+                        .ok_or(RuntimeError::RecoveryInvalid)?
+                && successful_after
+                    .committed
+                    .as_ref()
+                    .is_some_and(|position| position.token.as_str() == "42");
+        if !rows_and_checkpoint_commit_together || !complete_committed_email_row {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        drop(successful_state);
+
+        Ok(CheckpointAtomicityWitness {
+            faulted_commit_rolls_back_rows_and_checkpoint,
+            rows_and_checkpoint_commit_together,
+            complete_committed_email_row,
         })
     }
 
@@ -8976,6 +9080,200 @@ fn assertion_checkpoint_091_project() -> ProjectUnit {
             steps: Vec::new(),
             negative_cases: Vec::new(),
         },
+    }
+}
+
+fn checkpoint_atomicity_project(fixture_id: &str) -> ProjectUnit {
+    let mut values = vec!["0"; 41];
+    values.push("42");
+    ProjectUnit {
+        fixture_id: fixture_id.into(),
+        project_id: fixture_id.into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: fixture_id.into(),
+            source_id: "main.orna".into(),
+            parse_as: "module_unit".into(),
+            source: format!(
+                r#"
+                    pub table Email(id: Int) {{ value: Int, }}
+                    pub fn input() = Stream.from_list([{}], source_identity: "fixture:{fixture_id}");
+                    pub fn ingest() {{ input() | for_each(value => {{
+                        Email.insert({{ id: value, value: value }});
+                    }}); }}
+                "#,
+                values.join(", "),
+            ),
+        }],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+    }
+}
+
+async fn checkpoint_atomicity_prepare(
+    state: &RuntimeState,
+    writer: WriterLease,
+    key: &CheckpointKey,
+) -> Result<orna_stream_v1::Checkpoint, RuntimeError> {
+    let initial = state.stream_checkpoint(key).await?;
+    if !matches!(
+        state.pause_stream(writer, key.clone()).await?,
+        orna_runtime_v1::StreamAdministrationOutcome::Paused { .. }
+    ) {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    let checkpoint = state
+        .reset_checkpoint(
+            writer,
+            key.clone(),
+            CheckpointPrecondition::from(&initial),
+            checkpoint_atomicity_position("41")?,
+            "immutable CP-001 setup".into(),
+        )
+        .await?;
+    if !matches!(
+        state.resume_stream(writer, key.clone()).await?,
+        orna_runtime_v1::StreamAdministrationOutcome::Running { .. }
+    ) {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok(checkpoint)
+}
+
+#[derive(Clone, Copy)]
+struct CheckpointAtomicityFault(FaultPoint);
+
+impl FaultInjector for CheckpointAtomicityFault {
+    fn check(&self, point: FaultPoint) -> Result<(), RuntimeError> {
+        if point == self.0 {
+            Err(RuntimeError::FaultInjected(point))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn checkpoint_atomicity_email_row() -> Result<Vec<u8>, RuntimeError> {
+    Value::new(OvbRaw::Map(vec![
+        (OvbRaw::Text("id".into()), OvbRaw::Int(42.into())),
+        (OvbRaw::Text("value".into()), OvbRaw::Int(42.into())),
+    ]))
+    .map_err(|_| RuntimeError::RecoveryInvalid)?
+    .encode()
+    .map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+/// Drives the public validated-delivery fault seam directly because the
+/// ordinary stream runner deliberately supplies `NoFault`. The checkpoint
+/// positions are compared only for exact identity with the fixture values.
+async fn checkpoint_atomicity_fault_rolls_back(
+    state: &RuntimeState,
+    writer: WriterLease,
+    key: &CheckpointKey,
+    checkpoint: &orna_stream_v1::Checkpoint,
+    bridge: ListStreamBridge,
+    limits: EvaluatorLimits,
+    email_key: &[u8],
+) -> Result<bool, RuntimeError> {
+    let mut source = ListStreamSource::new(key.clone(), bridge.payloads.clone());
+    let item = match source
+        .next(checkpoint)
+        .await
+        .map_err(|_| RuntimeError::RecoveryInvalid)?
+    {
+        StreamSourcePoll::Item(item) => item,
+        StreamSourcePoll::Waiting | StreamSourcePoll::Exhausted => {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+    };
+    if item.delivery.position != checkpoint_atomicity_position("41")?
+        || item.delivery.successor != checkpoint_atomicity_position("42")?
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    let expected_stream = CheckpointPrecondition::from(checkpoint);
+    let lease = match state
+        .stream_backend(writer)
+        .apply_async(CommitIntent::Acquire {
+            delivery: item.delivery.clone(),
+            expected: expected_stream.clone(),
+            purpose: LeasePurpose::Deliver,
+        })
+        .await?
+    {
+        CommitResult::Acquired { lease } => lease,
+        _ => return Err(RuntimeError::RecoveryInvalid),
+    };
+    let capture = state.capture().await?;
+    let mut handler = ListTableHandler::new(bridge, limits);
+    let StreamHandlerResult::CommitValidatedTable(mut batch) = handler.handle(&item) else {
+        return Err(RuntimeError::RecoveryInvalid);
+    };
+    let fault = CheckpointAtomicityFault(FaultPoint::AfterCheckpoint);
+    let result = state
+        .commit_stream_validated_table_delivery(StreamValidatedTableDeliveryCommit {
+            writer,
+            expected_capture: &capture,
+            mutations: &batch.mutations,
+            next_digest: batch.next_digest,
+            delivery: lease.clone(),
+            expected_stream,
+            validator: batch.validator.as_mut(),
+            faults: &fault,
+        })
+        .await;
+    let rollback_observed = matches!(
+        result,
+        Err(StreamTableDeliveryError::Runtime(
+            RuntimeError::FaultInjected(FaultPoint::AfterCheckpoint)
+        ))
+    ) && state
+        .committed_table_row("Email", email_key)
+        .await?
+        .is_none()
+        && state.stream_checkpoint(key).await? == *checkpoint
+        && state.capture().await? == capture;
+    let cancelled = matches!(
+        state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Cancel { lease })
+            .await?,
+        CommitResult::Cancelled { checkpoint: cancelled, .. } if cancelled == *checkpoint
+    );
+    Ok(rollback_observed && cancelled)
+}
+
+fn checkpoint_atomicity_bridge(
+    project: &ProjectUnit,
+    limits: EvaluatorLimits,
+    identity: RuntimeIdentity,
+) -> Result<ListStreamBridge, RuntimeError> {
+    let admitted = admit_transaction_project(project, limits, "main.ingest")
+        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    admit_project_list_stream(project, admitted, "main.ingest", identity)
+        .map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn checkpoint_atomicity_position(token: &str) -> Result<Position, RuntimeError> {
+    Ok(Position {
+        token: Component::new(token).map_err(|_| RuntimeError::RecoveryInvalid)?,
+    })
+}
+
+fn checkpoint_atomicity_stream_error(error: orna_runtime_v1::StreamStepError) -> RuntimeError {
+    match error {
+        orna_runtime_v1::StreamStepError::Runtime(error) => error,
+        orna_runtime_v1::StreamStepError::Provider(_) => RuntimeError::RecoveryInvalid,
     }
 }
 
