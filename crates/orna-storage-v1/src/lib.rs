@@ -875,7 +875,8 @@ fn map_compact_runtime_error(error: RuntimeError) -> Error {
         | RuntimeError::CompactPublicationRequired
         | RuntimeError::CompactReceiptKeyMismatch
         | RuntimeError::InvalidCompactReceipt
-        | RuntimeError::RecoveryInvalid => Error::InvalidTransition,
+        | RuntimeError::RecoveryInvalid
+        | RuntimeError::CheckpointNotReplayable => Error::InvalidTransition,
         RuntimeError::RecoveryPending => Error::RuntimeUnavailable,
         RuntimeError::StreamIdentityMismatch
         | RuntimeError::StreamCheckpointStale
@@ -1228,6 +1229,14 @@ mod tests {
             Error::RuntimeUnavailable
         );
     }
+    #[test]
+    fn checkpoint_not_replayable_maps_to_invalid_transition() {
+        assert_eq!(
+            map_compact_runtime_error(RuntimeError::CheckpointNotReplayable),
+            Error::InvalidTransition
+        );
+    }
+
 
     fn git(directory: &Path, arguments: &[&str]) {
         assert!(
