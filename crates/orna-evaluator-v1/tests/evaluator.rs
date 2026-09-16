@@ -147,11 +147,20 @@ fn nominal_parts(value: &orna_foundation_v1::CanonicalValue) -> (&Raw, &[Raw]) {
 }
 
 fn nominal_input(field_key: Raw) -> orna_foundation_v1::CanonicalValue {
+    nominal_input_with_fields(vec![(field_key, Raw::Int(7.into()))])
+}
+
+fn nominal_input_with_fields(fields: Vec<(Raw, Raw)>) -> orna_foundation_v1::CanonicalValue {
     orna_foundation_v1::CanonicalValue::new(Raw::Tag(
         60009,
         Box::new(Raw::Array(vec![
             type_id_raw("stable.Thing"),
-            Raw::Array(vec![Raw::Array(vec![field_key, Raw::Int(7.into())])]),
+            Raw::Array(
+                fields
+                    .into_iter()
+                    .map(|(key, value)| Raw::Array(vec![key, value]))
+                    .collect(),
+            ),
         ])),
     ))
     .expect("nominal input should be structurally canonical")
@@ -175,6 +184,608 @@ fn evaluator_decode_accepts_nominal_object_id_field_keys() {
         .expect("canonical ObjectId nominal field keys should decode");
 
     assert_eq!(result.raw(), input.raw());
+}
+
+#[test]
+fn nominal_field_selection_rejects_missing_unknown_and_ambiguous_metadata() {
+    let definitions = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![
+            nominal_field("value", true, None),
+            nominal_field("other", true, None),
+        ],
+    );
+    let environment = BTreeMap::from([(
+        "value".into(),
+        nominal_input_with_fields(vec![
+            (field_id_raw("other"), Raw::Int(8.into())),
+            (field_id_raw("value"), Raw::Int(7.into())),
+        ]),
+    )]);
+    assert_eq!(
+        code(evaluate_parsed_with_nominals(
+            &parsed_expression("value.unknown"),
+            &environment,
+            &definitions,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-FIELD"
+    );
+
+    let unknown_type = BTreeMap::from([(
+        "value".into(),
+        orna_foundation_v1::CanonicalValue::new(Raw::Tag(
+            60009,
+            Box::new(Raw::Array(vec![
+                type_id_raw("stable.Unknown"),
+                Raw::Array(vec![Raw::Array(vec![
+                    field_id_raw("value"),
+                    Raw::Int(7.into()),
+                ])]),
+            ])),
+        ))
+        .expect("unknown nominal type should remain structurally canonical"),
+    )]);
+    assert_eq!(
+        code(evaluate_parsed_with_nominals(
+            &parsed_expression("value.value"),
+            &unknown_type,
+            &definitions,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
+
+    let mut ambiguous = definitions.clone();
+    ambiguous.insert(
+        "OtherThing".into(),
+        NominalDefinition::new(
+            object_id_bytes("stable.Thing"),
+            None,
+            vec![nominal_field("value", true, None)],
+        ),
+    );
+    let environment = BTreeMap::from([("value".into(), nominal_input(field_id_raw("value")))]);
+    assert_eq!(
+        code(evaluate_parsed_with_nominals(
+            &parsed_expression("value.value"),
+            &environment,
+            &ambiguous,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-VALUE"
+    );
+}
+
+#[test]
+fn nominal_field_selection_rejects_extra_and_missing_payload_members() {
+    let definitions = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![
+            nominal_field("value", true, None),
+            nominal_field("other", true, None),
+        ],
+    );
+    let extra = BTreeMap::from([(
+        "value".into(),
+        nominal_input_with_fields(vec![
+            (field_id_raw("unknown"), Raw::Int(8.into())),
+            (field_id_raw("value"), Raw::Int(7.into())),
+        ]),
+    )]);
+    let missing = BTreeMap::from([(
+        "value".into(),
+        nominal_input_with_fields(vec![(field_id_raw("value"), Raw::Int(7.into()))]),
+    )]);
+
+    for environment in [extra, missing] {
+        assert_eq!(
+            code(evaluate_parsed_with_nominals(
+                &parsed_expression("value.value"),
+                &environment,
+                &definitions,
+                Limits::default(),
+            )),
+            "ORNA-EVAL-VALUE"
+        );
+    }
+}
+
+#[test]
+fn nominal_admission_rejects_malformed_matching_payload_without_field_selection() {
+    let definitions = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![nominal_field("value", true, None)],
+    );
+    let environment = BTreeMap::from([(
+        "value".into(),
+        nominal_input_with_fields(vec![
+            (field_id_raw("unknown"), Raw::Int(8.into())),
+            (field_id_raw("value"), Raw::Int(7.into())),
+        ]),
+    )]);
+
+    assert_eq!(
+        code(evaluate_parsed_with_nominals(
+            &parsed_expression("value"),
+            &environment,
+            &definitions,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-VALUE"
+    );
+}
+
+#[test]
+fn nominal_admission_rejects_malformed_nominals_in_recursive_containers() {
+    let definitions = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![nominal_field("value", true, None)],
+    );
+    let malformed = nominal_input_with_fields(vec![
+        (field_id_raw("unknown"), Raw::Int(8.into())),
+        (field_id_raw("value"), Raw::Int(7.into())),
+    ]);
+    let nested = orna_foundation_v1::CanonicalValue::new(Raw::Array(vec![Raw::Map(vec![(
+        Raw::Text("nested".into()),
+        malformed.raw().clone(),
+    )])]))
+    .expect("nested nominal input should be structurally canonical");
+    let environment = BTreeMap::from([("value".into(), nested)]);
+
+    assert_eq!(
+        code(evaluate_parsed_with_nominals(
+            &parsed_expression("value"),
+            &environment,
+            &definitions,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-VALUE"
+    );
+}
+
+#[test]
+fn nominal_admission_rejects_malformed_host_arguments_even_when_unselected() {
+    let definitions = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![nominal_field("value", true, None)],
+    );
+    let malformed = nominal_input_with_fields(vec![
+        (field_id_raw("unknown"), Raw::Int(8.into())),
+        (field_id_raw("value"), Raw::Int(7.into())),
+    ]);
+    let arguments = Environment::from([("value".into(), malformed)]);
+    let functions = functions_from_source("fn ignore(value: Int) = 1;");
+
+    assert_eq!(
+        code(invoke_named_with_nominals(
+            "ignore",
+            &functions,
+            &arguments,
+            &definitions,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-VALUE"
+    );
+}
+
+#[test]
+fn nominal_admission_rejects_malformed_named_call_captures() {
+    let definitions = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![nominal_field("value", true, None)],
+    );
+    let malformed = nominal_input_with_fields(vec![
+        (field_id_raw("unknown"), Raw::Int(8.into())),
+        (field_id_raw("value"), Raw::Int(7.into())),
+    ]);
+    let functions = BTreeMap::from([
+        (
+            "run".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: parsed_expression("helper()"),
+                environment: Environment::new(),
+            },
+        ),
+        (
+            "helper".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: parsed_expression("1"),
+                environment: Environment::from([("captured".into(), malformed)]),
+            },
+        ),
+    ]);
+
+    assert_eq!(
+        code(invoke_named_with_nominals(
+            "run",
+            &functions,
+            &Environment::new(),
+            &definitions,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-VALUE"
+    );
+}
+
+#[test]
+fn nominal_definition_admission_enforces_total_limits_before_allocation() {
+    let oversized_definitions = NominalDefinitions::from([
+        (
+            "Thing".into(),
+            NominalDefinition::new(object_id_bytes("stable.Thing"), None, Vec::new()),
+        ),
+        (
+            "Other".into(),
+            NominalDefinition::new(object_id_bytes("stable.Other"), None, Vec::new()),
+        ),
+    ]);
+    assert_eq!(
+        code(evaluate_parsed_with_nominals(
+            &parsed_expression("1"),
+            &Environment::new(),
+            &oversized_definitions,
+            Limits {
+                max_collection_items: 1,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+
+    let oversized_fields = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![
+            nominal_field("left", true, None),
+            nominal_field("right", true, None),
+        ],
+    );
+    assert_eq!(
+        code(evaluate_parsed_with_nominals(
+            &parsed_expression("1"),
+            &Environment::new(),
+            &oversized_fields,
+            Limits {
+                max_collection_items: 1,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+
+    let oversized_name = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![nominal_field("long_name", true, None)],
+    );
+    assert_eq!(
+        code(evaluate_parsed_with_nominals(
+            &parsed_expression("1"),
+            &Environment::new(),
+            &oversized_name,
+            Limits {
+                max_string_bytes: 3,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn nominal_definition_admission_rejects_oversized_owner_before_cloning() {
+    let definitions = nominal_definitions("Thing", "stable.Thing", Some("owner"), Vec::new());
+
+    assert_eq!(
+        code(evaluate_parsed_with_nominals(
+            &parsed_expression("1"),
+            &Environment::new(),
+            &definitions,
+            Limits {
+                max_string_bytes: 4,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn nominal_construction_rejects_ambiguous_declared_fields() {
+    let duplicate_names = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![
+            nominal_field("value", true, None),
+            NominalField::public(object_id_bytes("field:other"), "value"),
+        ],
+    );
+    let duplicate_ids = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![
+            NominalField::public([9; 16], "left"),
+            NominalField::public([9; 16], "right"),
+        ],
+    );
+
+    assert_eq!(
+        code(evaluate_parsed_with_nominals(
+            &parsed_expression("Thing { value: 7 }"),
+            &Environment::new(),
+            &duplicate_names,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-VALUE"
+    );
+    assert_eq!(
+        code(evaluate_parsed_with_nominals(
+            &parsed_expression("Thing { left: 1, right: 2 }"),
+            &Environment::new(),
+            &duplicate_ids,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-VALUE"
+    );
+}
+
+#[test]
+fn nominal_construction_rejects_duplicate_type_ids_in_active_scope() {
+    let definitions = NominalDefinitions::from([
+        (
+            "Thing".into(),
+            NominalDefinition::new(
+                object_id_bytes("stable.Thing"),
+                None,
+                vec![nominal_field("value", true, None)],
+            ),
+        ),
+        (
+            "OtherThing".into(),
+            NominalDefinition::new(
+                object_id_bytes("stable.Thing"),
+                None,
+                vec![nominal_field("value", true, None)],
+            ),
+        ),
+    ]);
+
+    assert_eq!(
+        code(evaluate_parsed_with_nominals(
+            &parsed_expression("Thing { value: 7 }"),
+            &Environment::new(),
+            &definitions,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-VALUE"
+    );
+}
+
+#[test]
+fn nominal_public_field_selection_reads_the_declared_value() {
+    let definitions = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![nominal_field("value", true, None)],
+    );
+    let result = evaluate_parsed_with_nominals(
+        &parsed_expression("Thing { value: 7 }.value"),
+        &Environment::new(),
+        &definitions,
+        Limits::default(),
+    )
+    .expect("public nominal fields should be readable");
+
+    assert_eq!(result.raw(), &Raw::Int(7.into()));
+}
+
+#[test]
+fn nominal_private_field_selection_is_owner_scoped() {
+    let definitions = nominal_definitions(
+        "vault.Vault",
+        "stable.Vault",
+        Some("vault"),
+        vec![nominal_field("secret", false, None)],
+    );
+    let functions = BTreeMap::from([(
+        "vault.read".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: parsed_expression("Vault { secret: 7 }.secret"),
+            environment: Environment::new(),
+        },
+    )]);
+
+    let result = invoke_named_with_nominals(
+        "vault.read",
+        &functions,
+        &Environment::new(),
+        &definitions,
+        Limits::default(),
+    )
+    .expect("the nominal owner should read private fields");
+
+    assert_eq!(result.raw(), &Raw::Int(7.into()));
+}
+
+#[test]
+fn nominal_private_field_selection_is_rejected_outside_owner() {
+    let definitions = nominal_definitions(
+        "vault.Vault",
+        "stable.Vault",
+        Some("vault"),
+        vec![nominal_field("secret", false, None)],
+    );
+    let functions = BTreeMap::from([(
+        "vault.make".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: parsed_expression("Vault { secret: 7 }"),
+            environment: Environment::new(),
+        },
+    )]);
+    let value = invoke_named_with_nominals(
+        "vault.make",
+        &functions,
+        &Environment::new(),
+        &definitions,
+        Limits::default(),
+    )
+    .expect("the nominal owner should construct the value");
+    let environment = BTreeMap::from([("value".into(), value)]);
+
+    assert_eq!(
+        code(evaluate_with_functions_and_nominals(
+            &parsed_expression("value.secret"),
+            &environment,
+            &BTreeMap::new(),
+            &definitions,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
+}
+
+#[test]
+fn nominal_private_field_selection_works_in_owner_created_direct_closure() {
+    let definitions = nominal_definitions(
+        "vault.Vault",
+        "stable.Vault",
+        Some("vault"),
+        vec![nominal_field("secret", false, None)],
+    );
+    let functions = BTreeMap::from([(
+        "vault.read".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: parsed_expression("(() => Vault { secret: 7 }.secret)()"),
+            environment: Environment::new(),
+        },
+    )]);
+
+    let result = invoke_named_with_nominals(
+        "vault.read",
+        &functions,
+        &Environment::new(),
+        &definitions,
+        Limits::default(),
+    )
+    .expect("owner-created direct closures should retain their namespace");
+
+    assert_eq!(result.raw(), &Raw::Int(7.into()));
+}
+
+#[test]
+fn nominal_private_field_selection_works_in_owner_created_collection_closure() {
+    let definitions = nominal_definitions(
+        "vault.Vault",
+        "stable.Vault",
+        Some("vault"),
+        vec![nominal_field("secret", false, None)],
+    );
+    let functions = BTreeMap::from([(
+        "vault.map".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: parsed_expression(
+                "std.collection.map([1, 2], value => Vault { secret: value }.secret)",
+            ),
+            environment: Environment::new(),
+        },
+    )]);
+
+    let result = invoke_named_with_nominals(
+        "vault.map",
+        &functions,
+        &Environment::new(),
+        &definitions,
+        Limits::default(),
+    )
+    .expect("owner-created collection closures should retain their namespace");
+
+    assert_eq!(
+        result.raw(),
+        &Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())])
+    );
+}
+
+#[test]
+fn nominal_field_selection_uses_stable_field_identity_not_text_key() {
+    let stable_field_id = object_id_bytes("catalogue-field");
+    let definitions = NominalDefinitions::from([(
+        "Thing".into(),
+        NominalDefinition::new(
+            object_id_bytes("stable.Thing"),
+            None,
+            vec![NominalField::public(stable_field_id, "value")],
+        ),
+    )]);
+    let input = orna_foundation_v1::CanonicalValue::new(Raw::Tag(
+        60009,
+        Box::new(Raw::Array(vec![
+            type_id_raw("stable.Thing"),
+            Raw::Array(vec![Raw::Array(vec![
+                Raw::Tag(37, Box::new(Raw::Bytes(stable_field_id.to_vec()))),
+                Raw::Int(11.into()),
+            ])]),
+        ])),
+    ))
+    .expect("stable nominal identity should be canonical");
+    let environment = BTreeMap::from([("value".into(), input)]);
+
+    let result = evaluate_parsed_with_nominals(
+        &parsed_expression("value.value"),
+        &environment,
+        &definitions,
+        Limits::default(),
+    )
+    .expect("declared stable field identity should be readable");
+
+    assert_eq!(result.raw(), &Raw::Int(11.into()));
+}
+
+#[test]
+fn named_collection_callback_preserves_public_nominal_selection() {
+    let definitions = nominal_definitions(
+        "Thing",
+        "stable.Thing",
+        None,
+        vec![nominal_field("value", true, None)],
+    );
+    let functions = functions_from_source(
+        "fn select(value: Int) = value.value; fn run() = std.collection.map([Thing { value: 7 }], select);",
+    );
+
+    let result = invoke_named_with_nominals(
+        "run",
+        &functions,
+        &Environment::new(),
+        &definitions,
+        Limits::default(),
+    )
+    .expect("named collection callbacks should retain nominal definitions");
+
+    assert_eq!(result.raw(), &Raw::Array(vec![Raw::Int(7.into())]));
 }
 
 #[test]
