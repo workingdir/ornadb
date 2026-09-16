@@ -2220,7 +2220,7 @@ impl Repository {
             entries,
         };
         if manifest
-            .validate(Some(self.native_object_id_length()?))
+            .validate(Some(self.observer_native_object_id_length()?))
             .is_err()
             || verify_canonical_manifest_files(&manifest, &bytes, &shard_bytes_by_path).is_err()
         {
@@ -2260,6 +2260,58 @@ impl Repository {
     ) -> Result<BTreeMap<String, crate::GitObjectState>, RepositoryError> {
         let manifest = self.observed_compact_manifest(commit, table)?;
 
+        self.plan_observed_compact_manifest_hydration(commit, table, &manifest)
+    }
+
+    /// Plans the exact compact-segment objects for every compact table tracked
+    /// by `commit`, without fetching or changing local Git state.
+    ///
+    /// Table roots containing only `policy.orna` are ignored. All discovered
+    /// manifest, shard, and data paths must exactly match a canonical compact
+    /// manifest closure. Metadata is read through no-lazy observer commands;
+    /// materialized segments are fully verified and locally absent segments
+    /// are retained only when the per-table planner proves them promised.
+    pub fn plan_compact_manifest_inventory_hydration(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<BTreeMap<Uuid, BTreeMap<String, crate::GitObjectState>>, RepositoryError> {
+        let (manifests, mut compact_paths) =
+            self.observed_compact_manifest_inventory_paths(commit)?;
+        let mut inventory = BTreeMap::new();
+        for table in manifests {
+            let manifest = self.observed_compact_manifest(commit, table)?;
+            let mut declared_paths = BTreeSet::new();
+            for number in 0..manifest
+                .entries()
+                .len()
+                .div_ceil(COMPACT_MANIFEST_SHARD_LIMIT)
+            {
+                let number =
+                    u64::try_from(number).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                if !declared_paths.insert(path_key(&shard_path(table, number)?)?) {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+            for entry in manifest.entries() {
+                if !declared_paths.insert(path_key(entry.relative_path())?) {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+            if compact_paths.remove(&table).unwrap_or_default() != declared_paths {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let plan = self.plan_observed_compact_manifest_hydration(commit, table, &manifest)?;
+            inventory.insert(table, plan);
+        }
+        Ok(inventory)
+    }
+
+    fn plan_observed_compact_manifest_hydration(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+        manifest: &CompactManifest,
+    ) -> Result<BTreeMap<String, crate::GitObjectState>, RepositoryError> {
         let mut plan = BTreeMap::new();
         for entry in manifest.entries() {
             let Some((mode, object)) = self.observed_tree_entry_at(commit, &entry.relative_path)?
@@ -2288,6 +2340,87 @@ impl Repository {
             plan.insert(object, state);
         }
         Ok(plan)
+    }
+
+    fn observed_compact_manifest_inventory_paths(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<(BTreeSet<Uuid>, BTreeMap<Uuid, BTreeSet<String>>), RepositoryError> {
+        if !matches!(
+            self.observe_git_object(commit.as_str())?,
+            crate::GitObjectState::Materialized {
+                kind: crate::GitObjectKind::Commit,
+                ..
+            }
+        ) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let mut command = self.observer_command();
+        command.env("GIT_NO_LAZY_FETCH", "1").args([
+            "ls-tree",
+            "-rz",
+            "--full-tree",
+            commit.as_str(),
+            "--",
+            ".orna/storage",
+        ]);
+        let output = self.run(command)?.stdout;
+        let mut manifests = BTreeSet::new();
+        let mut compact_paths = BTreeMap::<Uuid, BTreeSet<String>>::new();
+        for record in output
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
+            let Some(separator) = record.iter().position(|byte| *byte == b'\t') else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            let fields = &record[..separator];
+            let mut fields = fields.split(|byte| *byte == b' ');
+            let mode = fields
+                .next()
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            let kind = fields.next();
+            let object = fields.next();
+            if kind != Some(b"blob")
+                || object.is_none()
+                || fields.next().is_some()
+                || !matches!(mode, b"100644" | b"100755")
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let path = std::str::from_utf8(&record[separator + 1..])
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let Some((table_name, entry)) = path
+                .strip_prefix(".orna/storage/")
+                .and_then(|path| path.split_once('/'))
+            else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            let table =
+                Uuid::parse_str(table_name).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            if table.to_string() != table_name {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            match entry {
+                "policy.orna" => {}
+                "manifest.orna" if manifests.insert(table) => {}
+                "manifest.orna" => return Err(RepositoryError::InvalidCompactManifest),
+                entry if entry.starts_with("shards/") || entry.starts_with("data/") => {
+                    if !compact_paths
+                        .entry(table)
+                        .or_default()
+                        .insert(path.to_owned())
+                    {
+                        return Err(RepositoryError::InvalidCompactManifest);
+                    }
+                }
+                _ => return Err(RepositoryError::InvalidCompactManifest),
+            }
+        }
+        if !compact_paths.keys().all(|table| manifests.contains(table)) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        Ok((manifests, compact_paths))
     }
 
     /// Plans the exact compact-segment objects whose inclusive key bounds
@@ -2399,7 +2532,7 @@ impl Repository {
             next_generation: header.next_generation,
             entries,
         };
-        manifest.validate(Some(self.native_object_id_length()?))?;
+        manifest.validate(Some(self.observer_native_object_id_length()?))?;
         verify_canonical_manifest_files(&manifest, &manifest_bytes, &shard_bytes_by_path)?;
         Ok(manifest)
     }
@@ -2437,7 +2570,7 @@ impl Repository {
             .args(["ls-tree", "-z", "--full-tree", commit.as_str(), "--"])
             .arg(path.as_path());
         let output = self.run(command)?.stdout;
-        parse_tree_entry(&output, path, self.native_object_id_length()?)
+        parse_tree_entry(&output, path, self.observer_native_object_id_length()?)
     }
 
     /// Builds a compact publication from the manifest committed by

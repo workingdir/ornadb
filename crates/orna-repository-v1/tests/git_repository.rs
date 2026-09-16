@@ -799,6 +799,198 @@ fn filtered_clone() -> Option<(TempDir, PathBuf, String)> {
     Some((fixture, clone, promised))
 }
 
+struct FilteredCompactClone {
+    _fixture: TempDir,
+    clone: PathBuf,
+    materialized_table: Uuid,
+    materialized_object: String,
+    promised_table: Uuid,
+    promised_object: String,
+    unrelated_promised_object: String,
+}
+
+/// Builds a compact snapshot in a real file-protocol filtered clone. Metadata
+/// and one segment are intentionally materialized before the promisor endpoint
+/// is disabled; the other segment and an unrelated blob must remain promised.
+fn filtered_compact_clone() -> Option<FilteredCompactClone> {
+    let fixture = TempDir::new().ok()?;
+    let origin = fixture.path().join("origin.git");
+    let seed = fixture.path().join("seed");
+    let clone = fixture.path().join("partial");
+    git(fixture.path(), &["init", "--bare", "origin.git"]);
+    git(fixture.path(), &["init", "-b", "main", "seed"]);
+    git(&seed, &["config", "user.email", "test@example.invalid"]);
+    git(&seed, &["config", "user.name", "Repository test"]);
+    git(&seed, &["config", "commit.gpgsign", "false"]);
+    fs::write(seed.join("main.orna"), "module main;\n").ok()?;
+    fs::write(seed.join("ordinary.txt"), "base\n").ok()?;
+    fs::create_dir_all(seed.join(".orna")).ok()?;
+    fs::write(seed.join(".orna/format.orna"), "format 1\n").ok()?;
+    git(&seed, &["add", "."]);
+    git(&seed, &["commit", "-m", "initial"]);
+
+    let repository = Repository::discover(&seed).ok()?;
+    let signing_key = compact_receipt_signing_key();
+    provision_compact_receipt_trust_root(&repository, &signing_key);
+    let materialized_table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0610);
+    let materialized_pending = repository
+        .publish_compact_repository_boundary(compact_plan(
+            &repository,
+            materialized_table,
+            [70; 16],
+            &[compact_segment(
+                materialized_table,
+                70,
+                b"materialized inventory segment".to_vec(),
+            )],
+        ))
+        .ok()?;
+    repository
+        .finish_compact_with_receipt(&compact_runtime_receipt(
+            &materialized_pending,
+            &signing_key,
+        ))
+        .ok()?;
+
+    let promised_table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0611);
+    let promised_pending = repository
+        .publish_compact_repository_boundary(compact_plan(
+            &repository,
+            promised_table,
+            [71; 16],
+            &[compact_segment(
+                promised_table,
+                71,
+                b"promised inventory segment".to_vec(),
+            )],
+        ))
+        .ok()?;
+    repository
+        .finish_compact_with_receipt(&compact_runtime_receipt(&promised_pending, &signing_key))
+        .ok()?;
+
+    let head = repository.head().ok()??;
+    let materialized_manifest = repository
+        .read_compact_manifest(&head, materialized_table)
+        .ok()??;
+    let promised_manifest = repository
+        .read_compact_manifest(&head, promised_table)
+        .ok()??;
+    let materialized_object = materialized_manifest
+        .entries()
+        .first()?
+        .git_object_id()
+        .to_owned();
+    let promised_object = promised_manifest
+        .entries()
+        .first()?
+        .git_object_id()
+        .to_owned();
+    fs::write(seed.join("unrelated-promised.txt"), "unrelated promised\n").ok()?;
+    git(&seed, &["add", "unrelated-promised.txt"]);
+    git(&seed, &["commit", "-m", "add unrelated promised blob"]);
+    let unrelated_promised_object = git(&seed, &["rev-parse", "HEAD:unrelated-promised.txt"]);
+
+    git(&origin, &["config", "uploadpack.allowFilter", "true"]);
+    let origin_url = format!("file://{}", origin.display());
+    git(&seed, &["remote", "add", "origin", &origin_url]);
+    git(&seed, &["push", "origin", "HEAD:refs/heads/main"]);
+    git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    let output = Command::new("git")
+        .current_dir(fixture.path())
+        .args([
+            "-c",
+            "protocol.file.allow=always",
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            &origin_url,
+            "partial",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success()
+        || git(
+            &clone,
+            &["config", "--local", "--get", "remote.origin.promisor"],
+        ) != "true"
+    {
+        return None;
+    }
+
+    for path in [
+        format!(".orna/storage/{materialized_table}/manifest.orna"),
+        format!(".orna/storage/{materialized_table}/shards/00000000.orna"),
+        materialized_manifest
+            .entries()
+            .first()?
+            .relative_path()
+            .as_path()
+            .display()
+            .to_string(),
+        format!(".orna/storage/{promised_table}/manifest.orna"),
+        format!(".orna/storage/{promised_table}/shards/00000000.orna"),
+    ] {
+        let selector = format!("HEAD:{path}");
+        let output = Command::new("git")
+            .current_dir(&clone)
+            .args(["cat-file", "blob", &selector])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+    }
+
+    for object in [&promised_object, &unrelated_promised_object] {
+        let output = Command::new("git")
+            .current_dir(&clone)
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["cat-file", "-e", object])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            return None;
+        }
+    }
+    git(
+        &clone,
+        &[
+            "config",
+            "remote.origin.url",
+            "file:///nonexistent-disabled-promisor",
+        ],
+    );
+    Some(FilteredCompactClone {
+        _fixture: fixture,
+        clone,
+        materialized_table,
+        materialized_object,
+        promised_table,
+        promised_object,
+        unrelated_promised_object,
+    })
+}
+
+fn no_lazy_object_inventory(root: &Path) -> String {
+    let output = Command::new("git")
+        .current_dir(root)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .args(["rev-list", "--objects", "--missing=print", "--all"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "no-lazy object inventory: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    format!(
+        "{}{}",
+        String::from_utf8(output.stdout).unwrap(),
+        git(root, &["count-objects", "-v"])
+    )
+}
+
 #[test]
 fn discovers_head_index_worktree_and_per_worktree_runtime_area() {
     let root = repository();
@@ -2901,6 +3093,12 @@ fn compact_manifest_inventory_discovers_every_table_without_mutating_repository_
 fn compact_manifest_inventory_ignores_policy_only_table_roots() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
+    let initial = repo.head().unwrap().unwrap();
+    assert!(
+        repo.plan_compact_manifest_inventory_hydration(&initial)
+            .unwrap()
+            .is_empty()
+    );
     let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0606);
     let head = repo.head().unwrap().unwrap();
     let candidate = repo
@@ -2920,6 +3118,315 @@ fn compact_manifest_inventory_ignores_policy_only_table_roots() {
             .unwrap()
             .is_empty()
     );
+    assert!(
+        repo.plan_compact_manifest_inventory_hydration(candidate.commit())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn compact_manifest_inventory_hydration_plans_all_tables_without_fetching_promised_segments() {
+    let fixture = filtered_compact_clone()
+        .expect("compact planner evidence requires a real filtered clone with promised blobs");
+    let repo = Repository::discover(&fixture.clone).unwrap();
+    let head = repo.head().unwrap().unwrap();
+
+    assert!(matches!(
+        repo.observe_git_object(&fixture.materialized_object)
+            .unwrap(),
+        GitObjectState::Materialized {
+            kind: GitObjectKind::Blob,
+            ..
+        }
+    ));
+    assert_eq!(
+        repo.observe_git_object(&fixture.promised_object).unwrap(),
+        GitObjectState::Promised
+    );
+    assert_eq!(
+        repo.observe_git_object(&fixture.unrelated_promised_object)
+            .unwrap(),
+        GitObjectState::Promised
+    );
+
+    fs::write(fixture.clone.join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(&fixture.clone, &["add", "ordinary.txt"]);
+    fs::write(fixture.clone.join("main.orna"), "unstaged ordinary\n").unwrap();
+    let fetch_head = fixture.clone.join(git(
+        &fixture.clone,
+        &["rev-parse", "--git-path", "FETCH_HEAD"],
+    ));
+    fs::write(&fetch_head, b"inventory-planner-sentinel\n").unwrap();
+    let before = git_state(&repo, &fixture.clone);
+    let objects_before = no_lazy_object_inventory(&fixture.clone);
+    let index_before = fs::read(fixture.clone.join(".git/index")).unwrap();
+    let worktree_before = fs::read(fixture.clone.join("main.orna")).unwrap();
+    let runtime = RuntimeGeneration::new(610);
+    let runtime_before = repo.cwd_generation(runtime).unwrap();
+    let journal_before = repo.read_publication_journal().unwrap();
+    let fetch_head_before = fs::read(&fetch_head).unwrap();
+
+    let plan = repo
+        .plan_compact_manifest_inventory_hydration(&head)
+        .unwrap();
+
+    assert_eq!(plan.len(), 2);
+    assert!(matches!(
+        plan[&fixture.materialized_table].get(&fixture.materialized_object),
+        Some(GitObjectState::Materialized {
+            kind: GitObjectKind::Blob,
+            ..
+        })
+    ));
+    assert_eq!(
+        plan[&fixture.promised_table].get(&fixture.promised_object),
+        Some(&GitObjectState::Promised)
+    );
+    for object in [&fixture.promised_object, &fixture.unrelated_promised_object] {
+        assert!(
+            !Command::new("git")
+                .current_dir(&fixture.clone)
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .args(["cat-file", "-e", object])
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "planner fetched a promised object despite the disabled promisor"
+        );
+    }
+    assert_eq!(
+        repo.observe_git_object(&fixture.promised_object).unwrap(),
+        GitObjectState::Promised
+    );
+    assert_eq!(
+        repo.observe_git_object(&fixture.unrelated_promised_object)
+            .unwrap(),
+        GitObjectState::Promised
+    );
+    assert_eq!(no_lazy_object_inventory(&fixture.clone), objects_before);
+    assert_eq!(git_state(&repo, &fixture.clone), before);
+    assert_eq!(
+        fs::read(fixture.clone.join(".git/index")).unwrap(),
+        index_before
+    );
+    assert_eq!(
+        fs::read(fixture.clone.join("main.orna")).unwrap(),
+        worktree_before
+    );
+    assert_eq!(repo.cwd_generation(runtime).unwrap(), runtime_before);
+    assert_eq!(repo.read_publication_journal().unwrap(), journal_before);
+    assert_eq!(fs::read(&fetch_head).unwrap(), fetch_head_before);
+}
+
+#[test]
+fn compact_manifest_inventory_hydration_rejects_missing_malformed_and_orphan_closure_without_mutation()
+ {
+    for failure in ["missing-segment", "malformed-shard", "orphan"] {
+        let root = repository();
+        let repo = Repository::discover(root.path()).unwrap();
+        let table = Uuid::new_v4();
+        let plan = compact_plan(
+            &repo,
+            table,
+            [72; 16],
+            &[compact_segment(
+                table,
+                72,
+                b"inventory closure witness".to_vec(),
+            )],
+        );
+        let manifest = repo
+            .read_compact_manifest(plan.candidate_commit(), table)
+            .unwrap()
+            .unwrap();
+        let manifest_path =
+            ManagedPath::new(format!(".orna/storage/{table}/manifest.orna")).unwrap();
+        let shard_path =
+            ManagedPath::new(format!(".orna/storage/{table}/shards/00000000.orna")).unwrap();
+        let segment_path = manifest.entries()[0].relative_path().clone();
+        let manifest_bytes = git_bytes(
+            root.path(),
+            &[
+                "show",
+                &format!(
+                    "{}:{}",
+                    plan.candidate_commit(),
+                    manifest_path.as_path().display()
+                ),
+            ],
+        );
+        let shard_bytes = git_bytes(
+            root.path(),
+            &[
+                "show",
+                &format!(
+                    "{}:{}",
+                    plan.candidate_commit(),
+                    shard_path.as_path().display()
+                ),
+            ],
+        );
+        let segment_bytes = git_bytes(
+            root.path(),
+            &[
+                "show",
+                &format!(
+                    "{}:{}",
+                    plan.candidate_commit(),
+                    segment_path.as_path().display()
+                ),
+            ],
+        );
+        let changes = match failure {
+            "missing-segment" => vec![
+                orna_repository_v1::ManagedFileChange::new(manifest_path, Some(manifest_bytes)),
+                orna_repository_v1::ManagedFileChange::new(shard_path, Some(shard_bytes)),
+            ],
+            "malformed-shard" => vec![
+                orna_repository_v1::ManagedFileChange::new(manifest_path, Some(manifest_bytes)),
+                orna_repository_v1::ManagedFileChange::new(
+                    shard_path,
+                    Some(b"not a compact manifest shard\n".to_vec()),
+                ),
+                orna_repository_v1::ManagedFileChange::new(segment_path, Some(segment_bytes)),
+            ],
+            "orphan" => vec![
+                orna_repository_v1::ManagedFileChange::new(manifest_path, Some(manifest_bytes)),
+                orna_repository_v1::ManagedFileChange::new(shard_path, Some(shard_bytes)),
+                orna_repository_v1::ManagedFileChange::new(segment_path, Some(segment_bytes)),
+                orna_repository_v1::ManagedFileChange::new(
+                    ManagedPath::new(format!(
+                        ".orna/storage/{table}/data/01/{}.parquet",
+                        Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0612)
+                    ))
+                    .unwrap(),
+                    Some(b"orphan inventory segment".to_vec()),
+                ),
+            ],
+            _ => unreachable!(),
+        };
+        let head = repo.head().unwrap().unwrap();
+        let candidate = repo
+            .build_private_commit(&head, &changes, "test: malformed inventory planner closure")
+            .unwrap();
+        repo.advance_current_ref(&head, &candidate).unwrap();
+
+        fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+        git(root.path(), &["add", "ordinary.txt"]);
+        fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
+        let before = git_state(&repo, root.path());
+        let objects_before = no_lazy_object_inventory(root.path());
+        let index_before = fs::read(root.path().join(".git/index")).unwrap();
+        let worktree_before = fs::read(root.path().join("main.orna")).unwrap();
+        let runtime = RuntimeGeneration::new(611);
+        let runtime_before = repo.cwd_generation(runtime).unwrap();
+        let journal_before = repo.read_publication_journal().unwrap();
+
+        assert!(matches!(
+            repo.plan_compact_manifest_inventory_hydration(candidate.commit()),
+            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
+        ));
+        assert_eq!(git_state(&repo, root.path()), before);
+        assert_eq!(no_lazy_object_inventory(root.path()), objects_before);
+        assert_eq!(
+            fs::read(root.path().join(".git/index")).unwrap(),
+            index_before
+        );
+        assert_eq!(
+            fs::read(root.path().join("main.orna")).unwrap(),
+            worktree_before
+        );
+        assert_eq!(repo.cwd_generation(runtime).unwrap(), runtime_before);
+        assert_eq!(repo.read_publication_journal().unwrap(), journal_before);
+    }
+}
+
+#[test]
+fn compact_manifest_inventory_hydration_rejects_later_invalid_table_without_partial_result_or_mutation()
+ {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let signing_key = compact_receipt_signing_key();
+    provision_compact_receipt_trust_root(&repo, &signing_key);
+    let first = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0613);
+    let pending = repo
+        .publish_compact_repository_boundary(compact_plan(
+            &repo,
+            first,
+            [73; 16],
+            &[compact_segment(
+                first,
+                73,
+                b"first inventory table".to_vec(),
+            )],
+        ))
+        .unwrap();
+    repo.finish_compact_with_receipt(&compact_runtime_receipt(&pending, &signing_key))
+        .unwrap();
+
+    let second = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0614);
+    let plan = compact_plan(
+        &repo,
+        second,
+        [74; 16],
+        &[compact_segment(
+            second,
+            74,
+            b"missing second inventory segment".to_vec(),
+        )],
+    );
+    let manifest_path = ManagedPath::new(format!(".orna/storage/{second}/manifest.orna")).unwrap();
+    let shard_path =
+        ManagedPath::new(format!(".orna/storage/{second}/shards/00000000.orna")).unwrap();
+    let manifest_bytes = git_bytes(
+        root.path(),
+        &[
+            "show",
+            &format!(
+                "{}:{}",
+                plan.candidate_commit(),
+                manifest_path.as_path().display()
+            ),
+        ],
+    );
+    let shard_bytes = git_bytes(
+        root.path(),
+        &[
+            "show",
+            &format!(
+                "{}:{}",
+                plan.candidate_commit(),
+                shard_path.as_path().display()
+            ),
+        ],
+    );
+    let head = repo.head().unwrap().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head,
+            &[
+                orna_repository_v1::ManagedFileChange::new(manifest_path, Some(manifest_bytes)),
+                orna_repository_v1::ManagedFileChange::new(shard_path, Some(shard_bytes)),
+            ],
+            "test: commit later invalid compact inventory table",
+        )
+        .unwrap();
+    repo.advance_current_ref(&head, &candidate).unwrap();
+
+    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
+    let before = git_state(&repo, root.path());
+    let objects_before = no_lazy_object_inventory(root.path());
+
+    assert!(matches!(
+        repo.plan_compact_manifest_inventory_hydration(candidate.commit()),
+        Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert_eq!(no_lazy_object_inventory(root.path()), objects_before);
 }
 
 #[test]
@@ -3039,6 +3546,10 @@ fn compact_manifest_inventory_rejects_symlinked_manifest_shard_and_segment_entri
 
         assert!(matches!(
             repo.read_compact_manifest_inventory(&corrupted),
+            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
+        ));
+        assert!(matches!(
+            repo.plan_compact_manifest_inventory_hydration(&corrupted),
             Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
         ));
     }
