@@ -2600,7 +2600,6 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
         "fn too_many() = sys.meta<Int, Str>(1);",
         "fn incompatible_pipeline() = 1 | sys.meta<Str>();",
         "fn unsupported_cancel(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(job);",
-        "fn unsupported_start() = sys.start<Int>(1, 2, as: 3);",
     ] {
         let rejected = analyze(&[ModuleInput::new("invalid-explicit-metadata.orna", source)]);
         let code = if source.contains("unsupported_") {
@@ -2733,6 +2732,7 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
         "fn duplicate(job: sys.InvocationHandle<Int>) = sys.await(job, invocation: job);",
         "fn wrong_label(failure: sys.Failure) = sys.await(job: sys.admin.replay_failure(failure.reference, expected_version: failure.version));",
         "fn wrong_timeout(failure: sys.Failure) = sys.await(sys.admin.replay_failure(failure.reference, expected_version: failure.version), deadline: null);",
+        "fn positional_after_named(job: sys.InvocationHandle<Int>) = sys.await(invocation: job, null);",
         "fn unknown(failure: sys.Failure) = sys.cancel(sys.admin.replay_failure(failure.reference, expected_version: failure.version));",
         "fn extra_generic(job: sys.InvocationHandle<Int>) = sys.await<Int, Str>(job);",
         "fn mismatched_generic(job: sys.InvocationHandle<Int>) = sys.await<Str>(job);",
@@ -2819,6 +2819,241 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
         &invalid.ty,
         Type::Function { result, .. } if result.as_ref() == &Type::Error
     ));
+}
+
+#[test]
+fn sys_start_typed_admission_requires_a_matching_result_witness_and_exact_shape() {
+    let valid = analyze(&[ModuleInput::new(
+        "start-generic.orna",
+        r#"
+            pub fn positional(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.start<Int>(function, arguments, as: Int);
+            pub fn named(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.start(function: function, arguments: arguments, as: Int,
+                    at: null, transaction: sys.InvokeTransaction.separate,
+                    idempotency_key: null);
+            pub fn local_generic<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.start<T>(function, arguments, as: T);
+        "#,
+    )]);
+    assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
+    let module = valid.modules.values().next().unwrap();
+    for name in ["positional", "named"] {
+        let symbol = &module.exports[name];
+        assert!(matches!(
+            &symbol.ty,
+            Type::Function { result, .. }
+                if result.as_ref() == &Type::Applied {
+                    base: "sys.InvocationHandle".into(),
+                    arguments: vec![Type::Int],
+                }
+        ));
+        assert_eq!(
+            symbol.effects.effects,
+            std::collections::BTreeSet::from(["invoke".into()])
+        );
+        assert!(symbol.effects.may_fail);
+    }
+    let local_generic = &module.exports["local_generic"];
+    assert!(matches!(
+        &local_generic.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Applied {
+                base: "sys.InvocationHandle".into(),
+                arguments: vec![Type::Named("T".into())],
+            }
+    ));
+    assert_eq!(
+        local_generic.effects.effects,
+        std::collections::BTreeSet::from(["invoke".into()])
+    );
+    assert!(local_generic.effects.may_fail);
+
+    for (name, source, message) in [
+        (
+            "missing",
+            "fn missing(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, arguments);",
+            "typed sys.start requires an explicit as: T witness",
+        ),
+        (
+            "malformed",
+            "fn malformed(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, arguments, as: 1);",
+            "sys.start as: witness must name a known static type",
+        ),
+        (
+            "mismatched",
+            "fn mismatched(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Str>(function, arguments, as: Int);",
+            "sys.start explicit type argument must match the as: witness",
+        ),
+        (
+            "extra_generic",
+            "fn extra_generic(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int, Str>(function, arguments, as: Int);",
+            "sys.start requires exactly one explicit type argument when generic arguments are supplied",
+        ),
+        (
+            "unknown_generic",
+            "fn unknown_generic(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Missing>(function, arguments, as: Int);",
+            "sys.start explicit type argument must name a known static type",
+        ),
+        (
+            "wrong_target",
+            "fn wrong_target(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(1, arguments, as: Int);",
+            "arguments do not match the portable sys.start<T> signature",
+        ),
+        (
+            "wrong_arguments",
+            "fn wrong_arguments(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, 1, as: Int);",
+            "arguments do not match the portable sys.start<T> signature",
+        ),
+        (
+            "duplicate",
+            "fn duplicate(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, arguments, as: Int, as: Int);",
+            "sys.start requires exactly one explicit as: T witness",
+        ),
+        (
+            "unknown_label",
+            "fn unknown_label(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, arguments, as: Int, extra: null);",
+            "arguments do not match the portable sys.start<T> signature",
+        ),
+        (
+            "positional_witness",
+            "fn positional_witness(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, arguments, Int);",
+            "typed sys.start requires an explicit as: T witness",
+        ),
+        (
+            "positional_after_named",
+            "fn positional_after_named(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, arguments: arguments, as: Int, null);",
+            "arguments do not match the portable sys.start<T> signature",
+        ),
+    ] {
+        let rejected = analyze(&[ModuleInput::new("start-generic-invalid.orna", source)]);
+        assert!(
+            has(&rejected, DIAG_TYPE),
+            "{source}: {:#?}",
+            rejected.diagnostics
+        );
+        assert!(
+            rejected
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message() == message),
+            "{name}: expected {message:?}, got {:#?}",
+            rejected.diagnostics
+        );
+        let symbol = &rejected.modules.values().next().unwrap().symbols[name];
+        assert!(matches!(
+            &symbol.ty,
+            Type::Function { result, .. } if result.as_ref() == &Type::Error
+        ));
+    }
+}
+
+#[test]
+fn sys_start_erased_admission_returns_a_value_handle_without_a_witness() {
+    let valid = analyze(&[ModuleInput::new(
+        "start-erased.orna",
+        r#"
+            pub fn positional(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.start(function, arguments);
+            pub fn named(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.start(function: function, arguments: arguments, at: null,
+                    transaction: sys.InvokeTransaction.separate,
+                    idempotency_key: null);
+        "#,
+    )]);
+    assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
+    let module = valid.modules.values().next().unwrap();
+    for name in ["positional", "named"] {
+        let symbol = &module.exports[name];
+        assert!(matches!(
+            &symbol.ty,
+            Type::Function { result, .. }
+                if result.as_ref() == &Type::Applied {
+                    base: "sys.InvocationHandle".into(),
+                    arguments: vec![Type::Named("sys.Value".into())],
+                }
+        ));
+        assert_eq!(
+            symbol.effects.effects,
+            std::collections::BTreeSet::from(["invoke".into()])
+        );
+        assert!(symbol.effects.may_fail);
+    }
+
+    let invalid = analyze(&[ModuleInput::new(
+        "start-erased-invalid.orna",
+        "fn positional_after_named(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start(function: function, arguments: arguments, null);",
+    )]);
+    assert!(has(&invalid, DIAG_TYPE), "{:#?}", invalid.diagnostics);
+    let symbol = &invalid.modules.values().next().unwrap().symbols["positional_after_named"];
+    assert!(matches!(
+        &symbol.ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Error
+    ));
+}
+
+#[test]
+fn sys_start_generic_pipeline_preserves_handle_type_and_rejects_bad_shape() {
+    let valid = analyze(&[ModuleInput::new(
+        "start-generic-pipeline.orna",
+        "pub fn piped(function: sys.FunctionRef, arguments: sys.ArgumentMap) = function | sys.start<Int>(arguments, as: Int);",
+    )]);
+    assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
+    let piped = &valid.modules.values().next().unwrap().exports["piped"];
+    assert!(matches!(
+        &piped.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Applied {
+                base: "sys.InvocationHandle".into(),
+                arguments: vec![Type::Int],
+            }
+    ));
+    assert_eq!(
+        piped.effects.effects,
+        std::collections::BTreeSet::from(["invoke".into()])
+    );
+    assert!(piped.effects.may_fail);
+
+    for (name, source, message) in [
+        (
+            "malformed",
+            "fn malformed(function: sys.FunctionRef, arguments: sys.ArgumentMap) = function | sys.start<Int>(arguments, as: 1);",
+            "sys.start as: witness must name a known static type",
+        ),
+        (
+            "mismatched",
+            "fn mismatched(function: sys.FunctionRef, arguments: sys.ArgumentMap) = function | sys.start<Str>(arguments, as: Int);",
+            "sys.start explicit type argument must match the as: witness",
+        ),
+        (
+            "positional_after_named",
+            "fn positional_after_named(function: sys.FunctionRef, arguments: sys.ArgumentMap) = function | sys.start<Int>(arguments: arguments, as: Int, null);",
+            "arguments do not match the portable sys.start<T> signature",
+        ),
+    ] {
+        let rejected = analyze(&[ModuleInput::new(
+            "start-generic-pipeline-invalid.orna",
+            source,
+        )]);
+        assert!(
+            has(&rejected, DIAG_TYPE),
+            "{source}: {:#?}",
+            rejected.diagnostics
+        );
+        assert!(
+            rejected
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message() == message),
+            "{name}: expected {message:?}, got {:#?}",
+            rejected.diagnostics
+        );
+        let symbol = &rejected.modules.values().next().unwrap().symbols[name];
+        assert!(matches!(
+            &symbol.ty,
+            Type::Function { result, .. } if result.as_ref() == &Type::Error
+        ));
+    }
 }
 
 #[test]

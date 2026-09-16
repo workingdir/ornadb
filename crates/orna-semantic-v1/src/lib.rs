@@ -10370,7 +10370,7 @@ fn infer_generic_pipeline_stage(
             effects,
         };
     };
-    if path == ["sys", "meta"] || path == ["sys", "await"] {
+    if path == ["sys", "meta"] || path == ["sys", "await"] || path == ["sys", "start"] {
         let stage = infer_descriptor_system_call_with_input(
             &path,
             arguments,
@@ -11312,6 +11312,22 @@ fn infer_descriptor_system_call(
             diagnostics,
         ));
     }
+    if path == ["sys", "start"]
+        && (type_arguments.is_some()
+            || arguments
+                .iter()
+                .any(|argument| argument.name.as_deref() == Some("as")))
+    {
+        return Some(infer_start_system_call(
+            functions,
+            arguments,
+            type_arguments,
+            None,
+            scope,
+            local,
+            diagnostics,
+        ));
+    }
     if type_arguments.is_some() {
         return Some(infer_unsupported_generic_system_call(
             functions,
@@ -11355,10 +11371,7 @@ fn infer_descriptor_system_call(
         .copied()
         .find(|function| descriptor_arguments_match(function, arguments, &values))
     else {
-        let code = if functions
-            .iter()
-            .any(|function| !function.type_parameters.is_empty())
-        {
+        let code = if supported.is_empty() {
             DIAG_UNSUPPORTED
         } else {
             DIAG_TYPE
@@ -11382,6 +11395,271 @@ fn infer_descriptor_system_call(
             .expect("supported descriptor functions have concrete types"),
         effects,
     })
+}
+
+/// `sys.start<T>` is admitted only through its explicit `as: T` witness. The
+/// opaque `sys.FunctionRef` target is resolved later by the invocation
+/// boundary, so this semantic slice validates the closed descriptor shape and
+/// carries the witness into the returned handle type.
+fn infer_start_system_call(
+    functions: &[system_api::FunctionDescriptor],
+    arguments: &[orna_syntax_v1::Argument],
+    type_arguments: Option<&[TypeExpr]>,
+    input: Option<&Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let mut effects = EffectSummary::default();
+    let input_offset = usize::from(input.is_some());
+    let mut witness_index = None;
+    let mut values = input.into_iter().cloned().collect::<Vec<_>>();
+    values.extend(arguments.iter().enumerate().map(|(index, argument)| {
+        if argument.name.as_deref() == Some("as") {
+            if witness_index.replace(input_offset + index).is_some() {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "sys.start requires exactly one explicit as: T witness",
+                ));
+            }
+            let Some(ty) = start_type_witness(&argument.value, scope) else {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "sys.start as: witness must name a known static type",
+                ));
+                return Type::Error;
+            };
+            return ty;
+        }
+        let value = infer(&argument.value, scope, local, diagnostics);
+        effects.join(&value.effects);
+        value.ty
+    }));
+
+    let Some(function) = functions
+        .iter()
+        .find(|function| start_typed_descriptor(function).is_some())
+    else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "portable generic system function is described but not implemented by this semantic slice",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    let parameter = start_typed_descriptor(function)
+        .expect("the selected descriptor is a typed sys.start overload");
+
+    let Some(witness_index) = witness_index else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "typed sys.start requires an explicit as: T witness",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    if values.iter().any(|value| matches!(value, Type::Error)) {
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+    let witness = values[witness_index].clone();
+
+    if let Some(type_arguments) = type_arguments {
+        if type_arguments.len() != 1 {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "sys.start requires exactly one explicit type argument when generic arguments are supplied",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        }
+        let Some(type_argument) = valid_static_type(&type_arguments[0], scope) else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "sys.start explicit type argument must name a known static type",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        };
+        if type_argument != witness {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "sys.start explicit type argument must match the as: witness",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        }
+    }
+
+    let parameters = function
+        .parameters
+        .iter()
+        .map(|descriptor| substitute_descriptor_type(&descriptor.ty, parameter, &witness))
+        .collect::<Option<Vec<_>>>();
+    let Some(parameters) = parameters else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "portable generic system function has an unsupported type shape",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    let names = function
+        .parameters
+        .iter()
+        .map(|parameter| parameter.name.clone())
+        .collect::<Vec<_>>();
+    let defaults = function
+        .parameters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, parameter)| parameter.has_default.then_some(index))
+        .collect::<BTreeSet<_>>();
+    if arguments.iter().enumerate().any(|(index, argument)| {
+        argument.name.as_deref() == Some("as") && input_offset + index != witness_index
+    }) || !descriptor_arguments_match_types(
+        &parameters,
+        &names,
+        &defaults,
+        arguments,
+        &values[input_offset..],
+        input,
+    ) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "arguments do not match the portable sys.start<T> signature",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+
+    effects.join(&descriptor_effects(function.effect));
+    Inferred {
+        ty: substitute_descriptor_type(&function.result, parameter, &witness)
+            .unwrap_or(Type::Error),
+        effects,
+    }
+}
+
+fn start_type_witness(expression: &Expr, scope: &Scope) -> Option<Type> {
+    let path = qualified_path(expression)?;
+    let name = path.join(".");
+    let ty = primitive(&name).unwrap_or_else(|| Type::Named(name));
+    let ty = resolve_type_aliases(&ty, &scope.type_aliases, &mut BTreeSet::new());
+    let ty = canonicalize_type(&ty, scope);
+    static_type_is_known(&ty, scope).then_some(ty)
+}
+
+fn start_typed_descriptor(function: &system_api::FunctionDescriptor) -> Option<&str> {
+    if function.name != "sys.start"
+        || function.effect != system_api::SystemEffect::Invoke
+        || function.type_parameters.len() != 1
+        || function.parameters.len() != 6
+    {
+        return None;
+    }
+    let parameter = function.type_parameters.iter().next()?;
+    let [target, arguments, witness, at, transaction, idempotency_key] =
+        function.parameters.as_slice()
+    else {
+        return None;
+    };
+    let named = |value: &system_api::SystemType, expected: &str| matches!(value, system_api::SystemType::Named(name) if name == expected);
+    if target.name != "function"
+        || !named(&target.ty, "sys.FunctionRef")
+        || target.has_default
+        || arguments.name != "arguments"
+        || !named(&arguments.ty, "sys.ArgumentMap")
+        || arguments.has_default
+        || witness.name != "as"
+        || witness.ty != system_api::SystemType::Named(parameter.to_owned())
+        || witness.has_default
+        || at.name != "at"
+        || at.ty
+            != system_api::SystemType::Optional(Box::new(system_api::SystemType::Named(
+                "sys.SnapshotRef".into(),
+            )))
+        || !at.has_default
+        || transaction.name != "transaction"
+        || !named(&transaction.ty, "sys.InvokeTransaction")
+        || !transaction.has_default
+        || idempotency_key.name != "idempotency_key"
+        || idempotency_key.ty
+            != system_api::SystemType::Optional(Box::new(system_api::SystemType::Named(
+                "Str".into(),
+            )))
+        || !idempotency_key.has_default
+    {
+        return None;
+    }
+    let system_api::SystemType::Applied { base, arguments } = &function.result else {
+        return None;
+    };
+    if base != "sys.InvocationHandle"
+        || arguments.as_slice() != [system_api::SystemType::Named(parameter.to_owned())]
+    {
+        return None;
+    }
+    Some(parameter)
+}
+
+fn descriptor_arguments_match_types(
+    parameters: &[Type],
+    parameter_names: &[String],
+    default_parameters: &BTreeSet<usize>,
+    arguments: &[orna_syntax_v1::Argument],
+    values: &[Type],
+    input: Option<&Type>,
+) -> bool {
+    if parameters.len() != parameter_names.len() || arguments.len() != values.len() {
+        return false;
+    }
+    let mut seen = BTreeSet::new();
+    let mut positional = 0usize;
+    let mut named_started = false;
+    let supplied = input.into_iter().map(|value| (None, value)).chain(
+        arguments
+            .iter()
+            .zip(values)
+            .map(|(argument, value)| (argument.name.as_deref(), value)),
+    );
+    for (name, actual) in supplied {
+        let index = if let Some(name) = name {
+            named_started = true;
+            parameter_names
+                .iter()
+                .position(|parameter| parameter == name)
+        } else if named_started {
+            None
+        } else {
+            let index = (positional < parameters.len()).then_some(positional);
+            positional += 1;
+            index
+        };
+        let Some(index) = index else {
+            return false;
+        };
+        if !seen.insert(index) || !types_match(&parameters[index], actual) {
+            return false;
+        }
+    }
+    (0..parameters.len()).all(|index| seen.contains(&index) || default_parameters.contains(&index))
 }
 
 /// Generic system operations outside the explicitly implemented subset still
@@ -11624,6 +11902,15 @@ fn infer_descriptor_system_call_with_input(
             local,
             diagnostics,
         )),
+        ["sys", "start"] => Some(infer_start_system_call(
+            functions,
+            arguments,
+            Some(type_arguments),
+            Some(input),
+            scope,
+            local,
+            diagnostics,
+        )),
         _ => None,
     }
 }
@@ -11691,6 +11978,7 @@ fn infer_await_system_call(
     let mut next_positional = 0usize;
     let mut invocation_type = None;
     let mut valid = true;
+    let mut named_started = false;
     let input_offset = usize::from(has_input);
     let supplied = input.into_iter().map(|value| (None, value)).chain(
         arguments
@@ -11700,10 +11988,13 @@ fn infer_await_system_call(
     );
     for (name, value) in supplied {
         let index = if let Some(name) = name {
+            named_started = true;
             function
                 .parameters
                 .iter()
                 .position(|parameter| parameter.name == *name)
+        } else if named_started {
+            None
         } else {
             while used.get(next_positional) == Some(&true) {
                 next_positional += 1;
@@ -11825,12 +12116,16 @@ fn descriptor_arguments_match(
 ) -> bool {
     let mut used = vec![false; function.parameters.len()];
     let mut next_positional = 0usize;
+    let mut named_started = false;
     for (argument, value) in arguments.iter().zip(values) {
         let index = if let Some(name) = &argument.name {
+            named_started = true;
             function
                 .parameters
                 .iter()
                 .position(|parameter| parameter.name == *name)
+        } else if named_started {
+            None
         } else {
             while used.get(next_positional) == Some(&true) {
                 next_positional += 1;
