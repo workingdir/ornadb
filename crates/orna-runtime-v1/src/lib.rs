@@ -1247,6 +1247,7 @@ pub enum RuntimeError {
     ObservationCoordinateMismatch,
     StreamIdentityMismatch,
     StreamCheckpointStale,
+    CheckpointNotReplayable,
     LeaseHeld,
     OwnerLost,
     RecoveryPending,
@@ -1271,6 +1272,20 @@ pub enum RuntimeError {
     FaultInjected(FaultPoint),
     StorageUnavailable,
 }
+impl RuntimeError {
+    /// Returns the stable public system code when this runtime error has one.
+    ///
+    /// The provider boundary deliberately exposes only the two checkpoint
+    /// outcomes required by the system contract. Other runtime failures stay
+    /// internal to this crate's existing error convention.
+    pub fn public_code(&self) -> Option<&'static str> {
+        match self {
+            Self::StreamCheckpointStale => Some("sys.checkpoint.conflict"),
+            Self::CheckpointNotReplayable => Some("sys.checkpoint.not_replayable"),
+            _ => None,
+        }
+    }
+}
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Do not disclose local paths, SQL, payloads, or native error text.
@@ -1281,6 +1296,7 @@ impl fmt::Display for RuntimeError {
             Self::ObservationCoordinateMismatch => "runtime observation coordinates do not match",
             Self::StreamIdentityMismatch => "stream source identity mismatch",
             Self::StreamCheckpointStale => "stream checkpoint is stale",
+            Self::CheckpointNotReplayable => "checkpoint target is not replayable",
             Self::LeaseHeld => "runtime writer is held",
             Self::OwnerLost => "runtime writer ownership was lost",
             Self::RecoveryPending => "runtime takeover recovery is pending",
@@ -2044,6 +2060,21 @@ pub struct CheckpointResetAudit {
     pub new_position: Position,
     pub reason: String,
     pub redacted: bool,
+}
+
+/// Host-supplied capability for one provider-backed checkpoint reset.
+///
+/// The runtime compares the provider's complete key before asking whether the
+/// opaque target is supported. The provider owns target semantics; this API
+/// does not infer ordering or provide a generic typed-position codec.
+pub trait CheckpointResetProvider {
+    /// The exact stream key served by this provider, including its position
+    /// format identity.
+    fn checkpoint_key(&self) -> CheckpointKey;
+
+    /// Returns whether this provider can resume/reset to the opaque target.
+    /// Returning false fails closed before a transaction or audit mutation.
+    fn supports_reset_target(&self, target: &Position) -> bool;
 }
 
 impl RuntimeState {
@@ -2937,6 +2968,42 @@ impl RuntimeState {
         reason: String,
     ) -> Result<StreamCheckpoint, RuntimeError> {
         self.reset_checkpoint_at_capture(lease, key, expected, to, reason, None)
+            .await
+    }
+
+    /// Provider-gated form of [`Self::reset_checkpoint`]. The host supplies
+    /// the provider capability for this exact stream; a key mismatch or an
+    /// unsupported opaque target is rejected before transaction admission.
+    pub async fn reset_checkpoint_with_provider<P: CheckpointResetProvider>(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+        expected: CheckpointPrecondition,
+        to: Position,
+        reason: String,
+        provider: &P,
+    ) -> Result<StreamCheckpoint, RuntimeError> {
+        self.reset_checkpoint_at_capture_with_provider(
+            lease, key, expected, to, reason, None, provider,
+        )
+        .await
+    }
+
+    /// Capture-fenced provider-gated form of the checkpoint reset boundary.
+    pub async fn reset_checkpoint_at_capture_with_provider<P: CheckpointResetProvider>(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+        expected: CheckpointPrecondition,
+        to: Position,
+        reason: String,
+        expected_capture: Option<&CwdCapture>,
+        provider: &P,
+    ) -> Result<StreamCheckpoint, RuntimeError> {
+        if provider.checkpoint_key() != key || !provider.supports_reset_target(&to) {
+            return Err(RuntimeError::CheckpointNotReplayable);
+        }
+        self.reset_checkpoint_at_capture(lease, key, expected, to, reason, expected_capture)
             .await
     }
 
