@@ -87,6 +87,9 @@ impl RuntimeEvaluator for CompositeEvaluator {
         if transaction_contract(scenario) {
             return run_durable_transaction_scenario(scenario);
         }
+        if assertion_checkpoint_091_contract(scenario) {
+            return run_assertion_checkpoint_091_scenario();
+        }
         if live_keyed_update_contract(scenario) {
             return run_live_keyed_update_scenario(scenario);
         }
@@ -510,6 +513,84 @@ fn run_durable_transaction_scenario(scenario: &Scenario) -> StageOutcome<Diagnos
     })();
     let _ = fs::remove_dir_all(&root);
     result.unwrap_or_else(durable_scenario_failure)
+}
+
+fn assertion_checkpoint_091_contract(scenario: &Scenario) -> bool {
+    scenario.id == "ASSERT-CHECKPOINT-091"
+        && scenario.title == "Assertion failure leaves a coupled stream checkpoint unchanged"
+        && scenario.given == ["a replayable stream delivery writes rows that violate an assertion"]
+        && scenario.when == ["commit the item activation"]
+        && scenario.then
+            == [
+                "rows roll back",
+                "the checkpoint does not advance",
+                "the delivery remains replayable",
+            ]
+        && scenario.requirements == ["ORNA-ASSERT-047", "ORNA-CP-003"]
+        && scenario.evidence_level == "implementation scenario, not executed by an Orna engine"
+}
+
+fn run_assertion_checkpoint_091_scenario() -> StageOutcome<Diagnostic> {
+    let root = conformance_scratch_root("orna-conformance-assert-checkpoint");
+    if fs::create_dir(&root).is_err() {
+        return assertion_checkpoint_scenario_failure();
+    }
+    let result = (|| {
+        let status = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .ok()?;
+        if !status.success() {
+            return None;
+        }
+        let repository = Repository::discover(&root).ok()?;
+        let evaluator = DurableTransactionalEvaluator::new("main", Default::default());
+        let (outcome, rows_rolled_back, checkpoint, exact_failure_attempts, replayable_payload) =
+            block_on(evaluator.execute_assert_checkpoint_091(
+                &repository,
+                RuntimeIdentity {
+                    database_id: [81; 16],
+                    repository_id: [82; 16],
+                },
+                [83; 16],
+                [84; 32],
+            ))
+            .ok()?;
+        (matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-LIST-STREAM-DELIVERY")
+            && rows_rolled_back
+            && checkpoint.as_deref() == Some("1")
+            && exact_failure_attempts == 1
+            && replayable_payload)
+            .then_some(StageOutcome::Passed)
+    })();
+    finish_assertion_checkpoint_091_scenario(&root, result)
+}
+
+fn finish_assertion_checkpoint_091_scenario(
+    root: &Path,
+    result: Option<StageOutcome<Diagnostic>>,
+) -> StageOutcome<Diagnostic> {
+    if fs::remove_dir_all(root).is_err() {
+        return assertion_checkpoint_scenario_failure();
+    }
+    result.unwrap_or_else(assertion_checkpoint_scenario_failure)
+}
+
+fn assertion_checkpoint_scenario_failure() -> StageOutcome<Diagnostic> {
+    StageOutcome::Failed(
+        Diagnostic::new(
+            SafeText::new("ORNA-CONFORMANCE-ASSERT-CHECKPOINT-091").expect("static code"),
+            DiagnosticSeverity::Error,
+            SafeText::new(
+                "durable assertion-checkpoint scenario did not satisfy its exact contract",
+            )
+            .expect("static message"),
+        )
+        .expect("valid diagnostic"),
+    )
 }
 
 fn durable_scenario_failure() -> StageOutcome<Diagnostic> {
@@ -1055,7 +1136,7 @@ fn run_profile(corpus: Corpus, profile: RunnerProfile) -> orna_conformance_v1::R
                         ),
                         (
                             "runtime-stages".into(),
-                            "pure row/expression units, the authoritative duplicate-key fixture, SYS-RT-RENAME-100 system-name resolution, the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, LIVE-004 universal subtree replacement, and EVAL-003 durable request replay contracts execute through bounded runtime witnesses; these scenario results remain implementation-scenario evidence and are not Orna-engine execution".into(),
+                            "pure row/expression units, the authoritative duplicate-key fixture, SYS-RT-RENAME-100 system-name resolution, the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, LIVE-004 universal subtree replacement, the ASSERT-CHECKPOINT-091 durable assertion/checkpoint rollback contract, and EVAL-003 durable request replay contracts execute through bounded runtime witnesses; these scenario results remain runtime-adapter evidence and are not compiler-produced or full Orna-engine execution".into(),
                         ),
                     ]
                     .into_iter()
@@ -1069,6 +1150,7 @@ fn run_profile(corpus: Corpus, profile: RunnerProfile) -> orna_conformance_v1::R
                         "LIVE-003".into(),
                         "LIVE-004".into(),
                         "SYS-RT-RENAME-100".into(),
+                        "ASSERT-CHECKPOINT-091".into(),
                         "EVAL-003".into(),
                     ],
                 })
@@ -1140,11 +1222,14 @@ fn report_exit_code(report: &orna_conformance_v1::RunReport) -> i32 {
 mod tests {
     use super::{
         CompositeEvaluator, Corpus, Harness, RunnerCommand, RunnerProfile, RuntimeAdapter,
-        Scenario, StageOutcome, parse_runner_command, report_exit_code, run_live_fallback_scenario,
+        Scenario, StageOutcome, assertion_checkpoint_091_contract, conformance_scratch_root,
+        finish_assertion_checkpoint_091_scenario, parse_runner_command, report_exit_code,
+        run_assertion_checkpoint_091_scenario, run_live_fallback_scenario,
         run_live_keyed_update_scenario, run_live_resync_scenario, run_live_unkeyed_update_scenario,
         run_profile, run_sys_rt_rename_scenario,
     };
     use orna_conformance_v1::EvidenceStatus;
+    use std::fs;
 
     #[test]
     fn report_exit_code_distinguishes_unsatisfied_evidence_from_skips() {
@@ -1222,6 +1307,68 @@ mod tests {
                 .all(|scenario| scenario.status != EvidenceStatus::Failed)
         );
         assert_eq!(report_exit_code(&report), 1);
+    }
+
+    #[test]
+    fn assertion_checkpoint_scenario_is_exactly_wired_to_durable_runtime_evidence() {
+        let corpus = Corpus::load_default().expect("reference corpus loads");
+        let scenario = corpus.scenarios["scenarios"]
+            .as_array()
+            .expect("scenario array")
+            .iter()
+            .find(|value| value["id"] == "ASSERT-CHECKPOINT-091")
+            .cloned()
+            .map(|value| serde_json::from_value::<Scenario>(value).expect("scenario shape"))
+            .expect("assertion-checkpoint scenario");
+        assert!(assertion_checkpoint_091_contract(&scenario));
+        assert!(matches!(
+            run_assertion_checkpoint_091_scenario(),
+            StageOutcome::Passed
+        ));
+
+        let report = run_profile(
+            Corpus::load_default().expect("reference corpus loads"),
+            RunnerProfile::BoundedExpressionRuntime,
+        );
+        assert_eq!(report.scenarios.len(), 144);
+        assert!(
+            report
+                .implementation_claim
+                .executed_scenario_contracts
+                .contains(&"ASSERT-CHECKPOINT-091".into())
+        );
+        assert!(
+            report
+                .implementation_claim
+                .environment
+                .get("runtime-stages")
+                .is_some_and(
+                    |description| description.contains("runtime-adapter evidence")
+                        && description
+                            .contains("not compiler-produced or full Orna-engine execution")
+                )
+        );
+        let result = report
+            .scenarios
+            .iter()
+            .find(|result| result.scenario == "ASSERT-CHECKPOINT-091")
+            .expect("assertion-checkpoint report result");
+        assert_eq!(result.class, orna_conformance_v1::EvidenceClass::Runtime);
+        assert_eq!(result.status, EvidenceStatus::Passed);
+        assert_eq!(result.requirements, ["ORNA-ASSERT-047", "ORNA-CP-003"]);
+    }
+
+    #[test]
+    fn assertion_checkpoint_cleanup_failure_cannot_publish_a_pass() {
+        let root = conformance_scratch_root("orna-conformance-cleanup-regression");
+        fs::write(&root, b"cleanup target is not a directory").expect("create cleanup target");
+        let outcome = finish_assertion_checkpoint_091_scenario(&root, Some(StageOutcome::Passed));
+        assert!(matches!(
+            outcome,
+            StageOutcome::Failed(ref diagnostic)
+                if diagnostic.code() == "ORNA-CONFORMANCE-ASSERT-CHECKPOINT-091"
+        ));
+        fs::remove_file(root).expect("remove cleanup regression target");
     }
 
     #[test]

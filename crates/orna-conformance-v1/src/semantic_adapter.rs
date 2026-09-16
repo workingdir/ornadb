@@ -26,10 +26,10 @@ use orna_runtime_v1::{
     FaultInjector, ListStreamSource, NoFault, RequestIdentity, RequestStatus,
     RunObservationRegistration, RunningTableRequestContinuation, RuntimeError, RuntimeIdentity,
     RuntimeState, StreamHandler, StreamHandlerResult, StreamItem, StreamObservationRegistration,
-    StreamRunControl, StreamRunOutcome, StreamTableCandidateValidator,
-    StreamValidatedTableMutationBatch, TableActivationCandidateValidator, TableActivationError,
-    TableMutation, TerminalOutcome, ValidatedTableActivationCommit,
-    ValidatedTableRequestActivationCommit, WriterLease,
+    StreamRunControl, StreamRunOutcome, StreamSource, StreamSourcePoll,
+    StreamTableCandidateValidator, StreamValidatedTableMutationBatch,
+    TableActivationCandidateValidator, TableActivationError, TableMutation, TerminalOutcome,
+    ValidatedTableActivationCommit, ValidatedTableRequestActivationCommit, WriterLease,
 };
 use orna_semantic_v1::{
     AssertionOwner, AssertionPlan, Catalogue, EffectSummary, ModuleInput, Namespace,
@@ -1920,40 +1920,79 @@ impl DurableTransactionalEvaluator {
             .stream_backend(writer)
             .checkpoint_async(&checkpoint_key)
             .await?;
-        let checkpoint_position = checkpoint
-            .committed
-            .as_ref()
-            .map(|position| position.token.as_str().to_owned());
-        let failure_identity = FailureIdentity(DeliveryIdentity {
-            consumer: checkpoint_key.consumer.clone(),
-            source_format: checkpoint_key.source_format.clone(),
-            source: checkpoint_key.source.clone(),
-            partition_format: checkpoint_key.partition_format.clone(),
-            partition: checkpoint_key.partition.clone(),
-            position_format: checkpoint_key.position_format.clone(),
-            position: Position {
-                token: Component::new("1").map_err(|_| RuntimeError::RecoveryInvalid)?,
-            },
-            successor: Position {
-                token: Component::new("2").map_err(|_| RuntimeError::RecoveryInvalid)?,
-            },
+        let checkpoint_is_expected = checkpoint.key == checkpoint_key
+            && checkpoint.version == 1
+            && checkpoint
+                .committed
+                .as_ref()
+                .is_some_and(|position| position.token.as_str() == "1");
+        let checkpoint_position = checkpoint_is_expected.then(|| {
+            checkpoint
+                .committed
+                .as_ref()
+                .expect("expected checkpoint has a committed position")
+                .token
+                .as_str()
+                .to_owned()
         });
+        let delivery_identity = |position: &str, successor: &str| {
+            Ok::<_, RuntimeError>(FailureIdentity(DeliveryIdentity {
+                consumer: checkpoint_key.consumer.clone(),
+                source_format: checkpoint_key.source_format.clone(),
+                source: checkpoint_key.source.clone(),
+                partition_format: checkpoint_key.partition_format.clone(),
+                partition: checkpoint_key.partition.clone(),
+                position_format: checkpoint_key.position_format.clone(),
+                position: Position {
+                    token: Component::new(position).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                },
+                successor: Position {
+                    token: Component::new(successor).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                },
+            }))
+        };
+        let first_delivery_identity = delivery_identity("0", "1")?;
+        let failure_identity = delivery_identity("1", "2")?;
         let stream = state.stream_backend(writer);
+        let first_failure = stream.failure_async(&first_delivery_identity).await?;
         let failure = stream.failure_async(&failure_identity).await?;
+        let exact_one_failure = first_failure.is_none()
+            && failure
+                .as_ref()
+                .is_some_and(|failure| failure.attempts == 1);
         let (attempts, replayable_payload) = match failure {
             Some(failure) => {
                 let payload = stream
                     .failure_payload_metadata_async(&failure.identity)
                     .await?;
+                let replayable_source = if checkpoint_is_expected {
+                    let expected_payload = bridge.payloads.get(1);
+                    let mut source =
+                        ListStreamSource::new(checkpoint.key.clone(), bridge.payloads.clone());
+                    source.descriptor().replayable
+                        && matches!(
+                            source.next(&checkpoint).await,
+                            Ok(StreamSourcePoll::Item(item))
+                                if item.delivery.checkpoint_key() == checkpoint_key
+                                    && item.delivery.position.token.as_str() == "1"
+                                    && item.delivery.successor.token.as_str() == "2"
+                                    && expected_payload
+                                        .is_some_and(|expected| item.payload == *expected)
+                        )
+                } else {
+                    false
+                };
                 (
                     failure.attempts,
-                    payload.is_some_and(|payload| {
-                        payload.redacted && payload.plaintext_bytes.is_some()
-                    }),
+                    replayable_source
+                        && payload.is_some_and(|payload| {
+                            payload.redacted && payload.plaintext_bytes.is_some()
+                        }),
                 )
             }
             None => (0, false),
         };
+        let attempts = if exact_one_failure { attempts } else { 0 };
         Ok((
             outcome,
             rows_rolled_back,
