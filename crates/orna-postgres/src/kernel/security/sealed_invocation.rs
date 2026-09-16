@@ -594,7 +594,7 @@ impl SealedInvocationOperation {
 
 #[cfg(test)]
 mod argument_metadata_tests {
-    use super::sealed_invocation_argument_type_metadata;
+    use super::{SealedInvocationArgumentMetadata, sealed_invocation_argument_type_metadata};
     use orna_core::{
         TypeId,
         types::{ResolvedType, StandardScalar},
@@ -619,6 +619,25 @@ mod argument_metadata_tests {
             sealed_invocation_argument_type_metadata(ResolvedType::value(type_id)),
             ("value", None, Some(type_id.to_bytes().to_vec()))
         );
+    }
+
+    #[test]
+    fn argument_metadata_debug_withholds_value_digest() {
+        let digest = vec![0x41; 32];
+        let metadata = SealedInvocationArgumentMetadata {
+            position: 0,
+            parameter_id: vec![0x11; 16],
+            name: "pin".to_owned(),
+            type_kind: "scalar",
+            scalar_type: Some("integer"),
+            target_type_id: None,
+            type_reference: None,
+            value_digest: digest.clone(),
+        };
+
+        let debug = format!("{metadata:?}");
+        assert!(debug.contains("<withheld>"));
+        assert!(!debug.contains(&format!("{digest:?}")));
     }
 }
 
@@ -872,7 +891,7 @@ impl SealedInvocationPreparedOutcome {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 struct SealedInvocationArgumentMetadata {
     position: i64,
     parameter_id: Vec<u8>,
@@ -882,6 +901,22 @@ struct SealedInvocationArgumentMetadata {
     target_type_id: Option<Vec<u8>>,
     type_reference: Option<Vec<u8>>,
     value_digest: Vec<u8>,
+}
+
+impl std::fmt::Debug for SealedInvocationArgumentMetadata {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SealedInvocationArgumentMetadata")
+            .field("position", &self.position)
+            .field("parameter_id", &self.parameter_id)
+            .field("name", &self.name)
+            .field("type_kind", &self.type_kind)
+            .field("scalar_type", &self.scalar_type)
+            .field("target_type_id", &self.target_type_id)
+            .field("type_reference", &self.type_reference)
+            .field("value_digest", &"<withheld>")
+            .finish()
+    }
 }
 
 fn sealed_invocation_scalar_name(scalar: orna_core::types::StandardScalar) -> &'static str {
