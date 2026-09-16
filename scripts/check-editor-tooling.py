@@ -42,6 +42,13 @@ TARGET_HIGHLIGHT_EXPECTATIONS = (
     ("accepted_resources_streams.orna", {"function": ("overdue", "execute_sql"), "property": ("payload",)}),
     ("accepted_actions_inspector.orna", {"function": ("echo",), "property": ("invoke",)}),
 )
+# The generic field-path rule may still capture target finals as properties;
+# Tree-sitter resolves the later target-specific function capture. These names
+# must never receive a target-specific function capture.
+TARGET_HIGHLIGHT_FORBIDDEN = (
+    ("accepted_resources_streams.orna", {"function": ("payload",)}),
+    ("accepted_actions_inspector.orna", {"function": ("invoke",)}),
+)
 QUALIFIED_NAME_HIGHLIGHT_EXPECTATIONS = {
     "namespace": ("SELECT", "FROM"),
     "type": ("END",),
@@ -933,7 +940,16 @@ def check_target_path_highlights(
     capture_line = re.compile(
         r"capture:\s+\d+\s+-\s+(?P<name>[^,]+),.*text: `(?P<text>[^`]*)`"
     )
-    for fixture_name, expected in TARGET_HIGHLIGHT_EXPECTATIONS:
+    for (fixture_name, expected), (forbidden_fixture_name, forbidden) in zip(
+        TARGET_HIGHLIGHT_EXPECTATIONS, TARGET_HIGHLIGHT_FORBIDDEN, strict=True
+    ):
+        if fixture_name != forbidden_fixture_name:
+            log(
+                "target highlight expectations disagree on fixture names: "
+                f"{fixture_name!r} != {forbidden_fixture_name!r}",
+                error=True,
+            )
+            return False
         fixture_path = tree_sitter_directory / "test" / "highlight" / fixture_name
         if not fixture_path.is_file():
             log(
@@ -977,6 +993,19 @@ def check_target_path_highlights(
                     log(
                         f"{label} target highlight query for {fixture_name} did not capture "
                         f"{capture_name} texts {expected_texts!r}: observed {observed!r}",
+                        error=True,
+                    )
+                    return False
+            for capture_name, forbidden_texts in forbidden.items():
+                observed = [
+                    text
+                    for name, text in captures
+                    if name == capture_name and text in forbidden_texts
+                ]
+                if observed:
+                    log(
+                        f"{label} target highlight query for {fixture_name} captured "
+                        f"forbidden {capture_name} texts {observed!r}",
                         error=True,
                     )
                     return False
