@@ -3941,6 +3941,7 @@ impl Repository {
 
     fn config_value(&self, scope: &str, key: &str) -> Result<ConfigValue, RepositoryError> {
         let mut command = self.observer_command();
+        command.env("GIT_NO_LAZY_FETCH", "1");
         command.args(["config", scope, "--get", key]);
         let output = command
             .output()
@@ -3956,6 +3957,7 @@ impl Repository {
 
     fn observer_remote_names(&self) -> Result<Vec<String>, RepositoryError> {
         let mut command = self.observer_command();
+        command.env("GIT_NO_LAZY_FETCH", "1");
         command.arg("remote");
         let output = command
             .output()
@@ -3978,6 +3980,7 @@ impl Repository {
     ) -> Result<std::collections::BTreeMap<String, String>, RepositoryError> {
         let mut command = self.observer_command();
         command
+            .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .args(["ls-remote", "--refs", remote])
             .args(expected.keys());
@@ -3994,6 +3997,7 @@ impl Repository {
 
     fn observer_native_object_id_length(&self) -> Result<usize, RepositoryError> {
         let mut command = self.observer_command();
+        command.env("GIT_NO_LAZY_FETCH", "1");
         command.args(["rev-parse", "--show-object-format"]);
         let output = command
             .output()
