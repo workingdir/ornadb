@@ -146,6 +146,37 @@ fn nominal_parts(value: &orna_foundation_v1::CanonicalValue) -> (&Raw, &[Raw]) {
     (type_id, fields.as_slice())
 }
 
+fn nominal_input(field_key: Raw) -> orna_foundation_v1::CanonicalValue {
+    orna_foundation_v1::CanonicalValue::new(Raw::Tag(
+        60009,
+        Box::new(Raw::Array(vec![
+            type_id_raw("stable.Thing"),
+            Raw::Array(vec![Raw::Array(vec![field_key, Raw::Int(7.into())])]),
+        ])),
+    ))
+    .expect("nominal input should be structurally canonical")
+}
+
+#[test]
+fn evaluator_decode_rejects_nominal_text_field_keys() {
+    let environment = BTreeMap::from([("value".into(), nominal_input(Raw::Text("value".into())))]);
+
+    let result = evaluate_parsed(&parsed_expression("value"), &environment, Limits::default());
+
+    assert_eq!(code(result), "ORNA-EVAL-VALUE");
+}
+
+#[test]
+fn evaluator_decode_accepts_nominal_object_id_field_keys() {
+    let input = nominal_input(field_id_raw("value"));
+    let environment = BTreeMap::from([("value".into(), input.clone())]);
+
+    let result = evaluate_parsed(&parsed_expression("value"), &environment, Limits::default())
+        .expect("canonical ObjectId nominal field keys should decode");
+
+    assert_eq!(result.raw(), input.raw());
+}
+
 #[test]
 fn nominal_construction_materializes_supplied_and_default_fields_in_declaration_order() {
     let definitions = nominal_definitions(
