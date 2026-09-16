@@ -416,6 +416,57 @@ class TreeSitterMetadataTests(unittest.TestCase):
                     self.assertIn(diagnostic, errors.getvalue())
 
 
+class TargetHighlightCaptureTests(unittest.TestCase):
+    def _run_target_check(self, captures: tuple[tuple[str, str], ...]) -> bool:
+        output = "\n".join(
+            f"capture: {index} - {name}, start: (0, 0), end: (0, 0), text: `{text}`"
+            for index, (name, text) in enumerate(captures)
+        )
+        result = subprocess.CompletedProcess(
+            args=["tree-sitter"],
+            returncode=0,
+            stdout=output,
+            stderr="",
+        )
+        with (
+            mock.patch.object(checker, "run_command", return_value=result),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            return checker.check_target_path_highlights(
+                "tree-sitter",
+                REPOSITORY / "editors" / "zed",
+                REPOSITORY / "editors" / "tree-sitter-orna",
+                REPOSITORY,
+            )
+
+    def test_accepts_target_functions_and_ordinary_properties(self) -> None:
+        self.assertTrue(
+            self._run_target_check(
+                (
+                    ("function", "overdue"),
+                    ("function", "execute_sql"),
+                    ("function", "echo"),
+                    ("property", "payload"),
+                    ("property", "invoke"),
+                )
+            )
+        )
+
+    def test_rejects_function_capture_for_an_ordinary_field_final(self) -> None:
+        self.assertFalse(
+            self._run_target_check(
+                (
+                    ("function", "overdue"),
+                    ("function", "execute_sql"),
+                    ("function", "echo"),
+                    ("function", "payload"),
+                    ("property", "payload"),
+                    ("property", "invoke"),
+                )
+            )
+        )
+
 
 class SourceCheckParityTests(unittest.TestCase):
     def _fixtures(self) -> list[checker.CorpusSourceFixture]:
