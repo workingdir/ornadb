@@ -10419,6 +10419,7 @@ fn infer_generic_pipeline_stage(
     if path == ["sys", "meta"]
         || path == ["sys", "await"]
         || path == ["sys", "cancel"]
+        || path == ["sys", "invoke"]
         || path == ["sys", "start"]
     {
         let stage = infer_descriptor_system_call_with_input(
@@ -11373,6 +11374,22 @@ fn infer_descriptor_system_call(
             diagnostics,
         ));
     }
+    if path == ["sys", "invoke"]
+        && (type_arguments.is_some()
+            || arguments
+                .iter()
+                .any(|argument| argument.name.as_deref() == Some("as")))
+    {
+        return Some(infer_invoke_system_call(
+            functions,
+            arguments,
+            type_arguments,
+            None,
+            scope,
+            local,
+            diagnostics,
+        ));
+    }
     if path == ["sys", "start"]
         && (type_arguments.is_some()
             || arguments
@@ -11456,6 +11473,212 @@ fn infer_descriptor_system_call(
             .expect("supported descriptor functions have concrete types"),
         effects,
     })
+}
+
+/// `sys.invoke<T>` is admitted only through its explicit `as: T` witness. The
+/// function reference remains opaque at this layer; the descriptor shape,
+/// named/default argument rules, result substitution and invoke effect are
+/// nevertheless checked before any runtime activation can occur.
+fn infer_invoke_system_call(
+    functions: &[system_api::FunctionDescriptor],
+    arguments: &[orna_syntax_v1::Argument],
+    type_arguments: Option<&[TypeExpr]>,
+    input: Option<&Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let mut effects = EffectSummary::default();
+    let input_offset = usize::from(input.is_some());
+    let mut witness_index = None;
+    let mut values = input.into_iter().cloned().collect::<Vec<_>>();
+    values.extend(arguments.iter().enumerate().map(|(index, argument)| {
+        if argument.name.as_deref() == Some("as") {
+            if witness_index.replace(input_offset + index).is_some() {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "sys.invoke requires exactly one explicit as: T witness",
+                ));
+            }
+            let Some(ty) = start_type_witness(&argument.value, scope) else {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "sys.invoke as: witness must name a known static type",
+                ));
+                return Type::Error;
+            };
+            return ty;
+        }
+        let value = infer(&argument.value, scope, local, diagnostics);
+        effects.join(&value.effects);
+        value.ty
+    }));
+
+    let Some(function) = functions
+        .iter()
+        .find(|function| invoke_typed_descriptor(function).is_some())
+    else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "portable generic system function is described but not implemented by this semantic slice",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    let parameter = invoke_typed_descriptor(function)
+        .expect("the selected descriptor is a typed sys.invoke overload");
+
+    let Some(witness_index) = witness_index else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "typed sys.invoke requires an explicit as: T witness",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    if values.iter().any(|value| matches!(value, Type::Error)) {
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+    let witness = values[witness_index].clone();
+
+    if let Some(type_arguments) = type_arguments {
+        if type_arguments.len() != 1 {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "sys.invoke requires exactly one explicit type argument when generic arguments are supplied",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        }
+        let Some(type_argument) = valid_static_type(&type_arguments[0], scope) else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "sys.invoke explicit type argument must name a known static type",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        };
+        if type_argument != witness {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "sys.invoke explicit type argument must match the as: witness",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        }
+    }
+
+    let parameters = function
+        .parameters
+        .iter()
+        .map(|descriptor| substitute_descriptor_type(&descriptor.ty, parameter, &witness))
+        .collect::<Option<Vec<_>>>();
+    let Some(parameters) = parameters else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "portable generic system function has an unsupported type shape",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    let names = function
+        .parameters
+        .iter()
+        .map(|parameter| parameter.name.clone())
+        .collect::<Vec<_>>();
+    let defaults = function
+        .parameters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, parameter)| parameter.has_default.then_some(index))
+        .collect::<BTreeSet<_>>();
+    if arguments.iter().enumerate().any(|(index, argument)| {
+        argument.name.as_deref() == Some("as") && input_offset + index != witness_index
+    }) || !descriptor_arguments_match_types(
+        &parameters,
+        &names,
+        &defaults,
+        arguments,
+        &values[input_offset..],
+        input,
+    ) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "arguments do not match the portable sys.invoke<T> signature",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+
+    effects.join(&descriptor_effects(function.effect));
+    Inferred {
+        ty: substitute_descriptor_type(&function.result, parameter, &witness)
+            .unwrap_or(Type::Error),
+        effects,
+    }
+}
+
+fn invoke_typed_descriptor(function: &system_api::FunctionDescriptor) -> Option<&str> {
+    if function.name != "sys.invoke"
+        || function.effect != system_api::SystemEffect::Invoke
+        || function.type_parameters.len() != 1
+        || function.parameters.len() != 6
+    {
+        return None;
+    }
+    let parameter = function.type_parameters.iter().next()?;
+    let [target, arguments, witness, at, transaction, idempotency_key] =
+        function.parameters.as_slice()
+    else {
+        return None;
+    };
+    let named = |value: &system_api::SystemType, expected: &str| matches!(value, system_api::SystemType::Named(name) if name == expected);
+    if target.name != "function"
+        || !named(&target.ty, "sys.FunctionRef")
+        || target.has_default
+        || arguments.name != "arguments"
+        || !named(&arguments.ty, "sys.ArgumentMap")
+        || arguments.has_default
+        || witness.name != "as"
+        || witness.ty != system_api::SystemType::Named(parameter.to_owned())
+        || witness.has_default
+        || at.name != "at"
+        || at.ty
+            != system_api::SystemType::Optional(Box::new(system_api::SystemType::Named(
+                "sys.SnapshotRef".into(),
+            )))
+        || !at.has_default
+        || transaction.name != "transaction"
+        || !named(&transaction.ty, "sys.InvokeTransaction")
+        || !transaction.has_default
+        || idempotency_key.name != "idempotency_key"
+        || idempotency_key.ty
+            != system_api::SystemType::Optional(Box::new(system_api::SystemType::Named(
+                "Str".into(),
+            )))
+        || !idempotency_key.has_default
+        || function.result != system_api::SystemType::Named(parameter.to_owned())
+    {
+        return None;
+    }
+    Some(parameter)
 }
 
 /// `sys.start<T>` is admitted only through its explicit `as: T` witness. The
@@ -11964,6 +12187,15 @@ fn infer_descriptor_system_call_with_input(
             diagnostics,
         )),
         ["sys", "cancel"] => Some(infer_cancel_system_call(
+            functions,
+            arguments,
+            Some(type_arguments),
+            Some(input),
+            scope,
+            local,
+            diagnostics,
+        )),
+        ["sys", "invoke"] => Some(infer_invoke_system_call(
             functions,
             arguments,
             Some(type_arguments),

@@ -2964,6 +2964,145 @@ fn sys_cancel_infers_and_validates_the_invocation_handle_result_type() {
 }
 
 #[test]
+fn sys_invoke_typed_admission_substitutes_the_explicit_result_witness() {
+    // ORNA-SYS-077/078/079: semantic admission keeps reflection behind the
+    // typed descriptor boundary; runtime binding owns the pinned identity and
+    // canonical argument envelope after this check.
+    // ORNA-SYS-132/140: `as: T` is explicit, exact, and never inferred as
+    // `sys.Value`. ORNA-SYS-039: the invoke effect remains conservative.
+    let valid = analyze(&[ModuleInput::new(
+        "invoke-generic.orna",
+        r#"
+            pub fn positional(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.invoke<Int>(function, arguments, as: Int);
+            pub fn named(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.invoke(function: function, arguments: arguments, as: Int,
+                    at: null, transaction: sys.InvokeTransaction.inherit,
+                    idempotency_key: null);
+            pub fn local_generic<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.invoke<T>(function, arguments, as: T);
+            pub fn piped(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                function | sys.invoke<Int>(arguments, as: Int);
+            pub fn erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.invoke(function, arguments);
+        "#,
+    )]);
+    assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
+    let module = valid.modules.values().next().unwrap();
+    for name in ["positional", "named", "piped"] {
+        let symbol = &module.exports[name];
+        assert!(matches!(
+            &symbol.ty,
+            Type::Function { result, .. } if result.as_ref() == &Type::Int
+        ));
+        assert_eq!(
+            symbol.effects.effects,
+            std::collections::BTreeSet::from(["invoke".into()])
+        );
+        assert!(symbol.effects.may_fail);
+    }
+    let local_generic = &module.exports["local_generic"];
+    assert!(matches!(
+        &local_generic.ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Named("T".into())
+    ));
+    assert_eq!(
+        local_generic.effects.effects,
+        std::collections::BTreeSet::from(["invoke".into()])
+    );
+    assert!(local_generic.effects.may_fail);
+    let erased = &module.exports["erased"];
+    assert!(matches!(
+        &erased.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Named("sys.Value".into())
+    ));
+    assert_eq!(
+        erased.effects.effects,
+        std::collections::BTreeSet::from(["invoke".into()])
+    );
+    assert!(erased.effects.may_fail);
+
+    for (name, source, message) in [
+        (
+            "missing",
+            "fn missing(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, arguments);",
+            "typed sys.invoke requires an explicit as: T witness",
+        ),
+        (
+            "malformed",
+            "fn malformed(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, arguments, as: 1);",
+            "sys.invoke as: witness must name a known static type",
+        ),
+        (
+            "mismatched",
+            "fn mismatched(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Str>(function, arguments, as: Int);",
+            "sys.invoke explicit type argument must match the as: witness",
+        ),
+        (
+            "extra_generic",
+            "fn extra_generic(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int, Str>(function, arguments, as: Int);",
+            "sys.invoke requires exactly one explicit type argument when generic arguments are supplied",
+        ),
+        (
+            "unknown_generic",
+            "fn unknown_generic(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Missing>(function, arguments, as: Int);",
+            "sys.invoke explicit type argument must name a known static type",
+        ),
+        (
+            "wrong_target",
+            "fn wrong_target(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(1, arguments, as: Int);",
+            "arguments do not match the portable sys.invoke<T> signature",
+        ),
+        (
+            "wrong_arguments",
+            "fn wrong_arguments(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, 1, as: Int);",
+            "arguments do not match the portable sys.invoke<T> signature",
+        ),
+        (
+            "duplicate",
+            "fn duplicate(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, arguments, as: Int, as: Int);",
+            "sys.invoke requires exactly one explicit as: T witness",
+        ),
+        (
+            "unknown_label",
+            "fn unknown_label(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, arguments, as: Int, extra: null);",
+            "arguments do not match the portable sys.invoke<T> signature",
+        ),
+        (
+            "positional_witness",
+            "fn positional_witness(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, arguments, Int);",
+            "typed sys.invoke requires an explicit as: T witness",
+        ),
+        (
+            "positional_after_named",
+            "fn positional_after_named(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, arguments: arguments, as: Int, null);",
+            "arguments do not match the portable sys.invoke<T> signature",
+        ),
+    ] {
+        let rejected = analyze(&[ModuleInput::new("invoke-generic-invalid.orna", source)]);
+        assert!(
+            has(&rejected, DIAG_TYPE),
+            "{name}: {:#?}",
+            rejected.diagnostics
+        );
+        assert!(
+            rejected
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message() == message),
+            "{name}: expected {message:?}, got {:#?}",
+            rejected.diagnostics
+        );
+        let symbol = &rejected.modules.values().next().unwrap().symbols[name];
+        assert!(matches!(
+            &symbol.ty,
+            Type::Function { result, .. } if result.as_ref() == &Type::Error
+        ));
+    }
+}
+
+#[test]
 fn sys_start_typed_admission_requires_a_matching_result_witness_and_exact_shape() {
     let valid = analyze(&[ModuleInput::new(
         "start-generic.orna",
