@@ -480,6 +480,7 @@ fn verify_physical_segment(
 ) -> Result<(), RepositoryError> {
     verify_physical_metadata(
         table,
+        segment.role,
         segment.schema,
         &segment.encoder_version,
         &segment.columns,
@@ -500,6 +501,7 @@ fn verify_physical_entry(
     }
     verify_physical_metadata(
         table,
+        entry.role,
         entry.schema,
         &entry.encoder_version,
         &entry.columns,
@@ -529,6 +531,7 @@ fn verify_manifest_segment_bytes(
 
 fn verify_physical_metadata(
     table: Uuid,
+    role: CompactSegmentRole,
     schema: [u8; 32],
     encoder_version: &str,
     columns: &[u8],
@@ -574,7 +577,10 @@ fn verify_physical_metadata(
     if schema_descriptor_fingerprint(&descriptor)? != schema {
         return Err(RepositoryError::InvalidCompactManifest);
     }
-    verify_physical_columns(columns, metadata.schema_descr())?;
+    if schema_descriptor_table(&descriptor)? != table {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    verify_physical_columns(columns, metadata.schema_descr(), &descriptor, role)?;
     if reader.num_row_groups() == 0 {
         return Err(RepositoryError::InvalidCompactManifest);
     }
@@ -642,6 +648,29 @@ fn verify_physical_metadata(
     Ok(())
 }
 
+/// Reads the owning table identity from the canonical Format §29 descriptor.
+/// The descriptor decoder verifies its closed shape; this explicit binding
+/// prevents a valid descriptor for one table from authorizing physical data
+/// published under another table's metadata and manifest.
+fn schema_descriptor_table(descriptor: &SchemaDescriptor) -> Result<Uuid, RepositoryError> {
+    let OvbRaw::Map(entries) = descriptor.raw() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let table = entries
+        .iter()
+        .find_map(|(key, value)| {
+            matches!(key, OvbRaw::Int(number) if number.to_string() == "1").then_some(value)
+        })
+        .ok_or(RepositoryError::InvalidCompactManifest)?;
+    let OvbRaw::Tag(37, table) = table else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let OvbRaw::Bytes(table) = table.as_ref() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    Uuid::from_slice(table).map_err(|_| RepositoryError::InvalidCompactManifest)
+}
+
 /// Verifies the compact scalar descriptor mapping supported by this publication
 /// witness.  The stable field identity must derive the physical leaf name, and
 /// the logical type, encoding, parameters, and Parquet primitive must agree.
@@ -650,7 +679,10 @@ fn verify_physical_metadata(
 fn verify_physical_columns(
     columns: &[u8],
     schema: &parquet::schema::types::SchemaDescriptor,
+    descriptor: &SchemaDescriptor,
+    segment_role: CompactSegmentRole,
 ) -> Result<(), RepositoryError> {
+    let required_fields = required_physical_fields(descriptor, segment_role)?;
     let value =
         CanonicalValue::decode(columns).map_err(|_| RepositoryError::InvalidCompactManifest)?;
     let OvbRaw::Array(descriptors) = value.raw() else {
@@ -660,6 +692,7 @@ fn verify_physical_columns(
         return Err(RepositoryError::InvalidCompactManifest);
     }
     let mut previous = None;
+    let mut mapped_fields = BTreeSet::new();
     for (descriptor, column) in descriptors.iter().zip(schema.columns()) {
         let OvbRaw::Array(fields) = descriptor else {
             return Err(RepositoryError::InvalidCompactManifest);
@@ -678,6 +711,12 @@ fn verify_physical_columns(
         };
         let field_id =
             Uuid::from_slice(field_id).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        let expected_type = required_fields
+            .get(&field_id)
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        if !mapped_fields.insert(field_id) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
         let OvbRaw::Array(path) = &fields[1] else {
             return Err(RepositoryError::InvalidCompactManifest);
         };
@@ -700,6 +739,9 @@ fn verify_physical_columns(
             return Err(RepositoryError::InvalidCompactManifest);
         }
         if path.len() != 1 || path[0] != format!("f_{}", field_id.simple()) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        if &fields[2] != *expected_type {
             return Err(RepositoryError::InvalidCompactManifest);
         }
         let OvbRaw::Array(logical_type) = &fields[2] else {
@@ -740,7 +782,62 @@ fn verify_physical_columns(
         }
         previous = Some(path);
     }
+    if mapped_fields.len() != required_fields.len() {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
     Ok(())
+}
+
+/// Returns the top-level fields that must have an exact physical mapping for
+/// this segment role.  The compact reader currently admits only scalar leaf
+/// mappings, so nested paths fail closed here rather than being inferred from
+/// Parquet structure.  Computed fields never occupy row storage; deletion
+/// segments enumerate primary-key fields only.
+fn required_physical_fields(
+    descriptor: &SchemaDescriptor,
+    segment_role: CompactSegmentRole,
+) -> Result<BTreeMap<Uuid, &OvbRaw>, RepositoryError> {
+    let OvbRaw::Map(entries) = descriptor.raw() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let fields = entries
+        .iter()
+        .find_map(|(key, value)| {
+            matches!(key, OvbRaw::Int(number) if number.to_string() == "3").then_some(value)
+        })
+        .and_then(|value| match value {
+            OvbRaw::Array(fields) => Some(fields),
+            _ => None,
+        })
+        .ok_or(RepositoryError::InvalidCompactManifest)?;
+    let mut required = BTreeMap::new();
+    for field in fields {
+        let OvbRaw::Array(parts) = field else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let [field_id, _, logical_type, OvbRaw::Int(role), _] = parts.as_slice() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let OvbRaw::Tag(37, field_id) = field_id else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let OvbRaw::Bytes(field_id) = field_id.as_ref() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let field_id =
+            Uuid::from_slice(field_id).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        let required_for_segment = match (segment_role, role.to_string().as_str()) {
+            (CompactSegmentRole::Data | CompactSegmentRole::Replacement, "0" | "1")
+            | (CompactSegmentRole::Deletion, "0") => true,
+            (CompactSegmentRole::Data | CompactSegmentRole::Replacement, "2")
+            | (CompactSegmentRole::Deletion, "1" | "2") => false,
+            _ => return Err(RepositoryError::InvalidCompactManifest),
+        };
+        if required_for_segment && required.insert(field_id, logical_type).is_some() {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+    }
+    Ok(required)
 }
 
 /// The Parquet reader verifies a present CRC while decoding a page, but the
@@ -4261,7 +4358,15 @@ mod tests {
         let bytes = bool_parquet_with_encoding(BOOL_TABLE, &descriptor, &columns, Encoding::RLE);
 
         assert!(matches!(
-            verify_physical_metadata(BOOL_TABLE, schema, "test-encoder-v1", &columns, 2, &bytes,),
+            verify_physical_metadata(
+                BOOL_TABLE,
+                CompactSegmentRole::Data,
+                schema,
+                "test-encoder-v1",
+                &columns,
+                2,
+                &bytes,
+            ),
             Err(RepositoryError::InvalidCompactManifest)
         ));
     }
