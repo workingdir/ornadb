@@ -1341,6 +1341,7 @@ impl std::error::Error for RuntimeError {}
 pub enum StreamTableDeliveryError {
     Runtime(RuntimeError),
     ValidationFailed(SafeDiagnostic),
+    HandlerFailed(SafeDiagnostic),
 }
 
 #[derive(Debug)]
@@ -1636,10 +1637,25 @@ pub struct StreamValidatedTableMutationBatch {
     pub validator: Box<dyn StreamTableCandidateValidator>,
 }
 
+/// Table mutations staged by a handler before it returns an ordinary failure.
+///
+/// The runtime applies these mutations only inside the admitted delivery
+/// transaction so it can prove the failure rolls back the table candidate,
+/// checkpoint completion, CWD capture, and pending mutation ledger together.
+/// `tables` is an explicit scope fence; a mutation outside it is rejected
+/// before the transaction.
+pub struct StreamStagedTableFailure {
+    pub mutations: Vec<TableMutation>,
+    pub tables: Vec<String>,
+    pub next_digest: [u8; 32],
+    pub diagnostic: SafeDiagnostic,
+}
+
 pub enum StreamHandlerResult {
     Commit(StreamMutationBatch),
     CommitTable(StreamTableMutationBatch),
     CommitValidatedTable(StreamValidatedTableMutationBatch),
+    FailTable(StreamStagedTableFailure),
     Fail(SafeDiagnostic),
     Cancelled,
 }
@@ -4047,6 +4063,13 @@ impl RuntimeState {
         }
     }
 
+    /// Cleanup after admission must never hide the error that caused the
+    /// delivery to stop. The lease is a recovery resource, so release it on
+    /// a best-effort basis while returning the original runtime failure.
+    async fn release_stream_lease_best_effort(&self, writer: WriterLease, lease: DeliveryLease) {
+        let _ = self.release_stream_lease(writer, lease).await;
+    }
+
     /// Runs at most one provider delivery. Polling, handler execution and
     /// durable publication stay separated: only a successful handler result
     /// reaches the atomic mutation/checkpoint boundary.
@@ -4209,6 +4232,7 @@ impl RuntimeState {
             };
             (lease, failure_payload)
         };
+        let lease_for_cleanup = lease.clone();
 
         // DELIVERY-1 admits each item as one activation. Capture that
         // activation's CWD generation before user code runs, then use the
@@ -4216,7 +4240,14 @@ impl RuntimeState {
         // that advances the generation while the handler executes must make
         // this delivery fail closed rather than rebasing its writes or
         // checkpoint movement onto the newer CWD.
-        let capture = self.capture().await.map_err(StreamStepError::Runtime)?;
+        let capture = match self.capture().await {
+            Ok(capture) => capture,
+            Err(error) => {
+                self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                    .await;
+                return Err(StreamStepError::Runtime(error));
+            }
+        };
 
         let (handler_result, handler_panicked) =
             match catch_unwind(AssertUnwindSafe(|| handler.handle(&item))) {
@@ -4230,24 +4261,40 @@ impl RuntimeState {
                 ),
             };
         if !handler_panicked && control.cancelled() {
-            let result = self
+            let result = match self
                 .stream_backend(writer)
-                .apply_async(CommitIntent::Cancel { lease })
+                .apply_async(CommitIntent::Cancel {
+                    lease: lease_for_cleanup.clone(),
+                })
                 .await
-                .map_err(StreamStepError::Runtime)?;
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                        .await;
+                    return Err(StreamStepError::Runtime(error));
+                }
+            };
             return match result {
                 CommitResult::Cancelled { checkpoint, .. } => {
                     Ok(StreamStep::Cancelled { checkpoint })
                 }
-                CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
-                _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                CommitResult::Rejected(reason) => {
+                    self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                        .await;
+                    Ok(StreamStep::Rejected(reason))
+                }
+                _ => {
+                    self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                        .await;
+                    Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                }
             };
         }
 
         match handler_result {
             StreamHandlerResult::Commit(batch) => {
                 let faults = NoFault;
-                let lease_for_cleanup = lease.clone();
                 let result = match self
                     .commit_stream_delivery(StreamDeliveryCommit {
                         writer,
@@ -4261,21 +4308,26 @@ impl RuntimeState {
                     .await
                 {
                     Ok((_, result)) => result,
-                    Err(error @ RuntimeError::StaleCapture { .. }) => {
-                        let _ = self.release_stream_lease(writer, lease_for_cleanup).await;
+                    Err(error) => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
                         return Err(StreamStepError::Runtime(error));
                     }
-                    Err(error) => return Err(StreamStepError::Runtime(error)),
                 };
                 match result {
                     CommitResult::CheckpointAdvanced { checkpoint } => {
                         Ok(StreamStep::Committed { checkpoint })
                     }
                     CommitResult::Rejected(reason) => {
-                        self.release_stream_lease(writer, lease_for_cleanup).await?;
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
                         Ok(StreamStep::Rejected(reason))
                     }
-                    _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                    _ => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
+                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                    }
                 }
             }
             // A typed table result without a validator cannot cross the
@@ -4285,27 +4337,43 @@ impl RuntimeState {
                 // Treat the missing validator as a handler failure so the
                 // acquired delivery is durably released and retryable. No
                 // table mutation, checkpoint, or capture is committed.
-                self.require_owner(&self.connection, writer)
-                    .await
-                    .map_err(StreamStepError::Runtime)?;
+                if let Err(error) = self.require_owner(&self.connection, writer).await {
+                    self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                        .await;
+                    return Err(StreamStepError::Runtime(error));
+                }
                 let diagnostic = SafeDiagnostic {
                     code: DiagnosticCode::ExecutionRejected,
                     class: DiagnosticClass::Permanent,
                 };
-                match self
+                let result = match self
                     .stream_backend(writer)
-                    .fail_with_payload_async(lease, diagnostic, failure_payload)
+                    .fail_with_payload_async(lease_for_cleanup.clone(), diagnostic, failure_payload)
                     .await
-                    .map_err(StreamStepError::Runtime)?
                 {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
+                        return Err(StreamStepError::Runtime(error));
+                    }
+                };
+                match result {
                     CommitResult::Failed { failure } => Ok(StreamStep::Failed { failure }),
-                    CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
-                    _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                    CommitResult::Rejected(reason) => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
+                        Ok(StreamStep::Rejected(reason))
+                    }
+                    _ => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
+                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                    }
                 }
             }
             StreamHandlerResult::CommitValidatedTable(mut batch) => {
                 let faults = NoFault;
-                let lease_for_cleanup = lease.clone();
                 let result = self
                     .commit_stream_validated_table_delivery(StreamValidatedTableDeliveryCommit {
                         writer,
@@ -4323,101 +4391,337 @@ impl RuntimeState {
                         Ok(StreamStep::Committed { checkpoint })
                     }
                     Ok((_, CommitResult::Rejected(reason))) => {
-                        self.release_stream_lease(writer, lease_for_cleanup).await?;
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
                         Ok(StreamStep::Rejected(reason))
                     }
-                    Ok(_) => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
-                    Err(StreamTableDeliveryError::Runtime(
-                        error @ RuntimeError::StaleCapture { .. },
-                    )) => {
-                        let _ = self.release_stream_lease(writer, lease_for_cleanup).await;
+                    Ok(_) => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
+                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                    }
+                    Err(StreamTableDeliveryError::Runtime(error)) => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
                         Err(StreamStepError::Runtime(error))
                     }
                     Err(StreamTableDeliveryError::ValidationFailed(diagnostic)) => {
                         if is_cancellation_diagnostic(diagnostic) {
-                            let result = self
+                            let result = match self
                                 .stream_backend(writer)
-                                .apply_async(CommitIntent::Cancel { lease })
+                                .apply_async(CommitIntent::Cancel {
+                                    lease: lease_for_cleanup.clone(),
+                                })
                                 .await
-                                .map_err(StreamStepError::Runtime)?;
+                            {
+                                Ok(result) => result,
+                                Err(error) => {
+                                    self.release_stream_lease_best_effort(
+                                        writer,
+                                        lease_for_cleanup.clone(),
+                                    )
+                                    .await;
+                                    return Err(StreamStepError::Runtime(error));
+                                }
+                            };
                             return match result {
                                 CommitResult::Cancelled { checkpoint, .. } => {
                                     Ok(StreamStep::Cancelled { checkpoint })
                                 }
-                                CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
-                                _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                                CommitResult::Rejected(reason) => {
+                                    self.release_stream_lease_best_effort(
+                                        writer,
+                                        lease_for_cleanup.clone(),
+                                    )
+                                    .await;
+                                    Ok(StreamStep::Rejected(reason))
+                                }
+                                _ => {
+                                    self.release_stream_lease_best_effort(
+                                        writer,
+                                        lease_for_cleanup.clone(),
+                                    )
+                                    .await;
+                                    Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                                }
                             };
                         }
-                        self.require_owner(&self.connection, writer)
-                            .await
-                            .map_err(StreamStepError::Runtime)?;
+                        if let Err(error) = self.require_owner(&self.connection, writer).await {
+                            self.release_stream_lease_best_effort(
+                                writer,
+                                lease_for_cleanup.clone(),
+                            )
+                            .await;
+                            return Err(StreamStepError::Runtime(error));
+                        }
                         let mut stream = self.stream_backend(writer);
-                        match stream
+                        let result = match stream
                             .fail_with_payload_async(lease, diagnostic, failure_payload)
                             .await
-                            .map_err(StreamStepError::Runtime)?
                         {
+                            Ok(result) => result,
+                            Err(error) => {
+                                self.release_stream_lease_best_effort(
+                                    writer,
+                                    lease_for_cleanup.clone(),
+                                )
+                                .await;
+                                return Err(StreamStepError::Runtime(error));
+                            }
+                        };
+                        match result {
                             CommitResult::Failed { failure } => Ok(StreamStep::Failed { failure }),
-                            CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
-                            _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                            CommitResult::Rejected(reason) => {
+                                self.release_stream_lease_best_effort(
+                                    writer,
+                                    lease_for_cleanup.clone(),
+                                )
+                                .await;
+                                Ok(StreamStep::Rejected(reason))
+                            }
+                            _ => {
+                                self.release_stream_lease_best_effort(
+                                    writer,
+                                    lease_for_cleanup.clone(),
+                                )
+                                .await;
+                                Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                            }
                         }
                     }
+                    Err(StreamTableDeliveryError::HandlerFailed(_)) => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
+                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                    }
+                }
+            }
+            StreamHandlerResult::FailTable(batch) => {
+                let diagnostic = batch.diagnostic;
+                let result = self
+                    .stage_stream_table_failure(
+                        writer,
+                        &capture,
+                        &batch.mutations,
+                        &batch.tables,
+                        batch.next_digest,
+                        lease,
+                        expected,
+                        diagnostic,
+                    )
+                    .await;
+                match result {
+                    Ok(CommitResult::Rejected(reason)) => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
+                        Ok(StreamStep::Rejected(reason))
+                    }
+                    Ok(_) => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
+                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                    }
+                    Err(StreamTableDeliveryError::HandlerFailed(diagnostic)) => {
+                        if is_cancellation_diagnostic(diagnostic) {
+                            let result = match self
+                                .stream_backend(writer)
+                                .apply_async(CommitIntent::Cancel {
+                                    lease: lease_for_cleanup.clone(),
+                                })
+                                .await
+                            {
+                                Ok(result) => result,
+                                Err(error) => {
+                                    self.release_stream_lease_best_effort(
+                                        writer,
+                                        lease_for_cleanup.clone(),
+                                    )
+                                    .await;
+                                    return Err(StreamStepError::Runtime(error));
+                                }
+                            };
+                            return match result {
+                                CommitResult::Cancelled { checkpoint, .. } => {
+                                    Ok(StreamStep::Cancelled { checkpoint })
+                                }
+                                CommitResult::Rejected(reason) => {
+                                    self.release_stream_lease_best_effort(
+                                        writer,
+                                        lease_for_cleanup.clone(),
+                                    )
+                                    .await;
+                                    Ok(StreamStep::Rejected(reason))
+                                }
+                                _ => {
+                                    self.release_stream_lease_best_effort(
+                                        writer,
+                                        lease_for_cleanup.clone(),
+                                    )
+                                    .await;
+                                    Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                                }
+                            };
+                        }
+                        if let Err(error) = self.require_owner(&self.connection, writer).await {
+                            self.release_stream_lease_best_effort(
+                                writer,
+                                lease_for_cleanup.clone(),
+                            )
+                            .await;
+                            return Err(StreamStepError::Runtime(error));
+                        }
+                        let result = match self
+                            .stream_backend(writer)
+                            .fail_with_payload_async(
+                                lease_for_cleanup.clone(),
+                                diagnostic,
+                                failure_payload,
+                            )
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => {
+                                self.release_stream_lease_best_effort(
+                                    writer,
+                                    lease_for_cleanup.clone(),
+                                )
+                                .await;
+                                return Err(StreamStepError::Runtime(error));
+                            }
+                        };
+                        match result {
+                            CommitResult::Failed { failure } => Ok(StreamStep::Failed { failure }),
+                            CommitResult::Rejected(reason) => {
+                                self.release_stream_lease_best_effort(
+                                    writer,
+                                    lease_for_cleanup.clone(),
+                                )
+                                .await;
+                                Ok(StreamStep::Rejected(reason))
+                            }
+                            _ => {
+                                self.release_stream_lease_best_effort(
+                                    writer,
+                                    lease_for_cleanup.clone(),
+                                )
+                                .await;
+                                Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                            }
+                        }
+                    }
+                    Err(StreamTableDeliveryError::ValidationFailed(_)) => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
+                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                    }
                     Err(StreamTableDeliveryError::Runtime(error)) => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
                         Err(StreamStepError::Runtime(error))
                     }
                 }
             }
             StreamHandlerResult::Fail(diagnostic) => {
                 if is_cancellation_diagnostic(diagnostic) {
-                    let result = self
+                    let result = match self
                         .stream_backend(writer)
-                        .apply_async(CommitIntent::Cancel { lease })
+                        .apply_async(CommitIntent::Cancel {
+                            lease: lease_for_cleanup.clone(),
+                        })
                         .await
-                        .map_err(StreamStepError::Runtime)?;
+                    {
+                        Ok(result) => result,
+                        Err(error) => {
+                            self.release_stream_lease_best_effort(
+                                writer,
+                                lease_for_cleanup.clone(),
+                            )
+                            .await;
+                            return Err(StreamStepError::Runtime(error));
+                        }
+                    };
                     return match result {
                         CommitResult::Cancelled { checkpoint, .. } => {
                             Ok(StreamStep::Cancelled { checkpoint })
                         }
-                        CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
-                        _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                        CommitResult::Rejected(reason) => {
+                            self.release_stream_lease_best_effort(
+                                writer,
+                                lease_for_cleanup.clone(),
+                            )
+                            .await;
+                            Ok(StreamStep::Rejected(reason))
+                        }
+                        _ => {
+                            self.release_stream_lease_best_effort(
+                                writer,
+                                lease_for_cleanup.clone(),
+                            )
+                            .await;
+                            Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                        }
                     };
                 }
-                self.require_owner(&self.connection, writer)
-                    .await
-                    .map_err(StreamStepError::Runtime)?;
-                let lease_for_cleanup = lease.clone();
+                if let Err(error) = self.require_owner(&self.connection, writer).await {
+                    self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                        .await;
+                    return Err(StreamStepError::Runtime(error));
+                }
                 let mut stream = self.stream_backend(writer);
                 let result = stream
-                    .fail_with_payload_async(lease, diagnostic, failure_payload)
+                    .fail_with_payload_async(lease_for_cleanup.clone(), diagnostic, failure_payload)
                     .await;
                 let result = match result {
                     Ok(result) => result,
-                    Err(RuntimeError::OwnerLost) => {
-                        return Err(StreamStepError::Runtime(RuntimeError::OwnerLost));
-                    }
                     Err(error) => {
-                        self.release_stream_lease(writer, lease_for_cleanup).await?;
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
                         return Err(StreamStepError::Runtime(error));
                     }
                 };
                 match result {
                     CommitResult::Failed { failure } => Ok(StreamStep::Failed { failure }),
-                    CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
-                    _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                    CommitResult::Rejected(reason) => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
+                        Ok(StreamStep::Rejected(reason))
+                    }
+                    _ => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
+                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                    }
                 }
             }
             StreamHandlerResult::Cancelled => {
-                let result = self
+                let result = match self
                     .stream_backend(writer)
-                    .apply_async(CommitIntent::Cancel { lease })
+                    .apply_async(CommitIntent::Cancel {
+                        lease: lease_for_cleanup.clone(),
+                    })
                     .await
-                    .map_err(StreamStepError::Runtime)?;
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
+                        return Err(StreamStepError::Runtime(error));
+                    }
+                };
                 match result {
                     CommitResult::Cancelled { checkpoint, .. } => {
                         Ok(StreamStep::Cancelled { checkpoint })
                     }
-                    CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
-                    _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                    CommitResult::Rejected(reason) => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
+                        Ok(StreamStep::Rejected(reason))
+                    }
+                    _ => {
+                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                            .await;
+                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                    }
                 }
             }
         }
@@ -5751,6 +6055,87 @@ impl RuntimeState {
         Ok((next, result))
     }
 
+    /// Stages the handler's table writes and completion transition, then
+    /// deliberately returns the handler diagnostic before the transaction can
+    /// commit. This is the durable boundary for a handler that inserts and
+    /// then errors: dropping this transaction rolls back its rows, checkpoint
+    /// successor, CWD state, and success transition as one unit. The caller
+    /// records the ordinary delivery failure only after that rollback.
+    async fn stage_stream_table_failure(
+        &self,
+        writer: WriterLease,
+        expected_capture: &CwdCapture,
+        mutations: &[TableMutation],
+        tables: &[String],
+        next_digest: [u8; 32],
+        delivery: DeliveryLease,
+        expected_stream: CheckpointPrecondition,
+        diagnostic: SafeDiagnostic,
+    ) -> Result<CommitResult, StreamTableDeliveryError> {
+        if mutations.is_empty() {
+            return Err(StreamTableDeliveryError::Runtime(
+                RuntimeError::EmptyMutationBatch,
+            ));
+        }
+        let encoded = mutations
+            .iter()
+            .map(TableMutation::runtime_mutation)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        validate_id(writer.owner_id).map_err(StreamTableDeliveryError::Runtime)?;
+        validate_stream_mutations(&encoded, next_digest)
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        validate_table_candidate_scope(mutations, tables)
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        let current = self
+            .capture()
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        if &current != expected_capture {
+            return Err(StreamTableDeliveryError::Runtime(
+                RuntimeError::StaleCapture {
+                    current: Box::new(current),
+                },
+            ));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| StreamTableDeliveryError::Runtime(RuntimeError::StorageUnavailable))?;
+        self.require_owner(&tx, writer)
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        let result = apply_stream_intent_tx(
+            &tx,
+            CommitIntent::Complete {
+                lease: delivery,
+                expected: expected_stream,
+            },
+        )
+        .await
+        .map_err(StreamTableDeliveryError::Runtime)?;
+        sync_stream_observation_tx(&tx, &result)
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        if matches!(result, CommitResult::Rejected(_)) {
+            return Ok(result);
+        }
+        for mutation in mutations {
+            apply_table_mutation_tx(&tx, mutation)
+                .await
+                .map_err(StreamTableDeliveryError::Runtime)?;
+        }
+        let faults = NoFault;
+        append_mutations_tx(&tx, expected_capture, &encoded, next_digest, &faults)
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        // Do not commit this transaction. The error is the handler's ordinary
+        // failure after its writes have been staged, so all staged effects are
+        // rolled back before the durable failure record is updated separately.
+        Err(StreamTableDeliveryError::HandlerFailed(diagnostic))
+    }
+
     async fn commit_stream_delivery_inner(
         &self,
         parts: StreamDeliveryParts<'_>,
@@ -6015,6 +6400,32 @@ impl RuntimeState {
         Ok(result)
     }
 
+    async fn cancel_stream_replay(
+        &self,
+        writer: WriterLease,
+        grant: &ReplayGrant,
+    ) -> Result<CommitResult, RuntimeError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, writer).await?;
+        let result = apply_stream_intent_tx(
+            &tx,
+            CommitIntent::ReplayCancel {
+                failure: grant.failure.clone(),
+                expected_version: grant.version,
+            },
+        )
+        .await?;
+        sync_stream_observation_tx(&tx, &result).await?;
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(result)
+    }
+
     /// Claims one admitted replay before reading retained data or contacting
     /// its provider. The claim is intentionally separate from the replay
     /// admission transition: an administrator may cancel a grant that has
@@ -6272,9 +6683,26 @@ impl RuntimeState {
                         .fail_stream_replay(writer, &grant, diagnostic)
                         .await
                         .map_err(StreamStepError::Runtime),
+                    Err(StreamTableDeliveryError::HandlerFailed(_)) => {
+                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                    }
                     Err(StreamTableDeliveryError::Runtime(error)) => {
                         Err(StreamStepError::Runtime(error))
                     }
+                }
+            }
+            // A staged table failure has no replay table candidate. Retain an
+            // ordinary diagnostic as a replay failure, while preserving a
+            // cancellation diagnostic as the distinct replay cancellation.
+            StreamHandlerResult::FailTable(batch) => {
+                if is_cancellation_diagnostic(batch.diagnostic) {
+                    self.cancel_stream_replay(writer, &grant)
+                        .await
+                        .map_err(StreamStepError::Runtime)
+                } else {
+                    self.fail_stream_replay(writer, &grant, batch.diagnostic)
+                        .await
+                        .map_err(StreamStepError::Runtime)
                 }
             }
             StreamHandlerResult::Fail(diagnostic) => self
@@ -11405,7 +11833,21 @@ async fn apply_stream_intent_tx(
                 if replay_claim.version != expected_version {
                     return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
                 }
-                return Ok(CommitResult::Rejected(RejectReason::LeaseAlreadyHeld));
+                let deleted = connection
+                    .execute(
+                        "DELETE FROM stream_replay_claim
+                         WHERE identity_id = ?1 AND version = ?2",
+                        params![
+                            stream_identity_id(&failure),
+                            i64::try_from(expected_version)
+                                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                        ],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                if deleted != 1 {
+                    return Err(RuntimeError::RecoveryInvalid);
+                }
             }
             connection
                 .execute(
@@ -13365,13 +13807,19 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            state
-                .stream_backend(writer)
-                .failure_async(&failure.identity)
+        let after_stale_retries = state
+            .stream_backend(writer)
+            .failure_async(&failure.identity)
+            .await
+            .unwrap()
+            .expect("stale retries must retain the failure record");
+        assert_eq!(after_stale_retries, failure);
+        assert!(
+            load_stream_lease(&state.connection, &key)
                 .await
-                .unwrap(),
-            Some(failure.clone())
+                .unwrap()
+                .is_none(),
+            "stale retries must not create a delivery lease"
         );
 
         state
@@ -14254,6 +14702,69 @@ mod tests {
         }
     }
 
+    struct StagedFailingTableHandler {
+        calls: usize,
+    }
+
+    impl StreamHandler for StagedFailingTableHandler {
+        fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult {
+            self.calls += 1;
+            assert_eq!(item.delivery.position.token.as_str(), "41");
+            assert_eq!(item.delivery.successor.token.as_str(), "42");
+            assert_eq!(item.payload, vec![42]);
+            StreamHandlerResult::FailTable(StreamStagedTableFailure {
+                mutations: vec![table_mutation(42, 42, Some(42))],
+                tables: vec!["books".into()],
+                next_digest: digest(42),
+                diagnostic: SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+            })
+        }
+    }
+
+    struct StagedCancellingTableHandler {
+        calls: usize,
+    }
+
+    impl StreamHandler for StagedCancellingTableHandler {
+        fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult {
+            self.calls += 1;
+            assert_eq!(item.payload, vec![7]);
+            StreamHandlerResult::FailTable(StreamStagedTableFailure {
+                mutations: vec![table_mutation(43, 7, Some(7))],
+                tables: vec!["books".into()],
+                next_digest: digest(7),
+                diagnostic: SafeDiagnostic {
+                    code: DiagnosticCode::Cancelled,
+                    class: DiagnosticClass::Cancellation,
+                },
+            })
+        }
+    }
+
+    struct StagedRetryHandler {
+        calls: usize,
+    }
+
+    impl StreamHandler for StagedRetryHandler {
+        fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult {
+            self.calls += 1;
+            assert_eq!(item.delivery.position.token.as_str(), "41");
+            assert_eq!(item.delivery.successor.token.as_str(), "42");
+            assert_eq!(item.payload, vec![42]);
+            StreamHandlerResult::CommitValidatedTable(StreamValidatedTableMutationBatch {
+                mutations: vec![table_mutation(42, 42, Some(42))],
+                next_digest: digest(42),
+                validator: Box::new(TablesOnlyValidator {
+                    tables: vec!["books".into()],
+                    calls: 0,
+                }),
+            })
+        }
+    }
+
     struct TablesOnlyValidator {
         tables: Vec<String>,
         calls: usize,
@@ -14853,6 +15364,289 @@ mod tests {
                 .expect("typed delivery checkpoint")
                 .digest,
             digest(9)
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_table_failure_rolls_back_and_retries_the_same_list_delivery() {
+        // Bounded runtime-adapter evidence for CP-005/006 and SYS-062/063:
+        // after checkpoint 41, item 42 stages an insert and mutation append,
+        // then fails. The durable delivery transaction must leave that row,
+        // checkpoint, CWD capture, pending ledger, and success transition
+        // uncommitted before retrying the exact provider position under a
+        // newly fenced lease.
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(42)).await.unwrap();
+        let delivery = stream_delivery("staged-failure-list", "staged-failure-list-next");
+        let key = delivery.checkpoint_key();
+        let payloads = (1_u8..=43).map(|value| vec![value]).collect::<Vec<_>>();
+        let mut source = ListStreamSource::new(key.clone(), payloads.clone());
+        let mut prefix_handler = CommitHandler { calls: 0 };
+
+        for expected_position in 1..=41_u64 {
+            assert!(matches!(
+                state
+                    .run_stream_once(writer, &key, &mut source, &mut prefix_handler)
+                    .await
+                    .unwrap(),
+                StreamStep::Committed {
+                    checkpoint: StreamCheckpoint { version, .. }
+                } if version == expected_position
+            ));
+        }
+        assert_eq!(prefix_handler.calls, 41);
+        let checkpoint_before = state.stream_checkpoint(&key).await.unwrap();
+        assert_eq!(checkpoint_before.version, 41);
+        assert_eq!(
+            checkpoint_before
+                .committed
+                .as_ref()
+                .map(|position| position.token.as_str()),
+            Some("41")
+        );
+        let capture_before = state.capture().await.unwrap();
+
+        let mut failing_handler = StagedFailingTableHandler { calls: 0 };
+        let failure = match state
+            .run_stream_once(writer, &key, &mut source, &mut failing_handler)
+            .await
+            .unwrap()
+        {
+            StreamStep::Failed { failure } => failure,
+            other => panic!("staged table delivery must fail: {other:?}"),
+        };
+        assert_eq!(failing_handler.calls, 1);
+        assert_eq!(failure.identity.0.position.token.as_str(), "41");
+        assert_eq!(failure.identity.0.successor.token.as_str(), "42");
+        assert_eq!(failure.status, FailureStatus::Failed);
+        assert_eq!(failure.attempts, 1);
+        assert_eq!(state.capture().await.unwrap(), capture_before);
+        assert_eq!(
+            state.stream_checkpoint(&key).await.unwrap(),
+            checkpoint_before
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            state.committed_table_row("books", &[42]).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            state.stream_failure_row_count_for_evidence().await.unwrap(),
+            1
+        );
+
+        let stale_checkpoint = CheckpointPrecondition {
+            version: checkpoint_before.version - 1,
+            committed: checkpoint_before.committed.clone(),
+        };
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Retry {
+                    failure: failure.identity.clone(),
+                    expected_version: failure.version,
+                    expected: stale_checkpoint.clone(),
+                })
+                .await
+                .unwrap(),
+            CommitResult::Rejected(RejectReason::StaleCheckpoint)
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Retry {
+                    failure: failure.identity.clone(),
+                    expected_version: failure.version - 1,
+                    expected: CheckpointPrecondition::from(&checkpoint_before),
+                })
+                .await
+                .unwrap(),
+            CommitResult::Rejected(RejectReason::StaleFailure)
+        );
+        assert_eq!(
+            state.stream_checkpoint(&key).await.unwrap(),
+            checkpoint_before
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_async(&failure.identity)
+                .await
+                .unwrap(),
+            Some(failure.clone())
+        );
+
+        let retry = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Retry {
+                failure: failure.identity.clone(),
+                expected_version: failure.version,
+                expected: CheckpointPrecondition::from(&checkpoint_before),
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::RetryScheduled { failure } => failure,
+            other => panic!("failed item must receive a fenced retry: {other:?}"),
+        };
+        assert_eq!(retry.identity, failure.identity);
+        assert_eq!(retry.attempts, 2);
+        assert_eq!(retry.status, FailureStatus::Retrying);
+        assert_eq!(retry.version, failure.version + 1);
+        let retry_lease = load_stream_lease(&state.connection, &key)
+            .await
+            .unwrap()
+            .expect("scheduled retry retains its delivery lease");
+        assert_eq!(retry_lease.delivery_position, "41");
+        assert_eq!(retry_lease.successor_position, "42");
+        assert_eq!(retry_lease.purpose, LeasePurpose::Deliver);
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Retry {
+                    failure: retry.identity.clone(),
+                    expected_version: retry.version,
+                    expected: stale_checkpoint,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Rejected(RejectReason::StaleCheckpoint)
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_async(&retry.identity)
+                .await
+                .unwrap(),
+            Some(retry.clone())
+        );
+        let lease_after_stale_retry = load_stream_lease(&state.connection, &key)
+            .await
+            .unwrap()
+            .expect("stale retry must retain the scheduled delivery lease");
+        assert_eq!(
+            lease_after_stale_retry.delivery_position,
+            retry_lease.delivery_position
+        );
+        assert_eq!(
+            lease_after_stale_retry.successor_position,
+            retry_lease.successor_position
+        );
+        assert_eq!(lease_after_stale_retry.fence, retry_lease.fence);
+        assert_eq!(lease_after_stale_retry.purpose, retry_lease.purpose);
+
+        let mut retry_source = ListStreamSource::new(key.clone(), payloads);
+        let mut retry_handler = StagedRetryHandler { calls: 0 };
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut retry_source, &mut retry_handler)
+                .await
+                .unwrap(),
+            StreamStep::Committed {
+                checkpoint: StreamCheckpoint { version: 42, ref committed, .. }
+            } if committed.as_ref().map(|position| position.token.as_str()) == Some("42")
+        ));
+        assert_eq!(retry_handler.calls, 1);
+        assert_eq!(
+            state.committed_table_row("books", &[42]).await.unwrap(),
+            Some(vec![42])
+        );
+        let completed_failure = state
+            .stream_backend(writer)
+            .failure_async(&failure.identity)
+            .await
+            .unwrap()
+            .expect("same failure identity remains durable after retry");
+        assert_eq!(completed_failure.identity, failure.identity);
+        assert_eq!(completed_failure.attempts, 2);
+        assert_eq!(completed_failure.status, FailureStatus::Succeeded);
+        assert_eq!(
+            state.stream_failure_row_count_for_evidence().await.unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_table_failure_cancellation_rolls_back_without_failure_record() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(43)).await.unwrap();
+        let delivery = stream_delivery("staged-failure-cancel", "staged-failure-cancel-next");
+        let key = delivery.checkpoint_key();
+        let checkpoint_before = state.stream_checkpoint(&key).await.unwrap();
+        let capture_before = state.capture().await.unwrap();
+        let identity = FailureIdentity(delivery.clone());
+        let mut source = TestSource {
+            key: key.clone(),
+            item: Some(StreamItem {
+                delivery,
+                payload: vec![7],
+            }),
+            polls: 0,
+        };
+        let mut handler = StagedCancellingTableHandler { calls: 0 };
+
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await
+                .unwrap(),
+            StreamStep::Cancelled { checkpoint } if checkpoint == checkpoint_before
+        ));
+        assert_eq!(handler.calls, 1);
+        assert_eq!(source.polls, 1);
+        assert_eq!(state.capture().await.unwrap(), capture_before);
+        assert_eq!(
+            state.stream_checkpoint(&key).await.unwrap(),
+            checkpoint_before
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            state.committed_table_row("books", &[7]).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            state.stream_failure_row_count_for_evidence().await.unwrap(),
+            0
+        );
+        assert!(
+            state
+                .stream_backend(writer)
+                .failure_async(&identity)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let re_admitted = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Acquire {
+                delivery: identity.0.clone(),
+                expected: CheckpointPrecondition::from(&checkpoint_before),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("cancellation must release its delivery lease: {other:?}"),
+        };
+        assert!(matches!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Cancel {
+                    lease: re_admitted,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Cancelled { checkpoint, .. } if checkpoint == checkpoint_before
+        ));
+        assert!(
+            load_stream_lease(&state.connection, &key)
+                .await
+                .unwrap()
+                .is_none(),
+            "re-admitted cancellation must release its delivery lease"
         );
     }
 
@@ -19431,7 +20225,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_replay_returns_the_same_failure_to_skipped_without_progress() {
+    async fn staged_table_failure_cancellation_replay_uses_cancel_transition() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(4)).await.unwrap();
@@ -19514,14 +20308,22 @@ mod tests {
 
         let mut handler = ReplayHandler {
             payload: Vec::new(),
-            result: Some(StreamHandlerResult::Cancelled),
+            result: Some(StreamHandlerResult::FailTable(StreamStagedTableFailure {
+                mutations: vec![table_mutation(44, 5, Some(9))],
+                tables: vec!["books".into()],
+                next_digest: digest(9),
+                diagnostic: SafeDiagnostic {
+                    code: DiagnosticCode::Cancelled,
+                    class: DiagnosticClass::Cancellation,
+                },
+            })),
         };
         let cancelled = state
             .replay_stream_failure(writer, grant.clone(), &mut handler)
             .await
             .unwrap();
         let recovered = match cancelled {
-            CommitResult::ReplayFailed { failure } => failure,
+            CommitResult::ReplayCancelled { failure } => failure,
             other => panic!("unexpected cancelled replay result: {other:?}"),
         };
 
@@ -19533,11 +20335,15 @@ mod tests {
         assert_eq!(
             recovered.diagnostic,
             SafeDiagnostic {
-                code: DiagnosticCode::Cancelled,
-                class: DiagnosticClass::Cancellation,
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Permanent,
             }
         );
         assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            state.committed_table_row("books", &[5]).await.unwrap(),
+            None
+        );
         assert_eq!(
             state
                 .stream_backend(writer)
