@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 use orna_core::{
     TypeId,
@@ -29,12 +29,36 @@ pub(super) fn render_result(
     stderr: &mut impl Write,
     encode: &mut impl FnMut(&RuntimeValue) -> Result<Vec<u8>, InstalledInvokeError>,
 ) -> Result<InstalledInvokeOutcome, InstalledInvokeError> {
+    render_result_with_terminal_capability(
+        result,
+        no_progress,
+        io::stderr().is_terminal(),
+        stdout,
+        stderr,
+        encode,
+    )
+}
+
+/// Renders one result using the caller's terminal capability.
+///
+/// The installed command uses [`render_result`] so production probes the
+/// actual standard error descriptor. Keeping the capability as an argument
+/// here gives tests a deterministic seam without changing output routing.
+pub(super) fn render_result_with_terminal_capability(
+    result: &SealedInvocationResult,
+    no_progress: bool,
+    stderr_is_terminal: bool,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+    encode: &mut impl FnMut(&RuntimeValue) -> Result<Vec<u8>, InstalledInvokeError>,
+) -> Result<InstalledInvokeOutcome, InstalledInvokeError> {
+    let show_progress = progress_enabled(no_progress, stderr_is_terminal);
     match result {
         SealedInvocationResult::Completed { events, .. } => {
-            render_event_stream(events, no_progress, stdout, stderr, encode)
+            render_event_stream(events, show_progress, stdout, stderr, encode)
         }
         SealedInvocationResult::Failed { events, .. } => {
-            render_event_stream(events, no_progress, stdout, stderr, encode)
+            render_event_stream(events, show_progress, stdout, stderr, encode)
         }
         SealedInvocationResult::Denied { .. } => {
             writeln!(stderr, "orna: invoke: invocation denied").map_err(presentation_error)?;
@@ -47,10 +71,14 @@ pub(super) fn render_result(
     }
 }
 
+fn progress_enabled(no_progress: bool, stderr_is_terminal: bool) -> bool {
+    !no_progress && stderr_is_terminal
+}
+
 /// Renders one sealed Event batch in record order.
 pub(super) fn render_event_stream(
     events: &orna_protocol::InvocationEventBatch,
-    no_progress: bool,
+    show_progress: bool,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
     encode: &mut impl FnMut(&RuntimeValue) -> Result<Vec<u8>, InstalledInvokeError>,
@@ -58,7 +86,7 @@ pub(super) fn render_event_stream(
     let mut outcome = InstalledInvokeOutcome::Completed;
     for record in events.records() {
         match record.event().body() {
-            InvocationEventBody::Started { .. } if !no_progress => {
+            InvocationEventBody::Started { .. } if show_progress => {
                 writeln!(stderr, "orna: invoke: invocation started").map_err(presentation_error)?;
             }
             InvocationEventBody::ValueBatch { values, .. } => {
@@ -68,7 +96,7 @@ pub(super) fn render_event_stream(
             }
             InvocationEventBody::Completed {
                 duration_nanoseconds,
-            } if !no_progress => {
+            } if show_progress => {
                 writeln!(
                     stderr,
                     "orna: invoke: invocation completed in {duration_nanoseconds}ns"
