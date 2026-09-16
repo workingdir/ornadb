@@ -954,6 +954,70 @@ fn table_assertion_rejects_authoritative_std_net_effect() {
 }
 
 #[test]
+fn imported_std_net_callables_preserve_effects_and_imports_remain_analysis_only() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "consumer.orna",
+            r#"
+                use std.net.http as http;
+                use std.net.http.{get};
+
+                pub fn aliased() = http.get("https://example.com");
+                pub fn named() = get("https://example.com");
+
+                pub table User(id: Uuid) {
+                    name: Str,
+                    assert http.get("https://example.com") == "ok";
+                    assert get("https://example.com") == "ok";
+                }
+            "#,
+        )],
+        &Catalogue::authoritative_core(),
+    );
+
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_ASSERTION_EFFECT)
+            .count(),
+        2,
+        "only the assertions evaluate the imported callable: {:?}",
+        result.diagnostics
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "consumer")
+        .expect("consumer module");
+    for name in ["aliased", "named"] {
+        let symbol = module.symbols.get(name).expect("imported callable summary");
+        assert!(symbol.effects.effects.contains("network"));
+        assert!(symbol.effects.may_fail);
+    }
+}
+
+#[test]
+fn unused_std_net_import_is_admitted_without_execution() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "consumer.orna",
+            "use std.net.http as http; pub fn untouched() = 1;",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let consumer = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "consumer")
+        .expect("consumer module");
+    assert!(consumer.symbols.contains_key("untouched"));
+    assert!(!consumer.symbols.contains_key("http"));
+}
+
+#[test]
 fn table_assertion_rejects_standard_filesystem_effect_before_admission() {
     let result = analyze(&[ModuleInput::new(
         "consumer.orna",

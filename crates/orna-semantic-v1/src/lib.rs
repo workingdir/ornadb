@@ -1037,6 +1037,9 @@ where
     let symbols = symbols
         .into_iter()
         .map(|(name, ty)| {
+            let effects = matches!(&ty, Type::Function { .. })
+                .then(|| catalogue_effects(&namespace))
+                .unwrap_or_default();
             (
                 name.into(),
                 Symbol {
@@ -1047,7 +1050,7 @@ where
                         SymbolKind::Type
                     },
                     public: true,
-                    effects: EffectSummary::default(),
+                    effects,
                     ty,
                 },
             )
@@ -1059,6 +1062,25 @@ where
         symbols,
         prelude_exports: prelude_exports.into_iter().map(Into::into).collect(),
         implicit: false,
+    }
+}
+
+fn catalogue_effects(namespace: &Namespace) -> EffectSummary {
+    let effect = if namespace.0.first().is_some_and(|part| part == "std")
+        && namespace.0.get(1).is_some_and(|part| part == "net")
+    {
+        "network"
+    } else if namespace.0.first().is_some_and(|part| part == "std")
+        && namespace.0.get(1).is_some_and(|part| part == "io")
+        && namespace.0.get(2).is_some_and(|part| part == "fs")
+    {
+        "filesystem"
+    } else {
+        return EffectSummary::default();
+    };
+    EffectSummary {
+        effects: BTreeSet::from([effect.into()]),
+        may_fail: true,
     }
 }
 
