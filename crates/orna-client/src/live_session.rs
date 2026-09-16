@@ -64,6 +64,7 @@ pub enum LiveSessionEvent {
     SnapshotPublished { revision: u64 },
     DeltaPublished { revision: u64 },
     ResyncSent { request: ResyncRequest },
+    ResyncAwaitingSnapshot { request: [u8; 16] },
 }
 
 /// Errors from the authenticated live attachment, typed presentation owner,
@@ -186,10 +187,17 @@ where
                 self.publish(update, &published)?;
                 Ok(event)
             }
-            LivePresentationUpdate::ResyncRequired => self
-                .flush_resync()
-                .await?
-                .ok_or_else(|| unreachable!("resync intent must be created by a failed update")),
+            LivePresentationUpdate::ResyncRequired => {
+                if let Some(request) = self.expected_resync_request {
+                    if let Some(intent) = self.presentation.take_resync_request() {
+                        self.presentation.acknowledge_resync_request(intent);
+                    }
+                    return Ok(LiveSessionEvent::ResyncAwaitingSnapshot { request });
+                }
+                self.flush_resync()
+                    .await?
+                    .ok_or_else(|| unreachable!("resync intent must be created by a failed update"))
+            }
         }
     }
 
@@ -721,6 +729,56 @@ mod tests {
         ));
         assert_eq!(driver.presentation().published().unwrap().revision(), 2);
         assert_eq!(driver.renderer.revisions, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn barriered_delta_keeps_original_resync_request_until_correlated_snapshot() {
+        let mut io = MemoryIo::default();
+        io.incoming.push_back(snapshot(0));
+        io.incoming.push_back(delta(9, 10, "bad-base"));
+        let mut driver = LiveSessionDriver::new(
+            io,
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
+        let LiveSessionEvent::ResyncSent { .. } = block_on(driver.receive_once()).unwrap() else {
+            panic!("initial recovery must send a resync request");
+        };
+        let original_request = Envelope::decode(&driver.io.sent[0], Limits::default())
+            .unwrap()
+            .request
+            .expect("resync request identity");
+
+        driver.io.incoming.push_back(delta(0, 1, "behind-barrier"));
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::ResyncAwaitingSnapshot {
+                request: original_request
+            }
+        );
+        assert_eq!(driver.io.sent.len(), 1);
+        assert_eq!(driver.request_ids.allocations, 1);
+
+        driver.io.incoming.push_back(snapshot_with_request(
+            1,
+            "recovered",
+            Some(original_request),
+        ));
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 1 })
+        ));
+        assert_eq!(driver.io.sent.len(), 1);
+        assert_eq!(driver.request_ids.allocations, 1);
+        assert!(!driver.presentation().awaiting_snapshot());
     }
 
     #[test]
