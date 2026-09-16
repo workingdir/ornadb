@@ -316,6 +316,57 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
 }
 
 #[tokio::test]
+async fn assert_checkpoint_091_exposes_durable_runtime_adapter_evidence() {
+    let contract = scenario("ASSERT-CHECKPOINT-091");
+    assert_eq!(
+        contract.title,
+        "Assertion failure leaves a coupled stream checkpoint unchanged"
+    );
+    assert_eq!(
+        contract.given,
+        ["a replayable stream delivery writes rows that violate an assertion"]
+    );
+    assert_eq!(contract.when, ["commit the item activation"]);
+    assert_eq!(
+        contract.then,
+        [
+            "rows roll back",
+            "the checkpoint does not advance",
+            "the delivery remains replayable"
+        ]
+    );
+    assert_eq!(contract.requirements, ["ORNA-ASSERT-047", "ORNA-CP-003"]);
+    assert_eq!(
+        contract.evidence_level,
+        "implementation scenario, not executed by an Orna engine"
+    );
+
+    let (_temp, repository) = durable_repository();
+    let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+    let (outcome, rows_rolled_back, checkpoint, attempts, replayable_payload) = evaluator
+        .execute_assert_checkpoint_091(
+            &repository,
+            RuntimeIdentity {
+                database_id: [81; 16],
+                repository_id: [82; 16],
+            },
+            [83; 16],
+            [84; 32],
+        )
+        .await
+        .expect("durable runtime adapter evidence");
+
+    assert!(
+        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-LIST-STREAM-DELIVERY"),
+        "the assertion-failing delivery must remain a runtime failure: {outcome:?}"
+    );
+    assert!(rows_rolled_back);
+    assert_eq!(checkpoint.as_deref(), Some("1"));
+    assert_eq!(attempts, 1);
+    assert!(replayable_payload);
+}
+
+#[tokio::test]
 async fn eval_003_replays_the_terminal_outcome_without_a_second_row() {
     let eval = scenario("EVAL-003");
     assert_eq!(

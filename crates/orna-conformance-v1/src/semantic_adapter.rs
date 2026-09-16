@@ -8,7 +8,8 @@
 //! still owns module execution, effects, and scenario lifecycles.
 
 use crate::{
-    ConformanceAdapter, ProjectUnit, Scenario, SourceUnit, StageOutcome, SyntaxAdapter,
+    ConformanceAdapter, ProjectEnvironment, ProjectExpectations, ProjectUnit, Scenario, SourceUnit,
+    StageOutcome, SyntaxAdapter,
     row_admission::{admit_project_rows, preflight_project_rows},
 };
 use num_bigint::BigInt;
@@ -36,8 +37,8 @@ use orna_semantic_v1::{
 };
 use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
 use orna_stream_v1::{
-    AssertionOwnerKind, CheckpointKey, Component, ConsumerIdentity, DiagnosticClass,
-    DiagnosticCode, SafeDiagnostic,
+    AssertionOwnerKind, AsyncCheckpointBackend, CheckpointKey, Component, ConsumerIdentity,
+    DeliveryIdentity, DiagnosticClass, DiagnosticCode, FailureIdentity, Position, SafeDiagnostic,
 };
 use orna_syntax_v1::{
     Declaration, Expr, Pattern, Statement, SyntaxSpan, TypeMember, TypeRepresentation,
@@ -1872,6 +1873,94 @@ impl DurableTransactionalEvaluator {
             &orna_runtime_v1::NeverCancelled,
         )
         .await
+    }
+
+    /// Executes the immutable ASSERT-CHECKPOINT-091 contract through the
+    /// durable project-stream adapter and returns only runtime-adapter
+    /// observations. This is not compiler-produced engine evidence and does
+    /// not claim full Orna conformance.
+    pub async fn execute_assert_checkpoint_091(
+        &self,
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        owner_id: [u8; 16],
+        initial_digest: [u8; 32],
+    ) -> Result<(StageOutcome<Diagnostic>, bool, Option<String>, u32, bool), RuntimeError> {
+        let project = assertion_checkpoint_091_project();
+        let outcome = self
+            .execute_project_stream(
+                repository,
+                identity,
+                owner_id,
+                initial_digest,
+                &project,
+                "main.ingest",
+            )
+            .await?;
+        let admitted = match admit_transaction_project(&project, self.limits, "main.ingest") {
+            Ok(admitted) => admitted,
+            Err(_) => return Ok((outcome, false, None, 0, false)),
+        };
+        let bridge = match admit_project_list_stream(&project, admitted, "main.ingest", identity) {
+            Ok(bridge) => bridge,
+            Err(_) => return Ok((outcome, false, None, 0, false)),
+        };
+        let state = RuntimeState::open(repository, identity, initial_digest).await?;
+        let one = Value::int(1.into())
+            .encode()
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let two = Value::int(2.into())
+            .encode()
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let rows_rolled_back = state.committed_table_row("Reading", &one).await?.is_some()
+            && state.committed_table_row("Reading", &two).await?.is_none();
+        let writer = state.acquire_lease(owner_id).await?;
+        let checkpoint_key = bridge.checkpoint_key()?;
+        let checkpoint = state
+            .stream_backend(writer)
+            .checkpoint_async(&checkpoint_key)
+            .await?;
+        let checkpoint_position = checkpoint
+            .committed
+            .as_ref()
+            .map(|position| position.token.as_str().to_owned());
+        let failure_identity = FailureIdentity(DeliveryIdentity {
+            consumer: checkpoint_key.consumer.clone(),
+            source_format: checkpoint_key.source_format.clone(),
+            source: checkpoint_key.source.clone(),
+            partition_format: checkpoint_key.partition_format.clone(),
+            partition: checkpoint_key.partition.clone(),
+            position_format: checkpoint_key.position_format.clone(),
+            position: Position {
+                token: Component::new("1").map_err(|_| RuntimeError::RecoveryInvalid)?,
+            },
+            successor: Position {
+                token: Component::new("2").map_err(|_| RuntimeError::RecoveryInvalid)?,
+            },
+        });
+        let stream = state.stream_backend(writer);
+        let failure = stream.failure_async(&failure_identity).await?;
+        let (attempts, replayable_payload) = match failure {
+            Some(failure) => {
+                let payload = stream
+                    .failure_payload_metadata_async(&failure.identity)
+                    .await?;
+                (
+                    failure.attempts,
+                    payload.is_some_and(|payload| {
+                        payload.redacted && payload.plaintext_bytes.is_some()
+                    }),
+                )
+            }
+            None => (0, false),
+        };
+        Ok((
+            outcome,
+            rows_rolled_back,
+            checkpoint_position,
+            attempts,
+            replayable_payload,
+        ))
     }
 
     /// Runs the finite-list project stream with a caller-owned cancellation
@@ -8584,6 +8673,42 @@ mod durable_tests {
     }
 }
 
+fn assertion_checkpoint_091_project() -> ProjectUnit {
+    ProjectUnit {
+        fixture_id: "ASSERT-CHECKPOINT-091".into(),
+        project_id: "ASSERT-CHECKPOINT-091".into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: "ASSERT-CHECKPOINT-091".into(),
+            source_id: "main.orna".into(),
+            parse_as: "module_unit".into(),
+            source: r#"
+                pub table Reading(id: Int) {
+                    value: Int,
+                    assert every(reading => reading.value < 2);
+                }
+                pub fn input() = Stream.from_list([1, 2], source_identity: "fixture:assertion");
+                pub fn ingest() { input() | for_each(value => {
+                    Reading.insert({ id: value, value: value });
+                }); }
+            "#
+            .into(),
+        }],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod list_stream_tests {
     use super::{
@@ -8651,39 +8776,7 @@ mod list_stream_tests {
     }
 
     fn asserted_project() -> ProjectUnit {
-        ProjectUnit {
-            fixture_id: "stream-table-assertion".into(),
-            project_id: "stream-table-assertion".into(),
-            environment_id: None,
-            modules: vec![SourceUnit {
-                fixture_id: "stream-table-assertion".into(),
-                source_id: "main.orna".into(),
-                parse_as: "module_unit".into(),
-                source: r#"
-                    pub table Reading(id: Int) {
-                        value: Int,
-                        assert every(reading => reading.value < 2);
-                    }
-                    pub fn input() = Stream.from_list([1, 2], source_identity: "fixture:assertion");
-                    pub fn ingest() { input() | for_each(value => {
-                        Reading.insert({ id: value, value: value });
-                    }); }
-                "#
-                .into(),
-            }],
-            loose_rows: Vec::new(),
-            expectations: ProjectExpectations {
-                environment: ProjectEnvironment {
-                    network: false,
-                    credentials: false,
-                    intrinsics: "Orna 1.0.0 core".into(),
-                    stdlib: None,
-                    initial_tables: "empty".into(),
-                },
-                steps: Vec::new(),
-                negative_cases: Vec::new(),
-            },
-        }
+        super::assertion_checkpoint_091_project()
     }
 
     #[tokio::test]
