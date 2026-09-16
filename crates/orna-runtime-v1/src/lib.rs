@@ -1341,7 +1341,6 @@ impl std::error::Error for RuntimeError {}
 pub enum StreamTableDeliveryError {
     Runtime(RuntimeError),
     ValidationFailed(SafeDiagnostic),
-    HandlerFailed(SafeDiagnostic),
 }
 
 #[derive(Debug)]
@@ -1637,25 +1636,10 @@ pub struct StreamValidatedTableMutationBatch {
     pub validator: Box<dyn StreamTableCandidateValidator>,
 }
 
-/// Table mutations staged by a handler before it returns an ordinary failure.
-///
-/// The runtime applies these mutations only inside the admitted delivery
-/// transaction so it can prove the failure rolls back the table candidate,
-/// checkpoint completion, CWD capture, and pending mutation ledger together.
-/// `tables` is an explicit scope fence; a mutation outside it is rejected
-/// before the transaction.
-pub struct StreamStagedTableFailure {
-    pub mutations: Vec<TableMutation>,
-    pub tables: Vec<String>,
-    pub next_digest: [u8; 32],
-    pub diagnostic: SafeDiagnostic,
-}
-
 pub enum StreamHandlerResult {
     Commit(StreamMutationBatch),
     CommitTable(StreamTableMutationBatch),
     CommitValidatedTable(StreamValidatedTableMutationBatch),
-    FailTable(StreamStagedTableFailure),
     Fail(SafeDiagnostic),
     Cancelled,
 }
@@ -4489,136 +4473,6 @@ impl RuntimeState {
                             }
                         }
                     }
-                    Err(StreamTableDeliveryError::HandlerFailed(_)) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
-                    }
-                }
-            }
-            StreamHandlerResult::FailTable(batch) => {
-                let diagnostic = batch.diagnostic;
-                let result = self
-                    .stage_stream_table_failure(
-                        writer,
-                        &capture,
-                        &batch.mutations,
-                        &batch.tables,
-                        batch.next_digest,
-                        lease,
-                        expected,
-                        diagnostic,
-                    )
-                    .await;
-                match result {
-                    Ok(CommitResult::Rejected(reason)) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Ok(StreamStep::Rejected(reason))
-                    }
-                    Ok(_) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
-                    }
-                    Err(StreamTableDeliveryError::HandlerFailed(diagnostic)) => {
-                        if is_cancellation_diagnostic(diagnostic) {
-                            let result = match self
-                                .stream_backend(writer)
-                                .apply_async(CommitIntent::Cancel {
-                                    lease: lease_for_cleanup.clone(),
-                                })
-                                .await
-                            {
-                                Ok(result) => result,
-                                Err(error) => {
-                                    self.release_stream_lease_best_effort(
-                                        writer,
-                                        lease_for_cleanup.clone(),
-                                    )
-                                    .await;
-                                    return Err(StreamStepError::Runtime(error));
-                                }
-                            };
-                            return match result {
-                                CommitResult::Cancelled { checkpoint, .. } => {
-                                    Ok(StreamStep::Cancelled { checkpoint })
-                                }
-                                CommitResult::Rejected(reason) => {
-                                    self.release_stream_lease_best_effort(
-                                        writer,
-                                        lease_for_cleanup.clone(),
-                                    )
-                                    .await;
-                                    Ok(StreamStep::Rejected(reason))
-                                }
-                                _ => {
-                                    self.release_stream_lease_best_effort(
-                                        writer,
-                                        lease_for_cleanup.clone(),
-                                    )
-                                    .await;
-                                    Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
-                                }
-                            };
-                        }
-                        if let Err(error) = self.require_owner(&self.connection, writer).await {
-                            self.release_stream_lease_best_effort(
-                                writer,
-                                lease_for_cleanup.clone(),
-                            )
-                            .await;
-                            return Err(StreamStepError::Runtime(error));
-                        }
-                        let result = match self
-                            .stream_backend(writer)
-                            .fail_with_payload_async(
-                                lease_for_cleanup.clone(),
-                                diagnostic,
-                                failure_payload,
-                            )
-                            .await
-                        {
-                            Ok(result) => result,
-                            Err(error) => {
-                                self.release_stream_lease_best_effort(
-                                    writer,
-                                    lease_for_cleanup.clone(),
-                                )
-                                .await;
-                                return Err(StreamStepError::Runtime(error));
-                            }
-                        };
-                        match result {
-                            CommitResult::Failed { failure } => Ok(StreamStep::Failed { failure }),
-                            CommitResult::Rejected(reason) => {
-                                self.release_stream_lease_best_effort(
-                                    writer,
-                                    lease_for_cleanup.clone(),
-                                )
-                                .await;
-                                Ok(StreamStep::Rejected(reason))
-                            }
-                            _ => {
-                                self.release_stream_lease_best_effort(
-                                    writer,
-                                    lease_for_cleanup.clone(),
-                                )
-                                .await;
-                                Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
-                            }
-                        }
-                    }
-                    Err(StreamTableDeliveryError::ValidationFailed(_)) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
-                    }
-                    Err(StreamTableDeliveryError::Runtime(error)) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Err(StreamStepError::Runtime(error))
-                    }
                 }
             }
             StreamHandlerResult::Fail(diagnostic) => {
@@ -6040,100 +5894,19 @@ impl RuntimeState {
                 .await
                 .map_err(StreamTableDeliveryError::Runtime)?;
         }
+        let next = append_mutations_tx(&tx, expected_capture, &encoded, next_digest, faults)
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
         let rows = table_rows_tx(&tx, validator.tables())
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
         validator
             .validate(&rows)
             .map_err(StreamTableDeliveryError::ValidationFailed)?;
-        let next = append_mutations_tx(&tx, expected_capture, &encoded, next_digest, faults)
-            .await
-            .map_err(StreamTableDeliveryError::Runtime)?;
         tx.commit()
             .await
             .map_err(|_| StreamTableDeliveryError::Runtime(RuntimeError::StorageUnavailable))?;
         Ok((next, result))
-    }
-
-    /// Stages the handler's table writes and completion transition, then
-    /// deliberately returns the handler diagnostic before the transaction can
-    /// commit. This is the durable boundary for a handler that inserts and
-    /// then errors: dropping this transaction rolls back its rows, checkpoint
-    /// successor, CWD state, and success transition as one unit. The caller
-    /// records the ordinary delivery failure only after that rollback.
-    async fn stage_stream_table_failure(
-        &self,
-        writer: WriterLease,
-        expected_capture: &CwdCapture,
-        mutations: &[TableMutation],
-        tables: &[String],
-        next_digest: [u8; 32],
-        delivery: DeliveryLease,
-        expected_stream: CheckpointPrecondition,
-        diagnostic: SafeDiagnostic,
-    ) -> Result<CommitResult, StreamTableDeliveryError> {
-        if mutations.is_empty() {
-            return Err(StreamTableDeliveryError::Runtime(
-                RuntimeError::EmptyMutationBatch,
-            ));
-        }
-        let encoded = mutations
-            .iter()
-            .map(TableMutation::runtime_mutation)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(StreamTableDeliveryError::Runtime)?;
-        validate_id(writer.owner_id).map_err(StreamTableDeliveryError::Runtime)?;
-        validate_stream_mutations(&encoded, next_digest)
-            .map_err(StreamTableDeliveryError::Runtime)?;
-        validate_table_candidate_scope(mutations, tables)
-            .map_err(StreamTableDeliveryError::Runtime)?;
-        let current = self
-            .capture()
-            .await
-            .map_err(StreamTableDeliveryError::Runtime)?;
-        if &current != expected_capture {
-            return Err(StreamTableDeliveryError::Runtime(
-                RuntimeError::StaleCapture {
-                    current: Box::new(current),
-                },
-            ));
-        }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| StreamTableDeliveryError::Runtime(RuntimeError::StorageUnavailable))?;
-        self.require_owner(&tx, writer)
-            .await
-            .map_err(StreamTableDeliveryError::Runtime)?;
-        let result = apply_stream_intent_tx(
-            &tx,
-            CommitIntent::Complete {
-                lease: delivery,
-                expected: expected_stream,
-            },
-        )
-        .await
-        .map_err(StreamTableDeliveryError::Runtime)?;
-        sync_stream_observation_tx(&tx, &result)
-            .await
-            .map_err(StreamTableDeliveryError::Runtime)?;
-        if matches!(result, CommitResult::Rejected(_)) {
-            return Ok(result);
-        }
-        for mutation in mutations {
-            apply_table_mutation_tx(&tx, mutation)
-                .await
-                .map_err(StreamTableDeliveryError::Runtime)?;
-        }
-        let faults = NoFault;
-        append_mutations_tx(&tx, expected_capture, &encoded, next_digest, &faults)
-            .await
-            .map_err(StreamTableDeliveryError::Runtime)?;
-        // Do not commit this transaction. The error is the handler's ordinary
-        // failure after its writes have been staged, so all staged effects are
-        // rolled back before the durable failure record is updated separately.
-        Err(StreamTableDeliveryError::HandlerFailed(diagnostic))
     }
 
     async fn commit_stream_delivery_inner(
@@ -6343,15 +6116,15 @@ impl RuntimeState {
                 .await
                 .map_err(StreamTableDeliveryError::Runtime)?;
         }
+        let next = append_mutations_tx(&tx, expected_capture, &encoded, next_digest, faults)
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
         let rows = table_rows_tx(&tx, validator.tables())
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
         validator
             .validate(&rows)
             .map_err(StreamTableDeliveryError::ValidationFailed)?;
-        let next = append_mutations_tx(&tx, expected_capture, &encoded, next_digest, faults)
-            .await
-            .map_err(StreamTableDeliveryError::Runtime)?;
         tx.commit()
             .await
             .map_err(|_| StreamTableDeliveryError::Runtime(RuntimeError::StorageUnavailable))?;
@@ -6400,7 +6173,10 @@ impl RuntimeState {
         Ok(result)
     }
 
-    async fn cancel_stream_replay(
+    /// Cancels a replay only after the handler has been admitted under this
+    /// exact owner-fenced claim. Public ReplayCancel intentionally cannot
+    /// cancel an in-flight handler.
+    async fn cancel_admitted_stream_replay(
         &self,
         writer: WriterLease,
         grant: &ReplayGrant,
@@ -6411,14 +6187,56 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         self.require_owner(&tx, writer).await?;
-        let result = apply_stream_intent_tx(
-            &tx,
-            CommitIntent::ReplayCancel {
-                failure: grant.failure.clone(),
-                expected_version: grant.version,
-            },
-        )
-        .await?;
+        let Some(record) = load_stream_failure(&tx, &grant.failure).await? else {
+            return Err(RuntimeError::OwnerLost);
+        };
+        if record.version != grant.version || record.status != FailureStatus::Replaying {
+            return Err(RuntimeError::OwnerLost);
+        }
+        let Some(claim) = load_stream_replay_claim(&tx, &grant.failure).await? else {
+            return Err(RuntimeError::OwnerLost);
+        };
+        if claim.version != grant.version || claim.owner != writer {
+            return Err(RuntimeError::OwnerLost);
+        }
+        let deleted = tx
+            .execute(
+                "DELETE FROM stream_replay_claim
+                 WHERE identity_id = ?1 AND version = ?2 AND owner_id = ?3 AND owner_epoch = ?4",
+                params![
+                    stream_identity_id(&grant.failure),
+                    i64::try_from(grant.version).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    writer.owner_id.to_vec(),
+                    i64::try_from(writer.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if deleted != 1 {
+            return Err(RuntimeError::OwnerLost);
+        }
+        let changed = tx
+            .execute(
+                "UPDATE stream_failure
+                 SET version = version + 1, status = ?4
+                 WHERE identity_id = ?1 AND version = ?2 AND status = ?3",
+                params![
+                    stream_identity_id(&grant.failure),
+                    i64::try_from(grant.version).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    encode_status(FailureStatus::Replaying),
+                    encode_status(FailureStatus::Skipped),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let result = CommitResult::ReplayCancelled {
+            failure: load_stream_failure(&tx, &grant.failure)
+                .await?
+                .ok_or(RuntimeError::RecoveryInvalid)?,
+        };
         sync_stream_observation_tx(&tx, &result).await?;
         tx.commit()
             .await
@@ -6683,26 +6501,9 @@ impl RuntimeState {
                         .fail_stream_replay(writer, &grant, diagnostic)
                         .await
                         .map_err(StreamStepError::Runtime),
-                    Err(StreamTableDeliveryError::HandlerFailed(_)) => {
-                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
-                    }
                     Err(StreamTableDeliveryError::Runtime(error)) => {
                         Err(StreamStepError::Runtime(error))
                     }
-                }
-            }
-            // A staged table failure has no replay table candidate. Retain an
-            // ordinary diagnostic as a replay failure, while preserving a
-            // cancellation diagnostic as the distinct replay cancellation.
-            StreamHandlerResult::FailTable(batch) => {
-                if is_cancellation_diagnostic(batch.diagnostic) {
-                    self.cancel_stream_replay(writer, &grant)
-                        .await
-                        .map_err(StreamStepError::Runtime)
-                } else {
-                    self.fail_stream_replay(writer, &grant, batch.diagnostic)
-                        .await
-                        .map_err(StreamStepError::Runtime)
                 }
             }
             StreamHandlerResult::Fail(diagnostic) => self
@@ -6710,14 +6511,7 @@ impl RuntimeState {
                 .await
                 .map_err(StreamStepError::Runtime),
             StreamHandlerResult::Cancelled => self
-                .fail_stream_replay(
-                    writer,
-                    &grant,
-                    SafeDiagnostic {
-                        code: DiagnosticCode::Cancelled,
-                        class: DiagnosticClass::Cancellation,
-                    },
-                )
+                .cancel_admitted_stream_replay(writer, &grant)
                 .await
                 .map_err(StreamStepError::Runtime),
         }
@@ -11833,21 +11627,9 @@ async fn apply_stream_intent_tx(
                 if replay_claim.version != expected_version {
                     return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
                 }
-                let deleted = connection
-                    .execute(
-                        "DELETE FROM stream_replay_claim
-                         WHERE identity_id = ?1 AND version = ?2",
-                        params![
-                            stream_identity_id(&failure),
-                            i64::try_from(expected_version)
-                                .map_err(|_| RuntimeError::RecoveryInvalid)?,
-                        ],
-                    )
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
-                if deleted != 1 {
-                    return Err(RuntimeError::RecoveryInvalid);
-                }
+                // A durable claim means a replay handler has begun work.
+                // Only its owner-fenced completion path may end that work.
+                return Ok(CommitResult::Rejected(RejectReason::LeaseAlreadyHeld));
             }
             connection
                 .execute(
@@ -14702,44 +14484,42 @@ mod tests {
         }
     }
 
-    struct StagedFailingTableHandler {
+    struct RejectingTableHandler {
         calls: usize,
     }
 
-    impl StreamHandler for StagedFailingTableHandler {
+    impl StreamHandler for RejectingTableHandler {
         fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult {
             self.calls += 1;
             assert_eq!(item.delivery.position.token.as_str(), "41");
             assert_eq!(item.delivery.successor.token.as_str(), "42");
             assert_eq!(item.payload, vec![42]);
-            StreamHandlerResult::FailTable(StreamStagedTableFailure {
+            StreamHandlerResult::CommitValidatedTable(StreamValidatedTableMutationBatch {
                 mutations: vec![table_mutation(42, 42, Some(42))],
-                tables: vec!["books".into()],
                 next_digest: digest(42),
-                diagnostic: SafeDiagnostic {
-                    code: DiagnosticCode::ExecutionRejected,
-                    class: DiagnosticClass::Permanent,
-                },
+                validator: Box::new(RejectingValidator {
+                    tables: vec!["books".into()],
+                    calls: 0,
+                }),
             })
         }
     }
 
-    struct StagedCancellingTableHandler {
+    struct CancellingTableHandler {
         calls: usize,
     }
 
-    impl StreamHandler for StagedCancellingTableHandler {
+    impl StreamHandler for CancellingTableHandler {
         fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult {
             self.calls += 1;
             assert_eq!(item.payload, vec![7]);
-            StreamHandlerResult::FailTable(StreamStagedTableFailure {
+            StreamHandlerResult::CommitValidatedTable(StreamValidatedTableMutationBatch {
                 mutations: vec![table_mutation(43, 7, Some(7))],
-                tables: vec!["books".into()],
                 next_digest: digest(7),
-                diagnostic: SafeDiagnostic {
-                    code: DiagnosticCode::Cancelled,
-                    class: DiagnosticClass::Cancellation,
-                },
+                validator: Box::new(CancellingValidator {
+                    tables: vec!["books".into()],
+                    calls: 0,
+                }),
             })
         }
     }
@@ -15407,7 +15187,7 @@ mod tests {
         );
         let capture_before = state.capture().await.unwrap();
 
-        let mut failing_handler = StagedFailingTableHandler { calls: 0 };
+        let mut failing_handler = RejectingTableHandler { calls: 0 };
         let failure = match state
             .run_stream_once(writer, &key, &mut source, &mut failing_handler)
             .await
@@ -15585,7 +15365,7 @@ mod tests {
             }),
             polls: 0,
         };
-        let mut handler = StagedCancellingTableHandler { calls: 0 };
+        let mut handler = CancellingTableHandler { calls: 0 };
 
         assert!(matches!(
             state
@@ -19733,6 +19513,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_replay_cancel_preserves_an_active_handler_claim() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let (grant, checkpoint, _) =
+            protected_replay_fixture(&state, writer, "replay-cancel-claim", digest(5)).await;
+        state
+            .claim_stream_replay(writer, &grant)
+            .await
+            .unwrap()
+            .unwrap();
+        let before = state
+            .stream_backend(writer)
+            .failure_async(&grant.failure)
+            .await
+            .unwrap()
+            .expect("admitted replay failure");
+
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::ReplayCancel {
+                    failure: grant.failure.clone(),
+                    expected_version: grant.version,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Rejected(RejectReason::LeaseAlreadyHeld)
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_async(&grant.failure)
+                .await
+                .unwrap(),
+            Some(before)
+        );
+        assert_eq!(
+            load_stream_replay_claim(&state.connection, &grant.failure)
+                .await
+                .unwrap(),
+            Some(StoredStreamReplayClaim {
+                version: grant.version,
+                owner: writer,
+            })
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&grant.failure.0.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
+        );
+    }
+
+    #[tokio::test]
     async fn durable_admitted_replay_does_not_block_later_ordered_delivery() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -20225,7 +20062,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn staged_table_failure_cancellation_replay_uses_cancel_transition() {
+    async fn replay_handler_cancellation_uses_owner_fenced_claim_transition() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(4)).await.unwrap();
@@ -20308,15 +20145,7 @@ mod tests {
 
         let mut handler = ReplayHandler {
             payload: Vec::new(),
-            result: Some(StreamHandlerResult::FailTable(StreamStagedTableFailure {
-                mutations: vec![table_mutation(44, 5, Some(9))],
-                tables: vec!["books".into()],
-                next_digest: digest(9),
-                diagnostic: SafeDiagnostic {
-                    code: DiagnosticCode::Cancelled,
-                    class: DiagnosticClass::Cancellation,
-                },
-            })),
+            result: Some(StreamHandlerResult::Cancelled),
         };
         let cancelled = state
             .replay_stream_failure(writer, grant.clone(), &mut handler)
@@ -20340,9 +20169,12 @@ mod tests {
             }
         );
         assert!(state.pending().await.unwrap().is_empty());
-        assert_eq!(
-            state.committed_table_row("books", &[5]).await.unwrap(),
-            None
+        assert!(
+            load_stream_replay_claim(&state.connection, &grant.failure)
+                .await
+                .unwrap()
+                .is_none(),
+            "owner-fenced handler cancellation must release its replay claim"
         );
         assert_eq!(
             state
