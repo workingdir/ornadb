@@ -246,6 +246,9 @@ impl CompactSegmentRole {
         }
     }
 }
+/// Observed compact-storage layout at one commit: manifest-holding tables
+/// paired with their validated shard/data paths.
+type CompactInventoryPaths = (BTreeSet<Uuid>, BTreeMap<Uuid, BTreeSet<String>>);
 
 /// One newly encoded immutable compact segment.  Its generation and native
 /// object ID are allocated only after the base manifest has been verified.
@@ -2442,7 +2445,7 @@ impl Repository {
     fn observed_compact_manifest_inventory_paths(
         &self,
         commit: &GitCommitRef,
-    ) -> Result<(BTreeSet<Uuid>, BTreeMap<Uuid, BTreeSet<String>>), RepositoryError> {
+    ) -> Result<CompactInventoryPaths, RepositoryError> {
         if !matches!(
             self.observe_git_object(commit.as_str())?,
             crate::GitObjectState::Materialized {
