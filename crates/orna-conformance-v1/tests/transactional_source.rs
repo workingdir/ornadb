@@ -494,20 +494,30 @@ fn parsed_pipeline_count_read_your_writes_succeeds_before_a_distinct_failure_rol
 }
 
 #[test]
-fn parsed_unsupported_relation_pipelines_fail_closed() {
-    for pipeline in [
-        r#"Note | filter(note => note.id != 7) | count"#,
-        r#"Note | map(note => note.text)"#,
-    ] {
-        let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-        let outcome = runtime.execute_source(&source(&format!("{pipeline};")));
+fn parsed_relation_filter_and_map_preserve_candidate_values() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source(
+        r#"
+            assert Note | filter(note => note.id != 7) | count == 0;
+            Note.insert({ id: 8, text: "second" });
+            let selected = Note | filter(note => note.id != 7);
+            assert selected | count == 1;
+            let texts = selected | map(note => note.text);
+            assert (texts | first() ?? "missing") == "second";
+        "#,
+    ));
 
-        assert!(
-            matches!(outcome, StageOutcome::Failed(_)),
-            "unsupported pipeline must fail closed: {pipeline}: {outcome:?}"
-        );
-        assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
-    }
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(7.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(8.into()))
+            .is_some()
+    );
 }
 
 #[test]
