@@ -863,6 +863,7 @@ pub enum ApplicationPreparation {
     Completed(DispatchOutcome),
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum WebSocketApplicationPreparation {
     Pending,
     Output(WebSocketOutput),
@@ -1868,6 +1869,13 @@ impl LiveHost {
     /// Performs protocol admission and returns an owned application ticket.
     /// The transport borrow ends before the application task runs, allowing a
     /// concurrent actor to process DELETE and other lifecycle commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns protocol admission and encoding errors: [`Error::Closed`] for a
+    /// retired attachment, [`Error::InvalidFrame`], [`Error::InvalidMessage`],
+    /// security boundary, serving, and durable-admission failures.
+    #[allow(clippy::too_many_lines)]
     pub async fn prepare_application_frame(
         &mut self,
         attachment: [u8; 16],
@@ -2074,6 +2082,12 @@ impl LiveHost {
     /// Validates and publishes a completed application ticket after the actor
     /// has reacquired its transport state. A stale completion is rejected by
     /// the durable terminal claim and the session/application fence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] for a retired attachment, serving fencing
+    /// errors, or validation failures from a stale response.
+    #[allow(clippy::too_many_lines)]
     pub async fn complete_application(
         &mut self,
         completion: LiveApplicationCompletion,
@@ -2298,6 +2312,11 @@ impl LiveHost {
     }
 
     #[allow(clippy::too_many_lines)]
+    ///
+    /// # Errors
+    ///
+    /// Returns attachment, security, serving, and response validation errors
+    /// as produced by the frame pipeline; see [`Self::complete`].
     pub async fn dispatch_frame(
         &mut self,
         attachment: [u8; 16],
@@ -2539,26 +2558,7 @@ impl LiveHost {
                             self.watches.remove(&(session, watch));
                             self.complete(session, request, &envelope, outcome).await
                         }
-                        Message::Event { .. } => {
-                            let response = self
-                                .application_call(
-                                    application,
-                                    session,
-                                    request,
-                                    &envelope.message,
-                                    envelope.watch,
-                                    fingerprint,
-                                )
-                                .await?;
-                            let outcome = validate_result_response(
-                                request,
-                                fingerprint,
-                                response,
-                                self.limits.protocol,
-                            )?;
-                            self.complete(session, request, &envelope, outcome).await
-                        }
-                        Message::Eval { .. } => {
+                        Message::Event { .. } | Message::Eval { .. } => {
                             let response = self
                                 .application_call(
                                     application,
@@ -4954,6 +4954,11 @@ impl LiveTransport {
     /// workers remain alive. Retired attachments are queued even when a drain
     /// fails: the host remains fail-closed and must cancel/join them before
     /// their identities can be reused.
+    ///
+    /// # Errors
+    ///
+    /// Returns serving and runtime fencing errors from expiring sessions, or
+    /// the first deletion drain failure while retirement is still queued.
     pub async fn expire_sessions_with_children(
         &mut self,
         now: u64,
@@ -5017,6 +5022,11 @@ impl LiveTransport {
     /// Reassembles one WebSocket input and performs only transport admission
     /// for a complete application envelope. The returned work ticket owns all
     /// application state needed after this method returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns frame-limit errors as [`Error::Limit`], malformed-frame errors,
+    /// or errors from [`Self::prepare_application_frame`] and the close path.
     pub async fn prepare_websocket_application(
         &mut self,
         socket: &mut WebSocketState,
@@ -5091,6 +5101,10 @@ impl LiveTransport {
     /// Publishes a prepared application result after the actor has reacquired
     /// transport state. Durable/runtime fencing decides whether a late result
     /// is a replay of cancellation or a valid terminal response.
+    ///
+    /// # Errors
+    ///
+    /// Returns host completion errors or output conversion failures.
     pub async fn complete_application(
         &mut self,
         completion: LiveApplicationCompletion,
@@ -6821,6 +6835,7 @@ impl fmt::Debug for WebSocketState {
             .map_or((None, 0), |(opcode, bytes)| (Some(*opcode), bytes.len()));
         formatter
             .debug_struct("WebSocketState")
+            .field("attachment", &self.attachment)
             .field("fragment_opcode", &fragment_opcode)
             .field("fragment_bytes", &fragment_bytes)
             .field("pending_bytes", &self.pending.len())
@@ -6924,6 +6939,12 @@ impl WebSocketState {
     /// returns to drain coalesced frames without reading more bytes. Invalid
     /// and oversized buffered frames report `true` so the normal receive path
     /// can convert them into the required protocol close.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Limit`] or the underlying frame error; malformed and
+    /// oversized pending input report `Ok(true)` so the receive path performs
+    /// the required protocol close.
     pub fn has_complete_frame(&self, limit: usize) -> Result<bool> {
         match ws_frame(&self.pending, limit) {
             Ok(frame) => Ok(frame.is_some()),
@@ -7858,6 +7879,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn direct_dispatch_request_status_mismatch_preserves_original_record() {
         let request = [26; 16];
         let mut application = RejectApplication;
@@ -8430,6 +8452,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn fragmented_text_with_co_read_input_closes_with_unsupported_data_code() {
         let origin = Origin::parse("https://app.example").unwrap();
         let mut host = LiveHost::new(
