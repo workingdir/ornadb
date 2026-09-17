@@ -597,10 +597,11 @@ mod batch_tests {
             .expect("retained function resolves at its admitted capture");
         assert_eq!(pinned, admitted);
 
-        // A later generation carries the same identity forward; the pinned
-        // read still returns the admitted generation's rows (ORNA-SYS-019).
-        let later = advance(&state, lease, 12).await;
-        assert_ne!(later.generation(), first.capture.generation());
+        // Multiple later generations must not impose predecessor adjacency
+        // on reads of an older pinned reference (ORNA-SYS-019).
+        advance(&state, lease, 12).await;
+        let later = advance(&state, lease, 14).await;
+        assert_eq!(later.generation() - first.capture.generation(), 2.into());
         assert_eq!(
             state
                 .catalogue_function_at("pkg.f", &first.capture)
@@ -641,23 +642,54 @@ mod batch_tests {
             CatalogueError::CatalogueCaptureInvalid
         );
 
-        // Foreign runtime identity: a fabricated CWD snapshot naming this
-        // database but another runtime. The current snapshot's generation is
-        // retained, so only the identity mismatch can reject it.
+        // A different runtime must not resolve through the current catalogue.
         let foreign_snapshot = Snapshot::cwd(
             first.capture.database_id(),
             [9; 16],
-            capture_tx(&reopened.connection).await.unwrap().generation().clone(),
+            capture_tx(&reopened.connection)
+                .await
+                .unwrap()
+                .generation()
+                .clone(),
         )
         .unwrap();
-        let foreign =
-            CwdCapture::new(foreign_snapshot, later.generation_digest()).unwrap();
+        let foreign = CwdCapture::new(foreign_snapshot, later.generation_digest()).unwrap();
         assert_eq!(
             reopened
                 .catalogue_function_at("pkg.f", &foreign)
                 .await
                 .unwrap_err(),
             CatalogueError::CatalogueCaptureInvalid
+        );
+
+        let never_retained = CwdCapture::new(
+            Snapshot::cwd(
+                first.capture.database_id(),
+                first.capture.runtime_id(),
+                later.generation() + 1,
+            )
+            .unwrap(),
+            later.generation_digest(),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened
+                .catalogue_function_at("pkg.f", &never_retained)
+                .await
+                .unwrap_err(),
+            CatalogueError::CatalogueCaptureInvalid
+        );
+        assert_eq!(
+            reopened
+                .catalogue_function_at("pkg.missing", &first.capture)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            capture_tx(&reopened.connection).await.unwrap(),
+            later,
+            "retained reads and rejected captures must not advance current state"
         );
     }
 
@@ -1502,7 +1534,6 @@ impl RuntimeState {
         Ok(Some(module))
     }
 
-
     /// Reads one function row at an exact retained CWD capture.
     ///
     /// The capture must be the complete, already persisted same-runtime
@@ -1519,12 +1550,7 @@ impl RuntimeState {
         validate_observation_text(qualified_name)?;
         let transaction = self.catalogue_transaction_read().await?;
         let stored = retained_capture_row_tx(&transaction, capture).await?;
-        let Some(id) = lookup_snapshot_object_id(
-            &transaction,
-            &stored,
-            qualified_name,
-        )
-        .await?
+        let Some(id) = lookup_snapshot_object_id(&transaction, &stored, qualified_name).await?
         else {
             transaction
                 .commit()
@@ -2190,10 +2216,10 @@ async fn validate_predecessor_capture_tx(
 /// Validates one exact retained same-runtime capture and returns its stored
 /// snapshot bytes.
 ///
- /// Retained reads use the full persisted identity set; unlike predecessor
- /// validation there is no adjacency requirement, because a pinned reference
- /// may point at any retained generation of this runtime, not only the
- /// immediately preceding one (ORNA-SYS-019).
+/// Retained reads use the full persisted identity set; unlike predecessor
+/// validation there is no adjacency requirement, because a pinned reference
+/// may point at any retained generation of this runtime, not only the
+/// immediately preceding one (ORNA-SYS-019).
 async fn retained_capture_row_tx(
     transaction: &Transaction,
     capture: &orna_foundation_v1::CwdCapture,
