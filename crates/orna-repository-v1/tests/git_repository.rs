@@ -4356,7 +4356,7 @@ fn observes_native_objects_with_case_insensitive_hex_spelling() {
 
     assert_eq!(
         repo.observe_git_object(&uppercase).unwrap(),
-        repo.observe_git_object(&object).unwrap()
+        repo.observe_git_object(object).unwrap()
     );
 }
 
@@ -4495,7 +4495,7 @@ fn capture_rejects_a_tracked_case_folded_loose_sibling_without_mutation() {
     let before = git_state(&repo, root.path());
 
     assert!(matches!(
-        repo.capture_managed_publication_state(&head, &index, &[proposed.clone()]),
+        repo.capture_managed_publication_state(&head, &index, std::slice::from_ref(&proposed)),
         Err(orna_repository_v1::RepositoryError::ManagedContentConflict)
     ));
     assert_eq!(git_state(&repo, root.path()), before);
@@ -4520,7 +4520,7 @@ fn capture_rejects_a_case_folded_table_root_without_mutation() {
     let before = git_state(&repo, root.path());
 
     assert!(matches!(
-        repo.capture_managed_publication_state(&head, &index, &[proposed.clone()]),
+        repo.capture_managed_publication_state(&head, &index, std::slice::from_ref(&proposed)),
         Err(orna_repository_v1::RepositoryError::ManagedContentConflict)
     ));
     assert_eq!(git_state(&repo, root.path()), before);
