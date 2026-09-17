@@ -9231,10 +9231,10 @@ mod durable_tests {
             .expect("maintenance mutation");
         let next = super::durable_activation_digest(
             snapshot.context().capture().generation_digest(),
-            &[maintenance.clone()],
+            std::slice::from_ref(&maintenance),
         );
         state
-            .commit_table_activation(owner, snapshot.context(), &[maintenance], next, &NoFault)
+            .commit_table_activation(owner, snapshot.context(), std::slice::from_ref(&maintenance), next, &NoFault)
             .await
             .expect("maintenance commit");
         let after_maintenance = state.capture().await.expect("advanced capture");
