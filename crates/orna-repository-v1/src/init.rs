@@ -737,6 +737,7 @@ mod tests {
             target.path(),
             &["config", "user.name", "Repository init test"],
         );
+        git(target.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(target.path().join("ordinary.txt"), "base\n").unwrap();
         fs::write(target.path().join("main.orna"), "module main;\n").unwrap();
         git(target.path(), &["add", "."]);
