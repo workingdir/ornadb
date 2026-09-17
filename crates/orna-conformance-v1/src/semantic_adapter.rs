@@ -164,14 +164,7 @@ impl SemanticAdapter {
             .map(|unit| ModuleInput::new(unit.source_id, unit.source))
             .collect::<Vec<_>>();
         let analysis = analyze_with_catalogue(&inputs, &self.catalogue);
-        match analysis
-            .diagnostics
-            .into_iter()
-            .find(|diagnostic| phase.accepts(diagnostic.code()))
-        {
-            Some(diagnostic) => StageOutcome::Failed(diagnostic.redacted()),
-            None => StageOutcome::Passed,
-        }
+        select_diagnostic(analysis.diagnostics, phase)
     }
 
     fn analyze_project(
@@ -180,14 +173,7 @@ impl SemanticAdapter {
         phase: SemanticPhase,
     ) -> StageOutcome<Diagnostic> {
         let analysis = self.project_analysis(project);
-        match analysis
-            .diagnostics
-            .into_iter()
-            .find(|diagnostic| phase.accepts(diagnostic.code()))
-        {
-            Some(diagnostic) => StageOutcome::Failed(diagnostic.redacted()),
-            None => StageOutcome::Passed,
-        }
+        select_diagnostic(analysis.diagnostics, phase)
     }
     fn unsupported_runtime() -> StageOutcome<Diagnostic> {
         StageOutcome::Skipped {
@@ -203,31 +189,68 @@ enum SemanticPhase {
 }
 
 impl SemanticPhase {
-    fn accepts(self, code: &str) -> bool {
+    fn accepts(self, diagnostic: &Diagnostic) -> bool {
+        // Annotation-boundary type names (for example unimported nominal
+        // annotations) fail before inference; the conformance harness treats
+        // them as typecheck-phase failures rather than resolution failures.
+        let is_typecheck = typecheck_phase(diagnostic);
         match self {
-            Self::Resolve => matches!(
-                code,
-                "ORNA100-E-SYS-RUNTIME"
-                    | "ORNA091-E-TRYFROM"
-                    | "ORNA-S001-PATH"
-                    | "ORNA-S002-NAMESPACE"
-                    | "ORNA-S003-RESERVED"
-                    | "ORNA-S010-IMPORT"
-                    | "ORNA-S011-AMBIGUOUS"
-                    | "ORNA-S012-UNRESOLVED"
-                    | "ORNA-S013-DUPLICATE"
-            ),
-            Self::Typecheck => matches!(
-                code,
-                "ORNA-S020-ANNOTATION"
-                    | "ORNA-S021-TYPE"
-                    | "ORNA-S022-UNSUPPORTED"
-                    | "ORNA-A091-004"
-                    | "ORNA-A091-003"
-                    | "ORNA-A091-007"
-                    | "ORNA-A091-012"
-            ),
+            Self::Resolve => {
+                !is_typecheck && {
+                    matches!(
+                        diagnostic.code(),
+                        "ORNA100-E-SYS-RUNTIME"
+                            | "ORNA091-E-TRYFROM"
+                            | "ORNA-S001-PATH"
+                            | "ORNA-S002-NAMESPACE"
+                            | "ORNA-S003-RESERVED"
+                            | "ORNA-S010-IMPORT"
+                            | "ORNA-S011-AMBIGUOUS"
+                            | "ORNA-S012-UNRESOLVED"
+                            | "ORNA-S013-DUPLICATE"
+                    )
+                }
+            }
+            Self::Typecheck => is_typecheck,
         }
+    }
+}
+
+fn typecheck_phase(diagnostic: &Diagnostic) -> bool {
+    matches!(
+        diagnostic.code(),
+        "ORNA-S020-ANNOTATION"
+            | "ORNA-S021-TYPE"
+            | "ORNA-S022-UNSUPPORTED"
+            | "ORNA-A091-004"
+            | "ORNA-A091-003"
+            | "ORNA-A091-007"
+            | "ORNA-A091-012"
+    ) || diagnostic.message() == "type name cannot be resolved"
+}
+
+/// Picks one diagnostic for the stage: an explicitly published mapping wins
+/// over unrelated internal codes so specific fixture obligations are not
+/// masked by incidental errors, otherwise the first accepted diagnostic does.
+fn select_diagnostic(
+    diagnostics: Vec<Diagnostic>,
+    phase: SemanticPhase,
+) -> StageOutcome<Diagnostic> {
+    let mut first_accepted = None;
+    for diagnostic in diagnostics {
+        if published_diagnostic_code(&diagnostic) != diagnostic.code() {
+            if phase.accepts(&diagnostic) {
+                return StageOutcome::Failed(diagnostic);
+            }
+        } else if first_accepted.is_none() && phase.accepts(&diagnostic) {
+            first_accepted = Some(diagnostic);
+        }
+    }
+    match first_accepted {
+        Some(diagnostic) => StageOutcome::Failed(diagnostic),
+        // Conformance compares compiler codes and message fragments. Runtime
+        // execution boundaries redact their failures separately.
+        None => StageOutcome::Passed,
     }
 }
 
