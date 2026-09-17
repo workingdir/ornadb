@@ -99,6 +99,10 @@ impl OperationAdmissionSource for RepositoryAdmissionSource {
     }
 }
 
+/// Terminal Eval rejections bound to a live session lease: fingerprint and
+/// envelope keyed by session and request.
+type RejectedTerminals = BTreeMap<SessionId, BTreeMap<[u8; 16], ([u8; 32], Envelope)>>;
+
 /// The server's pure Eval/Watch implementation.
 pub(crate) struct PureEvalApplication {
     database_id: [u8; 16],
@@ -108,7 +112,7 @@ pub(crate) struct PureEvalApplication {
     /// Terminal Eval rejections that occurred before an evaluator overlay
     /// could be admitted. They are still bound to a live session lease, so an
     /// exact retry cannot re-admit against later repository state.
-    rejected_terminals: BTreeMap<SessionId, BTreeMap<[u8; 16], ([u8; 32], Envelope)>>,
+    rejected_terminals: RejectedTerminals,
     #[cfg(test)]
     eval_started: Option<Arc<AtomicBool>>,
     #[cfg(test)]
