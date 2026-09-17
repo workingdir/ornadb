@@ -205,8 +205,10 @@ fn relation_integer_aggregate_rejects_too_many_candidate_rows_without_publicatio
         "#
         .into(),
     };
-    let mut limits = Limits::default();
-    limits.max_collection_items = 2;
+    let limits = Limits {
+        max_collection_items: 2,
+        ..Default::default()
+    };
     let mut evaluator = TransactionalEvaluator::new("parent", limits);
 
     let outcome = evaluator.execute_source(&unit);
@@ -240,8 +242,10 @@ fn relation_integer_sum_rejects_an_intermediate_integer_that_exceeds_the_limit()
         "#
         .into(),
     };
-    let mut limits = Limits::default();
-    limits.max_integer_digits = 2;
+    let limits = Limits {
+        max_integer_digits: 2,
+        ..Default::default()
+    };
     let mut evaluator = TransactionalEvaluator::new("parent", limits);
 
     let outcome = evaluator.execute_source(&unit);
@@ -261,8 +265,10 @@ fn relation_integer_sum_rejects_an_intermediate_integer_that_exceeds_the_limit()
 
 #[test]
 fn relation_scan_shares_evaluator_budget_and_rolls_back_on_exhaustion() {
-    let mut limits = Limits::default();
-    limits.max_steps = 14;
+    let limits = Limits {
+        max_steps: 14,
+        ..Default::default()
+    };
     let mut evaluator = TransactionalEvaluator::new("parent", limits);
     let outcome = evaluator.execute_source(&source(
         r#"
@@ -287,8 +293,10 @@ fn relation_scan_shares_evaluator_budget_and_rolls_back_on_exhaustion() {
 
 #[test]
 fn zero_step_budget_fails_before_any_publication() {
-    let mut limits = Limits::default();
-    limits.max_steps = 0;
+    let limits = Limits {
+        max_steps: 0,
+        ..Default::default()
+    };
     let mut evaluator = TransactionalEvaluator::new("parent", limits);
     let outcome = evaluator.execute_source(&source(
         r#"
@@ -325,8 +333,10 @@ fn assertion_scan_consumes_shared_budget_and_preserves_rollback() {
         "#
         .into(),
     };
-    let mut limits = Limits::default();
-    limits.max_steps = 10;
+    let limits = Limits {
+        max_steps: 10,
+        ..Default::default()
+    };
     let mut evaluator = TransactionalEvaluator::new("parent", limits);
 
     let outcome = evaluator.execute_source(&unit);
@@ -346,8 +356,10 @@ fn assertion_scan_consumes_shared_budget_and_preserves_rollback() {
 
 #[test]
 fn table_assertion_predicate_vm_work_shares_one_activation_budget() {
-    let mut limits = Limits::default();
-    limits.max_steps = 20;
+    let limits = Limits {
+        max_steps: 20,
+        ..Default::default()
+    };
     let mut evaluator = TransactionalEvaluator::new("parent", limits);
     assert!(matches!(
         evaluator.execute_source(&table_source(
@@ -404,8 +416,10 @@ fn nested_module_quantifier_cannot_reset_the_activation_budget() {
         "#
         .into(),
     };
-    let mut limits = Limits::default();
-    limits.max_steps = 20;
+    let limits = Limits {
+        max_steps: 20,
+        ..Default::default()
+    };
     let mut evaluator = TransactionalEvaluator::new("parent", limits);
     assert!(matches!(
         evaluator.execute_source(&seed),
@@ -437,8 +451,10 @@ fn zero_and_exhausted_assertion_budgets_publish_nothing() {
         "Reading.insert({ id: 1, value: 1 }); Reading.insert({ id: 2, value: 2 });",
     );
 
-    let mut zero_limits = Limits::default();
-    zero_limits.max_steps = 0;
+    let zero_limits = Limits {
+        max_steps: 0,
+        ..Default::default()
+    };
     let mut zero = TransactionalEvaluator::new("parent", zero_limits);
     let zero_outcome = zero.execute_source(&unit);
     assert!(matches!(
@@ -449,8 +465,10 @@ fn zero_and_exhausted_assertion_budgets_publish_nothing() {
         assert_eq!(zero.committed_row("Reading", &Value::int(id.into())), None);
     }
 
-    let mut exhausted_limits = Limits::default();
-    exhausted_limits.max_steps = 10;
+    let exhausted_limits = Limits {
+        max_steps: 10,
+        ..Default::default()
+    };
     let mut exhausted = TransactionalEvaluator::new("parent", exhausted_limits);
     let exhausted_outcome = exhausted.execute_source(&unit);
     assert!(matches!(
@@ -467,8 +485,10 @@ fn zero_and_exhausted_assertion_budgets_publish_nothing() {
 
 #[test]
 fn generous_assertion_budget_preserves_successful_publication() {
-    let mut limits = Limits::default();
-    limits.max_steps = 1_000;
+    let limits = Limits {
+        max_steps: 1_000,
+        ..Default::default()
+    };
     let mut evaluator = TransactionalEvaluator::new("parent", limits);
     let outcome = evaluator.execute_source(&table_assertion_source(
         "every(reading => reading.value > 0)",

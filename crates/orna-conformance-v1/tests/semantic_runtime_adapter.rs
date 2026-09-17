@@ -294,7 +294,7 @@ async fn project_stream_ignores_unrelated_false_module_assertion() {
     .expect("encoded Loan row");
     let mutation = TableMutation::new([86; 16], "Loan", key, Some(row)).expect("Loan mutation");
     state
-        .commit_table_activation(lease, &snapshot.context(), &[mutation], [87; 32], &NoFault)
+        .commit_table_activation(lease, snapshot.context(), &[mutation], [87; 32], &NoFault)
         .await
         .expect("seed unrelated Loan row");
 
