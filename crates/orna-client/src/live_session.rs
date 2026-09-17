@@ -65,8 +65,9 @@ pub enum LiveSessionEvent {
     DeltaPublished { revision: u64 },
     ResyncSent { request: ResyncRequest },
     ResyncAwaitingSnapshot { request: [u8; 16] },
+    DiagnosticReceived,
+    ResyncRejected,
 }
-
 /// Errors from the authenticated live attachment, typed presentation owner,
 /// or renderer publication boundary.
 #[derive(Debug)]
@@ -167,6 +168,20 @@ where
             .receive_binary(self.limits.max_message_bytes)
             .await
             .map_err(LiveSessionError::Io)?;
+        if let Ok(frame) = Envelope::decode(&encoded, self.limits)
+            && let Message::Diagnostic { .. } = frame.message
+        {
+            if frame.watch.is_some() && frame.watch != Some(self.watch) {
+                return Err(LiveSessionError::Presentation(
+                    LivePresentationError::WrongWatch,
+                ));
+            }
+            if frame.request == self.expected_resync_request {
+                self.expected_resync_request = None;
+                return Ok(LiveSessionEvent::ResyncRejected);
+            }
+            return Ok(LiveSessionEvent::DiagnosticReceived);
+        }
         self.validate_snapshot_request(&encoded)?;
         self.validate_resync_response(&encoded)?;
         let update = if encoded.len() > self.limits.max_message_bytes {
@@ -496,6 +511,16 @@ mod tests {
         encoded
     }
 
+    fn diagnostic_body() -> Vec<u8> {
+        let mut body = vec![0xa2, 0x00, 0xd9, 0xea, 0x6b, 0xa7];
+        body.extend([0x00, 0x74]);
+        body.extend(b"wire.invalid_message");
+        body.extend([0x01, 0x03, 0x02, 0x6f]);
+        body.extend(b"invalid message");
+        body.extend([0x03, 0x80, 0x04, 0x80, 0x05, 0x80, 0x06, 0xf5]);
+        body.extend([0x01, 0xf5]);
+        body
+    }
     fn replace_text(property: &str) -> Vec<u8> {
         let path = array(vec![array(vec![vec![0x00], text("text")])]);
         array(vec![vec![0x02], path, text(property)])
@@ -779,6 +804,50 @@ mod tests {
         assert_eq!(driver.io.sent.len(), 1);
         assert_eq!(driver.request_ids.allocations, 1);
         assert!(!driver.presentation().awaiting_snapshot());
+    }
+
+    #[test]
+    fn correlated_diagnostic_releases_resync_barrier() {
+        let mut io = MemoryIo::default();
+        io.incoming.push_back(snapshot(0));
+        io.incoming.push_back(delta(9, 10, "invalid"));
+        let mut driver = LiveSessionDriver::new(
+            io,
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
+        let LiveSessionEvent::ResyncSent { .. } = block_on(driver.receive_once()).unwrap() else {
+            panic!("invalid delta must send resync")
+        };
+        let request = Envelope::decode(&driver.io.sent[0], Limits::default())
+            .unwrap()
+            .request
+            .unwrap();
+        driver.io.incoming.push_back(frame_with_request(
+            19,
+            [7; 16],
+            Some(request),
+            diagnostic_body(),
+        ));
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::ResyncRejected
+        );
+        driver
+            .io
+            .incoming
+            .push_back(snapshot_with_request(1, "recovered", None));
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 1 })
+        ));
     }
 
     #[test]
