@@ -268,18 +268,14 @@ fn configured_initial_branch_entries(
     let mut initial_branch = None;
     let mut entries = entries.into_iter();
     for _ in 0..count {
-        let Some((key, value)) = entries.next() else {
-            return None;
-        };
+        let (key, value) = entries.next()?;
         let (Some(key), Some(value)) = (key, value) else {
             return None;
         };
-        if key != OsString::from("init.defaultBranch") {
+        if key != "init.defaultBranch" {
             continue;
         }
-        let Some(value) = value.to_str() else {
-            return None;
-        };
+        let value = value.to_str()?;
         if initial_branch.is_some() || !valid_initial_branch_name(value) {
             return None;
         }
