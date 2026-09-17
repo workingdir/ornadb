@@ -808,13 +808,17 @@ struct Lifecycle {
 struct LifecycleState {
     restarting: bool,
 }
+/// Test-only synchronization hook shared between the admissions fence and
+/// blocked worker threads.
+#[cfg(test)]
+type EnterHook = Arc<(Mutex<(bool, bool)>, Condvar)>;
 
 #[derive(Debug, Default)]
 struct SynchronousExecutions {
     state: Mutex<SynchronousExecutionState>,
     completed: Condvar,
     #[cfg(test)]
-    enter_hook: Mutex<Option<Arc<(Mutex<(bool, bool)>, Condvar)>>>,
+    enter_hook: Mutex<Option<EnterHook>>,
 }
 
 #[derive(Debug, Default)]
@@ -848,20 +852,20 @@ impl WorkerStartGate {
     }
 
     fn release(&self) {
-        if let Ok(mut open) = self.open.lock() {
-            if open.is_none() {
-                *open = Some(true);
-                self.changed.notify_all();
-            }
+        if let Ok(mut open) = self.open.lock()
+            && open.is_none()
+        {
+            *open = Some(true);
+            self.changed.notify_all();
         }
     }
 
     fn abort(&self) {
-        if let Ok(mut open) = self.open.lock() {
-            if open.is_none() {
-                *open = Some(false);
-                self.changed.notify_all();
-            }
+        if let Ok(mut open) = self.open.lock()
+            && open.is_none()
+        {
+            *open = Some(false);
+            self.changed.notify_all();
         }
     }
 }
@@ -940,7 +944,7 @@ impl SynchronousExecutions {
     }
 
     #[cfg(test)]
-    fn set_enter_hook(&self, hook: Option<Arc<(Mutex<(bool, bool)>, Condvar)>>) {
+    fn set_enter_hook(&self, hook: Option<EnterHook>) {
         *self.enter_hook.lock().unwrap() = hook;
     }
 
@@ -980,11 +984,11 @@ impl Drop for SynchronousReservation {
         if !self.reserved {
             return;
         }
-        if let Ok(mut state) = self.executions.state.lock() {
-            if let Some(pending) = state.pending.checked_sub(1) {
-                state.pending = pending;
-                self.executions.completed.notify_all();
-            }
+        if let Ok(mut state) = self.executions.state.lock()
+            && let Some(pending) = state.pending.checked_sub(1)
+        {
+            state.pending = pending;
+            self.executions.completed.notify_all();
         }
     }
 }
@@ -1077,12 +1081,10 @@ impl RuntimeSupervisor {
             let _ = worker.join();
         }
         self.synchronous.wait_empty()?;
-        let result = self
-            .runtime
+        self.runtime
             .lock()
             .map_err(|_| AdmissionError::RuntimeUnavailable)
-            .map(|mut runtime| runtime.restart());
-        result
+            .map(|mut runtime| runtime.restart())
     }
 
     /// Runs one admitted invocation synchronously under this owner's lifecycle
