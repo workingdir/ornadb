@@ -324,6 +324,9 @@ impl CompactExactKeyIndex {
     }
 }
 
+/// A boxed stream of canonical exact keys from a physical adapter.
+pub type CompactExactKeys<'a, E> = Box<dyn Iterator<Item = Result<Vec<u8>, E>> + 'a>;
+
 /// Physical adapter seam for exact canonical keys in one manifest entry.
 /// Physical Parquet decoding remains outside this module; the caller consumes
 /// the iterator under its checked logical-key budget.
@@ -333,7 +336,7 @@ pub trait CompactExactKeySource {
     fn exact_keys<'a>(
         &'a self,
         entry: &'a CompactManifestEntry,
-    ) -> Result<Box<dyn Iterator<Item = Result<Vec<u8>, Self::Error>> + 'a>, Self::Error>;
+    ) -> Result<CompactExactKeys<'a, Self::Error>, Self::Error>;
 }
 
 /// Storage-owned logical exact-key reader facade for an immutable compact
@@ -621,17 +624,16 @@ fn validate_key_type(
             let definition = definitions
                 .get(&uuid(&node[1])?)
                 .ok_or(CompactKeyError::InvalidProfile)?;
-            if definition.kind != 1 {
-                Err(CompactKeyError::UnsupportedKeyType)
-            } else if array(&definition.body)
-                .ok_or(CompactKeyError::InvalidProfile)?
-                .iter()
-                .all(|variant| {
-                    array(variant)
-                        .and_then(|variant| variant.get(2))
-                        .and_then(array)
-                        .is_some_and(|fields| !fields.is_empty())
-                })
+            if definition.kind != 1
+                || array(&definition.body)
+                    .ok_or(CompactKeyError::InvalidProfile)?
+                    .iter()
+                    .all(|variant| {
+                        array(variant)
+                            .and_then(|variant| variant.get(2))
+                            .and_then(array)
+                            .is_some_and(|fields| !fields.is_empty())
+                    })
             {
                 Err(CompactKeyError::UnsupportedKeyType)
             } else {
@@ -1034,8 +1036,7 @@ mod tests {
         fn exact_keys<'a>(
             &'a self,
             _entry: &'a CompactManifestEntry,
-        ) -> Result<Box<dyn Iterator<Item = Result<Vec<u8>, Self::Error>> + 'a>, Self::Error>
-        {
+        ) -> Result<CompactExactKeys<'a, Self::Error>, Self::Error> {
             Ok(Box::new(std::iter::empty()))
         }
     }

@@ -13,8 +13,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
-    COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactManifest, CompactManifestEntry, GitCommitRef,
-    Repository, RepositoryError, Uuid, validate_compact_page_uncompressed_sizes,
+    CompactManifest, CompactManifestEntry, GitCommitRef, Repository, RepositoryError, Uuid,
+    validate_compact_page_uncompressed_sizes,
 };
 use parquet::{
     basic::{Compression, ConvertedType, Encoding, Type},
@@ -23,7 +23,8 @@ use parquet::{
 };
 
 use crate::compact::{
-    COMPACT_STORAGE_PROFILE, CompactExactKeySource, CompactKeyError, CompactOvbProfile,
+    COMPACT_STORAGE_PROFILE, CompactExactKeySource, CompactExactKeys, CompactKeyError,
+    CompactOvbProfile,
 };
 
 /// A physical reader failure. Unsupported mappings are explicit: this slice
@@ -213,16 +214,17 @@ impl CompactParquetKeySource {
             usize::try_from(expected_row_count).map_err(|_| CompactParquetError::InvalidParquet)?;
         let mut encoded = Vec::with_capacity(rows);
         let mut previous: Option<Vec<OvbRaw>> = None;
-        for row in 0..rows {
-            let components = key_columns
+        let key_rows = (0..rows).map(|row| {
+            values
                 .iter()
-                .enumerate()
-                .map(|(column, _)| values[column][row].clone())
-                .collect::<Vec<_>>();
-            if let Some(previous) = &previous {
-                if compare_key_components(previous, &components)? == Ordering::Greater {
-                    return Err(CompactParquetError::UnorderedPrimaryKeys);
-                }
+                .map(|column| column[row].clone())
+                .collect::<Vec<_>>()
+        });
+        for components in key_rows {
+            if let Some(previous) = &previous
+                && compare_key_components(previous, &components)? == Ordering::Greater
+            {
+                return Err(CompactParquetError::UnorderedPrimaryKeys);
             }
             previous = Some(components.clone());
             let raw = match components.as_slice() {
@@ -388,7 +390,7 @@ impl CompactExactKeySource for CompactParquetKeySource {
     fn exact_keys<'a>(
         &'a self,
         entry: &'a CompactManifestEntry,
-    ) -> Result<Box<dyn Iterator<Item = Result<Vec<u8>, Self::Error>> + 'a>, Self::Error> {
+    ) -> Result<CompactExactKeys<'a, Self::Error>, Self::Error> {
         Ok(Box::new(
             self.exact_keys_for_entry(entry)?.into_iter().map(Ok),
         ))
@@ -541,10 +543,10 @@ fn key_columns(
     let mut by_id = BTreeMap::new();
     for (index, (descriptor, column)) in descriptors.iter().zip(schema.columns()).enumerate() {
         let (id, kind) = descriptor_field_id(descriptor, column, profile)?;
-        if let Some(expected) = expected_by_id.get(&id) {
-            if !matches!(kind, Some(kind) if matches_profile_key_kind(*expected, kind)) {
-                return Err(CompactParquetError::UnsupportedKeyMapping);
-            }
+        if let Some(expected) = expected_by_id.get(&id)
+            && !matches!(kind, Some(kind) if matches_profile_key_kind(*expected, kind))
+        {
+            return Err(CompactParquetError::UnsupportedKeyMapping);
         }
         if by_id.insert(id, (index, kind)).is_some() {
             return Err(CompactParquetError::DuplicateFieldColumn(id));
@@ -1084,7 +1086,8 @@ mod tests {
     use crate::compact::CompactLogicalKeyError;
     use orna_foundation_v1::SchemaDescriptor;
     use orna_repository_v1::{
-        CompactManifest, CompactSegment, CompactSegmentRole, ManagedFileChange, ManagedPath,
+        COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactManifest, CompactSegment, CompactSegmentRole,
+        ManagedFileChange, ManagedPath,
     };
     use parquet::{
         basic::{Compression, Encoding},
@@ -2022,8 +2025,7 @@ mod tests {
             .unwrap();
         let mut bytes = original[..footer_start].to_vec();
         bytes.extend(footer);
-        let bytes = with_page_checksums(bytes);
-        bytes
+        with_page_checksums(bytes)
     }
 
     struct TestPageHeader {
