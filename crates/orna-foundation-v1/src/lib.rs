@@ -1086,6 +1086,14 @@ impl Diagnostic {
         self.redacted = true;
         self
     }
+    /// Marks this diagnostic as redacted without discarding its code or an
+    /// already-admitted static message. Use only where the message is
+    /// producer-owned static text (never interpolated source); unadmitted
+    /// messages must still be constructed through [`SafeText::redacted`].
+    pub fn redacted_static(mut self) -> Self {
+        self.redacted = true;
+        self
+    }
     pub fn with_reference(mut self, reference: [u8; 16]) -> Self {
         self.reference = Some(reference);
         self
