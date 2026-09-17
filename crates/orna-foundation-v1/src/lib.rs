@@ -898,10 +898,10 @@ pub enum DiagnosticSeverity {
     Error,
     Fatal,
 }
-/// Text admitted to a diagnostic boundary. It rejects NUL/control injection
-/// and requires producers to deliberately use [`SafeText::redacted`] when the
-/// source text is not safe to disclose. This is the only constructor accepted
-/// by the live diagnostic builder.
+/// Diagnostic text validated against NUL/control injection. This validation
+/// does not establish disclosure safety: callers must deliberately admit the
+/// text or use [`SafeText::redacted`] when it must not be disclosed. Neither
+/// static ownership nor successful validation establishes disclosure admission.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SafeText(String);
 impl SafeText {
@@ -1086,13 +1086,14 @@ impl Diagnostic {
         self.redacted = true;
         self
     }
-    /// Marks this diagnostic as redacted without discarding its code or an
-    /// already-admitted static message. Use only where the message is
-    /// producer-owned static text (never interpolated source); unadmitted
-    /// messages must still be constructed through [`SafeText::redacted`].
-    pub fn redacted_static(mut self) -> Self {
-        self.redacted = true;
-        self
+    /// Recursively redacts messages and notes, then installs the caller-admitted
+    /// root message while preserving diagnostic identities and spans.
+    /// [`SafeText`] validates control safety only; the caller is responsible
+    /// for admitting this message for disclosure.
+    pub fn redacted_with_message(self, message: SafeText) -> Self {
+        let mut diagnostic = self.redacted();
+        diagnostic.message = message;
+        diagnostic
     }
     pub fn with_reference(mut self, reference: [u8; 16]) -> Self {
         self.reference = Some(reference);
