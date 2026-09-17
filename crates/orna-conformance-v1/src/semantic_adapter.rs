@@ -825,7 +825,7 @@ impl BoundedEvaluator {
                         identity.clone(),
                         NominalDefinition::new(
                             nominal_type_id(&identity),
-                            namespace.clone().map(str::to_owned),
+                            namespace.map(str::to_owned),
                             fields,
                         ),
                     );
@@ -1469,25 +1469,11 @@ impl TransactionalEvaluator {
     /// Executes the configured entry function inside one root activation.
     /// Errors escaping the function leave all table writes unpublished.
     pub fn execute_source(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        let (
-            functions,
-            key_fields,
-            float_fields,
-            table_fields,
-            table_assertions,
-            module_assertions,
-        ) = match admit_transaction_source(unit, self.limits, &self.entry) {
+        let admitted = match admit_transaction_source(unit, self.limits, &self.entry) {
             Ok(value) => value,
             Err(outcome) => return *outcome,
         };
-        match self.execute_admitted(
-            &functions,
-            &key_fields,
-            &float_fields,
-            &table_fields,
-            &table_assertions,
-            &module_assertions,
-        ) {
+        match self.execute_admitted(&admitted) {
             Ok(_) => StageOutcome::Passed,
             Err(diagnostic) => StageOutcome::Failed(*diagnostic),
         }
@@ -1505,12 +1491,11 @@ impl TransactionalEvaluator {
             return None;
         }
         let mut evaluator = Self::new("bad", self.limits);
-        let (functions, _, _, table_fields, table_assertions, module_assertions) =
-            match admit_transaction_source(unit, self.limits, "bad") {
-                Ok(value) => value,
-                Err(outcome) => return Some(*outcome),
-            };
-        let key_fields = BTreeMap::from([(
+        let mut admitted = match admit_transaction_source(unit, self.limits, "bad") {
+            Ok(value) => value,
+            Err(outcome) => return Some(*outcome),
+        };
+        admitted.key_fields = BTreeMap::from([(
             String::from("Contact"),
             TransactionTableKey::new(
                 String::from("Contact"),
@@ -1519,14 +1504,8 @@ impl TransactionalEvaluator {
             )
             .expect("valid Contact key schema"),
         )]);
-        let outcome = match evaluator.execute_admitted(
-            &functions,
-            &key_fields,
-            &TableFloatFields::new(),
-            &table_fields,
-            &table_assertions,
-            &module_assertions,
-        ) {
+        admitted.float_fields.clear();
+        let outcome = match evaluator.execute_admitted(&admitted) {
             Ok(_) => StageOutcome::Passed,
             Err(diagnostic) => StageOutcome::Failed(*diagnostic),
         };
@@ -1604,34 +1583,24 @@ impl TransactionalEvaluator {
 
     fn execute_admitted(
         &mut self,
-        functions: &Functions,
-        key_fields: &TableKeys,
-        float_fields: &TableFloatFields,
-        table_fields: &TableFields,
-        table_assertions: &TableAssertions,
-        module_assertions: &ModuleAssertions,
+        admitted: &AdmittedTransaction,
     ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
-        self.execute_admitted_with_arguments(
+        self.execute_admitted_with_arguments(admitted, &Environment::new())
+    }
+
+    fn execute_admitted_with_arguments(
+        &mut self,
+        admitted: &AdmittedTransaction,
+        arguments: &Environment,
+    ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
+        let AdmittedTransaction {
             functions,
             key_fields,
             float_fields,
             table_fields,
             table_assertions,
             module_assertions,
-            &Environment::new(),
-        )
-    }
-
-    fn execute_admitted_with_arguments(
-        &mut self,
-        functions: &Functions,
-        key_fields: &TableKeys,
-        float_fields: &TableFloatFields,
-        table_fields: &TableFields,
-        table_assertions: &TableAssertions,
-        module_assertions: &ModuleAssertions,
-        arguments: &Environment,
-    ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
+        } = admitted;
         let entry = self.entry.clone();
         let limits = self.limits;
         let mut mutations = Vec::new();
@@ -1692,6 +1661,19 @@ impl TransactionalEvaluator {
             .activate(|activation| activation.insert(table, TransactionKey::new(key), row))
             .map_err(|_| RuntimeError::InvalidTableMutation)
     }
+}
+
+/// The durable repository, runtime identity, and writer context for execution.
+#[derive(Clone, Copy)]
+pub struct RuntimeTarget<'a> {
+    /// Repository containing the durable runtime state.
+    pub repository: &'a Repository,
+    /// Runtime identity whose state is opened for execution.
+    pub identity: RuntimeIdentity,
+    /// Writer identity used to acquire the runtime lease.
+    pub owner_id: [u8; 16],
+    /// Generation digest used when initializing runtime state.
+    pub initial_digest: [u8; 32],
 }
 
 /// A source evaluator whose successful root activation is committed to the
@@ -1780,18 +1762,12 @@ impl DurableTransactionalEvaluator {
         initial_digest: [u8; 32],
         unit: &SourceUnit,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
-        let (
-            functions,
-            key_fields,
-            float_fields,
-            table_fields,
-            table_assertions,
-            module_assertions,
-        ) = match admit_transaction_source(unit, self.limits, &self.entry) {
+        let admitted = match admit_transaction_source(unit, self.limits, &self.entry) {
             Ok(value) => value,
             Err(outcome) => return Ok(*outcome),
         };
-        if functions
+        if admitted
+            .functions
             .get(&self.entry)
             .is_some_and(|function| literal_stream_pipeline(&function.body).is_some())
         {
@@ -1801,7 +1777,11 @@ impl DurableTransactionalEvaluator {
         }
         let state = RuntimeState::open(repository, identity, initial_digest).await?;
         let lease = state.acquire_lease(owner_id).await?;
-        let tables = key_fields.keys().map(String::as_str).collect::<Vec<_>>();
+        let tables = admitted
+            .key_fields
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         let snapshot = state.begin_table_activation(&tables).await?;
         let context = snapshot.context();
         self.record_activation_time(context.activation_time());
@@ -1813,14 +1793,7 @@ impl DurableTransactionalEvaluator {
                 evaluator.seed_committed(table.clone(), key.clone(), row)?;
             }
         }
-        let mutations = match evaluator.execute_admitted(
-            &functions,
-            &key_fields,
-            &float_fields,
-            &table_fields,
-            &table_assertions,
-            &module_assertions,
-        ) {
+        let mutations = match evaluator.execute_admitted(&admitted) {
             Ok(mutations) => mutations,
             Err(diagnostic) => return Ok(StageOutcome::Failed(*diagnostic)),
         };
@@ -1830,12 +1803,12 @@ impl DurableTransactionalEvaluator {
         let next_digest =
             durable_activation_digest(context.capture().generation_digest(), &mutations);
         let mut validator = TransactionalTableCandidateValidator::new(
-            &functions,
-            &key_fields,
-            &float_fields,
-            &table_fields,
-            &table_assertions,
-            &module_assertions,
+            &admitted.functions,
+            &admitted.key_fields,
+            &admitted.float_fields,
+            &admitted.table_fields,
+            &admitted.table_assertions,
+            &admitted.module_assertions,
             self.limits,
         );
         match state
@@ -1952,14 +1925,7 @@ impl DurableTransactionalEvaluator {
             return replay_or_fence_request(start.request);
         }
 
-        let (
-            functions,
-            key_fields,
-            float_fields,
-            table_fields,
-            table_assertions,
-            module_assertions,
-        ) = match admit_transaction_source(unit, self.limits, &self.entry) {
+        let admitted = match admit_transaction_source(unit, self.limits, &self.entry) {
             Ok(value) => value,
             Err(outcome) => {
                 let outcome = *outcome;
@@ -1967,7 +1933,8 @@ impl DurableTransactionalEvaluator {
                     .await;
             }
         };
-        if functions
+        if admitted
+            .functions
             .get(&self.entry)
             .is_some_and(|function| literal_stream_pipeline(&function.body).is_some())
         {
@@ -1978,7 +1945,11 @@ impl DurableTransactionalEvaluator {
                 .await;
         }
 
-        let tables = key_fields.keys().map(String::as_str).collect::<Vec<_>>();
+        let tables = admitted
+            .key_fields
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         let snapshot = match state.begin_table_activation(&tables).await {
             Ok(snapshot) => snapshot,
             Err(_) => {
@@ -2007,14 +1978,7 @@ impl DurableTransactionalEvaluator {
                 }
             }
         }
-        let mutations = match evaluator.execute_admitted(
-            &functions,
-            &key_fields,
-            &float_fields,
-            &table_fields,
-            &table_assertions,
-            &module_assertions,
-        ) {
+        let mutations = match evaluator.execute_admitted(&admitted) {
             Ok(mutations) => mutations,
             Err(diagnostic) => {
                 let outcome = StageOutcome::Failed(*diagnostic);
@@ -2030,12 +1994,12 @@ impl DurableTransactionalEvaluator {
         let next_digest =
             durable_activation_digest(context.capture().generation_digest(), &mutations);
         let mut validator = TransactionalTableCandidateValidator::new(
-            &functions,
-            &key_fields,
-            &float_fields,
-            &table_fields,
-            &table_assertions,
-            &module_assertions,
+            &admitted.functions,
+            &admitted.key_fields,
+            &admitted.float_fields,
+            &admitted.table_fields,
+            &admitted.table_assertions,
+            &admitted.module_assertions,
             self.limits,
         );
         match state
@@ -2123,18 +2087,12 @@ impl DurableTransactionalEvaluator {
             Err(error) => return RunningTableRequestDisposition::Fenced(error),
         };
 
-        let (
-            functions,
-            key_fields,
-            float_fields,
-            table_fields,
-            table_assertions,
-            module_assertions,
-        ) = match admit_transaction_source(unit, self.limits, &self.entry) {
+        let admitted = match admit_transaction_source(unit, self.limits, &self.entry) {
             Ok(value) => value,
             Err(outcome) => return RunningTableRequestDisposition::Semantic(*outcome),
         };
-        if functions
+        if admitted
+            .functions
             .get(&self.entry)
             .is_some_and(|function| literal_stream_pipeline(&function.body).is_some())
         {
@@ -2143,7 +2101,11 @@ impl DurableTransactionalEvaluator {
             });
         }
 
-        let tables = key_fields.keys().map(String::as_str).collect::<Vec<_>>();
+        let tables = admitted
+            .key_fields
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         let snapshot = match state.begin_table_activation(&tables).await {
             Ok(snapshot) => snapshot,
             Err(error) => return RunningTableRequestDisposition::Fenced(error),
@@ -2170,14 +2132,7 @@ impl DurableTransactionalEvaluator {
                 }
             }
         }
-        let mutations = match evaluator.execute_admitted(
-            &functions,
-            &key_fields,
-            &float_fields,
-            &table_fields,
-            &table_assertions,
-            &module_assertions,
-        ) {
+        let mutations = match evaluator.execute_admitted(&admitted) {
             Ok(mutations) => mutations,
             Err(diagnostic) => {
                 return RunningTableRequestDisposition::Semantic(StageOutcome::Failed(*diagnostic));
@@ -2195,12 +2150,12 @@ impl DurableTransactionalEvaluator {
             &mutations,
         );
         let mut validator = TransactionalTableCandidateValidator::new(
-            &functions,
-            &key_fields,
-            &float_fields,
-            &table_fields,
-            &table_assertions,
-            &module_assertions,
+            &admitted.functions,
+            &admitted.key_fields,
+            &admitted.float_fields,
+            &admitted.table_fields,
+            &admitted.table_assertions,
+            &admitted.module_assertions,
             self.limits,
         );
         match state
@@ -2257,10 +2212,12 @@ impl DurableTransactionalEvaluator {
         root_entry: &str,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
         self.execute_project_with_arguments(
-            repository,
-            identity,
-            owner_id,
-            initial_digest,
+            RuntimeTarget {
+                repository,
+                identity,
+                owner_id,
+                initial_digest,
+            },
             project,
             root_entry,
             &Environment::new(),
@@ -2275,10 +2232,7 @@ impl DurableTransactionalEvaluator {
     /// grant a caller access to a different module, function, or transaction.
     pub async fn execute_project_with_arguments(
         &self,
-        repository: &Repository,
-        identity: RuntimeIdentity,
-        owner_id: [u8; 16],
-        initial_digest: [u8; 32],
+        target: RuntimeTarget<'_>,
         project: &ProjectUnit,
         root_entry: &str,
         arguments: &Environment,
@@ -2293,7 +2247,7 @@ impl DurableTransactionalEvaluator {
             Err(outcome) => return Ok(*outcome),
         };
         if admitted
-            .0
+            .functions
             .get(root_entry)
             .is_some_and(|function| literal_stream_pipeline(&function.body).is_some())
         {
@@ -2301,16 +2255,8 @@ impl DurableTransactionalEvaluator {
                 reason: "project transaction admission does not run stream roots; use the explicit finite-list stream seam".into(),
             });
         }
-        self.execute_admitted_project_with_arguments(
-            repository,
-            identity,
-            owner_id,
-            initial_digest,
-            root_entry,
-            admitted,
-            arguments,
-        )
-        .await
+        self.execute_admitted_project_with_arguments(target, root_entry, admitted, arguments)
+            .await
     }
 
     /// Runs the deliberately narrow finite-list stream shape from independently
@@ -2327,10 +2273,12 @@ impl DurableTransactionalEvaluator {
         root_entry: &str,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
         self.execute_project_stream_with_control(
-            repository,
-            identity,
-            owner_id,
-            initial_digest,
+            RuntimeTarget {
+                repository,
+                identity,
+                owner_id,
+                initial_digest,
+            },
             project,
             root_entry,
             &orna_runtime_v1::NeverCancelled,
@@ -2775,10 +2723,7 @@ impl DurableTransactionalEvaluator {
     /// unless they need to coordinate cancellation with the source boundary.
     pub async fn execute_project_stream_with_control<C>(
         &self,
-        repository: &Repository,
-        identity: RuntimeIdentity,
-        owner_id: [u8; 16],
-        initial_digest: [u8; 32],
+        target: RuntimeTarget<'_>,
         project: &ProjectUnit,
         root_entry: &str,
         control: &C,
@@ -2795,25 +2740,16 @@ impl DurableTransactionalEvaluator {
             Ok(value) => value,
             Err(outcome) => return Ok(*outcome),
         };
-        let bridge = match admit_project_list_stream(project, admitted, root_entry, identity) {
+        let bridge = match admit_project_list_stream(project, admitted, root_entry, target.identity)
+        {
             Ok(bridge) => bridge,
             Err(outcome) => return Ok(*outcome),
         };
         let key = bridge.checkpoint_key()?;
         let (request, fingerprint) =
-            project_stream_compat_request(identity, initial_digest, root_entry, &key);
-        self.execute_admitted_project_stream(
-            repository,
-            identity,
-            owner_id,
-            initial_digest,
-            request,
-            fingerprint,
-            bridge,
-            key,
-            control,
-        )
-        .await
+            project_stream_compat_request(target.identity, target.initial_digest, root_entry, &key);
+        self.execute_admitted_project_stream(target, request, fingerprint, bridge, key, control)
+            .await
     }
 
     /// Executes an admitted finite-list project stream under a caller-owned
@@ -2824,20 +2760,14 @@ impl DurableTransactionalEvaluator {
     /// derived from the complete stream key and pinned runtime generation.
     pub async fn execute_project_stream_request(
         &self,
-        repository: &Repository,
-        identity: RuntimeIdentity,
-        owner_id: [u8; 16],
-        initial_digest: [u8; 32],
+        target: RuntimeTarget<'_>,
         request: RequestIdentity,
         fingerprint: [u8; 32],
         project: &ProjectUnit,
         root_entry: &str,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
         self.execute_project_stream_request_with_control(
-            repository,
-            identity,
-            owner_id,
-            initial_digest,
+            target,
             request,
             fingerprint,
             project,
@@ -2851,10 +2781,7 @@ impl DurableTransactionalEvaluator {
     /// durable request identity, fingerprint, and cancellation control.
     pub async fn execute_project_stream_request_with_control<C>(
         &self,
-        repository: &Repository,
-        identity: RuntimeIdentity,
-        owner_id: [u8; 16],
-        initial_digest: [u8; 32],
+        target: RuntimeTarget<'_>,
         request: RequestIdentity,
         fingerprint: [u8; 32],
         project: &ProjectUnit,
@@ -2867,7 +2794,8 @@ impl DurableTransactionalEvaluator {
         // Replay and fingerprint validation belong to the request boundary,
         // before source admission. A caller retrying a terminal request must
         // not need the current project source to remain admissible.
-        let state = RuntimeState::open(repository, identity, initial_digest).await?;
+        let state =
+            RuntimeState::open(target.repository, target.identity, target.initial_digest).await?;
         if let Some(status) = state.request_status(request, fingerprint).await? {
             return replay_or_fence_request(status);
         }
@@ -2881,31 +2809,19 @@ impl DurableTransactionalEvaluator {
             Ok(value) => value,
             Err(outcome) => return Ok(*outcome),
         };
-        let bridge = match admit_project_list_stream(project, admitted, root_entry, identity) {
+        let bridge = match admit_project_list_stream(project, admitted, root_entry, target.identity)
+        {
             Ok(bridge) => bridge,
             Err(outcome) => return Ok(*outcome),
         };
         let key = bridge.checkpoint_key()?;
-        self.execute_admitted_project_stream(
-            repository,
-            identity,
-            owner_id,
-            initial_digest,
-            request,
-            fingerprint,
-            bridge,
-            key,
-            control,
-        )
-        .await
+        self.execute_admitted_project_stream(target, request, fingerprint, bridge, key, control)
+            .await
     }
 
     async fn execute_admitted_project_stream<C>(
         &self,
-        repository: &Repository,
-        identity: RuntimeIdentity,
-        owner_id: [u8; 16],
-        initial_digest: [u8; 32],
+        target: RuntimeTarget<'_>,
         request: RequestIdentity,
         fingerprint: [u8; 32],
         mut bridge: ListStreamBridge,
@@ -2915,6 +2831,12 @@ impl DurableTransactionalEvaluator {
     where
         C: StreamRunControl,
     {
+        let RuntimeTarget {
+            repository,
+            identity,
+            owner_id,
+            initial_digest,
+        } = target;
         let state = RuntimeState::open(repository, identity, initial_digest).await?;
         if let Some(status) = state.request_status(request, fingerprint).await? {
             return replay_or_fence_request(status);
@@ -3041,25 +2963,24 @@ impl DurableTransactionalEvaluator {
 
     async fn execute_admitted_project_with_arguments(
         &self,
-        repository: &Repository,
-        identity: RuntimeIdentity,
-        owner_id: [u8; 16],
-        initial_digest: [u8; 32],
+        target: RuntimeTarget<'_>,
         entry: &str,
         admitted: AdmittedTransaction,
         arguments: &Environment,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
-        let (
-            functions,
-            key_fields,
-            float_fields,
-            table_fields,
-            table_assertions,
-            module_assertions,
-        ) = admitted;
+        let RuntimeTarget {
+            repository,
+            identity,
+            owner_id,
+            initial_digest,
+        } = target;
         let state = RuntimeState::open(repository, identity, initial_digest).await?;
         let lease = state.acquire_lease(owner_id).await?;
-        let tables = key_fields.keys().map(String::as_str).collect::<Vec<_>>();
+        let tables = admitted
+            .key_fields
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         let snapshot = state.begin_table_activation(&tables).await?;
         let context = snapshot.context();
         self.record_activation_time(context.activation_time());
@@ -3071,15 +2992,7 @@ impl DurableTransactionalEvaluator {
                 evaluator.seed_committed(table.clone(), key.clone(), row)?;
             }
         }
-        let mutations = match evaluator.execute_admitted_with_arguments(
-            &functions,
-            &key_fields,
-            &float_fields,
-            &table_fields,
-            &table_assertions,
-            &module_assertions,
-            arguments,
-        ) {
+        let mutations = match evaluator.execute_admitted_with_arguments(&admitted, arguments) {
             Ok(mutations) => mutations,
             Err(diagnostic) => return Ok(StageOutcome::Failed(*diagnostic)),
         };
@@ -3089,12 +3002,12 @@ impl DurableTransactionalEvaluator {
         let next_digest =
             durable_activation_digest(context.capture().generation_digest(), &mutations);
         let mut validator = TransactionalTableCandidateValidator::new(
-            &functions,
-            &key_fields,
-            &float_fields,
-            &table_fields,
-            &table_assertions,
-            &module_assertions,
+            &admitted.functions,
+            &admitted.key_fields,
+            &admitted.float_fields,
+            &admitted.table_fields,
+            &admitted.table_assertions,
+            &admitted.module_assertions,
             self.limits,
         );
         match state
@@ -3781,14 +3694,14 @@ fn admit_list_stream_source(
     limits: EvaluatorLimits,
     entry: &str,
 ) -> Result<ListStreamBridge, AdmissionFailure> {
-    let (
+    let AdmittedTransaction {
         functions,
         key_fields,
         float_fields,
         table_fields,
         mut table_assertions,
         module_assertions,
-    ) = admit_transaction_source(unit, limits, entry)?;
+    } = admit_transaction_source(unit, limits, entry)?;
     if key_fields.len() != 1 {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "literal list stream bridge requires one explicit-key table".into(),
@@ -3876,14 +3789,14 @@ fn admit_project_list_stream(
     root_entry: &str,
     identity: RuntimeIdentity,
 ) -> Result<ListStreamBridge, AdmissionFailure> {
-    let (
+    let AdmittedTransaction {
         functions,
         key_fields,
         float_fields,
         table_fields,
         mut table_assertions,
         module_assertions,
-    ) = admitted;
+    } = admitted;
     let root = functions.get(root_entry).ok_or_else(|| {
         Box::new(StageOutcome::Skipped {
             reason: "configured qualified project stream root is not present".into(),
@@ -5019,14 +4932,17 @@ type ModuleAssertions = Vec<AdmittedAssertion>;
 type TableKeys = BTreeMap<String, TransactionTableKey>;
 type TableFloatFields = BTreeMap<String, BTreeSet<String>>;
 type TableFields = BTreeMap<String, BTreeSet<String>>;
-type AdmittedTransaction = (
-    Functions,
-    TableKeys,
-    TableFloatFields,
-    TableFields,
-    TableAssertions,
-    ModuleAssertions,
-);
+/// Complete admission result for one transactional entry point: lowered
+/// functions plus every declared table and assertion surface.
+struct AdmittedTransaction {
+    functions: Functions,
+    key_fields: TableKeys,
+    float_fields: TableFloatFields,
+    table_fields: TableFields,
+    table_assertions: TableAssertions,
+    module_assertions: ModuleAssertions,
+}
+
 type AdmissionFailure = Box<StageOutcome<Diagnostic>>;
 
 fn relation_window_arguments(arguments: &[Value]) -> Result<(&str, usize, usize), EvaluationError> {
@@ -5118,10 +5034,20 @@ fn admit_transaction_source(
         .next()
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    attach_assertion_dependencies(&mut admitted.4, &mut admitted.5, plans)
-        .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
-    let (functions, key_fields, float_fields, table_fields, table_assertions, module_assertions) =
-        admitted;
+    attach_assertion_dependencies(
+        &mut admitted.table_assertions,
+        &mut admitted.module_assertions,
+        plans,
+    )
+    .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+    let AdmittedTransaction {
+        functions,
+        key_fields,
+        float_fields,
+        table_fields,
+        table_assertions,
+        module_assertions,
+    } = admitted;
     if let Err(error) = limits.check_items(functions.len()) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
     }
@@ -5130,14 +5056,14 @@ fn admit_transaction_source(
             reason: "configured transaction entry function is not present".into(),
         }));
     }
-    Ok((
+    Ok(AdmittedTransaction {
         functions,
         key_fields,
         float_fields,
         table_fields,
         table_assertions,
         module_assertions,
-    ))
+    })
 }
 
 /// Admits a project as a graph of independently parsed modules.  The retained
@@ -5197,14 +5123,14 @@ fn admit_transaction_project(
         }
         let namespace = project_transaction_namespace(project, unit)
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
-        let (
-            module_functions,
-            module_keys,
-            module_float_fields,
-            module_table_fields,
-            mut module_assertions_by_table,
-            mut module_assertions_only,
-        ) = admitted_transaction_module(&parsed.value.items, Some(&namespace), Some(&namespace))
+        let AdmittedTransaction {
+            functions: module_functions,
+            key_fields: module_keys,
+            float_fields: module_float_fields,
+            table_fields: module_table_fields,
+            table_assertions: mut module_assertions_by_table,
+            module_assertions: mut module_assertions_only,
+        } = admitted_transaction_module(&parsed.value.items, Some(&namespace), Some(&namespace))
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
         let semantic_namespace = project_semantic_namespace(project, unit).ok_or_else(|| {
             Box::new(StageOutcome::Skipped {
@@ -5253,14 +5179,14 @@ fn admit_transaction_project(
             reason: "configured qualified project transaction entry function is not present".into(),
         }));
     }
-    Ok((
+    Ok(AdmittedTransaction {
         functions,
         key_fields,
         float_fields,
         table_fields,
         table_assertions,
         module_assertions,
-    ))
+    })
 }
 
 fn controlled_table_effects(summary: &EffectSummary) -> bool {
@@ -5484,14 +5410,14 @@ fn admitted_transaction_module(
             }
         }
     }
-    Ok((
+    Ok(AdmittedTransaction {
         functions,
         key_fields,
         float_fields,
         table_fields,
-        assertions,
+        table_assertions: assertions,
         module_assertions,
-    ))
+    })
 }
 
 fn attach_assertion_dependencies(
@@ -9735,9 +9661,14 @@ mod durable_tests {
             );
             let parsed = parse_module(&source);
             assert!(parsed.is_ok(), "{operation}: {:?}", parsed.diagnostics);
-            let (functions, keys, float_fields, table_fields, _, _) =
+            let admitted =
                 admitted_transaction_module(&parsed.value.items, None, None).expect("valid source");
-            let lowered = lower_relation_bindings(&functions, &keys, &float_fields, &table_fields);
+            let lowered = lower_relation_bindings(
+                &admitted.functions,
+                &admitted.key_fields,
+                &admitted.float_fields,
+                &admitted.table_fields,
+            );
 
             assert!(
                 matches!(&lowered["total"].body, Expr::Binary { op, .. } if op == "|"),
@@ -9773,9 +9704,14 @@ mod durable_tests {
         ] {
             let parsed = parse_module(source);
             assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
-            let (functions, keys, float_fields, table_fields, _, _) =
+            let admitted =
                 admitted_transaction_module(&parsed.value.items, None, None).expect("valid source");
-            let lowered = lower_relation_bindings(&functions, &keys, &float_fields, &table_fields);
+            let lowered = lower_relation_bindings(
+                &admitted.functions,
+                &admitted.key_fields,
+                &admitted.float_fields,
+                &admitted.table_fields,
+            );
             for name in [
                 "lookup_case",
                 "filtered_one_case",
@@ -9804,10 +9740,10 @@ mod durable_tests {
         let parsed = parse_module(source);
         assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
 
-        let (_, _, _, _, table_assertions, module_assertions) =
+        let admitted =
             admitted_transaction_module(&parsed.value.items, Some("notes"), Some("notes"))
                 .expect("valid assertions");
-        let table_assertion = &table_assertions["Note"][0];
+        let table_assertion = &admitted.table_assertions["Note"][0];
         let table_expression_span = table_assertion.expression.span();
         assert_eq!(table_assertion.owner_kind, AssertionOwnerKind::Table);
         assert_eq!(table_assertion.owner_name, "Note");
@@ -9815,7 +9751,7 @@ mod durable_tests {
         assert!(table_assertion.declaration_span.start <= table_expression_span.start);
         assert!(table_assertion.declaration_span.end >= table_expression_span.end);
 
-        let module_assertion = &module_assertions[0];
+        let module_assertion = &admitted.module_assertions[0];
         assert_eq!(module_assertion.owner_kind, AssertionOwnerKind::Module);
         assert_eq!(module_assertion.owner_name, "notes");
         assert_eq!(module_assertion.source_order, 1);
