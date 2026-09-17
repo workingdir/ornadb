@@ -4321,8 +4321,13 @@ fn validate_type_annotation(
         // the internal error sentinel and silently bypasses later checks.
         TypeExpr::Product { lhs, rhs, .. } => {
             validate_type_annotation(lhs, scope, generic_names, diagnostics);
-            validate_type_annotation(rhs, scope, generic_names, diagnostics);
-            if type_of(type_expr) == Type::Error {
+            let product = type_of(type_expr);
+            if !matches!(product, Type::MoneyPerUnit { .. })
+                || !dimensional_argument_is_declared(rhs, scope, generic_names)
+            {
+                validate_type_annotation(rhs, scope, generic_names, diagnostics);
+            }
+            if product == Type::Error {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     "type product is not a supported static type",
