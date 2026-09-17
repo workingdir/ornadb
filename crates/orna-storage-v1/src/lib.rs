@@ -685,8 +685,7 @@ impl RuntimePublicationCoordinator {
         if self.journal.compact_manifest().is_some() {
             return Err(Error::InvalidTransition);
         }
-        if self.journal.stage() != orna_repository_v1::PublicationJournalStage::WorktreeReconciled
-        {
+        if self.journal.stage() != orna_repository_v1::PublicationJournalStage::WorktreeReconciled {
             return Err(Error::PublicationPending);
         }
         if repository
@@ -1229,6 +1228,7 @@ mod tests {
             Error::RuntimeUnavailable
         );
     }
+
     #[test]
     fn checkpoint_not_replayable_maps_to_invalid_transition() {
         assert_eq!(
@@ -1236,7 +1236,6 @@ mod tests {
             Error::InvalidTransition
         );
     }
-
 
     fn git(directory: &Path, arguments: &[&str]) {
         assert!(
@@ -1380,7 +1379,7 @@ mod tests {
     }
 
     fn compact_runtime_parquet() -> (Vec<u8>, [u8; 32]) {
-        const PARQUET: &str = "UEFSMRUGFQoVChXq3ovdBUwVAhUAFQIVChUAFQASAACAAgQBAhkSAhkYCAEAAAAAAAAAGRgIAQAAAAAAAAAVAhkWAAAZHBYIFTYWAAAAFQIZLEgGc2NoZW1hFQIAFQQlABgiZl8wMThmMDAwMDAwMDA3MDAwODAwMDAwMDAwMDAwMDAwMQAWAhkcGRwmABwVBBklBgoZGCJmXzAxOGYwMDAwMDAwMDcwMDA4MDAwMDAwMDAwMDAwMDAxFQwWAhY2FkImCDw2ACgIAQAAAAAAAAAYCAEAAAAAAAAAEREAABZ8FRQWPhU+ABY2FgImCBZCFAAAGXwYDG9ybmEucHJvZmlsZRgSY29tcGFjdC1zdG9yYWdlLXYxABgKb3JuYS50YWJsZRgkMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxABgSb3JuYS5zY2hlbWEuc2hhMjU2GEAwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3ABgPb3JuYS5zY2hlbWEub3ZiGARBQT09ABgQb3JuYS5jb2x1bW5zLm92YhhgZ1lXQjJDVlFBWThBQUFBQWNBQ0FBQUFBQUFBQUFZRjRJbVpmTURFNFpqQXdNREF3TURBd056QXdNRGd3TURBd01EQXdNREF3TURBd01ER0NBR05KYm5SbGFXNTBOalNBABgMb3JuYS5lbmNvZGVyGA90ZXN0LWVuY29kZXItdjEAGBFvcm5hLnRlc3QucGF5bG9hZBgOY29tcGFjdCBvYmplY3QAGBlwYXJxdWV0LXJzIHZlcnNpb24gNTkuMy4wGRwcAAAARgIAAFBBUjE=";
+        const PARQUET: &str = "UEFSMRUGFRAVEBWRgLnnCkwVAhUAFQIVABUAFQASAAABAAAAAAAAABkSAhkYCAEAAAAAAAAAGRgIAQAAAAAAAAAVAhkWAAAZHBYIFTwWAAAAFQIZLEgGc2NoZW1hFQIAFQQlABgiZl8wMThmMDAwMDAwMDA3MDAwODAwMDAwMDAwMDAwMDAwMQAWAhkcGRwmABwVBBklAAYZGCJmXzAxOGYwMDAwMDAwMDcwMDA4MDAwMDAwMDAwMDAwMDAxFQwWAhY8FkgmCDw2ACgIAQAAAAAAAAAYCAEAAAAAAAAAEREAABaCARUUFkQVPgAWPBYCJggWSBQAABl8GAxvcm5hLnByb2ZpbGUYEmNvbXBhY3Qtc3RvcmFnZS12MQAYCm9ybmEudGFibGUYJDAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQAYEm9ybmEuc2NoZW1hLnNoYTI1NhhANThhMDg5NzBhZGMyMzE4N2U5Nzk0NDVlOTNiODQzN2ExNjI3ZWUxMDk0ZjI2NTg5YTJlZmVmZWE4NTFiMmExZQAYD29ybmEuc2NoZW1hLm92YhiYAXBRQUJBZGdsVUFBQUFBQUFBQUFBQUFBQUFBQUFBQUVDZ2RnbFVBR1BBQUFBQUhBQWdBQUFBQUFBQUFFRGdZWFlKVkFCandBQUFBQndBSUFBQUFBQUFBQUJlQ0ptWHpBeE9HWXdNREF3TURBd01EY3dNREE0TURBd01EQXdNREF3TURBd01EQXhnZ0JqU1c1MEFJRUFCSUE9ABgQb3JuYS5jb2x1bW5zLm92YhhgZ1lXQjJDVlFBWThBQUFBQWNBQ0FBQUFBQUFBQUFZRjRJbVpmTURFNFpqQXdNREF3TURBd056QXdNRGd3TURBd01EQXdNREF3TURBd01ER0NBR05KYm5SbGFXNTBOalNBABgMb3JuYS5lbmNvZGVyGA90ZXN0LWVuY29kZXItdjEAGBFvcm5hLnRlc3QucGF5bG9hZBgOY29tcGFjdCBvYmplY3QAGBlwYXJxdWV0LXJzIHZlcnNpb24gNTkuMy4wGRwcAAAA3AIAAFBBUjE=";
         let original = decode_base64(PARQUET);
         let reader = SerializedFileReader::new(Bytes::from(original.clone())).unwrap();
         let file = reader.metadata().file_metadata();
@@ -1444,8 +1443,8 @@ mod tests {
             "test-encoder-v1",
             segment_path,
             parquet,
-            1u64.to_be_bytes().to_vec(),
-            1u64.to_be_bytes().to_vec(),
+            CanonicalValue::int(1.into()).encode().unwrap(),
+            CanonicalValue::int(1.into()).encode().unwrap(),
             1,
             compact_columns(),
             true,
@@ -2254,7 +2253,10 @@ mod tests {
             plan.complete(&repository, &runtime, &freeze).await,
             Err(Error::PublicationPending)
         ));
-        assert_eq!(plan.journal().stage(), orna_repository_v1::PublicationJournalStage::Prepared);
+        assert_eq!(
+            plan.journal().stage(),
+            orna_repository_v1::PublicationJournalStage::Prepared
+        );
         assert_eq!(runtime.pending().await.unwrap().len(), 1);
         assert_eq!(repository.head().unwrap(), Some(head));
         assert_eq!(repository.read_publication_journal().unwrap(), None);
