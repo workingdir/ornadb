@@ -153,8 +153,10 @@ async fn durable_unsupported_float_aggregate_rolls_back_staged_rows() {
 #[tokio::test]
 async fn durable_failed_float_sum_rolls_back_only_tentative_rows() {
     let (_control_temp, control_repository) = durable_repository();
-    let mut control_limits = Limits::default();
-    control_limits.max_collection_items = 3;
+    let control_limits = Limits {
+        max_collection_items: 3,
+        ..Default::default()
+    };
     let control_evaluator = DurableTransactionalEvaluator::new("parent", control_limits);
     let control_write = source(
         "durable-float-sum-limit-control",
@@ -217,8 +219,10 @@ async fn durable_failed_float_sum_rolls_back_only_tentative_rows() {
         Ok(StageOutcome::Passed)
     ));
 
-    let mut limits = Limits::default();
-    limits.max_collection_items = 3;
+    let limits = Limits {
+        max_collection_items: 3,
+        ..Default::default()
+    };
     let evaluator = DurableTransactionalEvaluator::new("parent", limits);
     let write = source(
         "durable-float-sum-limit-rollback",

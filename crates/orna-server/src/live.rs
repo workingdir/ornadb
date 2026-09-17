@@ -105,18 +105,18 @@ struct ApplicationWorkerHandle {
 }
 
 enum ApplicationWorkerCommand {
-    Execute(ApplicationJob),
+    Execute(Box<ApplicationJob>),
     Shutdown,
 }
+
+type ApplicationReply = futures::channel::oneshot::Sender<
+    Result<(WebSocketState, Vec<WebSocketOutput>), orna_live_v1::Error>,
+>;
 
 struct ApplicationJob {
     socket: Option<WebSocketState>,
     ticket: Option<LiveApplicationTicket>,
-    reply: Option<
-        futures::channel::oneshot::Sender<
-            Result<(WebSocketState, Vec<WebSocketOutput>), orna_live_v1::Error>,
-        >,
-    >,
+    reply: Option<ApplicationReply>,
     completion_sender: futures::channel::mpsc::UnboundedSender<ActorCommand>,
 }
 
@@ -138,11 +138,11 @@ impl ApplicationWorkerRegistry {
         &self,
         session: [u8; 16],
         job: ApplicationJob,
-    ) -> std::result::Result<(), ApplicationJob> {
+    ) -> std::result::Result<(), Box<ApplicationJob>> {
         let session = SessionId::new(session);
         if !self.workers.borrow().contains_key(&session) {
             if self.workers.borrow().len() >= MAX_EVALUATOR_WORKERS {
-                return Err(job);
+                return Err(Box::new(job));
             }
             let (sender, receiver) = std::sync::mpsc::channel();
             let recipe = self.recipe.clone();
@@ -152,7 +152,7 @@ impl ApplicationWorkerRegistry {
                 .map_err(|_| ())
                 .ok();
             let Some(join) = join else {
-                return Err(job);
+                return Err(Box::new(job));
             };
             self.workers.borrow_mut().insert(
                 session,
@@ -165,7 +165,9 @@ impl ApplicationWorkerRegistry {
         let result = {
             let workers = self.workers.borrow();
             let worker = workers.get(&session).expect("worker was inserted");
-            worker.sender.send(ApplicationWorkerCommand::Execute(job))
+            worker
+                .sender
+                .send(ApplicationWorkerCommand::Execute(Box::new(job)))
         };
         match result {
             Ok(()) => Ok(()),
@@ -334,13 +336,13 @@ impl ApplicationJob {
         let Some(reply) = self.reply.take() else {
             return;
         };
-        let _ = self
-            .completion_sender
-            .unbounded_send(ActorCommand::ApplicationComplete {
+        let _ = self.completion_sender.unbounded_send(
+            ActorCommand::ApplicationComplete(Box::new(ApplicationCompletion {
                 socket,
                 completion,
                 reply,
-            });
+            })),
+        );
     }
 
     fn reject(&mut self, error: orna_live_v1::Error) {
@@ -899,13 +901,7 @@ enum ActorCommand {
             Result<(WebSocketState, Vec<WebSocketOutput>), orna_live_v1::Error>,
         >,
     },
-    ApplicationComplete {
-        socket: WebSocketState,
-        completion: LiveApplicationCompletion,
-        reply: futures::channel::oneshot::Sender<
-            Result<(WebSocketState, Vec<WebSocketOutput>), orna_live_v1::Error>,
-        >,
-    },
+    ApplicationComplete(Box<ApplicationCompletion>),
     /// Stops admitted application work without relinquishing the actor's
     /// responsibility to process socket-worker retirement acknowledgements.
     DrainApplicationWork,
@@ -922,9 +918,13 @@ enum ActorCommand {
 struct PendingApplication {
     socket: WebSocketState,
     ticket: LiveApplicationTicket,
-    reply: futures::channel::oneshot::Sender<
-        Result<(WebSocketState, Vec<WebSocketOutput>), orna_live_v1::Error>,
-    >,
+    reply: ApplicationReply,
+}
+
+struct ApplicationCompletion {
+    socket: WebSocketState,
+    completion: LiveApplicationCompletion,
+    reply: ApplicationReply,
 }
 
 struct ActorHttpResult {
@@ -1368,11 +1368,12 @@ async fn run_host_actor(
                     }
                 }
             }
-            ActorCommand::ApplicationComplete {
-                socket,
-                completion,
-                reply,
-            } => {
+            ActorCommand::ApplicationComplete(completion) => {
+                let ApplicationCompletion {
+                    socket,
+                    completion,
+                    reply,
+                } = *completion;
                 let result = state.transport.complete_application(completion).await;
                 let result = match result {
                     Ok(output) => Ok((socket, vec![output])),
@@ -1417,6 +1418,8 @@ async fn run_host_actor(
 /// receives cancellation and is joined before the command channel closes and
 /// the actor is joined. A caller-requested cancellation remains observable even
 /// if a child also failed while shutdown was beginning.
+// Keep independently supervised shutdown owners explicit; no shared lifecycle bundle exists.
+#[allow(clippy::too_many_arguments)]
 async fn shutdown_concurrent_host(
     registry: &Rc<RefCell<WorkerRegistry>>,
     workers: &mut tokio::task::JoinSet<u64>,
@@ -2482,6 +2485,8 @@ async fn actor_http(
     Ok((result.connection, result.responses, result.retirement))
 }
 
+// Socket I/O, actor channels, and cancellation have distinct ownership lifetimes.
+#[allow(clippy::too_many_arguments)]
 async fn serve_websocket_worker<C>(
     mut reader: PrefixedReader<TokioReader>,
     mut writer: TokioWriter,
@@ -3320,7 +3325,8 @@ fn duration_milliseconds(duration: std::time::Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActorCommand, ApplicationJob, ApplicationWorkerRecipe, ApplicationWorkerRegistry,
+        ActorCommand, ApplicationCompletion, ApplicationJob, ApplicationWorkerRecipe,
+        ApplicationWorkerRegistry,
         DeletedLeaseIndex, HostApplicationChildren, HostDeletion, SharedApplication,
         commit_within_delivery_window, delivery_window, duration_milliseconds,
         expired_delete_response, runtime_identity, subscribe_payload,
@@ -4810,14 +4816,15 @@ mod tests {
                 .next()
                 .await
                 .expect("joined worker must report its fenced completion");
-            let ActorCommand::ApplicationComplete {
-                completion,
-                socket,
-                reply,
-            } = command
+            let ActorCommand::ApplicationComplete(completion) = command
             else {
                 panic!("worker reported an unexpected actor command");
             };
+            let ApplicationCompletion {
+                completion,
+                socket,
+                reply,
+            } = *completion;
             drop(socket);
             drop(reply);
             assert_eq!(

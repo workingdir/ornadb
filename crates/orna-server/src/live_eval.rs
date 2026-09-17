@@ -155,6 +155,8 @@ impl PureEvalApplication {
     /// Builds a worker-owned application from an immutable project snapshot.
     /// The repository is retained only for the durable CWD capture used when
     /// admitting each request; source loading never re-reads it.
+    // The worker recipe requires snapshots, but repository-backed callers pass no project or capture.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_repository_with_project(
         repository: &Repository,
         database_id: [u8; 16],
@@ -639,14 +641,16 @@ mod tests {
         .unwrap()
     }
 
-    fn application() -> (
+    type TestApplication = (
         PureEvalApplication,
         SessionExpiries,
         [u8; 16],
         Rc<RefCell<CwdCapture>>,
         Rc<Cell<usize>>,
         Rc<Cell<usize>>,
-    ) {
+    );
+
+    fn application() -> TestApplication {
         let database_id = [1; 16];
         let capture = Rc::new(RefCell::new(capture(database_id, 0)));
         let capture_admissions = Rc::new(Cell::new(0));
