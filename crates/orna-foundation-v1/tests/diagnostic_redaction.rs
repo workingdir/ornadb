@@ -9,7 +9,8 @@ fn diagnostic_with_secret_text() -> Diagnostic {
         SafeText::new("nested connector token: nested-secret-value").unwrap(),
     )
     .unwrap()
-    .with_note(SafeText::new("nested authorization: nested-secret-note").unwrap());
+    .with_note(SafeText::new("nested authorization: nested-secret-note").unwrap())
+    .with_reference([0xcd; 16]);
 
     Diagnostic::new(
         SafeText::new("ORNA-E-SECRET").unwrap(),
@@ -37,7 +38,18 @@ fn diagnostic_with_secret_text() -> Diagnostic {
 
 #[test]
 fn redaction_is_recursive_before_ovb_and_json_boundaries() {
-    let redacted = diagnostic_with_secret_text().redacted();
+    assert_redacted_boundaries(diagnostic_with_secret_text().redacted(), "<redacted>");
+}
+
+#[test]
+fn admitted_root_message_does_not_disclose_notes_or_nested_causes() {
+    let message = String::from("operation denied");
+    let redacted = diagnostic_with_secret_text()
+        .redacted_with_message(SafeText::new(message.clone()).unwrap());
+    assert_redacted_boundaries(redacted, &message);
+}
+
+fn assert_redacted_boundaries(redacted: Diagnostic, expected_message: &str) {
     let ovb = redacted.encode_ovb().unwrap();
     let decoded = Diagnostic::decode_ovb(&ovb).unwrap();
     let json = serde_json::to_vec(&redacted).unwrap();
@@ -63,7 +75,7 @@ fn redaction_is_recursive_before_ovb_and_json_boundaries() {
 
     assert_eq!(json_value["code"], "ORNA-E-SECRET");
     assert_eq!(json_value["severity"], "error");
-    assert_eq!(json_value["message"], "<redacted>");
+    assert_eq!(json_value["message"], expected_message);
     assert_eq!(json_value["notes"][0], "<redacted>");
     assert_eq!(json_value["redacted"], true);
     assert_eq!(
@@ -76,6 +88,10 @@ fn redaction_is_recursive_before_ovb_and_json_boundaries() {
     assert_eq!(json_value["causes"][0]["message"], "<redacted>");
     assert_eq!(json_value["causes"][0]["notes"][0], "<redacted>");
     assert_eq!(json_value["causes"][0]["redacted"], true);
+    assert_eq!(
+        json_value["causes"][0]["reference"],
+        "cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd"
+    );
 }
 
 #[test]
