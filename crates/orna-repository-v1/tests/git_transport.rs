@@ -630,7 +630,7 @@ fn fetch_rejects_a_remote_change_between_advertisement_and_install() {
     git(&fixture.source, &["add", "main.orna"]);
     git(&fixture.source, &["commit", "-m", "race"]);
     let raced = git(&fixture.source, &["rev-parse", "HEAD"]);
-    let race_refspec = format!("HEAD:refs/heads/race");
+    let race_refspec = "HEAD:refs/heads/race".to_string();
     git(&fixture.source, &["push", "origin", &race_refspec]);
     fixture.configure_fetch_race(&raced);
 
