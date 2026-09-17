@@ -3619,6 +3619,7 @@ fn durable_runtime_replays_a_terminal_request_after_host_reconstruction() {
     remove_test_repository(&root);
 }
 
+#[allow(clippy::too_many_lines)]
 fn assert_durable_application_result_replays_verbatim(
     mut first_application: UnitApplication,
     request_id: [u8; 16],
@@ -4481,6 +4482,7 @@ fn durable_replay_rejects_a_rollback_payload_for_external_uncertainty() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn durable_runtime_replays_proven_rollback_as_redacted_orphaned_failure() {
     let (root, repository) = durable_repository();
     let request = eval([1; 16], [79; 16], "1");
@@ -5560,7 +5562,8 @@ fn masked_with_length_code(
     let key = [1, 2, 3, 4];
     let mut frame = vec![(if fin { 128 } else { 0 }) | opcode, 128 | length_code];
     match length_code {
-        126 => frame.extend_from_slice(&(encoded_length as u16).to_be_bytes()),
+        126 => frame
+            .extend_from_slice(&(u16::try_from(encoded_length).expect("u16 length")).to_be_bytes()),
         127 => frame.extend_from_slice(&encoded_length.to_be_bytes()),
         _ => unreachable!("test helper only encodes extended lengths"),
     }
