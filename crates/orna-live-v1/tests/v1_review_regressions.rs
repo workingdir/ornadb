@@ -391,8 +391,8 @@ fn transport_debug_is_structural_and_redacts_credentials_bodies_and_buffers() {
     ] {
         assert!(!socket_debug.contains(secret));
     }
-    assert!(!socket_debug.contains(&format!("{:?}", fragment)));
-    assert!(!socket_debug.contains(&format!("{:?}", pending)));
+    assert!(!socket_debug.contains(&format!("{fragment:?}")));
+    assert!(!socket_debug.contains(&format!("{pending:?}")));
 }
 
 /// Chapter 30 transport profile; RFC 6455 section 5.5.1 requires a Close reply.
