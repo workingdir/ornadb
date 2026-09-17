@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use orna_repository_v1::{
     FetchError, FetchRequest, GitObjectKind, GitObjectState, NativeObjectId, OrnaInternalRef,
-    RemoteContinuity, Repository, RequiredInternalRef, RequestedRef,
+    RemoteContinuity, Repository, RequestedRef, RequiredInternalRef,
 };
 use tempfile::TempDir;
 
@@ -101,7 +101,10 @@ impl Fixture {
 
         git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
         git(&source, &["init", "-b", "main"]);
-        git(&source, &["config", "user.email", "transport@example.invalid"]);
+        git(
+            &source,
+            &["config", "user.email", "transport@example.invalid"],
+        );
         git(&source, &["config", "user.name", "Transport test"]);
         git(&source, &["config", "commit.gpgsign", "false"]);
         fs::write(source.join("main.orna"), "module main;\n").unwrap();
@@ -113,12 +116,7 @@ impl Fixture {
         let internal_refspec = format!("{INTERNAL_REF}:{INTERNAL_REF}");
         git(
             &source,
-            &[
-                "remote",
-                "add",
-                "origin",
-                remote.to_str().unwrap(),
-            ],
+            &["remote", "add", "origin", remote.to_str().unwrap()],
         );
         git(
             &source,
@@ -132,13 +130,12 @@ impl Fixture {
         );
         git(
             root.path(),
-            &[
-                "clone",
-                remote.to_str().unwrap(),
-                local.to_str().unwrap(),
-            ],
+            &["clone", remote.to_str().unwrap(), local.to_str().unwrap()],
         );
-        git(&local, &["config", "user.email", "transport@example.invalid"]);
+        git(
+            &local,
+            &["config", "user.email", "transport@example.invalid"],
+        );
         git(&local, &["config", "user.name", "Transport test"]);
         git(&local, &["config", "commit.gpgsign", "false"]);
 
@@ -321,7 +318,10 @@ fn fetch_preconditions_ignore_inherited_git_routing() {
         "child fetch failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]), next);
+    assert_eq!(
+        git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]),
+        next
+    );
     assert_eq!(repository.head().unwrap(), head_before);
 }
 
@@ -331,10 +331,7 @@ fn fetch_does_not_dereference_a_symbolic_destination() {
     let initial = fixture.initial_head();
     let next = fixture.advance_branch_only();
     git(&fixture.local, &["update-ref", "refs/heads/main", &initial]);
-    git(
-        &fixture.local,
-        &["symbolic-ref", "HEAD", "refs/heads/main"],
-    );
+    git(&fixture.local, &["symbolic-ref", "HEAD", "refs/heads/main"]);
     git(
         &fixture.local,
         &[
@@ -355,12 +352,18 @@ fn fetch_does_not_dereference_a_symbolic_destination() {
         .fetch(&request([RequestedRef::branch("main").unwrap()], []))
         .unwrap();
     assert!(report.ordinary()[0].updated());
-    assert_eq!(git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]), next);
+    assert_eq!(
+        git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]),
+        next
+    );
     assert!(!git_status(
         &fixture.local,
         &["symbolic-ref", "--quiet", "refs/remotes/origin/main"]
     ));
-    assert_eq!(git(&fixture.local, &["rev-parse", "refs/heads/main"]), initial);
+    assert_eq!(
+        git(&fixture.local, &["rev-parse", "refs/heads/main"]),
+        initial
+    );
     assert_eq!(repository.head().unwrap(), head_before);
     assert_eq!(repository.index_generation().unwrap(), index_before);
     assert_eq!(repository.worktree_state().unwrap(), worktree_before);
@@ -397,7 +400,10 @@ fn fetch_updates_branch_and_internal_refs_without_mutating_local_state() {
     assert!(!report.ordinary()[1].updated());
     assert_eq!(report.internal().len(), 1);
     assert!(report.internal()[0].updated());
-    assert_eq!(git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]), next);
+    assert_eq!(
+        git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]),
+        next
+    );
     assert_eq!(git(&fixture.local, &["rev-parse", INTERNAL_REF]), next);
     assert_eq!(repository.head().unwrap(), head_before);
     assert_eq!(repository.index_generation().unwrap(), index_before);
@@ -520,7 +526,10 @@ fn fetch_reports_missing_internal_ref_without_fabricating_it() {
 
     assert_eq!(report.continuity(), Some(RemoteContinuity::Missing));
     assert_eq!(report.internal(), &[]);
-    assert_eq!(git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]), initial);
+    assert_eq!(
+        git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]),
+        initial
+    );
     assert!(!git_status(
         &fixture.local,
         &["show-ref", "--verify", "--quiet", "--", INTERNAL_REF]
@@ -545,13 +554,20 @@ fn fetch_reports_stale_internal_ref_and_preserves_the_local_ref() {
     assert_eq!(report.continuity(), Some(RemoteContinuity::Stale));
     assert_eq!(report.internal(), &[]);
     assert_eq!(git(&fixture.local, &["rev-parse", INTERNAL_REF]), initial);
-    assert_eq!(git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]), next);
+    assert_eq!(
+        git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]),
+        next
+    );
 }
 
 #[test]
 fn fetch_rejects_a_newer_local_tracking_ref_without_overwriting_it() {
     let fixture = Fixture::new();
-    fs::write(fixture.local.join("main.orna"), "module main;\n\n// local\n").unwrap();
+    fs::write(
+        fixture.local.join("main.orna"),
+        "module main;\n\n// local\n",
+    )
+    .unwrap();
     git(&fixture.local, &["add", "main.orna"]);
     git(&fixture.local, &["commit", "-m", "local newer"]);
     let local_newer = git(&fixture.local, &["rev-parse", "HEAD"]);
@@ -566,7 +582,10 @@ fn fetch_rejects_a_newer_local_tracking_ref_without_overwriting_it() {
         .expect_err("newer local tracking ref must not be overwritten");
 
     assert!(matches!(error, FetchError::RefConflict));
-    assert_eq!(git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]), local_newer);
+    assert_eq!(
+        git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]),
+        local_newer
+    );
 }
 
 #[test]
@@ -576,7 +595,11 @@ fn fetch_errors_are_redacted_and_request_names_are_validated_before_git() {
         Err(FetchError::InvalidRef)
     ));
     assert!(matches!(
-        FetchRequest::new("-origin", [], [internal_witness("0000000000000000000000000000000000000000")]),
+        FetchRequest::new(
+            "-origin",
+            [],
+            [internal_witness("0000000000000000000000000000000000000000")]
+        ),
         Err(FetchError::InvalidRemote)
     ));
 
@@ -599,7 +622,11 @@ fn fetch_rejects_a_remote_change_between_advertisement_and_install() {
     let fixture = Fixture::new();
     let initial = fixture.initial_head();
     fixture.install_local_internal(&initial);
-    fs::write(fixture.source.join("main.orna"), "module main;\n\n// race\n").unwrap();
+    fs::write(
+        fixture.source.join("main.orna"),
+        "module main;\n\n// race\n",
+    )
+    .unwrap();
     git(&fixture.source, &["add", "main.orna"]);
     git(&fixture.source, &["commit", "-m", "race"]);
     let raced = git(&fixture.source, &["rev-parse", "HEAD"]);
@@ -616,7 +643,10 @@ fn fetch_rejects_a_remote_change_between_advertisement_and_install() {
         .expect_err("remote change must fail closed before local CAS");
 
     assert!(matches!(error, FetchError::RemoteChanged));
-    assert_eq!(git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]), initial);
+    assert_eq!(
+        git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]),
+        initial
+    );
     assert_eq!(git(&fixture.local, &["rev-parse", INTERNAL_REF]), initial);
 }
 
@@ -663,7 +693,10 @@ fn filtered_clone() -> Option<(TempDir, PathBuf, String)> {
     let clone = fixture.path().join("partial");
     git(fixture.path(), &["init", "--bare", origin.to_str()?]);
     git(fixture.path(), &["clone", origin.to_str()?, seed.to_str()?]);
-    git(&seed, &["config", "user.email", "transport@example.invalid"]);
+    git(
+        &seed,
+        &["config", "user.email", "transport@example.invalid"],
+    );
     git(&seed, &["config", "user.name", "Transport test"]);
     git(&seed, &["config", "commit.gpgsign", "false"]);
     git(&seed, &["branch", "-M", "main"]);
@@ -881,6 +914,108 @@ fn hydrate_fails_closed_with_an_unusable_promisor_without_changing_promises() {
     assert_eq!(git_path_bytes(&clone, "HEAD"), head_bytes_before);
     assert_eq!(git_path_bytes(&clone, "FETCH_HEAD"), fetch_head_before);
     drop(fixture);
+}
+
+#[test]
+fn hydration_and_fetch_ignore_unavailable_submodules() {
+    let (fixture, clone, promised) = filtered_clone()
+        .expect("transport isolation requires a real filtered clone with promised blobs");
+    let seed = fixture.path().join("seed");
+    // Avoid `submodule add`: its index refresh hydrates the parent's blobs.
+    git(&clone, &["clone", seed.to_str().unwrap(), "dependency"]);
+    fs::write(
+        clone.join(".gitmodules"),
+        format!(
+            "[submodule \"dependency\"]\n\tpath = dependency\n\turl = {}\n",
+            seed.display()
+        ),
+    )
+    .unwrap();
+    git(
+        &clone,
+        &["config", "submodule.dependency.url", seed.to_str().unwrap()],
+    );
+    let dependency_commit = git(&seed, &["rev-parse", "HEAD"]);
+    git(
+        &clone,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{dependency_commit},dependency"),
+        ],
+    );
+    let dependency = clone.join("dependency");
+    let unavailable = fixture.path().join("unavailable.git");
+    git(
+        &dependency,
+        &["remote", "set-url", "origin", unavailable.to_str().unwrap()],
+    );
+    git(&clone, &["config", "fetch.recurseSubmodules", "true"]);
+
+    let repository = Repository::discover(&clone).unwrap();
+    let head_before = git_path_bytes(&clone, "HEAD");
+    let fetch_head_before = git_path_bytes(&clone, "FETCH_HEAD");
+    let config_before = git_path_bytes(&clone, "config");
+    let index_before = repository.index_generation().unwrap();
+    let worktree_before = repository.worktree_state().unwrap();
+    let refs_before = git(
+        &clone,
+        &["for-each-ref", "--format=%(refname)=%(objectname)"],
+    );
+    let dependency_refs_before = git(
+        &dependency,
+        &["for-each-ref", "--format=%(refname)=%(objectname)"],
+    );
+    let dependency_fetch_head_before = git_path_bytes(&dependency, "FETCH_HEAD");
+    let promises_before = promised_inventory(&clone);
+    assert_eq!(
+        repository.observe_git_object(&promised).unwrap(),
+        GitObjectState::Promised
+    );
+
+    repository.hydrate_promised_object(&promised).unwrap();
+    repository
+        .fetch(&request([RequestedRef::branch("main").unwrap()], []))
+        .unwrap();
+
+    assert!(matches!(
+        repository.observe_git_object(&promised).unwrap(),
+        GitObjectState::Materialized {
+            kind: GitObjectKind::Blob,
+            ..
+        }
+    ));
+    assert_eq!(
+        promised_inventory(&clone),
+        promises_before
+            .into_iter()
+            .filter(|id| id != &promised)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(git_path_bytes(&clone, "HEAD"), head_before);
+    assert_eq!(git_path_bytes(&clone, "FETCH_HEAD"), fetch_head_before);
+    assert_eq!(git_path_bytes(&clone, "config"), config_before);
+    assert_eq!(repository.index_generation().unwrap(), index_before);
+    assert_eq!(repository.worktree_state().unwrap(), worktree_before);
+    assert_eq!(
+        git(
+            &clone,
+            &["for-each-ref", "--format=%(refname)=%(objectname)"]
+        ),
+        refs_before
+    );
+    assert_eq!(
+        git(
+            &dependency,
+            &["for-each-ref", "--format=%(refname)=%(objectname)"]
+        ),
+        dependency_refs_before
+    );
+    assert_eq!(
+        git_path_bytes(&dependency, "FETCH_HEAD"),
+        dependency_fetch_head_before
+    );
 }
 
 #[test]
