@@ -175,10 +175,10 @@ impl ApplicationWorkerRegistry {
                 // join it before returning the unadmitted job so a later
                 // request can establish a fresh, bounded owner.
                 let handle = self.workers.borrow_mut().remove(&session);
-                if let Some(mut handle) = handle {
-                    if let Some(join) = handle.join.take() {
-                        let _ = join.join();
-                    }
+                if let Some(mut handle) = handle
+                    && let Some(join) = handle.join.take()
+                {
+                    let _ = join.join();
                 }
                 match error.0 {
                     ApplicationWorkerCommand::Execute(job) => Err(job),
@@ -3171,10 +3171,10 @@ impl LiveSessionChildren for HostApplicationChildren {
         let workers = self.workers.clone();
         Box::pin(async move {
             let drained = supervisor.cancel_and_join(session).await;
-            if drained.is_err() {
-                if let Some(workers) = workers {
-                    let _ = workers.stop_and_join(SessionId::new(session)).await;
-                }
+            if drained.is_err()
+                && let Some(workers) = workers
+            {
+                let _ = workers.stop_and_join(SessionId::new(session)).await;
             }
             drained
         })
