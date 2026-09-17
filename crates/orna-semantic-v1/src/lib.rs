@@ -1849,15 +1849,17 @@ fn populate_nominal_identities(scope: &mut Scope, namespace: &Namespace, tree: &
         .available_modules
         .iter()
         .flat_map(|(module_namespace, module)| {
-            module.exports.iter().filter_map(|(name, symbol)| {
-                is_nominal_symbol(symbol).then(|| {
+            module
+                .exports
+                .iter()
+                .filter(|(_, symbol)| is_nominal_symbol(symbol))
+                .map(|(name, _)| {
                     (
                         module_namespace.clone(),
                         name.clone(),
                         nominal_identity(module_namespace, name),
                     )
                 })
-            })
         })
         .collect::<Vec<_>>();
     for (module_namespace, name, identity) in module_nominals {
@@ -7935,12 +7937,10 @@ fn infer_finite_list_collection(
                 Some(slot)
             }
         };
-        if let Some(slot) = slot {
-            if pipeline && slot == 0 {
-                malformed = true;
-            } else if slots[slot].replace(index).is_some() {
-                malformed = true;
-            }
+        if let Some(slot) = slot
+            && (pipeline && slot == 0 || slots[slot].replace(index).is_some())
+        {
+            malformed = true;
         }
     }
     if pipeline {
@@ -8071,12 +8071,10 @@ fn infer_finite_list_sort_by(
                 Some(slot)
             }
         };
-        if let Some(slot) = slot {
-            if pipeline && slot == 0 {
-                malformed = true;
-            } else if slots[slot].replace(index).is_some() {
-                malformed = true;
-            }
+        if let Some(slot) = slot
+            && (pipeline && slot == 0 || slots[slot].replace(index).is_some())
+        {
+            malformed = true;
         }
     }
     if pipeline {
@@ -8247,12 +8245,10 @@ fn infer_finite_list_numeric_aggregate(
                 Some(slot)
             }
         };
-        if let Some(slot) = slot {
-            if pipeline && slot == 0 {
-                malformed = true;
-            } else if row_slot.replace(index).is_some() {
-                malformed = true;
-            }
+        if let Some(slot) = slot
+            && (pipeline && slot == 0 || row_slot.replace(index).is_some())
+        {
+            malformed = true;
         }
     }
     if pipeline {
@@ -8403,12 +8399,10 @@ fn infer_finite_list_first(
                 Some(slot)
             }
         };
-        if let Some(slot) = slot {
-            if pipeline && slot == 0 {
-                malformed = true;
-            } else if row_slot.replace(index).is_some() {
-                malformed = true;
-            }
+        if let Some(slot) = slot
+            && (pipeline && slot == 0 || row_slot.replace(index).is_some())
+        {
+            malformed = true;
         }
     }
     if !pipeline && row_slot.is_none() {
@@ -8496,12 +8490,10 @@ fn infer_finite_list_one(
                 Some(slot)
             }
         };
-        if let Some(slot) = slot {
-            if pipeline && slot == 0 {
-                malformed = true;
-            } else if slots[slot].replace(index).is_some() {
-                malformed = true;
-            }
+        if let Some(slot) = slot
+            && (pipeline && slot == 0 || slots[slot].replace(index).is_some())
+        {
+            malformed = true;
         }
     }
     if pipeline {
@@ -8684,12 +8676,10 @@ fn infer_finite_list_every_exists(
                 Some(slot)
             }
         };
-        if let Some(slot) = slot {
-            if pipeline && slot == 0 {
-                malformed = true;
-            } else if slots[slot].replace(index).is_some() {
-                malformed = true;
-            }
+        if let Some(slot) = slot
+            && (pipeline && slot == 0 || slots[slot].replace(index).is_some())
+        {
+            malformed = true;
         }
     }
     if pipeline {
@@ -8964,9 +8954,11 @@ fn infer_relation_collection_call(
     let callback = infer_relation_callback(
         &arguments[callback_index].value,
         element.as_ref().clone(),
-        (operation == "filter")
-            .then_some(Type::Bool)
-            .unwrap_or(Type::Error),
+        if operation == "filter" {
+            Type::Bool
+        } else {
+            Type::Error
+        },
         scope,
         local,
         diagnostics,
@@ -9022,7 +9014,7 @@ fn infer_relation_terminal_call(
     let mut malformed = !expected.contains(&arguments.len());
     let mut positional = 0usize;
     let mut named_started = false;
-    let mut slots = vec![None; 3];
+    let mut slots = [None; 3];
     let callback_name = match operation {
         "every" | "exists" => Some("predicate"),
         "take" | "drop" => Some("count"),
@@ -9065,10 +9057,10 @@ fn infer_relation_terminal_call(
                 (slot < slots.len()).then_some(slot)
             }
         };
-        if let Some(slot) = slot {
-            if slots[slot].replace(index).is_some() {
-                malformed = true;
-            }
+        if let Some(slot) = slot
+            && slots[slot].replace(index).is_some()
+        {
+            malformed = true;
         }
     }
     if slots[0] != Some(row_index) {
@@ -9145,8 +9137,8 @@ fn infer_relation_terminal_call(
     {
         valid &= values[index].ty == Type::Bool;
     }
-    for slot in 1..3 {
-        if let Some(index) = slots[slot] {
+    for (slot, &index) in slots.iter().enumerate().skip(1) {
+        if let Some(index) = index {
             if matches!(operation, "take" | "drop" | "window")
                 && values[index].ty != Type::Int
                 && values[index].ty != Type::Error
@@ -11406,11 +11398,11 @@ fn infer_descriptor_system_call(
             diagnostics,
         ));
     }
-    if type_arguments.is_some() {
+    if let Some(type_arguments) = type_arguments {
         return Some(infer_unsupported_generic_system_call(
             functions,
             arguments,
-            type_arguments.expect("checked above"),
+            type_arguments,
             scope,
             local,
             diagnostics,
@@ -11844,7 +11836,7 @@ fn infer_start_system_call(
 fn start_type_witness(expression: &Expr, scope: &Scope) -> Option<Type> {
     let path = qualified_path(expression)?;
     let name = path.join(".");
-    let ty = primitive(&name).unwrap_or_else(|| Type::Named(name));
+    let ty = primitive(&name).unwrap_or(Type::Named(name));
     let ty = resolve_type_aliases(&ty, &scope.type_aliases, &mut BTreeSet::new());
     let ty = canonicalize_type(&ty, scope);
     static_type_is_known(&ty, scope).then_some(ty)
