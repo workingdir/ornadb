@@ -1614,6 +1614,26 @@ fn system_commit_rows_reject_mutation() {
 }
 
 #[test]
+fn money_rate_unit_resolves_before_float_exactness_check() {
+    let analysis = analyze(&[ModuleInput::new(
+        "rate.orna",
+        "fn cost(energy: Float<kWh>, rate: Money<GBP> / kWh) = energy * rate;",
+    )]);
+    assert!(
+        !has(&analysis, DIAG_UNRESOLVED),
+        "{:?}",
+        analysis.diagnostics
+    );
+    assert!(has(&analysis, DIAG_TYPE), "{:?}", analysis.diagnostics);
+
+    let unknown = analyze(&[ModuleInput::new(
+        "unknown.orna",
+        "fn cost(rate: Money<GBP> / UnknownUnit) = rate;",
+    )]);
+    assert!(has(&unknown, DIAG_UNRESOLVED));
+}
+
+#[test]
 fn published_money_and_affine_diagnostics_are_preserved() {
     let affine_sum = analyze(&[ModuleInput::new(
         "sum.orna",
