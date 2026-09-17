@@ -19,7 +19,15 @@ use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
 mod repl;
+mod semantic_payload;
 mod system_api;
+
+pub use semantic_payload::{
+    DeclarationExplicitness, LocalSourceOrigin, NamedSemanticParameter, SEMANTIC_PAYLOAD_DOMAIN,
+    SEMANTIC_PAYLOAD_VERSION, SemanticDeclaration, SemanticDeclarationKind,
+    SemanticPayloadAnalysis, SemanticPayloadError, SemanticPayloadErrorKind,
+    analyze_semantic_payloads,
+};
 
 pub use repl::{ReplAdmission, ReplCommitError, ReplContext};
 
@@ -1212,6 +1220,15 @@ pub fn analyze(inputs: &[ModuleInput]) -> Analysis {
 /// source or this catalogue remain unresolved; no profile is installed by
 /// default.
 pub fn analyze_with_catalogue(inputs: &[ModuleInput], catalogue: &Catalogue) -> Analysis {
+    analyze_retaining_context(inputs, catalogue, false).0
+}
+
+fn analyze_retaining_context(
+    inputs: &[ModuleInput],
+    catalogue: &Catalogue,
+    retain_context: bool,
+) -> (Analysis, Vec<(Namespace, SyntaxTree, Scope)>) {
+    let mut contexts = Vec::new();
     let mut result = Analysis {
         modules: catalogue.modules.clone(),
         ..Analysis::default()
@@ -1315,11 +1332,14 @@ pub fn analyze_with_catalogue(inputs: &[ModuleInput], catalogue: &Catalogue) -> 
                 .collect();
         }
         result.assertions.insert(namespace.clone(), plans);
+        if retain_context {
+            contexts.push((namespace.clone(), tree.clone(), scope));
+        }
     }
     result
         .diagnostics
         .sort_by(|a, b| a.code().cmp(b.code()).then(a.message().cmp(b.message())));
-    result
+    (result, contexts)
 }
 
 /// Function bodies may depend on inferred summaries declared later in their
