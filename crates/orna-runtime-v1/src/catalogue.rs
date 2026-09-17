@@ -27,6 +27,7 @@ pub enum CatalogueError {
     CatalogueRenameSourceMissing,
     CataloguePredecessorRequired,
     CataloguePredecessorInvalid,
+    CatalogueCaptureInvalid,
     CatalogueTypeMismatch,
     CatalogueTypeMissing,
     CatalogueFunctionMissing,
@@ -561,6 +562,106 @@ mod batch_tests {
     }
 
     #[tokio::test]
+    async fn retained_function_read_stays_pinned_and_rejects_invalid_captures() {
+        let (directory, state) = state().await;
+        let lease = state.acquire_lease([7; 16]).await.unwrap();
+        let first = admit(
+            &state,
+            lease,
+            CatalogueAdmission {
+                predecessor_capture: None,
+                types: vec![
+                    type_declaration("pkg.T", 4, 5, CatalogueTypeSpec::Named, None),
+                    type_declaration("pkg.Result", 6, 7, CatalogueTypeSpec::Named, None),
+                    type_declaration("pkg.Param", 8, 9, CatalogueTypeSpec::Named, None),
+                ],
+                functions: vec![function_declaration(
+                    vec![CatalogueParameterDeclaration {
+                        name: "value".into(),
+                        position: 0,
+                        type_name: "pkg.Param".into(),
+                    }],
+                    "pkg.Result",
+                )],
+            },
+        )
+        .await
+        .unwrap();
+        let admitted = first.functions[0].clone();
+
+        // The pinned read at the admitted generation is exact.
+        let pinned = state
+            .catalogue_function_at("pkg.f", &first.capture)
+            .await
+            .unwrap()
+            .expect("retained function resolves at its admitted capture");
+        assert_eq!(pinned, admitted);
+
+        // A later generation carries the same identity forward; the pinned
+        // read still returns the admitted generation's rows (ORNA-SYS-019).
+        let later = advance(&state, lease, 12).await;
+        assert_ne!(later.generation(), first.capture.generation());
+        assert_eq!(
+            state
+                .catalogue_function_at("pkg.f", &first.capture)
+                .await
+                .unwrap(),
+            Some(admitted.clone())
+        );
+
+        // Reopen: retained rows survive and stay pinned.
+        drop(state);
+        let reopened = RuntimeState::open_path(
+            &directory.path().join("state.db"),
+            RuntimeIdentity {
+                database_id: [1; 16],
+                repository_id: [2; 16],
+            },
+            digest(3),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reopened
+                .catalogue_function_at("pkg.f", &first.capture)
+                .await
+                .unwrap()
+                .expect("retained function survives reopen"),
+            admitted
+        );
+
+        // Forged digest: same snapshot bytes, wrong generation digest.
+        let forged = CwdCapture::new(first.capture.snapshot().clone(), [99; 32]).unwrap();
+        assert_eq!(
+            reopened
+                .catalogue_function_at("pkg.f", &forged)
+                .await
+                .unwrap_err(),
+            CatalogueError::CatalogueCaptureInvalid
+        );
+
+        // Foreign runtime identity: a fabricated CWD snapshot naming this
+        // database but another runtime. The current snapshot's generation is
+        // retained, so only the identity mismatch can reject it.
+        let foreign_snapshot = Snapshot::cwd(
+            first.capture.database_id(),
+            [9; 16],
+            capture_tx(&reopened.connection).await.unwrap().generation().clone(),
+        )
+        .unwrap();
+        let foreign =
+            CwdCapture::new(foreign_snapshot, later.generation_digest()).unwrap();
+        assert_eq!(
+            reopened
+                .catalogue_function_at("pkg.f", &foreign)
+                .await
+                .unwrap_err(),
+            CatalogueError::CatalogueCaptureInvalid
+        );
+    }
+
+    #[tokio::test]
     async fn reopening_reads_the_authoritative_identity_row() {
         let (directory, state) = state().await;
         let admitted = admit_without_explicit_lease(
@@ -836,6 +937,7 @@ impl std::fmt::Display for CatalogueError {
             Self::CatalogueRenameSourceMissing => "runtime catalogue rename source is missing",
             Self::CataloguePredecessorRequired => "runtime catalogue predecessor is required",
             Self::CataloguePredecessorInvalid => "runtime catalogue predecessor is invalid",
+            Self::CatalogueCaptureInvalid => "runtime catalogue capture is invalid",
             Self::CatalogueTypeMismatch => "runtime catalogue type mismatch",
             Self::CatalogueTypeMissing => "runtime catalogue type is missing",
             Self::CatalogueFunctionMissing => "runtime catalogue function is missing",
@@ -1400,6 +1502,43 @@ impl RuntimeState {
         Ok(Some(module))
     }
 
+
+    /// Reads one function row at an exact retained CWD capture.
+    ///
+    /// The capture must be the complete, already persisted same-runtime
+    /// capture: database and runtime identity, generation and generation
+    /// digest are all rechecked against `runtime_catalogue_capture`. A forged
+    /// digest, foreign runtime/database, or never-retained capture is
+    /// [`CatalogueError::CatalogueCaptureInvalid`] and never falls back to the
+    /// current snapshot or writes rows (ORNA-SYS-019/020).
+    pub async fn catalogue_function_at(
+        &self,
+        qualified_name: &str,
+        capture: &orna_foundation_v1::CwdCapture,
+    ) -> Result<Option<CatalogueFunction>, RuntimeError> {
+        validate_observation_text(qualified_name)?;
+        let transaction = self.catalogue_transaction_read().await?;
+        let stored = retained_capture_row_tx(&transaction, capture).await?;
+        let Some(id) = lookup_snapshot_object_id(
+            &transaction,
+            &stored,
+            qualified_name,
+        )
+        .await?
+        else {
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            return Ok(None);
+        };
+        let function = load_function_tx(&transaction, capture, id).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(Some(function))
+    }
     async fn catalogue_transaction(&self) -> Result<Transaction, RuntimeError> {
         self.connection
             .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
@@ -1800,9 +1939,10 @@ fn map_catalogue_runtime_error(error: CatalogueError) -> crate::RuntimeError {
         CatalogueError::StaleCapture { .. }
         | CatalogueError::CatalogueCorrupt
         | CatalogueError::CataloguePredecessorInvalid
+        | CatalogueError::CatalogueKindMismatch
         | CatalogueError::CatalogueAllocationExhausted
         | CatalogueError::RuntimeFailure
-        | CatalogueError::CatalogueKindMismatch
+        | CatalogueError::CatalogueCaptureInvalid
         | CatalogueError::CatalogueNameConflict
         | CatalogueError::CatalogueRevisionConflict
         | CatalogueError::CatalogueRenameSourceMissing
@@ -2045,6 +2185,47 @@ async fn validate_predecessor_capture_tx(
         return Err(RuntimeError::CataloguePredecessorInvalid);
     }
     Ok(())
+}
+
+/// Validates one exact retained same-runtime capture and returns its stored
+/// snapshot bytes.
+///
+ /// Retained reads use the full persisted identity set; unlike predecessor
+ /// validation there is no adjacency requirement, because a pinned reference
+ /// may point at any retained generation of this runtime, not only the
+ /// immediately preceding one (ORNA-SYS-019).
+async fn retained_capture_row_tx(
+    transaction: &Transaction,
+    capture: &orna_foundation_v1::CwdCapture,
+) -> Result<Vec<u8>, RuntimeError> {
+    let snapshot = capture_bytes(capture)?;
+    let mut rows = transaction
+        .query(
+            "SELECT database_id, runtime_id, generation, generation_digest
+             FROM runtime_catalogue_capture WHERE snapshot = ?1",
+            params![snapshot.clone()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Err(RuntimeError::CatalogueCaptureInvalid);
+    };
+    if fixed(row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?)? != capture.database_id()
+        || fixed(row.get(1).map_err(|_| RuntimeError::CatalogueCorrupt)?)? != capture.runtime_id()
+        || row
+            .get::<i64>(2)
+            .map_err(|_| RuntimeError::CatalogueCorrupt)?
+            != crate::bigint_to_i64(capture.generation())?
+        || fixed(row.get(3).map_err(|_| RuntimeError::CatalogueCorrupt)?)?
+            != capture.generation_digest()
+    {
+        return Err(RuntimeError::CatalogueCaptureInvalid);
+    }
+    Ok(snapshot)
 }
 
 async fn ensure_revision_row_tx(
