@@ -176,7 +176,7 @@ where
                     LivePresentationError::WrongWatch,
                 ));
             }
-            if frame.request == self.expected_resync_request {
+            if frame.request.is_some() && frame.request == self.expected_resync_request {
                 self.expected_resync_request = None;
                 return Ok(LiveSessionEvent::ResyncRejected);
             }
@@ -465,6 +465,22 @@ mod tests {
         bytes.extend([0x03, 0x50]);
         bytes.extend(watch);
         bytes.extend([0x04]);
+        bytes.extend(body);
+        Envelope::decode(&bytes, Limits::default())
+            .expect("test frame is canonical")
+            .encode(Limits::default())
+            .expect("test frame re-encodes canonically")
+    }
+    fn frame_without_watch(code: u8, request: Option<[u8; 16]>, body: Vec<u8>) -> Vec<u8> {
+        let mut bytes = vec![0xa5, 0x00, 0x01, 0x01, code, 0x02];
+        match request {
+            Some(request) => {
+                bytes.push(0x50);
+                bytes.extend(request);
+            }
+            None => bytes.push(0xf6),
+        }
+        bytes.extend([0x03, 0xf6, 0x04]);
         bytes.extend(body);
         Envelope::decode(&bytes, Limits::default())
             .expect("test frame is canonical")
@@ -848,6 +864,49 @@ mod tests {
             block_on(driver.receive_once()),
             Ok(LiveSessionEvent::SnapshotPublished { revision: 1 })
         ));
+    }
+
+    #[test]
+    fn foreign_watch_diagnostic_is_rejected() {
+        let mut io = MemoryIo::default();
+        io.incoming.push_back(snapshot(0));
+        io.incoming
+            .push_back(frame_with_request(19, [8; 16], None, diagnostic_body()));
+        let mut driver = LiveSessionDriver::new(
+            io,
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        block_on(driver.receive_once()).unwrap();
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Err(LiveSessionError::Presentation(
+                LivePresentationError::WrongWatch
+            ))
+        ));
+        assert_eq!(driver.presentation().published().unwrap().revision(), 0);
+    }
+
+    #[test]
+    fn connection_diagnostic_is_reported_without_watch_identity() {
+        let mut io = MemoryIo::default();
+        io.incoming
+            .push_back(frame_without_watch(19, None, diagnostic_body()));
+        let mut driver = LiveSessionDriver::new(
+            io,
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::DiagnosticReceived
+        );
     }
 
     #[test]
