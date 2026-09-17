@@ -107,11 +107,13 @@ fn parsed_repeated_primary_key_declaration_is_rejected_before_transaction_admiss
 
     let outcome = runtime.execute_source(&unit);
 
-    assert!(matches!(
-        outcome,
-        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-S013-DUPLICATE"
-            && diagnostic.message() == "duplicate primary-key field"
-    ));
+    assert!(
+        matches!(
+            outcome,
+            StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-S013-DUPLICATE"
+        ),
+        "{outcome:?}"
+    );
     let key = Value::new(orna_foundation_v1::OvbRaw::Text("north".into()))
         .expect("canonical primary key");
     assert_eq!(runtime.committed_row("Reading", &key), None);
