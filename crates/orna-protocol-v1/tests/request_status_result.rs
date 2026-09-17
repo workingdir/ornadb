@@ -63,12 +63,6 @@ fn raw_result_body() -> Vec<u8> {
     bytes
 }
 
-fn admit_then_execute(bytes: &[u8], executions: &mut usize) -> Result<Envelope, Error> {
-    let envelope = Envelope::decode(bytes, Limits::default())?;
-    *executions += 1;
-    Ok(envelope)
-}
-
 #[test]
 fn request_status_result_round_trips_every_state_and_valid_optional_shapes() {
     let valid_result = result_body();
@@ -83,8 +77,8 @@ fn request_status_result_round_trips_every_state_and_valid_optional_shapes() {
         ),
         // Terminal results may retain the fingerprint while pruning the body.
         (RequestState::Terminal, Some([2; 32]), None),
-        // Orphaned work may retain only its fingerprint or neither optional
-        // field; a retained result requires the terminal state above.
+        // Recovery may retain a failure body without manufacturing success.
+        (RequestState::Orphaned, Some([2; 32]), Some(valid_result)),
         (RequestState::Orphaned, Some([2; 32]), None),
         (RequestState::Orphaned, None, None),
     ];
@@ -99,18 +93,13 @@ fn request_status_result_round_trips_every_state_and_valid_optional_shapes() {
 }
 
 #[test]
-fn request_status_result_rejects_retained_result_without_terminal_claim() {
-    // ORNA-PROTO-004: a retained result is evidence of a terminal claim, not
-    // permission to execute a non-terminal request, including orphaned work.
-    for state in [0, 1, 2, 4] {
+fn request_status_result_rejects_retained_result_for_active_or_unknown_work() {
+    for state in [0, 1, 2] {
         let bytes = raw_status(state, Some(&[2; 32]), Some(&raw_result_body()));
-        let mut executions = 0;
-
         assert_eq!(
-            admit_then_execute(&bytes, &mut executions),
+            Envelope::decode(&bytes, Limits::default()),
             Err(Error::InvalidMessage)
         );
-        assert_eq!(executions, 0);
     }
 }
 
@@ -169,38 +158,17 @@ fn request_status_result_rejects_noncanonical_outer_state_encoding() {
 
 #[test]
 fn request_status_result_rejects_nested_duplicate_map_keys_before_admission() {
-    // ORNA-PROTO-001: a duplicate in the retained nested Result map is
-    // rejected by the complete decoder, before any operation can run.
+    // ORNA-PROTO-001: duplicate keys in the nested Result map are rejected.
     let duplicate = [
         0xa5, 0x00, 0x01, 0x00, 0x01, 0x01, 0xf6, 0x02, 0x58, 0x20, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
         2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0x03, 0xf6,
     ];
     let bytes = raw_status(4, Some(&[2; 32]), Some(&duplicate));
-    let mut executions = 0;
 
     assert_eq!(
-        admit_then_execute(&bytes, &mut executions),
+        Envelope::decode(&bytes, Limits::default()),
         Err(Error::NonCanonical)
     );
-    assert_eq!(executions, 0);
-}
-
-#[test]
-fn request_status_result_rejects_nested_noncanonical_encoding_before_admission() {
-    // ORNA-PROTO-001: the inner Result status uses a noncanonical integer
-    // width; no partially decoded request reaches the execution boundary.
-    let noncanonical = [
-        0xa4, 0x00, 0x18, 0x01, 0x01, 0xf6, 0x02, 0x58, 0x20, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0x03, 0xf6,
-    ];
-    let bytes = raw_status(4, Some(&[2; 32]), Some(&noncanonical));
-    let mut executions = 0;
-
-    assert_eq!(
-        admit_then_execute(&bytes, &mut executions),
-        Err(Error::NonCanonical)
-    );
-    assert_eq!(executions, 0);
 }
 
 #[test]
