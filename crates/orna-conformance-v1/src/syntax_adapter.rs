@@ -71,21 +71,20 @@ impl ConformanceAdapter for SyntaxAdapter {
 }
 
 fn foundation_diagnostic(diagnostic: &SyntaxDiagnostic) -> Diagnostic {
-    // Syntax diagnostics are parser-owned static messages. We still admit
-    // them through SafeText and intentionally omit native spans, labels and
-    // payload: those may contain source observations but the corpus has no
-    // pinned repository snapshot at this seam. The checked parser message is
-    // static text (never interpolated source) and is required by the
-    // corpus's message_contains expectations, so redaction blanks only
-    // unsafe text rather than the whole diagnostic.
+    // This adapter admits parser-owned messages for the corpus's
+    // message_contains expectations; SafeText checks control safety, not
+    // disclosure admission. Omit native spans, labels and payload because
+    // they may contain source observations and this seam has no pinned
+    // repository snapshot. Redact all other diagnostic text before retaining
+    // the admitted root message.
     let message = SafeText::new(&diagnostic.message).unwrap_or_else(|_| SafeText::redacted());
     Diagnostic::new(
         SafeText::new(diagnostic.code).expect("syntax diagnostic codes are safe"),
         DiagnosticSeverity::Error,
-        message,
+        SafeText::redacted(),
     )
     .expect("syntax diagnostics have non-empty codes")
-    .redacted_static()
+    .redacted_with_message(message)
 }
 
 fn unsupported_entry_point() -> Diagnostic {
