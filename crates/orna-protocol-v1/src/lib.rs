@@ -381,12 +381,24 @@ impl Message {
         }
         if let Self::RequestStatusResult {
             state,
-            result: Some(_),
+            result: Some(result),
             ..
         } = self
-            && !matches!(*state, RequestState::Terminal)
         {
-            return Err(Error::InvalidMessage);
+            match state {
+                RequestState::Terminal => {}
+                RequestState::Orphaned => {
+                    let fields = map(&result.0.0).ok_or(Error::InvalidMessage)?;
+                    // Recovery can retain proven failure or uncertainty, never success.
+                    if !matches!(
+                        ResultStatus::decode(field(fields, 0)?)?,
+                        ResultStatus::Failure | ResultStatus::RetainedWithoutValue
+                    ) {
+                        return Err(Error::InvalidMessage);
+                    }
+                }
+                _ => return Err(Error::InvalidMessage),
+            }
         }
         Ok(())
     }
@@ -2026,6 +2038,66 @@ mod tests {
             ResultBody::from_result(&messages()[0], Limits::default()),
             Err(Error::InvalidMessage)
         );
+    }
+
+    #[test]
+    fn orphaned_status_retains_recovery_outcomes_but_never_success() {
+        for result_status in [
+            ResultStatus::Failure,
+            ResultStatus::RetainedWithoutValue,
+            ResultStatus::Success,
+        ] {
+            let terminal = Envelope {
+                request: Some(id(1)),
+                watch: None,
+                message: Message::Result {
+                    status: result_status,
+                    value: (result_status == ResultStatus::Success).then(value),
+                    fingerprint: digest(1),
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            };
+            let body = ResultBody::from_result(&terminal, Limits::default()).unwrap();
+            let response = Envelope {
+                request: Some(id(4)),
+                watch: None,
+                message: Message::RequestStatusResult {
+                    target: id(1),
+                    state: RequestState::Orphaned,
+                    fingerprint: Some(digest(1)),
+                    result: Some(body.clone()),
+                },
+                extensions: BTreeMap::new(),
+            };
+            let encoded = wire(
+                20,
+                Some(id(4)),
+                None,
+                Node::Map(vec![
+                    (uint(0), Node::Bytes(id(1).to_vec())),
+                    (uint(1), uint(4)),
+                    (uint(2), Node::Bytes(digest(1).to_vec())),
+                    (uint(3), body.0.0),
+                ]),
+            );
+            if result_status == ResultStatus::Success {
+                assert_eq!(
+                    response.encode(Limits::default()),
+                    Err(Error::InvalidMessage)
+                );
+                assert_eq!(
+                    Envelope::decode(&encoded, Limits::default()),
+                    Err(Error::InvalidMessage)
+                );
+            } else {
+                assert_eq!(response.encode(Limits::default()).unwrap(), encoded);
+                assert_eq!(
+                    Envelope::decode(&encoded, Limits::default()).unwrap(),
+                    response
+                );
+            }
+        }
     }
 
     #[test]
