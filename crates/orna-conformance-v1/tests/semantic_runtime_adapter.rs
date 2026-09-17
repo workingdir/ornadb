@@ -1106,6 +1106,25 @@ fn semantic_adapter_keeps_type_errors_in_the_typecheck_phase() {
 }
 
 #[test]
+fn calendar_zone_rejection_preserves_published_diagnostic_identity() {
+    let unit = SourceUnit {
+        fixture_id: "calendar-zone".into(),
+        source_id: "calendar-zone.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "pub fn bad() = energy.Reading | bucket_by(1.day);".into(),
+    };
+    let mut adapter = SemanticAdapter::default();
+    let StageOutcome::Failed(diagnostic) = adapter.typecheck(&unit) else {
+        panic!("calendar bucketing without a zone must be rejected");
+    };
+    assert_eq!(
+        adapter.diagnostic_code(&diagnostic),
+        "E6001",
+        "{diagnostic:?}"
+    );
+}
+
+#[test]
 fn semantic_adapter_preserves_published_closed_type_diagnostics() {
     let corpus = Corpus::load_default().expect("reference corpus loads");
     let report = Harness::new(corpus).run(&mut SemanticAdapter::default());
