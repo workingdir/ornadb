@@ -303,10 +303,10 @@ impl LiveApplicationWorkSupervisor {
                 });
         if session_work.phase != ApplicationWorkPhase::Open
             || parent.is_some_and(|parent| {
-                !session_work
+                session_work
                     .work
                     .get(&parent)
-                    .is_some_and(|entry| !entry.cancelled.load(Ordering::Acquire))
+                    .is_none_or(|entry| entry.cancelled.load(Ordering::Acquire))
             })
         {
             return Err(Error::Closed);
@@ -340,6 +340,7 @@ impl LiveApplicationWorkSupervisor {
     /// owned application children without draining the rest of the session.
     /// The request identity is retained on every lease so a protocol cancel
     /// can signal the exact running or queued target.
+    #[must_use]
     pub fn cancel_request(&self, session: [u8; 16], request: [u8; 16]) -> bool {
         self.begin_request_cancellation(session, request)
     }
@@ -348,6 +349,11 @@ impl LiveApplicationWorkSupervisor {
     /// matching lease has released its activation-owned resources. This is a
     /// targeted join: unrelated application work in the same session remains
     /// admitted and running.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the supervisor state mutex is poisoned.
+    #[must_use]
     pub fn cancel_and_join_request(
         &self,
         session: [u8; 16],
@@ -409,6 +415,12 @@ impl LiveApplicationWorkSupervisor {
 
     /// Prevents new work, recursively requests cancellation, and joins every
     /// root and descendant currently owned by the session.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the supervisor state mutex is poisoned while beginning the
+    /// drain or while polling the join.
+    #[must_use]
     pub fn cancel_and_join(&self, session: [u8; 16]) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         let result = self.begin_draining(session);
         let state = Arc::clone(&self.state);
@@ -496,6 +508,10 @@ impl LiveApplicationWorkSupervisor {
     /// # Errors
     ///
     /// Returns [`Error::ApplicationDrainRequired`] if a lease remains.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the supervisor state mutex is poisoned.
     pub fn retire(&self, session: [u8; 16]) -> Result<()> {
         let mut state = self.state.lock().expect("application work state poisoned");
         if !state.sessions.contains_key(&session)
@@ -525,6 +541,10 @@ impl LiveApplicationWorkSupervisor {
     /// Releases the deletion tombstone after the transport has durably
     /// completed session deletion. A failed deletion retains the tombstone
     /// so a retry cannot reopen application admission.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the supervisor state mutex is poisoned.
     pub fn forget(&self, session: [u8; 16]) {
         let mut state = self.state.lock().expect("application work state poisoned");
         if state.sessions.get(&session).is_some_and(|session_work| {
@@ -537,6 +557,12 @@ impl LiveApplicationWorkSupervisor {
     /// Cancels and joins every session still owned by an executable actor.
     /// The actor uses this only after it stops accepting commands, leaving
     /// its task join set as the final owner of application futures.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any supervisor state mutex is poisoned while beginning the
+    /// drain or joining sessions.
+    #[must_use]
     pub fn cancel_and_join_all(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         let sessions = self
             .state
@@ -568,6 +594,10 @@ impl LiveApplicationWorkSupervisor {
         })
     }
 
+    ///
+    /// # Panics
+    ///
+    /// Panics if the supervisor state mutex is poisoned.
     #[must_use]
     pub fn is_draining_or_active(&self, session: [u8; 16]) -> bool {
         self.state
@@ -619,6 +649,10 @@ impl Drop for LiveApplicationWorkLease {
 impl LiveApplicationWorkLease {
     /// Returns whether cancellation has been requested for this lease or its
     /// session has entered deletion.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the supervisor state mutex is poisoned.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
@@ -869,6 +903,7 @@ impl LiveApplicationTicket {
     /// an executable scheduler cannot start it (for example, after its
     /// bounded queue is full). The lease is explicitly completed so dropping
     /// a scheduler-owned ticket cannot masquerade as an unjoined child.
+    #[must_use]
     pub fn reject(mut self, error: Error) -> LiveApplicationCompletion {
         self.work.complete();
         LiveApplicationCompletion {
@@ -2387,14 +2422,14 @@ impl LiveHost {
                         Err(Error::RequestMismatch)
                             if matches!(envelope.message, Message::RequestStatus { .. }) =>
                         {
-                            return Ok(request_mismatch_outcome(request)?);
+                            return request_mismatch_outcome(request);
                         }
                         Err(error) => return Err(error),
                     }
                 } else if let Some(record) = self.requests.get(&(session, request)) {
                     if record.fingerprint != fingerprint {
                         if matches!(envelope.message, Message::RequestStatus { .. }) {
-                            return Ok(request_mismatch_outcome(request)?);
+                            return request_mismatch_outcome(request);
                         }
                         return Err(Error::RequestMismatch);
                     }
@@ -3637,7 +3672,7 @@ fn retained_result_body(
 ) -> Option<ResultBody> {
     let response = terminal?.response.as_ref()?;
     validate_result_response(request, fingerprint, response.clone(), limits).ok()?;
-    ResultBody::from_result(&response, limits).ok()
+    ResultBody::from_result(response, limits).ok()
 }
 
 fn durable_result_body(
@@ -7750,9 +7785,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let target = std::env::var_os("CARGO_TARGET_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("target"));
+        let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+            || std::path::PathBuf::from("target"),
+            std::path::PathBuf::from,
+        );
         fs::create_dir_all(&target).unwrap();
         let root = target.join(format!("orna-live-status-mismatch-{nonce}"));
         fs::create_dir(&root).unwrap();
@@ -7864,9 +7900,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let target = std::env::var_os("CARGO_TARGET_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("target"));
+        let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+            || std::path::PathBuf::from("target"),
+            std::path::PathBuf::from,
+        );
         fs::create_dir_all(&target).unwrap();
         let root = target.join(format!("orna-live-direct-status-mismatch-{nonce}"));
         fs::create_dir(&root).unwrap();
