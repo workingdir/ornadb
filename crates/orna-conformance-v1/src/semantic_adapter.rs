@@ -453,6 +453,12 @@ impl BoundedEvaluator {
         environment: &Environment,
         expected: &Value,
     ) -> StageOutcome<Diagnostic> {
+        // Limits fail closed before parsing: an oversized scenario source can
+        // never reach evaluation, matching the evaluator's documented
+        // check_source contract for every caller-supplied source.
+        if let Err(error) = self.limits.check_source(source) {
+            return StageOutcome::Failed(error.diagnostic().clone());
+        }
         let parsed = parse_expression(source);
         if !parsed.is_ok() {
             return match evaluate_expression_with_functions(
@@ -9234,7 +9240,13 @@ mod durable_tests {
             std::slice::from_ref(&maintenance),
         );
         state
-            .commit_table_activation(owner, snapshot.context(), std::slice::from_ref(&maintenance), next, &NoFault)
+            .commit_table_activation(
+                owner,
+                snapshot.context(),
+                std::slice::from_ref(&maintenance),
+                next,
+                &NoFault,
+            )
             .await
             .expect("maintenance commit");
         let after_maintenance = state.capture().await.expect("advanced capture");
