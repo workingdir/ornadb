@@ -769,6 +769,13 @@ pub enum RunObservationStatus {
     Orphaned,
 }
 
+struct RequestTerminalTransition {
+    next: RequestState,
+    terminal_outcome: TerminalOutcome,
+    observation_status: RunObservationStatus,
+    diagnostic: Option<SafeDiagnostic>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamObservationStatus {
     Starting,
@@ -2008,7 +2015,7 @@ pub enum StreamStep {
     Waiting,
     Exhausted,
     Committed { checkpoint: StreamCheckpoint },
-    Failed { failure: FailureRecord },
+    Failed { failure: Box<FailureRecord> },
     Cancelled { checkpoint: StreamCheckpoint },
     Rejected(RejectReason),
 }
@@ -2068,6 +2075,15 @@ pub struct CheckpointResetAudit {
     pub new_position: Position,
     pub reason: String,
     pub redacted: bool,
+}
+
+/// The compare-and-set target and audit reason for one checkpoint reset.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointResetRequest {
+    pub key: CheckpointKey,
+    pub expected: CheckpointPrecondition,
+    pub to: Position,
+    pub reason: String,
 }
 
 /// Host-supplied capability for one provider-backed checkpoint reset.
@@ -2970,13 +2986,9 @@ impl RuntimeState {
     pub async fn reset_checkpoint(
         &self,
         lease: WriterLease,
-        key: CheckpointKey,
-        expected: CheckpointPrecondition,
-        to: Position,
-        reason: String,
+        request: CheckpointResetRequest,
     ) -> Result<StreamCheckpoint, RuntimeError> {
-        self.reset_checkpoint_at_capture(lease, key, expected, to, reason, None)
-            .await
+        self.reset_checkpoint_at_capture(lease, request, None).await
     }
 
     /// Provider-gated form of [`Self::reset_checkpoint`]. The host supplies
@@ -2985,33 +2997,26 @@ impl RuntimeState {
     pub async fn reset_checkpoint_with_provider<P: CheckpointResetProvider>(
         &self,
         lease: WriterLease,
-        key: CheckpointKey,
-        expected: CheckpointPrecondition,
-        to: Position,
-        reason: String,
+        request: CheckpointResetRequest,
         provider: &P,
     ) -> Result<StreamCheckpoint, RuntimeError> {
-        self.reset_checkpoint_at_capture_with_provider(
-            lease, key, expected, to, reason, None, provider,
-        )
-        .await
+        self.reset_checkpoint_at_capture_with_provider(lease, request, None, provider)
+            .await
     }
 
     /// Capture-fenced provider-gated form of the checkpoint reset boundary.
     pub async fn reset_checkpoint_at_capture_with_provider<P: CheckpointResetProvider>(
         &self,
         lease: WriterLease,
-        key: CheckpointKey,
-        expected: CheckpointPrecondition,
-        to: Position,
-        reason: String,
+        request: CheckpointResetRequest,
         expected_capture: Option<&CwdCapture>,
         provider: &P,
     ) -> Result<StreamCheckpoint, RuntimeError> {
-        if provider.checkpoint_key() != key || !provider.supports_reset_target(&to) {
+        if provider.checkpoint_key() != request.key || !provider.supports_reset_target(&request.to)
+        {
             return Err(RuntimeError::CheckpointNotReplayable);
         }
-        self.reset_checkpoint_at_capture(lease, key, expected, to, reason, expected_capture)
+        self.reset_checkpoint_at_capture(lease, request, expected_capture)
             .await
     }
 
@@ -3020,12 +3025,15 @@ impl RuntimeState {
     pub async fn reset_checkpoint_at_capture(
         &self,
         lease: WriterLease,
-        key: CheckpointKey,
-        expected: CheckpointPrecondition,
-        to: Position,
-        reason: String,
+        request: CheckpointResetRequest,
         expected_capture: Option<&CwdCapture>,
     ) -> Result<StreamCheckpoint, RuntimeError> {
+        let CheckpointResetRequest {
+            key,
+            expected,
+            to,
+            reason,
+        } = request;
         let audit_reason = redact_reset_reason(reason)?;
         let transaction = self
             .connection
@@ -4343,7 +4351,9 @@ impl RuntimeState {
                     }
                 };
                 match result {
-                    CommitResult::Failed { failure } => Ok(StreamStep::Failed { failure }),
+                    CommitResult::Failed { failure } => Ok(StreamStep::Failed {
+                        failure: Box::new(failure),
+                    }),
                     CommitResult::Rejected(reason) => {
                         self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
                             .await;
@@ -4454,7 +4464,9 @@ impl RuntimeState {
                             }
                         };
                         match result {
-                            CommitResult::Failed { failure } => Ok(StreamStep::Failed { failure }),
+                            CommitResult::Failed { failure } => Ok(StreamStep::Failed {
+                                failure: Box::new(failure),
+                            }),
                             CommitResult::Rejected(reason) => {
                                 self.release_stream_lease_best_effort(
                                     writer,
@@ -4534,7 +4546,9 @@ impl RuntimeState {
                     }
                 };
                 match result {
-                    CommitResult::Failed { failure } => Ok(StreamStep::Failed { failure }),
+                    CommitResult::Failed { failure } => Ok(StreamStep::Failed {
+                        failure: Box::new(failure),
+                    }),
                     CommitResult::Rejected(reason) => {
                         self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
                             .await;
@@ -4718,7 +4732,7 @@ impl RuntimeState {
                     return Ok(StreamRunOutcome::Failed {
                         delivered,
                         checkpoint,
-                        failure: Box::new(failure),
+                        failure,
                     });
                 }
                 StreamStep::Cancelled { checkpoint: next } => {
@@ -7104,7 +7118,7 @@ impl RuntimeState {
         }
         // This owner-only compatibility entry point has no capability to
         // authenticate. Reserved rows must use the capability-bound path.
-        return Err(RuntimeError::RequestStateConflict);
+        Err(RuntimeError::RequestStateConflict)
     }
 
     /// Starts a newly admitted request with the exact capability issued by
@@ -7494,10 +7508,12 @@ impl RuntimeState {
             identity,
             fingerprint,
             owner,
-            RequestState::Completed,
-            outcome,
-            RunObservationStatus::Failed,
-            Some(diagnostic),
+            RequestTerminalTransition {
+                next: RequestState::Completed,
+                terminal_outcome: outcome,
+                observation_status: RunObservationStatus::Failed,
+                diagnostic: Some(diagnostic),
+            },
         )
         .await
     }
@@ -8048,10 +8064,12 @@ impl RuntimeState {
             identity,
             fingerprint,
             owner,
-            next,
-            terminal_outcome,
-            observation_status,
-            None,
+            RequestTerminalTransition {
+                next,
+                terminal_outcome,
+                observation_status,
+                diagnostic: None,
+            },
         )
         .await
     }
@@ -8061,11 +8079,14 @@ impl RuntimeState {
         identity: RequestIdentity,
         fingerprint: [u8; 32],
         owner: WriterLease,
-        next: RequestState,
-        terminal_outcome: TerminalOutcome,
-        observation_status: RunObservationStatus,
-        diagnostic: Option<SafeDiagnostic>,
+        transition: RequestTerminalTransition,
     ) -> Result<RequestStatus, RuntimeError> {
+        let RequestTerminalTransition {
+            next,
+            terminal_outcome,
+            observation_status,
+            diagnostic,
+        } = transition;
         validate_request_identity(identity)?;
         validate_id(owner.owner_id)?;
         if owner.epoch == 0 || !next.is_terminal() {
@@ -13440,7 +13461,6 @@ mod tests {
                 .unwrap(),
             checkpoint_before_replay
         );
-        drop(stream);
         drop(state);
 
         let reopened = open_state(&repo).await;
@@ -15254,7 +15274,7 @@ mod tests {
                 .failure_async(&failure.identity)
                 .await
                 .unwrap(),
-            Some(failure.clone())
+            Some(failure.as_ref().clone())
         );
 
         let retry = match state
@@ -16796,13 +16816,15 @@ mod tests {
         let checkpoint = state
             .reset_checkpoint(
                 writer,
-                key.clone(),
-                CheckpointPrecondition {
-                    version: 0,
-                    committed: None,
+                CheckpointResetRequest {
+                    key: key.clone(),
+                    expected: CheckpointPrecondition {
+                        version: 0,
+                        committed: None,
+                    },
+                    to: reset_position.clone(),
+                    reason: "operator rewind".into(),
                 },
-                reset_position.clone(),
-                "operator rewind".into(),
             )
             .await
             .unwrap();
@@ -16826,13 +16848,15 @@ mod tests {
         let redacted_checkpoint = state
             .reset_checkpoint(
                 writer,
-                key.clone(),
-                CheckpointPrecondition {
-                    version: checkpoint.version,
-                    committed: Some(reset_position),
+                CheckpointResetRequest {
+                    key: key.clone(),
+                    expected: CheckpointPrecondition {
+                        version: checkpoint.version,
+                        committed: Some(reset_position),
+                    },
+                    to: redacted_position.clone(),
+                    reason: "operator\0secret".into(),
                 },
-                redacted_position.clone(),
-                "operator\0secret".into(),
             )
             .await
             .unwrap();
@@ -16874,12 +16898,14 @@ mod tests {
         state
             .reset_checkpoint(
                 writer,
-                key.clone(),
-                initial.clone(),
-                Position {
-                    token: Component::new("first-reset").unwrap(),
+                CheckpointResetRequest {
+                    key: key.clone(),
+                    expected: initial.clone(),
+                    to: Position {
+                        token: Component::new("first-reset").unwrap(),
+                    },
+                    reason: "first reset".into(),
                 },
-                "first reset".into(),
             )
             .await
             .unwrap();
@@ -16888,12 +16914,14 @@ mod tests {
             state
                 .reset_checkpoint(
                     writer,
-                    key.clone(),
-                    initial,
-                    Position {
-                        token: Component::new("stale-version").unwrap(),
+                    CheckpointResetRequest {
+                        key: key.clone(),
+                        expected: initial,
+                        to: Position {
+                            token: Component::new("stale-version").unwrap(),
+                        },
+                        reason: "stale version".into(),
                     },
-                    "stale version".into(),
                 )
                 .await,
             Err(RuntimeError::StreamCheckpointStale)
@@ -16902,17 +16930,19 @@ mod tests {
             state
                 .reset_checkpoint(
                     writer,
-                    key.clone(),
-                    CheckpointPrecondition {
-                        version: current.version,
-                        committed: Some(Position {
-                            token: Component::new("wrong-position").unwrap(),
-                        }),
+                    CheckpointResetRequest {
+                        key: key.clone(),
+                        expected: CheckpointPrecondition {
+                            version: current.version,
+                            committed: Some(Position {
+                                token: Component::new("wrong-position").unwrap(),
+                            }),
+                        },
+                        to: Position {
+                            token: Component::new("stale-position").unwrap(),
+                        },
+                        reason: "stale position".into(),
                     },
-                    Position {
-                        token: Component::new("stale-position").unwrap(),
-                    },
-                    "stale position".into(),
                 )
                 .await,
             Err(RuntimeError::StreamCheckpointStale)
@@ -16952,15 +16982,17 @@ mod tests {
             state
                 .reset_checkpoint(
                     writer,
-                    active_key.clone(),
-                    CheckpointPrecondition {
-                        version: 0,
-                        committed: None,
+                    CheckpointResetRequest {
+                        key: active_key.clone(),
+                        expected: CheckpointPrecondition {
+                            version: 0,
+                            committed: None,
+                        },
+                        to: Position {
+                            token: Component::new("active-rejected").unwrap(),
+                        },
+                        reason: "active delivery".into(),
                     },
-                    Position {
-                        token: Component::new("active-rejected").unwrap(),
-                    },
-                    "active delivery".into(),
                 )
                 .await,
             Err(RuntimeError::RecoveryInvalid)
@@ -17023,15 +17055,17 @@ mod tests {
             state
                 .reset_checkpoint(
                     writer,
-                    failed_key.clone(),
-                    CheckpointPrecondition {
-                        version: 0,
-                        committed: None,
+                    CheckpointResetRequest {
+                        key: failed_key.clone(),
+                        expected: CheckpointPrecondition {
+                            version: 0,
+                            committed: None,
+                        },
+                        to: Position {
+                            token: Component::new("blocking-rejected").unwrap(),
+                        },
+                        reason: "blocking failure".into(),
                     },
-                    Position {
-                        token: Component::new("blocking-rejected").unwrap(),
-                    },
-                    "blocking failure".into(),
                 )
                 .await,
             Err(RuntimeError::RecoveryInvalid)
@@ -17065,15 +17099,17 @@ mod tests {
             state
                 .reset_checkpoint_at_capture(
                     writer,
-                    key.clone(),
-                    CheckpointPrecondition {
-                        version: 0,
-                        committed: None,
+                    CheckpointResetRequest {
+                        key: key.clone(),
+                        expected: CheckpointPrecondition {
+                            version: 0,
+                            committed: None,
+                        },
+                        to: Position {
+                            token: Component::new("capture-rejected").unwrap(),
+                        },
+                        reason: "stale capture".into(),
                     },
-                    Position {
-                        token: Component::new("capture-rejected").unwrap(),
-                    },
-                    "stale capture".into(),
                     Some(&expected_capture),
                 )
                 .await,

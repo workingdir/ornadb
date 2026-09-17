@@ -1613,10 +1613,9 @@ async fn admit_object_tx(
                 &declaration.qualified_name,
             )
             .await?
+                && previous != object_id
             {
-                if previous != object_id {
-                    return Err(RuntimeError::CatalogueRevisionConflict);
-                }
+                return Err(RuntimeError::CatalogueRevisionConflict);
             }
         } else if declaration.rename_from.is_some() {
             return Err(RuntimeError::CataloguePredecessorRequired);
@@ -2111,10 +2110,10 @@ async fn insert_type_tx(
     object_id: [u8; 16],
     form: CatalogueTypeForm,
 ) -> Result<(), RuntimeError> {
-    if let CatalogueTypeForm::Reference { target } = form {
-        if object_kind_tx(transaction, target).await? != CatalogueObjectKind::Type {
-            return Err(RuntimeError::CatalogueKindMismatch);
-        }
+    if let CatalogueTypeForm::Reference { target } = form
+        && object_kind_tx(transaction, target).await? != CatalogueObjectKind::Type
+    {
+        return Err(RuntimeError::CatalogueKindMismatch);
     }
     let (form_name, target) = form.encode();
     transaction
