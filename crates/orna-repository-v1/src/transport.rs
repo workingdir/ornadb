@@ -16,8 +16,8 @@ use std::{
 };
 
 use super::{
-    NativeObjectId, RemoteContinuity, Repository, RepositoryError,
-    RequiredInternalRef, scrub_git_routing_environment, trim_output, valid_branch_name, valid_remote_name,
+    NativeObjectId, RemoteContinuity, Repository, RepositoryError, RequiredInternalRef,
+    scrub_git_routing_environment, trim_output, valid_branch_name, valid_remote_name,
 };
 
 const MAX_FETCH_REFS: usize = 4096;
@@ -256,6 +256,8 @@ impl Repository {
     /// already proven to be promised. The fetch has an empty destination, so
     /// it may add object bytes but cannot update refs or `FETCH_HEAD`; the
     /// postcondition verifies that the requested ID is locally materialized.
+    /// Submodule recursion is disabled: unrelated repositories cannot affect
+    /// the requested object's availability or receive incidental ref updates.
     /// A materialized object is an idempotent success. Unavailable, malformed,
     /// or unproven IDs fail closed before a remote is contacted.
     pub fn hydrate_promised_object(&self, object_id: &str) -> Result<(), FetchError> {
@@ -307,6 +309,7 @@ impl Repository {
                 .args([
                     "fetch",
                     "--no-tags",
+                    "--no-recurse-submodules",
                     "--no-write-fetch-head",
                     "--refmap=",
                     remote,
@@ -497,7 +500,10 @@ fn validate_request(request: &FetchRequest) -> Result<(), FetchError> {
     if !valid_remote_name(&request.remote) {
         return Err(FetchError::InvalidRemote);
     }
-    let request_len = request.ordinary.len().saturating_add(request.continuity.len());
+    let request_len = request
+        .ordinary
+        .len()
+        .saturating_add(request.continuity.len());
     if request_len == 0 {
         return Err(FetchError::EmptyRequest);
     }
@@ -541,7 +547,8 @@ fn advertise(
     if !output.status.success() {
         return Err(FetchError::RemoteUnavailable);
     }
-    let text = std::str::from_utf8(&output.stdout).map_err(|_| FetchError::MalformedAdvertisement)?;
+    let text =
+        std::str::from_utf8(&output.stdout).map_err(|_| FetchError::MalformedAdvertisement)?;
     if text.is_empty() {
         return Ok(BTreeMap::new());
     }
@@ -647,18 +654,18 @@ fn fetch_objects(
         return Ok(());
     }
     let mut command = repository.observer_command();
-    command
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .args([
-            "fetch",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "--refmap=",
-            remote,
-        ]);
+    command.env("GIT_TERMINAL_PROMPT", "0").args([
+        "fetch",
+        "--no-tags",
+        "--no-recurse-submodules",
+        "--no-write-fetch-head",
+        "--refmap=",
+        remote,
+    ]);
     // An empty destination downloads the source objects without allowing
     // Git's configured remote refspec to mutate a tracking ref.  Ref updates
     // are reserved for the validated CAS transaction below.
+    // Configured submodule recursion must not escape this repository's plan.
     let refspecs = plans
         .iter()
         .map(|plan| format!("{}:", plan.source))
@@ -712,12 +719,20 @@ fn install_refs(repository: &Repository, plans: &[RefPlan]) -> Result<(), FetchE
         if plan.updated {
             match &plan.old {
                 Some(old) => {
-                    input.push_str(&format!("update {} {} {}\n", plan.destination, plan.object_id, old));
+                    input.push_str(&format!(
+                        "update {} {} {}\n",
+                        plan.destination, plan.object_id, old
+                    ));
                 }
-                None => input.push_str(&format!("create {} {}\n", plan.destination, plan.object_id)),
+                None => {
+                    input.push_str(&format!("create {} {}\n", plan.destination, plan.object_id))
+                }
             }
         } else {
-            let old = plan.old.as_deref().expect("unchanged plan has an old object ID");
+            let old = plan
+                .old
+                .as_deref()
+                .expect("unchanged plan has an old object ID");
             input.push_str(&format!("verify {} {}\n", plan.destination, old));
         }
     }
