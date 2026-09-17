@@ -402,12 +402,14 @@ impl Repository {
         validate_fast_forward_plans(self, &all_plans)?;
         verify_remote_snapshot(
             self,
-            request.remote(),
-            &sources,
-            &advertised,
-            &request.continuity,
-            continuity,
-            object_id_length,
+            &RemoteSnapshot {
+                remote: request.remote().to_owned(),
+                sources,
+                initial: advertised,
+                required: &request.continuity,
+                initial_continuity: continuity,
+                object_id_length,
+            },
             &all_plans,
         )?;
         install_refs(self, &all_plans)?;
@@ -463,28 +465,40 @@ fn validate_fast_forward_plans(
         if !plan.updated || !matches!(plan.kind, RefKind::Branch | RefKind::Internal) {
             continue;
         }
-        if let Some(old) = &plan.old {
-            if !is_fast_forward(repository, old, &plan.object_id)? {
-                return Err(FetchError::RefConflict);
-            }
+        if let Some(old) = &plan.old
+            && !is_fast_forward(repository, old, &plan.object_id)?
+        {
+            return Err(FetchError::RefConflict);
         }
     }
     Ok(())
 }
 
-fn verify_remote_snapshot(
-    repository: &Repository,
-    remote: &str,
-    sources: &[String],
-    initial: &BTreeMap<String, String>,
-    required: &[RequiredInternalRef],
+struct RemoteSnapshot<'a> {
+    remote: String,
+    sources: Vec<String>,
+    initial: BTreeMap<String, String>,
+    required: &'a [RequiredInternalRef],
     initial_continuity: Option<RemoteContinuity>,
     object_id_length: usize,
+}
+
+fn verify_remote_snapshot(
+    repository: &Repository,
+    snapshot: &RemoteSnapshot<'_>,
     plans: &[RefPlan],
 ) -> Result<(), FetchError> {
-    let current = advertise(repository, remote, sources, object_id_length)?;
+    let RemoteSnapshot {
+        remote,
+        sources,
+        initial,
+        required,
+        initial_continuity,
+        object_id_length,
+    } = snapshot;
+    let current = advertise(repository, remote, sources, *object_id_length)?;
     if current != *initial
-        || continuity_state(required, &current, object_id_length)? != initial_continuity
+        || continuity_state(required, &current, *object_id_length)? != *initial_continuity
         || plans.iter().any(|plan| {
             current
                 .get(&plan.source)
