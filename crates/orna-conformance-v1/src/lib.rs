@@ -31,7 +31,7 @@ mod syntax_adapter;
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use semantic_adapter::{
     BoundedEvaluator, DurableTransactionalEvaluator, RunningTableRequestDisposition,
-    RuntimeAdapter, RuntimeEvaluator, SemanticAdapter, TransactionalEvaluator,
+    RuntimeAdapter, RuntimeEvaluator, RuntimeTarget, SemanticAdapter, TransactionalEvaluator,
 };
 pub use syntax_adapter::SyntaxAdapter;
 
@@ -681,6 +681,9 @@ impl Corpus {
     }
 }
 
+/// Encoded `(key, value)` byte pair for one admitted reference table row.
+type ReferenceEncodedRow = (Vec<u8>, Vec<u8>);
+
 #[derive(Debug, Clone)]
 struct ReferenceTableSchema {
     fields: Vec<(String, String)>,
@@ -689,7 +692,7 @@ struct ReferenceTableSchema {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct ReferenceRuntimeSnapshot {
-    tables: BTreeMap<String, Vec<(Vec<u8>, Vec<u8>)>>,
+    tables: BTreeMap<String, Vec<ReferenceEncodedRow>>,
     checkpoint: Option<Checkpoint>,
 }
 
@@ -852,10 +855,12 @@ async fn execute_reference_project_runtime_adapter(
             let arguments = reference_arguments(&project, case)?;
             let outcome = evaluator
                 .execute_project_with_arguments(
-                    &repository,
-                    identity,
-                    owner_id,
-                    initial_digest,
+                    RuntimeTarget {
+                        repository: &repository,
+                        identity,
+                        owner_id,
+                        initial_digest,
+                    },
                     &project,
                     &case.invoke,
                     &arguments,
@@ -1180,7 +1185,7 @@ fn reference_type_name(ty: &TypeExpr) -> Option<&str> {
 fn reference_expected_rows(
     schema: &ReferenceTableSchema,
     expected: &Value,
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+) -> Result<Vec<ReferenceEncodedRow>, String> {
     let mut rows = Vec::new();
     for row in expected
         .as_array()
