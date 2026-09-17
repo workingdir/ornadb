@@ -3381,6 +3381,57 @@ mod tests {
         Ok(response)
     }
 
+    // Admit through HTTP so both the host lease and transport session record
+    // exist before the actor begins WebSocket delivery.
+    async fn admit_test_session(
+        transport: &mut LiveTransport,
+        deletion: &mut HostDeletion,
+        now: u64,
+        metadata: orna_live_v1::SessionMetadata,
+    ) -> [u8; 32] {
+        struct Authority(orna_live_v1::SessionMetadata);
+
+        impl orna_live_v1::LiveSessionAuthority for Authority {
+            fn create_session(
+                &mut self,
+                _: [u8; 16],
+                _: u64,
+            ) -> orna_live_v1::Result<orna_live_v1::SessionMetadata> {
+                Ok(self.0.clone())
+            }
+        }
+
+        let mut database = String::with_capacity(36);
+        for (index, byte) in metadata.database.into_iter().enumerate() {
+            if [4, 6, 8, 10].contains(&index) {
+                database.push('-');
+            }
+            database.push(b"0123456789abcdef"[(byte >> 4) as usize] as char);
+            database.push(b"0123456789abcdef"[(byte & 15) as usize] as char);
+        }
+        let mut issuer = SystemCredentialIssuer::default();
+        let created = transport
+            .handle(
+                WireRequest {
+                    method: "POST".into(),
+                    path: "/orna/session".into(),
+                    headers: vec![
+                        ("origin".into(), "https://app.example".into()),
+                        ("content-type".into(), "application/json".into()),
+                    ],
+                    body: format!(r#"{{"database":"{database}","protocol":"orna.present.v1"}}"#)
+                        .into_bytes(),
+                },
+                now,
+                &mut Authority(metadata),
+                &mut issuer,
+                deletion,
+            )
+            .await;
+        assert_eq!(created.status, 201);
+        issuer.last_issued().unwrap()
+    }
+
     #[test]
     fn delivery_test_gate_install_preserves_an_existing_gate_on_panic() {
         let (guard, _entered) = super::DeliveryTestGateGuard::install(61);
@@ -3494,7 +3545,6 @@ mod tests {
             Serving::new(orna_serving_v1::Limits::default()).unwrap(),
         )
         .unwrap();
-        let mut issuer = SystemCredentialIssuer::default();
         let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
         let application = PureEvalApplication::from_repository_with_project(
             &repository.recipe.repository,
@@ -3515,44 +3565,18 @@ mod tests {
             application: Rc::new(RefCell::new(Some(application))),
             application_workers: Some(application_workers.clone()),
         };
-        // Admit through HTTP so both the host lease and transport session
-        // record exist before the actor begins WebSocket delivery.
-        struct Authority {
-            session: [u8; 16],
-            expires_at: u64,
-        }
-        impl orna_live_v1::LiveSessionAuthority for Authority {
-            fn create_session(
-                &mut self,
-                database: [u8; 16],
-                _: u64,
-            ) -> orna_live_v1::Result<orna_live_v1::SessionMetadata> {
-                Ok(orna_live_v1::SessionMetadata {
-                    session: self.session,
-                    database,
-                    runtime: [23; 16],
-                    expires_at: self.expires_at,
-                    subscribe: subscribe_payload(),
-                })
-            }
-        }
-        let created = futures::executor::block_on(transport.handle(
-            WireRequest {
-                method: "POST".into(),
-                path: "/orna/session".into(),
-                headers: vec![
-                    ("origin".into(), "https://app.example".into()),
-                    ("content-type".into(), "application/json".into()),
-                ],
-                body: br#"{"database":"01010101-0101-0101-0101-010101010101","protocol":"orna.present.v1"}"#.to_vec(),
-            },
-            now,
-            &mut Authority { session, expires_at },
-            &mut issuer,
+        let token = futures::executor::block_on(admit_test_session(
+            &mut transport,
             &mut deletion,
+            now,
+            orna_live_v1::SessionMetadata {
+                session,
+                database: repository.recipe.database_id,
+                runtime: [23; 16],
+                expires_at,
+                subscribe: subscribe_payload(),
+            },
         ));
-        assert_eq!(created.status, 201);
-        let token = issuer.last_issued().unwrap();
         let mut token_text = String::with_capacity(43);
         const BASE64URL: &[u8; 64] =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -3807,25 +3831,44 @@ mod tests {
             SessionId::new(session),
             expires_at,
         )])));
-        let mut host = LiveHost::new(
+        let host = LiveHost::new(
             Limits::default(),
             SessionBoundary::new(OriginPolicy::new([origin.clone()], []), 60_000),
             Serving::new(orna_serving_v1::Limits::default()).unwrap(),
         )
         .unwrap();
-        let mut issuer = SystemCredentialIssuer::default();
-        futures::executor::block_on(host.create(
-            CreateRequest {
-                id: session,
-                origin,
-                expires_at,
-                now,
-                subscribe: &subscribe_payload(),
-            },
-            &mut issuer,
-        ))
+        let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+        let application = PureEvalApplication::from_repository_with_project(
+            &repository.recipe.repository,
+            repository.recipe.database_id,
+            repository.recipe.identity,
+            repository.recipe.initial_digest,
+            repository.recipe.runtime_owner,
+            Rc::clone(&expiries),
+            Some(repository.recipe.project.clone()),
+            Some(repository.recipe.capture.clone()),
+        )
         .unwrap();
-        let token = issuer.last_issued().unwrap();
+        let application_work = transport.application_work_supervisor();
+        let application_workers = ApplicationWorkerRegistry::new(repository.recipe.clone());
+        let mut deletion = HostDeletion {
+            expiries: Rc::clone(&expiries),
+            deleted_leases: Rc::new(RefCell::new(BTreeMap::new())),
+            application: Rc::new(RefCell::new(Some(application))),
+            application_workers: Some(application_workers.clone()),
+        };
+        let token = futures::executor::block_on(admit_test_session(
+            &mut transport,
+            &mut deletion,
+            now,
+            orna_live_v1::SessionMetadata {
+                session,
+                database: repository.recipe.database_id,
+                runtime: [54; 16],
+                expires_at,
+                subscribe: subscribe_payload(),
+            },
+        ));
         let mut token_text = String::with_capacity(43);
         const BASE64URL: &[u8; 64] =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -3846,26 +3889,6 @@ mod tests {
                 token_text.push(BASE64URL[(chunk[2] & 63) as usize] as char);
             }
         }
-        let transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
-        let application = PureEvalApplication::from_repository_with_project(
-            &repository.recipe.repository,
-            repository.recipe.database_id,
-            repository.recipe.identity,
-            repository.recipe.initial_digest,
-            repository.recipe.runtime_owner,
-            Rc::clone(&expiries),
-            Some(repository.recipe.project.clone()),
-            Some(repository.recipe.capture.clone()),
-        )
-        .unwrap();
-        let application_work = transport.application_work_supervisor();
-        let application_workers = ApplicationWorkerRegistry::new(repository.recipe.clone());
-        let deletion = HostDeletion {
-            expiries: Rc::clone(&expiries),
-            deleted_leases: Rc::new(RefCell::new(BTreeMap::new())),
-            application: Rc::new(RefCell::new(Some(application))),
-            application_workers: Some(application_workers.clone()),
-        };
         super::shutdown_tests::run_local(async move {
             let registry = Rc::new(RefCell::new(super::WorkerRegistry::default()));
             let (actor_sender, actor_receiver) = futures::channel::mpsc::unbounded();
@@ -4041,10 +4064,22 @@ mod tests {
             .await
             .expect("candidate worker must be joined");
             assert!(!super::acknowledge_worker_join(&registry, joined));
-            let retirement =
-                bounded_test_wait(retirement_gates.next(), "candidate retirement gate")
-                    .await
-                    .expect("candidate retirement gate must be published");
+            let retirement = bounded_test_wait(
+                async {
+                    loop {
+                        let retirement = retirement_gates
+                            .next()
+                            .await
+                            .expect("candidate retirement gate must be published");
+                        if retirement.is_empty() {
+                            continue;
+                        }
+                        break retirement;
+                    }
+                },
+                "candidate retirement gate",
+            )
+            .await;
             assert_eq!(retirement.len(), 1);
             assert_eq!(
                 bounded_test_wait(
@@ -4191,39 +4226,14 @@ mod tests {
                 SessionId::new(session),
                 expires_at,
             )])));
-            let mut host = LiveHost::new(
+            let host = LiveHost::new(
                 Limits::default(),
                 SessionBoundary::new(OriginPolicy::new([origin.clone()], []), 60_000),
                 Serving::new(orna_serving_v1::Limits::default()).unwrap(),
             )
             .unwrap();
-            let mut issuer = SystemCredentialIssuer::default();
-            host.create(
-                CreateRequest {
-                    id: session,
-                    origin: origin.clone(),
-                    expires_at,
-                    now,
-                    subscribe: &subscribe_payload(),
-                },
-                &mut issuer,
-            )
-            .await
-            .unwrap();
-            let token = issuer.last_issued().unwrap();
-            let transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+            let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
             let application_work = transport.application_work_supervisor();
-            let mut application_lease = application_work.admit(session, [26; 16]).unwrap();
-            let application_drained = Arc::new(AtomicBool::new(false));
-            let (worker_exit_acknowledged, worker_exit_acknowledgement) =
-                futures::channel::oneshot::channel();
-            let application_drained_for_task = Arc::clone(&application_drained);
-            let application_task = tokio::task::spawn_local(async move {
-                application_lease.cancellation().await.unwrap();
-                worker_exit_acknowledgement.await.unwrap();
-                application_lease.complete();
-                application_drained_for_task.store(true, Ordering::Release);
-            });
             let application = PureEvalApplication::from_repository_with_project(
                 &repository.recipe.repository,
                 repository.recipe.database_id,
@@ -4236,12 +4246,36 @@ mod tests {
             )
             .unwrap();
             let application_workers = ApplicationWorkerRegistry::new(repository.recipe.clone());
-            let deletion = HostDeletion {
+            let mut deletion = HostDeletion {
                 expiries: Rc::clone(&expiries),
                 deleted_leases: Rc::new(RefCell::new(BTreeMap::new())),
                 application: Rc::new(RefCell::new(Some(application))),
                 application_workers: Some(application_workers.clone()),
             };
+            let token = admit_test_session(
+                &mut transport,
+                &mut deletion,
+                now,
+                orna_live_v1::SessionMetadata {
+                    session,
+                    database: repository.recipe.database_id,
+                    runtime: [27; 16],
+                    expires_at,
+                    subscribe: subscribe_payload(),
+                },
+            )
+            .await;
+            let mut application_lease = application_work.admit(session, [26; 16]).unwrap();
+            let application_drained = Arc::new(AtomicBool::new(false));
+            let (worker_exit_acknowledged, worker_exit_acknowledgement) =
+                futures::channel::oneshot::channel();
+            let application_drained_for_task = Arc::clone(&application_drained);
+            let application_task = tokio::task::spawn_local(async move {
+                application_lease.cancellation().await.unwrap();
+                worker_exit_acknowledgement.await.unwrap();
+                application_lease.complete();
+                application_drained_for_task.store(true, Ordering::Release);
+            });
             let mut token_text = String::with_capacity(43);
             const BASE64URL: &[u8; 64] =
                 b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
