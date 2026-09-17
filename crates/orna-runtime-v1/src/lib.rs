@@ -3436,6 +3436,7 @@ impl RuntimeState {
                 outcome,
                 faults,
                 None,
+                None,
             )
             .await
         {
@@ -3463,6 +3464,30 @@ impl RuntimeState {
         &self,
         request: ValidatedTableRequestActivationCommit<'_>,
     ) -> Result<RequestActivationCommit, TableActivationError> {
+        self.commit_validated_request_activation(request, None)
+            .await
+    }
+
+    /// Publishes a complete catalogue and validated table candidate together
+    /// with their checkpoint and request terminal outcome. The catalogue's
+    /// predecessor must exactly equal the activation's starting capture.
+    /// Empty table mutations are permitted: a real catalogue ledger event
+    /// advances the generation without fabricating a table write. Terminal
+    /// replay returns the retained outcome without re-admitting the batch.
+    pub async fn commit_validated_catalogue_table_request_activation(
+        &self,
+        request: ValidatedTableRequestActivationCommit<'_>,
+        admission: &catalogue::CatalogueAdmission,
+    ) -> Result<RequestActivationCommit, TableActivationError> {
+        self.commit_validated_request_activation(request, Some(admission))
+            .await
+    }
+
+    async fn commit_validated_request_activation(
+        &self,
+        request: ValidatedTableRequestActivationCommit<'_>,
+        admission: Option<&catalogue::CatalogueAdmission>,
+    ) -> Result<RequestActivationCommit, TableActivationError> {
         let ValidatedTableRequestActivationCommit {
             writer,
             identity,
@@ -3485,6 +3510,7 @@ impl RuntimeState {
                 outcome,
                 faults,
                 Some(validator),
+                admission,
             )
             .await
         {
@@ -3531,6 +3557,7 @@ impl RuntimeState {
         outcome: TerminalOutcome,
         faults: &dyn FaultInjector,
         mut validator: Option<&mut dyn TableActivationCandidateValidator>,
+        admission: Option<&catalogue::CatalogueAdmission>,
     ) -> Result<RequestActivationCommit, RequestActivationTransactionError> {
         validate_request_identity(identity)?;
         let transaction = self
@@ -3568,14 +3595,18 @@ impl RuntimeState {
         if evidence.owner != Some(RequestOwner::from(lease)) {
             return Err(RuntimeError::RequestOwnerConflict.into());
         }
-        if mutations.is_empty() {
+        if mutations.is_empty() && admission.is_none() {
             return Err(RuntimeError::EmptyMutationBatch.into());
         }
-        let encoded = mutations
+        let mut encoded = mutations
             .iter()
             .map(TableMutation::runtime_mutation)
             .collect::<Result<Vec<_>, _>>()?;
-        validate_mutations(&encoded, next_digest)?;
+        if admission.is_some() {
+            validate_stream_mutations(&encoded, next_digest)?;
+        } else {
+            validate_mutations(&encoded, next_digest)?;
+        }
         if let Some(validator) = &mut validator {
             validate_table_candidate_scope(mutations, validator.tables())?;
         }
@@ -3586,9 +3617,37 @@ impl RuntimeState {
             }
             .into());
         }
+        if admission.is_some_and(|admission| {
+            admission.predecessor_capture.as_ref() != Some(context.capture())
+        }) {
+            return Err(RuntimeError::RecoveryInvalid.into());
+        }
 
         if let Err(error) = faults.check(FaultPoint::BeforeTableWrite) {
             return Err(request_activation_rollback(transaction, error).await?);
+        }
+        if let Some(admission) = admission {
+            let next = CwdCapture::new(
+                Snapshot::cwd(
+                    current_capture.database_id(),
+                    current_capture.runtime_id(),
+                    current_capture.generation() + BigInt::from(1),
+                )
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                next_digest,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            match catalogue::admit_activation_catalogue_tx(
+                &transaction,
+                &current_capture,
+                &next,
+                admission,
+            )
+            .await
+            {
+                Ok(mutation) => encoded.push(mutation),
+                Err(error) => return Err(request_activation_rollback(transaction, error).await?),
+            }
         }
         for mutation in mutations {
             if let Err(error) = apply_table_mutation_tx(&transaction, mutation).await {
@@ -3607,12 +3666,13 @@ impl RuntimeState {
                 return Err(request_activation_validation_rollback(transaction, diagnostic).await?);
             }
         }
-        let capture = match append_mutations_tx(
+        let capture = match append_mutations_with_catalogue_tx(
             &transaction,
             context.capture(),
             &encoded,
             next_digest,
             faults,
+            admission.is_none(),
         )
         .await
         {
@@ -12368,6 +12428,18 @@ async fn append_mutations_tx(
     next_digest: [u8; 32],
     faults: &dyn FaultInjector,
 ) -> Result<CwdCapture, RuntimeError> {
+    append_mutations_with_catalogue_tx(connection, expected, mutations, next_digest, faults, true)
+        .await
+}
+
+async fn append_mutations_with_catalogue_tx(
+    connection: &Connection,
+    expected: &CwdCapture,
+    mutations: &[Mutation],
+    next_digest: [u8; 32],
+    faults: &dyn FaultInjector,
+    carry_catalogue_forward: bool,
+) -> Result<CwdCapture, RuntimeError> {
     let current = capture_tx(connection).await?;
     if &current != expected {
         return Err(RuntimeError::StaleCapture {
@@ -12435,7 +12507,9 @@ async fn append_mutations_tx(
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     faults.check(FaultPoint::AfterCapture)?;
     let capture = capture_tx(connection).await?;
-    crate::catalogue::persist_capture_for_runtime_tx(connection, &current, &capture).await?;
+    if carry_catalogue_forward {
+        crate::catalogue::persist_capture_for_runtime_tx(connection, &current, &capture).await?;
+    }
     Ok(capture)
 }
 
@@ -12871,6 +12945,435 @@ mod tests {
             .run
             .unwrap();
         (identity, fingerprint, run)
+    }
+
+    fn activation_catalogue(predecessor: Option<CwdCapture>, revision: u8) -> CatalogueAdmission {
+        CatalogueAdmission {
+            predecessor_capture: predecessor,
+            types: vec![CatalogueTypeDeclaration {
+                declaration: CatalogueDeclaration {
+                    qualified_name: "pkg.Result".into(),
+                    kind: CatalogueObjectKind::Type,
+                    revision_id: digest(180),
+                    semantic_hash: digest(181),
+                    rename_from: None,
+                },
+                form: CatalogueTypeSpec::Named,
+            }],
+            functions: vec![CatalogueFunctionDeclaration {
+                declaration: CatalogueDeclaration {
+                    qualified_name: "pkg.activate".into(),
+                    kind: CatalogueObjectKind::Function,
+                    revision_id: digest(revision),
+                    semantic_hash: digest(revision),
+                    rename_from: None,
+                },
+                parameters: Vec::new(),
+                result_type_name: "pkg.Result".into(),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn combined_catalogue_activation_success_source_only_reopen_and_replay() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let initial = state.capture().await.unwrap();
+        let admitted = state
+            .admit_catalogue_at(writer, &initial, activation_catalogue(None, 182))
+            .await
+            .unwrap();
+        let old_function = admitted.functions[0].clone();
+        let mut expected_rows = Vec::new();
+        for (index, source_only) in [false, true].into_iter().enumerate() {
+            let (identity, fingerprint, _) =
+                begin_continuable_request(&state, writer, 60, 61 + index as u8, 65 + index as u8)
+                    .await;
+            let context = state.begin_activation().await.unwrap();
+            let admission =
+                activation_catalogue(Some(context.capture().clone()), 183 + index as u8);
+            let mutations = if source_only {
+                Vec::new()
+            } else {
+                expected_rows.push((vec![1], vec![9]));
+                vec![table_mutation(70, 1, Some(9))]
+            };
+            let mut validator = ObservingTableActivationValidator {
+                tables: vec!["books".into()],
+                calls: 0,
+                seen: None,
+            };
+            let committed = state
+                .commit_validated_catalogue_table_request_activation(
+                    ValidatedTableRequestActivationCommit {
+                        writer,
+                        identity,
+                        fingerprint,
+                        context: &context,
+                        mutations: &mutations,
+                        next_digest: digest(80 + index as u8),
+                        outcome: outcome(90),
+                        validator: &mut validator,
+                        faults: &NoFault,
+                    },
+                    &admission,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                committed.capture.generation(),
+                &(context.capture().generation() + BigInt::from(1))
+            );
+            assert_eq!(committed.request.terminal_outcome, Some(outcome(90)));
+            assert_eq!(validator.seen.unwrap().get("books"), Some(&expected_rows));
+            let function = state
+                .catalogue_function("pkg.activate")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(function.object.object_id, old_function.object.object_id);
+            assert_eq!(function.object.revision_id, digest(183 + index as u8));
+            assert_eq!(
+                state
+                    .catalogue_function_at("pkg.activate", &initial)
+                    .await
+                    .unwrap(),
+                Some(old_function.clone())
+            );
+
+            let pending = state.pending().await.unwrap();
+            let event = pending.last().unwrap();
+            let value = Value::decode(&event.payload).unwrap();
+            let OvbRaw::Array(fields) = value.raw() else {
+                panic!("catalogue event must be structural")
+            };
+            assert_eq!(
+                fields[0],
+                OvbRaw::Text("orna.runtime.catalogue-change.v1".into())
+            );
+            assert_eq!(fields[3], committed.capture.snapshot().raw());
+            assert_eq!(
+                state
+                    .latest_checkpoint()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .mutation_sequence,
+                2 + index as u64
+            );
+
+            // Invalid new inputs and a rejecting validator cannot cause a
+            // matching terminal request to re-execute or re-admit identities.
+            let mut rejecting = RejectingValidator {
+                tables: Vec::new(),
+                calls: 0,
+            };
+            let replay = state
+                .commit_validated_catalogue_table_request_activation(
+                    ValidatedTableRequestActivationCommit {
+                        writer,
+                        identity,
+                        fingerprint,
+                        context: &context,
+                        mutations: &[],
+                        next_digest: digest(0),
+                        outcome: outcome(99),
+                        validator: &mut rejecting,
+                        faults: &Fail(FaultPoint::BeforeTableWrite),
+                    },
+                    &activation_catalogue(None, 199),
+                )
+                .await
+                .unwrap();
+            assert_eq!(replay, committed);
+            assert_eq!(rejecting.calls, 0);
+            assert_eq!(state.pending().await.unwrap(), pending);
+        }
+        let capture = state.capture().await.unwrap();
+        let checkpoint = state.latest_checkpoint().await.unwrap();
+        drop(state);
+        let reopened = open_state(&repo).await;
+        assert_eq!(reopened.capture().await.unwrap(), capture);
+        assert_eq!(reopened.latest_checkpoint().await.unwrap(), checkpoint);
+        assert_eq!(
+            reopened.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+        assert_eq!(
+            reopened
+                .catalogue_function("pkg.activate")
+                .await
+                .unwrap()
+                .unwrap()
+                .object
+                .revision_id,
+            digest(184)
+        );
+        assert_eq!(
+            reopened
+                .catalogue_function_at("pkg.activate", &initial)
+                .await
+                .unwrap(),
+            Some(old_function)
+        );
+        assert_eq!(
+            reopened
+                .request_status(request(60, 62), digest(66))
+                .await
+                .unwrap()
+                .unwrap()
+                .terminal_outcome,
+            Some(outcome(90))
+        );
+    }
+
+    #[tokio::test]
+    async fn combined_catalogue_activation_rollback_and_writer_fencing() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let (identity, fingerprint, _) =
+            begin_continuable_request(&state, writer, 100, 101, 102).await;
+        let context = state.begin_activation().await.unwrap();
+        let admission = activation_catalogue(Some(context.capture().clone()), 182);
+        let mutations = [table_mutation(103, 1, Some(9))];
+        for point in [
+            FaultPoint::BeforeTableWrite,
+            FaultPoint::AfterTableWrite,
+            FaultPoint::AfterMutation,
+            FaultPoint::AfterCheckpoint,
+            FaultPoint::AfterCapture,
+            FaultPoint::BeforeTerminalClaim,
+            FaultPoint::AfterTerminalClaim,
+        ] {
+            let (identity, fingerprint, run) = begin_continuable_request(
+                &state,
+                writer,
+                110 + point as u8,
+                130 + point as u8,
+                150 + point as u8,
+            )
+            .await;
+            let mut validator = ObservingTableActivationValidator {
+                tables: vec!["books".into()],
+                calls: 0,
+                seen: None,
+            };
+            let result = state
+                .commit_validated_catalogue_table_request_activation(
+                    ValidatedTableRequestActivationCommit {
+                        writer,
+                        identity,
+                        fingerprint,
+                        context: &context,
+                        mutations: &mutations,
+                        next_digest: digest(104),
+                        outcome: outcome(105),
+                        validator: &mut validator,
+                        faults: &Fail(point),
+                    },
+                    &admission,
+                )
+                .await;
+            assert!(
+                matches!(result, Err(TableActivationError::Runtime(RuntimeError::FaultInjected(actual))) if actual == point)
+            );
+            assert_eq!(state.capture().await.unwrap(), *context.capture());
+            assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+            assert!(state.pending().await.unwrap().is_empty());
+            assert_eq!(
+                state.committed_table_row("books", &[1]).await.unwrap(),
+                None
+            );
+            assert_eq!(
+                state.catalogue_function("pkg.activate").await.unwrap(),
+                None
+            );
+            assert_eq!(
+                state
+                    .request_status(identity, fingerprint)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                RequestState::Running
+            );
+            assert_eq!(
+                state.run_observation(run.id).await.unwrap().unwrap().status,
+                RunObservationStatus::Running
+            );
+        }
+        let mut rejecting = RejectingValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+        };
+        let rejected = state
+            .commit_validated_catalogue_table_request_activation(
+                ValidatedTableRequestActivationCommit {
+                    writer,
+                    identity,
+                    fingerprint,
+                    context: &context,
+                    mutations: &mutations,
+                    next_digest: digest(104),
+                    outcome: outcome(105),
+                    validator: &mut rejecting,
+                    faults: &NoFault,
+                },
+                &admission,
+            )
+            .await;
+        assert!(matches!(
+            rejected,
+            Err(TableActivationError::ValidationFailed(_))
+        ));
+        let mut validator = ObservingTableActivationValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+            seen: None,
+        };
+        for invalid_writer in [
+            WriterLease {
+                owner_id: id(5),
+                epoch: writer.epoch,
+            },
+            WriterLease {
+                owner_id: writer.owner_id,
+                epoch: writer.epoch + 1,
+            },
+        ] {
+            let result = state
+                .commit_validated_catalogue_table_request_activation(
+                    ValidatedTableRequestActivationCommit {
+                        writer: invalid_writer,
+                        identity,
+                        fingerprint,
+                        context: &context,
+                        mutations: &mutations,
+                        next_digest: digest(104),
+                        outcome: outcome(105),
+                        validator: &mut validator,
+                        faults: &NoFault,
+                    },
+                    &admission,
+                )
+                .await;
+            assert!(matches!(
+                result,
+                Err(TableActivationError::Runtime(RuntimeError::OwnerLost))
+            ));
+        }
+        let invalid = activation_catalogue(None, 182);
+        let result = state
+            .commit_validated_catalogue_table_request_activation(
+                ValidatedTableRequestActivationCommit {
+                    writer,
+                    identity,
+                    fingerprint,
+                    context: &context,
+                    mutations: &mutations,
+                    next_digest: digest(104),
+                    outcome: outcome(105),
+                    validator: &mut validator,
+                    faults: &NoFault,
+                },
+                &invalid,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(TableActivationError::Runtime(RuntimeError::RecoveryInvalid))
+        ));
+        let stale_context = RuntimeActivationContext {
+            capture: CwdCapture::new(context.capture().snapshot().clone(), digest(200)).unwrap(),
+            activation_time: context.activation_time(),
+        };
+        let result = state
+            .commit_validated_catalogue_table_request_activation(
+                ValidatedTableRequestActivationCommit {
+                    writer,
+                    identity,
+                    fingerprint,
+                    context: &stale_context,
+                    mutations: &mutations,
+                    next_digest: digest(104),
+                    outcome: outcome(105),
+                    validator: &mut validator,
+                    faults: &NoFault,
+                },
+                &admission,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(TableActivationError::Runtime(
+                RuntimeError::StaleCapture { .. }
+            ))
+        ));
+        let (invalid_identity, invalid_fingerprint, _) =
+            begin_continuable_request(&state, writer, 170, 171, 172).await;
+        let mut invalid_batch = admission.clone();
+        invalid_batch.functions[0].result_type_name = "pkg.Missing".into();
+        let result = state
+            .commit_validated_catalogue_table_request_activation(
+                ValidatedTableRequestActivationCommit {
+                    writer,
+                    identity: invalid_identity,
+                    fingerprint: invalid_fingerprint,
+                    context: &context,
+                    mutations: &mutations,
+                    next_digest: digest(104),
+                    outcome: outcome(105),
+                    validator: &mut validator,
+                    faults: &NoFault,
+                },
+                &invalid_batch,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(TableActivationError::Runtime(RuntimeError::RecoveryInvalid))
+        ));
+        assert_eq!(validator.calls, 0);
+        let mut identities = state
+            .connection
+            .query("SELECT COUNT(*) FROM runtime_catalogue_identity", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            identities
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<i64>(0)
+                .unwrap(),
+            0
+        );
+        drop(identities);
+        drop(state);
+        let reopened = open_state(&repo).await;
+        assert_eq!(reopened.capture().await.unwrap(), *context.capture());
+        assert!(reopened.pending().await.unwrap().is_empty());
+        assert_eq!(reopened.latest_checkpoint().await.unwrap(), None);
+        assert_eq!(
+            reopened.catalogue_function("pkg.activate").await.unwrap(),
+            None
+        );
+        assert_eq!(
+            reopened.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert_ne!(
+            reopened
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            RequestState::Completed
+        );
     }
 
     #[tokio::test]
