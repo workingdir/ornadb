@@ -3488,26 +3488,14 @@ mod tests {
             SessionId::new(session),
             expires_at,
         )])));
-        let mut host = LiveHost::new(
+        let host = LiveHost::new(
             Limits::default(),
             SessionBoundary::new(OriginPolicy::new([origin.clone()], []), 60_000),
             Serving::new(orna_serving_v1::Limits::default()).unwrap(),
         )
         .unwrap();
         let mut issuer = SystemCredentialIssuer::default();
-        futures::executor::block_on(host.create(
-            CreateRequest {
-                id: session,
-                origin: origin.clone(),
-                expires_at,
-                now,
-                subscribe: &subscribe_payload(),
-            },
-            &mut issuer,
-        ))
-        .unwrap();
-        let token = issuer.last_issued().unwrap();
-        let transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+        let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
         let application = PureEvalApplication::from_repository_with_project(
             &repository.recipe.repository,
             repository.recipe.database_id,
@@ -3521,12 +3509,50 @@ mod tests {
         .unwrap();
         let application_work = transport.application_work_supervisor();
         let application_workers = ApplicationWorkerRegistry::new(repository.recipe.clone());
-        let deletion = HostDeletion {
+        let mut deletion = HostDeletion {
             expiries: Rc::clone(&expiries),
             deleted_leases: Rc::new(RefCell::new(BTreeMap::new())),
             application: Rc::new(RefCell::new(Some(application))),
             application_workers: Some(application_workers.clone()),
         };
+        // Admit through HTTP so both the host lease and transport session
+        // record exist before the actor begins WebSocket delivery.
+        struct Authority {
+            session: [u8; 16],
+            expires_at: u64,
+        }
+        impl orna_live_v1::LiveSessionAuthority for Authority {
+            fn create_session(
+                &mut self,
+                database: [u8; 16],
+                _: u64,
+            ) -> orna_live_v1::Result<orna_live_v1::SessionMetadata> {
+                Ok(orna_live_v1::SessionMetadata {
+                    session: self.session,
+                    database,
+                    runtime: [23; 16],
+                    expires_at: self.expires_at,
+                    subscribe: subscribe_payload(),
+                })
+            }
+        }
+        let created = futures::executor::block_on(transport.handle(
+            WireRequest {
+                method: "POST".into(),
+                path: "/orna/session".into(),
+                headers: vec![
+                    ("origin".into(), "https://app.example".into()),
+                    ("content-type".into(), "application/json".into()),
+                ],
+                body: br#"{"database":"01010101-0101-0101-0101-010101010101","protocol":"orna.present.v1"}"#.to_vec(),
+            },
+            now,
+            &mut Authority { session, expires_at },
+            &mut issuer,
+            &mut deletion,
+        ));
+        assert_eq!(created.status, 201);
+        let token = issuer.last_issued().unwrap();
         let mut token_text = String::with_capacity(43);
         const BASE64URL: &[u8; 64] =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -3710,22 +3736,27 @@ mod tests {
                 .is_err()
             );
             allow_exit_sender.send(()).unwrap();
-            let joined = workers
-                .join_next_with_id()
+            let joined = bounded_test_wait(workers.join_next_with_id(), "committed worker join")
                 .await
                 .expect("committed worker must be joined");
             assert!(!super::acknowledge_worker_join(&registry, joined));
 
-            let retirement = loop {
-                let retirement = retirement_gate_receiver
-                    .next()
-                    .await
-                    .expect("closed attachment must publish its retirement gate");
-                if retirement.iter().any(|gate| gate.attachment == attachment) {
-                    break retirement;
-                }
-                assert!(retirement.is_empty());
-            };
+            let retirement = bounded_test_wait(
+                async {
+                    loop {
+                        let retirement = retirement_gate_receiver
+                            .next()
+                            .await
+                            .expect("closed attachment must publish its retirement gate");
+                        if retirement.iter().any(|gate| gate.attachment == attachment) {
+                            break retirement;
+                        }
+                        assert!(retirement.is_empty());
+                    }
+                },
+                "closed attachment retirement gate",
+            )
+            .await;
             assert_eq!(retirement.len(), 1);
             assert_eq!(retirement[0].attachment, attachment);
 
