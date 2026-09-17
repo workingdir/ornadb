@@ -2187,7 +2187,21 @@ fn websocket_replacement_queues_retirement_and_close_is_idempotent() {
         Ok(FrameOutcome::Closed)
     );
     assert!(transport.acknowledge_retired_attachment([6; 16]));
-    assert_eq!(transport.take_retired_attachments(), Vec::<[u8; 16]>::new());
+    assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
+    assert_eq!(
+        block_on(transport.upgrade(upgrade([5; 16]).0, [5; 16], 5)).status,
+        503
+    );
+    assert_eq!(
+        block_on(transport.close_attachment([5; 16], 5)),
+        Err(Error::Closed)
+    );
+    assert!(transport.take_retired_attachments().is_empty());
+    assert!(transport.acknowledge_retired_attachment([5; 16]));
+    assert_eq!(
+        block_on(transport.upgrade(upgrade([5; 16]).0, [5; 16], 6)).status,
+        101
+    );
 }
 
 #[test]
