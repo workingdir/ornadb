@@ -6,16 +6,16 @@
 //! caller supplies names and semantic hashes; it never supplies an ObjectRef
 //! or an ObjectId to this boundary.
 
-use libsql::{params, Connection, Transaction};
+use libsql::{Connection, Transaction, params};
 use orna_foundation_v1::{
-    function_reference, object_reference, type_reference, validate_type_reference, FunctionRef,
-    ObjectRef, Snapshot, TypeRef, Value,
+    FunctionRef, ObjectRef, Snapshot, TypeRef, Value, function_reference, object_reference,
+    type_reference, validate_type_reference,
 };
 use uuid::Uuid;
 
 use crate::{
-    capture_tx, fixed, now_ms, validate_observation_text, RuntimeError as RuntimeFailure,
-    RuntimeState,
+    RuntimeError as RuntimeFailure, RuntimeState, capture_tx, fixed, now_ms,
+    validate_observation_text,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

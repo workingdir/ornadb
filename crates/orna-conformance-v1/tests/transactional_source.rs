@@ -76,9 +76,11 @@ fn parsed_nested_insert_commits_when_parent_returns_successfully() {
         runtime.execute_source(&source("")),
         StageOutcome::Passed
     ));
-    assert!(runtime
-        .committed_row("Note", &Value::int(7.into()))
-        .is_some());
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(7.into()))
+            .is_some()
+    );
 }
 
 #[test]
@@ -151,9 +153,11 @@ fn parsed_upsert_patches_existing_rows_and_inserts_absent_rows() {
             if fields.iter().any(|(key, value)| key == &orna_foundation_v1::OvbRaw::Text("text".into())
                 && value == &orna_foundation_v1::OvbRaw::Text("updated".into()))
     ));
-    assert!(runtime
-        .committed_row("Note", &Value::int(8.into()))
-        .is_some());
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(8.into()))
+            .is_some()
+    );
 }
 
 #[test]
@@ -233,9 +237,11 @@ fn parsed_keyed_relation_one_observes_candidate_rows_and_absence_rolls_back() {
         committed.execute_source(&unit),
         StageOutcome::Passed
     ));
-    assert!(committed
-        .committed_row("Note", &Value::int(7.into()))
-        .is_some());
+    assert!(
+        committed
+            .committed_row("Note", &Value::int(7.into()))
+            .is_some()
+    );
 
     let missing = SourceUnit {
         fixture_id: "relation-one-missing".into(),
@@ -303,9 +309,11 @@ fn parsed_pipeline_count_in_a_direct_function_body_observes_activation_writes() 
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed));
-    assert!(runtime
-        .committed_row("Note", &Value::int(7.into()))
-        .is_some());
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(7.into()))
+            .is_some()
+    );
 }
 
 #[test]
@@ -399,9 +407,11 @@ fn parsed_pipeline_count_call_in_a_direct_function_body_observes_activation_writ
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed));
-    assert!(runtime
-        .committed_row("Note", &Value::int(7.into()))
-        .is_some());
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(7.into()))
+            .is_some()
+    );
 }
 
 #[test]
@@ -412,12 +422,16 @@ fn parsed_filter_count_pipeline_observes_candidate_rows_and_read_your_writes() {
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed));
-    assert!(runtime
-        .committed_row("Note", &Value::int(7.into()))
-        .is_some());
-    assert!(runtime
-        .committed_row("Note", &Value::int(8.into()))
-        .is_some());
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(7.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(8.into()))
+            .is_some()
+    );
 }
 
 #[test]
@@ -452,12 +466,16 @@ fn parsed_pipeline_count_bare_statement_observes_activation_writes() {
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed));
-    assert!(runtime
-        .committed_row("Note", &Value::int(7.into()))
-        .is_some());
-    assert!(runtime
-        .committed_row("Note", &Value::int(8.into()))
-        .is_some());
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(7.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(8.into()))
+            .is_some()
+    );
 }
 
 #[test]
@@ -510,9 +528,11 @@ fn parsed_rekey_moves_the_row_atomically() {
         StageOutcome::Passed
     ));
     assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
-    assert!(runtime
-        .committed_row("Note", &Value::int(8.into()))
-        .is_some());
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(8.into()))
+            .is_some()
+    );
 }
 
 #[test]
@@ -521,10 +541,7 @@ fn parsed_composite_rekey_moves_every_key_component_in_declaration_order() {
     let outcome = runtime.execute_source(&composite_source(
         r#"Stock.rekey(("north", "pencil"), ("south", "pencil"));"#,
     ));
-    assert!(matches!(
-        outcome,
-        StageOutcome::Passed
-    ));
+    assert!(matches!(outcome, StageOutcome::Passed));
 
     let north = Value::new(orna_foundation_v1::OvbRaw::Array(vec![
         orna_foundation_v1::OvbRaw::Text("north".into()),
@@ -611,12 +628,16 @@ fn table_every_assertion_permits_atomic_publication() {
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed));
-    assert!(runtime
-        .committed_row("Note", &Value::int(7.into()))
-        .is_some());
-    assert!(runtime
-        .committed_row("Note", &Value::int(8.into()))
-        .is_some());
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(7.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(8.into()))
+            .is_some()
+    );
 }
 
 #[test]
@@ -657,12 +678,16 @@ fn table_all_unique_assertion_permits_atomic_publication() {
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed));
-    assert!(runtime
-        .committed_row("Note", &Value::int(7.into()))
-        .is_some());
-    assert!(runtime
-        .committed_row("Note", &Value::int(8.into()))
-        .is_some());
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(7.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(8.into()))
+            .is_some()
+    );
 }
 
 #[test]
@@ -690,12 +715,16 @@ fn module_every_exists_assertion_permits_atomic_cross_table_publication() {
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed));
-    assert!(runtime
-        .committed_row("Book", &Value::int(7.into()))
-        .is_some());
-    assert!(runtime
-        .committed_row("Loan", &Value::int(1.into()))
-        .is_some());
+    assert!(
+        runtime
+            .committed_row("Book", &Value::int(7.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Loan", &Value::int(1.into()))
+            .is_some()
+    );
 }
 
 #[test]
