@@ -3192,10 +3192,10 @@ impl Context<'_, '_> {
             .checked_add(debited)
             .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
         let page = result?.ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
-        if let (Some(after), Some(next)) = (after, page.next.as_deref()) {
-            if next <= after {
-                return Err(error("ORNA-EVAL-VALUE"));
-            }
+        if let (Some(after), Some(next)) = (after, page.next.as_deref())
+            && next <= after
+        {
+            return Err(error("ORNA-EVAL-VALUE"));
         }
         Ok(page)
     }
@@ -4230,14 +4230,11 @@ impl Context<'_, '_> {
             lawful_group_key(&group_key)?;
             let mut matched = false;
             for (existing_key, rows) in &mut groups {
-                match compare_group_keys(existing_key, &group_key)? {
-                    std::cmp::Ordering::Equal => {
-                        rows.push(value.clone());
-                        self.items(rows.len())?;
-                        matched = true;
-                        break;
-                    }
-                    _ => {}
+                if compare_group_keys(existing_key, &group_key)? == std::cmp::Ordering::Equal {
+                    rows.push(value.clone());
+                    self.items(rows.len())?;
+                    matched = true;
+                    break;
                 }
             }
             if !matched {
