@@ -1941,14 +1941,14 @@ impl Parser {
         let mut parentheses = 0usize;
         let mut brackets = 0usize;
         let mut body_open = None;
-        for index in (at + 1)..tokens.len() {
-            match tokens[index].kind {
+        for (index, token) in tokens[at + 1..].iter().enumerate() {
+            match token.kind {
                 TokenKind::Punct("(") => parentheses += 1,
                 TokenKind::Punct(")") if parentheses > 0 => parentheses -= 1,
                 TokenKind::Punct("[") => brackets += 1,
                 TokenKind::Punct("]") if brackets > 0 => brackets -= 1,
                 TokenKind::Punct("{") if parentheses == 0 && brackets == 0 => {
-                    body_open = Some(index);
+                    body_open = Some(index + at + 1);
                     break;
                 }
                 TokenKind::Punct(";" | "}") if parentheses == 0 && brackets == 0 => return false,
@@ -2096,12 +2096,11 @@ impl Parser {
                 }
                 TokenKind::Punct("}") => {
                     braces = braces.saturating_sub(1);
-                    if braces == 0 && type_declaration {
-                        if type_refinement_body || !type_has_equals {
-                            type_declaration = false;
-                            type_has_equals = false;
-                            type_refinement_body = false;
-                        }
+                    if braces == 0 && type_declaration && (type_refinement_body || !type_has_equals)
+                    {
+                        type_declaration = false;
+                        type_has_equals = false;
+                        type_refinement_body = false;
                     }
                 }
                 TokenKind::Punct("<") if braces == 0 => angles += 1,
@@ -2149,17 +2148,17 @@ impl Parser {
     }
     fn table_body_open(tokens: &[Token], at: usize) -> Option<usize> {
         let mut nested_braces = 0usize;
-        (0..at).rev().find_map(|index| match tokens[index].kind {
+        (0..at).rev().find(|index| match tokens[*index].kind {
             TokenKind::Punct("}") => {
                 nested_braces += 1;
-                None
+                false
             }
-            TokenKind::Punct("{") if nested_braces == 0 => Some(index),
+            TokenKind::Punct("{") if nested_braces == 0 => true,
             TokenKind::Punct("{") => {
                 nested_braces -= 1;
-                None
+                false
             }
-            _ => None,
+            _ => false,
         })
     }
     fn is_table_declaration_body(tokens: &[Token], table_open: usize) -> bool {
@@ -3992,17 +3991,18 @@ impl Parser {
                 NominalBraceMode::ControlRoot => false,
                 NominalBraceMode::ControlNested => self.nominal_brace_is_expression_continuation(),
             };
-            if nominal_braces && self.is_punct("{") {
-                if let Some(path) = nominal_path(&lhs) {
-                    let start = lhs.span().start;
-                    let fields = self.parse_record();
-                    lhs = Expr::Nominal {
-                        path,
-                        fields,
-                        span: SourceSpan::new(start, self.previous().span.end),
-                    };
-                    continue;
-                }
+            if nominal_braces
+                && self.is_punct("{")
+                && let Some(path) = nominal_path(&lhs)
+            {
+                let start = lhs.span().start;
+                let fields = self.parse_record();
+                lhs = Expr::Nominal {
+                    path,
+                    fields,
+                    span: SourceSpan::new(start, self.previous().span.end),
+                };
+                continue;
             }
             if self.is_punct("[") {
                 let start = lhs.span().start;
