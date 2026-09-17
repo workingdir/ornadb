@@ -5069,7 +5069,7 @@ impl LiveTransport {
             )),
             SocketEvent::Pong => Ok(WebSocketApplicationPreparation::Pending),
             SocketEvent::Close => {
-                self.host.close_attachment(socket.attachment, now).await?;
+                self.close_attachment(socket.attachment, now).await?;
                 Ok(WebSocketApplicationPreparation::Output(
                     WebSocketOutput::Close { code: None },
                 ))
@@ -5092,7 +5092,7 @@ impl LiveTransport {
         socket.closed = true;
         socket.fragment = None;
         socket.pending.clear();
-        let _ = self.host.close_attachment(socket.attachment, now).await;
+        let _ = self.close_attachment(socket.attachment, now).await;
         Ok(WebSocketApplicationPreparation::Output(
             WebSocketOutput::Close { code: Some(code) },
         ))
@@ -5116,6 +5116,8 @@ impl LiveTransport {
     /// Idempotently closes one attachment through the transport-owned host
     /// state. Retired workers may call this after replacement; the inner host
     /// reports [`Error::Closed`] without affecting the replacement.
+    /// A successful close queues retirement; session cleanup stays fenced
+    /// until the executable owner joins and acknowledges the socket worker.
     ///
     /// # Errors
     ///
@@ -5126,7 +5128,16 @@ impl LiveTransport {
         attachment: [u8; 16],
         now: u64,
     ) -> Result<FrameOutcome> {
-        self.host.close_attachment(attachment, now).await
+        let session = self.host.attachments.get(&attachment).copied();
+        let outcome = self.host.close_attachment(attachment, now).await;
+        // The host also removes stale attachments on validation failure.
+        // Preserve their transport fence even when close reports an error.
+        if let Some(session) = session
+            && !self.host.attachments.contains_key(&attachment)
+        {
+            self.queue_retired_attachment(session, attachment);
+        }
+        outcome
     }
 
     /// Parses exactly the three live-session HTTP endpoint shapes.
