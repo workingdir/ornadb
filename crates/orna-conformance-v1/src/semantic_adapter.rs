@@ -23,10 +23,10 @@ use orna_evaluator_v1::{
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    FaultInjector, FaultPoint, ListStreamSource, NoFault, RequestIdentity, RequestStatus,
-    RunObservationRegistration, RunningTableRequestContinuation, RuntimeError, RuntimeIdentity,
-    RuntimeState, StreamFailurePayload, StreamHandler, StreamHandlerResult, StreamItem,
-    StreamObservationRegistration, StreamRunControl, StreamRunOutcome, StreamSource,
+    CheckpointResetRequest, FaultInjector, FaultPoint, ListStreamSource, NoFault, RequestIdentity,
+    RequestStatus, RunObservationRegistration, RunningTableRequestContinuation, RuntimeError,
+    RuntimeIdentity, RuntimeState, StreamFailurePayload, StreamHandler, StreamHandlerResult,
+    StreamItem, StreamObservationRegistration, StreamRunControl, StreamRunOutcome, StreamSource,
     StreamSourcePoll, StreamStep, StreamTableCandidateValidator, StreamTableDeliveryError,
     StreamValidatedTableDeliveryCommit, StreamValidatedTableMutationBatch,
     TableActivationCandidateValidator, TableActivationError, TableMutation, TerminalOutcome,
@@ -9967,10 +9967,12 @@ async fn checkpoint_atomicity_prepare(
     let checkpoint = state
         .reset_checkpoint(
             writer,
-            key.clone(),
-            CheckpointPrecondition::from(&initial),
-            checkpoint_atomicity_position("41")?,
-            "immutable CP-001 setup".into(),
+            CheckpointResetRequest {
+                key: key.clone(),
+                expected: CheckpointPrecondition::from(&initial),
+                to: checkpoint_atomicity_position("41")?,
+                reason: "immutable CP-001 setup".into(),
+            },
         )
         .await?;
     if !matches!(
