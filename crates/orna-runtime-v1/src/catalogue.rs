@@ -1206,6 +1206,226 @@ pub struct CatalogueParameterHandle {
     pub type_object: CatalogueTypeHandle,
 }
 
+/// Admits a complete candidate at the next, not-yet-visible generation and
+/// records a real catalogue ledger event. This is not a table mutation or a
+/// source revision producer: revision witnesses remain caller-supplied facts.
+pub(crate) async fn admit_activation_catalogue_tx(
+    transaction: &Transaction,
+    predecessor: &orna_foundation_v1::CwdCapture,
+    capture: &orna_foundation_v1::CwdCapture,
+    admission: &CatalogueAdmission,
+) -> Result<crate::Mutation, crate::RuntimeError> {
+    use orna_foundation_v1::OvbRaw;
+    use sha2::{Digest, Sha256};
+
+    // The outer request boundary checks this before any candidate writes.
+    if admission.predecessor_capture.as_ref() != Some(predecessor) {
+        return Err(crate::RuntimeError::RecoveryInvalid);
+    }
+    persist_capture_tx(transaction, predecessor)
+        .await
+        .map_err(map_catalogue_runtime_error)?;
+    admit_catalogue_batch_tx(transaction, capture, admission)
+        .await
+        .map_err(map_catalogue_runtime_error)?;
+
+    fn declaration(value: &CatalogueDeclaration) -> OvbRaw {
+        OvbRaw::Array(vec![
+            OvbRaw::Text(value.qualified_name.clone()),
+            OvbRaw::Bytes(value.revision_id.to_vec()),
+            OvbRaw::Bytes(value.semantic_hash.to_vec()),
+            value
+                .rename_from
+                .as_ref()
+                .map_or(OvbRaw::Null, |name| OvbRaw::Text(name.clone())),
+        ])
+    }
+    let types = admission
+        .types
+        .iter()
+        .map(|value| {
+            let form = match &value.form {
+                CatalogueTypeSpec::Named => OvbRaw::Array(vec![OvbRaw::Text("named".into())]),
+                CatalogueTypeSpec::Value => OvbRaw::Array(vec![OvbRaw::Text("value".into())]),
+                CatalogueTypeSpec::Reference { target } => OvbRaw::Array(vec![
+                    OvbRaw::Text("reference".into()),
+                    OvbRaw::Text(target.clone()),
+                ]),
+            };
+            OvbRaw::Array(vec![declaration(&value.declaration), form])
+        })
+        .collect();
+    let functions = admission
+        .functions
+        .iter()
+        .map(|value| {
+            OvbRaw::Array(vec![
+                declaration(&value.declaration),
+                OvbRaw::Text(value.result_type_name.clone()),
+                OvbRaw::Array(
+                    value
+                        .parameters
+                        .iter()
+                        .map(|parameter| {
+                            OvbRaw::Array(vec![
+                                OvbRaw::Text(parameter.name.clone()),
+                                OvbRaw::Int(parameter.position.into()),
+                                OvbRaw::Text(parameter.type_name.clone()),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ])
+        })
+        .collect();
+    let batch = Value::new(OvbRaw::Array(vec![
+        OvbRaw::Array(types),
+        OvbRaw::Array(functions),
+    ]))
+    .and_then(|value| value.encode())
+    .map_err(|_| crate::RuntimeError::RecoveryInvalid)?;
+    let payload = Value::new(OvbRaw::Array(vec![
+        OvbRaw::Text("orna.runtime.catalogue-change.v1".into()),
+        predecessor.snapshot().raw(),
+        OvbRaw::Bytes(predecessor.generation_digest().to_vec()),
+        capture.snapshot().raw(),
+        OvbRaw::Bytes(capture.generation_digest().to_vec()),
+        OvbRaw::Bytes(Sha256::digest(&batch).to_vec()),
+    ]))
+    .and_then(|value| value.encode())
+    .map_err(|_| crate::RuntimeError::RecoveryInvalid)?;
+    Ok(crate::Mutation {
+        id: *Uuid::new_v4().as_bytes(),
+        digest: Sha256::digest(&payload).into(),
+        payload,
+    })
+}
+
+async fn admit_catalogue_batch_tx(
+    transaction: &Transaction,
+    capture: &orna_foundation_v1::CwdCapture,
+    admission: &CatalogueAdmission,
+) -> Result<CatalogueAdmissionResult, RuntimeError> {
+    persist_capture_tx(transaction, capture).await?;
+    let predecessor = if let Some(predecessor) = admission.predecessor_capture.as_ref() {
+        validate_predecessor_capture_tx(transaction, predecessor, capture).await?;
+        Some(predecessor)
+    } else {
+        if capture.generation() != &num_bigint::BigInt::from(0) {
+            return Err(RuntimeError::CataloguePredecessorRequired);
+        }
+        None
+    };
+    reject_separate_module_rows_tx(transaction, capture).await?;
+    let already_admitted = catalogue_admission_exists_tx(transaction, capture).await?;
+    if already_admitted {
+        return replay_catalogue_tx(transaction, capture, predecessor, admission).await;
+    }
+    clear_catalogue_snapshot_tx(transaction, capture).await?;
+
+    let mut names = std::collections::BTreeMap::new();
+    let mut type_ids = std::collections::BTreeMap::new();
+    for declaration in &admission.types {
+        if declaration.declaration.kind != CatalogueObjectKind::Type {
+            return Err(RuntimeError::CatalogueKindMismatch);
+        }
+        validate_type_spec(&declaration.form)?;
+        if names
+            .insert(
+                declaration.declaration.qualified_name.clone(),
+                CatalogueObjectKind::Type,
+            )
+            .is_some()
+        {
+            return Err(RuntimeError::CatalogueNameConflict);
+        }
+        let object_id =
+            admit_object_tx(transaction, capture, predecessor, &declaration.declaration).await?;
+        type_ids.insert(declaration.declaration.qualified_name.clone(), object_id);
+    }
+    for declaration in &admission.types {
+        let object_id = type_ids[&declaration.declaration.qualified_name];
+        let form = resolve_type_spec(&declaration.form, &type_ids)?;
+        insert_type_tx(transaction, capture, object_id, form).await?;
+    }
+    validate_type_references_tx(transaction, capture).await?;
+
+    let mut function_ids = Vec::new();
+    for declaration in &admission.functions {
+        if declaration.declaration.kind != CatalogueObjectKind::Function {
+            return Err(RuntimeError::CatalogueKindMismatch);
+        }
+        validate_function_shape(declaration)?;
+        if names
+            .insert(
+                declaration.declaration.qualified_name.clone(),
+                CatalogueObjectKind::Function,
+            )
+            .is_some()
+        {
+            return Err(RuntimeError::CatalogueNameConflict);
+        }
+        let object_id =
+            admit_object_tx(transaction, capture, predecessor, &declaration.declaration).await?;
+        let result_type = *type_ids
+            .get(&declaration.result_type_name)
+            .ok_or(RuntimeError::CatalogueTypeMissing)?;
+        let parameter_types = declaration
+            .parameters
+            .iter()
+            .map(|parameter| {
+                type_ids
+                    .get(&parameter.type_name)
+                    .copied()
+                    .ok_or(RuntimeError::CatalogueTypeMissing)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        insert_function_tx(
+            transaction,
+            capture,
+            object_id,
+            result_type,
+            &declaration.parameters,
+            &parameter_types,
+        )
+        .await?;
+        function_ids.push(object_id);
+    }
+
+    validate_complete_batch_tx(transaction, capture, &names).await?;
+    let inserted = transaction
+        .execute(
+            "INSERT INTO runtime_catalogue_admission (snapshot) VALUES (?1)",
+            params![capture_bytes(capture)?],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if inserted != 1 {
+        return Err(RuntimeError::CatalogueCorrupt);
+    }
+
+    let mut types = Vec::with_capacity(admission.types.len());
+    for declaration in &admission.types {
+        types.push(
+            load_type_handle_tx(
+                transaction,
+                capture,
+                type_ids[&declaration.declaration.qualified_name],
+            )
+            .await?,
+        );
+    }
+    let mut functions = Vec::with_capacity(function_ids.len());
+    for object_id in function_ids {
+        functions.push(load_function_tx(transaction, capture, object_id).await?);
+    }
+    Ok(CatalogueAdmissionResult {
+        capture: capture.clone(),
+        types,
+        functions,
+    })
+}
+
 impl RuntimeState {
     /// Returns the complete previously observed capture for use as a
     /// predecessor. Its generation digest is retained and checked by the
@@ -1240,146 +1460,12 @@ impl RuntimeState {
                 current: Box::new(capture),
             });
         }
-        persist_capture_tx(&transaction, &capture).await?;
-        let predecessor = if let Some(predecessor) = admission.predecessor_capture.as_ref() {
-            validate_predecessor_capture_tx(&transaction, predecessor, &capture).await?;
-            Some(predecessor)
-        } else {
-            if capture.generation() != &num_bigint::BigInt::from(0) {
-                return Err(RuntimeError::CataloguePredecessorRequired);
-            }
-            None
-        };
-        reject_separate_module_rows_tx(&transaction, &capture).await?;
-        let already_admitted = catalogue_admission_exists_tx(&transaction, &capture).await?;
-        if already_admitted {
-            let result =
-                replay_catalogue_tx(&transaction, &capture, predecessor, &admission).await?;
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-            return Ok(result);
-        }
-        clear_catalogue_snapshot_tx(&transaction, &capture).await?;
-
-        let mut names = std::collections::BTreeMap::new();
-        let mut type_ids = std::collections::BTreeMap::new();
-        for declaration in &admission.types {
-            if declaration.declaration.kind != CatalogueObjectKind::Type {
-                return Err(RuntimeError::CatalogueKindMismatch);
-            }
-            validate_type_spec(&declaration.form)?;
-            if names
-                .insert(
-                    declaration.declaration.qualified_name.clone(),
-                    CatalogueObjectKind::Type,
-                )
-                .is_some()
-            {
-                return Err(RuntimeError::CatalogueNameConflict);
-            }
-            let object_id = admit_object_tx(
-                &transaction,
-                &capture,
-                predecessor,
-                &declaration.declaration,
-            )
-            .await?;
-            type_ids.insert(declaration.declaration.qualified_name.clone(), object_id);
-        }
-        for declaration in &admission.types {
-            let object_id = type_ids[&declaration.declaration.qualified_name];
-            let form = resolve_type_spec(&declaration.form, &type_ids)?;
-            insert_type_tx(&transaction, &capture, object_id, form).await?;
-        }
-        validate_type_references_tx(&transaction, &capture).await?;
-
-        let mut function_ids = Vec::new();
-        for declaration in &admission.functions {
-            if declaration.declaration.kind != CatalogueObjectKind::Function {
-                return Err(RuntimeError::CatalogueKindMismatch);
-            }
-            validate_function_shape(declaration)?;
-            if names
-                .insert(
-                    declaration.declaration.qualified_name.clone(),
-                    CatalogueObjectKind::Function,
-                )
-                .is_some()
-            {
-                return Err(RuntimeError::CatalogueNameConflict);
-            }
-            let object_id = admit_object_tx(
-                &transaction,
-                &capture,
-                predecessor,
-                &declaration.declaration,
-            )
-            .await?;
-            let result_type = *type_ids
-                .get(&declaration.result_type_name)
-                .ok_or(RuntimeError::CatalogueTypeMissing)?;
-            let parameter_types = declaration
-                .parameters
-                .iter()
-                .map(|parameter| {
-                    type_ids
-                        .get(&parameter.type_name)
-                        .copied()
-                        .ok_or(RuntimeError::CatalogueTypeMissing)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            insert_function_tx(
-                &transaction,
-                &capture,
-                object_id,
-                result_type,
-                &declaration.parameters,
-                &parameter_types,
-            )
-            .await?;
-            function_ids.push(object_id);
-        }
-
-        validate_complete_batch_tx(&transaction, &capture, &names).await?;
-        if !already_admitted {
-            let inserted = transaction
-                .execute(
-                    "INSERT INTO runtime_catalogue_admission (snapshot) VALUES (?1)",
-                    params![capture_bytes(&capture)?],
-                )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-            if inserted != 1 {
-                return Err(RuntimeError::CatalogueCorrupt);
-            }
-        }
-
-        let mut types = Vec::with_capacity(admission.types.len());
-        for declaration in &admission.types {
-            types.push(
-                load_type_handle_tx(
-                    &transaction,
-                    &capture,
-                    type_ids[&declaration.declaration.qualified_name],
-                )
-                .await?,
-            );
-        }
-        let mut functions = Vec::with_capacity(function_ids.len());
-        for object_id in function_ids {
-            functions.push(load_function_tx(&transaction, &capture, object_id).await?);
-        }
+        let result = admit_catalogue_batch_tx(&transaction, &capture, &admission).await?;
         transaction
             .commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        Ok(CatalogueAdmissionResult {
-            capture,
-            types,
-            functions,
-        })
+        Ok(result)
     }
 
     /// Atomically admits or replays one resolved module identity at the
