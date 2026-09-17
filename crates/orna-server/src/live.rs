@@ -336,13 +336,15 @@ impl ApplicationJob {
         let Some(reply) = self.reply.take() else {
             return;
         };
-        let _ = self.completion_sender.unbounded_send(
-            ActorCommand::ApplicationComplete(Box::new(ApplicationCompletion {
-                socket,
-                completion,
-                reply,
-            })),
-        );
+        let _ = self
+            .completion_sender
+            .unbounded_send(ActorCommand::ApplicationComplete(Box::new(
+                ApplicationCompletion {
+                    socket,
+                    completion,
+                    reply,
+                },
+            )));
     }
 
     fn reject(&mut self, error: orna_live_v1::Error) {
@@ -3326,9 +3328,8 @@ fn duration_milliseconds(duration: std::time::Duration) -> u64 {
 mod tests {
     use super::{
         ActorCommand, ApplicationCompletion, ApplicationJob, ApplicationWorkerRecipe,
-        ApplicationWorkerRegistry,
-        DeletedLeaseIndex, HostApplicationChildren, HostDeletion, SharedApplication,
-        commit_within_delivery_window, delivery_window, duration_milliseconds,
+        ApplicationWorkerRegistry, DeletedLeaseIndex, HostApplicationChildren, HostDeletion,
+        SharedApplication, commit_within_delivery_window, delivery_window, duration_milliseconds,
         expired_delete_response, runtime_identity, subscribe_payload,
     };
     use crate::live_eval::PureEvalApplication;
@@ -4816,8 +4817,7 @@ mod tests {
                 .next()
                 .await
                 .expect("joined worker must report its fenced completion");
-            let ActorCommand::ApplicationComplete(completion) = command
-            else {
+            let ActorCommand::ApplicationComplete(completion) = command else {
                 panic!("worker reported an unexpected actor command");
             };
             let ApplicationCompletion {
