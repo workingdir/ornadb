@@ -915,10 +915,12 @@ fn run_project_invocation_with_arguments(
         })?
         .block_on(
             DurableTransactionalEvaluator::default().execute_project_with_arguments(
-                &repository,
-                identity,
-                owner_id,
-                initial_digest,
+                orna_conformance_v1::RuntimeTarget {
+                    repository: &repository,
+                    identity,
+                    owner_id,
+                    initial_digest,
+                },
                 &project,
                 root_entry,
                 arguments,

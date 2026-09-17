@@ -590,10 +590,12 @@ async fn project_stream_cancellation_before_first_poll_is_retained_without_failu
     let control = CancelAtCheck::new(1);
     let outcome = orna_conformance_v1::DurableTransactionalEvaluator::default()
         .execute_project_stream_request_with_control(
-            &repository,
-            identity,
-            [106; 16],
-            [107; 32],
+            orna_conformance_v1::RuntimeTarget {
+                repository: &repository,
+                identity,
+                owner_id: [106; 16],
+                initial_digest: [107; 32],
+            },
             request,
             fingerprint,
             &cancellation_project(),
@@ -663,10 +665,12 @@ async fn project_stream_cancellation_after_one_commit_retains_progress_without_f
     let control = CancelAtCheck::new(4);
     let outcome = orna_conformance_v1::DurableTransactionalEvaluator::default()
         .execute_project_stream_request_with_control(
-            &repository,
-            identity,
-            [116; 16],
-            [117; 32],
+            orna_conformance_v1::RuntimeTarget {
+                repository: &repository,
+                identity,
+                owner_id: [116; 16],
+                initial_digest: [117; 32],
+            },
             request,
             fingerprint,
             &cancellation_project(),
