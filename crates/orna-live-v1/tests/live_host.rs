@@ -3,8 +3,7 @@ use futures::{
     io::{AsyncRead, AsyncWrite, Cursor},
 };
 use orna_foundation_v1::{
-    CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, OvbRaw, SafeText,
-    Value,
+    CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value,
 };
 use orna_live_v1::{
     CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpConnection,
@@ -3946,15 +3945,13 @@ fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
     }
     .encode(Limits::default().protocol)
     .unwrap();
-    let mismatch_outcome = block_on(host.dispatch_frame(
-        [6; 16],
-        2,
-        Frame::Binary(mismatch),
-        &mut application,
-    ))
-    .unwrap();
+    let mismatch_outcome =
+        block_on(host.dispatch_frame([6; 16], 2, Frame::Binary(mismatch), &mut application))
+            .unwrap();
     assert_eq!(mismatch_outcome.outcome, FrameOutcome::Accepted);
-    let response = mismatch_outcome.response.expect("request mismatch response");
+    let response = mismatch_outcome
+        .response
+        .expect("request mismatch response");
     let diagnostic = FoundationDiagnostic::new(
         SafeText::new(Error::RequestMismatch.code()).unwrap(),
         DiagnosticSeverity::Error,
@@ -3996,15 +3993,11 @@ fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
     }
     .encode(Limits::default().protocol)
     .unwrap();
-    let fresh_response = block_on(host.dispatch_frame(
-        [6; 16],
-        2,
-        Frame::Binary(fresh_status),
-        &mut application,
-    ))
-    .unwrap()
-    .response
-    .expect("fresh request status response");
+    let fresh_response =
+        block_on(host.dispatch_frame([6; 16], 2, Frame::Binary(fresh_status), &mut application))
+            .unwrap()
+            .response
+            .expect("fresh request status response");
     assert!(matches!(
         fresh_response.message,
         Message::RequestStatusResult {

@@ -9,12 +9,12 @@
 
 use std::{cmp::Ordering, collections::BTreeMap, error::Error, fmt};
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
-    validate_compact_page_uncompressed_sizes, CompactManifest, CompactManifestEntry, GitCommitRef,
-    Repository, RepositoryError, Uuid, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES,
+    COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactManifest, CompactManifestEntry, GitCommitRef,
+    Repository, RepositoryError, Uuid, validate_compact_page_uncompressed_sizes,
 };
 use parquet::{
     basic::{Compression, ConvertedType, Encoding, Type},
@@ -23,7 +23,7 @@ use parquet::{
 };
 
 use crate::compact::{
-    CompactExactKeySource, CompactKeyError, CompactOvbProfile, COMPACT_STORAGE_PROFILE,
+    COMPACT_STORAGE_PROFILE, CompactExactKeySource, CompactKeyError, CompactOvbProfile,
 };
 
 /// A physical reader failure. Unsupported mappings are explicit: this slice
@@ -2806,17 +2806,19 @@ mod tests {
         let (temp, repository) = repository();
         let head = repository.head().unwrap().unwrap();
         let generation = repository.index_generation().unwrap();
-        assert!(repository
-            .prepare_compact_publication(
-                &head,
-                generation.clone(),
-                CompactManifest::empty(TABLE, expected_profile.schema_fingerprint()),
-                [9; 16],
-                [8; 32],
-                &[valid],
-                "valid schema descriptor fixture",
-            )
-            .is_ok());
+        assert!(
+            repository
+                .prepare_compact_publication(
+                    &head,
+                    generation.clone(),
+                    CompactManifest::empty(TABLE, expected_profile.schema_fingerprint()),
+                    [9; 16],
+                    [8; 32],
+                    &[valid],
+                    "valid schema descriptor fixture",
+                )
+                .is_ok()
+        );
         assert!(matches!(
             repository.prepare_compact_publication(
                 &head,
@@ -3004,12 +3006,14 @@ mod tests {
         let dates = [0_i32, 1_i32, 1_i32];
         let plain = mixed_parquet(&profile, &[KEY_A], &[TestColumn::Date(&dates)], false, None);
         let reader = SerializedFileReader::new(Bytes::copy_from_slice(&plain)).unwrap();
-        assert!(reader
-            .metadata()
-            .row_group(0)
-            .column(0)
-            .encodings()
-            .any(|encoding| encoding == Encoding::PLAIN));
+        assert!(
+            reader
+                .metadata()
+                .row_group(0)
+                .column(0)
+                .encodings()
+                .any(|encoding| encoding == Encoding::PLAIN)
+        );
         assert_eq!(
             CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &plain, 3).unwrap(),
             vec![
@@ -3028,12 +3032,14 @@ mod tests {
             true,
         );
         let reader = SerializedFileReader::new(Bytes::copy_from_slice(&dictionary)).unwrap();
-        assert!(reader
-            .metadata()
-            .row_group(0)
-            .column(0)
-            .encodings()
-            .any(|encoding| encoding == parquet::basic::Encoding::RLE_DICTIONARY));
+        assert!(
+            reader
+                .metadata()
+                .row_group(0)
+                .column(0)
+                .encodings()
+                .any(|encoding| encoding == parquet::basic::Encoding::RLE_DICTIONARY)
+        );
         assert_eq!(
             CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &dictionary, 3)
                 .unwrap(),
@@ -3608,12 +3614,14 @@ mod tests {
             None,
         );
         let reader = SerializedFileReader::new(Bytes::copy_from_slice(&plain)).unwrap();
-        assert!(reader
-            .metadata()
-            .row_group(0)
-            .column(0)
-            .encodings()
-            .any(|encoding| encoding == Encoding::PLAIN));
+        assert!(
+            reader
+                .metadata()
+                .row_group(0)
+                .column(0)
+                .encodings()
+                .any(|encoding| encoding == Encoding::PLAIN)
+        );
         assert_eq!(
             CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &plain, 2).unwrap(),
             vec![expected_text("alpha"), expected_text("beta")]
@@ -3629,12 +3637,14 @@ mod tests {
             true,
         );
         let reader = SerializedFileReader::new(Bytes::copy_from_slice(&dictionary)).unwrap();
-        assert!(reader
-            .metadata()
-            .row_group(0)
-            .column(0)
-            .encodings()
-            .any(|encoding| { encoding == parquet::basic::Encoding::RLE_DICTIONARY }));
+        assert!(
+            reader
+                .metadata()
+                .row_group(0)
+                .column(0)
+                .encodings()
+                .any(|encoding| { encoding == parquet::basic::Encoding::RLE_DICTIONARY })
+        );
         assert_eq!(
             CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &dictionary, 3)
                 .unwrap(),

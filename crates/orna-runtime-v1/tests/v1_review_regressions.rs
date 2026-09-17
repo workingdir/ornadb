@@ -331,9 +331,11 @@ async fn unadmitted_data_only_generation_allows_first_catalogue_admission() {
         .await
         .expect("first complete catalogue admission remains allowed");
     assert_eq!(admitted.capture, next);
-    assert!(state
-        .catalogue_function("pkg.f")
-        .await
-        .expect("read first admitted function")
-        .is_some());
+    assert!(
+        state
+            .catalogue_function("pkg.f")
+            .await
+            .expect("read first admitted function")
+            .is_some()
+    );
 }
