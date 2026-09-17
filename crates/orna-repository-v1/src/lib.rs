@@ -4196,9 +4196,7 @@ impl Repository {
                         return Err(RepositoryError::ManagedContentConflict);
                     }
                 }
-                if let Err(error) = self.install_managed_candidate(&candidate, &target) {
-                    return Err(error);
-                }
+                self.install_managed_candidate(&candidate, &target)?;
                 if let Some(hook) = after_boundary.as_mut() {
                     hook(PublicationMaterializationPhase::Installed)?;
                 }
@@ -5413,7 +5411,7 @@ impl GitIndexLock {
     fn reclaim_abandoned(path: PathBuf, journal_binding: [u8; 32]) -> Result<(), RepositoryError> {
         #[cfg(target_os = "linux")]
         {
-            return Self::reclaim_abandoned_linux(path, journal_binding, |_, _| {});
+            Self::reclaim_abandoned_linux(path, journal_binding, |_, _| {})
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -7236,9 +7234,11 @@ mod tests {
     fn legacy_journal_fixtures_preserve_lock_binding_for_versions_two_through_four() {
         let root = tempfile::TempDir::new().unwrap();
         let fixture = |hex: &str| {
-            assert!(hex.len() % 2 == 0);
+            assert!(hex.len().is_multiple_of(2));
             hex.as_bytes()
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
                 .collect::<Vec<_>>()
         };
