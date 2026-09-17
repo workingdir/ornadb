@@ -11,8 +11,9 @@ use std::{
 
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    CheckpointKey, CheckpointResetAudit, CheckpointResetProvider, Component, ConsumerIdentity,
-    RuntimeError, RuntimeIdentity, RuntimeState, StreamAdministrationOutcome,
+    CheckpointKey, CheckpointResetAudit, CheckpointResetProvider, CheckpointResetRequest,
+    Component, ConsumerIdentity, RuntimeError, RuntimeIdentity, RuntimeState,
+    StreamAdministrationOutcome,
 };
 use orna_stream_v1::{CheckpointPrecondition, Position};
 use tempfile::{Builder, TempDir};
@@ -125,10 +126,12 @@ async fn unsupported_target_and_key_format_mismatch_fail_before_mutation() {
     let rejected = state
         .reset_checkpoint_with_provider(
             writer,
-            key.clone(),
-            expected_initial(),
-            position("unsupported"),
-            "unsupported target".into(),
+            CheckpointResetRequest {
+                key: key.clone(),
+                expected: expected_initial(),
+                to: position("unsupported"),
+                reason: "unsupported target".into(),
+            },
             &unsupported,
         )
         .await
@@ -152,10 +155,12 @@ async fn unsupported_target_and_key_format_mismatch_fail_before_mutation() {
     let rejected = state
         .reset_checkpoint_with_provider(
             writer,
-            key.clone(),
-            expected_initial(),
-            position("format-mismatch"),
-            "format mismatch".into(),
+            CheckpointResetRequest {
+                key: key.clone(),
+                expected: expected_initial(),
+                to: position("format-mismatch"),
+                reason: "format mismatch".into(),
+            },
             &mismatch_provider,
         )
         .await
@@ -184,10 +189,12 @@ async fn supported_target_advances_once_and_audits_once() {
     let checkpoint = state
         .reset_checkpoint_with_provider(
             writer,
-            key.clone(),
-            expected_initial(),
-            target.clone(),
-            "operator rewind".into(),
+            CheckpointResetRequest {
+                key: key.clone(),
+                expected: expected_initial(),
+                to: target.clone(),
+                reason: "operator rewind".into(),
+            },
             &provider,
         )
         .await
@@ -217,10 +224,12 @@ async fn stale_version_and_position_map_to_conflict_without_mutation() {
     state
         .reset_checkpoint_with_provider(
             writer,
-            key.clone(),
-            expected_initial(),
-            first.clone(),
-            "first reset".into(),
+            CheckpointResetRequest {
+                key: key.clone(),
+                expected: expected_initial(),
+                to: first.clone(),
+                reason: "first reset".into(),
+            },
             &provider,
         )
         .await
@@ -230,10 +239,12 @@ async fn stale_version_and_position_map_to_conflict_without_mutation() {
     let stale_version = state
         .reset_checkpoint_with_provider(
             writer,
-            key.clone(),
-            expected_initial(),
-            position("stale-version"),
-            "stale version".into(),
+            CheckpointResetRequest {
+                key: key.clone(),
+                expected: expected_initial(),
+                to: position("stale-version"),
+                reason: "stale version".into(),
+            },
             &provider,
         )
         .await
@@ -244,13 +255,15 @@ async fn stale_version_and_position_map_to_conflict_without_mutation() {
     let stale_position = state
         .reset_checkpoint_with_provider(
             writer,
-            key.clone(),
-            CheckpointPrecondition {
-                version: before.version,
-                committed: Some(position("wrong-position")),
+            CheckpointResetRequest {
+                key: key.clone(),
+                expected: CheckpointPrecondition {
+                    version: before.version,
+                    committed: Some(position("wrong-position")),
+                },
+                to: position("stale-position"),
+                reason: "stale position".into(),
             },
-            position("stale-position"),
-            "stale position".into(),
             &provider,
         )
         .await
