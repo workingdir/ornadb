@@ -2226,6 +2226,8 @@ impl Harness {
                     binding.scenario_id
                 ));
             }
+            validate_repository_reference(&binding.implementation_ref, "implementation")?;
+            validate_repository_reference(&binding.test_ref, "test")?;
             let result = report
                 .scenarios
                 .iter()
