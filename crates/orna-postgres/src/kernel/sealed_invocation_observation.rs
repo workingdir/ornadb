@@ -638,7 +638,13 @@ async fn load_observation_by_id(
         &capture,
         function,
         &record,
-    )?;
+    )?
+    .ok_or_else(|| {
+        observation_invariant(
+            &record,
+            "accepted invocation observation must retain an authoritative function reference",
+        )
+    })?;
     let result_type_reference = decode_catalogue_type_reference(
         observation_optional_bytes(&row, &record, "result_type_reference")?,
         &capture,
@@ -691,13 +697,13 @@ async fn load_observation_by_id(
         .collect::<Result<Vec<_>, _>>()?;
     validate_argument_order(&arguments, &record)?;
     Ok(Some(SealedInvocationObservation {
-        admission_capture: capture,
         reference,
         invocation,
         source_revision,
         catalogue_revision,
         function,
-        function_reference,
+        function_reference: Some(function_reference),
+        admission_capture: capture,
         result_type_reference,
         status,
         started,
