@@ -9,7 +9,10 @@ use std::{error::Error, fmt};
 use orna_core::{
     FunctionId, FunctionRevisionId, TypeId,
     canonical_hash::artifact_payload_digest,
-    catalogue::{CatalogueSnapshot, FunctionDefinition, FunctionReturn},
+    catalogue::{
+        CatalogueSnapshot, FunctionDefinition, FunctionReturn, TypeDeclarationWitness,
+        TypeWitnessError,
+    },
     catalogue_diff::{CatalogueSemanticDiff, catalogue_diff},
     revision::{
         ActiveDatabaseRevision, ArtifactCatalogueCompatibility, ArtifactCompatibilityCoordinates,
@@ -112,6 +115,8 @@ pub enum ResolvedSourceCatalogueError {
     MissingCheckedBundle,
     /// Constructing the digest-bound artifact provenance envelope failed.
     ArtifactProvenance(ArtifactProvenanceError),
+    /// An object declaration lacked exact representable witness facts.
+    TypeWitness(TypeWitnessError),
 }
 
 impl fmt::Display for ResolvedSourceCatalogueError {
@@ -158,6 +163,7 @@ impl fmt::Display for ResolvedSourceCatalogueError {
                 formatter.write_str("candidate has no checked resolver bundle")
             }
             Self::ArtifactProvenance(error) => error.fmt(formatter),
+            Self::TypeWitness(error) => error.fmt(formatter),
         }
     }
 }
@@ -175,6 +181,7 @@ impl Error for ResolvedSourceCatalogueError {
             | Self::MissingCandidateFunction { .. } => None,
             Self::MissingCheckedBundle => None,
             Self::ArtifactProvenance(error) => Some(error),
+            Self::TypeWitness(error) => Some(error),
         }
     }
 }
@@ -252,8 +259,10 @@ pub struct ResolvedSourceCatalogue {
     base: CatalogueSnapshot,
     candidate: DeployableRevision,
     diff: CatalogueSemanticDiff,
-    function_artifacts: Vec<FunctionArtifactEntry>,
     checked_nominal_types: Vec<CheckedObjectType>,
+    function_artifacts: Vec<FunctionArtifactEntry>,
+    type_witnesses: Vec<TypeDeclarationWitness>,
+    type_witness_errors: Vec<TypeWitnessError>,
 }
 
 impl ResolvedSourceCatalogue {
@@ -286,6 +295,14 @@ impl ResolvedSourceCatalogue {
     /// authority from this view.
     pub fn checked_nominal_types(&self) -> &[CheckedObjectType] {
         &self.checked_nominal_types
+    }
+    /// Returns immutable OVB-1 witnesses for candidate object declarations.
+    pub fn type_witnesses(&self) -> &[TypeDeclarationWitness] {
+        &self.type_witnesses
+    }
+    /// Returns object declarations whose facts cannot currently form witnesses.
+    pub fn type_witness_errors(&self) -> &[TypeWitnessError] {
+        &self.type_witness_errors
     }
 
     /// Returns the expected active source/catalogue pair.
@@ -498,6 +515,14 @@ fn materialize_prepared_provenance_catalogue(
     checked_nominal_types: Vec<CheckedObjectType>,
 ) -> Result<ResolvedSourceCatalogue, ResolvedSourceCatalogueError> {
     let function_artifacts = materialize_function_artifacts(&candidate, active)?;
+    let mut type_witnesses = Vec::new();
+    let mut type_witness_errors = Vec::new();
+    for object in candidate.candidate().object_types() {
+        match object.type_declaration_witness() {
+            Ok(witness) => type_witnesses.push(witness),
+            Err(error) => type_witness_errors.push(error),
+        }
+    }
     let diff = catalogue_diff(active.catalogue(), candidate.candidate());
     Ok(ResolvedSourceCatalogue {
         base: active.catalogue().clone(),
@@ -505,6 +530,8 @@ fn materialize_prepared_provenance_catalogue(
         diff,
         function_artifacts,
         checked_nominal_types,
+        type_witnesses,
+        type_witness_errors,
     })
 }
 
@@ -1195,6 +1222,8 @@ mod tests {
             candidate,
             diff,
             function_artifacts,
+            type_witnesses: Vec::new(),
+            type_witness_errors: Vec::new(),
             checked_nominal_types: Vec::new(),
         }
     }
