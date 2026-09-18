@@ -1342,6 +1342,7 @@ impl CompactManifestWitness {
     pub(crate) fn validate(&self, object_id_length: Option<usize>) -> Result<(), RepositoryError> {
         if self.generation == 0
             || self.runtime_intent_id == [0; 16]
+            || self.cleanup_watermark == [0; 32]
             || !is_selected_ref(&self.selected_ref)
             || self.entries.is_empty()
             || self.manifest_path != managed_child(&compact_root(self.table), "manifest.orna")?
@@ -1620,7 +1621,7 @@ impl CompactRuntimeReceipt {
         journal_verifier: [u8; 32],
         signature: [u8; 64],
     ) -> Result<Self, RepositoryError> {
-        if runtime_intent_id == [0; 16] {
+        if runtime_intent_id == [0; 16] || cleanup_watermark == [0; 32] {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         Ok(Self {
@@ -1640,7 +1641,7 @@ impl CompactRuntimeReceipt {
         commit: &GitCommitRef,
         journal_verifier: [u8; 32],
     ) -> Result<Vec<u8>, RepositoryError> {
-        if runtime_intent_id == [0; 16] {
+        if runtime_intent_id == [0; 16] || cleanup_watermark == [0; 32] {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         let mut bytes = Vec::new();
