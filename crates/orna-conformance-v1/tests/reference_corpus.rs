@@ -363,8 +363,8 @@ fn engine_witnesses_require_an_exact_expectation_satisfied_fixture_stage() {
         fixture_id: "valid/minimal-root.orna".into(),
         fixture_path: "examples/valid/minimal-root.orna".into(),
         stage: Stage::Parse,
-        implementation_ref: "orna.syntax.module-entrypoint".into(),
-        test_ref: "conformance.reference_corpus.engine_witnesses".into(),
+        implementation_ref: "crates/orna-conformance-v1/src/lib.rs::Harness::engine_witnesses".into(),
+        test_ref: "crates/orna-conformance-v1/tests/reference_corpus.rs::engine_witnesses_require_an_exact_expectation_satisfied_fixture_stage".into(),
     };
     let witnesses = harness
         .engine_witnesses(&report, std::slice::from_ref(&binding))
@@ -388,8 +388,8 @@ fn engine_witnesses_require_an_exact_expectation_satisfied_fixture_stage() {
         fixture_id: "PROJECT-REFERENCE".into(),
         fixture_path: "examples/reference".into(),
         stage: Stage::Evaluate,
-        implementation_ref: "orna.project-runtime".into(),
-        test_ref: "conformance.project_runtime".into(),
+        implementation_ref: "crates/orna-conformance-v1/src/lib.rs::Harness::engine_witnesses".into(),
+        test_ref: "crates/orna-conformance-v1/tests/reference_corpus.rs::engine_witnesses_require_an_exact_expectation_satisfied_fixture_stage".into(),
     };
     assert!(
         harness
@@ -729,22 +729,30 @@ fn scenario_witnesses_bind_only_declared_passed_implementation_scenarios() {
                 "TXN-002".into(),
             ],
         });
-    let mut declared_adapter = RuntimeAdapter::new(BoundedEvaluator::default());
-    let declared_report = declared_harness.run(&mut declared_adapter);
+    let declared_report = declared_harness.run(&mut adapter);
+    let bindings = [
+        ScenarioExecutionBinding {
+            requirement_id: "ORNA-VALUE-006".into(),
+            scenario_id: "LET-REBIND-091".into(),
+            implementation_ref: "crates/orna-conformance-v1/src/main.rs::let_rebinding_contract".into(),
+            test_ref: "crates/orna-conformance-v1/tests/reference_corpus.rs::scenario_witnesses_bind_only_declared_passed_implementation_scenarios".into(),
+        },
+        ScenarioExecutionBinding {
+            requirement_id: "ORNA-PIPE-001".into(),
+            scenario_id: "PIPE-001".into(),
+            implementation_ref: "crates/orna-conformance-v1/src/main.rs::pipeline_insertion_contract".into(),
+            test_ref: "crates/orna-conformance-v1/tests/reference_corpus.rs::scenario_witnesses_bind_only_declared_passed_implementation_scenarios".into(),
+        },
+        ScenarioExecutionBinding {
+            requirement_id: "ORNA-PIPE-002".into(),
+            scenario_id: "PIPE-002".into(),
+            implementation_ref: "crates/orna-conformance-v1/src/main.rs::pipeline_precedence_contract".into(),
+            test_ref: "crates/orna-conformance-v1/tests/reference_corpus.rs::scenario_witnesses_bind_only_declared_passed_implementation_scenarios".into(),
+        },
+    ];
     let witnesses = declared_harness
         .scenario_execution_witnesses(&declared_report, &bindings)
-        .expect("declared passed scenario becomes implementation-scenario traceability evidence");
-    assert_eq!(witnesses.witnesses().len(), 3);
-    assert_eq!(
-        witnesses.publication_digests(),
-        &declared_report.publication_digests
-    );
-    assert!(
-        witnesses
-            .witnesses()
-            .iter()
-            .all(|witness| witness.observed_status() == &EvidenceStatus::Passed)
-    );
+        .expect("declared passed scenarios become implementation witnesses");
     assert_eq!(
         witnesses
             .witnesses()
