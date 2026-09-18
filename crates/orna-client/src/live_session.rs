@@ -76,6 +76,9 @@ pub enum LiveSessionError<I, R> {
     Presentation(LivePresentationError),
     Protocol(orna_protocol_v1::Error),
     Renderer(R),
+    /// The attachment was irreversibly lost and must be replaced before any
+    /// further frames can be consumed.
+    Detached,
 }
 
 /// A concrete async live client driver for one authenticated watch.
@@ -93,6 +96,7 @@ pub struct LiveSessionDriver<I, R, A> {
     pending_resync: Option<(ResyncRequest, [u8; 16], Vec<u8>)>,
     expected_resync_request: Option<[u8; 16]>,
     pending_publication: Option<(LivePresentationUpdate, PublishedPresentation)>,
+    detached: bool,
 }
 
 impl<I, R, A> LiveSessionDriver<I, R, A>
@@ -134,6 +138,7 @@ where
             pending_resync: None,
             expected_resync_request: expected_snapshot_request,
             pending_publication: None,
+            detached: false,
         })
     }
 
@@ -155,6 +160,9 @@ where
     pub async fn receive_once(
         &mut self,
     ) -> Result<LiveSessionEvent, LiveSessionError<I::Error, R::Error>> {
+        if self.detached {
+            return Err(LiveSessionError::Detached);
+        }
         if let Some(event) = self.flush_resync().await? {
             return Ok(event);
         }
@@ -167,7 +175,10 @@ where
             .io
             .receive_binary(self.limits.max_message_bytes)
             .await
-            .map_err(LiveSessionError::Io)?;
+            .map_err(|error| {
+                self.detached = true;
+                LiveSessionError::Io(error)
+            })?;
         if let Ok(frame) = Envelope::decode(&encoded, self.limits)
             && let Message::Diagnostic { .. } = frame.message
         {
@@ -220,6 +231,7 @@ where
     /// dropped, its queued frames cannot be consumed, and retained state is
     /// fenced until a complete snapshot arrives on the replacement.
     pub fn replace_authenticated_attachment(&mut self, io: I) {
+        self.detached = false;
         self.io = io;
         self.presentation.begin_resubscription();
         self.pending_resync = None;
@@ -240,6 +252,7 @@ where
             return Err(());
         }
         self.io = io;
+        self.detached = false;
         self.watch = watch;
         let presentation = WatchPresentation::new(watch, self.limits).map_err(|_| ())?;
         self.presentation = presentation;
@@ -269,7 +282,6 @@ where
             .send_binary(encoded)
             .await
             .map_err(LiveSessionError::Io)?;
-        self.presentation.acknowledge_resync_request(request);
         self.pending_resync = None;
         self.expected_resync_request = Some(request_id);
         Ok(Some(LiveSessionEvent::ResyncSent { request }))
@@ -964,6 +976,33 @@ mod tests {
         let decoded = Envelope::decode(&driver.io.sent[0], Limits::default()).unwrap();
         assert_eq!(decoded.request, Some([1; 16]));
         assert_eq!(decoded.watch, Some([7; 16]));
+    }
+    #[test]
+    fn receive_failure_fences_old_attachment_until_replacement() {
+        let driver_io = MemoryIo::default();
+        let mut driver = LiveSessionDriver::new(
+            driver_io,
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Err(LiveSessionError::Io("no incoming frame"))
+        ));
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Err(LiveSessionError::Detached)
+        ));
+        let mut replacement = MemoryIo::default();
+        replacement.incoming.push_back(snapshot(0));
+        driver.replace_authenticated_attachment(replacement);
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
     }
 
     #[test]
