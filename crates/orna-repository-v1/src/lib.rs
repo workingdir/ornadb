@@ -3424,6 +3424,12 @@ impl Repository {
                 CheckoutRecoveryPhase::Discarded
                     if journal.discarded.as_ref() == Some(&current) =>
                 {
+                    // The target may be a movable branch. Re-resolve it while
+                    // the recovery lock is held before switching: otherwise a
+                    // branch update between discard and restart could make
+                    // recovery mutate HEAD/worktree to a different commit
+                    // than the one the force witness authorized.
+                    self.verify_prepared_checkout_journal_locked(&journal)?;
                     self.switch_checkout_target(&journal.target)?;
                     let after = self.cwd_generation_locked(journal.runtime)?;
                     if after.head.as_ref() != Some(journal.target.commit())
