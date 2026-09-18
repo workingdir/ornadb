@@ -1238,7 +1238,8 @@ mod tests {
         assert!(requirement.boundaries.iter().any(|boundary| {
             boundary.kind == "engine-witness"
                 && boundary.status == Status::Executed
-                && boundary.implementation_ref.as_deref() == Some("orna.syntax.module-entrypoint")
+                && boundary.implementation_ref.as_deref()
+                    == Some("crates/orna-conformance-v1/src/lib.rs::Harness::engine_witnesses")
         }));
 
         let mut mismatched_report = conformance_report;
