@@ -1267,9 +1267,18 @@ mod tests {
         let binding = orna_conformance_v1::ScenarioExecutionBinding {
             requirement_id: "ORNA-VALUE-006".into(),
             scenario_id: "LET-REBIND-091".into(),
-            implementation_ref: "orna.bounded-expression-runtime.let-rebinding".into(),
-            test_ref: "conformance.runtime_scenarios.let_rebinding".into(),
+            implementation_ref: "crates/orna-conformance-v1/src/main.rs::let_rebinding_contract".into(),
+            test_ref: "crates/orna-conformance-v1/src/main.rs::tests::digest_bound_scenario_witnesses_remain_distinct_from_engine_execution".into(),
         };
+        let mut malformed = binding.clone();
+        malformed.implementation_ref = "/tmp/not-a-repository-reference".into();
+        let error = harness
+            .scenario_execution_witnesses(&conformance_report, &[malformed])
+            .expect_err("scenario evidence must use repository-qualified references");
+        assert_eq!(
+            error,
+            "invalid repository-relative implementation reference"
+        );
         let witnesses = harness
             .scenario_execution_witnesses(&conformance_report, std::slice::from_ref(&binding))
             .expect("declared passed scenario becomes a digest-bound witness");
@@ -1319,8 +1328,8 @@ mod tests {
         let binding = orna_conformance_v1::ScenarioExecutionBinding {
             requirement_id: "ORNA-EVIDENCE-001".into(),
             scenario_id: "LET-REBIND-091".into(),
-            implementation_ref: "orna.bounded-expression-runtime.let-rebinding".into(),
-            test_ref: "conformance.runtime_scenarios.let_rebinding".into(),
+            implementation_ref: "crates/orna-conformance-v1/src/main.rs::let_rebinding_contract".into(),
+            test_ref: "crates/orna-conformance-v1/src/main.rs::tests::digest_bound_scenario_witnesses_remain_distinct_from_engine_execution".into(),
         };
 
         let error = harness
