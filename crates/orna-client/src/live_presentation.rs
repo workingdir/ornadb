@@ -5,6 +5,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use orna_foundation_v1::Value;
 use orna_protocol_v1::{
     CanonicalSnapshot, Envelope, Error as ProtocolError, Limits, Message, PatchList, PresentNode,
 };
@@ -246,7 +247,12 @@ impl WatchPresentation {
         }) {
             return self.require_resync();
         }
-        if present.validate_with_limits(self.limits).is_err() {
+        let snapshot_bytes = Value::new(snapshot.raw())
+            .and_then(|value| value.encode())
+            .map_or(usize::MAX, |bytes| bytes.len());
+        if present.validate_with_limits(self.limits).is_err()
+            || snapshot_bytes > self.limits.max_message_bytes
+        {
             return self.require_resync();
         }
         self.published = Some(PublishedPresentation {
@@ -708,6 +714,32 @@ mod tests {
             LivePresentationUpdate::ResyncRequired
         );
         assert_eq!(state.published().cloned(), visible);
+        assert!(state.take_resync_request().is_some());
+    }
+    #[test]
+    fn direct_snapshot_install_rejects_snapshot_over_negotiated_message_limit() {
+        let watch = [7; 16];
+        let limits = Limits {
+            max_message_bytes: 32,
+            ..Limits::default()
+        };
+        let mut state = WatchPresentation::new(watch, limits).expect("limits are valid");
+        let source = frame(16, watch, snapshot(1, "bounded"));
+        let Message::Snapshot {
+            revision,
+            present,
+            snapshot,
+        } = source.message
+        else {
+            panic!("fixture must be a snapshot");
+        };
+
+        assert_eq!(
+            state.install_snapshot(revision, present, snapshot),
+            LivePresentationUpdate::ResyncRequired
+        );
+        assert!(state.published().is_none());
+        assert!(state.awaiting_snapshot());
         assert!(state.take_resync_request().is_some());
     }
 
