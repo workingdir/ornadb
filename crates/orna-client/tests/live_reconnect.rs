@@ -715,6 +715,7 @@ fn reconnect_failure_returns_rotated_retry_session_without_mutating_visible_driv
         let retry = match error {
             LiveReconnectError::AfterResume(failure) => failure.into_session(),
             LiveReconnectError::Resume(_) => panic!("resume completed before replacement failure"),
+            LiveReconnectError::InvalidRequest => panic!("valid subscribe request was rejected"),
         };
         assert_eq!(retry.session_id(), session.session_id());
         assert_eq!(driver.watch(), [7; 16]);
