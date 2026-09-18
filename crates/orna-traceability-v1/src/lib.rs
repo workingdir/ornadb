@@ -1218,8 +1218,11 @@ mod tests {
             fixture_id: "valid/minimal-root.orna".into(),
             fixture_path: "examples/valid/minimal-root.orna".into(),
             stage: Stage::Parse,
-            implementation_ref: "orna.syntax.module-entrypoint".into(),
-            test_ref: "conformance.reference_corpus.engine_witnesses".into(),
+            implementation_ref: "crates/orna-conformance-v1/src/lib.rs::Harness::engine_witnesses"
+                .into(),
+            test_ref:
+                "crates/orna-traceability-v1/src/lib.rs::engine_witnesses_add_an_executed_boundary"
+                    .into(),
         };
         let witnesses = harness
             .engine_witnesses(&conformance_report, std::slice::from_ref(&binding))
