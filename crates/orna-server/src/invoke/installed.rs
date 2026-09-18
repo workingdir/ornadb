@@ -604,6 +604,16 @@ fn client_function_returns_ui(function: &FunctionDefinition) -> bool {
 pub(super) fn client_sink_offers(
     selected: RuntimeFamily,
 ) -> Result<Vec<InvocationSinkOffer>, InstalledInvokeError> {
+    // Keep this boundary closed even when called outside `selected_runtime`.
+    // Advertising sinks for a runtime that is not installed would let a
+    // caller construct a sealed CLIENT offer that no local presenter can
+    // consume. `selected_runtime` rejects this in the normal path, but this
+    // helper is also an independent request-construction boundary.
+    if matches!(selected, RuntimeFamily::NotInstalled) {
+        return Err(usage_error(
+            "the not-installed runtime family is not installed".to_owned(),
+        ));
+    }
     let document = InvocationSinkOffer::new(
         TypeDescriptor::named(STD_TERMINAL_DOCUMENT_TYPE_ID),
         [DOCUMENT_SINK_MEDIA_TYPE],
