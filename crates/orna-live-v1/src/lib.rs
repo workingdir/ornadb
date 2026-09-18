@@ -5788,6 +5788,15 @@ impl LiveTransport {
                 return Err(HttpIoError::Transport(HttpConnectionError::Encode(error)));
             }
         };
+        // Hold the session reservation across the real socket delivery. This
+        // is the transport-side linearization fence: expiry, resume, and
+        // deletion cannot consume the candidate between prepare and commit.
+        if !self.begin_websocket_upgrade_delivery(&upgrade, now) {
+            self.abort_websocket_upgrade(&upgrade);
+            return Err(HttpIoError::Transport(HttpConnectionError::Protocol(
+                Error::Closed,
+            )));
+        }
         if let Err(error) =
             await_http_io(writer.write_all(&encoded), cancellation, HttpIoError::Write).await
         {
