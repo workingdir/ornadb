@@ -204,6 +204,9 @@ where
         .map_err(LiveSessionError::Presentation)?;
         match update {
             LivePresentationUpdate::SnapshotInstalled | LivePresentationUpdate::DeltaApplied => {
+                if matches!(update, LivePresentationUpdate::SnapshotInstalled) {
+                    self.expected_resync_request = None;
+                }
                 let published = self
                     .presentation
                     .published()
@@ -283,12 +286,13 @@ where
             .await
             .map_err(LiveSessionError::Io)?;
         self.pending_resync = None;
+        self.presentation.acknowledge_resync_request(request);
         self.expected_resync_request = Some(request_id);
         Ok(Some(LiveSessionEvent::ResyncSent { request }))
     }
 
     fn validate_resync_response(
-        &mut self,
+        &self,
         encoded: &[u8],
     ) -> Result<(), LiveSessionError<I::Error, R::Error>> {
         let Some(expected) = self.expected_resync_request else {
@@ -303,7 +307,6 @@ where
                     orna_protocol_v1::Error::InvalidMessage,
                 ));
             }
-            self.expected_resync_request = None;
         }
         Ok(())
     }
