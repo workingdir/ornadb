@@ -1886,6 +1886,7 @@ dependencies = [
  "orna-artifact",
  "orna-compiler",
  "orna-core",
+ "orna-foundation-v1",
  "orna-protocol",
  "orna-protocol-v1",
  "orna-runtime-tty",
