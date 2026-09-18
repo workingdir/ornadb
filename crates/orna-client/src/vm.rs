@@ -103,6 +103,13 @@ impl std::error::Error for ClientVmExecutionError {
     }
 }
 
+fn security_context_matches_admission(
+    authorisation_digest: [u8; 32],
+    admission_digest: [u8; 32],
+) -> bool {
+    authorisation_digest == admission_digest
+}
+
 /// Executes an admitted pure expression plan after rechecking its live fences.
 ///
 /// Stage 1 deliberately rejects plans that need a host capability. The existing
@@ -124,6 +131,12 @@ pub fn execute_admitted_pure_client_function(
         || target.revision().source().to_bytes() != source_revision
         || target.revision().catalogue().to_bytes() != catalogue_revision
     {
+        return Err(ClientVmExecutionError::TargetMismatch);
+    }
+    if !security_context_matches_admission(
+        authorisation.security_context_digest().to_bytes(),
+        admission.host().security_context_digest(),
+    ) {
         return Err(ClientVmExecutionError::TargetMismatch);
     }
     if !host.admission_is_current(admission) {
@@ -1300,5 +1313,10 @@ mod tests {
             context.issue_ephemeral_lease(root),
             Err(ClientVmIdentityError::UnboundRoot)
         ));
+    }
+    #[test]
+    fn admitted_execution_requires_matching_security_context() {
+        assert!(security_context_matches_admission([7; 32], [7; 32]));
+        assert!(!security_context_matches_admission([7; 32], [8; 32]));
     }
 }
