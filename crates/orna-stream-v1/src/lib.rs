@@ -1098,6 +1098,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                     return CommitResult::Rejected(RejectReason::RetryNotAllowed);
                 }
                 record.version += 1;
+                record.attempts += 1;
                 record.status = FailureStatus::Skipped;
                 record.diagnostic = diagnostic;
                 record.assertion_detail = None;
@@ -1125,6 +1126,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                     return CommitResult::Rejected(RejectReason::RetryNotAllowed);
                 }
                 record.version += 1;
+                record.attempts += 1;
                 record.status = FailureStatus::Skipped;
                 record.diagnostic = diagnostic;
                 record.assertion_detail = Some(detail);
@@ -1146,6 +1148,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                     return CommitResult::Rejected(RejectReason::RetryNotAllowed);
                 }
                 record.version += 1;
+                record.attempts += 1;
                 record.status = FailureStatus::Skipped;
                 CommitResult::ReplayCancelled {
                     failure: record.clone(),
@@ -1866,7 +1869,7 @@ mod tests {
             result => panic!("unexpected result: {result:?}"),
         };
         assert_eq!(failed_again.identity, failure.identity);
-        assert_eq!(failed_again.attempts, 2);
+        assert_eq!(failed_again.attempts, 3);
         assert_eq!(failed_again.status, FailureStatus::Skipped);
     }
 
@@ -1917,7 +1920,7 @@ mod tests {
             result => panic!("unexpected result: {result:?}"),
         };
         assert_eq!(cancelled.identity, failure.identity);
-        assert_eq!(cancelled.attempts, 2);
+        assert_eq!(cancelled.attempts, 3);
         assert_eq!(cancelled.status, FailureStatus::Skipped);
         assert_eq!(
             backend.checkpoint(&item.checkpoint_key()),
