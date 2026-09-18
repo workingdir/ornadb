@@ -393,6 +393,11 @@ impl Repository {
                     RefKind::Internal,
                 )?);
             }
+            // Keep the internal transaction's order stable regardless of the
+            // caller's witness order.  Allocator/checkpoint refs are one
+            // continuity domain, so deterministic ref ordering makes fetch
+            // planning and the subsequent CAS transaction reproducible.
+            internal_plans.sort_by(|left, right| left.destination.cmp(&right.destination));
         }
 
         let mut all_plans = ordinary_plans.clone();
