@@ -595,7 +595,13 @@ impl RuntimePublicationCoordinator {
         batch: FrozenBatch,
         message: &str,
     ) -> Result<Self, Error> {
-        if batch.watermark != freeze.checkpoint.mutation_sequence {
+        if batch.watermark != freeze.checkpoint.mutation_sequence
+            || batch.id != MutationId::new(hex_id(freeze.intent_id))?
+        {
+            // The frozen prefix is the only runtime range completion may
+            // consume.  Requiring the lowering batch identity to equal the
+            // durable freeze intent prevents a caller from publishing bytes
+            // under one journal intent and then deleting another prefix.
             return Err(Error::IncompleteStaging);
         }
         let paths = batch
@@ -1840,11 +1846,12 @@ mod tests {
             next: Some(row("published")),
         };
         let batch = FrozenBatch::new(
-            MutationId::new("publication-conflict-batch").unwrap(),
+            MutationId::new(hex_id(freeze.intent_id)).unwrap(),
             vec![mutation],
             freeze.checkpoint.mutation_sequence,
         )
         .unwrap();
+
         RuntimePublicationCoordinator::prepare(
             repository,
             &repository.head().unwrap().unwrap(),
@@ -1854,6 +1861,40 @@ mod tests {
             "orna: publish runtime data",
         )
         .unwrap()
+    }
+    #[test]
+    fn prepare_rejects_batch_not_bound_to_freeze_intent() {
+        let (_temp, repository) = repository();
+        let freeze = PublicationFreeze {
+            intent_id: [43; 16],
+            checkpoint: orna_runtime_v1::Checkpoint {
+                generation: 1,
+                digest: [44; 32],
+                mutation_sequence: 1,
+            },
+        };
+        let batch = FrozenBatch::new(
+            MutationId::new("unrelated-batch").unwrap(),
+            vec![LooseMutation {
+                id: MutationId::new("mutation").unwrap(),
+                path: path(),
+                expected: None,
+                next: Some(row("published")),
+            }],
+            freeze.checkpoint.mutation_sequence,
+        )
+        .unwrap();
+        assert_eq!(
+            RuntimePublicationCoordinator::prepare(
+                &repository,
+                &repository.head().unwrap().unwrap(),
+                repository.index_generation().unwrap(),
+                &freeze,
+                batch,
+                "orna: reject unrelated batch",
+            ),
+            Err(Error::IncompleteStaging)
+        );
     }
 
     #[test]
@@ -2006,7 +2047,7 @@ mod tests {
         fs::write(&target, b"unstaged\n").unwrap();
 
         let staged_batch = FrozenBatch::new(
-            id("staged-batch"),
+            MutationId::new(hex_id([81; 16])).unwrap(),
             vec![LooseMutation {
                 id: id("staged-mutation"),
                 path: path.clone(),
@@ -2056,7 +2097,7 @@ mod tests {
         );
         let unstaged_index = repository.index_generation().unwrap();
         let unstaged_batch = FrozenBatch::new(
-            id("unstaged-batch"),
+            MutationId::new(hex_id([83; 16])).unwrap(),
             vec![LooseMutation {
                 id: id("unstaged-mutation"),
                 path: path.clone(),
