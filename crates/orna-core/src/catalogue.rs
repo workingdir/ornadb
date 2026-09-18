@@ -14,7 +14,7 @@ use std::{
 use crate::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
     SchemaId, TypeBindingId, TypeId,
-    types::{ResolvedType, TypeDescriptor},
+    types::{ResolvedType, StandardScalar, TypeDescriptor},
 };
 
 mod types;
@@ -1455,6 +1455,171 @@ impl CatalogueSnapshot {
 
         Ok(())
     }
+}
+
+/// An immutable OVB-1 witness for one exact object type declaration.
+///
+/// The payload is the validated canonical OVB-1 declaration; all identities
+/// remain compiler/core identities and no runtime object identity is allocated.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeDeclarationWitness {
+    type_id: TypeId,
+    qualified_name: QualifiedSemanticName,
+    canonical_payload: Vec<u8>,
+    semantic_hash: [u8; 32],
+    revision_id: [u8; 32],
+}
+
+impl TypeDeclarationWitness {
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+    pub fn qualified_name(&self) -> &QualifiedSemanticName {
+        &self.qualified_name
+    }
+    pub fn canonical_payload(&self) -> &[u8] {
+        &self.canonical_payload
+    }
+    pub const fn semantic_hash(&self) -> [u8; 32] {
+        self.semantic_hash
+    }
+    pub const fn revision_id(&self) -> [u8; 32] {
+        self.revision_id
+    }
+}
+
+/// A type declaration fact that cannot be represented by the bounded witness.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypeWitnessError {
+    DefaultExpression {
+        field: FieldId,
+        expression: ExpressionId,
+    },
+    UnsupportedType {
+        field: FieldId,
+        resolved_type: ResolvedType,
+    },
+    InvalidPayload,
+}
+
+impl fmt::Display for TypeWitnessError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DefaultExpression { field, expression } => write!(
+                formatter,
+                "field {field} default expression {expression} is not witnessed"
+            ),
+            Self::UnsupportedType {
+                field,
+                resolved_type,
+            } => write!(
+                formatter,
+                "field {field} type {resolved_type:?} is not representable"
+            ),
+            Self::InvalidPayload => {
+                formatter.write_str("object declaration is not a valid OVB-1 payload")
+            }
+        }
+    }
+}
+
+impl Error for TypeWitnessError {}
+
+impl ObjectTypeDefinition {
+    /// Builds the bounded, canonical OVB-1 declaration witness for this type.
+    pub fn type_declaration_witness(&self) -> Result<TypeDeclarationWitness, TypeWitnessError> {
+        use orna_value_v1::{Raw, Value, domain_digest};
+        let fields = self
+            .fields
+            .iter()
+            .map(|field| {
+                if let Some(expression) = field.default_expression() {
+                    return Err(TypeWitnessError::DefaultExpression {
+                        field: field.id(),
+                        expression,
+                    });
+                }
+                let resolved_type = witness_type(field.id(), field.resolved_type())?;
+                let on_delete = match field.on_delete() {
+                    None => Raw::Null,
+                    Some(OnDeleteAction::Restrict) => Raw::Text("restrict".into()),
+                    Some(OnDeleteAction::SetNull) => Raw::Text("set_null".into()),
+                    Some(OnDeleteAction::Cascade) => Raw::Text("cascade".into()),
+                };
+                Ok(Raw::Array(vec![
+                    Raw::Bytes(field.id().to_bytes().to_vec()),
+                    Raw::Int(field.ordinal().into()),
+                    Raw::Text(field.name().to_owned()),
+                    resolved_type,
+                    Raw::Bool(field.nullable()),
+                    Raw::Bool(field.unique()),
+                    on_delete,
+                    Raw::Null,
+                ]))
+            })
+            .collect::<Result<Vec<_>, TypeWitnessError>>()?;
+        let payload = Value::new(Raw::Array(vec![
+            Raw::Int(1.into()),
+            Raw::Text("object".into()),
+            Raw::Text(self.name.to_string()),
+            Raw::Bytes(self.id.to_bytes().to_vec()),
+            Raw::Array(fields),
+        ]))
+        .map_err(|_| TypeWitnessError::InvalidPayload)?;
+        let semantic_hash = domain_digest("orna.type-declaration.semantic.v1", payload.raw())
+            .map_err(|_| TypeWitnessError::InvalidPayload)?;
+        let revision_id = domain_digest("orna.type-declaration.revision.v1", payload.raw())
+            .map_err(|_| TypeWitnessError::InvalidPayload)?;
+        Ok(TypeDeclarationWitness {
+            type_id: self.id,
+            qualified_name: self.name.clone(),
+            canonical_payload: payload
+                .encode()
+                .map_err(|_| TypeWitnessError::InvalidPayload)?,
+            semantic_hash,
+            revision_id,
+        })
+    }
+}
+
+fn witness_type(
+    field: FieldId,
+    resolved: ResolvedType,
+) -> Result<orna_value_v1::Raw, TypeWitnessError> {
+    use orna_value_v1::Raw;
+    Ok(match resolved {
+        ResolvedType::Scalar(scalar) => {
+            let name = match scalar {
+                StandardScalar::Boolean => "Bool",
+                StandardScalar::Integer => "Int",
+                StandardScalar::Float => "Float",
+                StandardScalar::Decimal => "Decimal",
+                StandardScalar::CharacterLargeObject => "Str",
+                StandardScalar::BinaryLargeObject => "Blob",
+                StandardScalar::Uuid => "Uuid",
+                StandardScalar::Date => "Date",
+                StandardScalar::Time => "TimeOfDay",
+                StandardScalar::Timestamp => "Instant",
+                StandardScalar::BigInt | StandardScalar::Duration | StandardScalar::Void => {
+                    return Err(TypeWitnessError::UnsupportedType {
+                        field,
+                        resolved_type: resolved,
+                    });
+                }
+            };
+            Raw::Array(vec![Raw::Int(0.into()), Raw::Text(name.into())])
+        }
+        ResolvedType::Named(id) => {
+            Raw::Array(vec![Raw::Int(1.into()), Raw::Bytes(id.to_bytes().to_vec())])
+        }
+        ResolvedType::Reference { target } => Raw::Array(vec![
+            Raw::Int(2.into()),
+            Raw::Bytes(target.to_bytes().to_vec()),
+        ]),
+        ResolvedType::Value(id) => {
+            Raw::Array(vec![Raw::Int(3.into()), Raw::Bytes(id.to_bytes().to_vec())])
+        }
+    })
 }
 
 /// Returns the exact schema that owns a qualified definition name.
