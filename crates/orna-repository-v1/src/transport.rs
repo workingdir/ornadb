@@ -258,8 +258,10 @@ impl Repository {
     /// postcondition verifies that the requested ID is locally materialized.
     /// Submodule recursion is disabled: unrelated repositories cannot affect
     /// the requested object's availability or receive incidental ref updates.
-    /// A materialized object is an idempotent success. Unavailable, malformed,
-    /// or unproven IDs fail closed before a remote is contacted.
+    /// A materialized object is an idempotent success. A failed transport remains
+    /// `ObjectUnavailable`; a successful transport that does not materialize the
+    /// requested object fails as `HydrationFailed`. Unavailable, malformed, or
+    /// unproven IDs fail closed before a remote is contacted.
     pub fn hydrate_promised_object(&self, object_id: &str) -> Result<(), FetchError> {
         let object_id =
             NativeObjectId::new(object_id.to_owned()).map_err(|_| FetchError::InvalidObjectId)?;
@@ -302,6 +304,7 @@ impl Repository {
             });
         }
 
+        let mut saw_successful_fetch = false;
         for remote in capabilities.promisor_remotes() {
             let mut command = self.observer_command();
             command
@@ -323,13 +326,18 @@ impl Repository {
             if !status.success() {
                 continue;
             }
+            saw_successful_fetch = true;
             match self.observe_git_object(object_id.as_str())? {
                 super::GitObjectState::Materialized { .. } => return Ok(()),
                 super::GitObjectState::Promised | super::GitObjectState::Unavailable => {}
                 super::GitObjectState::Malformed => return Err(FetchError::HydrationFailed),
             }
         }
-        Err(FetchError::ObjectUnavailable)
+        if saw_successful_fetch {
+            Err(FetchError::HydrationFailed)
+        } else {
+            Err(FetchError::ObjectUnavailable)
+        }
     }
 
     /// Fetches requested ordinary refs and continuity-approved `refs/orna/*`
