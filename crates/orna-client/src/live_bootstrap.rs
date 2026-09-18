@@ -54,6 +54,9 @@ impl LiveReconnectFailure {
 }
 
 pub enum LiveReconnectError {
+    /// The requested fresh-watch attachment was malformed; no session resume
+    /// or socket replacement was attempted.
+    InvalidRequest,
     Resume(LiveTransportError),
     AfterResume(LiveReconnectFailure),
 }
@@ -61,14 +64,14 @@ pub enum LiveReconnectError {
 impl LiveReconnectError {
     pub fn rotated_session(&self) -> Option<&LiveSession> {
         match self {
-            Self::Resume(_) => None,
+            Self::InvalidRequest | Self::Resume(_) => None,
             Self::AfterResume(failure) => Some(failure.session()),
         }
     }
 
     pub fn into_rotated_session(self) -> Option<LiveSession> {
         match self {
-            Self::Resume(_) => None,
+            Self::InvalidRequest | Self::Resume(_) => None,
             Self::AfterResume(failure) => Some(failure.into_session()),
         }
     }
@@ -123,6 +126,13 @@ impl<I> AuthenticatedLiveTransport for PrefetchedBinaryTransport<I> where
 {
 }
 
+/// Returns whether an attachment request is a fresh-watch subscription.
+fn valid_subscribe_request(request: &Envelope) -> bool {
+    request.request.is_some()
+        && request.watch.is_none()
+        && matches!(request.message, Message::Subscribe { .. })
+}
+
 /// An authenticated subscription whose first snapshot is ready for the
 /// existing [`LiveSessionDriver`] without being decoded or consumed twice.
 pub struct BootstrappedLiveAttachment<I> {
@@ -144,10 +154,7 @@ where
         request: Envelope,
         limits: Limits,
     ) -> Result<Self, LiveBootstrapError<I::Error>> {
-        if request.request.is_none()
-            || request.watch.is_some()
-            || !matches!(request.message, Message::Subscribe { .. })
-        {
+        if !valid_subscribe_request(&request) {
             return Err(LiveBootstrapError::InvalidRequest);
         }
         let encoded = request
@@ -298,6 +305,9 @@ impl LiveClient {
         R: PresentRenderer,
         A: RequestIdAllocator,
     {
+        if !valid_subscribe_request(&request) {
+            return Err(LiveReconnectError::InvalidRequest);
+        }
         let mut replacement = Some(
             self.resume_session(session)
                 .await
