@@ -3391,10 +3391,7 @@ impl Repository {
             str::to_owned,
         );
         let plan = self.plan_checkout_locked(&selector, journal.runtime)?;
-        if plan.target != journal.target
-            || plan.force_token() != journal.force_token
-            || plan.git.discardable_paths != journal.discard_paths
-        {
+        if plan.target != journal.target || plan.git.discardable_paths != journal.discard_paths {
             return Err(RepositoryError::CheckoutRecoveryRequired);
         }
         Ok(())
