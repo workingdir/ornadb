@@ -38,6 +38,70 @@ fn v11_snapshot_uses_generic_source_lowering_for_math() {
 }
 
 #[test]
+fn v11_math_catalogue_preserves_the_pure_client_effect_contract() {
+    let snapshot = super::super::retained_standard_library_v11_snapshot()
+        .expect("the retained V11 source is valid");
+    let verified = super::super::verify_standard_library_v11_snapshot(snapshot)
+        .expect("the retained V11 source verifies");
+    let mut math_functions = verified
+        .catalogue()
+        .functions()
+        .iter()
+        .filter(|function| {
+            function
+                .name()
+                .parts()
+                .get(1)
+                .is_some_and(|part| part == "math")
+        })
+        .collect::<Vec<_>>();
+    math_functions.sort_by_key(|function| function.name().to_string());
+
+    let expected_names = [
+        "std.math.clamp",
+        "std.math.decrement",
+        "std.math.increment",
+        "std.math.is_zero",
+        "std.math.max",
+        "std.math.min",
+    ];
+    assert_eq!(
+        math_functions
+            .iter()
+            .map(|function| function.name().to_string())
+            .collect::<Vec<_>>(),
+        expected_names
+    );
+
+    for function in math_functions {
+        assert_eq!(
+            function.domain(),
+            orna_core::catalogue::FunctionDomain::Client,
+            "{} must remain client-local",
+            function.name()
+        );
+        assert_eq!(
+            function.security(),
+            orna_core::catalogue::FunctionSecurity::Invoker,
+            "{} must not change security context",
+            function.name()
+        );
+        assert_eq!(
+            function.transaction(),
+            None,
+            "{} must not acquire a transaction boundary",
+            function.name()
+        );
+        assert_eq!(
+            function.volatility(),
+            orna_core::catalogue::FunctionVolatility::Immutable,
+            "{} must remain effect-free with respect to state",
+            function.name()
+        );
+    }
+}
+
+#[test]
 fn v11_math_dogfood_fixture_checks_and_prepares() {
     let snapshot = super::super::retained_standard_library_v11_snapshot()
         .expect("the retained V11 source is valid");

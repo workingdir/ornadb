@@ -123,11 +123,10 @@ smokes remain separate.
 8. `scripts/`: static editor-tooling and accepted demo runners.
 9. `postgresql/`: the embedded PostgreSQL engine build and lifecycle tooling.
 10. `compose.yaml`: the loopback-only PostgreSQL development service.
-11. `.github/workflows/`: quality and embedded PostgreSQL workflows.
-12. `.beads/`: the tracked issue ledger; preserve it when cleaning other
+11. `.beads/`: the tracked issue ledger; preserve it when cleaning other
     repository state.
-13. `docs/`: maintained operator guidance and historical design decisions.
-14. `packaging/linux/`: deterministic Linux artifact builder, verifier, installer,
+12. `docs/`: maintained operator guidance and historical design decisions.
+13. `packaging/linux/`: deterministic Linux artifact builder, verifier, installer,
     and focused package tests.
 
 The repository intentionally has no website, Debian release package, or
@@ -289,7 +288,7 @@ provide `ORNA_POSTGRES_ENGINE_OUTPUT` as a complete output directory at an
 **absolute** path. These environment-gated Compose proofs also require a Linux
 x86_64 host.
 
-CI captures the service and gate logs:
+Capture the service and gate logs locally when retaining evidence:
 
 ```sh
 set -euo pipefail
@@ -331,8 +330,8 @@ The reproducibility evidence is written under
 `target/postgresql-embedded-native-two/`). The output includes the embedded
 archives, support data, lifecycle report/stdout, symbol inventories, licence,
 and `embedded-engine-manifest.json`; retain the complete `target` subtree when
-reviewing a result. CI uploads the first run's `output/*`, not an unrecorded
-local summary. A missing submodule, unavailable Docker daemon/image source,
+reviewing a result. Retain the first run's `output/*`, not an unrecorded local
+summary. A missing submodule, unavailable Docker daemon/image source,
 non-zero build, lifecycle verifier failure, or mismatch between the two runs
 is a failed or unavailable gate as appropriate; it is never evidence of a
 passed embedded build. This checkout has the PostgreSQL source at the checked-in
@@ -649,7 +648,7 @@ about previously considered distribution approaches. Historical references are
 not live build inputs. Current operational claims belong in this runbook and in
 the executable tests.
 
-The quality workflow uploads:
+For a local evidence bundle, retain the outputs from the quality gates:
 
 ```text
 ci-evidence/tool-versions.txt
@@ -657,13 +656,6 @@ ci-evidence/check.log
 ci-evidence/editor-tooling.log
 ci-evidence/kernel-test.log
 ci-evidence/postgres.log
-```
-
-The dedicated SQLite workflow uploads:
-
-```text
-ci-evidence/sqlite-check.log
-ci-evidence/sqlite-smoke.log
 ```
 
 For a local evidence bundle, create the directory and preserve exit status
@@ -679,7 +671,7 @@ CARGO_NET_OFFLINE=true just sqlite-check 2>&1 | tee ci-evidence/sqlite-check.log
 CARGO_NET_OFFLINE=true just sqlite-smoke 2>&1 | tee ci-evidence/sqlite-smoke.log
 ```
 
-The embedded PostgreSQL workflow stores its lifecycle output under
+The embedded PostgreSQL lifecycle command stores its output under
 `target/postgresql-embedded-native-one/output/`; the comparison run is under
 the sibling `-two` directory. Report a result only when a recorded artifact
 or a newly run command supports it. A missing prerequisite may be recorded as
