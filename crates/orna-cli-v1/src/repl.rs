@@ -292,7 +292,7 @@ fn truncate(value: &str) -> String {
 mod tests {
     use super::*;
     use orna_evaluator_v1::Limits;
-    use std::io::BufReader;
+    use std::{cell::Cell, io::BufReader};
 
     #[test]
     fn inspect_is_bounded_and_redacts_protected_values() {
@@ -341,6 +341,39 @@ mod tests {
             assert_eq!(target, SnapshotTarget::Head);
             Ok(AdmittedReplSession::new(Limits::default()))
         }
+    }
+
+    struct CountingSnapshotLoader {
+        calls: Cell<usize>,
+    }
+
+    impl SnapshotSessionLoader for CountingSnapshotLoader {
+        type Error = ();
+
+        fn load_snapshot(
+            &self,
+            _target: SnapshotTarget,
+        ) -> Result<AdmittedReplSession, Self::Error> {
+            self.calls.set(self.calls.get() + 1);
+            Err(())
+        }
+    }
+
+    #[test]
+    fn malformed_snapshot_selection_does_not_call_the_loader() {
+        let mut input = b":at\n:at HEAD extra\n:at HEAD\x1b\n:quit\n".as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        let loader = CountingSnapshotLoader {
+            calls: Cell::new(0),
+        };
+        run_with_snapshot_loader(&mut input, &mut output, &mut session, &loader)
+            .expect("REPL runs");
+        assert_eq!(loader.calls.get(), 0);
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "> error[ORNA-REPL-AT]\n> error[ORNA-REPL-AT]\n> error[ORNA-REPL-AT]\n> "
+        );
     }
 
     #[test]
