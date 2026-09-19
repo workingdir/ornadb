@@ -1123,7 +1123,6 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 }
                 self.replay_claims.remove(&failure);
                 record.version += 1;
-                record.attempts += 1;
                 record.status = FailureStatus::Skipped;
                 record.diagnostic = diagnostic;
                 record.assertion_detail = None;
@@ -1152,7 +1151,6 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 }
                 self.replay_claims.remove(&failure);
                 record.version += 1;
-                record.attempts += 1;
                 record.status = FailureStatus::Skipped;
                 record.diagnostic = diagnostic;
                 record.assertion_detail = Some(detail);
@@ -1178,7 +1176,6 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 }
                 self.replay_claims.remove(&failure);
                 record.version += 1;
-                record.attempts += 1;
                 record.status = FailureStatus::Skipped;
                 CommitResult::ReplayCancelled {
                     failure: record.clone(),
@@ -1870,7 +1867,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_failure_updates_the_stable_failure_attempt_count() {
+    fn replay_failure_preserves_the_admission_attempt_count() {
         let mut backend = InMemoryCheckpointBackend::default();
         let item = delivery("receipt:zero", "resume:one");
         let failure = acquire_and_fail(&mut backend, item.clone());
@@ -1899,7 +1896,7 @@ mod tests {
             result => panic!("unexpected result: {result:?}"),
         };
         assert_eq!(failed_again.identity, failure.identity);
-        assert_eq!(failed_again.attempts, 3);
+        assert_eq!(failed_again.attempts, 2);
         assert_eq!(failed_again.status, FailureStatus::Skipped);
     }
 
@@ -1950,7 +1947,7 @@ mod tests {
             result => panic!("unexpected result: {result:?}"),
         };
         assert_eq!(cancelled.identity, failure.identity);
-        assert_eq!(cancelled.attempts, 3);
+        assert_eq!(cancelled.attempts, 2);
         assert_eq!(cancelled.status, FailureStatus::Skipped);
         assert_eq!(
             backend.checkpoint(&item.checkpoint_key()),
