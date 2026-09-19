@@ -173,6 +173,23 @@ async fn catalogue_identical_same_snapshot_replay_is_idempotent() {
 }
 
 #[tokio::test]
+async fn catalogue_duplicate_parameter_names_are_rejected_before_persistence() {
+    let (_directory, state, lease, mut batch, first) = admitted_state().await;
+    batch.functions[0]
+        .parameters
+        .push(CatalogueParameterDeclaration {
+            name: "x".into(),
+            position: 1,
+            type_name: "pkg.T".into(),
+        });
+    assert_eq!(
+        state.admit_catalogue_at(lease, &first.capture, batch).await,
+        Err(CatalogueError::CatalogueParameterConflict)
+    );
+    assert_unchanged(&state, &first).await;
+}
+
+#[tokio::test]
 async fn catalogue_same_snapshot_additive_replay_is_rejected_without_changes() {
     let (_directory, state, lease, mut batch, first) = admitted_state().await;
     batch.types.push(named_type("pkg.U", 6, 7));

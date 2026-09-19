@@ -6,6 +6,8 @@
 //! caller supplies names and semantic hashes; it never supplies an ObjectRef
 //! or an ObjectId to this boundary.
 
+use std::collections::BTreeSet;
+
 use libsql::{Connection, Transaction, params};
 use orna_foundation_v1::{
     FunctionRef, ObjectRef, Snapshot, TypeRef, Value, function_reference, object_reference,
@@ -3050,10 +3052,11 @@ async fn load_parameters_tx(
 fn validate_function_shape(declaration: &CatalogueFunctionDeclaration) -> Result<(), RuntimeError> {
     validate_observation_text(&declaration.result_type_name)?;
     let mut expected = 0;
+    let mut names = BTreeSet::new();
     for parameter in &declaration.parameters {
         validate_observation_text(&parameter.name)?;
         validate_observation_text(&parameter.type_name)?;
-        if parameter.position != expected {
+        if parameter.position != expected || !names.insert(&parameter.name) {
             return Err(RuntimeError::CatalogueParameterConflict);
         }
         expected = expected
