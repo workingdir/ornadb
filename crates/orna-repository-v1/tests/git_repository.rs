@@ -7,7 +7,7 @@ use std::{
 
 use ed25519_dalek::{Signer, SigningKey};
 use fs2::FileExt;
-use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
+use orna_foundation_v1::{CanonicalValue, GitHash, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
     CheckoutExecutionError, CheckoutTarget, CompactManifest, CompactRuntimeReceipt, CompactSegment,
     CompactSegmentRole, GitDeclaredObjectSetState, GitObjectKind, GitObjectState,
@@ -43,6 +43,41 @@ fn git(directory: &Path, arguments: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn decode_oid(object_id: &str) -> Vec<u8> {
+    object_id
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16).unwrap();
+            let low = (pair[1] as char).to_digit(16).unwrap();
+            ((high << 4) | low) as u8
+        })
+        .collect()
+}
+
+fn repository_with_object_format(format: &str) -> Option<TempDir> {
+    let temp = TempDir::new().unwrap();
+    let output = Command::new("git")
+        .current_dir(temp.path())
+        .args(["init", "-b", "main"])
+        .arg(format!("--object-format={format}"))
+        .output()
+        .unwrap();
+    if !output.status.success() {
+        return None;
+    }
+    git(
+        temp.path(),
+        &["config", "user.email", "test@example.invalid"],
+    );
+    git(temp.path(), &["config", "user.name", "Repository test"]);
+    git(temp.path(), &["config", "commit.gpgsign", "false"]);
+    fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
+    git(temp.path(), &["add", "main.orna"]);
+    git(temp.path(), &["commit", "-m", "initial"]);
+    Some(temp)
 }
 
 fn repository() -> TempDir {
@@ -1387,6 +1422,80 @@ fn snapshot_resolution_accepts_commits_and_rejects_non_commits_and_malformed_ids
     ));
     git(root.path(), &["switch", "--detach", &dangling]);
     assert_eq!(repo.resolve_snapshot("HEAD").unwrap().as_str(), dangling);
+}
+
+#[test]
+fn exact_committed_oid_resolution_reuses_commit_and_reachability_guards() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let head_bytes = decode_oid(head.as_str());
+    let before = git_state(&repo, root.path());
+
+    assert_eq!(
+        repo.resolve_committed_oid(GitHash::Sha1, &head_bytes)
+            .unwrap()
+            .as_str(),
+        head.as_str()
+    );
+    assert_eq!(git_state(&repo, root.path()), before);
+
+    assert!(matches!(
+        repo.resolve_committed_oid(GitHash::Sha1, &[0; 20]),
+        Err(orna_repository_v1::RepositoryError::SnapshotNotFound)
+    ));
+    let blob = git(root.path(), &["hash-object", "ordinary.txt"]);
+    assert!(matches!(
+        repo.resolve_committed_oid(GitHash::Sha1, &decode_oid(&blob)),
+        Err(orna_repository_v1::RepositoryError::GitOperationFailed)
+    ));
+
+    let unreachable = git(
+        root.path(),
+        &["commit-tree", "HEAD^{tree}", "-m", "unreachable"],
+    );
+    assert!(matches!(
+        repo.resolve_committed_oid(GitHash::Sha1, &decode_oid(&unreachable)),
+        Err(orna_repository_v1::RepositoryError::SnapshotNotReachable)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
+fn exact_committed_oid_resolution_rejects_malformed_and_foreign_formats() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+
+    assert!(matches!(
+        repo.resolve_committed_oid(GitHash::Sha1, &[0; 19]),
+        Err(orna_repository_v1::RepositoryError::InvalidObjectId)
+    ));
+    assert!(matches!(
+        repo.resolve_committed_oid(GitHash::Sha256, &[0; 32]),
+        Err(orna_repository_v1::RepositoryError::InvalidObjectId)
+    ));
+}
+
+#[test]
+fn exact_committed_oid_resolution_supports_sha256_repositories() {
+    let Some(root) = repository_with_object_format("sha256") else {
+        return;
+    };
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let head_bytes = decode_oid(head.as_str());
+
+    assert_eq!(head_bytes.len(), 32);
+    assert_eq!(
+        repo.resolve_committed_oid(GitHash::Sha256, &head_bytes)
+            .unwrap()
+            .as_str(),
+        head.as_str()
+    );
+    assert!(matches!(
+        repo.resolve_committed_oid(GitHash::Sha1, &[0; 20]),
+        Err(orna_repository_v1::RepositoryError::InvalidObjectId)
+    ));
 }
 
 #[test]
