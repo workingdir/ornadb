@@ -9,7 +9,11 @@ use orna_core::{
     source::{SourceBundle, SourceUnit},
 };
 use orna_repository_v1::Repository;
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::{
+    NoFault, RequestIdentity, RunObservationRegistration, RuntimeIdentity, RuntimeState,
+    TableActivationCandidateValidator, TerminalOutcome, ValidatedTableRequestActivationCommit,
+};
+use orna_stream_v1::{Component, SafeDiagnostic};
 use tempfile::TempDir;
 
 fn git(root: &Path, args: &[&str]) {
@@ -83,6 +87,19 @@ fn empty_active() -> ActiveDatabaseRevision {
     .unwrap()
 }
 
+struct NoTableValidator;
+
+impl TableActivationCandidateValidator for NoTableValidator {
+    fn tables(&self) -> &[String] {
+        &[]
+    }
+
+    fn validate(&mut self, rows: &orna_runtime_v1::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+        assert!(rows.is_empty());
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn real_source_candidate_projects_and_admits_at_runtime_capture() {
     let (_temp, repository) = repository();
@@ -123,4 +140,93 @@ async fn real_source_candidate_projects_and_admits_at_runtime_capture() {
     assert_eq!(result.capture, capture);
     assert_eq!(runtime.capture().await.unwrap(), capture);
     assert_eq!(runtime.capture().await.unwrap(), result.capture);
+}
+
+#[tokio::test]
+async fn real_source_candidate_commits_through_combined_runtime_activation() {
+    let (_temp, repository) = repository();
+    let runtime = RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [11; 16],
+            repository_id: [12; 16],
+        },
+        [13; 32],
+    )
+    .await
+    .unwrap();
+    let active = empty_active();
+    let bundle = SourceBundle::new([SourceUnit::new(
+        "application.orna",
+        "CREATE SCHEMA app; CREATE TYPE app.item AS OBJECT (value INTEGER);",
+    )])
+    .unwrap();
+    let report = check(&bundle, active.catalogue());
+    assert!(
+        report.diagnostics().is_empty(),
+        "{:?}",
+        report.diagnostics()
+    );
+    let resolved = materialize_resolved_source_catalogue(&report, active.pair(), &active).unwrap();
+
+    let writer = runtime.acquire_lease([14; 16]).await.unwrap();
+    let request = RequestIdentity {
+        session_id: [15; 16],
+        request_id: [16; 16],
+    };
+    let fingerprint = [17; 32];
+    let started = runtime
+        .begin_observed_request(
+            RunObservationRegistration {
+                request,
+                consumer_identity: orna_stream_v1::ConsumerIdentity {
+                    principal: Component::new("orna").unwrap(),
+                    root: Component::new("source-admission").unwrap(),
+                    function: Component::new("catalogue").unwrap(),
+                    binding: Component::new("test").unwrap(),
+                },
+                function: "app.apply".into(),
+                source_identity: Some("application.orna".into()),
+                invocation_id: [18; 16],
+            },
+            fingerprint,
+            writer,
+        )
+        .await
+        .unwrap();
+    let context = runtime.begin_activation().await.unwrap();
+    assert_eq!(started.run.unwrap().snapshot, context.capture().clone());
+
+    let outcome = TerminalOutcome::new(b"source-admission-test".to_vec()).unwrap();
+    let mut validator = NoTableValidator;
+    let committed = orna_conformance_v1::commit_resolved_source_catalogue_activation(
+        &runtime,
+        &resolved,
+        ValidatedTableRequestActivationCommit {
+            writer,
+            identity: request,
+            fingerprint,
+            context: &context,
+            mutations: &[],
+            next_digest: [19; 32],
+            outcome: outcome.clone(),
+            validator: &mut validator,
+            faults: &NoFault,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(committed.request.identity, request);
+    assert_eq!(committed.request.terminal_outcome, Some(outcome));
+    assert_eq!(committed.capture.generation(), &num_bigint::BigInt::from(1));
+    assert_eq!(committed.capture.generation_digest(), [19; 32]);
+    assert_eq!(runtime.capture().await.unwrap(), committed.capture);
+    assert!(
+        runtime
+            .catalogue_type("app.item", orna_runtime_v1::CatalogueTypeForm::Named,)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
