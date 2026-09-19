@@ -8,7 +8,6 @@ storage, server, and client boundaries.
 | Plan | Scope | Status |
 | --- | --- | --- |
 | [004 — SQLite runtime/security parity](004-sqlite-runtime-security-parity.md) | The local SQLite command, socket, security, USER-state, invocation, and redacted inspection surface | Implemented local parity slice; full PostgreSQL parity is not claimed |
-| [005 — SQLite parity CI](005-sqlite-parity-ci.md) | Deterministic offline checks, process smoke coverage, and CI evidence | Implemented as a dedicated CI gate |
 
 The SQLite implementation shares the neutral revision-store contract and canonical
 source/artifact validation with PostgreSQL. `LocalPath` now routes source apply/diff,
