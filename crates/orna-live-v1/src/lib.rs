@@ -6152,6 +6152,7 @@ impl LiveTransport {
             return Err(wire_error(401, "live.unauthenticated"));
         };
         if request.method != "GET"
+            || header(&request.headers, "host").is_none()
             || !header_token(&request.headers, "connection", "upgrade")
             || !header_eq(&request.headers, "upgrade", "websocket")
             || !header_eq(&request.headers, "sec-websocket-version", "13")
