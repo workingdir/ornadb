@@ -456,6 +456,12 @@ fn validate_rekeys(
         }
         let old = (rekey.table, canonical_key(&rekey.old_key));
         let new = (rekey.table, canonical_key(&rekey.new_key));
+        if old_keys.contains(&new) || new_keys.contains(&old) {
+            return Err(PlanningError::AmbiguousRekey {
+                table: rekey.table,
+                reason: "a re-key target is another intent's source key",
+            });
+        }
         if !old_keys.insert(old) {
             return Err(PlanningError::AmbiguousRekey {
                 table: rekey.table,
@@ -794,6 +800,31 @@ mod tests {
         assert!(matches!(
             plan(&source, &source, &request(rekeys)),
             Err(PlanningError::AmbiguousRekey { .. })
+        ));
+    }
+
+    #[test]
+    fn rekey_target_cannot_be_another_intent_source() {
+        let source = schema(table(true, vec![field(2, "name", false)]));
+        let rekeys = vec![
+            RekeyIntent {
+                table: id(1),
+                old_key: CanonicalValue::uuid([2; 16]),
+                new_key: CanonicalValue::uuid([3; 16]),
+            },
+            RekeyIntent {
+                table: id(1),
+                old_key: CanonicalValue::uuid([3; 16]),
+                new_key: CanonicalValue::uuid([4; 16]),
+            },
+        ];
+
+        assert!(matches!(
+            plan(&source, &source, &request(rekeys)),
+            Err(PlanningError::AmbiguousRekey {
+                reason: "a re-key target is another intent's source key",
+                ..
+            })
         ));
     }
 
