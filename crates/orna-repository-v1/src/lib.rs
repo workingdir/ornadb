@@ -8,7 +8,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fmt, fs,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Output, Stdio},
 };
@@ -71,6 +71,40 @@ impl fmt::Display for GitCommitRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
+}
+
+/// One recursively listed entry in an immutable committed Git tree.
+///
+/// This deliberately retains only the repository-relative path and Git entry
+/// kind. Callers that need bytes must use [`Repository::read_committed_file`]
+/// so each body has an explicit size bound.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedTreeEntry {
+    path: ManagedPath,
+    kind: CommittedTreeEntryKind,
+}
+
+impl CommittedTreeEntry {
+    /// The normalized repository-relative path of this entry.
+    pub fn path(&self) -> &ManagedPath {
+        &self.path
+    }
+
+    /// The entry's Git object kind and supported file mode.
+    pub const fn kind(&self) -> CommittedTreeEntryKind {
+        self.kind
+    }
+}
+
+/// The Git tree entry kinds a committed snapshot loader must classify.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommittedTreeEntryKind {
+    /// An ordinary regular file. `executable` records Git's executable bit.
+    File { executable: bool },
+    /// A symbolic-link blob, which snapshot source loaders must not follow.
+    Symlink,
+    /// A gitlink/submodule entry, which is not source content in this tree.
+    Submodule,
 }
 
 /// A verified Git tree ID produced from the ordinary Git index.
@@ -3593,6 +3627,83 @@ impl Repository {
         Ok(bytes)
     }
 
+    /// Lists a committed tree recursively without consulting or changing the
+    /// worktree, index, or refs.
+    ///
+    /// The caller supplies an entry limit before Git output is accumulated.
+    /// Symlinks and submodules are returned for explicit rejection by the
+    /// caller; malformed or unsupported tree modes fail closed. File bytes
+    /// remain unavailable through this listing and require
+    /// [`Self::read_committed_file`] with a separate byte bound.
+    pub fn list_committed_tree(
+        &self,
+        commit: &GitCommitRef,
+        max_entries: usize,
+    ) -> Result<Vec<CommittedTreeEntry>, RepositoryError> {
+        const MAX_ENTRY_BYTES: usize = 4 * 1024;
+
+        let resolved = self.commit_required(&format!("{}^{{commit}}", commit.as_str()))?;
+        if resolved != *commit {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+
+        let mut command = self.command();
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["ls-tree", "-r", "-z", "--full-tree", commit.as_str()])
+            .stdout(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        let listed = {
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or(RepositoryError::GitOperationFailed)?;
+            let mut stdout = BufReader::new(stdout);
+            let mut entries = Vec::new();
+            (|| {
+                loop {
+                    let mut raw_entry = Vec::new();
+                    let bytes = (&mut stdout)
+                        .take((MAX_ENTRY_BYTES + 1) as u64)
+                        .read_until(b'\0', &mut raw_entry)
+                        .map_err(|_| RepositoryError::GitOperationFailed)?;
+                    if bytes == 0 {
+                        break;
+                    }
+                    if raw_entry.len() > MAX_ENTRY_BYTES || raw_entry.last() != Some(&b'\0') {
+                        return Err(RepositoryError::GitOperationFailed);
+                    }
+                    if entries.len() == max_entries {
+                        return Err(RepositoryError::GitOperationFailed);
+                    }
+                    raw_entry.pop();
+                    entries.push(parse_committed_tree_entry(
+                        &raw_entry,
+                        self.native_object_id_length()?,
+                    )?);
+                }
+                Ok(entries)
+            })()
+        };
+        let entries = match listed {
+            Ok(entries) => entries,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        let status = child
+            .wait()
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        if !status.success() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        Ok(entries)
+    }
+
     /// Stages exactly `paths` through normal Git index semantics.
     ///
     /// It checks the caller's observed index generation first, so stale
@@ -6334,6 +6445,38 @@ fn parse_remote_orna_refs(
         }
     }
     Ok(refs)
+}
+
+fn parse_committed_tree_entry(
+    raw_entry: &[u8],
+    object_id_length: usize,
+) -> Result<CommittedTreeEntry, RepositoryError> {
+    let tab = raw_entry
+        .iter()
+        .position(|byte| *byte == b'\t')
+        .ok_or(RepositoryError::GitOperationFailed)?;
+    let mut fields = raw_entry[..tab].split(|byte| *byte == b' ');
+    let mode = fields.next().unwrap_or_default();
+    let object_kind = fields.next().unwrap_or_default();
+    let object = fields.next().unwrap_or_default();
+    if fields.next().is_some()
+        || object_kind != b"blob" && object_kind != b"commit"
+        || object.len() != object_id_length
+        || !object.iter().all(u8::is_ascii_hexdigit)
+    {
+        return Err(RepositoryError::GitOperationFailed);
+    }
+    let path = std::str::from_utf8(&raw_entry[tab + 1..])
+        .map_err(|_| RepositoryError::GitOperationFailed)?;
+    let path = ManagedPath::new(path)?;
+    let kind = match (mode, object_kind) {
+        (b"100644", b"blob") => CommittedTreeEntryKind::File { executable: false },
+        (b"100755", b"blob") => CommittedTreeEntryKind::File { executable: true },
+        (b"120000", b"blob") => CommittedTreeEntryKind::Symlink,
+        (b"160000", b"commit") => CommittedTreeEntryKind::Submodule,
+        _ => return Err(RepositoryError::GitOperationFailed),
+    };
+    Ok(CommittedTreeEntry { path, kind })
 }
 
 fn valid_native_object_id(object_id: &str) -> bool {
