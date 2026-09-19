@@ -278,7 +278,7 @@ fn application_worker_loop(
         recipe.runtime_owner,
         Rc::clone(&expiries),
         Some(recipe.project),
-        None,
+        Some(recipe.capture),
     ) {
         Ok(application) => application,
         Err(()) => {
