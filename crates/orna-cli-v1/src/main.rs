@@ -1075,7 +1075,11 @@ fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnost
 fn repl_session(endpoint: &Endpoint) -> Result<AdmittedReplSession, Diagnostic> {
     let project_context = match endpoint {
         Endpoint::ManagedLocal => orna_repository_v1::Repository::discover(".").is_ok(),
-        Endpoint::Path(_) | Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => true,
+        Endpoint::Path(_) => true,
+        // Snapshot selectors are deliberately repository-backed. Keep a
+        // non-local REPL core-only so the loader can reject `:at` uniformly as
+        // ORNA-REPL-AT instead of failing before the command loop starts.
+        Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => false,
     };
     if project_context {
         let project = load_project_without_standard_rejection(endpoint)?;
@@ -1104,6 +1108,62 @@ fn repl_session_error(error: &ReplError) -> Diagnostic {
             "project REPL session is not available",
             "use a project supported by the configured REPL runtime",
         )
+    }
+}
+
+/// Read-only bridge from REPL `:at` selectors to project admission.
+///
+/// The REPL owns replacement semantics: this loader only returns an owned,
+/// fully admitted candidate once the selected source set has loaded. In
+/// particular, it never checks out a commit or changes Git's index, worktree,
+/// HEAD, or refs.
+struct ReplSnapshotSessionLoader<'a> {
+    endpoint: &'a Endpoint,
+}
+
+impl ReplSnapshotSessionLoader<'_> {
+    fn repository(&self) -> Result<orna_repository_v1::Repository, ()> {
+        let path = local_project_path(self.endpoint).map_err(|_| ())?;
+        orna_repository_v1::Repository::discover(path).map_err(|_| ())
+    }
+
+    fn admit(project: &orna_project_v1::LoadedProject) -> Result<AdmittedReplSession, ()> {
+        // Keep the existing standard-import boundary intact: no host standard
+        // sources are supplied, so uncaptured imports remain inadmissible.
+        AdmittedReplSession::from_loaded_project(project, [], Limits::default()).map_err(|_| ())
+    }
+}
+
+impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
+    type Error = ();
+
+    fn load_snapshot(
+        &self,
+        target: repl::SnapshotTarget,
+    ) -> Result<AdmittedReplSession, Self::Error> {
+        match target {
+            repl::SnapshotTarget::Cwd => {
+                let project =
+                    load_project_without_standard_rejection(self.endpoint).map_err(|_| ())?;
+                Self::admit(&project)
+            }
+            repl::SnapshotTarget::Head => {
+                let repository = self.repository()?;
+                let commit = repository.head().map_err(|_| ())?.ok_or(())?;
+                let project = orna_project_v1::ProjectLoader::default()
+                    .load_committed_snapshot(&repository, &commit)
+                    .map_err(|_| ())?;
+                Self::admit(&project)
+            }
+            repl::SnapshotTarget::Ref(reference) => {
+                let repository = self.repository()?;
+                let commit = repository.resolve_snapshot(&reference).map_err(|_| ())?;
+                let project = orna_project_v1::ProjectLoader::default()
+                    .load_committed_snapshot(&repository, &commit)
+                    .map_err(|_| ())?;
+                Self::admit(&project)
+            }
+        }
     }
 }
 
@@ -1150,10 +1210,12 @@ fn run_repl(endpoint: &Endpoint, expression: Option<&str>) -> Result<(), Diagnos
     }
     let stdin = io::stdin();
     let stdout = io::stdout();
-    repl::run(
+    let loader = ReplSnapshotSessionLoader { endpoint };
+    repl::run_with_snapshot_loader(
         &mut BufReader::new(stdin.lock()),
         &mut stdout.lock(),
         &mut session,
+        &loader,
     )
     .map_err(|_| {
         Diagnostic::target(
@@ -1496,6 +1558,118 @@ mod tests {
         assert_eq!(
             error.help,
             "use a captured standard dependency or remove the import"
+        );
+    }
+
+    #[test]
+    fn repl_snapshot_loader_reads_cwd_head_and_named_refs_without_git_mutation() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git init")
+                .success()
+        );
+        std::fs::write(directory.path().join("main.orna"), "use library;")
+            .expect("committed source");
+        std::fs::write(
+            directory.path().join("library.orna"),
+            "pub fn answer(): Int = 42;",
+        )
+        .expect("committed library source");
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "main.orna", "library.orna"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git add")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=orna@example.test",
+                    "-c",
+                    "user.name=Orna Test",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "snapshot",
+                ])
+                .current_dir(directory.path())
+                .status()
+                .expect("git commit")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["branch", "snapshot"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git branch")
+                .success()
+        );
+        std::fs::write(
+            directory.path().join("library.orna"),
+            "pub fn answer(): Int = 7;",
+        )
+        .expect("CWD source");
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(directory.path())
+            .output()
+            .expect("Git status before snapshot reads");
+
+        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
+        let loader = ReplSnapshotSessionLoader {
+            endpoint: &endpoint,
+        };
+        for (target, expected) in [
+            (repl::SnapshotTarget::Cwd, "7 : Int"),
+            (repl::SnapshotTarget::Head, "42 : Int"),
+            (repl::SnapshotTarget::Ref("snapshot".into()), "42 : Int"),
+        ] {
+            let mut session = repl::SnapshotSessionLoader::load_snapshot(&loader, target)
+                .expect("snapshot project is admitted");
+            let imported = session.submit("use library;");
+            assert!(imported.is_ok(), "snapshot import failed: {imported:?}");
+            let value = session
+                .submit("library.answer()")
+                .expect("snapshot function evaluates")
+                .expect("visible result");
+            assert_eq!(repl::inspect(&value), expected);
+        }
+
+        let after = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(directory.path())
+            .output()
+            .expect("Git status after snapshot reads");
+        assert_eq!(after.stdout, status.stdout);
+        assert_eq!(after.stderr, status.stderr);
+    }
+
+    #[test]
+    fn repl_snapshot_loader_rejects_non_local_endpoints_as_at_errors() {
+        let endpoint = Endpoint::RemoteTls("orna://host/project".into());
+        let loader = ReplSnapshotSessionLoader {
+            endpoint: &endpoint,
+        };
+        let mut session = repl_session(&endpoint).expect("core-only remote REPL session");
+        let mut input = b":at HEAD\n:at snapshot\n:quit\n".as_slice();
+        let mut output = Vec::new();
+
+        repl::run_with_snapshot_loader(&mut input, &mut output, &mut session, &loader)
+            .expect("REPL runs");
+
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "> error[ORNA-REPL-AT]\n> error[ORNA-REPL-AT]\n> "
         );
     }
 
