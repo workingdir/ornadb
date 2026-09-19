@@ -24,6 +24,53 @@ fn repository(files: &[(&str, &str)]) -> (TempDir, Repository) {
     (directory, repository)
 }
 
+fn commit_all(directory: &TempDir) {
+    for (key, value) in [
+        ("user.email", "project-loader@example.invalid"),
+        ("user.name", "Project loader test"),
+        ("commit.gpgsign", "false"),
+    ] {
+        assert!(
+            Command::new("git")
+                .args(["config", key, value])
+                .current_dir(directory.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    assert!(
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(directory.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["commit", "--quiet", "-m", "snapshot"])
+            .current_dir(directory.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+fn git_output(directory: &TempDir, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
 #[test]
 fn loads_only_reachable_modules_in_deterministic_logical_order() {
     let (_directory, repository) = repository(&[
@@ -351,6 +398,62 @@ fn accepts_committed_orna_metadata_without_treating_it_as_source() {
 }
 
 #[test]
+fn loads_reachable_modules_from_a_committed_snapshot_without_touching_git_state() {
+    let (directory, repository) = repository(&[
+        ("main.orna", "use library; pub fn run() = seed();"),
+        ("library.orna", "pub fn seed(): Int = 42;"),
+        ("unused.orna", "@@ this snapshot file is not reachable"),
+        ("README.txt", "ordinary non-source content"),
+        (".orna/format.orna", "metadata is not source"),
+    ]);
+    commit_all(&directory);
+    let commit = repository.resolve_snapshot("HEAD").unwrap();
+    let before_head = git_output(&directory, &["rev-parse", "HEAD"]);
+    let before_index = git_output(&directory, &["ls-files", "-s"]);
+    let before_status = git_output(&directory, &["status", "--porcelain=v1"]);
+
+    fs::write(directory.path().join("main.orna"), "@@ worktree is ignored").unwrap();
+    let project = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &commit)
+        .unwrap();
+
+    assert_eq!(
+        project
+            .identities()
+            .iter()
+            .map(|identity| identity.logical_path())
+            .collect::<Vec<_>>(),
+        ["library.orna", "main.orna"]
+    );
+    assert_eq!(git_output(&directory, &["rev-parse", "HEAD"]), before_head);
+    assert_eq!(git_output(&directory, &["ls-files", "-s"]), before_index);
+    assert_eq!(
+        git_output(&directory, &["status", "--porcelain=v1"]),
+        format!(" M main.orna\n{before_status}")
+    );
+}
+
+#[test]
+fn committed_snapshot_loader_enforces_repository_entry_limit_before_reads() {
+    let (directory, repository) = repository(&[
+        ("main.orna", "pub fn run() {}"),
+        ("unreachable.orna", "@@ must not be parsed"),
+    ]);
+    commit_all(&directory);
+    let commit = repository.resolve_snapshot("HEAD").unwrap();
+    let loader = ProjectLoader::new(ProjectLimits {
+        max_modules: 1,
+        max_source_bytes: 1024,
+        max_repository_entries: 1,
+    });
+
+    assert!(matches!(
+        loader.load_committed_snapshot(&repository, &commit),
+        Err(ProjectLoadError::RepositoryLimit)
+    ));
+}
+
+#[test]
 fn rejects_invalid_non_metadata_module_paths() {
     let (_directory, repository) = repository(&[
         ("main.orna", "pub fn run() {}"),
@@ -358,6 +461,52 @@ fn rejects_invalid_non_metadata_module_paths() {
     ]);
     assert!(matches!(
         ProjectLoader::default().load(&repository),
+        Err(ProjectLoadError::UnsafePath)
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn committed_snapshot_loader_rejects_symlink_entries() {
+    use std::os::unix::fs::symlink;
+
+    let (directory, repository) = repository(&[("main.orna", "pub fn run() {}")]);
+    symlink("main.orna", directory.path().join("linked.orna")).unwrap();
+    commit_all(&directory);
+    let commit = repository.resolve_snapshot("HEAD").unwrap();
+
+    assert!(matches!(
+        ProjectLoader::default().load_committed_snapshot(&repository, &commit),
+        Err(ProjectLoadError::Symlink)
+    ));
+}
+
+#[test]
+fn committed_snapshot_loader_rejects_submodule_entries() {
+    let (directory, repository) = repository(&[("main.orna", "pub fn run() {}")]);
+    commit_all(&directory);
+    let object = git_output(&directory, &["rev-parse", "HEAD"]);
+    let cache_info = format!("160000,{},vendor", object.trim());
+    assert!(
+        Command::new("git")
+            .args(["update-index", "--add", "--cacheinfo", &cache_info])
+            .current_dir(directory.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["commit", "--quiet", "-m", "gitlink"])
+            .current_dir(directory.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let commit = repository.resolve_snapshot("HEAD").unwrap();
+
+    assert!(matches!(
+        ProjectLoader::default().load_committed_snapshot(&repository, &commit),
         Err(ProjectLoadError::UnsafePath)
     ));
 }
