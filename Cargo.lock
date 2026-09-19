@@ -1916,6 +1916,8 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "num-bigint 0.4.8",
+ "orna-compiler",
+ "orna-core",
  "orna-evaluator-v1",
  "orna-foundation-v1",
  "orna-live-v1",
