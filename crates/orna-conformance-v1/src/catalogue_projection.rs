@@ -91,13 +91,14 @@ fn witness_name(
 
 /// Projects a compiler candidate into the runtime's source-only admission.
 ///
-/// `predecessor_capture` is caller-supplied and passed through unchanged. The
+/// `predecessor_capture` is caller-supplied and passed through unchanged,
+/// including `None` for the first catalogue admission. The
 /// projection is closed over witnessed object types and newly compiled
 /// functions; scalar, value, stream, row, default, missing-standard, and
 /// unwitnessed forms fail closed.
 pub fn project_source_catalogue(
     catalogue: &ResolvedSourceCatalogue,
-    predecessor_capture: CwdCapture,
+    predecessor_capture: Option<CwdCapture>,
 ) -> Result<CatalogueAdmission, CatalogueProjectionError> {
     if let Some(error) = catalogue.type_witness_errors().first() {
         return Err(CatalogueProjectionError::TypeWitness(error.to_string()));
@@ -199,7 +200,7 @@ pub fn project_source_catalogue(
     }
 
     Ok(CatalogueAdmission {
-        predecessor_capture: Some(predecessor_capture),
+        predecessor_capture,
         types,
         functions,
     })
