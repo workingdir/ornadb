@@ -3609,6 +3609,7 @@ mod tests {
             method: "GET".into(),
             path: session_path.into(),
             headers: vec![
+                ("host".into(), "app.example".into()),
                 ("origin".into(), "https://app.example".into()),
                 ("connection".into(), "Upgrade".into()),
                 ("upgrade".into(), "websocket".into()),
@@ -4307,6 +4308,7 @@ mod tests {
                 method: "GET".into(),
                 path: "/orna/live/18181818-1818-1818-1818-181818181818".into(),
                 headers: vec![
+                    ("host".into(), "app.example".into()),
                     ("origin".into(), "https://app.example".into()),
                     ("connection".into(), "Upgrade".into()),
                     ("upgrade".into(), "websocket".into()),

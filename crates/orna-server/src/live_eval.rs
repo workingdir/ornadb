@@ -53,11 +53,13 @@ struct OperationAdmission {
 /// Server-owned source for the durable CWD pin and immutable project inputs.
 ///
 /// The live transport has already made the request reservation when this is
-/// called. Keeping this seam here makes the remaining synchronous application
-/// callback obtain its context at operation admission, rather than comparing
-/// with a capture made when the listener was bound.
+/// called. Keeping this seam here makes the application obtain its context
+/// asynchronously at operation admission, rather than comparing with a
+/// capture made when the listener was bound.
 trait OperationAdmissionSource {
-    fn capture(&self) -> std::result::Result<CwdCapture, &'static str>;
+    fn capture<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CwdCapture, &'static str>> + 'a>>;
     fn repl(&self) -> std::result::Result<AdmittedReplSession, &'static str>;
 }
 
@@ -69,14 +71,15 @@ struct RepositoryAdmissionSource {
 }
 
 impl OperationAdmissionSource for RepositoryAdmissionSource {
-    fn capture(&self) -> std::result::Result<CwdCapture, &'static str> {
-        let state = futures::executor::block_on(RuntimeState::open(
-            &self.repository,
-            self.identity,
-            self.initial_digest,
-        ))
-        .map_err(|_| "wire.invalid_message")?;
-        futures::executor::block_on(state.capture()).map_err(|_| "wire.invalid_message")
+    fn capture<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CwdCapture, &'static str>> + 'a>> {
+        Box::pin(async move {
+            let state = RuntimeState::open(&self.repository, self.identity, self.initial_digest)
+                .await
+                .map_err(|_| "wire.invalid_message")?;
+            state.capture().await.map_err(|_| "wire.invalid_message")
+        })
     }
 
     fn repl(&self) -> std::result::Result<AdmittedReplSession, &'static str> {
@@ -212,7 +215,7 @@ impl PureEvalApplication {
         self.rejected_terminals.remove(&session);
     }
 
-    fn admit(
+    async fn admit(
         &self,
         database: &DatabaseContext,
         _presentation: &PresentationContext,
@@ -224,7 +227,7 @@ impl PureEvalApplication {
         // transport has reserved this operation. The resulting capture is
         // retained by the session state and cannot be changed by later CWD
         // or repository movement.
-        let capture = self.admissions.capture()?;
+        let capture = self.admissions.capture().await?;
         if capture.database_id() != self.database_id {
             return Err("wire.invalid_message");
         }
@@ -240,7 +243,7 @@ impl PureEvalApplication {
         })
     }
 
-    fn session(
+    async fn session(
         &mut self,
         session: [u8; 16],
         database: &DatabaseContext,
@@ -250,12 +253,12 @@ impl PureEvalApplication {
         if !self.expiries.borrow().contains_key(&session) {
             return Err("wire.session_expired");
         }
-        let OperationAdmission { snapshot } = self.admit(database, presentation)?;
+        let OperationAdmission { snapshot } = self.admit(database, presentation).await?;
         if !self.sessions.contains_key(&session) {
             // The evaluator is constructed only after the durable capture is
             // accepted, then remains the session overlay for that exact pin.
             let repl = self.admissions.repl()?;
-            if self.admissions.capture()?.snapshot() != &snapshot {
+            if self.admissions.capture().await?.snapshot() != &snapshot {
                 // Do not bind loaded source to a CWD that moved while the
                 // immutable evaluator was being built. A later repository
                 // change cannot affect `repl`, which owns the loaded source.
@@ -388,7 +391,9 @@ impl LiveApplication for PureEvalApplication {
         request: [u8; 16],
         message: &Message,
     ) -> Result<Envelope> {
-        self.eval_with_cancellation(session, request, message, None, None)
+        futures::executor::block_on(
+            self.eval_with_cancellation(session, request, message, None, None),
+        )
     }
 
     fn dispatch_with_work<'a>(
@@ -412,13 +417,16 @@ impl LiveApplication for PureEvalApplication {
         Box::pin(async move {
             work.check_active()?;
             let response = match message {
-                Message::Eval { .. } => self.eval_with_cancellation(
-                    session,
-                    request,
-                    message,
-                    Some(fingerprint),
-                    Some(&cancellation),
-                ),
+                Message::Eval { .. } => {
+                    self.eval_with_cancellation(
+                        session,
+                        request,
+                        message,
+                        Some(fingerprint),
+                        Some(&cancellation),
+                    )
+                    .await
+                }
                 Message::Subscribe { .. } => self.subscribe(session, request, message),
                 Message::Resync => self.resync(
                     session,
@@ -448,7 +456,7 @@ impl LiveApplication for PureEvalApplication {
 }
 
 impl PureEvalApplication {
-    fn eval_with_cancellation(
+    async fn eval_with_cancellation(
         &mut self,
         session: [u8; 16],
         request: [u8; 16],
@@ -478,7 +486,7 @@ impl PureEvalApplication {
             return Ok(response);
         }
         let result = {
-            let (state, _) = match self.session(session, database, presentation) {
+            let (state, _) = match self.session(session, database, presentation).await {
                 Ok(state) => state,
                 Err(code) => {
                     let response = self.failure(request, operation_fingerprint, code)?;
@@ -599,10 +607,15 @@ mod tests {
     }
 
     impl OperationAdmissionSource for TestAdmissionSource {
-        fn capture(&self) -> std::result::Result<CwdCapture, &'static str> {
-            self.capture_admissions
-                .set(self.capture_admissions.get() + 1);
-            Ok(self.capture.borrow().clone())
+        fn capture<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = std::result::Result<CwdCapture, &'static str>> + 'a>>
+        {
+            Box::pin(async move {
+                self.capture_admissions
+                    .set(self.capture_admissions.get() + 1);
+                Ok(self.capture.borrow().clone())
+            })
         }
 
         fn repl(&self) -> std::result::Result<AdmittedReplSession, &'static str> {
