@@ -1655,6 +1655,173 @@ mod tests {
     }
 
     #[test]
+    fn repl_snapshot_loader_keeps_a_selected_ref_stable_after_it_moves() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git init")
+                .success()
+        );
+        std::fs::write(directory.path().join("main.orna"), "use library;")
+            .expect("initial main source");
+        std::fs::write(
+            directory.path().join("library.orna"),
+            "pub fn answer(): Int = 42;",
+        )
+        .expect("initial library source");
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "main.orna", "library.orna"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git add")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=orna@example.test",
+                    "-c",
+                    "user.name=Orna Test",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "selected snapshot",
+                ])
+                .current_dir(directory.path())
+                .status()
+                .expect("initial git commit")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["branch", "snapshot"])
+                .current_dir(directory.path())
+                .status()
+                .expect("snapshot branch")
+                .success()
+        );
+        std::fs::write(
+            directory.path().join("library.orna"),
+            "pub fn answer(): Int = 7;",
+        )
+        .expect("advanced library source");
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "library.orna"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git add advanced source")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=orna@example.test",
+                    "-c",
+                    "user.name=Orna Test",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "advanced source",
+                ])
+                .current_dir(directory.path())
+                .status()
+                .expect("advanced git commit")
+                .success()
+        );
+
+        let git_output = |arguments: &[&str]| {
+            std::process::Command::new("git")
+                .args(arguments)
+                .current_dir(directory.path())
+                .output()
+                .expect("git output")
+        };
+        let selected_ref = git_output(&["rev-parse", "snapshot"]);
+        assert!(selected_ref.status.success());
+        let head = git_output(&["rev-parse", "HEAD"]);
+        assert!(head.status.success());
+        assert_ne!(selected_ref.stdout, head.stdout);
+        let symbolic_head = git_output(&["symbolic-ref", "--quiet", "HEAD"]);
+        assert!(symbolic_head.status.success());
+        let index_path = git_output(&["rev-parse", "--git-path", "index"]);
+        assert!(index_path.status.success());
+        let index_path = directory.path().join(
+            std::str::from_utf8(&index_path.stdout)
+                .expect("UTF-8 index path")
+                .trim(),
+        );
+        let index = std::fs::read(&index_path).expect("index before snapshot selection");
+        let main =
+            std::fs::read(directory.path().join("main.orna")).expect("main before selection");
+        let library =
+            std::fs::read(directory.path().join("library.orna")).expect("library before selection");
+        let status = git_output(&["status", "--porcelain=v1", "-z"]);
+        assert!(status.status.success());
+
+        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
+        let loader = ReplSnapshotSessionLoader {
+            endpoint: &endpoint,
+        };
+        let mut session = repl::SnapshotSessionLoader::load_snapshot(
+            &loader,
+            repl::SnapshotTarget::Ref("snapshot".into()),
+        )
+        .expect("selected snapshot project is admitted");
+
+        assert!(
+            std::process::Command::new("git")
+                .args(["branch", "--force", "snapshot", "HEAD"])
+                .current_dir(directory.path())
+                .status()
+                .expect("move selected branch")
+                .success()
+        );
+        let moved_ref = git_output(&["rev-parse", "snapshot"]);
+        assert!(moved_ref.status.success());
+        assert_eq!(moved_ref.stdout, head.stdout);
+
+        session
+            .submit("use library;")
+            .expect("selected import succeeds");
+        let value = session
+            .submit("library.answer()")
+            .expect("selected function evaluates")
+            .expect("visible result");
+        assert_eq!(repl::inspect(&value), "42 : Int");
+
+        let after_head = git_output(&["rev-parse", "HEAD"]);
+        let after_symbolic_head = git_output(&["symbolic-ref", "--quiet", "HEAD"]);
+        let after_status = git_output(&["status", "--porcelain=v1", "-z"]);
+        assert_eq!(after_head.stdout, head.stdout);
+        assert_eq!(after_symbolic_head.stdout, symbolic_head.stdout);
+        assert_eq!(
+            std::fs::read(&index_path).expect("index after selection"),
+            index
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("main.orna")).expect("main after selection"),
+            main
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("library.orna")).expect("library after selection"),
+            library
+        );
+        assert_eq!(after_status.stdout, status.stdout);
+        assert_eq!(after_status.stderr, status.stderr);
+    }
+
+    #[test]
     fn repl_snapshot_loader_rejects_non_local_endpoints_as_at_errors() {
         let endpoint = Endpoint::RemoteTls("orna://host/project".into());
         let loader = ReplSnapshotSessionLoader {
