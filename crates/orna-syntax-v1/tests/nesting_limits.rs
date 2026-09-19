@@ -1,6 +1,6 @@
 use orna_syntax_v1::{
     Declaration, parse_expression, parse_expression_with_file, parse_module,
-    parse_module_with_file, parse_repl_with_file,
+    parse_module_with_file, parse_repl_with_file, parse_row,
 };
 
 const LIMIT_ERROR: &str = "maximum syntax nesting exceeded";
@@ -82,6 +82,20 @@ fn repl_entrypoint_reports_the_same_nesting_limit_with_file_context() {
             .iter()
             .all(|error| error.span.file.as_deref() == Some("repl.orna"))
     );
+}
+
+#[test]
+fn row_entrypoint_reports_the_same_nesting_limit_without_panicking() {
+    let nested = format!(
+        "{}1{}",
+        "{ value: ".repeat(100),
+        " }".repeat(100),
+    );
+    let parsed = parse_row(&nested);
+    assert_limited(&parsed.diagnostics);
+
+    let shallow = parse_row("{ value: 1 }");
+    assert!(shallow.is_ok(), "{:?}", shallow.diagnostics);
 }
 
 #[test]
