@@ -18,6 +18,8 @@ orna-protocol-v1 = { path = "../orna-protocol-v1" }
 orna-project-v1 = { path = "../orna-project-v1" }
 orna-repository-v1 = { path = "../orna-repository-v1" }
 orna-semantic-v1 = { path = "../orna-semantic-v1" }
+orna-compiler = { path = "../orna-compiler" }
+orna-core = { path = "../orna-core" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
 orna-runtime-v1 = { path = "../orna-runtime-v1" }
 orna-stream-v1 = { path = "../orna-stream-v1" }
