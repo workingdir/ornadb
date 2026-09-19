@@ -25,10 +25,12 @@ use std::{
 };
 
 mod admitted_repl;
+pub mod catalogue_projection;
 pub mod row_admission;
 mod semantic_adapter;
 mod syntax_adapter;
 pub use admitted_repl::{AdmittedReplSession, ReplError};
+pub use catalogue_projection::{CatalogueProjectionError, project_source_catalogue};
 pub use semantic_adapter::{
     BoundedEvaluator, DurableTransactionalEvaluator, RunningTableRequestDisposition,
     RuntimeAdapter, RuntimeEvaluator, RuntimeTarget, SemanticAdapter, TransactionalEvaluator,
