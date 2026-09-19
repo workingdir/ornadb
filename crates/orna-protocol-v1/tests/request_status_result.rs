@@ -93,6 +93,15 @@ fn request_status_result_round_trips_every_state_and_valid_optional_shapes() {
 }
 
 #[test]
+fn request_status_result_rejects_mismatched_embedded_fingerprint() {
+    let encoded = raw_status(4, Some(&[3; 32]), Some(&raw_result_body()));
+    assert_eq!(
+        Envelope::decode(&encoded, Limits::default()),
+        Err(Error::InvalidMessage)
+    );
+}
+
+#[test]
 fn request_status_result_rejects_retained_result_for_active_or_unknown_work() {
     for state in [0, 1, 2] {
         let bytes = raw_status(state, Some(&[2; 32]), Some(&raw_result_body()));
