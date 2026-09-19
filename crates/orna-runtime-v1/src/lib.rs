@@ -6796,6 +6796,46 @@ impl RuntimeState {
         if stored != freeze.checkpoint {
             return Err(RuntimeError::ConflictingPublicationIntent);
         }
+        let mut completed_rows = transaction
+            .query(
+                "SELECT commit_id, compact_receipt FROM publication_commit \
+                 WHERE intent_id = ?1",
+                params![freeze.intent_id.to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if let Some(completed) = completed_rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let completed_commit: Vec<u8> = completed
+                .get(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let encoded: Option<Vec<u8>> = completed
+                .get(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let receipt = CompactRuntimeReceipt::decode(
+                encoded
+                    .as_deref()
+                    .ok_or(RuntimeError::ConflictingPublicationCommit)?,
+            )
+            .map_err(|_| RuntimeError::InvalidCompactReceipt)?;
+            self.verify_compact_receipt(&receipt)?;
+            if completed_commit != pending.commit().as_str().as_bytes()
+                || receipt.commit() != pending.commit()
+                || receipt.runtime_intent_id() != pending.runtime_intent_id()
+                || receipt.cleanup_watermark() != pending.cleanup_watermark()
+                || receipt.journal_verifier() != pending.journal_verifier()
+            {
+                return Err(RuntimeError::ConflictingPublicationCommit);
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            return Ok(());
+        }
         let watermark: Option<Vec<u8>> = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let commit: Option<Vec<u8>> = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let verifier: Option<Vec<u8>> = row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
