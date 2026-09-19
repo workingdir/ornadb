@@ -66,14 +66,10 @@ struct RepositoryAdmissionSource {
     identity: RuntimeIdentity,
     initial_digest: [u8; 32],
     project: Option<orna_project_v1::LoadedProject>,
-    capture: Option<CwdCapture>,
 }
 
 impl OperationAdmissionSource for RepositoryAdmissionSource {
     fn capture(&self) -> std::result::Result<CwdCapture, &'static str> {
-        if let Some(capture) = &self.capture {
-            return Ok(capture.clone());
-        }
         let state = futures::executor::block_on(RuntimeState::open(
             &self.repository,
             self.identity,
@@ -165,7 +161,7 @@ impl PureEvalApplication {
         _runtime_owner: [u8; 16],
         expiries: SessionExpiries,
         project: Option<orna_project_v1::LoadedProject>,
-        capture: Option<CwdCapture>,
+        _capture: Option<CwdCapture>,
     ) -> std::result::Result<Self, ()> {
         if identity.database_id != database_id {
             return Err(());
@@ -177,7 +173,6 @@ impl PureEvalApplication {
                 identity,
                 initial_digest,
                 project,
-                capture,
             }),
             expiries,
             sessions: BTreeMap::new(),
