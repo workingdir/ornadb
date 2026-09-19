@@ -7903,6 +7903,64 @@ mod transaction_admission_tests {
             );
         }
     }
+
+    #[test]
+    fn relation_scan_step_limit_rolls_back_the_complete_activation() {
+        let unit = SourceUnit {
+            fixture_id: "relation-scan-step-limit".into(),
+            source_id: "relation-scan-step-limit.orna".into(),
+            parse_as: "module_unit".into(),
+            source: r#"
+                pub table Note(id: Int) {
+                    text: Str,
+                }
+                fn main() {
+                    Note.insert({ id: 1, text: "one" });
+                    Note.insert({ id: 2, text: "two" });
+                    Note.insert({ id: 3, text: "three" });
+                    Note | take(3) | count();
+                }
+            "#
+            .into(),
+        };
+        let limits = Limits {
+            max_steps: 25,
+            ..Default::default()
+        };
+        let no_scan = SourceUnit {
+            source: unit.source.replace("take(3)", "take(0)"),
+            ..unit.clone()
+        };
+        let mut no_scan_evaluator = TransactionalEvaluator::new("main", limits);
+        assert!(matches!(
+            no_scan_evaluator.execute_source(&no_scan),
+            StageOutcome::Passed
+        ));
+        for id in 1..=3 {
+            assert!(
+                no_scan_evaluator
+                    .committed_row("Note", &Value::int(id.into()))
+                    .is_some(),
+                "row {id} did not commit when the relation scan was skipped"
+            );
+        }
+        let mut evaluator = TransactionalEvaluator::new("main", limits);
+
+        let outcome = evaluator.execute_source(&unit);
+
+        assert!(matches!(
+            outcome,
+            StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+        ));
+        for id in 1..=3 {
+            assert_eq!(
+                evaluator.committed_row("Note", &Value::int(id.into())),
+                None,
+                "row {id} escaped the relation-scan limit rollback"
+            );
+        }
+    }
+
     #[test]
     fn typed_composite_scan_orders_components_and_rejects_invalid_cursors() {
         let schema = TransactionTableKey::new(
