@@ -3509,6 +3509,90 @@ impl Repository {
         self.commit_required(&format!("{object_id}^{{commit}}"))
     }
 
+    /// Reads one bounded regular file from an already-resolved reachable
+    /// commit without consulting or changing the worktree, index, or refs.
+    ///
+    /// Git tree entries that are directories, symlinks, or submodules are not
+    /// source files and are rejected at this boundary. A size limit is
+    /// required so a historical snapshot cannot make a caller allocate an
+    /// unbounded source buffer.
+    pub fn read_committed_file(
+        &self,
+        commit: &GitCommitRef,
+        path: impl AsRef<Path>,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        let path = ManagedPath::new(path)?;
+        let resolved = self.commit_required(&format!("{}^{{commit}}", commit.as_str()))?;
+        if resolved != *commit {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+
+        let mut tree = self.command();
+        tree.env("GIT_NO_LAZY_FETCH", "1")
+            .args(["ls-tree", "-z", "--full-tree", commit.as_str(), "--"])
+            .arg(path.as_path());
+        let tree_output = self.run(tree)?;
+        let entry = tree_output
+            .stdout
+            .split(|byte| *byte == 0)
+            .find(|entry| !entry.is_empty())
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let tab = entry
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        if &entry[tab + 1..] != path.as_path().as_os_str().as_encoded_bytes() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let mut fields = entry[..tab].split(|byte| *byte == b' ');
+        let mode = fields.next().unwrap_or_default();
+        let kind = fields.next().unwrap_or_default();
+        let object = fields.next().unwrap_or_default();
+        if fields.next().is_some() || mode != b"100644" && mode != b"100755" || kind != b"blob" {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let object =
+            String::from_utf8(object.to_vec()).map_err(|_| RepositoryError::GitOperationFailed)?;
+        GitCommitRef::from_verified_commit(object.clone(), self.native_object_id_length()?)?;
+
+        let mut size_command = self.command();
+        size_command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["cat-file", "-s", object.as_str()]);
+        let size = trim_output(&self.run(size_command)?.stdout)
+            .parse::<usize>()
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        if size > max_bytes {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+
+        let mut read_command = self.command();
+        read_command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["cat-file", "blob", object.as_str()])
+            .stdout(Stdio::piped());
+        let mut child = read_command
+            .spawn()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        let mut bytes = Vec::with_capacity(size);
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        stdout
+            .take(max_bytes.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let status = child
+            .wait()
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        if !status.success() || bytes.len() > max_bytes || bytes.len() != size {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        Ok(bytes)
+    }
+
     /// Stages exactly `paths` through normal Git index semantics.
     ///
     /// It checks the caller's observed index generation first, so stale

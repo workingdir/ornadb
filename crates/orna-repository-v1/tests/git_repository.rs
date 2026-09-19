@@ -1499,6 +1499,38 @@ fn exact_committed_oid_resolution_supports_sha256_repositories() {
 }
 
 #[test]
+fn committed_file_reads_are_bounded_and_do_not_mutate_repository_state() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let before = git_state(&repo, root.path());
+
+    assert_eq!(
+        repo.read_committed_file(&head, Path::new("ordinary.txt"), 64)
+            .unwrap(),
+        b"base\n"
+    );
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert!(matches!(
+        repo.read_committed_file(&head, Path::new("ordinary.txt"), 4),
+        Err(orna_repository_v1::RepositoryError::GitOperationFailed)
+    ));
+    assert!(matches!(
+        repo.read_committed_file(&head, Path::new(".orna"), 64),
+        Err(orna_repository_v1::RepositoryError::GitOperationFailed)
+    ));
+    assert!(matches!(
+        repo.read_committed_file(&head, Path::new("../ordinary.txt"), 64),
+        Err(orna_repository_v1::RepositoryError::UnsafeManagedPath)
+    ));
+    assert!(matches!(
+        repo.read_committed_file(&head, Path::new("missing.orna"), 64),
+        Err(orna_repository_v1::RepositoryError::GitOperationFailed)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
 fn named_branch_snapshot_resolution_stays_pinned_after_branch_moves() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
