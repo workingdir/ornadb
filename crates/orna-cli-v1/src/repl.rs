@@ -17,6 +17,37 @@ enum ReadSubmission {
     Source(String),
 }
 
+/// A repository-neutral selector for a replacement REPL snapshot context.
+///
+/// `Ref` deliberately retains only the user-supplied reference spelling. The
+/// adapter that implements [`SnapshotSessionLoader`] is responsible for
+/// resolving it read-only and for constructing a fully admitted replacement
+/// session from that immutable snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SnapshotTarget {
+    Cwd,
+    Head,
+    Ref(String),
+}
+
+/// Prepares a complete replacement session for a read-only `:at` selection.
+///
+/// The loader must not mutate repository HEAD, the index, the worktree, or
+/// refs. It must return an *owned*, fully admitted session only after source
+/// loading and admission succeed. `run_with_snapshot_loader` leaves the
+/// current session unchanged for malformed selectors and loader errors, then
+/// replaces the whole session on success; the replacement therefore cannot
+/// retain the previous snapshot's REPL overlay, `$_`, or `$?`.
+///
+/// The CLI integration adapter belongs in `main.rs`: it should map `Cwd` to
+/// the current project loader and `Head`/`Ref` to read-only committed snapshot
+/// resolution and `ProjectLoader::load_committed_snapshot`.
+pub trait SnapshotSessionLoader {
+    type Error;
+
+    fn load_snapshot(&self, target: SnapshotTarget) -> Result<AdmittedReplSession, Self::Error>;
+}
+
 /// Run one retained, line-oriented admitted REPL session. A malformed or
 /// rejected submission reports its redacted evaluator code and leaves the
 /// session open.
@@ -25,6 +56,34 @@ pub fn run<R: BufRead, W: Write>(
     writer: &mut W,
     session: &mut AdmittedReplSession,
 ) -> io::Result<()> {
+    run_loop(
+        reader,
+        writer,
+        session,
+        None::<&dyn SnapshotSessionLoader<Error = ()>>,
+    )
+}
+
+/// Run an admitted REPL session with an atomic, loader-backed `:at` command.
+///
+/// A successful `:at CWD|HEAD|ref` installs the owned candidate returned by
+/// `loader`. Failed preparation and malformed selectors report
+/// `ORNA-REPL-AT` and retain the prior session unchanged.
+pub fn run_with_snapshot_loader<R: BufRead, W: Write, L: SnapshotSessionLoader + ?Sized>(
+    reader: &mut R,
+    writer: &mut W,
+    session: &mut AdmittedReplSession,
+    loader: &L,
+) -> io::Result<()> {
+    run_loop(reader, writer, session, Some(loader))
+}
+
+fn run_loop<R: BufRead, W: Write, L: SnapshotSessionLoader + ?Sized>(
+    reader: &mut R,
+    writer: &mut W,
+    session: &mut AdmittedReplSession,
+    loader: Option<&L>,
+) -> io::Result<()> {
     loop {
         writer.write_all(b"> ")?;
         writer.flush()?;
@@ -32,17 +91,51 @@ pub fn run<R: BufRead, W: Write>(
             ReadSubmission::Eof => return Ok(()),
             ReadSubmission::TooLong => writeln!(writer, "error[ORNA-REPL-INPUT-LIMIT]")?,
             ReadSubmission::InvalidUtf8 => writeln!(writer, "error[ORNA-REPL-INPUT-UTF8]")?,
-            ReadSubmission::Source(source) if source.trim() == ":quit" => return Ok(()),
-            ReadSubmission::Source(source) if source.trim_start().starts_with(':') => {
-                writeln!(writer, "error[ORNA-REPL-COMMAND]")?;
+            ReadSubmission::Source(source) => {
+                let command = source.trim();
+                if command == ":quit" {
+                    return Ok(());
+                }
+                if let Some(loader) = loader
+                    && let Some(target) = parse_snapshot_target(command)
+                {
+                    match target.and_then(|target| loader.load_snapshot(target).map_err(|_| ())) {
+                        Ok(candidate) => *session = candidate,
+                        Err(()) => writeln!(writer, "error[ORNA-REPL-AT]")?,
+                    }
+                } else if source.trim_start().starts_with(':') {
+                    writeln!(writer, "error[ORNA-REPL-COMMAND]")?;
+                } else {
+                    match session.submit(&source) {
+                        Ok(Some(value)) => writeln!(writer, "{}", inspect(&value))?,
+                        Ok(None) => {}
+                        Err(error) => writeln!(writer, "error[{}]", error.code())?,
+                    }
+                }
             }
-            ReadSubmission::Source(source) => match session.submit(&source) {
-                Ok(Some(value)) => writeln!(writer, "{}", inspect(&value))?,
-                Ok(None) => {}
-                Err(error) => writeln!(writer, "error[{}]", error.code())?,
-            },
         }
     }
+}
+
+fn parse_snapshot_target(command: &str) -> Option<Result<SnapshotTarget, ()>> {
+    let mut words = command.split_ascii_whitespace();
+    if words.next() != Some(":at") {
+        return None;
+    }
+    let Some(selector) = words.next() else {
+        return Some(Err(()));
+    };
+    if words.next().is_some() {
+        return Some(Err(()));
+    }
+    if selector.chars().any(char::is_control) {
+        return Some(Err(()));
+    }
+    Some(Ok(match selector {
+        "CWD" => SnapshotTarget::Cwd,
+        "HEAD" => SnapshotTarget::Head,
+        reference => SnapshotTarget::Ref(reference.into()),
+    }))
 }
 
 fn read_submission<R: BufRead>(reader: &mut R) -> io::Result<ReadSubmission> {
@@ -220,6 +313,69 @@ mod tests {
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
             "> > 42 : Int\n> "
+        );
+    }
+
+    struct FailingSnapshotLoader;
+
+    impl SnapshotSessionLoader for FailingSnapshotLoader {
+        type Error = ();
+
+        fn load_snapshot(
+            &self,
+            _target: SnapshotTarget,
+        ) -> Result<AdmittedReplSession, Self::Error> {
+            Err(())
+        }
+    }
+
+    struct FreshSnapshotLoader;
+
+    impl SnapshotSessionLoader for FreshSnapshotLoader {
+        type Error = ();
+
+        fn load_snapshot(
+            &self,
+            target: SnapshotTarget,
+        ) -> Result<AdmittedReplSession, Self::Error> {
+            assert_eq!(target, SnapshotTarget::Head);
+            Ok(AdmittedReplSession::new(Limits::default()))
+        }
+    }
+
+    #[test]
+    fn failed_snapshot_selection_preserves_the_existing_overlay() {
+        let mut input = b"let answer: Int = 42;\n:at HEAD\nanswer\n:quit\n".as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        run_with_snapshot_loader(
+            &mut input,
+            &mut output,
+            &mut session,
+            &FailingSnapshotLoader,
+        )
+        .expect("REPL runs");
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "> > error[ORNA-REPL-AT]\n> 42 : Int\n> "
+        );
+    }
+
+    #[test]
+    fn successful_snapshot_selection_replaces_the_existing_overlay() {
+        let mut input = b"let answer: Int = 42;\n:at HEAD\nanswer\n:quit\n".as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        run_with_snapshot_loader(&mut input, &mut output, &mut session, &FreshSnapshotLoader)
+            .expect("REPL runs");
+        let output = String::from_utf8(output).expect("UTF-8");
+        assert!(
+            !output.contains("42 : Int"),
+            "old overlay survived: {output}"
+        );
+        assert!(
+            output.contains("error["),
+            "fresh session unexpectedly resolved answer: {output}"
         );
     }
 
