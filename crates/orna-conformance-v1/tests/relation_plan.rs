@@ -74,6 +74,30 @@ fn bound_relation_variables_support_direct_terminals() {
 }
 
 #[test]
+fn relation_sort_by_orders_signed_scalar_keys_and_preserves_canonical_ties() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let unit = relation_source(
+        r#"
+            pub table Note(id: Int) { value: Int, }
+            fn parent() {
+                Note.insert({ id: 1, value: 2 });
+                Note.insert({ id: 0, value: -1 });
+                Note.insert({ id: -2, value: 0 });
+                Note.insert({ id: -1, value: -1 });
+
+                assert (Note | sort_by(note => note.value) | take(1) | one()).id == -1;
+                assert (Note | sort_by(note => note.value) | drop(1) | take(1) | one()).id == 0;
+                assert (Note | sort_by(note => note.value) | drop(2) | take(1) | one()).id == -2;
+                assert (Note | sort_by(note => note.value) | drop(3) | take(1) | one()).id == 1;
+            }
+        "#,
+    );
+
+    let outcome = runtime.execute_source(&unit);
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+}
+
+#[test]
 fn lexical_filter_shadow_is_not_hijacked_by_relation_intrinsic() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let unit = relation_source(
