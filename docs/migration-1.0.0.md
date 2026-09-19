@@ -42,7 +42,7 @@ predecessor and forward-edge sets. In particular:
   the selected adapter accept or reject its currently implemented physical
   subset; an unsupported shape must fail closed, not acquire different
   backend-specific semantics.
-- Do not treat a CI retention artifact, a local binary, or a build directory as
+- Do not treat a retained evidence artifact, a local binary, or a build directory as
   a production distribution authority. The old
   [first-release decision](decisions/0047-first-one-zero-release.md) records a
   historical managed-product release plan; it does not amend the immutable
