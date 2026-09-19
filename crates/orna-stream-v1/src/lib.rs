@@ -656,6 +656,29 @@ pub struct InMemoryCheckpointBackend {
     pause_requested: BTreeSet<CheckpointKey>,
     next_fence: BTreeMap<CheckpointKey, u64>,
     retry_claims: BTreeSet<CheckpointKey>,
+    replay_claims: BTreeSet<FailureIdentity>,
+}
+
+impl InMemoryCheckpointBackend {
+    /// Claims an admitted replay before provider or handler execution begins.
+    ///
+    /// Once claimed, administrative cancellation is fenced until the replay
+    /// reaches a terminal completion or failure transition.
+    pub fn claim_replay(&mut self, grant: &ReplayGrant) -> Result<(), RejectReason> {
+        let Some(record) = self.failures.get(&grant.failure) else {
+            return Err(RejectReason::FailureMissing);
+        };
+        if record.version != grant.version {
+            return Err(RejectReason::StaleFailure);
+        }
+        if record.status != FailureStatus::Replaying {
+            return Err(RejectReason::RetryNotAllowed);
+        }
+        if !self.replay_claims.insert(grant.failure.clone()) {
+            return Err(RejectReason::LeaseAlreadyHeld);
+        }
+        Ok(())
+    }
 }
 
 impl InMemoryCheckpointBackend {
@@ -1077,6 +1100,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 if record.status != FailureStatus::Replaying {
                     return CommitResult::Rejected(RejectReason::RetryNotAllowed);
                 }
+                self.replay_claims.remove(&failure);
                 record.version += 1;
                 record.status = FailureStatus::Replayed;
                 CommitResult::ReplayCompleted {
@@ -1097,6 +1121,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 if record.status != FailureStatus::Replaying {
                     return CommitResult::Rejected(RejectReason::RetryNotAllowed);
                 }
+                self.replay_claims.remove(&failure);
                 record.version += 1;
                 record.attempts += 1;
                 record.status = FailureStatus::Skipped;
@@ -1125,6 +1150,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 if record.status != FailureStatus::Replaying {
                     return CommitResult::Rejected(RejectReason::RetryNotAllowed);
                 }
+                self.replay_claims.remove(&failure);
                 record.version += 1;
                 record.attempts += 1;
                 record.status = FailureStatus::Skipped;
@@ -1147,6 +1173,10 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 if record.status != FailureStatus::Replaying {
                     return CommitResult::Rejected(RejectReason::RetryNotAllowed);
                 }
+                if self.replay_claims.contains(&failure) {
+                    return CommitResult::Rejected(RejectReason::LeaseAlreadyHeld);
+                }
+                self.replay_claims.remove(&failure);
                 record.version += 1;
                 record.attempts += 1;
                 record.status = FailureStatus::Skipped;
@@ -1925,6 +1955,41 @@ mod tests {
         assert_eq!(
             backend.checkpoint(&item.checkpoint_key()),
             before_checkpoint
+        );
+    }
+
+    #[test]
+    fn replay_cancellation_is_fenced_after_execution_claim() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let item = delivery("receipt:claimed", "resume:claimed");
+        let failure = acquire_and_fail(&mut backend, item.clone());
+        let lease = acquire_skip(&mut backend, item.clone());
+        assert!(matches!(
+            backend.apply(CommitIntent::Skip {
+                lease,
+                expected: expected(&backend, &item),
+                expected_failure_version: failure.version,
+            }),
+            CommitResult::CheckpointAdvanced { .. }
+        ));
+        let replay = match backend.apply(CommitIntent::Replay {
+            failure: failure.identity.clone(),
+            expected_version: failure.version + 1,
+        }) {
+            CommitResult::ReplayGranted { grant } => grant,
+            result => panic!("unexpected result: {result:?}"),
+        };
+        backend.claim_replay(&replay).unwrap();
+        assert_eq!(
+            backend.apply(CommitIntent::ReplayCancel {
+                failure: replay.failure.clone(),
+                expected_version: replay.version,
+            }),
+            CommitResult::Rejected(RejectReason::LeaseAlreadyHeld)
+        );
+        assert_eq!(
+            backend.failure(&replay.failure).unwrap().status,
+            FailureStatus::Replaying
         );
     }
 
