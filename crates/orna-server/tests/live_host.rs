@@ -1104,6 +1104,20 @@ fn loopback_host_evaluates_pure_source_retains_state_and_replays_terminal_eval()
     let database = initialized.metadata().database_id().to_string();
     let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
     let address = host.address();
+    let (identity, digest) = stored_runtime_identity(uuid_bytes(&database));
+    let state = block_on(RuntimeState::open(
+        initialized.repository(),
+        identity,
+        digest,
+    ))
+    .unwrap();
+    let capture_before_rejected_table_write = block_on(state.capture()).unwrap();
+    assert!(
+        block_on(state.committed_table_rows("Note"))
+            .unwrap()
+            .is_empty()
+    );
+    drop(state);
     let (sender, receiver) = futures::channel::oneshot::channel();
     let client = std::thread::spawn(move || {
         let mut create = TcpStream::connect(address).unwrap();
@@ -1275,6 +1289,17 @@ fn loopback_host_evaluates_pure_source_retains_state_and_replays_terminal_eval()
             panic!("a rejected effect must not replace the retained pure result");
         };
         assert_eq!(after_rejection.encode().unwrap(), forty_three);
+        let retained_binding =
+            websocket_eval(address, &session, &token, &database, [20; 16], "answer + 2");
+        let Message::Result {
+            status: ResultStatus::Success,
+            value: Some(retained_binding),
+            ..
+        } = retained_binding.message
+        else {
+            panic!("a rejected table mutation must preserve the retained REPL overlay");
+        };
+        assert_eq!(retained_binding.encode().unwrap(), forty_two);
 
         let replayed = websocket_eval(address, &session, &token, &database, [13; 16], "$_ + 1");
         let current = websocket_eval(address, &session, &token, &database, [15; 16], "$_");
@@ -1297,6 +1322,23 @@ fn loopback_host_evaluates_pure_source_retains_state_and_replays_terminal_eval()
         Err(LiveHostError::Cancelled)
     );
     client.join().unwrap();
+    let state = block_on(RuntimeState::open(
+        initialized.repository(),
+        identity,
+        digest,
+    ))
+    .unwrap();
+    assert_eq!(
+        block_on(state.capture()).unwrap(),
+        capture_before_rejected_table_write,
+        "a rejected remote Eval table mutation must not advance durable CWD capture"
+    );
+    assert!(
+        block_on(state.committed_table_rows("Note"))
+            .unwrap()
+            .is_empty(),
+        "a rejected remote Eval table mutation must not persist table rows"
+    );
     let _released = TcpListener::bind(address).unwrap();
 }
 
