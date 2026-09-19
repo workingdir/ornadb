@@ -9,10 +9,11 @@ use ed25519_dalek::{Signer, SigningKey};
 use fs2::FileExt;
 use orna_foundation_v1::{CanonicalValue, GitHash, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
-    CheckoutExecutionError, CheckoutTarget, CompactManifest, CompactRuntimeReceipt, CompactSegment,
-    CompactSegmentRole, GitDeclaredObjectSetState, GitObjectKind, GitObjectState,
-    GitRepositoryMode, IndexGeneration, ManagedPath, NativeObjectId, OrnaInternalRef,
-    RemoteContinuity, Repository, RequiredInternalRef, RuntimeGeneration, WorktreeState,
+    CheckoutExecutionError, CheckoutTarget, CommittedTreeEntryKind, CompactManifest,
+    CompactRuntimeReceipt, CompactSegment, CompactSegmentRole, GitDeclaredObjectSetState,
+    GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, ManagedPath, NativeObjectId,
+    OrnaInternalRef, RemoteContinuity, Repository, RequiredInternalRef, RuntimeGeneration,
+    WorktreeState,
 };
 use parquet::{
     basic::{Compression, Encoding, PageType},
@@ -1527,6 +1528,57 @@ fn committed_file_reads_are_bounded_and_do_not_mutate_repository_state() {
         repo.read_committed_file(&head, Path::new("missing.orna"), 64),
         Err(orna_repository_v1::RepositoryError::GitOperationFailed)
     ));
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
+fn committed_tree_listing_is_bounded_and_does_not_mutate_repository_state() {
+    let root = repository();
+    fs::create_dir_all(root.path().join("nested")).unwrap();
+    fs::write(
+        root.path().join("nested/tool.orna"),
+        "module nested.tool;\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "nested/tool.orna"]);
+    git(root.path(), &["commit", "-m", "add nested source"]);
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let before = git_state(&repo, root.path());
+
+    let entries = repo.list_committed_tree(&head, 8).unwrap();
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert!(entries.iter().any(|entry| {
+        entry.path().as_path() == Path::new("main.orna")
+            && entry.kind() == CommittedTreeEntryKind::File { executable: false }
+    }));
+    assert!(entries.iter().any(|entry| {
+        entry.path().as_path() == Path::new("nested/tool.orna")
+            && entry.kind() == CommittedTreeEntryKind::File { executable: false }
+    }));
+    assert!(matches!(
+        repo.list_committed_tree(&head, entries.len().saturating_sub(1)),
+        Err(orna_repository_v1::RepositoryError::GitOperationFailed)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn committed_tree_listing_classifies_symlinks_without_following_them() {
+    let root = repository();
+    std::os::unix::fs::symlink("main.orna", root.path().join("linked.orna")).unwrap();
+    git(root.path(), &["add", "linked.orna"]);
+    git(root.path(), &["commit", "-m", "add source symlink"]);
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let before = git_state(&repo, root.path());
+
+    let entries = repo.list_committed_tree(&head, 8).unwrap();
+    assert!(entries.iter().any(|entry| {
+        entry.path().as_path() == Path::new("linked.orna")
+            && entry.kind() == CommittedTreeEntryKind::Symlink
+    }));
     assert_eq!(git_state(&repo, root.path()), before);
 }
 
