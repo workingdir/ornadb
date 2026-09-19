@@ -12,7 +12,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use orna_repository_v1::{Repository, RepositoryError};
+use orna_repository_v1::{
+    CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef, Repository, RepositoryError,
+};
 use orna_semantic_v1::{Catalogue, ModuleInput, StandardCatalogueError, StandardDependencyProfile};
 use orna_syntax_v1::{Declaration, parse_module};
 use unicode_normalization::UnicodeNormalization;
@@ -138,78 +140,130 @@ impl ProjectLoader {
     ) -> Result<LoadedProject, ProjectLoadError> {
         let root = canonical_worktree(repository)?;
         validate_repository_paths(&root, self.limits)?;
-        let mut pending = VecDeque::from([String::from("main.orna")]);
-        let mut loaded = BTreeMap::<String, LoadedModule>::new();
-        let mut namespaces = BTreeMap::<Vec<String>, String>::new();
-        let mut total_bytes = 0usize;
-        let mut standard_imports = false;
-        let mut standard_modules = BTreeSet::new();
+        load_reachable_project(
+            self.limits,
+            standard_profile,
+            |logical_path, total_bytes| read_module(&root, logical_path, total_bytes, self.limits),
+            |segments| resolve_import(&root, segments),
+        )
+    }
 
-        while let Some(logical_path) = pending.pop_front() {
-            if loaded.contains_key(&logical_path) {
+    /// Loads the root module and reachable ordinary imports from an already
+    /// verified, reachable Git commit. The committed tree is read directly:
+    /// this does not consult or modify the worktree, index, or refs.
+    pub fn load_committed_snapshot(
+        &self,
+        repository: &Repository,
+        commit: &GitCommitRef,
+    ) -> Result<LoadedProject, ProjectLoadError> {
+        self.load_committed_snapshot_with_standard_profile(repository, commit, None)
+    }
+
+    /// Snapshot variant of [`Self::load_with_standard_profile`]. Standard
+    /// dependencies remain explicitly caller supplied; committed project
+    /// loading never discovers host standard-library files.
+    pub fn load_committed_snapshot_with_standard_profile(
+        &self,
+        repository: &Repository,
+        commit: &GitCommitRef,
+        standard_profile: Option<StandardDependencyProfile>,
+    ) -> Result<LoadedProject, ProjectLoadError> {
+        let source_paths = validate_committed_tree(repository, commit, self.limits)?;
+        load_reachable_project(
+            self.limits,
+            standard_profile,
+            |logical_path, total_bytes| {
+                read_committed_module(
+                    repository,
+                    commit,
+                    &source_paths,
+                    logical_path,
+                    total_bytes,
+                    self.limits,
+                )
+            },
+            |segments| resolve_committed_import(&source_paths, segments),
+        )
+    }
+}
+
+fn load_reachable_project(
+    limits: ProjectLimits,
+    standard_profile: Option<StandardDependencyProfile>,
+    mut read_module: impl FnMut(&str, &mut usize) -> Result<String, ProjectLoadError>,
+    mut resolve_import: impl FnMut(&[&str]) -> Result<String, ProjectLoadError>,
+) -> Result<LoadedProject, ProjectLoadError> {
+    let mut pending = VecDeque::from([String::from("main.orna")]);
+    let mut loaded = BTreeMap::<String, LoadedModule>::new();
+    let mut namespaces = BTreeMap::<Vec<String>, String>::new();
+    let mut total_bytes = 0usize;
+    let mut standard_imports = false;
+    let mut standard_modules = BTreeSet::new();
+
+    while let Some(logical_path) = pending.pop_front() {
+        if loaded.contains_key(&logical_path) {
+            continue;
+        }
+        if loaded.len() == limits.max_modules {
+            return Err(ProjectLoadError::ModuleLimit);
+        }
+        let source = read_module(&logical_path, &mut total_bytes)?;
+        let parsed = parse_module(&source);
+        if !parsed.is_ok() {
+            return Err(ProjectLoadError::InvalidModule);
+        }
+        let namespace = namespace_for_path(&logical_path)?;
+        if let Some(previous) = namespaces.insert(namespace.clone(), logical_path.clone())
+            && previous != logical_path
+        {
+            return Err(ProjectLoadError::DuplicateNamespace);
+        }
+
+        let mut imports = BTreeSet::new();
+        for item in &parsed.value.items {
+            let Declaration::Use { path, .. } = &item.declaration else {
+                continue;
+            };
+            let segments = path
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .collect::<Vec<_>>();
+            if segments.is_empty() {
+                return Err(ProjectLoadError::UnsupportedImport);
+            }
+            if matches!(segments[0], "sys" | "std") {
+                standard_imports |= segments[0] == "std";
+                if segments[0] == "std" {
+                    let mut logical_path = segments.join("/");
+                    if !logical_path.ends_with(".orna") {
+                        logical_path.push_str(".orna");
+                    }
+                    standard_modules.insert(logical_path);
+                }
                 continue;
             }
-            if loaded.len() == self.limits.max_modules {
-                return Err(ProjectLoadError::ModuleLimit);
-            }
-            let source = read_module(&root, &logical_path, &mut total_bytes, self.limits)?;
-            let parsed = parse_module(&source);
-            if !parsed.is_ok() {
-                return Err(ProjectLoadError::InvalidModule);
-            }
-            let namespace = namespace_for_path(&logical_path)?;
-            if let Some(previous) = namespaces.insert(namespace.clone(), logical_path.clone())
-                && previous != logical_path
-            {
-                return Err(ProjectLoadError::DuplicateNamespace);
-            }
-
-            let mut imports = BTreeSet::new();
-            for item in &parsed.value.items {
-                let Declaration::Use { path, .. } = &item.declaration else {
-                    continue;
-                };
-                let segments = path
-                    .iter()
-                    .map(|segment| segment.name.as_str())
-                    .collect::<Vec<_>>();
-                if segments.is_empty() {
-                    return Err(ProjectLoadError::UnsupportedImport);
-                }
-                if matches!(segments[0], "sys" | "std") {
-                    standard_imports |= segments[0] == "std";
-                    if segments[0] == "std" {
-                        let mut logical_path = segments.join("/");
-                        if !logical_path.ends_with(".orna") {
-                            logical_path.push_str(".orna");
-                        }
-                        standard_modules.insert(logical_path);
-                    }
-                    continue;
-                }
-                imports.insert(resolve_import(&root, &segments)?);
-            }
-            pending.extend(imports);
-            loaded.insert(logical_path, LoadedModule { source, namespace });
+            imports.insert(resolve_import(&segments)?);
         }
-
-        let mut modules = Vec::with_capacity(loaded.len());
-        let mut identities = Vec::with_capacity(loaded.len());
-        for (logical_path, module) in loaded {
-            identities.push(ModuleIdentity {
-                logical_path: logical_path.clone(),
-                namespace: module.namespace,
-            });
-            modules.push(ModuleInput::new(logical_path, module.source));
-        }
-        Ok(LoadedProject {
-            modules,
-            identities,
-            standard_profile,
-            standard_imports,
-            standard_modules,
-        })
+        pending.extend(imports);
+        loaded.insert(logical_path, LoadedModule { source, namespace });
     }
+
+    let mut modules = Vec::with_capacity(loaded.len());
+    let mut identities = Vec::with_capacity(loaded.len());
+    for (logical_path, module) in loaded {
+        identities.push(ModuleIdentity {
+            logical_path: logical_path.clone(),
+            namespace: module.namespace,
+        });
+        modules.push(ModuleInput::new(logical_path, module.source));
+    }
+    Ok(LoadedProject {
+        modules,
+        identities,
+        standard_profile,
+        standard_imports,
+        standard_modules,
+    })
 }
 
 #[derive(Debug)]
@@ -342,6 +396,93 @@ fn validate_repository_paths(root: &Path, limits: ProjectLimits) -> Result<(), P
     Ok(())
 }
 
+/// Validates the complete immutable tree before any reachable source body is
+/// read. Git emits only leaf entries, so sibling ownership is reconstructed
+/// from every component rather than inferred from the mutable worktree.
+fn validate_committed_tree(
+    repository: &Repository,
+    commit: &GitCommitRef,
+    limits: ProjectLimits,
+) -> Result<BTreeSet<String>, ProjectLoadError> {
+    let entries = repository
+        .list_committed_tree(commit, limits.max_repository_entries.saturating_add(1))
+        .map_err(ProjectLoadError::Repository)?;
+    if entries.len() > limits.max_repository_entries {
+        return Err(ProjectLoadError::RepositoryLimit);
+    }
+
+    let mut source_paths = BTreeSet::new();
+    let mut module_owners = BTreeMap::<Vec<String>, String>::new();
+    let mut siblings = BTreeMap::<PathBuf, BTreeMap<String, String>>::new();
+    for entry in entries {
+        validate_committed_tree_entry(entry, &mut siblings, &mut module_owners, &mut source_paths)?;
+    }
+    Ok(source_paths)
+}
+
+fn validate_committed_tree_entry(
+    entry: CommittedTreeEntry,
+    siblings: &mut BTreeMap<PathBuf, BTreeMap<String, String>>,
+    module_owners: &mut BTreeMap<Vec<String>, String>,
+    source_paths: &mut BTreeSet<String>,
+) -> Result<(), ProjectLoadError> {
+    match entry.kind() {
+        CommittedTreeEntryKind::File { .. } => {}
+        CommittedTreeEntryKind::Symlink => return Err(ProjectLoadError::Symlink),
+        CommittedTreeEntryKind::Submodule => return Err(ProjectLoadError::UnsafePath),
+    }
+
+    let path = entry.path().as_path();
+    let mut parent = PathBuf::new();
+    let mut components = Vec::new();
+    for component in path.components() {
+        let Component::Normal(component) = component else {
+            return Err(ProjectLoadError::UnsafePath);
+        };
+        let component = component.to_str().ok_or(ProjectLoadError::UnsafePath)?;
+        if !portable_component(component) {
+            return Err(ProjectLoadError::NonPortablePath);
+        }
+        let owned = component.to_owned();
+        let key = unicode_sibling_key(component);
+        if let Some(existing) = siblings
+            .entry(parent.clone())
+            .or_default()
+            .insert(key, owned.clone())
+            && existing != owned
+        {
+            return Err(ProjectLoadError::SiblingCollision);
+        }
+        parent.push(component);
+        components.push(component);
+    }
+    if components.is_empty() {
+        return Err(ProjectLoadError::UnsafePath);
+    }
+    if components[0] == ".orna" {
+        return Ok(());
+    }
+
+    let logical_path = path.to_str().ok_or(ProjectLoadError::UnsafePath)?;
+    if !logical_path.ends_with(".orna") {
+        return Ok(());
+    }
+    let namespace = namespace_for_path(logical_path)?;
+    if namespace
+        .first()
+        .is_some_and(|component| matches!(component.as_str(), "sys" | "std"))
+    {
+        return Err(ProjectLoadError::ReservedNamespace);
+    }
+    if let Some(existing) = module_owners.insert(namespace, logical_path.to_owned())
+        && existing != logical_path
+    {
+        return Err(ProjectLoadError::DuplicateModuleNamespace);
+    }
+    source_paths.insert(logical_path.to_owned());
+    Ok(())
+}
+
 fn is_committed_metadata_path(root: &Path, path: &Path) -> bool {
     path.strip_prefix(root)
         .ok()
@@ -366,6 +507,27 @@ fn resolve_import(root: &Path, segments: &[&str]) -> Result<String, ProjectLoadE
         (true, true) => Err(ProjectLoadError::AmbiguousImport),
         (true, false) => logical_path(root, &file),
         (false, true) => logical_path(root, &directory),
+    }
+}
+
+fn resolve_committed_import(
+    source_paths: &BTreeSet<String>,
+    segments: &[&str],
+) -> Result<String, ProjectLoadError> {
+    if segments.iter().any(|segment| !valid_component(segment)) {
+        return Err(ProjectLoadError::UnsupportedImport);
+    }
+    let base = segments.join("/");
+    let file = format!("{base}.orna");
+    let directory = format!("{base}/main.orna");
+    match (
+        source_paths.contains(&file),
+        source_paths.contains(&directory),
+    ) {
+        (false, false) => Err(ProjectLoadError::ImportUnavailable),
+        (true, true) => Err(ProjectLoadError::AmbiguousImport),
+        (true, false) => Ok(file),
+        (false, true) => Ok(directory),
     }
 }
 
@@ -409,6 +571,29 @@ fn read_module(
         .take(maximum.saturating_add(1) as u64)
         .read_to_string(&mut source)
         .map_err(|_| ProjectLoadError::SourceUnavailable)?;
+    if source.len() > maximum {
+        return Err(ProjectLoadError::SourceTooLarge);
+    }
+    *total_bytes += source.len();
+    Ok(source)
+}
+
+fn read_committed_module(
+    repository: &Repository,
+    commit: &GitCommitRef,
+    source_paths: &BTreeSet<String>,
+    logical_path: &str,
+    total_bytes: &mut usize,
+    limits: ProjectLimits,
+) -> Result<String, ProjectLoadError> {
+    if !source_paths.contains(logical_path) {
+        return Err(ProjectLoadError::SourceUnavailable);
+    }
+    let maximum = limits.max_source_bytes.saturating_sub(*total_bytes);
+    let bytes = repository
+        .read_committed_file(commit, logical_path, maximum)
+        .map_err(ProjectLoadError::Repository)?;
+    let source = String::from_utf8(bytes).map_err(|_| ProjectLoadError::SourceUnavailable)?;
     if source.len() > maximum {
         return Err(ProjectLoadError::SourceTooLarge);
     }
