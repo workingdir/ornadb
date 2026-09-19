@@ -2119,7 +2119,7 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo_inner() -> Tes
         }
 
         // Invoke through sys.invoke and capture the completed invocation.
-        let by_name = sealed_echo_request(
+        let by_name = sealed_echo_request_with_runtime_offer(
             InvocationRequestTarget::qualified_name(
                 orna_core::catalogue::QualifiedSemanticName::new(["std", "invoke", "echo"])?,
             )?,
@@ -2185,6 +2185,17 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo_inner() -> Tes
             "the loaded epoch did not retain the root call row",
         )?;
 
+        let expected_runtime_binding = orna_core::inspect::RuntimeBindingRow::new(
+            "tty-proof".to_owned(),
+            "1.0".to_owned(),
+            vec![
+                orna_core::types::TypeDescriptor::named(STD_TERMINAL_DOCUMENT_TYPE_ID),
+                orna_core::types::TypeDescriptor::named(STD_IO_BYTE_STREAM_TYPE_ID),
+            ],
+            Vec::new(),
+            true,
+            7,
+        )?;
         let resources = kernel.inspect_resources(&loaded, InspectPrivilege::OwnInvocation).await?;
         require(
             resources.len() == 3
@@ -2202,7 +2213,7 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo_inner() -> Tes
                     .is_empty()
                 && kernel
                     .inspect_runtime_bindings(&loaded, InspectPrivilege::OwnInvocation).await?
-                    .is_empty(),
+                    == vec![expected_runtime_binding.clone()],
             "the populated projections returned unexpected rows",
         )?;
         let denied_audits_before = inspect_denied_audit_rows(&database).await?.len();
@@ -2462,8 +2473,21 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo_inner() -> Tes
         )?;
 
         // A fresh recovery validates the inspection relations and the
-        // appended INSPECT capture audit row.
+        // appended INSPECT capture audit row. Reloading the same INEP epoch
+        // after recovery proves the runtime offer was persisted, not merely
+        // observed before encoding.
         kernel.recover().await?;
+        let recovered = kernel
+            .load_inspect_snapshot(&session, epoch_id)
+            .await?
+            .ok_or_else(|| failure("the recovered INEP epoch did not load"))?;
+        require(
+            kernel
+                .inspect_runtime_bindings(&recovered, InspectPrivilege::OwnInvocation)
+                .await?
+                == vec![expected_runtime_binding],
+            "the recovered INEP epoch did not retain the runtime binding row",
+        )?;
         Ok(())
     })
     .await
@@ -3513,6 +3537,36 @@ fn sealed_echo_request(
     selector: InvocationParameterSelector,
     value: i32,
 ) -> TestResult<InvokeRequest> {
+    sealed_echo_request_with_runtime_offers(target, selector, value, Vec::new())
+}
+
+/// Builds the same checked echo request with a valid client runtime offer.
+fn sealed_echo_request_with_runtime_offer(
+    target: InvocationRequestTarget,
+    selector: InvocationParameterSelector,
+    value: i32,
+) -> TestResult<InvokeRequest> {
+    let runtime = InvocationRuntimeOffer::new(
+        "tty-proof",
+        "1.0",
+        [
+            orna_core::types::TypeDescriptor::named(STD_TERMINAL_DOCUMENT_TYPE_ID),
+            orna_core::types::TypeDescriptor::named(STD_IO_BYTE_STREAM_TYPE_ID),
+        ],
+        Vec::new(),
+        7,
+        true,
+        None,
+    )?;
+    sealed_echo_request_with_runtime_offers(target, selector, value, vec![runtime])
+}
+
+fn sealed_echo_request_with_runtime_offers(
+    target: InvocationRequestTarget,
+    selector: InvocationParameterSelector,
+    value: i32,
+    runtime_offers: Vec<InvocationRuntimeOffer>,
+) -> TestResult<InvokeRequest> {
     Ok(InvokeRequest::new(InvokeRequestInput {
         target,
         arguments: vec![InvocationArgument::new(
@@ -3534,7 +3588,7 @@ fn sealed_echo_request(
             "en-GB",
             "UTC",
             Vec::new(),
-            Vec::new(),
+            runtime_offers,
             1_024,
             0,
             None,
