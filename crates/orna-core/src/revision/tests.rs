@@ -429,6 +429,101 @@ fn source(parent: Option<SourceRevisionId>) -> StoredSourceRevision {
 }
 
 #[test]
+fn stored_source_revision_serde_round_trips_without_changing_its_shape() {
+    let source = source(None);
+    let encoded = serde_json::to_value(&source).unwrap();
+    let decoded: StoredSourceRevision = serde_json::from_value(encoded.clone()).unwrap();
+
+    assert_eq!(decoded, source);
+    assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+}
+
+#[test]
+fn stored_source_serde_keeps_unknown_fields_ignored() {
+    let source = source(None);
+    let mut encoded = serde_json::to_value(&source).unwrap();
+    encoded["unknown"] = serde_json::json!("ignored");
+    encoded["units"][0]["unknown"] = serde_json::json!(true);
+
+    let decoded: StoredSourceRevision = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded, source);
+}
+
+#[test]
+fn stored_source_serde_leaves_hash_validation_deferred() {
+    let source = source(None);
+    let mut encoded = serde_json::to_value(&source).unwrap();
+    encoded["bundle_hash"] = serde_json::to_value(digest::<99>()).unwrap();
+    encoded["revision_hash"] = serde_json::to_value(digest::<98>()).unwrap();
+
+    let decoded: StoredSourceRevision = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded.bundle_hash(), digest::<99>());
+    assert_eq!(decoded.revision_hash(), digest::<98>());
+}
+
+#[test]
+fn stored_source_revision_serde_rejects_constructor_invariants() {
+    let source = source(None);
+    let source_id = serde_json::to_value(source.id()).unwrap();
+    let first_unit_id = serde_json::to_value(source.units()[0].id()).unwrap();
+    let first_path = serde_json::to_value(source.units()[0].logical_path()).unwrap();
+
+    let mut self_parent = serde_json::to_value(&source).unwrap();
+    self_parent["parent"] = source_id;
+    let error = serde_json::from_value::<StoredSourceRevision>(self_parent).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("source revision is its own parent")
+    );
+
+    let mut out_of_sequence = serde_json::to_value(&source).unwrap();
+    out_of_sequence["units"][1]["ordinal"] = serde_json::json!(2);
+    let error = serde_json::from_value::<StoredSourceRevision>(out_of_sequence).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("stored source ordinals are not contiguous")
+    );
+
+    let mut duplicate_id = serde_json::to_value(&source).unwrap();
+    duplicate_id["units"][1]["id"] = first_unit_id;
+    let error = serde_json::from_value::<StoredSourceRevision>(duplicate_id).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate stored source unit identity")
+    );
+
+    let mut duplicate_path = serde_json::to_value(&source).unwrap();
+    duplicate_path["units"][1]["logical_path"] = first_path;
+    let error = serde_json::from_value::<StoredSourceRevision>(duplicate_path).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate stored source logical path")
+    );
+}
+
+#[test]
+fn stored_source_unit_serde_rejects_empty_paths_and_malformed_payloads() {
+    let unit = source(None).units()[0].clone();
+
+    let mut empty_path = serde_json::to_value(&unit).unwrap();
+    empty_path["logical_path"] = serde_json::json!("");
+    let error = serde_json::from_value::<StoredSourceUnit>(empty_path).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("stored source unit has an empty logical path")
+    );
+
+    let mut missing_content = serde_json::to_value(&unit).unwrap();
+    missing_content.as_object_mut().unwrap().remove("content");
+    assert!(serde_json::from_value::<StoredSourceUnit>(missing_content).is_err());
+}
+
+#[test]
 fn executable_artifact_provenance_binds_source_catalogue_compatibility_and_revision() {
     let source = valid_source_for_artifact_provenance();
     let provenance = valid_provenance_envelope();

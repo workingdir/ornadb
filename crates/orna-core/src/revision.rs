@@ -11,7 +11,7 @@
 //! `recover` validates durable rows, hashes, links, and physical naming. Those
 //! checks need base or storage context and do not belong in this module.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -285,13 +285,39 @@ impl SourceOrigin {
 }
 
 /// One exact source file retained in a durable source revision.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct StoredSourceUnit {
     id: SourceUnitId,
     ordinal: u32,
     logical_path: String,
     content: String,
     content_hash: Sha256Digest,
+}
+
+#[derive(Deserialize)]
+struct StoredSourceUnitFields {
+    id: SourceUnitId,
+    ordinal: u32,
+    logical_path: String,
+    content: String,
+    content_hash: Sha256Digest,
+}
+
+impl<'de> Deserialize<'de> for StoredSourceUnit {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = StoredSourceUnitFields::deserialize(deserializer)?;
+        Self::new(
+            fields.id,
+            fields.ordinal,
+            fields.logical_path,
+            fields.content,
+            fields.content_hash,
+        )
+        .map_err(D::Error::custom)
+    }
 }
 
 impl StoredSourceUnit {
@@ -348,7 +374,7 @@ impl StoredSourceUnit {
 }
 
 /// One immutable, ordered durable source snapshot.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct StoredSourceRevision {
     bundle: SourceBundleId,
     id: SourceRevisionId,
@@ -356,6 +382,34 @@ pub struct StoredSourceRevision {
     units: Vec<StoredSourceUnit>,
     bundle_hash: Sha256Digest,
     revision_hash: Sha256Digest,
+}
+
+#[derive(Deserialize)]
+struct StoredSourceRevisionFields {
+    bundle: SourceBundleId,
+    id: SourceRevisionId,
+    parent: Option<SourceRevisionId>,
+    units: Vec<StoredSourceUnit>,
+    bundle_hash: Sha256Digest,
+    revision_hash: Sha256Digest,
+}
+
+impl<'de> Deserialize<'de> for StoredSourceRevision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = StoredSourceRevisionFields::deserialize(deserializer)?;
+        Self::new(
+            fields.bundle,
+            fields.id,
+            fields.parent,
+            fields.units,
+            fields.bundle_hash,
+            fields.revision_hash,
+        )
+        .map_err(D::Error::custom)
+    }
 }
 
 impl StoredSourceRevision {
