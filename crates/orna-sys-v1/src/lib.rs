@@ -3181,4 +3181,111 @@ mod tests {
         assert!(json.contains("redacted"));
         assert!(!json.contains("super-secret"));
     }
+
+    #[test]
+    fn normative_sys_descriptor_metadata_is_present_and_runtime_neutral() {
+        // This is descriptor evidence only: the normative JSON is parsed and
+        // validated here, but no sys function is implemented or invoked.
+        let document: serde_json::Value =
+            serde_json::from_str(include_str!("../../../api/sys.json"))
+                .expect("api/sys.json must remain valid JSON");
+
+        assert_eq!(document["status"], "specification");
+        let functions = document["functions"]
+            .as_array()
+            .expect("sys API must declare function descriptors");
+        assert!(!functions.is_empty());
+
+        let mut names = std::collections::BTreeSet::new();
+        for function in functions {
+            let name = function["name"]
+                .as_str()
+                .filter(|name| !name.trim().is_empty())
+                .expect("every sys function descriptor needs a name");
+            assert!(
+                names.insert(name),
+                "duplicate sys function descriptor: {name}"
+            );
+            assert!(matches!(
+                function["effect"].as_str(),
+                Some("read" | "invoke" | "admin")
+            ));
+            for field in ["signature", "purpose"] {
+                assert!(
+                    function[field]
+                        .as_str()
+                        .is_some_and(|value| !value.trim().is_empty()),
+                    "{name} needs non-blank {field} metadata"
+                );
+            }
+
+            if name.starts_with("sys.admin.") {
+                assert!(
+                    function["contract"]
+                        .as_str()
+                        .is_some_and(|value| !value.trim().is_empty()),
+                    "{name} needs its administrative contract metadata"
+                );
+            }
+            if name.starts_with("sys.invoke") || name.starts_with("sys.start") {
+                assert!(
+                    function["snapshot_rule"]
+                        .as_str()
+                        .is_some_and(|value| !value.trim().is_empty()),
+                    "{name} needs its snapshot rule metadata"
+                );
+            }
+            if name.starts_with("sys.start") {
+                assert!(
+                    function["ownership"]
+                        .as_str()
+                        .is_some_and(|value| !value.trim().is_empty()),
+                    "{name} needs its ownership metadata"
+                );
+            }
+        }
+
+        for required in [
+            "sys.meta",
+            "sys.describe",
+            "sys.invoke(Value)",
+            "sys.invoke<T>",
+            "sys.start(Value)",
+            "sys.start<T>",
+            "sys.await",
+            "sys.cancel",
+        ] {
+            assert!(names.contains(required), "missing descriptor: {required}");
+        }
+
+        let value_metadata = document["value_types"]
+            .as_array()
+            .and_then(|types| {
+                types
+                    .iter()
+                    .find(|value| value["name"] == "sys.ValueMetadata<T>")
+            })
+            .expect("sys.ValueMetadata<T> descriptor must be present");
+        assert_eq!(value_metadata["kind"], "record-generic");
+        assert!(
+            value_metadata["purpose"]
+                .as_str()
+                .is_some_and(|purpose| !purpose.trim().is_empty())
+        );
+        assert_eq!(
+            value_metadata["fields"]
+                .as_array()
+                .expect("sys.ValueMetadata<T> fields must be declared")
+                .iter()
+                .map(|field| field["name"].as_str().expect("field name"))
+                .collect::<Vec<_>>(),
+            [
+                "static_type",
+                "nominal_type",
+                "protocols",
+                "codecs",
+                "redacted"
+            ]
+        );
+    }
 }
