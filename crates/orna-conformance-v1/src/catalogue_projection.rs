@@ -16,6 +16,8 @@ use orna_foundation_v1::CwdCapture;
 use orna_runtime_v1::{
     CatalogueAdmission, CatalogueDeclaration, CatalogueFunctionDeclaration, CatalogueObjectKind,
     CatalogueParameterDeclaration, CatalogueTypeDeclaration, CatalogueTypeSpec,
+    RequestActivationCommit, RuntimeState, TableActivationError,
+    ValidatedTableRequestActivationCommit,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,6 +28,24 @@ pub enum CatalogueProjectionError {
     UnsupportedReturn { function: String },
     ParameterDefault { function: String, parameter: String },
     MissingFunctionRevision(String),
+}
+
+#[derive(Debug)]
+pub enum SourceCatalogueActivationError {
+    Projection(CatalogueProjectionError),
+    Runtime(TableActivationError),
+}
+
+impl From<CatalogueProjectionError> for SourceCatalogueActivationError {
+    fn from(error: CatalogueProjectionError) -> Self {
+        Self::Projection(error)
+    }
+}
+
+impl From<TableActivationError> for SourceCatalogueActivationError {
+    fn from(error: TableActivationError) -> Self {
+        Self::Runtime(error)
+    }
 }
 
 fn rename_for_type(catalogue: &ResolvedSourceCatalogue, id: orna_core::TypeId) -> Option<String> {
@@ -204,4 +224,24 @@ pub fn project_source_catalogue(
         types,
         functions,
     })
+}
+
+/// Projects and atomically commits one resolved source catalogue as part of
+/// an already-admitted request activation.
+///
+/// The request carries the caller's writer, request, activation, staged table
+/// mutations, validator, terminal outcome, and fault policy. This bridge only
+/// supplies the source catalogue admission and binds its predecessor to the
+/// exact activation capture; it does not derive request, object, reference,
+/// or type evidence. Unsupported source facts remain projection errors.
+pub async fn commit_resolved_source_catalogue_activation(
+    runtime: &RuntimeState,
+    catalogue: &ResolvedSourceCatalogue,
+    request: ValidatedTableRequestActivationCommit<'_>,
+) -> Result<RequestActivationCommit, SourceCatalogueActivationError> {
+    let admission = project_source_catalogue(catalogue, Some(request.context.capture().clone()))?;
+    runtime
+        .commit_validated_catalogue_table_request_activation(request, &admission)
+        .await
+        .map_err(SourceCatalogueActivationError::Runtime)
 }
