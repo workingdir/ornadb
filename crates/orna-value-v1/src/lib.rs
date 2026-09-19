@@ -1044,7 +1044,7 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
         }
         60006 => {
             let a = array(v)?;
-            if a.len() != 2 {
+            if a.len() != 2 || !matches!(a[0], Raw::Int(_) | Raw::Float(_) | Raw::Tag(60000, _)) {
                 return Err(Error::InvalidTag);
             }
             uuid_array(&a[1])?;
@@ -2308,6 +2308,19 @@ mod tests {
     }
 
     #[test]
+    fn quantity_requires_a_numeric_amount() {
+        let raw = tag(
+            60006,
+            Raw::Array(vec![Raw::Text("not-a-number".into()), uuid_raw([7; 16])]),
+        );
+        assert_eq!(Value::new(raw.clone()), Err(Error::InvalidTag));
+
+        let mut bytes = Vec::new();
+        write_raw(&raw, &mut bytes).unwrap();
+        assert_eq!(Value::decode(&bytes), Err(Error::InvalidTag));
+    }
+
+    #[test]
     fn error_value_round_trips_nested_causes_and_safe_details() {
         let mut child_details = BTreeMap::new();
         child_details.insert("retryable".into(), Value::new(Raw::Bool(true)).unwrap());
@@ -2616,6 +2629,22 @@ mod tests {
                 h(vector)
             );
         }
+        let commit_sha256 = h(
+            "8401d82550000102030405060708090a0b0c0d0e0f6673686132353658200404040404040404040404040404040404040404040404040404040404040404",
+        );
+        let commit_sha256_raw = Value::decode(&commit_sha256).unwrap().raw().clone();
+        assert_eq!(
+            encode_raw(&Snapshot::decode(&commit_sha256_raw).unwrap().raw()).unwrap(),
+            commit_sha256
+        );
+
+        let invalid_sha256 = Raw::Array(vec![
+            Raw::Int(1.into()),
+            uuid_raw(db),
+            Raw::Text("sha256".into()),
+            Raw::Bytes(vec![4; 31]),
+        ]);
+        assert!(Snapshot::decode(&invalid_sha256).is_err());
         let invalid = fixture["invalid_bare_cwd"].as_str().unwrap();
         assert!(Value::decode(&h(invalid)).is_ok());
         assert!(Snapshot::decode(Value::decode(&h(invalid)).unwrap().raw()).is_err());
