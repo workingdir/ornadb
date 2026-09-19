@@ -1,6 +1,6 @@
 default: check
 
-# Run the default local fmt/build/lint/non-ignored test/rustdoc gate; CI also runs separate editor-tooling and Compose kernel gates.
+# Run the default local fmt/build/lint/non-ignored test/rustdoc gate.
 check: fmt build lint test rustdoc-check
 
 # Check the SQLite adapter, storage contract, and local CLI binary offline.
@@ -114,7 +114,7 @@ runtime-display-suite:
 
 
 # Validate the accepted headless runtime C-shaped ABI header against the canonical spec bundle.
-# The canonical header is an external sibling input in this checkout; clean CI hosts without
+# The canonical header is an external sibling input in this checkout; hosts without
 # ../spec cannot run this local gate until the checkout contract is resolved.
 runtime-abi-header-check:
     gcc -std=c11 -fsyntax-only ../spec/spec/orna_runtime_abi_v1.h
