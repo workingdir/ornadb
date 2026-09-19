@@ -474,6 +474,7 @@ impl PostgresKernel {
                      WHERE source_revision_id IS NOT NULL \
                        AND catalogue_revision_id IS NOT NULL \
                        AND function_id IS NOT NULL \
+                       AND function_reference IS NOT NULL \
                        AND admission_snapshot IS NOT NULL \
                        AND admission_generation_digest IS NOT NULL \
                        AND admission_runtime_id IS NOT NULL \
@@ -613,6 +614,7 @@ async fn load_observation_by_id(
                AND source_revision_id IS NOT NULL \
                AND catalogue_revision_id IS NOT NULL \
                AND function_id IS NOT NULL \
+               AND function_reference IS NOT NULL \
                AND admission_snapshot IS NOT NULL \
                AND admission_generation_digest IS NOT NULL \
                AND admission_runtime_id IS NOT NULL \
