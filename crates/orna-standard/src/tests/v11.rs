@@ -38,6 +38,90 @@ fn v11_snapshot_uses_generic_source_lowering_for_math() {
 }
 
 #[test]
+fn v10_to_v11_upgrade_preserves_the_pinned_snapshot_and_application_digest() {
+    let version_ten = super::super::verify_standard_library_v10_snapshot(
+        super::super::retained_standard_library_v10_snapshot()
+            .expect("the retained V10 source is valid"),
+    )
+    .expect("the retained V10 standard source verifies");
+    let active = super::empty_version_two_active_revision(&version_ten);
+
+    let upgrade = super::super::prepare_standard_upgrade_v10_to_v11(&active)
+        .expect("the installed V10 parent prepares the V11 upgrade");
+    let verified = upgrade.verified_standard_snapshot();
+
+    assert_eq!(
+        verified.revision(),
+        super::super::STANDARD_LIBRARY_V11_REVISION_ID
+    );
+    assert_eq!(
+        verified.catalogue().revision(),
+        super::super::STANDARD_CATALOGUE_V11_REVISION_ID
+    );
+    assert_eq!(
+        verified.source().bundle(),
+        super::super::STANDARD_SOURCE_V11_BUNDLE_ID
+    );
+    assert_eq!(
+        verified.source().id(),
+        super::super::STANDARD_SOURCE_V11_REVISION_ID
+    );
+    assert_eq!(
+        verified.source().parent(),
+        Some(super::super::STANDARD_SOURCE_V10_REVISION_ID)
+    );
+    assert_eq!(verified.executables().len(), 18);
+    assert_eq!(
+        upgrade
+            .checked_standard_library()
+            .checked_executables()
+            .len(),
+        18
+    );
+
+    assert_eq!(
+        upgrade.application_revision().expected_base(),
+        active.pair()
+    );
+    let standard = upgrade
+        .application_revision()
+        .catalogue_hash_context()
+        .standard()
+        .expect("the application revision pins the upgraded standard library");
+    assert_eq!(
+        standard.revision(),
+        super::super::STANDARD_LIBRARY_V11_REVISION_ID
+    );
+    assert_eq!(standard.digest(), verified.digest());
+    assert_eq!(
+        standard.digest_version(),
+        orna_core::revision::StandardLibraryDigestVersion::Version2
+    );
+}
+
+#[test]
+fn v10_to_v11_upgrade_rejects_non_v10_parents_before_compiler_work() {
+    let version_eleven = super::super::verify_standard_library_v11_snapshot(
+        super::super::retained_standard_library_v11_snapshot()
+            .expect("the retained V11 source is valid"),
+    )
+    .expect("the retained V11 standard source verifies");
+    let active = super::empty_version_two_active_revision(&version_eleven);
+
+    let error = super::super::prepare_standard_upgrade_v10_to_v11(&active)
+        .expect_err("a non-V10 parent must not enter the V10-to-V11 path");
+
+    assert!(matches!(
+        error,
+        super::super::StandardUpgradeError::Prepare {
+            source: orna_compiler::PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                revision
+            }
+        } if revision == super::super::STANDARD_LIBRARY_V11_REVISION_ID
+    ));
+}
+
+#[test]
 fn v11_math_catalogue_preserves_the_pure_client_effect_contract() {
     let snapshot = super::super::retained_standard_library_v11_snapshot()
         .expect("the retained V11 source is valid");
