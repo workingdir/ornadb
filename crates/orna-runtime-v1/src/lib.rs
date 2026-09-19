@@ -3636,6 +3636,12 @@ impl RuntimeState {
             }
             .into());
         }
+        if load_run_observation_for_request_tx(&transaction, identity, context.capture())
+            .await?
+            .is_some_and(|run| !run.live || run.status != RunObservationStatus::Running)
+        {
+            return Err(RuntimeError::RecoveryInvalid.into());
+        }
         if admission.is_some_and(|admission| {
             admission.predecessor_capture.as_ref() != Some(context.capture())
         }) {
