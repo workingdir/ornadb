@@ -3385,13 +3385,17 @@ impl Repository {
     fn verify_prepared_checkout_journal_locked(
         &self,
         journal: &CheckoutRecoveryJournal,
+        verify_force_token: bool,
     ) -> Result<(), RepositoryError> {
         let selector = journal.target.branch_name().map_or_else(
             || journal.target.commit().as_str().to_owned(),
             str::to_owned,
         );
         let plan = self.plan_checkout_locked(&selector, journal.runtime)?;
-        if plan.target != journal.target || plan.git.discardable_paths != journal.discard_paths {
+        if plan.target != journal.target
+            || plan.git.discardable_paths != journal.discard_paths
+            || (verify_force_token && plan.force_token() != journal.force_token)
+        {
             return Err(RepositoryError::CheckoutRecoveryRequired);
         }
         Ok(())
@@ -3412,7 +3416,7 @@ impl Repository {
             let current = self.cwd_generation_locked(journal.runtime)?;
             return match journal.phase {
                 CheckoutRecoveryPhase::Prepared if &current == before => {
-                    self.verify_prepared_checkout_journal_locked(&journal)?;
+                    self.verify_prepared_checkout_journal_locked(&journal, true)?;
                     self.clear_checkout_recovery_journal_locked()
                 }
                 CheckoutRecoveryPhase::Applied if journal.after.as_ref() == Some(&current) => {
@@ -3426,7 +3430,7 @@ impl Repository {
                     // branch update between discard and restart could make
                     // recovery mutate HEAD/worktree to a different commit
                     // than the one the force witness authorized.
-                    self.verify_prepared_checkout_journal_locked(&journal)?;
+                    self.verify_prepared_checkout_journal_locked(&journal, false)?;
                     self.switch_checkout_target(&journal.target)?;
                     let after = self.cwd_generation_locked(journal.runtime)?;
                     if after.head.as_ref() != Some(journal.target.commit())
@@ -3457,7 +3461,7 @@ impl Repository {
         // Version-one journals did not contain enough state to recognize a
         // post-mutation CWD. Retain their historical no-mutation recovery
         // behavior rather than assuming a destructive transition completed.
-        self.verify_prepared_checkout_journal_locked(&journal)?;
+        self.verify_prepared_checkout_journal_locked(&journal, false)?;
         self.clear_checkout_recovery_journal_locked()
     }
 
