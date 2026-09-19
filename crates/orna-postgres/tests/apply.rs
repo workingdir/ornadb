@@ -70,8 +70,8 @@ use orna_core::{
     invocation::{
         InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
         InvocationEventBody, InvocationEventKind, InvocationParameterSelector,
-        InvocationTarget as InvocationRequestTarget, InvocationTracePolicy, InvokeEvent,
-        InvokeRequest, InvokeRequestInput, InvokeValue,
+        InvocationRuntimeOffer, InvocationTarget as InvocationRequestTarget, InvocationTracePolicy,
+        InvokeEvent, InvokeRequest, InvokeRequestInput, InvokeValue,
     },
     security::{
         CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteDecision, ExecuteDenial, ExecuteGrant,
