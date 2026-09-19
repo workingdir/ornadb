@@ -2463,6 +2463,76 @@ fn interrupted_force_checkout_after_discard_journal_recovers_recorded_target() {
 }
 
 #[test]
+fn interrupted_force_checkout_after_discard_journal_recovers_detached_target() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    let target = git(root.path(), &["rev-parse", "HEAD"]);
+    git(root.path(), &["switch", "main"]);
+
+    fs::write(root.path().join("ordinary.txt"), "staged discard\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "staged preserve\n").unwrap();
+    git(root.path(), &["add", "main.orna"]);
+    fs::write(root.path().join("main.orna"), "unstaged preserve\n").unwrap();
+    fs::write(root.path().join("untracked.txt"), "untracked preserve\n").unwrap();
+    let plan = repo
+        .plan_checkout(&target, RuntimeGeneration::new(42))
+        .unwrap();
+    assert!(matches!(
+        plan.target(),
+        CheckoutTarget::Detached { commit } if commit.as_str() == target
+    ));
+    let token = plan.force_token();
+    let discard = repo
+        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .unwrap();
+    repo.persist_validated_checkout_discard(&discard).unwrap();
+
+    let mut interrupt = || Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired);
+    assert!(matches!(
+        repo.execute_validated_force_checkout_after_discard_with_test_hook(
+            &discard,
+            &mut interrupt
+        ),
+        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
+    ));
+    assert!(repo.has_pending_pre_execution_checkout().unwrap());
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+
+    let restarted = Repository::discover(root.path()).unwrap();
+    restarted.recover_pre_execution_checkout().unwrap();
+    assert!(!restarted.has_pending_pre_execution_checkout().unwrap());
+    assert!(
+        !restarted
+            .runtime_paths()
+            .root()
+            .join("checkout-journal.bin")
+            .exists()
+    );
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "");
+    assert_eq!(git(root.path(), &["rev-parse", "HEAD"]), target);
+    assert_eq!(git(root.path(), &["show", ":ordinary.txt"]), "target");
+    assert_eq!(
+        fs::read_to_string(root.path().join("ordinary.txt")).unwrap(),
+        "target\n"
+    );
+    assert_eq!(git(root.path(), &["show", ":main.orna"]), "staged preserve");
+    assert_eq!(
+        fs::read_to_string(root.path().join("main.orna")).unwrap(),
+        "unstaged preserve\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
+        "untracked preserve\n"
+    );
+}
+
+#[test]
 fn interrupted_force_checkout_after_git_switch_recovers_selected_target() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
