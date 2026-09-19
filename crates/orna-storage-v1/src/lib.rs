@@ -371,7 +371,7 @@ pub fn lower_runtime_table_mutations(
         batch_id,
         lowered
             .into_values()
-            .filter(|mutation| mutation.next.is_some() || mutation.expected.is_some())
+            .filter(|mutation| mutation.next.as_ref().map(LooseRow::hash) != mutation.expected)
             .collect(),
         freeze.checkpoint.mutation_sequence,
     )
@@ -1992,6 +1992,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.journal().entries().len(), 1);
+    }
+
+    #[test]
+    fn runtime_table_prefix_discards_a_net_noop_update() {
+        let freeze = PublicationFreeze {
+            intent_id: [25; 16],
+            checkpoint: orna_runtime_v1::Checkpoint {
+                generation: 1,
+                digest: [26; 32],
+                mutation_sequence: 1,
+            },
+        };
+        let mutation = TableMutation::new(
+            [27; 16],
+            "Contact",
+            b"Alice".to_vec(),
+            Some(b"unchanged".to_vec()),
+        )
+        .unwrap();
+        assert_eq!(
+            lower_runtime_table_mutations(
+                &freeze,
+                std::slice::from_ref(&mutation),
+                |_mutation| LoosePath::for_key("Contact", &["Alice".into()]),
+                |_path| Ok(Some(b"unchanged".to_vec())),
+            ),
+            Err(Error::IncompleteStaging)
+        );
     }
 
     #[test]
