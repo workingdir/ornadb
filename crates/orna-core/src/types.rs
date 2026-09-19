@@ -1,6 +1,9 @@
 //! Resolved Orna type descriptors.
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, DeserializeSeed, EnumAccess, VariantAccess},
+};
 use std::{error::Error, fmt};
 
 use crate::TypeId;
@@ -15,14 +18,14 @@ pub const MAX_TYPE_DESCRIPTOR_NODES: usize = 256;
 ///
 /// Checked constructors own all recursive limit accounting. A descriptor does
 /// not by itself admit the type in a catalogue or execution position.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 pub struct TypeDescriptor {
     node: TypeDescriptorNode,
     depth: usize,
     node_count: usize,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 enum TypeDescriptorNode {
     Named(TypeId),
     Reference(TypeId),
@@ -134,6 +137,18 @@ impl TypeDescriptor {
         })
     }
 
+    fn from_node(node: TypeDescriptorNode) -> Result<Self, TypeDescriptorError> {
+        match node {
+            TypeDescriptorNode::Named(type_id) => Ok(Self::named(type_id)),
+            TypeDescriptorNode::Reference(target) => Ok(Self::reference(target)),
+            TypeDescriptorNode::List(element) => Self::list(*element),
+            TypeDescriptorNode::Set(element) => Self::set(*element),
+            TypeDescriptorNode::Map { key, value } => Self::map(*key, *value),
+            TypeDescriptorNode::Option(value) => Self::option(*value),
+            TypeDescriptorNode::Stream(value) => Self::stream(*value),
+        }
+    }
+
     /// Creates one bounded `OPTION` descriptor.
     pub fn option(value: Self) -> Result<Self, TypeDescriptorError> {
         Self::unary(value, TypeDescriptorNode::Option)
@@ -180,6 +195,380 @@ impl TypeDescriptor {
                 actual: usize::MAX,
             })?;
         Self::checked(node(Box::new(child)), depth, node_count)
+    }
+}
+
+impl<'de> Deserialize<'de> for TypeDescriptor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut budget = TypeDescriptorBudget::default();
+        TypeDescriptorSeed {
+            constructed_depth: 0,
+            budget: &mut budget,
+        }
+        .deserialize(deserializer)
+    }
+}
+
+#[derive(Default)]
+struct TypeDescriptorBudget {
+    node_count: usize,
+}
+
+impl TypeDescriptorBudget {
+    fn claim_node<E>(&mut self) -> Result<(), E>
+    where
+        E: de::Error,
+    {
+        let actual = self.node_count.saturating_add(1);
+        if actual > MAX_TYPE_DESCRIPTOR_NODES {
+            return Err(E::custom(TypeDescriptorError::TooLarge {
+                maximum: MAX_TYPE_DESCRIPTOR_NODES,
+                actual,
+            }));
+        }
+        self.node_count = actual;
+        Ok(())
+    }
+}
+
+struct TypeDescriptorSeed<'budget> {
+    constructed_depth: usize,
+    budget: &'budget mut TypeDescriptorBudget,
+}
+
+impl<'de, 'budget> de::DeserializeSeed<'de> for TypeDescriptorSeed<'budget> {
+    type Value = TypeDescriptor;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        self.budget.claim_node()?;
+        deserializer.deserialize_struct(
+            "TypeDescriptor",
+            &["node", "depth", "node_count"],
+            TypeDescriptorVisitor {
+                constructed_depth: self.constructed_depth,
+                budget: self.budget,
+            },
+        )
+    }
+}
+
+struct TypeDescriptorVisitor<'budget> {
+    constructed_depth: usize,
+    budget: &'budget mut TypeDescriptorBudget,
+}
+
+impl<'de, 'budget> de::Visitor<'de> for TypeDescriptorVisitor<'budget> {
+    type Value = TypeDescriptor;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a bounded type descriptor")
+    }
+
+    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    where
+        M: de::MapAccess<'de>,
+    {
+        let mut node = None;
+        let mut depth: Option<usize> = None;
+        let mut node_count: Option<usize> = None;
+
+        while let Some(field) = map.next_key::<String>()? {
+            match field.as_str() {
+                "node" => {
+                    if node.is_some() {
+                        return Err(de::Error::duplicate_field("node"));
+                    }
+                    node = Some(map.next_value_seed(TypeDescriptorNodeSeed {
+                        constructed_depth: self.constructed_depth,
+                        budget: self.budget,
+                    })?);
+                }
+                "depth" => {
+                    if depth.is_some() {
+                        return Err(de::Error::duplicate_field("depth"));
+                    }
+                    depth = Some(map.next_value()?);
+                }
+                "node_count" => {
+                    if node_count.is_some() {
+                        return Err(de::Error::duplicate_field("node_count"));
+                    }
+                    node_count = Some(map.next_value()?);
+                }
+                _ => {
+                    let _: de::IgnoredAny = map.next_value()?;
+                }
+            }
+        }
+
+        self.finish(
+            node.ok_or_else(|| de::Error::missing_field("node"))?,
+            depth.ok_or_else(|| de::Error::missing_field("depth"))?,
+            node_count.ok_or_else(|| de::Error::missing_field("node_count"))?,
+        )
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: de::SeqAccess<'de>,
+    {
+        let node = sequence
+            .next_element_seed(TypeDescriptorNodeSeed {
+                constructed_depth: self.constructed_depth,
+                budget: self.budget,
+            })?
+            .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+        let depth = sequence
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+        let node_count = sequence
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(2, &self))?;
+        self.finish(node, depth, node_count)
+    }
+}
+
+impl<'budget> TypeDescriptorVisitor<'budget> {
+    fn finish<E>(
+        self,
+        node: TypeDescriptorNode,
+        supplied_depth: usize,
+        supplied_node_count: usize,
+    ) -> Result<TypeDescriptor, E>
+    where
+        E: de::Error,
+    {
+        let descriptor = TypeDescriptor::from_node(node).map_err(E::custom)?;
+
+        if descriptor.depth != supplied_depth {
+            return Err(E::custom(format_args!(
+                "type descriptor depth metadata does not match its structure: expected {}, got {}",
+                descriptor.depth, supplied_depth
+            )));
+        }
+        if descriptor.node_count != supplied_node_count {
+            return Err(E::custom(format_args!(
+                "type descriptor node count metadata does not match its structure: expected {}, got {}",
+                descriptor.node_count, supplied_node_count
+            )));
+        }
+        Ok(descriptor)
+    }
+}
+
+struct TypeDescriptorNodeSeed<'budget> {
+    constructed_depth: usize,
+    budget: &'budget mut TypeDescriptorBudget,
+}
+
+impl<'de, 'budget> de::DeserializeSeed<'de> for TypeDescriptorNodeSeed<'budget> {
+    type Value = TypeDescriptorNode;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_enum(
+            "TypeDescriptorNode",
+            &[
+                "Named",
+                "Reference",
+                "List",
+                "Set",
+                "Map",
+                "Option",
+                "Stream",
+            ],
+            TypeDescriptorNodeVisitor {
+                constructed_depth: self.constructed_depth,
+                budget: self.budget,
+            },
+        )
+    }
+}
+
+#[derive(Deserialize)]
+enum TypeDescriptorNodeVariant {
+    Named,
+    Reference,
+    List,
+    Set,
+    Map,
+    Option,
+    Stream,
+}
+
+struct TypeDescriptorNodeVisitor<'budget> {
+    constructed_depth: usize,
+    budget: &'budget mut TypeDescriptorBudget,
+}
+
+impl<'de, 'budget> de::Visitor<'de> for TypeDescriptorNodeVisitor<'budget> {
+    type Value = TypeDescriptorNode;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an externally tagged type descriptor node")
+    }
+
+    fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
+    where
+        A: EnumAccess<'de>,
+    {
+        let (variant, access) = data.variant::<TypeDescriptorNodeVariant>()?;
+        match variant {
+            TypeDescriptorNodeVariant::Named => {
+                Ok(TypeDescriptorNode::Named(access.newtype_variant()?))
+            }
+            TypeDescriptorNodeVariant::Reference => {
+                Ok(TypeDescriptorNode::Reference(access.newtype_variant()?))
+            }
+            TypeDescriptorNodeVariant::List => {
+                let child_depth = self.next_constructed_depth()?;
+                Ok(TypeDescriptorNode::List(Box::new(
+                    access.newtype_variant_seed(TypeDescriptorSeed {
+                        constructed_depth: child_depth,
+                        budget: self.budget,
+                    })?,
+                )))
+            }
+            TypeDescriptorNodeVariant::Set => {
+                let child_depth = self.next_constructed_depth()?;
+                Ok(TypeDescriptorNode::Set(Box::new(
+                    access.newtype_variant_seed(TypeDescriptorSeed {
+                        constructed_depth: child_depth,
+                        budget: self.budget,
+                    })?,
+                )))
+            }
+            TypeDescriptorNodeVariant::Option => {
+                let child_depth = self.next_constructed_depth()?;
+                Ok(TypeDescriptorNode::Option(Box::new(
+                    access.newtype_variant_seed(TypeDescriptorSeed {
+                        constructed_depth: child_depth,
+                        budget: self.budget,
+                    })?,
+                )))
+            }
+            TypeDescriptorNodeVariant::Stream => {
+                let child_depth = self.next_constructed_depth()?;
+                Ok(TypeDescriptorNode::Stream(Box::new(
+                    access.newtype_variant_seed(TypeDescriptorSeed {
+                        constructed_depth: child_depth,
+                        budget: self.budget,
+                    })?,
+                )))
+            }
+            TypeDescriptorNodeVariant::Map => {
+                let child_depth = self.next_constructed_depth()?;
+                let payload = access.struct_variant(
+                    &["key", "value"],
+                    TypeDescriptorMapVisitor {
+                        constructed_depth: child_depth,
+                        budget: self.budget,
+                    },
+                )?;
+                Ok(TypeDescriptorNode::Map {
+                    key: Box::new(payload.key),
+                    value: Box::new(payload.value),
+                })
+            }
+        }
+    }
+}
+
+impl<'budget> TypeDescriptorNodeVisitor<'budget> {
+    fn next_constructed_depth<E>(&self) -> Result<usize, E>
+    where
+        E: de::Error,
+    {
+        let depth = self.constructed_depth.saturating_add(1);
+        if depth > MAX_TYPE_DESCRIPTOR_DEPTH {
+            return Err(E::custom(TypeDescriptorError::TooDeep {
+                maximum: MAX_TYPE_DESCRIPTOR_DEPTH,
+                actual: depth,
+            }));
+        }
+        Ok(depth)
+    }
+}
+
+struct TypeDescriptorMapValue {
+    key: TypeDescriptor,
+    value: TypeDescriptor,
+}
+
+struct TypeDescriptorMapVisitor<'budget> {
+    constructed_depth: usize,
+    budget: &'budget mut TypeDescriptorBudget,
+}
+
+impl<'de, 'budget> de::Visitor<'de> for TypeDescriptorMapVisitor<'budget> {
+    type Value = TypeDescriptorMapValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a map type descriptor payload")
+    }
+
+    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    where
+        M: de::MapAccess<'de>,
+    {
+        let mut key = None;
+        let mut value = None;
+        while let Some(field) = map.next_key::<String>()? {
+            match field.as_str() {
+                "key" => {
+                    if key.is_some() {
+                        return Err(de::Error::duplicate_field("key"));
+                    }
+                    key = Some(map.next_value_seed(TypeDescriptorSeed {
+                        constructed_depth: self.constructed_depth,
+                        budget: self.budget,
+                    })?);
+                }
+                "value" => {
+                    if value.is_some() {
+                        return Err(de::Error::duplicate_field("value"));
+                    }
+                    value = Some(map.next_value_seed(TypeDescriptorSeed {
+                        constructed_depth: self.constructed_depth,
+                        budget: self.budget,
+                    })?);
+                }
+                _ => {
+                    let _: de::IgnoredAny = map.next_value()?;
+                }
+            }
+        }
+        Ok(TypeDescriptorMapValue {
+            key: key.ok_or_else(|| de::Error::missing_field("key"))?,
+            value: value.ok_or_else(|| de::Error::missing_field("value"))?,
+        })
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: de::SeqAccess<'de>,
+    {
+        let key = sequence
+            .next_element_seed(TypeDescriptorSeed {
+                constructed_depth: self.constructed_depth,
+                budget: self.budget,
+            })?
+            .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+        let value = sequence
+            .next_element_seed(TypeDescriptorSeed {
+                constructed_depth: self.constructed_depth,
+                budget: self.budget,
+            })?
+            .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+        Ok(TypeDescriptorMapValue { key, value })
     }
 }
 
@@ -334,6 +723,7 @@ mod tests {
     use std::collections::HashSet;
 
     use proptest::prelude::*;
+    use serde_json::json;
 
     use super::{
         MAX_TYPE_DESCRIPTOR_DEPTH, MAX_TYPE_DESCRIPTOR_NODES, ResolvedType, StandardScalar,
@@ -551,6 +941,129 @@ mod tests {
             TypeDescriptor::list(first.clone()).unwrap(),
             TypeDescriptor::list(first).unwrap()
         );
+    }
+
+    #[test]
+    fn type_descriptor_serde_round_trip_preserves_all_node_shapes() {
+        let first = TypeDescriptor::named(TypeId::from_bytes([51; 16]));
+        let second = TypeDescriptor::reference(TypeId::from_bytes([52; 16]));
+        let descriptors = [
+            first.clone(),
+            second.clone(),
+            TypeDescriptor::list(first.clone()).unwrap(),
+            TypeDescriptor::set(first.clone()).unwrap(),
+            TypeDescriptor::map(first.clone(), second.clone()).unwrap(),
+            TypeDescriptor::option(first.clone()).unwrap(),
+            TypeDescriptor::stream(second).unwrap(),
+        ];
+
+        for descriptor in descriptors {
+            let encoded = serde_json::to_value(&descriptor).unwrap();
+            let decoded: TypeDescriptor = serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(decoded, descriptor);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        }
+    }
+
+    #[test]
+    fn type_descriptor_serde_ignores_unknown_fields_like_derived_deserialization() {
+        let descriptor =
+            TypeDescriptor::list(TypeDescriptor::named(TypeId::from_bytes([53; 16]))).unwrap();
+        let mut encoded = serde_json::to_value(&descriptor).unwrap();
+        encoded["unknown"] = json!("ignored");
+        encoded["node"]["List"]["unknown"] = json!(true);
+
+        let decoded: TypeDescriptor = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, descriptor);
+    }
+
+    #[test]
+    fn type_descriptor_serde_rejects_forged_root_and_nested_metadata() {
+        let descriptor =
+            TypeDescriptor::list(TypeDescriptor::named(TypeId::from_bytes([54; 16]))).unwrap();
+
+        let mut forged_root = serde_json::to_value(&descriptor).unwrap();
+        forged_root["depth"] = json!(0);
+        assert!(serde_json::from_value::<TypeDescriptor>(forged_root).is_err());
+
+        let mut forged_nested = serde_json::to_value(&descriptor).unwrap();
+        forged_nested["node"]["List"]["node_count"] = json!(2);
+        assert!(serde_json::from_value::<TypeDescriptor>(forged_nested).is_err());
+    }
+
+    #[test]
+    fn type_descriptor_serde_accepts_exact_depth_and_node_boundaries() {
+        let mut max_depth = TypeDescriptor::named(TypeId::from_bytes([55; 16]));
+        for _ in 0..MAX_TYPE_DESCRIPTOR_DEPTH {
+            max_depth = TypeDescriptor::option(max_depth).unwrap();
+        }
+        let encoded = serde_json::to_value(&max_depth).unwrap();
+        assert_eq!(
+            serde_json::from_value::<TypeDescriptor>(encoded).unwrap(),
+            max_depth
+        );
+
+        let mut max_nodes = TypeDescriptor::named(TypeId::from_bytes([56; 16]));
+        for _ in 0..7 {
+            max_nodes = TypeDescriptor::map(max_nodes.clone(), max_nodes).unwrap();
+        }
+        max_nodes = TypeDescriptor::list(max_nodes).unwrap();
+        assert_eq!(max_nodes.node_count(), MAX_TYPE_DESCRIPTOR_NODES);
+        let encoded = serde_json::to_value(&max_nodes).unwrap();
+        assert_eq!(
+            serde_json::from_value::<TypeDescriptor>(encoded).unwrap(),
+            max_nodes
+        );
+    }
+
+    #[test]
+    fn type_descriptor_serde_rejects_structural_depth_and_node_overflows() {
+        let mut max_depth = TypeDescriptor::named(TypeId::from_bytes([57; 16]));
+        for _ in 0..MAX_TYPE_DESCRIPTOR_DEPTH {
+            max_depth = TypeDescriptor::option(max_depth).unwrap();
+        }
+        let mut over_depth = serde_json::json!({
+            "node": { "Option": serde_json::to_value(&max_depth).unwrap() },
+            "depth": MAX_TYPE_DESCRIPTOR_DEPTH + 1,
+            "node_count": max_depth.node_count() + 1,
+        });
+        let error = serde_json::from_value::<TypeDescriptor>(over_depth.take()).unwrap_err();
+        assert!(error.to_string().contains("type descriptor is too deep"));
+
+        let mut max_nodes = TypeDescriptor::named(TypeId::from_bytes([58; 16]));
+        for _ in 0..7 {
+            max_nodes = TypeDescriptor::map(max_nodes.clone(), max_nodes).unwrap();
+        }
+        max_nodes = TypeDescriptor::list(max_nodes).unwrap();
+        let over_nodes = serde_json::json!({
+            "node": { "List": serde_json::to_value(&max_nodes).unwrap() },
+            "depth": max_nodes.depth() + 1,
+            "node_count": MAX_TYPE_DESCRIPTOR_NODES + 1,
+        });
+        let error = serde_json::from_value::<TypeDescriptor>(over_nodes).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("type descriptor has too many nodes")
+        );
+    }
+
+    #[test]
+    fn type_descriptor_serde_rejects_malformed_payloads() {
+        let malformed = [
+            json!({}),
+            json!({"node": {"Named": [1, 2, 3]}, "depth": 0, "node_count": 1}),
+            json!({"node": {"Unknown": null}, "depth": 0, "node_count": 1}),
+            json!({
+                "node": {"Map": {"key": serde_json::to_value(TypeDescriptor::named(TypeId::from_bytes([59; 16]))).unwrap()}},
+                "depth": 1,
+                "node_count": 2
+            }),
+        ];
+
+        for payload in malformed {
+            assert!(serde_json::from_value::<TypeDescriptor>(payload).is_err());
+        }
     }
 
     proptest! {
