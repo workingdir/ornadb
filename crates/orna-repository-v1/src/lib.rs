@@ -3483,6 +3483,32 @@ impl Repository {
         self.commit_required(&expression)
     }
 
+    /// Resolves one exact native Git object ID as a reachable immutable
+    /// commit. This accepts only the repository's native object format and
+    /// never creates or hydrates Git objects.
+    pub fn resolve_committed_oid(
+        &self,
+        algorithm: orna_foundation_v1::GitHash,
+        oid: &[u8],
+    ) -> Result<GitCommitRef, RepositoryError> {
+        let native_length = self.native_object_id_length()?;
+        let (expected_algorithm, expected_bytes) = match native_length {
+            40 => (orna_foundation_v1::GitHash::Sha1, 20),
+            64 => (orna_foundation_v1::GitHash::Sha256, 32),
+            _ => return Err(RepositoryError::UnsupportedObjectFormat),
+        };
+        if algorithm != expected_algorithm || oid.len() != expected_bytes {
+            return Err(RepositoryError::InvalidObjectId);
+        }
+
+        let mut object_id = String::with_capacity(native_length);
+        for byte in oid {
+            use std::fmt::Write as _;
+            write!(object_id, "{byte:02x}").map_err(|_| RepositoryError::GitOperationFailed)?;
+        }
+        self.commit_required(&format!("{object_id}^{{commit}}"))
+    }
+
     /// Stages exactly `paths` through normal Git index semantics.
     ///
     /// It checks the caller's observed index generation first, so stale
