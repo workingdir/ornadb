@@ -5503,6 +5503,7 @@ fn wire(method: &str, path: &str, body: &str) -> WireRequest {
         path: path.into(),
         headers: vec![
             ("origin".into(), "https://app.example".into()),
+            ("host".into(), "app.example".into()),
             ("content-type".into(), "application/json".into()),
         ],
         body: body.as_bytes().to_vec(),
