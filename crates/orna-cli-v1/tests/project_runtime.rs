@@ -979,6 +979,47 @@ async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_withou
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn binary_generic_run_executes_a_renamed_finite_list_stream_root() {
+    let directory = reference_project();
+    let sensors_path = directory.path().join("sensors.orna");
+    let sensors = std::fs::read_to_string(&sensors_path).expect("read sensors source");
+    std::fs::write(&sensors_path, sensors.replace("ingest", "deliver"))
+        .expect("rename stream root");
+
+    let init = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["init", directory.path().to_str().expect("UTF-8 path")])
+        .output()
+        .expect("CLI process");
+    assert!(init.status.success());
+    assert_eq!(init.stdout, b"initialized Orna repository\n");
+    assert!(init.stderr.is_empty());
+
+    let output = invoke(directory.path(), "run", "sensors.deliver");
+    assert!(
+        output.status.success(),
+        "generic stream invocation failed: {:?}",
+        output.stderr
+    );
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let (runtime_identity, initial_digest) = identity(directory.path());
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("reopen runtime after generic stream invocation");
+    assert_eq!(
+        state
+            .committed_table_rows("Reading")
+            .await
+            .expect("read durable readings")
+            .len(),
+        3
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 #[allow(clippy::too_many_lines)]
 async fn binary_sensors_ingest_reopens_typed_rows_and_checkpoint() {
     let directory = reference_project();
