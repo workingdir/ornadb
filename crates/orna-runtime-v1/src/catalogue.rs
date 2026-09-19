@@ -2087,6 +2087,27 @@ async fn carry_forward_catalogue_tx(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?
         .is_some();
+    let mut mismatches = connection
+        .query(
+            "SELECT 1
+             FROM runtime_catalogue_revision AS revision
+             LEFT JOIN runtime_catalogue_identity AS identity
+               ON identity.object_id = revision.object_id
+             WHERE revision.snapshot = ?1
+               AND (identity.object_id IS NULL OR revision.kind <> identity.kind)
+             LIMIT 1",
+            params![predecessor_snapshot.clone()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if mismatches
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some()
+    {
+        return Err(RuntimeError::CatalogueKindMismatch);
+    }
     copy_catalogue_relation_tx(
         connection,
         "runtime_catalogue_revision",
