@@ -2197,6 +2197,25 @@ impl RuntimeState {
         if request.state != RequestState::Reserved {
             return Err(RuntimeError::RequestStateConflict);
         }
+        let mut existing_rows = tx
+            .query(
+                "SELECT 1 FROM sys_run_observation \
+                 WHERE session_id = ?1 AND request_id = ?2",
+                params![
+                    registration.request.session_id.to_vec(),
+                    registration.request.request_id.to_vec(),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if existing_rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::RequestStateConflict);
+        }
         let capture = capture_tx(&tx).await?;
         let id = RunObservationId(*Uuid::new_v4().as_bytes());
         tx.execute(
@@ -23087,6 +23106,29 @@ mod tests {
                 .await,
             Err(RuntimeError::RequestStateConflict)
         );
+    }
+    #[tokio::test]
+    async fn run_observation_registration_rejects_duplicate_request_identity() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let request = request(44, 45);
+        state.reserve_request(request, digest(46)).await.unwrap();
+        let registration = RunObservationRegistration {
+            request,
+            consumer_identity: stream_delivery("duplicate", "run").consumer,
+            function: "pkg.duplicate".into(),
+            source_identity: Some("source duplicate".into()),
+            invocation_id: id(47),
+        };
+        let first = state
+            .register_run_observation(registration.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            state.register_run_observation(registration).await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+        assert_eq!(state.run_observation(first.id).await.unwrap(), Some(first));
     }
 
     #[tokio::test]
