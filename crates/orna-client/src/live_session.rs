@@ -4,7 +4,7 @@
 //! before this module is constructed. `AuthenticatedLiveTransport` is an
 //! explicit trust-boundary marker; it does not validate credentials itself.
 
-use std::{future::Future, pin::Pin};
+use std::{collections::BTreeMap, future::Future, pin::Pin};
 
 use orna_protocol_v1::{CanonicalSnapshot, Envelope, Limits, Message, PresentNode};
 
@@ -97,6 +97,8 @@ pub struct LiveSessionDriver<I, R, A> {
     expected_resync_request: Option<[u8; 16]>,
     pending_publication: Option<(LivePresentationUpdate, PublishedPresentation)>,
     detached: bool,
+    terminal_unsubscribed: bool,
+    unsubscribe_completed: bool,
 }
 
 impl<I, R, A> LiveSessionDriver<I, R, A>
@@ -139,6 +141,8 @@ where
             expected_resync_request: expected_snapshot_request,
             pending_publication: None,
             detached: false,
+            terminal_unsubscribed: false,
+            unsubscribe_completed: false,
         })
     }
 
@@ -154,13 +158,52 @@ where
         self.limits
     }
 
+    /// Sends one canonical unsubscribe frame for this watch and permanently
+    /// fences the attachment, whether the transport accepts or rejects it.
+    ///
+    /// The request identity is supplied by the caller because unsubscribe is
+    /// a session-level lifecycle operation rather than a presentation update.
+    pub async fn unsubscribe(
+        &mut self,
+        request: [u8; 16],
+    ) -> Result<(), LiveSessionError<I::Error, R::Error>> {
+        if self.terminal_unsubscribed {
+            if self.unsubscribe_completed {
+                return Ok(());
+            }
+            return Err(LiveSessionError::Detached);
+        }
+        if self.detached {
+            return Err(LiveSessionError::Detached);
+        }
+
+        let encoded = Envelope {
+            request: Some(request),
+            watch: Some(self.watch),
+            message: Message::Unsubscribe,
+            extensions: BTreeMap::new(),
+        }
+        .encode(self.limits)
+        .map_err(LiveSessionError::Protocol)?;
+
+        self.terminal_unsubscribed = true;
+        self.detached = true;
+        match self.io.send_binary(encoded).await {
+            Ok(()) => {
+                self.unsubscribe_completed = true;
+                Ok(())
+            }
+            Err(error) => Err(LiveSessionError::Io(error)),
+        }
+    }
+
     /// Receives at most one bounded binary envelope, publishes an accepted
     /// complete tree, or sends the current resync request. A failed send keeps
     /// the exact encoded bytes and request identity for the next call.
     pub async fn receive_once(
         &mut self,
     ) -> Result<LiveSessionEvent, LiveSessionError<I::Error, R::Error>> {
-        if self.detached {
+        if self.detached || self.terminal_unsubscribed {
             return Err(LiveSessionError::Detached);
         }
         if let Some(event) = self.flush_resync().await? {
@@ -256,6 +299,8 @@ where
         }
         self.io = io;
         self.detached = false;
+        self.terminal_unsubscribed = false;
+        self.unsubscribe_completed = false;
         self.watch = watch;
         let presentation = WatchPresentation::new(watch, self.limits).map_err(|_| ())?;
         self.presentation = presentation;
@@ -378,6 +423,7 @@ mod tests {
         sent: Vec<Vec<u8>>,
         requested_limits: Vec<usize>,
         fail_sends: usize,
+        block_sends: bool,
     }
 
     impl LiveByteDriver for MemoryIo {
@@ -396,6 +442,9 @@ mod tests {
             bytes: Vec<u8>,
         ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 'a>> {
             Box::pin(async move {
+                if self.block_sends {
+                    std::future::pending::<()>().await;
+                }
                 if self.fail_sends > 0 {
                     self.fail_sends -= 1;
                     return Err("send failed");
@@ -1112,5 +1161,146 @@ mod tests {
             Ok(LiveSessionEvent::SnapshotPublished { revision: 1 })
         ));
         assert_eq!(driver.renderer.revisions, vec![1]);
+    }
+    #[test]
+    fn unsubscribe_sends_canonical_watch_frame_and_detaches() {
+        let mut driver = LiveSessionDriver::new(
+            MemoryIo::default(),
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        let request = [9; 16];
+
+        assert!(block_on(driver.unsubscribe(request)).is_ok());
+        assert_eq!(driver.io.sent.len(), 1);
+        let frame = Envelope::decode(&driver.io.sent[0], Limits::default()).unwrap();
+        assert_eq!(frame.request, Some(request));
+        assert_eq!(frame.watch, Some([7; 16]));
+        assert_eq!(frame.message, Message::Unsubscribe);
+        assert!(frame.extensions.is_empty());
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Err(LiveSessionError::Detached)
+        ));
+    }
+    #[test]
+    fn successful_unsubscribe_is_idempotent() {
+        let mut driver = LiveSessionDriver::new(
+            MemoryIo::default(),
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+
+        assert!(block_on(driver.unsubscribe([9; 16])).is_ok());
+        assert!(block_on(driver.unsubscribe([10; 16])).is_ok());
+        assert_eq!(driver.io.sent.len(), 1);
+    }
+
+    #[test]
+    fn same_watch_replacement_does_not_revive_unsubscribed_driver() {
+        let mut driver = LiveSessionDriver::new(
+            MemoryIo::default(),
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+
+        assert!(block_on(driver.unsubscribe([9; 16])).is_ok());
+        driver.replace_authenticated_attachment(MemoryIo::default());
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Err(LiveSessionError::Detached)
+        ));
+    }
+    #[test]
+    fn different_watch_replacement_clears_unsubscribe_fence() {
+        let mut driver = LiveSessionDriver::new(
+            MemoryIo::default(),
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+
+        assert!(block_on(driver.unsubscribe([9; 16])).is_ok());
+        let mut replacement = MemoryIo::default();
+        replacement
+            .incoming
+            .push_back(frame(16, [8; 16], snapshot_body(0, "new-watch")));
+        driver
+            .replace_authenticated_attachment_with_watch(replacement, [8; 16], None)
+            .unwrap();
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
+    }
+
+    #[test]
+    fn dropped_unsubscribe_future_keeps_receive_fenced() {
+        let io = MemoryIo {
+            block_sends: true,
+            ..MemoryIo::default()
+        };
+        let mut driver = LiveSessionDriver::new(
+            io,
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        let mut future = Box::pin(driver.unsubscribe([9; 16]));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+        drop(future);
+        assert!(matches!(
+            block_on(driver.unsubscribe([10; 16])),
+            Err(LiveSessionError::Detached)
+        ));
+        assert!(driver.io.sent.is_empty());
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Err(LiveSessionError::Detached)
+        ));
+    }
+
+    #[test]
+    fn unsubscribe_send_failure_detaches_without_retrying() {
+        let io = MemoryIo {
+            fail_sends: 1,
+            ..MemoryIo::default()
+        };
+        let mut driver = LiveSessionDriver::new(
+            io,
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            block_on(driver.unsubscribe([9; 16])),
+            Err(LiveSessionError::Io("send failed"))
+        ));
+        assert!(driver.io.sent.is_empty());
+        assert!(matches!(
+            block_on(driver.unsubscribe([10; 16])),
+            Err(LiveSessionError::Detached)
+        ));
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Err(LiveSessionError::Detached)
+        ));
     }
 }
