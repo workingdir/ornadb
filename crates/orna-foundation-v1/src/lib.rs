@@ -19,13 +19,26 @@ pub type TypeDescriptor = SchemaDescriptor;
 pub type CanonicalSnapshot = Snapshot;
 
 /// `sys.RowRef<T>` as OVB tag 60010. Key and snapshot context are identity.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct RowRef {
     pub database_id: [u8; 16],
     pub table_id: [u8; 16],
     pub key: OvbRaw,
     pub snapshot: CanonicalSnapshot,
 }
+
+impl fmt::Debug for RowRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RowRef")
+            .field("database_id", &self.database_id)
+            .field("table_id", &self.table_id)
+            .field("key", &"<redacted>")
+            .field("snapshot", &"<redacted>")
+            .finish()
+    }
+}
+
 impl RowRef {
     pub fn new(
         database_id: [u8; 16],
@@ -66,11 +79,22 @@ impl RowRef {
 /// validate a relation identity and never grants authority. The generic
 /// conversion must not be treated as proof of `Kind`, row existence, or
 /// authorization.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct TypedRowRef<Kind> {
     raw: RowRef,
     kind: PhantomData<Kind>,
 }
+
+impl<Kind> fmt::Debug for TypedRowRef<Kind> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TypedRowRef")
+            .field("kind", &std::any::type_name::<Kind>())
+            .field("raw", &self.raw)
+            .finish()
+    }
+}
+
 impl<Kind> TypedRowRef<Kind> {
     pub fn from_row_ref(raw: RowRef) -> Self {
         Self {
@@ -670,12 +694,35 @@ fn validate_catalogue_reference<Kind>(
 
 fn snapshot_id(snapshot: &CanonicalSnapshot) -> Result<[u8; 32], SystemReferenceError> {
     match snapshot {
-        CanonicalSnapshot::Cwd { id, .. } => Ok(*id),
+        CanonicalSnapshot::Cwd {
+            database,
+            runtime,
+            generation,
+            id,
+        } => {
+            let canonical = canonical_cwd_id(*database, *runtime, generation.clone())
+                .map_err(|_| SystemReferenceError::InvalidSnapshotKey)?;
+            if *id != canonical {
+                return Err(SystemReferenceError::InvalidSnapshotKey);
+            }
+            Ok(*id)
+        }
         CanonicalSnapshot::Commit { .. } => {
             orna_value_v1::domain_digest("orna.snapshot.v1", &snapshot.raw())
                 .map_err(|_| SystemReferenceError::InvalidSnapshotKey)
         }
     }
+}
+
+fn canonical_cwd_id(
+    database: [u8; 16],
+    runtime: [u8; 16],
+    generation: BigInt,
+) -> Result<[u8; 32], ValueError> {
+    let Snapshot::Cwd { id, .. } = Snapshot::cwd(database, runtime, generation)? else {
+        unreachable!("Snapshot::cwd always returns a CWD snapshot")
+    };
+    Ok(id)
 }
 
 fn checkpoint_key_from_raw(key: &OvbRaw) -> Result<(), SystemReferenceError> {
@@ -1298,14 +1345,25 @@ impl CwdCapture {
         snapshot: CanonicalSnapshot,
         generation_digest: [u8; 32],
     ) -> Result<Self, FoundationError> {
-        if matches!(snapshot, Snapshot::Cwd { .. }) {
-            Ok(Self {
-                snapshot,
-                generation_digest,
-            })
-        } else {
-            Err(FoundationError::ExpectedCwdSnapshot)
+        let Snapshot::Cwd {
+            database,
+            runtime,
+            generation,
+            id,
+        } = &snapshot
+        else {
+            return Err(FoundationError::ExpectedCwdSnapshot);
+        };
+        if canonical_cwd_id(*database, *runtime, generation.clone())
+            .map_err(|_| FoundationError::NoncanonicalCwdSnapshot)?
+            != *id
+        {
+            return Err(FoundationError::NoncanonicalCwdSnapshot);
         }
+        Ok(Self {
+            snapshot,
+            generation_digest,
+        })
     }
     pub fn database_id(&self) -> [u8; 16] {
         match &self.snapshot {
@@ -1456,6 +1514,7 @@ pub enum FoundationError {
     InvalidDiagnosticEncoding,
     ExpectedSysValue,
     ExpectedCwdSnapshot,
+    NoncanonicalCwdSnapshot,
     BareRepositoryHasNoCwd,
     UnsafeDiagnosticText,
     InvalidSystemReferenceEncoding,
@@ -1470,6 +1529,7 @@ impl fmt::Display for FoundationError {
             Self::InvalidDiagnosticEncoding => f.write_str("invalid diagnostic encoding"),
             Self::ExpectedSysValue => f.write_str("expected tag 60026 sys.Value"),
             Self::ExpectedCwdSnapshot => f.write_str("expected CWD snapshot"),
+            Self::NoncanonicalCwdSnapshot => f.write_str("noncanonical CWD snapshot ID"),
             Self::BareRepositoryHasNoCwd => f.write_str("a bare repository has no CWD"),
             Self::UnsafeDiagnosticText => f.write_str("unsafe diagnostic text"),
             Self::InvalidSystemReferenceEncoding => {
@@ -1724,6 +1784,86 @@ mod tests {
             Err(SystemReferenceError::SnapshotMismatch)
         );
     }
+
+    #[test]
+    fn cwd_capture_and_snapshot_reference_reject_noncanonical_cwd_ids() {
+        let canonical = Snapshot::cwd([1; 16], [2; 16], 3.into()).unwrap();
+        let mut forged = canonical.clone();
+        let Snapshot::Cwd { id, .. } = &mut forged else {
+            unreachable!();
+        };
+        *id = [0xa5; 32];
+
+        assert!(matches!(
+            CwdCapture::new(forged.clone(), [4; 32]),
+            Err(FoundationError::NoncanonicalCwdSnapshot)
+        ));
+        assert_eq!(
+            snapshot_reference([1; 16], forged),
+            Err(SystemReferenceError::InvalidSnapshotKey)
+        );
+        assert!(CwdCapture::new(canonical, [4; 32]).is_ok());
+    }
+
+    #[test]
+    fn row_ref_debug_redacts_text_and_byte_key_and_snapshot_payload() {
+        let text_debug = format!(
+            "{:?}",
+            RowRef::new(
+                [1; 16],
+                [2; 16],
+                OvbRaw::Text("sensitive-text-key".into()),
+                Snapshot::Commit {
+                    database: [3; 16],
+                    algorithm: GitHash::Sha256,
+                    oid: vec![250; 32],
+                },
+            )
+            .unwrap()
+        );
+        assert!(text_debug.contains("database_id"));
+        assert!(text_debug.contains("table_id"));
+        assert!(text_debug.contains("<redacted>"));
+        assert!(!text_debug.contains("sensitive-text-key"));
+        assert!(!text_debug.contains("250"));
+
+        let bytes_debug = format!(
+            "{:?}",
+            RowRef::new(
+                [1; 16],
+                [2; 16],
+                OvbRaw::Bytes(vec![251, 252, 253, 254]),
+                commit(),
+            )
+            .unwrap()
+        );
+        assert!(bytes_debug.contains("<redacted>"));
+        assert!(!bytes_debug.contains("251"));
+        assert!(!bytes_debug.contains("252"));
+        assert!(!bytes_debug.contains("253"));
+        assert!(!bytes_debug.contains("254"));
+    }
+
+    #[test]
+    fn typed_row_ref_debug_redacts_nested_row_ref_payloads() {
+        let nested = RowRef::new(
+            [4; 16],
+            [5; 16],
+            OvbRaw::Text("nested-sensitive-key".into()),
+            commit(),
+        )
+        .unwrap();
+        let typed = TypedRowRef::<InvocationArgumentKind>::from_row_ref(
+            RowRef::new([1; 16], [2; 16], row_ref_raw(&nested), commit()).unwrap(),
+        );
+
+        let debug = format!("{typed:?}");
+        assert!(debug.contains("InvocationArgumentKind"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("nested-sensitive-key"));
+        assert!(!debug.contains("[4, 4, 4, 4"));
+    }
+
     #[test]
     fn catalogue_and_snapshot_references_use_exact_pinned_natural_keys() {
         let snapshot = Snapshot::cwd([1; 16], [2; 16], 3.into()).unwrap();
