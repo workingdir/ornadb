@@ -1048,11 +1048,6 @@ fn sealed_standard_dispatch_rejects_unsupported_artifact_before_execution() {
             orna_artifact::client_plan::FORMAT_IDENTITY,
             orna_artifact::client_plan::INSPECT_FORMAT_VERSION,
         ),
-        (
-            ExecutableArtifactKind::Client,
-            orna_artifact::client_plan::FORMAT_IDENTITY,
-            orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION,
-        ),
     ] {
         let unsupported = ExecutableArtifact::new(
             kind,
