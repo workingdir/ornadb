@@ -173,7 +173,7 @@ Record a gate as **pass** only when the command exits zero and its output is
 retained. A manifest-declared `compose-only` demo, absent optional
 `../spec/examples`, or unavailable optional Emacs/host runtime is an explicit
 skip or unavailable result, not a pass. A command that ran and exited
-non-zero is a failure. The expected CI/local evidence files are
+non-zero is a failure. The expected local evidence files are
 `ci-evidence/tool-versions.txt`, `check.log`, `editor-tooling.log`,
 `kernel-test.log`, `postgres.log`, `sqlite-check.log`, and
 `sqlite-smoke.log`; retain the complete embedded `target` output when that
