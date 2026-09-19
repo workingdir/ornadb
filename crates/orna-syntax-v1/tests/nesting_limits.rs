@@ -33,6 +33,20 @@ fn recursive_types_and_patterns_share_the_parser_limit() {
 }
 
 #[test]
+fn ordinary_recursive_forms_below_the_budget_are_accepted() {
+    let parsed = parse_expression(&format!("{}value", "!".repeat(32)));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+
+    let nested_type = format!("{}Int{}", "[".repeat(32), "]".repeat(32));
+    let parsed = parse_module(&format!("fn typed(value: {nested_type}) = value;"));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+
+    let nested_pattern = format!("{}value{}", "[".repeat(32), "]".repeat(32));
+    let parsed = parse_module(&format!("fn destructure({nested_pattern}) = 1;"));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+}
+
+#[test]
 fn mixed_delimiters_and_postfix_spines_share_one_ast_budget() {
     let source = format!(
         "{}value{}{}",
@@ -86,11 +100,7 @@ fn repl_entrypoint_reports_the_same_nesting_limit_with_file_context() {
 
 #[test]
 fn row_entrypoint_reports_the_same_nesting_limit_without_panicking() {
-    let nested = format!(
-        "{}1{}",
-        "{ value: ".repeat(100),
-        " }".repeat(100),
-    );
+    let nested = format!("{}1{}", "{ value: ".repeat(100), " }".repeat(100),);
     let parsed = parse_row(&nested);
     assert_limited(&parsed.diagnostics);
 
