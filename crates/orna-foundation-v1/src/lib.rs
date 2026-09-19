@@ -1355,10 +1355,10 @@ impl CwdCapture {
             return Err(FoundationError::ExpectedCwdSnapshot);
         };
         if canonical_cwd_id(*database, *runtime, generation.clone())
-            .map_err(|_| FoundationError::NoncanonicalCwdSnapshot)?
+            .map_err(|_| FoundationError::ExpectedCwdSnapshot)?
             != *id
         {
-            return Err(FoundationError::NoncanonicalCwdSnapshot);
+            return Err(FoundationError::ExpectedCwdSnapshot);
         }
         Ok(Self {
             snapshot,
@@ -1514,7 +1514,6 @@ pub enum FoundationError {
     InvalidDiagnosticEncoding,
     ExpectedSysValue,
     ExpectedCwdSnapshot,
-    NoncanonicalCwdSnapshot,
     BareRepositoryHasNoCwd,
     UnsafeDiagnosticText,
     InvalidSystemReferenceEncoding,
@@ -1529,7 +1528,6 @@ impl fmt::Display for FoundationError {
             Self::InvalidDiagnosticEncoding => f.write_str("invalid diagnostic encoding"),
             Self::ExpectedSysValue => f.write_str("expected tag 60026 sys.Value"),
             Self::ExpectedCwdSnapshot => f.write_str("expected CWD snapshot"),
-            Self::NoncanonicalCwdSnapshot => f.write_str("noncanonical CWD snapshot ID"),
             Self::BareRepositoryHasNoCwd => f.write_str("a bare repository has no CWD"),
             Self::UnsafeDiagnosticText => f.write_str("unsafe diagnostic text"),
             Self::InvalidSystemReferenceEncoding => {
@@ -1796,7 +1794,7 @@ mod tests {
 
         assert!(matches!(
             CwdCapture::new(forged.clone(), [4; 32]),
-            Err(FoundationError::NoncanonicalCwdSnapshot)
+            Err(FoundationError::ExpectedCwdSnapshot)
         ));
         assert_eq!(
             snapshot_reference([1; 16], forged),
