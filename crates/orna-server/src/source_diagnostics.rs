@@ -389,25 +389,27 @@ fn clip_source_line(
     const LEADING_CONTEXT: usize = 36;
 
     let rendered = render_source_line(raw_line);
-    let characters = rendered.chars().collect::<Vec<_>>();
-    if characters.len() <= MAX_COLUMNS {
+    let rendered_width = display_column(&rendered);
+    if rendered_width <= MAX_COLUMNS {
         return (rendered, marker_start, marker_width);
     }
 
     let marker_end = marker_start.saturating_add(marker_width);
     let mut window_start = marker_start.saturating_sub(LEADING_CONTEXT);
-    let mut window_end = (window_start + MAX_COLUMNS).min(characters.len());
+    let mut window_end = (window_start + MAX_COLUMNS).min(rendered_width);
     if marker_end > window_end {
         window_start = marker_end.saturating_sub(MAX_COLUMNS);
-        window_end = (window_start + MAX_COLUMNS).min(characters.len());
+        window_end = (window_start + MAX_COLUMNS).min(rendered_width);
     }
+    let (window_start_byte, window_start) = rendered_boundary_at_or_before(&rendered, window_start);
+    let (window_end_byte, window_end) = rendered_boundary_at_or_after(&rendered, window_end);
     let leading_ellipsis = window_start != 0;
-    let trailing_ellipsis = window_end != characters.len();
+    let trailing_ellipsis = window_end != rendered_width;
     let mut clipped = String::new();
     if leading_ellipsis {
         clipped.push_str("...");
     }
-    clipped.extend(characters[window_start..window_end].iter());
+    clipped.push_str(&rendered[window_start_byte..window_end_byte]);
     if trailing_ellipsis {
         clipped.push_str("...");
     }
@@ -419,6 +421,33 @@ fn clip_source_line(
         visible_start - window_start + usize::from(leading_ellipsis) * 3,
         visible_end - visible_start,
     )
+}
+
+fn rendered_boundary_at_or_before(rendered: &str, target_column: usize) -> (usize, usize) {
+    let mut byte = 0;
+    let mut column = 0;
+    for character in rendered.chars() {
+        let width = character.width().unwrap_or(0);
+        if column.saturating_add(width) > target_column {
+            break;
+        }
+        byte += character.len_utf8();
+        column += width;
+    }
+    (byte, column)
+}
+
+fn rendered_boundary_at_or_after(rendered: &str, target_column: usize) -> (usize, usize) {
+    let mut byte = 0;
+    let mut column = 0;
+    for character in rendered.chars() {
+        if column >= target_column {
+            break;
+        }
+        byte += character.len_utf8();
+        column += character.width().unwrap_or(0);
+    }
+    (byte, column)
 }
 
 fn render_source_line(line: &str) -> String {
@@ -900,6 +929,17 @@ mod source_context_tests {
         assert!(marker_start < line.len());
         assert_eq!(marker_width, 6);
         assert_eq!(&line[marker_start..marker_start + marker_width], "target");
+    }
+
+    #[test]
+    fn long_source_lines_clip_wide_prefixes_by_display_columns() {
+        let raw = format!("{}target{}", "表".repeat(70), "z".repeat(80));
+        let marker_start = display_column(&"表".repeat(70));
+        let (line, marker_start, marker_width) = clip_source_line(&raw, marker_start, 6);
+
+        assert!(line.contains("target"));
+        assert_eq!(marker_start, 39);
+        assert_eq!(marker_width, 6);
     }
 
     #[test]
