@@ -13,7 +13,7 @@ use std::{
     os::{
         fd::AsRawFd,
         unix::{
-            fs::{FileTypeExt, PermissionsExt},
+            fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::UnixStream as StandardUnixStream,
         },
     },
@@ -131,6 +131,10 @@ pub fn run_sqlite_server(database_path: impl Into<PathBuf>) -> Result<(), Sqlite
 
 async fn run_sqlite_server_async(database_path: PathBuf) -> Result<(), SqliteSocketError> {
     let socket_path = socket_path(&database_path);
+    // Hold the local owner fence from stale-path inspection through server
+    // shutdown. A replacement owner must not bind, or let an older cleanup
+    // unlink its socket, while this process still owns the state.
+    let owner_lock = acquire_socket_owner_lock(&socket_path)?;
     // Probe the derived socket before opening SQLite so a live server is
     // reported as a socket conflict rather than as a database lock failure.
     remove_stale_socket(&socket_path)?;
@@ -147,7 +151,7 @@ async fn run_sqlite_server_async(database_path: PathBuf) -> Result<(), SqliteSoc
     ApplicationRevisionStore::recover(&store)
         .await
         .map_err(|source| storage_error("could not recover SQLite database", source))?;
-    let (listener, _cleanup) = bind_socket(&socket_path)?;
+    let (listener, _cleanup) = bind_socket(&socket_path, owner_lock)?;
     run_listener(listener, Arc::new(store)).await
 }
 
@@ -253,14 +257,98 @@ fn connection_has_current_session(
     binding.matches_active(active) && binding.matches_session(session)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl SocketIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
+struct SocketOwnerLock {
+    _file: fs::File,
+}
+
+fn socket_lock_path(path: &Path) -> PathBuf {
+    let mut lock_path = path.to_path_buf();
+    lock_path.set_extension("orna.lock");
+    lock_path
+}
+
+fn acquire_socket_owner_lock(path: &Path) -> Result<SocketOwnerLock, SqliteSocketError> {
+    let lock_path = socket_lock_path(path);
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+        .open(&lock_path)
+        .map_err(|source| SqliteSocketError::io("could not open socket owner lock", source))?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|source| SqliteSocketError::io("could not secure socket owner lock", source))?;
+    let mut lock = nix::libc::flock {
+        l_type: nix::libc::F_WRLCK as i16,
+        l_whence: nix::libc::SEEK_SET as i16,
+        l_start: 0,
+        l_len: 1,
+        l_pid: 0,
+    };
+    // SAFETY: the descriptor and lock pointer are valid for this fcntl call.
+    if unsafe { nix::libc::fcntl(file.as_raw_fd(), nix::libc::F_SETLK, &mut lock) } != 0 {
+        let source = io::Error::last_os_error();
+        if matches!(source.raw_os_error(), Some(code) if code == nix::libc::EACCES || code == nix::libc::EAGAIN)
+        {
+            return Err(SqliteSocketError::protocol(
+                "socket already has a live server",
+            ));
+        }
+        return Err(SqliteSocketError::io(
+            "could not acquire socket owner lock",
+            source,
+        ));
+    }
+    Ok(SocketOwnerLock { _file: file })
+}
+
+fn socket_identity(path: &Path) -> io::Result<SocketIdentity> {
+    fs::symlink_metadata(path).map(|metadata| SocketIdentity::from_metadata(&metadata))
+}
+
+fn remove_socket_if_identity(path: &Path, expected: SocketIdentity) -> io::Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(source),
+    };
+    if !metadata.file_type().is_socket() || SocketIdentity::from_metadata(&metadata) != expected {
+        return Ok(false);
+    }
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(source),
+    }
+}
+
 struct SocketCleanup {
     path: PathBuf,
+    identity: SocketIdentity,
+    _owner_lock: SocketOwnerLock,
 }
 
 impl Drop for SocketCleanup {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-        let _ = sync_socket_parent(&self.path);
+        if remove_socket_if_identity(&self.path, self.identity).unwrap_or(false) {
+            let _ = sync_socket_parent(&self.path);
+        }
     }
 }
 
@@ -274,12 +362,18 @@ fn sync_socket_parent(path: &Path) -> io::Result<()> {
     fs::File::open(parent).and_then(|directory| directory.sync_all())
 }
 
-fn bind_socket(path: &Path) -> Result<(UnixListener, SocketCleanup), SqliteSocketError> {
-    remove_stale_socket(path)?;
+fn bind_socket(
+    path: &Path,
+    owner_lock: SocketOwnerLock,
+) -> Result<(UnixListener, SocketCleanup), SqliteSocketError> {
     let listener = UnixListener::bind(path)
         .map_err(|source| SqliteSocketError::io("could not bind", source))?;
+    let identity = socket_identity(path)
+        .map_err(|source| SqliteSocketError::io("could not identify bound socket", source))?;
     let cleanup = SocketCleanup {
         path: path.to_path_buf(),
+        identity,
+        _owner_lock: owner_lock,
     };
     if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(SOCKET_MODE)) {
         drop(cleanup);
@@ -319,6 +413,7 @@ fn remove_stale_socket(path: &Path) -> Result<(), SqliteSocketError> {
             ));
         }
     };
+    let identity = SocketIdentity::from_metadata(&metadata);
     if !metadata.file_type().is_socket() {
         return Err(SqliteSocketError::protocol(
             "socket path is occupied by a non-socket",
@@ -330,11 +425,13 @@ fn remove_stale_socket(path: &Path) -> Result<(), SqliteSocketError> {
             "socket already has a live server",
         )),
         Err(source) if source.kind() == io::ErrorKind::ConnectionRefused => {
-            fs::remove_file(path)
+            let removed = remove_socket_if_identity(path, identity)
                 .map_err(|error| SqliteSocketError::io("could not remove stale socket", error))?;
-            sync_socket_parent(path).map_err(|error| {
-                SqliteSocketError::io("could not sync stale socket removal", error)
-            })?;
+            if removed {
+                sync_socket_parent(path).map_err(|error| {
+                    SqliteSocketError::io("could not sync stale socket removal", error)
+                })?;
+            }
             Ok(())
         }
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -1123,6 +1220,52 @@ mod tests {
             "orna-sqlite-socket-auth-{}.db",
             InvocationId::new().canonical()
         ))
+    }
+
+    #[test]
+    fn stale_socket_identity_fence_preserves_replacement_socket() {
+        let socket = test_database_path().with_extension("orna.sock");
+        let stale = StandardUnixListener::bind(&socket).expect("stale socket binds");
+        let stale_identity = socket_identity(&socket).expect("stale socket identity");
+        drop(stale);
+        fs::remove_file(&socket).expect("remove stale socket for replacement");
+        let replacement = StandardUnixListener::bind(&socket).expect("replacement binds");
+
+        assert!(!remove_socket_if_identity(&socket, stale_identity).expect("identity fence"));
+        assert!(
+            fs::symlink_metadata(&socket)
+                .expect("replacement metadata")
+                .file_type()
+                .is_socket(),
+            "replacement socket must remain after stale cleanup loses its identity"
+        );
+
+        drop(replacement);
+        fs::remove_file(&socket).expect("remove replacement socket");
+        let _ = fs::remove_file(socket_lock_path(&socket));
+    }
+
+    #[test]
+    fn socket_cleanup_preserves_replacement_socket() {
+        let socket = test_database_path().with_extension("orna.sock");
+        let owner_lock = acquire_socket_owner_lock(&socket).expect("owner lock");
+        let (listener, cleanup) = bind_socket(&socket, owner_lock).expect("socket binds");
+        fs::remove_file(&socket).expect("remove original socket for replacement");
+        let replacement = StandardUnixListener::bind(&socket).expect("replacement binds");
+
+        drop(listener);
+        drop(cleanup);
+        assert!(
+            fs::symlink_metadata(&socket)
+                .expect("replacement metadata")
+                .file_type()
+                .is_socket(),
+            "owner cleanup must not unlink a replacement socket"
+        );
+
+        drop(replacement);
+        fs::remove_file(&socket).expect("remove replacement socket");
+        let _ = fs::remove_file(socket_lock_path(&socket));
     }
 
     #[tokio::test]
