@@ -284,7 +284,10 @@ impl WatchPresentation {
         let Ok(present) = current.present.apply_patches(patches, self.limits) else {
             return self.require_resync();
         };
-        if present.validate_with_limits(self.limits).is_err() {
+        let snapshot_bytes = Value::new(snapshot.raw())
+            .and_then(|value| value.encode())
+            .map_or(usize::MAX, |bytes| bytes.len());
+        if snapshot_bytes > self.limits.max_message_bytes {
             return self.require_resync();
         }
         self.published = Some(PublishedPresentation {
