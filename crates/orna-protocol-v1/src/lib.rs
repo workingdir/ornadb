@@ -380,11 +380,16 @@ impl Message {
             return Err(Error::InvalidMessage);
         }
         if let Self::RequestStatusResult {
+            fingerprint,
             state,
             result: Some(result),
             ..
         } = self
         {
+            let fields = map(&result.0.0).ok_or(Error::InvalidMessage)?;
+            if *fingerprint != Some(bytes32(field(fields, 2)?)?) {
+                return Err(Error::InvalidMessage);
+            }
             match state {
                 RequestState::Terminal => {}
                 RequestState::Orphaned => {
