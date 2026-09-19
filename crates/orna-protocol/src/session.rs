@@ -94,6 +94,8 @@ pub enum SessionCodecError {
     InvalidIdentity,
     /// A payload is not valid UTF-8.
     InvalidUtf8,
+    /// A prompt contains terminal control characters.
+    InvalidPrompt,
     /// A frame or payload exceeds its bound.
     Oversize,
     /// Bytes remain after the declared payload.
@@ -110,6 +112,7 @@ impl fmt::Display for SessionCodecError {
             Self::InvalidLength => "session frame length is invalid",
             Self::InvalidIdentity => "session frame identity is invalid",
             Self::InvalidUtf8 => "session frame payload is not valid UTF-8",
+            Self::InvalidPrompt => "session prompt contains terminal control characters",
             Self::Oversize => "session frame exceeds its bound",
             Self::TrailingData => "session frame has trailing data",
         })
@@ -314,6 +317,12 @@ fn parse_header(
     }
     Ok((tag, root, stream, request, payload_length))
 }
+fn validate_prompt(prompt: &str) -> Result<(), SessionCodecError> {
+    if prompt.chars().any(|character| character.is_control()) {
+        return Err(SessionCodecError::InvalidPrompt);
+    }
+    Ok(())
+}
 
 /// Encodes a server-to-client input request.
 pub fn encode_session_server_frame(
@@ -327,6 +336,7 @@ pub fn encode_session_server_frame(
     ) {
         return Err(SessionCodecError::InvalidIdentity);
     }
+    validate_prompt(&request.prompt)?;
     let payload = request.prompt.as_bytes();
     if payload.len() > MAX_SESSION_LINE_LENGTH {
         return Err(SessionCodecError::Oversize);
@@ -355,6 +365,7 @@ pub fn decode_session_server_frame(
     let prompt = std::str::from_utf8(&encoded[HEADER_LENGTH..])
         .map_err(|_| SessionCodecError::InvalidUtf8)?
         .to_owned();
+    validate_prompt(&prompt)?;
     Ok(SessionServerFrame::InputRequested(InputRequested {
         root_invocation_id: root,
         call_stream: stream,
@@ -559,6 +570,24 @@ mod tests {
         assert_eq!(
             encode_session_client_frame(&oversized),
             Err(SessionCodecError::Oversize)
+        );
+    }
+    #[test]
+    fn codec_rejects_terminal_control_prompts() {
+        let mut malformed_request = request();
+        malformed_request.prompt = "\u{1b}[2J\n".to_owned();
+        assert_eq!(
+            encode_session_server_frame(&SessionServerFrame::InputRequested(malformed_request)),
+            Err(SessionCodecError::InvalidPrompt)
+        );
+
+        let mut encoded =
+            encode_session_server_frame(&SessionServerFrame::InputRequested(request()))
+                .expect("request encodes");
+        encoded[HEADER_LENGTH] = 0x1b;
+        assert_eq!(
+            decode_session_server_frame(&encoded),
+            Err(SessionCodecError::InvalidPrompt)
         );
     }
 
