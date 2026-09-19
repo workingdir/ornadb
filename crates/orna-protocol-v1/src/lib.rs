@@ -1271,7 +1271,7 @@ impl ResultBody {
         let Message::Result { .. } = &response.message else {
             return Err(Error::InvalidMessage);
         };
-        let body = response.message.body(&BTreeMap::new())?;
+        let body = response.message.body(&response.extensions)?;
         Self::decode(&body)
     }
 
@@ -2042,6 +2042,39 @@ mod tests {
         assert_eq!(
             ResultBody::from_result(&messages()[0], Limits::default()),
             Err(Error::InvalidMessage)
+        );
+    }
+
+    #[test]
+    fn result_body_extraction_preserves_ignorable_result_extensions() {
+        let mut result = messages().into_iter().nth(10).unwrap();
+        result.extensions.insert(
+            11,
+            ValueNode(Node::Text("retained result extension".into())),
+        );
+
+        let body = ResultBody::from_result(&result, Limits::default()).unwrap();
+        let fields = map(&body.0.0).unwrap();
+        assert_eq!(
+            field(fields, 11).unwrap(),
+            &Node::Text("retained result extension".into())
+        );
+
+        let status = Envelope {
+            request: Some(id(4)),
+            watch: None,
+            message: Message::RequestStatusResult {
+                target: id(1),
+                state: RequestState::Terminal,
+                fingerprint: Some(digest(1)),
+                result: Some(body),
+            },
+            extensions: BTreeMap::new(),
+        };
+        let encoded = status.encode(Limits::default()).unwrap();
+        assert_eq!(
+            Envelope::decode(&encoded, Limits::default()).unwrap(),
+            status
         );
     }
 
