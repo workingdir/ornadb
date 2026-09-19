@@ -2929,6 +2929,55 @@ impl Repository {
             let bytes = self.git_bytes(["cat-file", "blob", &object])?;
             verify_manifest_segment_bytes(manifest.table, entry, &object, &bytes)?;
         }
+        let root = compact_root(manifest.table);
+        let root_text = root
+            .as_path()
+            .to_str()
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        let mut command = self.command();
+        command.args([
+            "ls-tree",
+            "-rz",
+            "--full-tree",
+            commit.as_str(),
+            "--",
+            root_text,
+        ]);
+        let output = self.run(command)?.stdout;
+        let mut actual = BTreeSet::new();
+        for record in output
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
+            let Some(separator) = record.iter().position(|byte| *byte == b'\t') else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            let mut fields = record[..separator].split(|byte| *byte == b' ');
+            let mode = fields.next();
+            let kind = fields.next();
+            if !matches!(mode, Some(b"100644") | Some(b"100755"))
+                || kind != Some(b"blob")
+                || fields.next().is_some()
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let path = std::str::from_utf8(&record[separator + 1..])
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            if !actual.insert(path.to_owned()) {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+        }
+        let mut expected = BTreeSet::new();
+        expected.insert(path_key(&managed_child(&root, "policy.orna")?)?);
+        for change in manifest.canonical_files()? {
+            expected.insert(path_key(change.path())?);
+        }
+        for entry in &manifest.entries {
+            expected.insert(path_key(&entry.relative_path)?);
+        }
+        if actual != expected {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
         Ok(())
     }
 
