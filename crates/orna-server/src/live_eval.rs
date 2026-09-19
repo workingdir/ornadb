@@ -47,6 +47,7 @@ struct SessionState {
 
 /// The immutable durable CWD pin captured for one admitted operation.
 struct OperationAdmission {
+    capture: CwdCapture,
     snapshot: CanonicalSnapshot,
 }
 
@@ -60,6 +61,7 @@ trait OperationAdmissionSource {
     fn capture<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<CwdCapture, &'static str>> + 'a>>;
+    fn project_matches_capture(&self, capture: &CwdCapture) -> bool;
     fn repl(&self) -> std::result::Result<AdmittedReplSession, &'static str>;
 }
 
@@ -68,6 +70,7 @@ struct RepositoryAdmissionSource {
     identity: RuntimeIdentity,
     initial_digest: [u8; 32],
     project: Option<orna_project_v1::LoadedProject>,
+    project_capture: Option<CwdCapture>,
 }
 
 impl OperationAdmissionSource for RepositoryAdmissionSource {
@@ -80,6 +83,12 @@ impl OperationAdmissionSource for RepositoryAdmissionSource {
                 .map_err(|_| "wire.invalid_message")?;
             state.capture().await.map_err(|_| "wire.invalid_message")
         })
+    }
+
+    fn project_matches_capture(&self, capture: &CwdCapture) -> bool {
+        self.project_capture
+            .as_ref()
+            .is_none_or(|bound| bound == capture)
     }
 
     fn repl(&self) -> std::result::Result<AdmittedReplSession, &'static str> {
@@ -164,7 +173,7 @@ impl PureEvalApplication {
         _runtime_owner: [u8; 16],
         expiries: SessionExpiries,
         project: Option<orna_project_v1::LoadedProject>,
-        _capture: Option<CwdCapture>,
+        capture: Option<CwdCapture>,
     ) -> std::result::Result<Self, ()> {
         if identity.database_id != database_id {
             return Err(());
@@ -176,6 +185,7 @@ impl PureEvalApplication {
                 identity,
                 initial_digest,
                 project,
+                project_capture: capture,
             }),
             expiries,
             sessions: BTreeMap::new(),
@@ -225,8 +235,8 @@ impl PureEvalApplication {
         }
         // REQUEST-1 step 3: capture the current durable CWD only after the
         // transport has reserved this operation. The resulting capture is
-        // retained by the session state and cannot be changed by later CWD
-        // or repository movement.
+        // retained by the operation and cannot be changed by later CWD or
+        // repository movement.
         let capture = self.admissions.capture().await?;
         if capture.database_id() != self.database_id {
             return Err("wire.invalid_message");
@@ -240,6 +250,7 @@ impl PureEvalApplication {
         }
         Ok(OperationAdmission {
             snapshot: capture.snapshot().clone(),
+            capture,
         })
     }
 
@@ -253,15 +264,15 @@ impl PureEvalApplication {
         if !self.expiries.borrow().contains_key(&session) {
             return Err("wire.session_expired");
         }
-        let OperationAdmission { snapshot } = self.admit(database, presentation).await?;
+        let OperationAdmission { capture, snapshot } = self.admit(database, presentation).await?;
         if !self.sessions.contains_key(&session) {
             // The evaluator is constructed only after the durable capture is
             // accepted, then remains the session overlay for that exact pin.
             let repl = self.admissions.repl()?;
-            if self.admissions.capture().await?.snapshot() != &snapshot {
-                // Do not bind loaded source to a CWD that moved while the
-                // immutable evaluator was being built. A later repository
-                // change cannot affect `repl`, which owns the loaded source.
+            if !self.admissions.project_matches_capture(&capture) {
+                // Do not bind loaded source to a CWD that moved after the
+                // immutable evaluator was built. A later repository change
+                // cannot affect `repl`, which owns the loaded source.
                 return Err("wire.snapshot_expired");
             }
             self.sessions.insert(
@@ -616,6 +627,10 @@ mod tests {
                     .set(self.capture_admissions.get() + 1);
                 Ok(self.capture.borrow().clone())
             })
+        }
+
+        fn project_matches_capture(&self, _capture: &CwdCapture) -> bool {
+            true
         }
 
         fn repl(&self) -> std::result::Result<AdmittedReplSession, &'static str> {
