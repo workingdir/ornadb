@@ -856,7 +856,6 @@ fn public_project_function(analysis: &orna_semantic_v1::Analysis, target: &str) 
         .and_then(|module| module.exports.get(function))
         .is_some_and(|symbol| symbol.kind == orna_semantic_v1::SymbolKind::Function)
 }
-
 fn run_public_project_function(endpoint: &Endpoint, target: &str) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue();
@@ -874,7 +873,26 @@ fn run_public_project_function(endpoint: &Endpoint, target: &str) -> Result<(), 
             "use a supported table transaction; stream roots require the explicit stream runtime",
         ));
     }
+    let execution = execution_project(&project);
+    if DurableTransactionalEvaluator::default().project_stream_root_admitted(&execution, target) {
+        return run_project_stream_invocation_with_project(endpoint, target, &execution);
+    }
     run_project_invocation(endpoint, target)
+}
+
+fn run_project_stream_invocation(endpoint: &Endpoint, root_entry: &str) -> Result<(), Diagnostic> {
+    let project = load_project(endpoint)?;
+    let catalogue = semantic_catalogue();
+    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    if !analysis.is_ok() {
+        return Err(Diagnostic::target(
+            "E2101",
+            "project semantic analysis failed",
+            "fix the first reported source contract error, then run the project again",
+        ));
+    }
+    let execution = execution_project(&project);
+    run_project_stream_invocation_with_project(endpoint, root_entry, &execution)
 }
 
 fn run_project_invocation_with_arguments(
@@ -944,6 +962,13 @@ fn run_project_invocation_with_arguments(
             "the project transaction failed atomically; no partial changes were committed",
         )),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
+        StageOutcome::Skipped { reason }
+            if arguments.is_empty()
+                && reason
+                    == "project transaction admission does not run stream roots; use the explicit finite-list stream seam" =>
+        {
+            run_project_stream_invocation(endpoint, root_entry)
+        }
         StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "durable project invocation is not available",
             "use a supported table transaction; stream roots require the explicit stream runtime",
@@ -951,7 +976,11 @@ fn run_project_invocation_with_arguments(
     }
 }
 
-fn run_project_stream_invocation(endpoint: &Endpoint, root_entry: &str) -> Result<(), Diagnostic> {
+fn run_project_stream_invocation_with_project(
+    endpoint: &Endpoint,
+    root_entry: &str,
+    project: &ProjectUnit,
+) -> Result<(), Diagnostic> {
     let repository = orna_repository_v1::Repository::discover(local_project_path(endpoint)?)
         .map_err(|_| {
             Diagnostic::target(
@@ -960,18 +989,7 @@ fn run_project_stream_invocation(endpoint: &Endpoint, root_entry: &str) -> Resul
                 "run the command inside an initialized local Git worktree",
             )
         })?;
-    let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue();
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
-    if !analysis.is_ok() {
-        return Err(Diagnostic::target(
-            "E2101",
-            "project semantic analysis failed",
-            "fix the first reported source contract error, then run the project again",
-        ));
-    }
     let (identity, initial_digest) = runtime_identity(&repository)?;
-    let project = execution_project(&project);
     let owner_id = invocation_owner_id(identity);
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -989,7 +1007,7 @@ fn run_project_stream_invocation(endpoint: &Endpoint, root_entry: &str) -> Resul
                 identity,
                 owner_id,
                 initial_digest,
-                &project,
+                project,
                 root_entry,
             ),
         )

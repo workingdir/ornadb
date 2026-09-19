@@ -1771,6 +1771,33 @@ impl DurableTransactionalEvaluator {
             activation_time_observer: None,
         }
     }
+    /// Reports whether a project root is admitted by the same bounded
+    /// finite-list stream seam used by [`Self::execute_project_stream`].
+    ///
+    /// This probe does not open runtime state or perform delivery. It exists
+    /// for callers that must choose the stream route before invoking the
+    /// transactional route; unsupported transactions must not be inferred from
+    /// an evaluator failure.
+    #[must_use]
+    pub fn project_stream_root_admitted(&self, project: &ProjectUnit, root_entry: &str) -> bool {
+        if !root_entry.contains('.') {
+            return false;
+        }
+        let admitted = match admit_transaction_project(project, self.limits, root_entry) {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+        admit_project_list_stream(
+            project,
+            &admitted,
+            root_entry,
+            RuntimeIdentity {
+                database_id: [0; 16],
+                repository_id: [0; 16],
+            },
+        )
+        .is_ok()
+    }
 
     fn record_activation_time(&self, activation_time: SystemTime) {
         #[cfg(test)]
@@ -2275,13 +2302,9 @@ impl DurableTransactionalEvaluator {
             Ok(value) => value,
             Err(outcome) => return Ok(*outcome),
         };
-        if admitted
-            .functions
-            .get(root_entry)
-            .is_some_and(|function| literal_stream_pipeline(&function.body).is_some())
-        {
+        if admit_project_list_stream(project, &admitted, root_entry, target.identity).is_ok() {
             return Ok(StageOutcome::Skipped {
-                reason: "project transaction admission does not run stream roots; use the explicit finite-list stream seam".into(),
+                reason: PROJECT_STREAM_ROOT_ADMISSION_REASON.into(),
             });
         }
         self.execute_admitted_project_with_arguments(target, root_entry, admitted, arguments)
@@ -2341,7 +2364,7 @@ impl DurableTransactionalEvaluator {
             Ok(admitted) => admitted,
             Err(_) => return Ok((outcome, false, None, 0, false)),
         };
-        let bridge = match admit_project_list_stream(&project, admitted, "main.ingest", identity) {
+        let bridge = match admit_project_list_stream(&project, &admitted, "main.ingest", identity) {
             Ok(bridge) => bridge,
             Err(_) => return Ok((outcome, false, None, 0, false)),
         };
@@ -2769,11 +2792,11 @@ impl DurableTransactionalEvaluator {
             Ok(value) => value,
             Err(outcome) => return Ok(*outcome),
         };
-        let bridge = match admit_project_list_stream(project, admitted, root_entry, target.identity)
-        {
-            Ok(bridge) => bridge,
-            Err(outcome) => return Ok(*outcome),
-        };
+        let bridge =
+            match admit_project_list_stream(project, &admitted, root_entry, target.identity) {
+                Ok(bridge) => bridge,
+                Err(outcome) => return Ok(*outcome),
+            };
         let key = bridge.checkpoint_key()?;
         let (request, fingerprint) =
             project_stream_compat_request(target.identity, target.initial_digest, root_entry, &key);
@@ -2838,11 +2861,11 @@ impl DurableTransactionalEvaluator {
             Ok(value) => value,
             Err(outcome) => return Ok(*outcome),
         };
-        let bridge = match admit_project_list_stream(project, admitted, root_entry, target.identity)
-        {
-            Ok(bridge) => bridge,
-            Err(outcome) => return Ok(*outcome),
-        };
+        let bridge =
+            match admit_project_list_stream(project, &admitted, root_entry, target.identity) {
+                Ok(bridge) => bridge,
+                Err(outcome) => return Ok(*outcome),
+            };
         let key = bridge.checkpoint_key()?;
         self.execute_admitted_project_stream(target, request, fingerprint, bridge, key, control)
             .await
@@ -3647,6 +3670,8 @@ impl StreamHandler for ListTableHandler {
     }
 }
 
+const PROJECT_STREAM_ROOT_ADMISSION_REASON: &str = "project transaction admission does not run stream roots; use the explicit finite-list stream seam";
+
 fn stream_handler_diagnostic() -> SafeDiagnostic {
     SafeDiagnostic {
         code: DiagnosticCode::DecodeRejected,
@@ -3808,13 +3833,74 @@ fn admit_list_stream_source(
     })
 }
 
-/// Admits exactly one project root of the form `producer() | for_each(...)`,
-/// where `producer` is a zero-argument sibling function returning a literal
-/// `Stream.from_list`. The project function map is already namespace-qualified
-/// by `admit_transaction_project`, so this does not combine module text.
+/// Resolves the admitted root's producer expression to canonical list values.
+/// A direct `Stream.from_list` is retained for inline project roots; a bare
+/// zero-argument name resolves only within the root's qualified module.
+fn project_stream_source<'a>(
+    functions: &'a Functions,
+    root_entry: &str,
+    lhs: &'a Expr,
+) -> Result<(&'a [Expr], String, String), AdmissionFailure> {
+    let Expr::Call {
+        callee, arguments, ..
+    } = lhs
+    else {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "project list stream producer must be a zero-argument sibling call".into(),
+        }));
+    };
+    if qualified_expr_path(callee).as_deref() == Some(["Stream", "from_list"].as_slice()) {
+        let (values, source_identity) = literal_list_source(lhs).ok_or_else(|| {
+            Box::new(StageOutcome::Skipped {
+                reason: "project list stream producer must return literal Stream.from_list".into(),
+            })
+        })?;
+        return Ok((values, source_identity, root_entry.into()));
+    }
+    let Expr::Name { text: producer, .. } = callee.as_ref() else {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "project list stream producer must be a zero-argument sibling call".into(),
+        }));
+    };
+    if !arguments.is_empty() {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "project list stream producer must have canonical zero-argument bindings"
+                .into(),
+        }));
+    }
+    let (namespace, _) = root_entry.rsplit_once('.').ok_or_else(|| {
+        Box::new(StageOutcome::Skipped {
+            reason: "project stream root must have a module namespace".into(),
+        })
+    })?;
+    let producer_entry = format!("{namespace}.{producer}");
+    let producer = functions.get(&producer_entry).ok_or_else(|| {
+        Box::new(StageOutcome::Skipped {
+            reason: "project list stream producer must resolve in the root module".into(),
+        })
+    })?;
+    if !producer.parameters.is_empty() {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "project list stream producer must have canonical zero-argument bindings"
+                .into(),
+        }));
+    }
+    let (values, source_identity) = literal_list_source(&producer.body).ok_or_else(|| {
+        Box::new(StageOutcome::Skipped {
+            reason: "project list stream producer must return literal Stream.from_list".into(),
+        })
+    })?;
+    Ok((values, source_identity, producer_entry))
+}
+
+/// Admits exactly one project root of the form `Stream.from_list(...) |
+/// for_each(...)` or `producer() | for_each(...)`, where `producer` is a
+/// zero-argument sibling function returning a literal `Stream.from_list`.
+/// The project function map is already namespace-qualified by
+/// `admit_transaction_project`, so this does not combine module text.
 fn admit_project_list_stream(
     _project: &ProjectUnit,
-    admitted: AdmittedTransaction,
+    admitted: &AdmittedTransaction,
     root_entry: &str,
     identity: RuntimeIdentity,
 ) -> Result<ListStreamBridge, AdmissionFailure> {
@@ -3823,7 +3909,7 @@ fn admit_project_list_stream(
         key_fields,
         float_fields,
         table_fields,
-        mut table_assertions,
+        table_assertions,
         module_assertions,
     } = admitted;
     let root = functions.get(root_entry).ok_or_else(|| {
@@ -3861,47 +3947,8 @@ fn admit_project_list_stream(
             reason: "project list stream root must pipe a producer into for_each".into(),
         }));
     }
-    let Expr::Call {
-        callee, arguments, ..
-    } = lhs.as_ref()
-    else {
-        return Err(Box::new(StageOutcome::Skipped {
-            reason: "project list stream producer must be a zero-argument sibling call".into(),
-        }));
-    };
-    let Expr::Name { text: producer, .. } = callee.as_ref() else {
-        return Err(Box::new(StageOutcome::Skipped {
-            reason: "project list stream producer must be a zero-argument sibling call".into(),
-        }));
-    };
-    if !arguments.is_empty() {
-        return Err(Box::new(StageOutcome::Skipped {
-            reason: "project list stream producer must have canonical zero-argument bindings"
-                .into(),
-        }));
-    }
-    let (namespace, _) = root_entry.rsplit_once('.').ok_or_else(|| {
-        Box::new(StageOutcome::Skipped {
-            reason: "project stream root must have a module namespace".into(),
-        })
-    })?;
-    let producer_entry = format!("{namespace}.{producer}");
-    let producer = functions.get(&producer_entry).ok_or_else(|| {
-        Box::new(StageOutcome::Skipped {
-            reason: "project list stream producer must resolve in the root module".into(),
-        })
-    })?;
-    if !producer.parameters.is_empty() {
-        return Err(Box::new(StageOutcome::Skipped {
-            reason: "project list stream producer must have canonical zero-argument bindings"
-                .into(),
-        }));
-    }
-    let (values, source_identity) = literal_list_source(&producer.body).ok_or_else(|| {
-        Box::new(StageOutcome::Skipped {
-            reason: "project list stream producer must return literal Stream.from_list".into(),
-        })
-    })?;
+    let (values, source_identity, producer_entry) =
+        project_stream_source(functions, root_entry, lhs)?;
     let (parameter, table, insert_row) = list_for_each_body(rhs).ok_or_else(|| {
         Box::new(StageOutcome::Skipped {
             reason: "project list stream root must use one for_each table insert body".into(),
@@ -3912,7 +3959,7 @@ fn admit_project_list_stream(
             reason: "project list stream insert must target a declared keyed table".into(),
         })
     })?;
-    applicable_module_assertions(&table, &module_assertions)
+    applicable_module_assertions(&table, module_assertions)
         .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
     if keys.is_empty() {
         return Err(Box::new(StageOutcome::Skipped {
@@ -3920,8 +3967,8 @@ fn admit_project_list_stream(
         }));
     }
     let assertion_functions =
-        lower_relation_bindings(&functions, &key_fields, &float_fields, &table_fields);
-    let table_assertions = table_assertions.remove(&table).unwrap_or_default();
+        lower_relation_bindings(functions, key_fields, float_fields, table_fields);
+    let table_assertions = table_assertions.get(&table).cloned().unwrap_or_default();
     let payloads = canonical_list_payloads(values)?;
     let database = identity
         .database_id
@@ -3941,7 +3988,7 @@ fn admit_project_list_stream(
         parameter,
         insert_row: insert_row.clone(),
         table_assertions,
-        module_assertions,
+        module_assertions: module_assertions.clone(),
         assertion_functions,
         payloads,
     })
@@ -10065,10 +10112,9 @@ fn checkpoint_atomicity_bridge(
 ) -> Result<ListStreamBridge, RuntimeError> {
     let admitted = admit_transaction_project(project, limits, "main.ingest")
         .map_err(|_| RuntimeError::RecoveryInvalid)?;
-    admit_project_list_stream(project, admitted, "main.ingest", identity)
+    admit_project_list_stream(project, &admitted, "main.ingest", identity)
         .map_err(|_| RuntimeError::RecoveryInvalid)
 }
-
 fn checkpoint_atomicity_position(token: &str) -> Result<Position, RuntimeError> {
     Ok(Position {
         token: Component::new(token).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -10085,8 +10131,9 @@ fn checkpoint_atomicity_stream_error(error: orna_runtime_v1::StreamStepError) ->
 #[cfg(test)]
 mod list_stream_tests {
     use super::{
-        DurableTransactionalEvaluator, SourceUnit, StageOutcome, admit_project_list_stream,
-        admit_transaction_project, stream_handler_diagnostic, substitute_list_item, table_key,
+        DurableTransactionalEvaluator, PROJECT_STREAM_ROOT_ADMISSION_REASON, SourceUnit,
+        StageOutcome, admit_project_list_stream, admit_transaction_project,
+        stream_handler_diagnostic, substitute_list_item, table_key,
     };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use orna_evaluator_v1::Limits;
@@ -10175,7 +10222,7 @@ mod list_stream_tests {
 
         let bridge = admit_project_list_stream(
             &project,
-            admit_transaction_project(&project, Limits::default(), "main.ingest")
+            &admit_transaction_project(&project, Limits::default(), "main.ingest")
                 .expect("project admission"),
             "main.ingest",
             identity(),
@@ -10304,7 +10351,7 @@ mod list_stream_tests {
 
         let bridge = admit_project_list_stream(
             &project,
-            admit_transaction_project(&project, Limits::default(), "sensors.ingest")
+            &admit_transaction_project(&project, Limits::default(), "sensors.ingest")
                 .expect("authoritative project admission"),
             "sensors.ingest",
             identity(),
@@ -10371,7 +10418,7 @@ mod list_stream_tests {
 
         let first_bridge = admit_project_list_stream(
             &first,
-            admit_transaction_project(&first, Limits::default(), "sensors.ingest")
+            &admit_transaction_project(&first, Limits::default(), "sensors.ingest")
                 .expect("first project admission"),
             "sensors.ingest",
             identity(),
@@ -10400,7 +10447,7 @@ mod list_stream_tests {
 
         let changed_bridge = admit_project_list_stream(
             &changed,
-            admit_transaction_project(&changed, Limits::default(), "sensors.ingest")
+            &admit_transaction_project(&changed, Limits::default(), "sensors.ingest")
                 .expect("changed project admission"),
             "sensors.ingest",
             identity(),
@@ -10416,6 +10463,63 @@ mod list_stream_tests {
             6,
             "changed literal contents must not resume the predecessor checkpoint"
         );
+    }
+
+    #[tokio::test]
+    async fn project_transaction_route_skips_admitted_stream_root_before_evaluation() {
+        let (_temp, repository) = repository();
+        let project = authoritative_sensor_project();
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+
+        assert!(evaluator.project_stream_root_admitted(&project, "sensors.ingest"));
+        let outcome = evaluator
+            .execute_project(
+                &repository,
+                identity(),
+                [23; 16],
+                [24; 32],
+                &project,
+                "sensors.ingest",
+            )
+            .await
+            .expect("transaction route should return a semantic skip");
+        assert!(matches!(
+            outcome,
+            StageOutcome::Skipped { ref reason }
+                if reason == PROJECT_STREAM_ROOT_ADMISSION_REASON
+        ));
+    }
+
+    #[tokio::test]
+    async fn project_stream_preserves_inline_literal_source_support() {
+        let (_temp, repository) = repository();
+        let mut project = authoritative_sensor_project();
+        let source = &mut project.modules[0].source;
+        let declaration_start = source
+            .find("pub fn input() = ")
+            .expect("inline source declaration");
+        let declaration_end = source[declaration_start..]
+            .find(";\n")
+            .map(|offset| declaration_start + offset)
+            .expect("inline source declaration terminator");
+        let producer =
+            source[declaration_start + "pub fn input() = ".len()..declaration_end].to_owned();
+        source.replace_range(declaration_start..=declaration_end, "");
+        *source = source.replace("input() | for_each", &format!("{producer} | for_each"));
+
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+        let outcome = evaluator
+            .execute_project_stream(
+                &repository,
+                identity(),
+                [23; 16],
+                [24; 32],
+                &project,
+                "sensors.ingest",
+            )
+            .await
+            .expect("inline project stream");
+        assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
     }
 
     #[tokio::test]
@@ -10447,7 +10551,7 @@ mod list_stream_tests {
         let expected = authoritative_sensor_project();
         let bridge = admit_project_list_stream(
             &expected,
-            admit_transaction_project(&expected, Limits::default(), "sensors.ingest")
+            &admit_transaction_project(&expected, Limits::default(), "sensors.ingest")
                 .expect("authoritative project admission"),
             "sensors.ingest",
             identity(),
