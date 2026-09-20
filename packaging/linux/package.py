@@ -514,125 +514,199 @@ def verify_archive(
 
 
 def require_install_owner(
-    path: Path, metadata: os.stat_result, *, created: bool
-) -> None:
+    descriptor: int, path: Path, metadata: os.stat_result, *, created: bool
+) -> os.stat_result:
     if os.geteuid() != 0 or (metadata.st_uid == 0 and metadata.st_gid == 0):
-        return
+        return metadata
     if not created:
         fail(f"package install directory is not root-owned: {path}")
     try:
-        os.chown(path, 0, 0, follow_symlinks=False)
-        metadata = path.lstat()
+        os.fchown(descriptor, 0, 0)
+        metadata = os.fstat(descriptor)
     except OSError as error:
         fail(f"cannot set package install directory owner {path}: {error}")
     if metadata.st_uid != 0 or metadata.st_gid != 0:
         fail(f"package install directory is not root-owned: {path}")
+    return metadata
 
 
-def prepare_install_root(root: Path) -> Path:
-    """Normalize an install root lexically and reject symlinked ancestors."""
+def open_directory_at(parent: int, part: str, path: Path, *, label: str) -> tuple[int, bool]:
+    """Open one no-follow directory component, creating it only beneath parent."""
+    created = False
+    try:
+        os.mkdir(part, mode=0o755, dir_fd=parent)
+    except FileExistsError:
+        pass
+    except OSError as error:
+        fail(f"cannot create {label} {path}: {error}")
+    else:
+        created = True
+    try:
+        descriptor = os.open(
+            part, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent
+        )
+    except OSError as error:
+        fail(f"cannot open {label} {path}: {error}")
+    return descriptor, created
+
+
+def prepare_install_root(root: Path) -> tuple[Path, int]:
+    """Open an install root component-by-component without following replacements."""
     normalized = Path(os.path.abspath(os.fspath(root)))
     current = Path(normalized.anchor)
     try:
-        anchor_metadata = current.lstat()
+        descriptor = os.open(current, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        anchor_metadata = os.fstat(descriptor)
     except OSError as error:
         fail(f"cannot inspect package install root {current}: {error}")
     if not stat.S_ISDIR(anchor_metadata.st_mode):
+        os.close(descriptor)
         fail(f"package install root is not a directory: {current}")
-    require_install_owner(current, anchor_metadata, created=False)
-    for part in normalized.parts[1:]:
-        current /= part
-        created = False
-        try:
-            metadata = current.lstat()
-        except FileNotFoundError:
-            try:
-                current.mkdir(mode=0o755)
-            except FileExistsError:
-                pass
-            else:
-                created = True
-            try:
-                metadata = current.lstat()
-            except OSError as error:
-                fail(f"cannot inspect package install root {current}: {error}")
-        except OSError as error:
-            fail(f"cannot inspect package install root {current}: {error}")
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-            fail(f"package install root is not a directory: {current}")
-        if created:
-            try:
-                os.chmod(current, 0o755)
-            except OSError as error:
-                fail(f"cannot set package install root mode {current}: {error}")
-        require_install_owner(current, metadata, created=created)
-
-
     try:
-        root_metadata = normalized.lstat()
+        require_install_owner(descriptor, current, anchor_metadata, created=False)
+        for part in normalized.parts[1:]:
+            current /= part
+            next_descriptor, created = open_directory_at(
+                descriptor, part, current, label="package install root"
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISDIR(metadata.st_mode):
+                fail(f"package install root is not a directory: {current}")
+            if created:
+                os.fchmod(descriptor, 0o755)
+            require_install_owner(descriptor, current, metadata, created=created)
+        root_metadata = os.fstat(descriptor)
+        if stat.S_IMODE(root_metadata.st_mode) != 0o755:
+            fail(f"package install root has the wrong mode: {normalized}")
+        return normalized, descriptor
     except OSError as error:
-        fail(f"cannot inspect package install root {normalized}: {error}")
-    if (
-        not stat.S_ISDIR(root_metadata.st_mode)
-        or stat.S_IMODE(root_metadata.st_mode) != 0o755
-    ):
-        fail(f"package install root has the wrong mode: {normalized}")
+        os.close(descriptor)
+        fail(f"cannot prepare package install root {normalized}: {error}")
+    except PackageError:
+        os.close(descriptor)
+        raise
 
-    return normalized
 
-def ensure_install_parent(root: Path, relative: PurePosixPath) -> Path:
+def ensure_install_parent(root: Path, root_descriptor: int, relative: PurePosixPath) -> tuple[int, str]:
+    """Return a descriptor-backed parent and leaf for a product payload path."""
+    descriptor = os.dup(root_descriptor)
     current = root
-    for part in relative.parent.parts:
-        current /= part
-        created = False
+    try:
+        for part in relative.parent.parts:
+            current /= part
+            next_descriptor, created = open_directory_at(
+                descriptor, part, current, label="package destination parent"
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISDIR(metadata.st_mode):
+                fail(f"package destination parent is not a directory: {current}")
+            if created:
+                os.fchmod(descriptor, 0o755)
+            elif stat.S_IMODE(metadata.st_mode) != 0o755:
+                fail(f"package destination parent has the wrong mode: {current}")
+            require_install_owner(descriptor, current, metadata, created=created)
+        return descriptor, relative.name
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def atomic_write_at(parent: int, name: str, content: bytes, *, mode: int) -> None:
+    temporary = f".{name}.orna-install"
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            mode,
+            dir_fd=parent,
+        )
+    except OSError as error:
+        fail(f"cannot create package output {name}: {error}")
+    try:
+        view = memoryview(content)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                fail(f"could not write package output {name}")
+            view = view[written:]
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+    except OSError as error:
+        fail(f"could not write package output {name}: {error}")
+    finally:
+        os.close(descriptor)
+    try:
+        os.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
+    except OSError as error:
         try:
-            metadata = current.lstat()
-        except FileNotFoundError:
-            try:
-                current.mkdir(mode=0o755)
-            except FileExistsError:
-                pass
-            else:
-                created = True
-            try:
-                metadata = current.lstat()
-            except OSError as error:
-                fail(f"cannot inspect package destination parent {current}: {error}")
-        except OSError as error:
-            fail(f"cannot inspect package destination parent {current}: {error}")
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-            fail(f"package destination parent is not a directory: {current}")
-        if created:
-            try:
-                os.chmod(current, 0o755)
-            except OSError as error:
-                fail(f"cannot set package destination parent mode {current}: {error}")
-        elif stat.S_IMODE(metadata.st_mode) != 0o755:
-            fail(f"package destination parent has the wrong mode: {current}")
-        require_install_owner(current, metadata, created=created)
-    return root.joinpath(*relative.parts)
+            os.unlink(temporary, dir_fd=parent)
+        except OSError:
+            pass
+        fail(f"cannot install package output {name}: {error}")
+
+
+def destination_is_regular(parent: int, name: str) -> bool:
+    try:
+        metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
+    except OSError as error:
+        fail(f"cannot inspect package destination {name}: {error}")
+    return stat.S_ISREG(metadata.st_mode)
+
+
+def parent_is_current(root: int, relative: PurePosixPath, expected: int) -> bool:
+    """Prove a retained destination descriptor is still reachable from root."""
+    descriptor = os.dup(root)
+    try:
+        for part in relative.parent.parts:
+            next_descriptor = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+        observed = os.fstat(descriptor)
+        retained = os.fstat(expected)
+        return (observed.st_dev, observed.st_ino) == (retained.st_dev, retained.st_ino)
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
 
 
 def install_archive(path: Path, root: Path) -> None:
     members = verify_archive(path)
-    root = prepare_install_root(root)
-    for member, content in members:
-        relative = PurePosixPath(member.name)
-        if (
-            relative.is_absolute()
-            or any(part in ("", ".", "..") for part in relative.parts)
-            or member.name.startswith("-")
-        ):
-            fail(f"unsafe package archive path: {member.name}")
-        destination = ensure_install_parent(root, relative)
-        if destination.is_symlink() or (destination.exists() and not destination.is_file()):
-            fail(f"package destination is not a regular file: {destination}")
-        temporary = destination.with_name(f".{destination.name}.orna-install")
-        atomic_write(temporary, content, mode=member.mode & 0o7777)
-        os.replace(temporary, destination)
-        os.chmod(destination, member.mode & 0o7777)
-        if os.geteuid() == 0:
-            os.chown(destination, 0, 0)
+    root, root_descriptor = prepare_install_root(root)
+    try:
+        for member, content in members:
+            relative = PurePosixPath(member.name)
+            if (
+                relative.is_absolute()
+                or any(part in ("", ".", "..") for part in relative.parts)
+                or member.name.startswith("-")
+            ):
+                fail(f"unsafe package archive path: {member.name}")
+            parent, name = ensure_install_parent(root, root_descriptor, relative)
+            try:
+                if not destination_is_regular(parent, name):
+                    fail(f"package destination is not a regular file: {root / relative}")
+                if not parent_is_current(root_descriptor, relative, parent):
+                    fail(f"package destination parent changed before installation: {root / relative}")
+                atomic_write_at(parent, name, content, mode=member.mode & 0o7777)
+                if not parent_is_current(root_descriptor, relative, parent):
+                    fail(f"package destination parent changed during installation: {root / relative}")
+                if os.geteuid() == 0:
+                    os.chown(name, 0, 0, dir_fd=parent, follow_symlinks=False)
+            finally:
+                os.close(parent)
+    finally:
+        os.close(root_descriptor)
 
 
 def make_archive(args: argparse.Namespace) -> Path:
