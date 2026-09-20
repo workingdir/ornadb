@@ -1279,6 +1279,20 @@ fn loopback_host_evaluates_pure_source_retains_state_and_replays_terminal_eval()
                 ..
             }
         ));
+        let table_write_bytes = table_write.encode().unwrap();
+        let replayed_table_write = websocket_eval(
+            address,
+            &session,
+            &token,
+            &database,
+            [18; 16],
+            "table Note(id: Int) { value: Int, } fn main() { Note.insert({ id: 1, value: 2 }); }",
+        );
+        assert_eq!(
+            replayed_table_write.encode().unwrap(),
+            table_write_bytes,
+            "replaying a rejected table mutation must return the byte-identical terminal outcome"
+        );
         let after_rejection = websocket_eval(address, &session, &token, &database, [19; 16], "$_");
         let Message::Result {
             status: ResultStatus::Success,
@@ -1289,6 +1303,16 @@ fn loopback_host_evaluates_pure_source_retains_state_and_replays_terminal_eval()
             panic!("a rejected effect must not replace the retained pure result");
         };
         assert_eq!(after_rejection.encode().unwrap(), forty_three);
+        let after_replay = websocket_eval(address, &session, &token, &database, [21; 16], "$_");
+        let Message::Result {
+            status: ResultStatus::Success,
+            value: Some(after_replay),
+            ..
+        } = after_replay.message
+        else {
+            panic!("replaying a rejected table mutation must preserve the retained REPL overlay");
+        };
+        assert_eq!(after_replay.encode().unwrap(), forty_three);
         let retained_binding =
             websocket_eval(address, &session, &token, &database, [20; 16], "answer + 2");
         let Message::Result {
@@ -1300,6 +1324,17 @@ fn loopback_host_evaluates_pure_source_retains_state_and_replays_terminal_eval()
             panic!("a rejected table mutation must preserve the retained REPL overlay");
         };
         assert_eq!(retained_binding.encode().unwrap(), forty_two);
+        let retained_binding_after_replay =
+            websocket_eval(address, &session, &token, &database, [22; 16], "answer + 2");
+        let Message::Result {
+            status: ResultStatus::Success,
+            value: Some(retained_binding_after_replay),
+            ..
+        } = retained_binding_after_replay.message
+        else {
+            panic!("replaying a rejected table mutation must preserve retained bindings");
+        };
+        assert_eq!(retained_binding_after_replay.encode().unwrap(), forty_two);
 
         let replayed = websocket_eval(address, &session, &token, &database, [13; 16], "$_ + 1");
         let current = websocket_eval(address, &session, &token, &database, [15; 16], "$_");
