@@ -24,6 +24,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+const SPECIFICATION_VERSION: &str = "1.0.0";
+const NORMATIVE_PAYLOAD_COUNT: usize = 46;
+const EXPECTED_DIAGNOSTIC_STATUS: &str = "expected-not-executed";
+
 mod admitted_repl;
 pub mod catalogue_projection;
 pub mod row_admission;
@@ -384,10 +388,12 @@ pub struct InvalidFixture {
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExpectedDiagnostic {
+    pub version: String,
     pub fixture: String,
     pub failing_phase: String,
     pub primary_diagnostic: String,
     pub message_contains: String,
+    pub status: String,
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct Requirement {
@@ -478,7 +484,9 @@ impl Corpus {
         Ok(corpus)
     }
     pub fn validate(&self) -> Result<(), CorpusError> {
-        if self.manifest.version != "1.0.0" || self.invalid_metadata.version != "1.0.0" {
+        if self.manifest.version != SPECIFICATION_VERSION
+            || self.invalid_metadata.version != SPECIFICATION_VERSION
+        {
             return Err(CorpusError("expected Orna reference version 1.0.0".into()));
         }
         if self.manifest.fixtures.len() != 167 || self.manifest.counts.total != 167 {
@@ -540,7 +548,9 @@ impl Corpus {
                 let expected = self.diagnostics.get(&fixture.path).ok_or_else(|| {
                     CorpusError(format!("expected diagnostic missing: {}", fixture.path))
                 })?;
-                if fixture.failing_phase.as_deref() != Some(&metadata.failing_phase)
+                if expected.version != SPECIFICATION_VERSION
+                    || expected.status != EXPECTED_DIAGNOSTIC_STATUS
+                    || fixture.failing_phase.as_deref() != Some(&metadata.failing_phase)
                     || fixture.diagnostic.as_deref() != Some(&metadata.diagnostic)
                     || expected.primary_diagnostic != metadata.diagnostic
                     || expected.failing_phase != metadata.failing_phase
@@ -1513,12 +1523,15 @@ fn read_json<T: for<'a> Deserialize<'a>>(root: &Path, relative: &str) -> Result<
 fn release_digests(root: &Path) -> Result<BTreeMap<String, String>, CorpusError> {
     #[derive(Deserialize)]
     struct Release {
+        version: String,
         normative_payload_sha256: BTreeMap<String, String>,
     }
     let release: Release = read_json(root, "release.json")?;
-    if release.normative_payload_sha256.is_empty() {
+    if release.version != SPECIFICATION_VERSION
+        || release.normative_payload_sha256.len() != NORMATIVE_PAYLOAD_COUNT
+    {
         return Err(CorpusError(
-            "release has an empty normative digest inventory".into(),
+            "release version or digest inventory is invalid".into(),
         ));
     }
     Ok(release.normative_payload_sha256)
@@ -2540,5 +2553,49 @@ fn stage_matches<A: ConformanceAdapter>(
         // A skipped required pass/fail is absent execution, never a pass.
         (_, StageOutcome::Skipped { .. }) => false,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+
+    fn write_release(root: &Path, version: &str, count: usize) {
+        let digests = (0..count)
+            .map(|index| (format!("member-{index}"), "0".repeat(64)))
+            .collect::<BTreeMap<_, _>>();
+        fs::write(
+            root.join("release.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": version,
+                "normative_payload_sha256": digests,
+            }))
+            .expect("release JSON serializes"),
+        )
+        .expect("release JSON writes");
+    }
+
+    #[test]
+    fn release_metadata_is_pinned_to_the_authoritative_1_0_0_inventory() {
+        let root = tempfile::tempdir().expect("temporary authority root");
+        write_release(root.path(), "0.9.0", NORMATIVE_PAYLOAD_COUNT);
+        assert_eq!(
+            release_digests(root.path())
+                .expect_err("wrong release version")
+                .to_string(),
+            "release version or digest inventory is invalid"
+        );
+
+        write_release(
+            root.path(),
+            SPECIFICATION_VERSION,
+            NORMATIVE_PAYLOAD_COUNT - 1,
+        );
+        assert_eq!(
+            release_digests(root.path())
+                .expect_err("incomplete digest inventory")
+                .to_string(),
+            "release version or digest inventory is invalid"
+        );
     }
 }
