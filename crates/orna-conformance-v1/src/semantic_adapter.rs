@@ -8624,7 +8624,7 @@ mod bounded_tests {
     use orna_foundation_v1::Value;
     use orna_sys_v1::{
         AdmissionError, AdmissionRequest, ArgumentMap, FunctionDescriptor, FunctionId,
-        FunctionIdentity, InvocationContext, InvocationMode, InvocationState,
+        FunctionIdentity, InvocationContext, InvocationMode, InvocationState, InvocationStatus,
         RetainedInvocationResult, RevisionId, RuntimeId, RuntimeSupervisor, SnapshotId,
         TransactionMode, TypeId, TypeWitness,
     };
@@ -8781,9 +8781,12 @@ mod bounded_tests {
         let result = supervisor
             .await_invocation(&handle, Some(Duration::from_secs(1)))
             .expect("source start completes");
-        let RetainedInvocationResult::Success(value) = result else {
-            panic!("source start did not retain success");
-        };
+        assert!(result.status.is_terminal());
+        assert_eq!(result.status, InvocationStatus::Succeeded);
+        assert!(result.failure.is_none());
+        let value = result
+            .value
+            .expect("a succeeded source start retains a value");
         assert_eq!(
             Value::decode(value.canonical().expect("success retains canonical value")).unwrap(),
             Value::int(BigInt::from(42)),
