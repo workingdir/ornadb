@@ -312,3 +312,55 @@ fn sys_session_schema_binds_the_live_runtime_relation_without_runtime_claims() {
         .expect("runtime session handle");
     assert_eq!(session_handle["type"], "Relation<sys.Session>");
 }
+
+#[test]
+fn sys_runtime_info_schema_matches_the_published_compatibility_contract() {
+    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+    let runtime = document["value_types"]
+        .as_array()
+        .expect("value types")
+        .iter()
+        .find(|value| value["name"] == "sys.RuntimeInfo")
+        .expect("sys.RuntimeInfo");
+
+    assert_eq!(runtime["kind"], "record");
+    assert_eq!(runtime["type_parameters"], serde_json::json!([]));
+    assert_eq!(
+        runtime["fields"],
+        serde_json::json!([
+            {"name": "language_version", "type": "Str"},
+            {"name": "sys_version", "type": "Str"},
+            {"name": "canonical_orna_codec_version", "type": "Str"},
+            {"name": "repository_layout_version", "type": "Str"},
+            {"name": "storage_manifest_version", "type": "Str"},
+            {"name": "presentation_protocol_version", "type": "Str"},
+            {"name": "implementation_name", "type": "Str"},
+            {"name": "implementation_version", "type": "Str"},
+            {"name": "build_id", "type": "Str"},
+            {"name": "supported_profiles", "type": "[Str]"},
+            {"name": "runtime", "type": "sys.RuntimeId"},
+            {"name": "mode", "type": "sys.RuntimeMode"},
+            {"name": "read_only", "type": "Bool"},
+            {"name": "std_snapshot", "type": "sys.SnapshotRef?"},
+            {"name": "unicode_version", "type": "Str"},
+            {"name": "timezone_database_version", "type": "Str?"}
+        ])
+    );
+
+    let singleton = document["singletons"]
+        .as_array()
+        .expect("singletons")
+        .iter()
+        .find(|value| value["name"] == "sys.rt")
+        .expect("sys.rt singleton");
+    assert_eq!(singleton["type"], "sys.RuntimeView");
+
+    let info = document["functions"]
+        .as_array()
+        .expect("functions")
+        .iter()
+        .find(|value| value["name"] == "sys.rt.info")
+        .expect("sys.rt.info function");
+    assert_eq!(info["signature"], "fn sys.rt.info(): sys.RuntimeInfo");
+    assert_eq!(info["effect"], "read");
+}
