@@ -381,6 +381,7 @@ fn loopback_host_creates_a_session_from_a_real_repository() {
     assert!(response.contains(&format!(r#""database":"{database}""#)));
     assert!(response.contains(r#""runtime":""#));
     assert!(response.contains("set-cookie: orna_session="));
+    assert!(!response.contains("; Secure"));
     assert!(response.contains("resume_token"));
 }
 

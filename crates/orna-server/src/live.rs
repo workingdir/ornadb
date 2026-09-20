@@ -451,7 +451,7 @@ impl LiveOnceHost {
             runtime_owner,
         )
         .map_err(|_| LiveHostError::Configuration)?;
-        let transport = LiveTransport::new(host, TransportLimits::default())
+        let transport = LiveTransport::new(host, loopback_transport_limits())
             .map_err(|_| LiveHostError::Configuration)?;
         let application_work = transport.application_work_supervisor();
         Ok(Self {
@@ -3262,6 +3262,16 @@ fn runtime_identity(database_id: [u8; 16]) -> (RuntimeIdentity, [u8; 32]) {
         },
         initial_digest,
     )
+}
+
+fn loopback_transport_limits() -> TransportLimits {
+    TransportLimits {
+        // LiveOnceHost owns a plain TCP loopback listener.  A Secure cookie
+        // would be withheld by browsers on this cleartext endpoint, so the
+        // advertised cookie profile must match the actual listener.
+        tls: false,
+        ..TransportLimits::default()
+    }
 }
 
 fn subscribe_payload() -> Vec<u8> {
