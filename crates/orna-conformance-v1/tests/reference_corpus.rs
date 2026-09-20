@@ -55,6 +55,168 @@ fn requirement_evidence_keeps_all_authoritative_not_executed_markers() {
 }
 
 #[test]
+fn requirement_mapping_is_stage_scoped_and_does_not_promote_skips() {
+    let mut corpus = Corpus::load_default().expect("reference corpus loads");
+    corpus
+        .requirement_evidence
+        .requirements
+        .iter_mut()
+        .find(|entry| entry.requirement == "ORNA-SOURCE-001")
+        .expect("source requirement exists")
+        .tests
+        .push(serde_json::json!({
+            "kind": "ordinary source fixture",
+            "status": "planned",
+            "subject": "ORNA-SOURCE-001",
+            "fixture": "valid/minimal-root.orna",
+            "stage": "parse",
+        }));
+
+    let mut adapter = SkippingAdapter;
+    let report = Harness::new(corpus).run(&mut adapter);
+    let fixture = report
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.fixture == "valid/minimal-root.orna")
+        .expect("representative fixture is reported");
+    let parse = fixture
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Parse))
+        .expect("parse stage is reported");
+    assert_eq!(
+        parse.requirements,
+        vec!["ORNA-SOURCE-001".to_string()]
+    );
+    assert!(matches!(
+        &parse.requirement_mapping,
+        RequirementMapping::Mapped { .. }
+    ));
+    assert_eq!(parse.status, EvidenceStatus::Skipped);
+    let serialized = serde_json::to_value(&report).expect("run report serializes");
+    let serialized_fixture = serialized["fixtures"]
+        .as_array()
+        .expect("serialized fixture array")
+        .iter()
+        .find(|fixture| fixture["fixture"] == "valid/minimal-root.orna")
+        .expect("serialized representative fixture");
+    let serialized_parse = serialized_fixture["stages"]
+        .as_array()
+        .expect("serialized stage array")
+        .first()
+        .expect("serialized parse stage");
+    assert_eq!(serialized_parse["status"], "skipped");
+    assert_eq!(serialized_parse["requirement_mapping"]["status"], "mapped");
+    assert_eq!(serialized["coverage"]["mapped_stage_evidence"], 0);
+
+    let resolve = fixture
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Resolve))
+        .expect("resolve stage is reported");
+    assert!(resolve.requirements.is_empty());
+    assert!(matches!(
+        &resolve.requirement_mapping,
+        RequirementMapping::Unmapped { reason } if reason.contains("resolve")
+    ));
+
+    let unrelated = report
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.fixture == "valid/affine-max.orna")
+        .expect("unrelated fixture is reported");
+    assert!(matches!(
+        &unrelated.stages[0].requirement_mapping,
+        RequirementMapping::Unmapped { .. }
+    ));
+    assert_eq!(report.coverage.mapped_stage_evidence, 0);
+    assert!(report.coverage.unmapped_stage_evidence > 1);
+}
+
+#[test]
+fn malformed_requirement_links_are_rejected_or_reported_unmapped() {
+    let mut corpus = Corpus::load_default().expect("reference corpus loads");
+    let entry = corpus
+        .requirement_evidence
+        .requirements
+        .iter_mut()
+        .find(|entry| entry.requirement == "ORNA-SOURCE-001")
+        .expect("source requirement exists");
+    entry.tests.push(serde_json::json!({
+        "kind": "ordinary source fixture",
+        "status": "planned",
+        "subject": 7,
+        "fixture": "valid/minimal-root.orna",
+        "stage": "parse",
+    }));
+    assert_eq!(
+        corpus.validate().expect_err("non-string subject is invalid").to_string(),
+        "requirement evidence test subject must match requirement"
+    );
+    let mut adapter = SkippingAdapter;
+    let report = Harness::new(corpus).run(&mut adapter);
+    let parse = report
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.fixture == "valid/minimal-root.orna")
+        .expect("representative fixture")
+        .stages
+        .first()
+        .expect("parse stage");
+    assert!(matches!(
+        &parse.requirement_mapping,
+        RequirementMapping::Unmapped { reason } if reason.contains("malformed")
+    ));
+
+    let mut conflict = Corpus::load_default().expect("reference corpus reloads");
+    conflict
+        .requirement_evidence
+        .requirements
+        .iter_mut()
+        .find(|entry| entry.requirement == "ORNA-SOURCE-001")
+        .expect("source requirement exists")
+        .tests
+        .push(serde_json::json!({
+            "kind": "ordinary source fixture",
+            "status": "planned",
+            "subject": "ORNA-SOURCE-001",
+            "fixture": "valid/minimal-root.orna",
+            "stage": "parse",
+            "stages": ["resolve"],
+        }));
+    assert_eq!(
+        conflict
+            .validate()
+            .expect_err("conflicting stage fields are invalid")
+            .to_string(),
+        "requirement evidence stage and stages are mutually exclusive"
+    );
+
+    let mut unknown = Corpus::load_default().expect("reference corpus reloads");
+    unknown
+        .requirement_evidence
+        .requirements
+        .iter_mut()
+        .find(|entry| entry.requirement == "ORNA-SOURCE-001")
+        .expect("source requirement exists")
+        .tests
+        .push(serde_json::json!({
+            "kind": "ordinary source fixture",
+            "status": "planned",
+            "subject": "ORNA-SOURCE-001",
+            "fixture": "valid/minimal-root.orna",
+            "stages": ["parse", "bogus-stage"],
+        }));
+    assert_eq!(
+        unknown
+            .validate()
+            .expect_err("unknown stage spelling is invalid")
+            .to_string(),
+        "requirement evidence stages must contain known stages"
+    );
+}
+
+#[test]
 fn no_adapter_cannot_create_runtime_passes() {
     let corpus = Corpus::load_default().expect("reference corpus loads");
     let mut adapter = SkippingAdapter;

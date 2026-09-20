@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
 description = "Private, single-writer local runtime state for Orna 1.0"
+publish = false
 
 [dependencies]
 orna-core = { path = "../orna-core" }

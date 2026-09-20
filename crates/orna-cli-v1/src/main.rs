@@ -80,6 +80,83 @@ impl Diagnostic {
         Self::target("E2000", title, help)
     }
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DiagnosticDocumentation {
+    code: &'static str,
+    title: &'static str,
+    explanation: &'static str,
+    help: &'static str,
+}
+
+fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
+    Some(match code {
+        "ORNA-S010-IMPORT" => DiagnosticDocumentation {
+            code: "ORNA-S010-IMPORT",
+            title: "imported module is unavailable",
+            explanation:
+                "The project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.",
+            help: "use a captured standard dependency or remove the import",
+        },
+        "ORNA-S012-UNRESOLVED" => DiagnosticDocumentation {
+            code: "ORNA-S012-UNRESOLVED",
+            title: "name could not be resolved",
+            explanation:
+                "The source refers to a name that is not declared or imported in the current namespace.",
+            help: "declare the name or add the matching `use` import before using it",
+        },
+        "ORNA-S021-TYPE" => DiagnosticDocumentation {
+            code: "ORNA-S021-TYPE",
+            title: "expression has the wrong type",
+            explanation:
+                "The value produced by an expression does not satisfy the type required at that source location.",
+            help: "change the expression or its declared type so the value and requirement agree",
+        },
+        "ORNA-REPL-EFFECT" => DiagnosticDocumentation {
+            code: "ORNA-REPL-EFFECT",
+            title: "REPL preview cannot perform an effect",
+            explanation:
+                "Interactive previews are read-only and cannot perform network, filesystem, process, or other external effects.",
+            help: "evaluate a pure expression or invoke the operation through its admitted runtime entry point",
+        },
+        "ORNA-REPL-AT" => DiagnosticDocumentation {
+            code: "ORNA-REPL-AT",
+            title: "snapshot selection failed",
+            explanation:
+                "The requested CWD, HEAD, or reference snapshot could not be loaded as an admitted REPL context.",
+            help: "choose an existing snapshot and keep the repository available while selecting it",
+        },
+        "ORNA091-E-RETURN-ARROW" => DiagnosticDocumentation {
+            code: "ORNA091-E-RETURN-ARROW",
+            title: "function return type uses the arrow form",
+            explanation:
+                "Orna function declarations separate the parameter list from the return type with a colon.",
+            help: "replace `->` with `:` in the function declaration",
+        },
+        "ORNA091-E-VAR" => DiagnosticDocumentation {
+            code: "ORNA091-E-VAR",
+            title: "local declaration uses `var`",
+            explanation:
+                "Orna uses `let` for local declarations; reassignment updates that binding when permitted.",
+            help: "replace `var` with `let`",
+        },
+        _ => return None,
+    })
+}
+
+fn explain_diagnostic(code: &str) -> Result<String, Diagnostic> {
+    let Some(documentation) = diagnostic_documentation(code) else {
+        return Err(Diagnostic::usage(
+            "E1002",
+            "diagnostic code is unknown",
+            "supply a code printed by an Orna diagnostic, such as `ORNA-S010-IMPORT`",
+        ));
+    };
+    Ok(format!(
+        "{}: {}\n{}\nhelp: {}",
+        documentation.code, documentation.title, documentation.explanation, documentation.help
+    ))
+}
+
 
 fn cancellation_diagnostic(diagnostic: &orna_foundation_v1::Diagnostic) -> Diagnostic {
     let code = match diagnostic.code() {
@@ -273,6 +350,7 @@ enum Command {
     Init(Option<PathBuf>),
     Status { format: StatusFormat },
     Check,
+    Explain(String),
     Invoke(String),
     Run(Invocation),
     Help,
@@ -353,6 +431,18 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                 format: StatusFormat::Human,
             },
         },
+        Some("explain") => Command::Explain(
+            words
+                .next()
+                .ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1001",
+                        "`explain` needs a diagnostic code",
+                        "supply a diagnostic code after `explain`, such as `ORNA-S010-IMPORT`",
+                    )
+                })?
+                .to_owned(),
+        ),
         Some("check") => Command::Check,
         Some("invoke") => Command::Invoke(
             words
@@ -1401,7 +1491,7 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     match parsed.command.clone() {
         Command::Help => {
             println!(
-                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|status|status --porcelain|status --short|check|invoke TARGET|run [QUALIFIED_FUNCTION]|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
+                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|status|status --porcelain|status --short|check|explain CODE|invoke TARGET|run [QUALIFIED_FUNCTION]|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
             );
             println!("orna-cli-v1 init [DIRECTORY]");
             Ok(())
@@ -1422,6 +1512,10 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         } => run_status_short(&parsed.endpoint),
         Command::Check => check_project(&parsed.endpoint),
         Command::Invoke(ref target) => run_pure_invocation(&parsed.endpoint, target),
+        Command::Explain(code) => {
+            println!("{}", explain_diagnostic(&code)?);
+            Ok(())
+        }
         Command::Repl(ref expression) => run_repl(&parsed.endpoint, expression.as_deref()),
         Command::Run(Invocation::Seed) => run_project_invocation(&parsed.endpoint, "main.seed"),
         Command::Run(Invocation::Exercise) => {
@@ -1594,6 +1688,22 @@ mod tests {
             "E1001"
         );
         let error = parse_cli(&["serve".into()]).expect_err("unsupported");
+        assert_eq!((error.code, error.exit), ("E1002", Exit::Usage));
+    }
+
+    #[test]
+    fn explain_documents_a_stable_diagnostic_and_rejects_unknown_codes() {
+        assert_eq!(
+            parse_cli(&["explain".into(), "ORNA-S010-IMPORT".into()])
+                .expect("explain parses")
+                .command,
+            Command::Explain("ORNA-S010-IMPORT".into())
+        );
+        assert_eq!(
+            explain_diagnostic("ORNA-S010-IMPORT").expect("known diagnostic"),
+            "ORNA-S010-IMPORT: imported module is unavailable\nThe project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.\nhelp: use a captured standard dependency or remove the import"
+        );
+        let error = explain_diagnostic("ORNA-NOT-A-CODE").expect_err("unknown diagnostic");
         assert_eq!((error.code, error.exit), ("E1002", Exit::Usage));
     }
 

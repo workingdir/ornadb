@@ -1652,6 +1652,12 @@ pub enum StreamHandlerResult {
     Commit(StreamMutationBatch),
     CommitTable(StreamTableMutationBatch),
     CommitValidatedTable(StreamValidatedTableMutationBatch),
+    /// The handler staged table writes in this activation and then failed.
+    ///
+    /// The staged batch is deliberately discarded: failed delivery
+    /// activations must retain only the durable failure record, never table
+    /// rows, mutation records, a CWD capture, or checkpoint progress.
+    FailAfterTable(StreamTableMutationBatch, SafeDiagnostic),
     Fail(SafeDiagnostic),
     Cancelled,
 }
@@ -4776,7 +4782,13 @@ impl RuntimeState {
                     }
                 }
             }
-            StreamHandlerResult::Fail(diagnostic) => {
+            // A handler may have staged table inserts before returning an
+            // ordinary error. Those inserts are activation-local and must be
+            // dropped before the separate durable failure-record transaction.
+            // Keep this path identical to `Fail`: the delivery remains at its
+            // current checkpoint and can be retried under the same identity.
+            StreamHandlerResult::FailAfterTable(_, diagnostic)
+            | StreamHandlerResult::Fail(diagnostic) => {
                 if is_cancellation_diagnostic(diagnostic) {
                     let result = match self
                         .stream_backend(writer)
@@ -6807,7 +6819,8 @@ impl RuntimeState {
                     }
                 }
             }
-            StreamHandlerResult::Fail(diagnostic) => self
+            StreamHandlerResult::FailAfterTable(_, diagnostic)
+            | StreamHandlerResult::Fail(diagnostic) => self
                 .fail_stream_replay(writer, &grant, diagnostic)
                 .await
                 .map_err(StreamStepError::Runtime),

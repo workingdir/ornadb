@@ -446,6 +446,16 @@ fn compare_fields(
         if before.contains_key(&id) {
             continue;
         }
+        // A new key field changes the table's complete primary-key identity;
+        // v1 exposes only explicit row re-keying, never an implicit schema
+        // operation that would reinterpret every existing row.
+        if field.role == FieldRole::Key {
+            return Err(PlanningError::IncompatibleField {
+                table,
+                field: id,
+                reason: "primary-key fields cannot be added during schema evolution",
+            });
+        }
         if field.role == FieldRole::Computed {
             return Err(PlanningError::IncompatibleField {
                 table,
@@ -765,6 +775,26 @@ mod tests {
             assert!(plan(&old, &next, &request(vec![])).is_err());
         }
     }
+    #[test]
+    fn adding_a_primary_key_field_fails_closed_instead_of_emitting_a_column_add() {
+        let old = schema(table(true, vec![field(2, "name", false)]));
+        let mut added_key = field(3, "account_id", true);
+        added_key.role = FieldRole::Key;
+        let next = schema(table(
+            true,
+            vec![field(2, "name", false), added_key],
+        ));
+
+        assert!(matches!(
+            plan(&old, &next, &request(vec![])),
+            Err(PlanningError::IncompatibleField {
+                table,
+                field,
+                reason: "primary-key fields cannot be added during schema evolution",
+            }) if table == id(1) && field == id(3)
+        ));
+    }
+
 
     #[test]
     fn explicit_key_mode_changes_fail_closed_in_both_directions() {

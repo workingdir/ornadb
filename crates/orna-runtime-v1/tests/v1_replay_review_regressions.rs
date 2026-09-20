@@ -28,7 +28,8 @@ use orna_runtime_v1::{
     StreamCheckpoint, StreamFailurePayloadFuture, StreamFailurePayloadProvider, StreamHandler,
     StreamHandlerResult, StreamItem, StreamMutationBatch, StreamRunGate, StreamSource,
     StreamSourceDescriptor, StreamSourceKind, StreamSourcePoll, StreamStep, StreamStepError,
-    StreamTableCandidateValidator, StreamValidatedTableMutationBatch, TableMutation, WriterLease,
+    StreamTableCandidateValidator, StreamTableMutationBatch, StreamValidatedTableMutationBatch,
+    TableMutation, WriterLease,
 };
 use orna_stream_v1::{
     AsyncCheckpointBackend, Checkpoint, CommitIntent, CommitResult, Component, ConsumerIdentity,
@@ -437,7 +438,6 @@ impl StreamHandler for CancelAfterTableCallback {
         })
     }
 }
-
 struct BooksValidator;
 
 impl StreamTableCandidateValidator for BooksValidator {
@@ -732,6 +732,49 @@ async fn failed_protected_replay_counts_one_attempt_without_moving_checkpoint() 
 }
 
 #[tokio::test]
+async fn failed_table_replay_preserves_skipped_identity_and_checkpoint() {
+    let fixture = Fixture::new(StreamFailurePayload::Plaintext(PAYLOAD.to_vec())).await;
+    let capture = fixture.state.capture().await.unwrap();
+    let grant = fixture.admit().await;
+    let before = fixture.failure(fixture.writer).await;
+    let mut handler = CountingHandler::new(StreamHandlerResult::FailAfterTable(
+        StreamTableMutationBatch {
+            mutations: vec![
+                TableMutation::new([33; 16], "books", vec![5], Some(vec![13])).unwrap(),
+            ],
+            next_digest: capture.generation_digest(),
+        },
+        diagnostic(),
+    ));
+    let failed = match fixture
+        .state
+        .replay_stream_failure(fixture.writer, grant.clone(), &mut handler)
+        .await
+        .expect("execute failed replay")
+    {
+        CommitResult::ReplayFailed { failure } => failure,
+        other => panic!("expected failed replay, got {other:?}"),
+    };
+    assert_eq!(handler.calls, 1);
+    assert_eq!(failed.identity, grant.failure);
+    assert_eq!(failed.status, FailureStatus::Skipped);
+    assert_eq!(failed.version, grant.version + 1);
+    assert_eq!(
+        failed.attempts, before.attempts,
+        "replay admission already counted this processing attempt"
+    );
+    assert_eq!(failed.diagnostic, diagnostic());
+    assert_eq!(fixture.failure(fixture.writer).await, failed);
+    assert_eq!(
+        fixture.state.committed_table_row("books", &[5]).await.unwrap(),
+        None
+    );
+    assert!(fixture.state.pending().await.unwrap().is_empty());
+    fixture.assert_checkpoint(fixture.writer).await;
+    assert_eq!(fixture.state.capture().await.unwrap(), capture);
+}
+
+#[tokio::test]
 async fn replay_cancel_counts_one_attempt_without_moving_checkpoint() {
     let fixture = Fixture::new(StreamFailurePayload::Plaintext(PAYLOAD.to_vec())).await;
     let grant = fixture.admit().await;
@@ -896,6 +939,137 @@ async fn cancellation_after_callback_discards_staged_table_and_checkpoint() {
     drop(repository);
     drop(directory);
 }
+
+#[tokio::test]
+async fn failed_table_delivery_retains_failure_and_retries_same_identity() {
+    let (directory, repository) = repository();
+    let state = RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [21; 16],
+            repository_id: [22; 16],
+        },
+        [23; 32],
+    )
+    .await
+    .expect("open failed-delivery fixture");
+    let writer = state.acquire_lease([24; 16]).await.expect("acquire writer");
+    let item_delivery = delivery();
+    let successor = item_delivery.successor.clone();
+    let key = item_delivery.checkpoint_key();
+    let capture = state.capture().await.expect("capture before failure");
+    let checkpoint = state
+        .stream_backend(writer)
+        .checkpoint_async(&key)
+        .await
+        .expect("read initial checkpoint");
+    let mut source = OneItemSource {
+        key: key.clone(),
+        item: Some(StreamItem {
+            delivery: item_delivery.clone(),
+            payload: PAYLOAD.to_vec(),
+        }),
+        polls: 0,
+    };
+    let mut handler = CountingHandler::new(StreamHandlerResult::FailAfterTable(
+        StreamTableMutationBatch {
+            mutations: vec![
+                TableMutation::new([32; 16], "books", vec![4], Some(vec![12])).unwrap(),
+            ],
+            next_digest: [9; 32],
+        },
+        diagnostic(),
+    ));
+
+    let failure = match state
+        .run_stream_once(writer, &key, &mut source, &mut handler)
+        .await
+        .expect("retain failed delivery")
+    {
+        StreamStep::Failed { failure } => *failure,
+        other => panic!("expected failed delivery, got {other:?}"),
+    };
+    assert_eq!(failure.identity.0, item_delivery);
+    assert_eq!(failure.status, FailureStatus::Failed);
+    assert_eq!(failure.attempts, 1);
+    assert_eq!(failure.diagnostic, diagnostic());
+    assert_eq!(state.capture().await.unwrap(), capture);
+    assert_eq!(state.committed_table_row("books", &[4]).await.unwrap(), None);
+    assert!(state.pending().await.unwrap().is_empty());
+    assert_eq!(
+        state
+            .stream_backend(writer)
+            .checkpoint_async(&key)
+            .await
+            .unwrap(),
+        checkpoint
+    );
+
+    let retrying = match state
+        .stream_backend(writer)
+        .apply_async(CommitIntent::Retry {
+            failure: failure.identity.clone(),
+            expected_version: failure.version,
+            expected: (&checkpoint).into(),
+        })
+        .await
+        .expect("admit same-delivery retry")
+    {
+        CommitResult::RetryScheduled { failure } => failure,
+        other => panic!("expected retry admission, got {other:?}"),
+    };
+    assert_eq!(retrying.identity, failure.identity);
+    assert_eq!(retrying.attempts, 2);
+
+    let mut retry_source = OneItemSource {
+        key: key.clone(),
+        item: Some(StreamItem {
+            delivery: failure.identity.0.clone(),
+            payload: PAYLOAD.to_vec(),
+        }),
+        polls: 0,
+    };
+    let mut retry_handler = CountingHandler::new(StreamHandlerResult::Commit(
+        StreamMutationBatch {
+            mutations: Vec::new(),
+            next_digest: capture.generation_digest(),
+        },
+    ));
+    assert!(matches!(
+        state
+            .run_stream_once(writer, &key, &mut retry_source, &mut retry_handler)
+            .await
+            .expect("commit same-delivery retry"),
+        StreamStep::Committed {
+            checkpoint: StreamCheckpoint {
+                committed: Some(Position { .. }),
+                ..
+            }
+        }
+    ));
+    let recovered = state
+        .stream_backend(writer)
+        .failure_async(&failure.identity)
+        .await
+        .unwrap()
+        .expect("load recovered failure");
+    assert_eq!(recovered.identity, failure.identity);
+    assert_eq!(recovered.status, FailureStatus::Succeeded);
+    assert_eq!(recovered.attempts, 2);
+    assert_eq!(
+        state
+            .stream_backend(writer)
+            .checkpoint_async(&key)
+            .await
+            .unwrap()
+            .committed,
+        Some(successor)
+    );
+    drop(state);
+    drop(repository);
+    drop(directory);
+}
+
 
 #[tokio::test]
 async fn stale_stream_writer_is_rejected_before_source_poll() {

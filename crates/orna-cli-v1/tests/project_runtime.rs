@@ -216,6 +216,38 @@ fn sensors_checkpoint_key(database_id: [u8; 16]) -> CheckpointKey {
 }
 
 #[test]
+fn binary_explain_returns_extended_orna_diagnostic_guidance() {
+    let directory = tempfile::tempdir().expect("CLI working directory");
+    let documented = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["explain", "ORNA-S010-IMPORT"])
+        .output()
+        .expect("CLI process");
+
+    assert!(documented.status.success());
+    assert_eq!(
+        documented.stdout,
+        b"ORNA-S010-IMPORT: imported module is unavailable\nThe project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.\nhelp: use a captured standard dependency or remove the import\n"
+    );
+    assert!(documented.stderr.is_empty());
+
+    let unknown = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["explain", "ORNA-NOT-A-CODE"])
+        .output()
+        .expect("CLI process");
+    assert!(!unknown.status.success());
+    assert_eq!(unknown.status.code(), Some(2), "unknown explain uses usage exit status");
+    assert!(unknown.stdout.is_empty());
+    assert_eq!(
+        unknown.stderr,
+        b"error[E1002]: diagnostic code is unknown\nhelp: supply a code printed by an Orna diagnostic, such as `ORNA-S010-IMPORT`\n"
+    );
+}
+
+#[test]
 fn binary_repl_executes_a_pure_expression_at_the_cli_boundary() {
     let directory = tempfile::tempdir().expect("REPL working directory");
     let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
