@@ -53,7 +53,9 @@ use super::{
     STANDARD_LIBRARY_V3_VERSION_IDENTITY, STANDARD_LIBRARY_V4_REVISION_ID,
     STANDARD_LIBRARY_V4_VERSION_IDENTITY, STANDARD_LIBRARY_V5_REVISION_ID,
     STANDARD_LIBRARY_V5_VERSION_IDENTITY, STANDARD_LIBRARY_V6_REVISION_ID,
-    STANDARD_LIBRARY_V6_VERSION_IDENTITY, STANDARD_LIBRARY_V11_REVISION_ID,
+    STANDARD_LIBRARY_V6_VERSION_IDENTITY, STANDARD_LIBRARY_V7_REVISION_ID,
+    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID,
+    STANDARD_LIBRARY_V10_REVISION_ID, STANDARD_LIBRARY_V11_REVISION_ID,
     STANDARD_LIBRARY_VERSION_IDENTITY, STANDARD_SOURCE_BUNDLE_ID, STANDARD_SOURCE_REVISION_ID,
     STANDARD_SOURCE_UNIT_ID, STANDARD_SOURCE_V2_BUNDLE_ID, STANDARD_SOURCE_V2_REVISION_ID,
     STANDARD_SOURCE_V3_BUNDLE_ID, STANDARD_SOURCE_V3_REVISION_ID, STANDARD_SOURCE_V4_BUNDLE_ID,
@@ -308,13 +310,26 @@ mod v5_v10;
 
 #[test]
 fn retained_standard_selection_is_pinned_and_fail_closed() {
-    let first = select_verified_standard_library(STANDARD_LIBRARY_REVISION_ID)
-        .expect("V1 is a retained verified standard snapshot");
-    assert_eq!(first.revision(), STANDARD_LIBRARY_REVISION_ID);
-
-    let latest = select_verified_standard_library(STANDARD_LIBRARY_V11_REVISION_ID)
-        .expect("V11 is a retained verified standard snapshot");
-    assert_eq!(latest.revision(), STANDARD_LIBRARY_V11_REVISION_ID);
+    // Selection is retention/identity verification, not a release compatibility
+    // claim. Every registered historical coordinate must resolve only to its
+    // exact verified snapshot; no nearest-version fallback is permitted.
+    for revision in [
+        STANDARD_LIBRARY_REVISION_ID,
+        STANDARD_LIBRARY_V2_REVISION_ID,
+        STANDARD_LIBRARY_V3_REVISION_ID,
+        STANDARD_LIBRARY_V4_REVISION_ID,
+        STANDARD_LIBRARY_V5_REVISION_ID,
+        STANDARD_LIBRARY_V6_REVISION_ID,
+        STANDARD_LIBRARY_V7_REVISION_ID,
+        STANDARD_LIBRARY_V8_REVISION_ID,
+        STANDARD_LIBRARY_V9_REVISION_ID,
+        STANDARD_LIBRARY_V10_REVISION_ID,
+        STANDARD_LIBRARY_V11_REVISION_ID,
+    ] {
+        let selected = select_verified_standard_library(revision)
+            .expect("registered standard revision is retained and verified");
+        assert_eq!(selected.revision(), revision);
+    }
 
     let unknown = StandardLibraryRevisionId::from_bytes([0xff; 16]);
     assert!(matches!(
