@@ -70,9 +70,9 @@ use orna_protocol::{
     encode_server_frame, encode_session_server_frame,
 };
 use orna_repository_v1::{Repository, RuntimeOwnerLock, inspect_metadata};
-use orna_runtime_v1::{RuntimeError, RuntimeIdentity, RuntimeState, WriterLease};
 #[cfg(test)]
 use orna_runtime_v1::RequestState;
+use orna_runtime_v1::{RuntimeError, RuntimeIdentity, RuntimeState, WriterLease};
 use orna_standard::{RegisteredOpaqueCodecsError, registered_opaque_codecs};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -5739,9 +5739,8 @@ mod runtime_admission_tests {
         drop(runtime);
         drop(admission);
 
-        let replacement =
-            RawSocketRuntimeAdmission::from_repository(repository.clone())
-                .expect("replacement admission");
+        let replacement = RawSocketRuntimeAdmission::from_repository(repository.clone())
+            .expect("replacement admission");
         let replacement_owner = replacement.owner;
         let replacement_identity = replacement.identity;
         let replacement_initial_digest = replacement.initial_digest;
