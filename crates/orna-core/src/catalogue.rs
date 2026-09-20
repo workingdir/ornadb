@@ -1470,6 +1470,163 @@ pub struct TypeDeclarationWitness {
     revision_id: [u8; 32],
 }
 
+/// An immutable compiler-produced declaration admission artifact.
+///
+/// This is the narrow, identity-preserving handoff from a resolved source
+/// catalogue to a runtime catalogue authority.  It deliberately carries core
+/// identities and canonical declaration witnesses, never runtime object
+/// identities or snapshot-pinned references.  The runtime remains the sole
+/// allocator of `sys.ObjectId` and constructor of `sys.{Type,Function}Ref`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogueAdmissionArtifact {
+    types: Vec<CatalogueAdmissionType>,
+    functions: Vec<CatalogueAdmissionFunction>,
+}
+
+impl CatalogueAdmissionArtifact {
+    pub fn new(
+        types: Vec<CatalogueAdmissionType>,
+        functions: Vec<CatalogueAdmissionFunction>,
+    ) -> Self {
+        Self { types, functions }
+    }
+
+    pub fn types(&self) -> &[CatalogueAdmissionType] {
+        &self.types
+    }
+
+    pub fn functions(&self) -> &[CatalogueAdmissionFunction] {
+        &self.functions
+    }
+}
+
+/// One canonical type declaration in a [`CatalogueAdmissionArtifact`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogueAdmissionType {
+    witness: TypeDeclarationWitness,
+    rename_from: Option<String>,
+    form: CatalogueAdmissionTypeForm,
+}
+
+impl CatalogueAdmissionType {
+    pub fn new(
+        witness: TypeDeclarationWitness,
+        rename_from: Option<String>,
+        form: CatalogueAdmissionTypeForm,
+    ) -> Self {
+        Self {
+            witness,
+            rename_from,
+            form,
+        }
+    }
+
+    pub fn witness(&self) -> &TypeDeclarationWitness {
+        &self.witness
+    }
+
+    pub fn rename_from(&self) -> Option<&str> {
+        self.rename_from.as_deref()
+    }
+
+    pub const fn form(&self) -> CatalogueAdmissionTypeForm {
+        self.form
+    }
+}
+
+/// A core-identity type form accepted by the admission artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CatalogueAdmissionTypeForm {
+    Named,
+    Value,
+    Reference { target: TypeId },
+}
+
+/// One function signature declaration in a [`CatalogueAdmissionArtifact`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogueAdmissionFunction {
+    function_id: FunctionId,
+    qualified_name: String,
+    revision_id: [u8; 32],
+    semantic_hash: [u8; 32],
+    rename_from: Option<String>,
+    parameters: Vec<CatalogueAdmissionParameter>,
+    result_type: TypeId,
+}
+
+impl CatalogueAdmissionFunction {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        function_id: FunctionId,
+        qualified_name: String,
+        revision_id: [u8; 32],
+        semantic_hash: [u8; 32],
+        rename_from: Option<String>,
+        parameters: Vec<CatalogueAdmissionParameter>,
+        result_type: TypeId,
+    ) -> Self {
+        Self {
+            function_id,
+            qualified_name,
+            revision_id,
+            semantic_hash,
+            rename_from,
+            parameters,
+            result_type,
+        }
+    }
+
+    pub const fn function_id(&self) -> FunctionId {
+        self.function_id
+    }
+    pub fn qualified_name(&self) -> &str {
+        &self.qualified_name
+    }
+    pub const fn revision_id(&self) -> [u8; 32] {
+        self.revision_id
+    }
+    pub const fn semantic_hash(&self) -> [u8; 32] {
+        self.semantic_hash
+    }
+    pub fn rename_from(&self) -> Option<&str> {
+        self.rename_from.as_deref()
+    }
+    pub fn parameters(&self) -> &[CatalogueAdmissionParameter] {
+        &self.parameters
+    }
+    pub const fn result_type(&self) -> TypeId {
+        self.result_type
+    }
+}
+
+/// One ordered function parameter in a [`CatalogueAdmissionArtifact`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogueAdmissionParameter {
+    name: String,
+    position: u64,
+    type_id: TypeId,
+}
+
+impl CatalogueAdmissionParameter {
+    pub fn new(name: String, position: u64, type_id: TypeId) -> Self {
+        Self {
+            name,
+            position,
+            type_id,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub const fn position(&self) -> u64 {
+        self.position
+    }
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+}
+
 impl TypeDeclarationWitness {
     pub const fn type_id(&self) -> TypeId {
         self.type_id
