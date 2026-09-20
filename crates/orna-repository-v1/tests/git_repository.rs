@@ -5222,6 +5222,74 @@ fn publish_candidate_completes_ref_index_and_worktree_boundaries() {
 }
 
 #[test]
+fn publication_refuses_to_replace_a_retained_journal() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let retained_candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"retained row\n".to_vec()),
+            )],
+            "orna: retained publication",
+        )
+        .unwrap();
+    let retained = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        retained_candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [71; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"retained row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+    repo.write_publication_journal(&retained).unwrap();
+
+    let replacement_candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"replacement row\n".to_vec()),
+            )],
+            "orna: replacement publication",
+        )
+        .unwrap();
+    let mut replacement = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        replacement_candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [72; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"replacement row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+
+    assert!(matches!(
+        repo.publish_candidate(&index_before, &replacement_candidate, &mut replacement),
+        Err(orna_repository_v1::RepositoryError::PublicationPending)
+    ));
+    assert_eq!(repo.head().unwrap(), Some(head));
+    assert_eq!(repo.index_generation().unwrap(), index_before);
+    assert_eq!(repo.managed_file_bytes(&managed).unwrap(), None);
+    assert_eq!(repo.read_publication_journal().unwrap(), Some(retained));
+    assert_eq!(
+        replacement.stage(),
+        orna_repository_v1::PublicationJournalStage::Prepared
+    );
+}
+
+#[test]
 fn publication_pauses_for_an_existing_git_index_lock_before_ref_change() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
