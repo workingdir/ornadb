@@ -1977,6 +1977,19 @@ impl Repository {
         }
         let _coordination_lock = self.acquire_coordination_lock()?;
         self.require_no_pending_checkout_recovery_locked()?;
+        // A retained PUB-1 journal is the sole recovery authority for its
+        // candidate. Never replace it with another publisher's prepared
+        // journal: doing so would discard the first candidate's exact
+        // ref/index/worktree evidence before recovery can reconcile it.
+        if let Some(retained) = self.read_publication_journal_locked()? {
+            // Compact publication persists this exact prepared journal before
+            // it invokes the common PUB-1 boundary, so an exact retry is the
+            // same recovery operation, not a second publisher. Any differing
+            // journal remains fenced rather than replacing its evidence.
+            if retained != *journal {
+                return Err(RepositoryError::PublicationPending);
+            }
+        }
         let paths = journal
             .entries()
             .iter()
