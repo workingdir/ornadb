@@ -10,10 +10,11 @@ use orna_core::{
     FunctionId, FunctionRevisionId, TypeId,
     canonical_hash::artifact_payload_digest,
     catalogue::{
-        CatalogueSnapshot, FunctionDefinition, FunctionReturn, TypeDeclarationWitness,
-        TypeWitnessError,
+        CatalogueAdmissionArtifact, CatalogueAdmissionFunction, CatalogueAdmissionParameter,
+        CatalogueAdmissionType, CatalogueAdmissionTypeForm, CatalogueSnapshot, FunctionDefinition,
+        FunctionReturn, TypeDeclarationWitness, TypeWitnessError,
     },
-    catalogue_diff::{CatalogueSemanticDiff, catalogue_diff},
+    catalogue_diff::{CatalogueSemanticDiff, SemanticChange, catalogue_diff},
     revision::{
         ActiveDatabaseRevision, ArtifactCatalogueCompatibility, ArtifactCompatibilityCoordinates,
         ArtifactProvenanceError, ArtifactStandardLibraryCompatibility, DefinitionOrigin,
@@ -303,6 +304,120 @@ impl ResolvedSourceCatalogue {
     /// Returns object declarations whose facts cannot currently form witnesses.
     pub fn type_witness_errors(&self) -> &[TypeWitnessError] {
         &self.type_witness_errors
+    }
+
+    /// Produces the immutable compiler-owned admission artifact for the
+    /// currently supported runtime slice.
+    ///
+    /// The artifact contains only canonical OVB-backed object declarations
+    /// and signatures whose types resolve to those declarations. Runtime
+    /// object identities remain unallocated. Scalar, value, reference,
+    /// default-bearing, stream and row forms fail closed because this
+    /// compiler/runtime boundary has no authoritative declaration witness or
+    /// default plan for them yet.
+    pub fn admission_artifact(
+        &self,
+    ) -> Result<CatalogueAdmissionArtifact, ResolvedSourceCatalogueError> {
+        if let Some(error) = self.type_witness_errors.first() {
+            return Err(ResolvedSourceCatalogueError::TypeWitness(error.clone()));
+        }
+
+        let witnesses = self
+            .type_witnesses
+            .iter()
+            .map(|witness| (witness.type_id(), witness))
+            .collect::<std::collections::HashMap<_, _>>();
+        let types = self
+            .type_witnesses
+            .iter()
+            .map(|witness| {
+                CatalogueAdmissionType::new(
+                    witness.clone(),
+                    self.diff.changes().iter().find_map(|change| match change {
+                        SemanticChange::ObjectTypeRenamed { id, from, .. }
+                            if *id == witness.type_id() =>
+                        {
+                            Some(from.clone())
+                        }
+                        _ => None,
+                    }),
+                    CatalogueAdmissionTypeForm::Named,
+                )
+            })
+            .collect();
+
+        let mut functions = Vec::new();
+        for revision in self.candidate.new_function_revisions() {
+            let definition = self
+                .candidate
+                .candidate()
+                .function_by_id(revision.function())
+                .ok_or(ResolvedSourceCatalogueError::MissingCandidateFunction {
+                    function: revision.function(),
+                    revision: revision.id(),
+                })?;
+            let parameters = definition
+                .parameters()
+                .iter()
+                .map(|parameter| {
+                    if parameter.default_expression().is_some() {
+                        return Err(ResolvedSourceCatalogueError::UnsupportedType {
+                            function: definition.id(),
+                            slot: SignatureSlot::Parameter(parameter.ordinal()),
+                            resolved_type: parameter.resolved_type(),
+                        });
+                    }
+                    let type_id = admission_type_id(
+                        &witnesses,
+                        definition.id(),
+                        SignatureSlot::Parameter(parameter.ordinal()),
+                        parameter.resolved_type(),
+                    )?;
+                    Ok(CatalogueAdmissionParameter::new(
+                        parameter.name().to_owned(),
+                        u64::from(parameter.ordinal()),
+                        type_id,
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let result_type = match definition.return_type() {
+                FunctionReturn::Single(resolved_type) => admission_type_id(
+                    &witnesses,
+                    definition.id(),
+                    SignatureSlot::Result,
+                    *resolved_type,
+                )?,
+                FunctionReturn::Stream(_) => {
+                    return Err(ResolvedSourceCatalogueError::UnsupportedReturn {
+                        function: definition.id(),
+                        shape: UnsupportedReturnShape::Stream,
+                    });
+                }
+                FunctionReturn::Rows(_) => {
+                    return Err(ResolvedSourceCatalogueError::UnsupportedReturn {
+                        function: definition.id(),
+                        shape: UnsupportedReturnShape::Rows,
+                    });
+                }
+            };
+            let rename_from = self.diff.changes().iter().find_map(|change| match change {
+                SemanticChange::FunctionRenamed { id, from, .. } if *id == definition.id() => {
+                    Some(from.clone())
+                }
+                _ => None,
+            });
+            functions.push(CatalogueAdmissionFunction::new(
+                definition.id(),
+                definition.name().to_string(),
+                revision.declaration_content_hash().to_bytes(),
+                revision.semantic_hash().to_bytes(),
+                rename_from,
+                parameters,
+                result_type,
+            ));
+        }
+
+        Ok(CatalogueAdmissionArtifact::new(types, functions))
     }
 
     /// Returns the expected active source/catalogue pair.
@@ -682,6 +797,28 @@ fn validate_invocation_projection(
         }
     }
     Ok(())
+}
+
+fn admission_type_id(
+    witnesses: &std::collections::HashMap<TypeId, &TypeDeclarationWitness>,
+    function: FunctionId,
+    slot: SignatureSlot,
+    resolved_type: ResolvedType,
+) -> Result<TypeId, ResolvedSourceCatalogueError> {
+    match resolved_type {
+        ResolvedType::Named(type_id) if witnesses.contains_key(&type_id) => Ok(type_id),
+        ResolvedType::Named(type_id) => Err(ResolvedSourceCatalogueError::MissingType {
+            function,
+            slot,
+            type_id,
+            resolved_type,
+        }),
+        _ => Err(ResolvedSourceCatalogueError::UnsupportedType {
+            function,
+            slot,
+            resolved_type,
+        }),
+    }
 }
 
 fn validate_signature_type(
