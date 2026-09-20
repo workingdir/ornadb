@@ -3343,7 +3343,7 @@ mod tests {
         expired_delete_response, runtime_identity, subscribe_payload,
     };
     use crate::live_eval::PureEvalApplication;
-    use futures::StreamExt;
+    use futures::{StreamExt, io::AsyncWrite};
     use orna_live_v1::{
         ApplicationPreparation, CreateRequest, Frame, HttpConnection, Limits, LiveCredentialIssuer,
         LiveHost, LiveTransport, ResumeRequest, SessionCredential, SystemCredentialIssuer,
@@ -3367,14 +3367,42 @@ mod tests {
         fs, io,
         net::TcpListener,
         path::PathBuf,
+        pin::Pin,
         rc::Rc,
         sync::{
             Arc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
+        task::{Context, Poll},
         thread,
     };
     use tokio::io::{AsyncReadExt as TokioAsyncReadExt, AsyncWriteExt as TokioAsyncWriteExt};
+
+    struct FlushFailureAfterWrite {
+        written: Vec<u8>,
+    }
+
+    impl AsyncWrite for FlushFailureAfterWrite {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.written.extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "test flush failure",
+            )))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     async fn bounded_test_wait<T>(future: impl Future<Output = T>, operation: &str) -> T {
         tokio::time::timeout(Duration::from_secs(2), future)
@@ -3542,6 +3570,121 @@ mod tests {
         assert_eq!(deletion.delete(session), Err(()));
         assert_eq!(expiries.borrow().get(&session), Some(&100));
         assert!(deleted_leases.borrow().is_empty());
+    }
+
+    #[test]
+    fn failed_upgrade_flush_aborts_candidate_and_preserves_incumbent() {
+        let session = [61; 16];
+        let incumbent = [62; 16];
+        let candidate = [63; 16];
+        let now = super::system_milliseconds();
+        let expires_at = now.saturating_add(60_000);
+        let origin = Origin::parse("https://app.example").unwrap();
+        let host = LiveHost::new(
+            Limits::default(),
+            SessionBoundary::new(OriginPolicy::new([origin], []), 60_000),
+            Serving::new(orna_serving_v1::Limits::default()).unwrap(),
+        )
+        .unwrap();
+        let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+        let mut deletion = HostDeletion {
+            expiries: Rc::new(RefCell::new(BTreeMap::new())),
+            deleted_leases: Rc::new(RefCell::new(BTreeMap::new())),
+            application: Rc::new(RefCell::new(None)),
+            application_workers: None,
+        };
+        let token = futures::executor::block_on(admit_test_session(
+            &mut transport,
+            &mut deletion,
+            now,
+            orna_live_v1::SessionMetadata {
+                session,
+                database: [64; 16],
+                runtime: [65; 16],
+                expires_at,
+                subscribe: subscribe_payload(),
+            },
+        ));
+        let mut token_text = String::with_capacity(43);
+        const BASE64URL: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        for chunk in token.chunks(3) {
+            token_text.push(BASE64URL[(chunk[0] >> 2) as usize] as char);
+            token_text.push(
+                BASE64URL
+                    [(((chunk[0] & 3) << 4) | (chunk.get(1).copied().unwrap_or(0) >> 4)) as usize]
+                    as char,
+            );
+            if chunk.len() > 1 {
+                token_text.push(
+                    BASE64URL[(((chunk[1] & 15) << 2) | (chunk.get(2).copied().unwrap_or(0) >> 6))
+                        as usize] as char,
+                );
+            }
+            if chunk.len() > 2 {
+                token_text.push(BASE64URL[(chunk[2] & 63) as usize] as char);
+            }
+        }
+        let request = WireRequest {
+            method: "GET".into(),
+            path: "/orna/live/3d3d3d3d-3d3d-3d3d-3d3d-3d3d3d3d3d3d".into(),
+            headers: vec![
+                ("host".into(), "app.example".into()),
+                ("origin".into(), "https://app.example".into()),
+                ("connection".into(), "Upgrade".into()),
+                ("upgrade".into(), "websocket".into()),
+                ("sec-websocket-version".into(), "13".into()),
+                (
+                    "sec-websocket-key".into(),
+                    "dGhlIHNhbXBsZSBub25jZQ==".into(),
+                ),
+                ("sec-websocket-protocol".into(), "orna.present.v1".into()),
+                ("cookie".into(), format!("orna_session={token_text}")),
+            ],
+            body: Vec::new(),
+        };
+        let upgrade = transport
+            .begin_websocket_upgrade(&request, incumbent, now)
+            .unwrap();
+        assert!(transport.begin_websocket_upgrade_delivery(&upgrade, now));
+        assert_eq!(
+            futures::executor::block_on(transport.commit_websocket_upgrade(upgrade, now))
+                .unwrap()
+                .status,
+            101
+        );
+
+        let upgrade = transport
+            .begin_websocket_upgrade(&request, candidate, now)
+            .unwrap();
+        assert!(transport.begin_websocket_upgrade_delivery(&upgrade, now));
+        let encoded = upgrade
+            .response()
+            .encode_http(TransportLimits::default())
+            .unwrap();
+        let mut writer = FlushFailureAfterWrite {
+            written: Vec::new(),
+        };
+        let mut cancellation = futures::future::pending();
+        assert!(
+            futures::executor::block_on(super::deliver_websocket_upgrade_response(
+                &mut writer,
+                &encoded,
+                &mut cancellation,
+            ))
+            .is_err()
+        );
+        assert_eq!(writer.written, encoded);
+
+        // This is the strongest safe server-side guarantee available with the
+        // current APIs: a failed flush aborts the candidate and leaves the
+        // incumbent usable. A successful flush still returns to the actor
+        // before commit; no unforgeable post-flush witness spans that turn.
+        assert!(transport.abort_websocket_upgrade(&upgrade));
+        assert_eq!(
+            futures::executor::block_on(transport.close_attachment(incumbent, now)),
+            Ok(orna_live_v1::FrameOutcome::Closed)
+        );
     }
 
     #[test]
