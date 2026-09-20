@@ -1049,7 +1049,10 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks_exact(2) {
+    let (pairs, []) = value.as_bytes().as_chunks::<2>() else {
+        return None;
+    };
+    for pair in pairs {
         let high = hex_digit(pair[0])?;
         let low = hex_digit(pair[1])?;
         bytes.push((high << 4) | low);
