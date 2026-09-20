@@ -609,6 +609,21 @@ fn nonempty_unqualified_nominal_construction_is_accepted() {
     nominal_body("type T { x: Int, } fn f() = T { x: 1 };", &["T"], &["x"]);
 }
 
+// grammar/orna.ebnf: qualified_name starts with identifier; contextual names
+// are admitted only after a qualified-name dot.
+#[test]
+fn reserved_words_cannot_start_type_references() {
+    for keyword in ["true", "false", "null", "self", "if", "type", "pub", "as"] {
+        let source = format!("fn f(value: {keyword}) = value;");
+        let parsed = parse_module(&source);
+        assert!(
+            !parsed.is_ok(),
+            "reserved word {keyword:?} was accepted as a type head: {:?}",
+            parsed.diagnostics
+        );
+    }
+}
+
 // source/04-lexical.md: ORNA-RECORD-001 and ORNA-PATTERN-002.
 #[test]
 fn nominal_construction_punning_is_rejected() {
