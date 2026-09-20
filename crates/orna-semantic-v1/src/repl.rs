@@ -189,6 +189,7 @@ impl ReplContext {
                 ty,
                 public: false,
                 effects: EffectSummary::default(),
+                generic_parameters: Vec::new(),
                 table_schema: None,
             },
         );
@@ -209,6 +210,7 @@ impl ReplContext {
                     ty: ty.clone(),
                     public: false,
                     effects: EffectSummary::default(),
+                    generic_parameters: Vec::new(),
                     table_schema: None,
                 },
             );
@@ -229,12 +231,14 @@ impl ReplContext {
                 public: false,
                 effects: EffectSummary::default(),
                 table_schema: None,
+                generic_parameters: Vec::new(),
             },
         );
         let header = ModuleHeader {
             namespace: Namespace(Vec::new()),
             exports: BTreeMap::new(),
             symbols,
+            generic_functions: BTreeMap::new(),
             prelude_exports: BTreeSet::new(),
             implicit: false,
         };
