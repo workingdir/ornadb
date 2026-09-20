@@ -1315,6 +1315,7 @@ pub(crate) async fn admit_activation_catalogue_tx(
     predecessor: &orna_foundation_v1::CwdCapture,
     capture: &orna_foundation_v1::CwdCapture,
     admission: &CatalogueAdmission,
+    revision_pair: Option<orna_core::revision::RevisionPair>,
 ) -> Result<crate::Mutation, crate::RuntimeError> {
     use orna_foundation_v1::OvbRaw;
     use sha2::{Digest, Sha256};
@@ -1326,7 +1327,7 @@ pub(crate) async fn admit_activation_catalogue_tx(
     persist_capture_tx(transaction, predecessor)
         .await
         .map_err(map_catalogue_runtime_error)?;
-    admit_catalogue_batch_tx(transaction, capture, admission)
+    admit_catalogue_batch_tx(transaction, capture, admission, revision_pair)
         .await
         .map_err(map_catalogue_runtime_error)?;
 
@@ -1406,6 +1407,7 @@ async fn admit_catalogue_batch_tx(
     transaction: &Transaction,
     capture: &orna_foundation_v1::CwdCapture,
     admission: &CatalogueAdmission,
+    revision_pair: Option<orna_core::revision::RevisionPair>,
 ) -> Result<CatalogueAdmissionResult, RuntimeError> {
     persist_capture_tx(transaction, capture).await?;
     let predecessor = if let Some(predecessor) = admission.predecessor_capture.as_ref() {
@@ -1420,6 +1422,7 @@ async fn admit_catalogue_batch_tx(
     reject_separate_module_rows_tx(transaction, capture).await?;
     let already_admitted = catalogue_admission_exists_tx(transaction, capture).await?;
     if already_admitted {
+        validate_revision_binding_tx(transaction, capture, revision_pair).await?;
         return replay_catalogue_tx(transaction, capture, predecessor, admission).await;
     }
     clear_catalogue_snapshot_tx(transaction, capture).await?;
@@ -1504,6 +1507,7 @@ async fn admit_catalogue_batch_tx(
     if inserted != 1 {
         return Err(RuntimeError::CatalogueCorrupt);
     }
+    insert_revision_binding_tx(transaction, capture, revision_pair).await?;
 
     let mut types = Vec::with_capacity(admission.types.len());
     for declaration in &admission.types {
@@ -1528,6 +1532,46 @@ async fn admit_catalogue_batch_tx(
 }
 
 impl RuntimeState {
+    /// Returns the compiler/core revision pair retained for one exact source
+    /// catalogue activation, if that activation was published through the
+    /// bound source bridge. An absent row is deliberately distinct from a
+    /// fabricated revision pair for legacy or generic catalogue admission.
+    pub async fn catalogue_revision_pair_at(
+        &self,
+        capture: &orna_foundation_v1::CwdCapture,
+    ) -> Result<Option<orna_core::revision::RevisionPair>, RuntimeError> {
+        let transaction = self.catalogue_transaction_read().await?;
+        let snapshot = retained_capture_row_tx(&transaction, capture).await?;
+        let mut rows = transaction
+            .query(
+                "SELECT source_revision_id, catalogue_revision_id
+                 FROM runtime_catalogue_revision_binding WHERE snapshot = ?1",
+                params![snapshot.clone()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let pair = match rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            None => None,
+            Some(row) => Some(orna_core::revision::RevisionPair::new(
+                orna_core::SourceRevisionId::from_bytes(fixed(
+                    row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?,
+                )?),
+                orna_core::CatalogueRevisionId::from_bytes(fixed(
+                    row.get(1).map_err(|_| RuntimeError::CatalogueCorrupt)?,
+                )?),
+            )),
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(pair)
+    }
+
     /// Returns the complete previously observed capture for use as a
     /// predecessor. Its generation digest is retained and checked by the
     /// admission transaction; adapters must not reduce it to snapshot bytes.
@@ -1561,7 +1605,7 @@ impl RuntimeState {
                 current: Box::new(capture),
             });
         }
-        let result = admit_catalogue_batch_tx(&transaction, &capture, &admission).await?;
+        let result = admit_catalogue_batch_tx(&transaction, &capture, &admission, None).await?;
         transaction
             .commit()
             .await
@@ -2241,11 +2285,24 @@ async fn carry_forward_catalogue_tx(
         let inserted = connection
             .execute(
                 "INSERT INTO runtime_catalogue_admission (snapshot) VALUES (?1)",
-                params![snapshot],
+                params![snapshot.clone()],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         if inserted != 1 {
+            return Err(RuntimeError::CatalogueCorrupt);
+        }
+        let copied = connection
+            .execute(
+                "INSERT INTO runtime_catalogue_revision_binding
+                 (snapshot, source_revision_id, catalogue_revision_id)
+                 SELECT ?2, source_revision_id, catalogue_revision_id
+                 FROM runtime_catalogue_revision_binding WHERE snapshot = ?1",
+                params![predecessor_snapshot, snapshot],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if copied > 1 {
             return Err(RuntimeError::CatalogueCorrupt);
         }
     }
@@ -2331,6 +2388,65 @@ async fn catalogue_admission_exists_tx(
         .is_some())
 }
 
+async fn insert_revision_binding_tx(
+    transaction: &Transaction,
+    capture: &orna_foundation_v1::CwdCapture,
+    revision_pair: Option<orna_core::revision::RevisionPair>,
+) -> Result<(), RuntimeError> {
+    let Some(revision_pair) = revision_pair else {
+        return Ok(());
+    };
+    let inserted = transaction
+        .execute(
+            "INSERT INTO runtime_catalogue_revision_binding
+             (snapshot, source_revision_id, catalogue_revision_id) VALUES (?1, ?2, ?3)",
+            params![
+                capture_bytes(capture)?,
+                revision_pair.source().to_bytes().to_vec(),
+                revision_pair.catalogue().to_bytes().to_vec(),
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if inserted != 1 {
+        return Err(RuntimeError::CatalogueCorrupt);
+    }
+    Ok(())
+}
+
+async fn validate_revision_binding_tx(
+    transaction: &Transaction,
+    capture: &orna_foundation_v1::CwdCapture,
+    revision_pair: Option<orna_core::revision::RevisionPair>,
+) -> Result<(), RuntimeError> {
+    let Some(revision_pair) = revision_pair else {
+        return Ok(());
+    };
+    let mut rows = transaction
+        .query(
+            "SELECT source_revision_id, catalogue_revision_id
+             FROM runtime_catalogue_revision_binding WHERE snapshot = ?1",
+            params![capture_bytes(capture)?],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Err(RuntimeError::CatalogueRevisionConflict);
+    };
+    if fixed(row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?)?
+        != revision_pair.source().to_bytes()
+        || fixed(row.get(1).map_err(|_| RuntimeError::CatalogueCorrupt)?)?
+            != revision_pair.catalogue().to_bytes()
+    {
+        return Err(RuntimeError::CatalogueRevisionConflict);
+    }
+    Ok(())
+}
+
 async fn clear_catalogue_snapshot_tx(
     transaction: &Transaction,
     capture: &orna_foundation_v1::CwdCapture,
@@ -2341,6 +2457,7 @@ async fn clear_catalogue_snapshot_tx(
         "runtime_catalogue_function",
         "runtime_catalogue_type",
         "runtime_catalogue_revision",
+        "runtime_catalogue_revision_binding",
     ] {
         transaction
             .execute(

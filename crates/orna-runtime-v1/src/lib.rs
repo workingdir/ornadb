@@ -323,6 +323,11 @@ CREATE TABLE IF NOT EXISTS runtime_catalogue_admission (
     snapshot BLOB PRIMARY KEY CHECK (length(snapshot) > 0),
     FOREIGN KEY (snapshot) REFERENCES runtime_catalogue_capture(snapshot)
 );
+CREATE TABLE IF NOT EXISTS runtime_catalogue_revision_binding (
+    snapshot BLOB PRIMARY KEY REFERENCES runtime_catalogue_admission(snapshot),
+    source_revision_id BLOB NOT NULL CHECK (length(source_revision_id) = 16),
+    catalogue_revision_id BLOB NOT NULL CHECK (length(catalogue_revision_id) = 16)
+);
 CREATE TABLE IF NOT EXISTS runtime_catalogue_revision (
     object_id BLOB NOT NULL REFERENCES runtime_catalogue_identity(object_id),
     snapshot BLOB NOT NULL CHECK (length(snapshot) > 0),
@@ -3567,6 +3572,7 @@ impl RuntimeState {
                 faults,
                 None,
                 None,
+                None,
             )
             .await
         {
@@ -3594,7 +3600,7 @@ impl RuntimeState {
         &self,
         request: ValidatedTableRequestActivationCommit<'_>,
     ) -> Result<RequestActivationCommit, TableActivationError> {
-        self.commit_validated_request_activation(request, None)
+        self.commit_validated_request_activation(request, None, None)
             .await
     }
 
@@ -3609,7 +3615,21 @@ impl RuntimeState {
         request: ValidatedTableRequestActivationCommit<'_>,
         admission: &catalogue::CatalogueAdmission,
     ) -> Result<RequestActivationCommit, TableActivationError> {
-        self.commit_validated_request_activation(request, Some(admission))
+        self.commit_validated_request_activation(request, Some(admission), None)
+            .await
+    }
+
+    /// Publishes a complete compiler-resolved source catalogue with the exact
+    /// source/catalogue revision pair that produced it. The pair is retained
+    /// only as compiler/core identity evidence; this boundary neither derives
+    /// a revision identity nor constructs a snapshot-pinned reference.
+    pub async fn commit_validated_catalogue_table_request_activation_with_revision_pair(
+        &self,
+        request: ValidatedTableRequestActivationCommit<'_>,
+        admission: &catalogue::CatalogueAdmission,
+        revision_pair: orna_core::revision::RevisionPair,
+    ) -> Result<RequestActivationCommit, TableActivationError> {
+        self.commit_validated_request_activation(request, Some(admission), Some(revision_pair))
             .await
     }
 
@@ -3617,6 +3637,7 @@ impl RuntimeState {
         &self,
         request: ValidatedTableRequestActivationCommit<'_>,
         admission: Option<&catalogue::CatalogueAdmission>,
+        revision_pair: Option<orna_core::revision::RevisionPair>,
     ) -> Result<RequestActivationCommit, TableActivationError> {
         let ValidatedTableRequestActivationCommit {
             writer,
@@ -3641,6 +3662,7 @@ impl RuntimeState {
                 faults,
                 Some(validator),
                 admission,
+                revision_pair,
             )
             .await
         {
@@ -3688,6 +3710,7 @@ impl RuntimeState {
         faults: &dyn FaultInjector,
         mut validator: Option<&mut dyn TableActivationCandidateValidator>,
         admission: Option<&catalogue::CatalogueAdmission>,
+        revision_pair: Option<orna_core::revision::RevisionPair>,
     ) -> Result<RequestActivationCommit, RequestActivationTransactionError> {
         validate_request_identity(identity)?;
         let transaction = self
@@ -3778,6 +3801,7 @@ impl RuntimeState {
                 &current_capture,
                 &next,
                 admission,
+                revision_pair,
             )
             .await
             {
@@ -16949,21 +16973,9 @@ mod tests {
             assert_eq!(retrying.attempts, expected_attempts);
             assert_eq!(retrying.status, FailureStatus::Retrying);
 
-            let lease = match stream
-                .apply_async(CommitIntent::Acquire {
-                    delivery: delivery.clone(),
-                    expected: expected.clone(),
-                    purpose: LeasePurpose::Deliver,
-                })
-                .await
-                .unwrap()
-            {
-                CommitResult::Acquired { lease } => lease,
-                other => panic!("unexpected retry delivery admission: {other:?}"),
-            };
             previous = match stream
-                .fail_async(
-                    lease,
+                .fail_retry_async(
+                    delivery.clone(),
                     diagnostic,
                     StreamFailurePayload::Plaintext(vec![expected_attempts as u8]),
                 )
