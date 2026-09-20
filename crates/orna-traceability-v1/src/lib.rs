@@ -1073,6 +1073,33 @@ mod tests {
         }
     }
     #[test]
+    fn canonical_repl_requirements_remain_explicit_non_executed_gaps() {
+        let report = generate(corpus()).expect("valid corpus");
+        for requirement_id in [
+            "ORNA-REPL-001",
+            "ORNA-REPL-002",
+            "ORNA-REPL-003",
+            "ORNA-REPL-004",
+            "ORNA-REPL-005",
+            "ORNA-REPL-006",
+        ] {
+            let requirement = report
+                .requirements
+                .iter()
+                .find(|requirement| requirement.requirement_id == requirement_id)
+                .expect("published REPL requirement");
+            assert_eq!(requirement.chapter, "repl", "{requirement_id}");
+            assert_eq!(requirement.status, Status::JustifiedGap, "{requirement_id}");
+            assert!(
+                requirement
+                    .boundaries
+                    .iter()
+                    .all(|boundary| boundary.status != Status::Executed),
+                "{requirement_id} must not claim engine execution"
+            );
+        }
+    }
+    #[test]
     fn aggregate_requires_all_applicable_boundaries_to_execute() {
         let cases = [
             ("empty", vec![], Status::JustifiedGap),
