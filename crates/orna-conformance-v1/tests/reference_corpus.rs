@@ -15,6 +15,43 @@ fn loads_the_complete_unchanged_reference_corpus() {
 }
 
 #[test]
+fn requirement_evidence_keeps_all_authoritative_not_executed_markers() {
+    let corpus = Corpus::load_default().expect("reference corpus loads");
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(corpus.root.join("tests/requirement-evidence.json"))
+            .expect("requirement evidence reads"),
+    )
+    .expect("requirement evidence is valid JSON");
+    let entries = value["requirements"]
+        .as_array()
+        .expect("requirement evidence entries are an array");
+
+    assert_eq!(entries.len(), 870);
+    assert!(entries.iter().all(|entry| {
+        entry["implementation_result"] == "not executed"
+            && entry["full_implementation_coverage_claimed"] == false
+            && entry["tests"].as_array().is_some_and(|tests| {
+                tests.iter().all(|test| {
+                    test["status"] == "planned"
+                        && !test.as_object().is_some_and(|test| {
+                            test.contains_key("fixture") || test.contains_key("path")
+                        })
+                })
+            })
+    }));
+
+    let mut adapter = SkippingAdapter;
+    let report = Harness::new(corpus).run(&mut adapter);
+    assert_eq!(report.coverage.mapped_stage_evidence, 0);
+    assert!(
+        report
+            .implementation_claim
+            .executed_scenario_contracts
+            .is_empty()
+    );
+}
+
+#[test]
 fn no_adapter_cannot_create_runtime_passes() {
     let corpus = Corpus::load_default().expect("reference corpus loads");
     let mut adapter = SkippingAdapter;
