@@ -511,6 +511,34 @@ fn fetch_rejects_a_force_rewound_remote_branch_without_mutating_local_state() {
 }
 
 #[test]
+fn fetch_rejects_a_non_commit_branch_target_without_installing_it() {
+    let fixture = Fixture::new();
+    let repository = fixture.repository();
+    let blob = git(&fixture.source, &["rev-parse", "HEAD:main.orna"]);
+    git(
+        &fixture.local,
+        &["update-ref", "-d", "refs/remotes/origin/main"],
+    );
+    fs::write(fixture.remote.join("refs/heads/main"), format!("{blob}\n")).unwrap();
+
+    let error = repository
+        .fetch(&request([RequestedRef::branch("main").unwrap()], []))
+        .expect_err("a branch must not install a non-commit target");
+
+    assert!(matches!(error, FetchError::MalformedAdvertisement));
+    assert!(!git_status(
+        &fixture.local,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "--",
+            "refs/remotes/origin/main"
+        ]
+    ));
+}
+
+#[test]
 fn fetch_reports_missing_internal_ref_without_fabricating_it() {
     let fixture = Fixture::new();
     let initial = fixture.initial_head();

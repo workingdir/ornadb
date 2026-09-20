@@ -723,6 +723,21 @@ fn verify_fetched_objects(repository: &Repository, plans: &[RefPlan]) -> Result<
         if !status.success() {
             return Err(FetchError::ObjectUnavailable);
         }
+        if matches!(plan.kind, RefKind::Branch) {
+            let mut command = repository.observer_command();
+            command
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .args(["cat-file", "-t", &plan.object_id]);
+            let output = command
+                .output()
+                .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
+            if !output.status.success() {
+                return Err(FetchError::ObjectUnavailable);
+            }
+            if trim_output(&output.stdout) != "commit" {
+                return Err(FetchError::MalformedAdvertisement);
+            }
+        }
     }
     Ok(())
 }
