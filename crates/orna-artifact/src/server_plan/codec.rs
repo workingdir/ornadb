@@ -435,6 +435,7 @@ const fn supports_distinct_projection(resolved_type: ResolvedType) -> bool {
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid
         )) | Some(LegacyResolvedType::Reference(_))
     )
 }
