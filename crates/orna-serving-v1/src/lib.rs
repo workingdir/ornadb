@@ -513,7 +513,9 @@ impl Serving {
     }
 
     /// Recognise cancellation requests in the protocol vocabulary without
-    /// treating arbitrary protocol messages as state transitions.
+    /// treating arbitrary protocol messages as state transitions.  Request
+    /// cancellation is terminal; watch cancellation reuses the idempotent
+    /// unsubscribe boundary.
     pub fn cancel_envelope(&mut self, session_id: Id, envelope: &Envelope) -> Result<()> {
         match &envelope.message {
             Message::Cancel {
@@ -524,6 +526,15 @@ impl Serving {
                 && envelope.request != Some(*target) =>
             {
                 self.cancel_request(session_id, *target)
+            }
+            Message::Cancel {
+                target_kind: TargetKind::Watch,
+                target,
+            } if envelope.request.is_some()
+                && envelope.watch.is_none()
+                && envelope.request != Some(*target) =>
+            {
+                self.close_watch(session_id, *target)
             }
             _ => Err(Error::MalformedAdmission),
         }
@@ -724,6 +735,26 @@ mod tests {
             state.cancel_request(id(1), id(4)),
             Err(Error::RequestTerminal)
         );
+    }
+
+    #[test]
+    fn watch_cancellation_uses_idempotent_unsubscribe_boundary() {
+        let mut state = admitted();
+        state.apply_patch(id(1), 0, 1, &[], pin(1)).unwrap();
+        state.open_watch(id(1), id(5), 1).unwrap();
+
+        let envelope = Envelope {
+            request: Some(id(8)),
+            watch: None,
+            message: Message::Cancel {
+                target_kind: TargetKind::Watch,
+                target: id(5),
+            },
+            extensions: BTreeMap::new(),
+        };
+        state.cancel_envelope(id(1), &envelope).unwrap();
+        state.cancel_envelope(id(1), &envelope).unwrap();
+        assert_eq!(state.action(id(1), id(5), 1, 0), Err(Error::WatchUnknown));
     }
 
     #[test]
