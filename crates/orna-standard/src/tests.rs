@@ -19,7 +19,8 @@ use orna_core::system::{
     SYS_INSPECT_UI_NODES_TYPE_ID,
 };
 use orna_core::{
-    CatalogueRevisionId, SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
+    CatalogueRevisionId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
+    TypeId,
     canonical_hash::{
         artifact_payload_digest, calculate_standard_library_digest, catalogue_digest,
         catalogue_digest_with_context, function_semantic_digest_with_version, source_bundle_digest,
@@ -52,14 +53,15 @@ use super::{
     STANDARD_LIBRARY_V3_VERSION_IDENTITY, STANDARD_LIBRARY_V4_REVISION_ID,
     STANDARD_LIBRARY_V4_VERSION_IDENTITY, STANDARD_LIBRARY_V5_REVISION_ID,
     STANDARD_LIBRARY_V5_VERSION_IDENTITY, STANDARD_LIBRARY_V6_REVISION_ID,
-    STANDARD_LIBRARY_V6_VERSION_IDENTITY, STANDARD_LIBRARY_VERSION_IDENTITY,
-    STANDARD_SOURCE_BUNDLE_ID, STANDARD_SOURCE_REVISION_ID, STANDARD_SOURCE_UNIT_ID,
-    STANDARD_SOURCE_V2_BUNDLE_ID, STANDARD_SOURCE_V2_REVISION_ID, STANDARD_SOURCE_V3_BUNDLE_ID,
-    STANDARD_SOURCE_V3_REVISION_ID, STANDARD_SOURCE_V4_BUNDLE_ID, STANDARD_SOURCE_V4_REVISION_ID,
-    STANDARD_SOURCE_V5_BUNDLE_ID, STANDARD_SOURCE_V5_REVISION_ID, STANDARD_SOURCE_V6_BUNDLE_ID,
-    STANDARD_SOURCE_V6_REVISION_ID, STANDARD_TYPE_IDS, STD_ACTION_CONTRACT, STD_ACTION_SCHEMA_ID,
-    STD_ACTION_SOURCE_LOGICAL_PATH, STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID,
-    STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+    STANDARD_LIBRARY_V6_VERSION_IDENTITY, STANDARD_LIBRARY_V11_REVISION_ID,
+    STANDARD_LIBRARY_VERSION_IDENTITY, STANDARD_SOURCE_BUNDLE_ID, STANDARD_SOURCE_REVISION_ID,
+    STANDARD_SOURCE_UNIT_ID, STANDARD_SOURCE_V2_BUNDLE_ID, STANDARD_SOURCE_V2_REVISION_ID,
+    STANDARD_SOURCE_V3_BUNDLE_ID, STANDARD_SOURCE_V3_REVISION_ID, STANDARD_SOURCE_V4_BUNDLE_ID,
+    STANDARD_SOURCE_V4_REVISION_ID, STANDARD_SOURCE_V5_BUNDLE_ID, STANDARD_SOURCE_V5_REVISION_ID,
+    STANDARD_SOURCE_V6_BUNDLE_ID, STANDARD_SOURCE_V6_REVISION_ID, STANDARD_TYPE_IDS,
+    STD_ACTION_CONTRACT, STD_ACTION_SCHEMA_ID, STD_ACTION_SOURCE_LOGICAL_PATH,
+    STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID, STD_INTEGER_TYPE_ID,
+    STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
     STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
     STD_INVOKE_SOURCE_LOGICAL_PATH, STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_CONTRACT,
     STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_CONTRACT, STD_JSON_ENCODE_FUNCTION_ID,
@@ -76,8 +78,8 @@ use super::{
     retained_standard_library_snapshot, retained_standard_library_snapshot_from_source,
     retained_standard_library_v2_snapshot, retained_standard_library_v2_snapshot_from_source,
     retained_standard_library_v3_snapshot, retained_standard_library_v4_snapshot,
-    standard_library_manifest, standard_library_v2_manifest, standard_library_v3_manifest,
-    standard_library_v4_manifest, verify_standard_library_snapshot,
+    select_verified_standard_library, standard_library_manifest, standard_library_v2_manifest,
+    standard_library_v3_manifest, standard_library_v4_manifest, verify_standard_library_snapshot,
     verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
     verify_standard_library_v4_snapshot,
 };
@@ -303,6 +305,23 @@ mod v1;
 mod v11;
 mod v2_v4;
 mod v5_v10;
+
+#[test]
+fn retained_standard_selection_is_pinned_and_fail_closed() {
+    let first = select_verified_standard_library(STANDARD_LIBRARY_REVISION_ID)
+        .expect("V1 is a retained verified standard snapshot");
+    assert_eq!(first.revision(), STANDARD_LIBRARY_REVISION_ID);
+
+    let latest = select_verified_standard_library(STANDARD_LIBRARY_V11_REVISION_ID)
+        .expect("V11 is a retained verified standard snapshot");
+    assert_eq!(latest.revision(), STANDARD_LIBRARY_V11_REVISION_ID);
+
+    let unknown = StandardLibraryRevisionId::from_bytes([0xff; 16]);
+    assert!(matches!(
+        select_verified_standard_library(unknown),
+        Err(StandardLibraryError::UnsupportedRevision { revision }) if revision == unknown
+    ));
+}
 
 use v1::EXPECTED_RETAINED_INVOKE_SOURCE;
 use v2_v4::EXPECTED_RETAINED_ACTION_SOURCE;

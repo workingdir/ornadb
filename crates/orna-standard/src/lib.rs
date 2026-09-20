@@ -2525,6 +2525,11 @@ pub enum StandardLibraryError {
     },
     /// The standard library is not installed at the service boundary.
     Unavailable,
+    /// No retained, verified standard snapshot is registered for this revision.
+    UnsupportedRevision {
+        /// The requested standard-library revision.
+        revision: StandardLibraryRevisionId,
+    },
 }
 
 impl fmt::Display for StandardLibraryError {
@@ -2557,6 +2562,9 @@ impl fmt::Display for StandardLibraryError {
                 "the standard library digest does not match the hard-coded accepted digest",
             ),
             Self::Unavailable => formatter.write_str("the standard library is not installed"),
+            Self::UnsupportedRevision { .. } => {
+                formatter.write_str("the requested standard library revision is not retained")
+            }
         }
     }
 }
@@ -2570,7 +2578,8 @@ impl Error for StandardLibraryError {
             Self::RetainedSourceMismatch
             | Self::CatalogueIdentityMismatch { .. }
             | Self::AcceptedDigestMismatch { .. }
-            | Self::Unavailable => None,
+            | Self::Unavailable
+            | Self::UnsupportedRevision { .. } => None,
         }
     }
 }
@@ -3719,6 +3728,52 @@ pub fn verify_standard_library_v10_snapshot(
     }
     verify_canonical_standard_library_v2_snapshot(snapshot)
         .map_err(|source| StandardLibraryError::CanonicalHash { source })
+}
+
+/// Selects and verifies one of the retained standard-library snapshots.
+///
+/// This is a pinned, fail-closed selection boundary. It does not install a
+/// snapshot or mutate an active database revision; the kernel's standard
+/// upgrade application remains the authority-granting operation.
+pub fn select_verified_standard_library(
+    revision: StandardLibraryRevisionId,
+) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
+    match revision {
+        STANDARD_LIBRARY_REVISION_ID => {
+            verify_standard_library_snapshot(retained_standard_library_snapshot()?)
+        }
+        STANDARD_LIBRARY_V2_REVISION_ID => {
+            verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot()?)
+        }
+        STANDARD_LIBRARY_V3_REVISION_ID => {
+            verify_standard_library_v3_snapshot(retained_standard_library_v3_snapshot()?)
+        }
+        STANDARD_LIBRARY_V4_REVISION_ID => {
+            verify_standard_library_v4_snapshot(retained_standard_library_v4_snapshot()?)
+        }
+        STANDARD_LIBRARY_V5_REVISION_ID => {
+            verify_standard_library_v5_snapshot(retained_standard_library_v5_snapshot()?)
+        }
+        STANDARD_LIBRARY_V6_REVISION_ID => {
+            verify_standard_library_v6_snapshot(retained_standard_library_v6_snapshot()?)
+        }
+        STANDARD_LIBRARY_V7_REVISION_ID => {
+            verify_standard_library_v7_snapshot(retained_standard_library_v7_snapshot()?)
+        }
+        STANDARD_LIBRARY_V8_REVISION_ID => {
+            verify_standard_library_v8_snapshot(retained_standard_library_v8_snapshot()?)
+        }
+        STANDARD_LIBRARY_V9_REVISION_ID => {
+            verify_standard_library_v9_snapshot(retained_standard_library_v9_snapshot()?)
+        }
+        STANDARD_LIBRARY_V10_REVISION_ID => {
+            verify_standard_library_v10_snapshot(retained_standard_library_v10_snapshot()?)
+        }
+        STANDARD_LIBRARY_V11_REVISION_ID => {
+            verify_standard_library_v11_snapshot(retained_standard_library_v11_snapshot()?)
+        }
+        _ => Err(StandardLibraryError::UnsupportedRevision { revision }),
+    }
 }
 
 fn matches_qualified_export(
