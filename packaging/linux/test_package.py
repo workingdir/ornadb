@@ -149,6 +149,26 @@ def main() -> None:
         ancestor_root = scratch / "ancestor-root"
         ancestor_root.symlink_to(symlink_target, target_is_directory=True)
         expect_failure(lambda: package.install_archive(first, ancestor_root / "nested"))
+        replaced_parent_root = scratch / "replaced-parent-root"
+        escaped_target = scratch / "escaped-target"
+        escaped_target.mkdir(mode=0o755)
+        original_atomic_write_at = package.atomic_write_at
+        replaced = False
+
+        def replace_parent_after_write(parent, name, content, *, mode):
+            nonlocal replaced
+            original_atomic_write_at(parent, name, content, mode=mode)
+            if replaced:
+                return
+            replaced = True
+            retained_parent = replaced_parent_root / "usr"
+            retained_parent.rename(scratch / "detached-usr")
+            retained_parent.symlink_to(escaped_target, target_is_directory=True)
+
+        with patch.object(package, "atomic_write_at", replace_parent_after_write):
+            expect_failure(lambda: package.install_archive(first, replaced_parent_root))
+        if (escaped_target / "bin" / "orna").exists():
+            raise AssertionError("replaced install parent redirected package payload")
         if os.geteuid() != 0:
             owned_root = scratch / "owned-root"
             owned_root.mkdir(mode=0o755)
