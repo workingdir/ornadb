@@ -2432,7 +2432,7 @@ fn raw_call_client_accepts_pre_acceptance_failure_as_terminal_without_state_chan
 }
 
 #[test]
-fn raw_call_client_rejects_late_acceptance_after_cancellation_without_state_change() {
+fn raw_call_client_drains_an_acceptance_that_crosses_cancellation() {
     let function = FunctionId::from_bytes([0x11; 16]);
     let invocation = InvocationId::from_bytes([0x22; 16]);
     let accepted = encode_server_frame(&ServerFrame::CallAccepted {
@@ -2442,13 +2442,19 @@ fn raw_call_client_rejects_late_acceptance_after_cancellation_without_state_chan
     .unwrap();
     let (mut client, _) = RawCallClient::start(function);
     client.request_cancellation().unwrap();
-    let before = client.clone();
 
     assert_eq!(
-        client.receive_encoded(&accepted),
-        Err(RawCallClientError::WrongState)
+        client.receive_encoded(&accepted).unwrap(),
+        RawCallClientResponse::Accepted { invocation }
     );
-    assert_eq!(client, before);
+    assert_eq!(
+        client
+            .receive_encoded(
+                &encode_server_frame(&ServerFrame::CallCancelled { stream: 1 }).unwrap(),
+            )
+            .unwrap(),
+        RawCallClientResponse::Cancelled
+    );
 }
 
 #[test]
@@ -3492,6 +3498,72 @@ fn invocation_client_cancellation_is_explicit_and_one_shot() {
     assert_eq!(
         client.receive_encoded(&active, &registry, &cancelled),
         Ok(InvocationClientResponse::Cancelled),
+    );
+
+    let retained =
+        encode_invoke_request(&active, &registry, &minimal_request(None)).expect("request");
+    let (mut crossing, _) = InvocationClient::start(retained);
+    crossing.request_cancellation().expect("one cancellation");
+    let invocation = InvocationId::from_bytes([0x7a; 16]);
+    let accepted = encode_constructed_server_frame(
+        &active,
+        &registry,
+        &ServerFrame::CallAccepted {
+            stream: 1,
+            invocation,
+        },
+    )
+    .expect("accepted frame");
+    assert_eq!(
+        crossing.receive_encoded(&active, &registry, &accepted),
+        Ok(InvocationClientResponse::Accepted { invocation }),
+    );
+    let started = InvokeEvent::new(
+        invocation,
+        0,
+        InvocationEventBody::Started {
+            visible_principal: None,
+        },
+    )
+    .expect("started event");
+    let terminal = InvokeEvent::new(
+        invocation,
+        1,
+        InvocationEventBody::cancelled(None).expect("cancelled body"),
+    )
+    .expect("cancelled event");
+    let events = encode_constructed_server_frame(
+        &active,
+        &registry,
+        &ServerFrame::EventBatch {
+            stream: 1,
+            channel: Channel::ResultValues,
+            events: vec![
+                EventRecord {
+                    sequence: 1,
+                    event: Event::Value(RuntimeValue::InvokeEvent(started)),
+                },
+                EventRecord {
+                    sequence: 2,
+                    event: Event::Value(RuntimeValue::InvokeEvent(terminal)),
+                },
+            ],
+        },
+    )
+    .expect("cancellation events");
+    assert!(matches!(
+        crossing.receive_encoded(&active, &registry, &events),
+        Ok(InvocationClientResponse::EventBatch(_))
+    ));
+    let completed = encode_constructed_server_frame(
+        &active,
+        &registry,
+        &ServerFrame::CallCompleted { stream: 1 },
+    )
+    .expect("completion frame");
+    assert_eq!(
+        crossing.receive_encoded(&active, &registry, &completed),
+        Ok(InvocationClientResponse::Completed),
     );
 }
 #[test]
