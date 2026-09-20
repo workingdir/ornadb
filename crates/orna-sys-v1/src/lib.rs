@@ -235,12 +235,118 @@ impl ArgumentMap {
 /// row: it deliberately carries no synthesized row reference. Protected
 /// payloads are never retained in observation metadata.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct InvocationArgumentMetadata {
+pub struct InvocationArgumentMetadata {
     name: String,
     position: usize,
     static_type: TypeId,
     value: Option<Vec<u8>>,
     redacted: bool,
+}
+
+impl InvocationArgumentMetadata {
+    /// Returns the bound parameter name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the canonical zero-based position in Unicode name order.
+    pub const fn position(&self) -> usize {
+        self.position
+    }
+
+    /// Returns the exact originating static type.
+    pub fn static_type(&self) -> &TypeId {
+        &self.static_type
+    }
+
+    /// Returns public canonical bytes, or `None` for a protected value.
+    pub fn canonical(&self) -> Option<&[u8]> {
+        self.value.as_deref()
+    }
+
+    /// Returns whether the argument payload is protected.
+    pub const fn is_redacted(&self) -> bool {
+        self.redacted
+    }
+}
+
+/// Redaction-safe metadata for one locally admitted invocation.
+///
+/// This is deliberately a local runtime observation rather than a portable
+/// `sys.Invocation` row. It carries no fabricated `RowRef`, diagnostic
+/// identity, parent/session link, or type witness. Those fields require the
+/// corresponding durable authority and remain absent until an owner supplies
+/// them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvocationMetadata {
+    invocation: InvocationRef,
+    function: FunctionIdentity,
+    arguments: Vec<InvocationArgumentMetadata>,
+    mode: InvocationMode,
+    transaction: TransactionMode,
+    context: InvocationContext,
+    result_type: TypeRef,
+    status: InvocationStatus,
+    failure: Option<Diagnostic>,
+    started: Instant,
+    ended: Option<Instant>,
+}
+
+impl InvocationMetadata {
+    /// Returns the local descriptive invocation identity.
+    pub fn invocation(&self) -> &InvocationRef {
+        &self.invocation
+    }
+
+    /// Returns the exact pinned function identity used for admission.
+    pub fn function(&self) -> &FunctionIdentity {
+        &self.function
+    }
+
+    /// Returns bound arguments in canonical name order.
+    pub fn arguments(&self) -> &[InvocationArgumentMetadata] {
+        &self.arguments
+    }
+
+    /// Returns whether the invocation was admitted synchronously or as a start.
+    pub const fn mode(&self) -> InvocationMode {
+        self.mode
+    }
+
+    /// Returns the transaction mode selected before execution.
+    pub const fn transaction(&self) -> TransactionMode {
+        self.transaction
+    }
+
+    /// Returns the captured caller context.
+    pub fn context(&self) -> &InvocationContext {
+        &self.context
+    }
+
+    /// Returns the result type selected by the explicit typed boundary.
+    pub fn result_type(&self) -> &TypeRef {
+        &self.result_type
+    }
+
+    /// Returns the current terminal or running status.
+    pub const fn status(&self) -> InvocationStatus {
+        self.status
+    }
+
+    /// Returns a retained safe diagnostic, when one exists.
+    pub fn failure(&self) -> Option<&Diagnostic> {
+        self.failure.as_ref()
+    }
+
+    /// Returns the local admission instant.
+    pub const fn started(&self) -> Instant {
+        self.started
+    }
+
+    /// Returns the terminal instant, if the invocation has completed.
+    pub const fn ended(&self) -> Option<Instant> {
+        self.ended
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -699,20 +805,26 @@ impl Runtime {
             .ok_or(AdmissionError::RuntimeUnavailable)?;
         self.next_invocation = next_invocation;
         let invocation = InvocationId::new(format!("invocation-{next_invocation}"));
+        let function = request.function.identity.clone();
+        let context = request.context.clone();
         let boundary = ExecutionBoundary {
             invocation: invocation.clone(),
             identity: identity.clone(),
-            function: request.function.identity,
+            function: function.clone(),
             arguments: bound,
             mode: request.mode,
             transaction: request.transaction,
-            context: request.context,
+            context: context.clone(),
         };
         self.invocations.insert(
             invocation.clone(),
             StoredInvocation {
+                function,
                 result_type: request.witness.static_type().clone(),
                 arguments: metadata,
+                mode: request.mode,
+                transaction: request.transaction,
+                context,
                 terminal: None,
                 started: Instant::now(),
                 ended: None,
@@ -736,6 +848,49 @@ impl Runtime {
             boundary: Box::new(boundary),
         })
     }
+
+    /// Returns redaction-safe metadata for one local invocation.
+    ///
+    /// The returned object is a descriptive runtime observation. It is not a
+    /// durable system row and cannot be used as await/cancel authority; those
+    /// operations still require the original generation-bound handle.
+    pub fn invocation_metadata<T>(
+        &self,
+        handle: &InvocationHandle<T>,
+    ) -> Result<InvocationMetadata, AdmissionError> {
+        self.check_handle(handle)?;
+        let stored = self
+            .invocations
+            .get(handle.invocation.id())
+            .expect("checked");
+        let (status, failure) = match &stored.terminal {
+            None => (InvocationStatus::Running, None),
+            Some(RetainedInvocationResult::Success(_)) => (InvocationStatus::Succeeded, None),
+            Some(RetainedInvocationResult::OrdinaryFailure(failure)) => {
+                (InvocationStatus::Failed, Some(failure.clone()))
+            }
+            Some(RetainedInvocationResult::Cancelled(failure)) => {
+                (InvocationStatus::Cancelled, failure.clone())
+            }
+            Some(RetainedInvocationResult::Orphaned(failure)) => {
+                (InvocationStatus::Orphaned, failure.clone())
+            }
+        };
+        Ok(InvocationMetadata {
+            invocation: handle.invocation.clone(),
+            function: stored.function.clone(),
+            arguments: stored.arguments.clone(),
+            mode: stored.mode,
+            transaction: stored.transaction,
+            context: stored.context.clone(),
+            result_type: TypeRef::from_id(stored.result_type.clone()),
+            status,
+            failure,
+            started: stored.started,
+            ended: stored.ended,
+        })
+    }
+
     /// Runs one newly admitted synchronous invocation through the supplied
     /// execution boundary. Existing active and terminal idempotency records
     /// never execute the callback a second time.
@@ -1582,12 +1737,28 @@ impl RuntimeSupervisor {
             .map_err(|_| AdmissionError::RuntimeUnavailable)?
             .invocation_state(handle)
     }
+
+    /// Returns redaction-safe metadata through the supervised runtime
+    /// boundary without granting any new operational authority.
+    pub fn invocation_metadata<T>(
+        &self,
+        handle: &InvocationHandle<T>,
+    ) -> Result<InvocationMetadata, AdmissionError> {
+        self.runtime
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)?
+            .invocation_metadata(handle)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StoredInvocation {
+    function: FunctionIdentity,
     result_type: TypeId,
     arguments: Vec<InvocationArgumentMetadata>,
+    mode: InvocationMode,
+    transaction: TransactionMode,
+    context: InvocationContext,
     terminal: Option<RetainedInvocationResult>,
     started: Instant,
     ended: Option<Instant>,
@@ -2132,6 +2303,47 @@ mod tests {
         let rendered = format!("{metadata:?}");
         assert!(!rendered.contains("super-secret"));
         assert!(!format!("{runtime:?}").contains("digest:"));
+
+        let projection = runtime
+            .invocation_metadata(&handle)
+            .expect("admitted invocation metadata should project");
+        assert_eq!(projection.invocation(), handle.invocation());
+        assert_eq!(projection.status(), InvocationStatus::Running);
+        assert_eq!(projection.result_type().as_str(), "Str");
+        assert_eq!(projection.arguments()[0].name(), "a");
+        assert_eq!(
+            projection.arguments()[0].canonical(),
+            Some(b"42".as_slice())
+        );
+        assert_eq!(projection.arguments()[1].name(), "b");
+        assert_eq!(projection.arguments()[1].canonical(), None);
+        assert!(projection.arguments()[1].is_redacted());
+        assert!(!format!("{projection:?}").contains("super-secret"));
+    }
+
+    #[test]
+    fn invocation_metadata_projects_failure_without_inventing_diagnostic_identity() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let handle = match runtime
+            .admit(request(Some(value("Int", "1")), ArgumentMap::default()))
+            .unwrap()
+        {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!("a new request must create one retained observation"),
+        };
+        let failure = Diagnostic {
+            code: "sys.invoke.target",
+            message: "target failed",
+            fields: BTreeMap::new(),
+        };
+        runtime
+            .retain_terminal(&handle, InvocationResult::OrdinaryFailure(failure.clone()))
+            .unwrap();
+
+        let projection = runtime.invocation_metadata(&handle).unwrap();
+        assert_eq!(projection.status(), InvocationStatus::Failed);
+        assert_eq!(projection.failure(), Some(&failure));
+        assert!(projection.ended().is_some());
     }
 
     #[test]
