@@ -491,6 +491,15 @@ applies the same local-peer and execute checks as the direct LocalPath routes.
 SQLite LocalPath does not expose PostgreSQL CLIENT/Qt execution, standard
 protected transports, or resource dispatch.
 
+These authentication and transport session paths do not currently expose the
+canonical live `sys.Session`/`sys.SessionRef` projection through
+`sys.rt.sessions` or `sys.RuntimeView.sessions`. The schema is pinned by the
+`sys_api_contract` regression in commit `78301153`; the runtime projection
+remains blocked until authoritative `started`, `last_seen`, client, locale,
+timezone, renderer, and session-reference provenance exists with the required
+epoch/session fencing. Do not infer those fields from peer identity, transport
+metadata, expiry, or subscribe payloads.
+
 Keep secrets out of source, argument files, state value files, shell history,
 CI logs, and evidence artifacts. The Compose password is a repository-visible
 development fixture, not a production credential.
