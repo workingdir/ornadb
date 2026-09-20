@@ -149,6 +149,9 @@ struct Manifest {
 }
 #[derive(Deserialize)]
 struct Counts {
+    valid: usize,
+    invalid: usize,
+    project: usize,
     total: usize,
 }
 #[derive(Deserialize)]
@@ -156,8 +159,15 @@ struct Fixture {
     id: String,
     kind: String,
     path: String,
+    parse_as: String,
     #[serde(default)]
     expect: BTreeMap<String, String>,
+    #[serde(default)]
+    failing_phase: Option<String>,
+    #[serde(default)]
+    diagnostic: Option<String>,
+    #[serde(default)]
+    expected_diagnostic: Option<String>,
 }
 #[derive(Deserialize)]
 struct InvalidMetadata {
@@ -171,6 +181,15 @@ struct InvalidFixture {
     failing_phase: String,
     diagnostic: String,
     message_contains: String,
+}
+#[derive(Deserialize)]
+struct ExpectedDiagnostic {
+    version: String,
+    fixture: String,
+    failing_phase: String,
+    primary_diagnostic: String,
+    message_contains: String,
+    status: String,
 }
 #[allow(clippy::struct_field_names)]
 #[derive(Deserialize)]
@@ -270,6 +289,7 @@ fn generate_inner(
     let scenarios: Scenarios = read_json(root, "tests/scenarios.json")?;
     let models: Models = read_json(root, "evidence/contract-models.json")?;
     validate(
+        root,
         &requirements,
         &evidence,
         &manifest,
@@ -655,6 +675,7 @@ fn stage_name(stage: &Stage) -> &'static str {
 }
 
 fn validate(
+    root: &Path,
     requirements: &[Requirement],
     evidence: &EvidenceFile,
     manifest: &Manifest,
@@ -708,21 +729,111 @@ fn validate(
             }
         }
     }
+    let fixture_counts = manifest
+        .fixtures
+        .iter()
+        .fold(BTreeMap::new(), |mut counts, fixture| {
+            *counts.entry(fixture.kind.as_str()).or_insert(0usize) += 1;
+            counts
+        });
     if manifest.version != VERSION
-        || manifest.counts.total != 167
+        || manifest.counts.total != manifest.fixtures.len()
+        || manifest.counts.valid != fixture_counts.get("valid").copied().unwrap_or(0)
+        || manifest.counts.invalid != fixture_counts.get("invalid").copied().unwrap_or(0)
+        || manifest.counts.project != fixture_counts.get("project").copied().unwrap_or(0)
         || manifest.fixtures.len() != 167
+        || fixture_counts.get("valid") != Some(&86)
+        || fixture_counts.get("invalid") != Some(&80)
+        || fixture_counts.get("project") != Some(&1)
         || !unique(manifest.fixtures.iter().map(|f| f.id.as_str()))
+        || !unique(manifest.fixtures.iter().map(|f| f.path.as_str()))
     {
         return Err(err(
-            "conformance manifest count or fixture identifiers are invalid",
+            "conformance manifest counts or fixture identities are invalid",
         ));
+    }
+    for fixture in &manifest.fixtures {
+        safe_logical(&fixture.path)?;
+        if fixture.parse_as.is_empty()
+            || !matches!(fixture.kind.as_str(), "valid" | "invalid" | "project")
+            || !root.join(&fixture.path).exists()
+            || fixture
+                .expected_diagnostic
+                .as_deref()
+                .is_some_and(|path| safe_logical(path).is_err() || !root.join(path).is_file())
+            || fixture.expect.iter().any(|(stage, result)| {
+                !matches!(
+                    stage.as_str(),
+                    "parse" | "resolve" | "typecheck" | "evaluate" | "load_rows"
+                ) || !matches!(result.as_str(), "pass" | "fail" | "not-run")
+            })
+        {
+            return Err(err(format!(
+                "conformance manifest fixture is invalid: {}",
+                fixture.id
+            )));
+        }
+        match fixture.kind.as_str() {
+            "valid"
+                if fixture.failing_phase.is_some()
+                    || fixture.diagnostic.is_some()
+                    || fixture.expected_diagnostic.is_some() =>
+            {
+                return Err(err(format!(
+                    "valid fixture has failure metadata: {}",
+                    fixture.id
+                )));
+            }
+            "invalid"
+                if fixture.failing_phase.is_none()
+                    || fixture.diagnostic.is_none()
+                    || fixture.expected_diagnostic.is_none() =>
+            {
+                return Err(err(format!(
+                    "invalid fixture lacks failure metadata: {}",
+                    fixture.id
+                )));
+            }
+            "project"
+                if fixture.parse_as != "database_project"
+                    || fixture.failing_phase.is_some()
+                    || fixture.diagnostic.is_some()
+                    || fixture.expected_diagnostic.is_some()
+                    || fixture.expect.get("parse").map(String::as_str) != Some("pass")
+                    || fixture.expect.get("resolve").map(String::as_str) != Some("pass")
+                    || fixture.expect.get("typecheck").map(String::as_str) != Some("pass")
+                    || fixture.expect.get("load_rows").map(String::as_str) != Some("pass") =>
+            {
+                return Err(err(format!(
+                    "project fixture schema is invalid: {}",
+                    fixture.id
+                )));
+            }
+            _ => {}
+        }
     }
     let fixture_paths = manifest
         .fixtures
         .iter()
         .map(|f| f.path.as_str())
         .collect::<BTreeSet<_>>();
-    if invalid.version != VERSION || invalid.count != 80 || invalid.fixtures.len() != 80 {
+    let invalid_paths = manifest
+        .fixtures
+        .iter()
+        .filter(|fixture| fixture.kind == "invalid")
+        .map(|fixture| fixture.path.as_str())
+        .collect::<BTreeSet<_>>();
+    let metadata_paths = invalid
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.path.as_str())
+        .collect::<BTreeSet<_>>();
+    if invalid.version != VERSION
+        || invalid.count != invalid.fixtures.len()
+        || invalid.fixtures.len() != 80
+        || metadata_paths.len() != invalid.fixtures.len()
+        || metadata_paths != invalid_paths
+    {
         return Err(err("invalid fixture metadata count is invalid"));
     }
     for item in &invalid.fixtures {
@@ -734,6 +845,36 @@ fn validate(
             return Err(err(
                 "invalid fixture metadata has a broken link or empty field",
             ));
+        }
+    }
+    for fixture in manifest
+        .fixtures
+        .iter()
+        .filter(|fixture| fixture.kind == "invalid")
+    {
+        let metadata = invalid
+            .fixtures
+            .iter()
+            .find(|item| item.path == fixture.path)
+            .ok_or_else(|| err(format!("invalid metadata is missing: {}", fixture.id)))?;
+        let expected_path = fixture
+            .expected_diagnostic
+            .as_deref()
+            .ok_or_else(|| err(format!("expected diagnostic is missing: {}", fixture.id)))?;
+        let expected: ExpectedDiagnostic = read_json(root, expected_path)?;
+        if expected.version != VERSION
+            || expected.fixture != fixture.path
+            || expected.failing_phase != metadata.failing_phase
+            || expected.failing_phase != fixture.failing_phase.as_deref().unwrap_or_default()
+            || expected.primary_diagnostic != metadata.diagnostic
+            || expected.primary_diagnostic != fixture.diagnostic.as_deref().unwrap_or_default()
+            || expected.message_contains != metadata.message_contains
+            || expected.status != "expected-not-executed"
+        {
+            return Err(err(format!(
+                "invalid fixture metadata disagrees with its expected diagnostic: {}",
+                fixture.id
+            )));
         }
     }
     if scenarios.version != VERSION
@@ -1185,6 +1326,30 @@ mod tests {
             1,
         );
         fs::write(&evidence, changed).expect("write");
+        assert!(generate(&root).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn rejects_manifest_count_drift() {
+        let root = copy_corpus();
+        let manifest = root.join("tests/conformance-manifest.json");
+        let mut value: Value =
+            serde_json::from_str(&fs::read_to_string(&manifest).expect("manifest")).expect("json");
+        value["counts"]["valid"] = Value::from(85);
+        fs::write(&manifest, serde_json::to_vec(&value).expect("json")).expect("write");
+        assert!(generate(&root).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn rejects_invalid_metadata_drift() {
+        let root = copy_corpus();
+        let metadata = root.join("tests/invalid-metadata.json");
+        let changed = fs::read_to_string(&metadata).expect("metadata").replacen(
+            "\"diagnostic\": \"E5002\"",
+            "\"diagnostic\": \"E9999\"",
+            1,
+        );
+        fs::write(&metadata, changed).expect("write");
         assert!(generate(&root).is_err());
         let _ = fs::remove_dir_all(root);
     }
