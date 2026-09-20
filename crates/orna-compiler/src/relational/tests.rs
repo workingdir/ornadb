@@ -614,8 +614,7 @@ fn missing_standard_boolean_reports_identity_projection_before_selector_equality
 
 #[test]
 fn rejects_unsupported_server_equality_types_in_v1_and_v2() {
-    let message =
-        "SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values";
+    let message = "SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, UUID, and REF values";
     for expression in ["t.title = t.title", "t.score = t.score"] {
         let v1 = query(&format!("SELECT {expression} FROM tasks.task t"));
         let diagnostics = check_query(&v1, &catalogue(), "tasks.orna").unwrap_err();
@@ -927,7 +926,7 @@ fn reports_unsupported_distinct_projections_in_projection_order() {
         assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
         assert_eq!(
             diagnostic.message(),
-            "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values",
+            "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, UUID, and REF values",
         );
         assert_eq!(diagnostic.location().logical_path(), "tasks.orna");
         assert_eq!(
@@ -984,6 +983,7 @@ fn distinct_type_domain_is_exact_and_independent_from_equality() {
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid
         );
         assert_eq!(
             supports_server_select_distinct(SemanticType::<TypeId>::scalar(scalar)),
@@ -1047,6 +1047,7 @@ fn standard_and_legacy_value_allowlists_are_exact() {
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid
         );
         let legacy = ValueType::<TypeId>::legacy_scalar(scalar, false);
         let standard = ValueType::<TypeId>::standard_value(standard_id, scalar, false);
@@ -1138,6 +1139,7 @@ fn server_select_equality_allowlist_is_exact() {
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid
         );
         assert_eq!(
             supports_server_select_equality(SemanticType::<TypeId>::scalar(scalar)),
@@ -1151,6 +1153,26 @@ fn server_select_equality_allowlist_is_exact() {
     assert!(!supports_server_select_equality(SemanticType::Named(
         TASK_TYPE
     )));
+}
+
+#[test]
+fn accepts_uuid_equality_with_standard_value_provenance() {
+    let uuid_type = TypeId::from_bytes([0x71; 16]);
+    let catalogue = provenance_catalogue_with_compatibility(
+        (StandardScalar::Uuid, Some(uuid_type)),
+        (StandardScalar::Uuid, Some(uuid_type)),
+    );
+    let query = query("SELECT t.left FROM tasks.task t WHERE t.left = t.right");
+
+    let checked = check_query_in(&query, &catalogue, "tasks.orna").unwrap();
+
+    assert!(matches!(
+        checked
+            .plan()
+            .selection()
+            .map(|expression| expression.kind()),
+        Some(ExpressionKind::Equality { .. })
+    ));
 }
 
 #[test]
