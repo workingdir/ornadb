@@ -463,6 +463,7 @@ impl Corpus {
         let mut diagnostics = BTreeMap::new();
         for fixture in &manifest.fixtures {
             if let Some(relative) = &fixture.expected_diagnostic {
+                checked_path(relative)?;
                 let diagnostic: ExpectedDiagnostic = read_json(&root, relative)?;
                 diagnostics.insert(fixture.path.clone(), diagnostic);
             }
@@ -489,11 +490,6 @@ impl Corpus {
         {
             return Err(CorpusError("expected Orna reference version 1.0.0".into()));
         }
-        if self.manifest.fixtures.len() != 167 || self.manifest.counts.total != 167 {
-            return Err(CorpusError(
-                "conformance manifest must contain exactly 167 fixtures".into(),
-            ));
-        }
         let kinds = self
             .manifest
             .fixtures
@@ -502,6 +498,16 @@ impl Corpus {
                 *counts.entry(fixture.kind.as_str()).or_insert(0usize) += 1;
                 counts
             });
+        if self.manifest.fixtures.len() != 167
+            || self.manifest.counts.total != self.manifest.fixtures.len()
+            || self.manifest.counts.valid != kinds.get("valid").copied().unwrap_or(0)
+            || self.manifest.counts.invalid != kinds.get("invalid").copied().unwrap_or(0)
+            || self.manifest.counts.project != kinds.get("project").copied().unwrap_or(0)
+        {
+            return Err(CorpusError(
+                "conformance manifest counts disagree with its fixtures".into(),
+            ));
+        }
         if kinds.get("valid") != Some(&86)
             || kinds.get("invalid") != Some(&80)
             || kinds.get("project") != Some(&1)
@@ -511,7 +517,7 @@ impl Corpus {
                     .into(),
             ));
         }
-        if self.invalid_metadata.count != 80
+        if self.invalid_metadata.count != self.invalid_metadata.fixtures.len()
             || self.invalid_metadata.fixtures.len() != 80
             || self.diagnostics.len() != 80
         {
@@ -528,13 +534,119 @@ impl Corpus {
         if ids.len() != self.manifest.fixtures.len() {
             return Err(CorpusError("fixture ids must be unique".into()));
         }
+        let paths = self
+            .manifest
+            .fixtures
+            .iter()
+            .map(|fixture| fixture.path.as_str())
+            .collect::<BTreeSet<_>>();
+        if paths.len() != self.manifest.fixtures.len() {
+            return Err(CorpusError("fixture paths must be unique".into()));
+        }
+        let invalid_paths = self
+            .manifest
+            .fixtures
+            .iter()
+            .filter(|fixture| fixture.kind == "invalid")
+            .map(|fixture| fixture.path.as_str())
+            .collect::<BTreeSet<_>>();
+        let metadata_paths = self
+            .invalid_metadata
+            .fixtures
+            .iter()
+            .map(|fixture| fixture.path.as_str())
+            .collect::<BTreeSet<_>>();
+        let diagnostic_paths = self
+            .diagnostics
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if metadata_paths.len() != self.invalid_metadata.fixtures.len()
+            || metadata_paths != invalid_paths
+            || diagnostic_paths != invalid_paths
+        {
+            return Err(CorpusError(
+                "invalid metadata and expected diagnostics must exactly cover invalid fixtures"
+                    .into(),
+            ));
+        }
         for fixture in &self.manifest.fixtures {
             checked_path(&fixture.path)?;
+            if fixture.id.is_empty() || fixture.parse_as.is_empty() {
+                return Err(CorpusError(format!(
+                    "fixture identity or parse mode is empty: {}",
+                    fixture.path
+                )));
+            }
+            if !matches!(fixture.kind.as_str(), "valid" | "invalid" | "project") {
+                return Err(CorpusError(format!(
+                    "fixture kind is not part of the published schema: {}",
+                    fixture.kind
+                )));
+            }
+            if fixture.expect.iter().any(|(stage, result)| {
+                !matches!(
+                    stage.as_str(),
+                    "parse" | "resolve" | "typecheck" | "evaluate" | "load_rows"
+                ) || !matches!(result.as_str(), "pass" | "fail" | "not-run")
+            }) {
+                return Err(CorpusError(format!(
+                    "fixture has an invalid stage expectation: {}",
+                    fixture.path
+                )));
+            }
             if !self.root.join(&fixture.path).is_file() && fixture.kind != "project" {
                 return Err(CorpusError(format!(
                     "fixture source missing: {}",
                     fixture.path
                 )));
+            }
+            match fixture.kind.as_str() {
+                "valid" => {
+                    if fixture.failing_phase.is_some()
+                        || fixture.diagnostic.is_some()
+                        || fixture.message_contains.is_some()
+                        || fixture.expected_diagnostic.is_some()
+                        || fixture.expect.iter().any(|(stage, result)| {
+                            matches!(stage.as_str(), "parse" | "resolve" | "typecheck")
+                                && result != "pass"
+                        })
+                    {
+                        return Err(CorpusError(format!(
+                            "valid fixture has invalid failure metadata or expectations: {}",
+                            fixture.path
+                        )));
+                    }
+                }
+                "project" => {
+                    if fixture.parse_as != "database_project"
+                        || fixture.failing_phase.is_some()
+                        || fixture.diagnostic.is_some()
+                        || fixture.message_contains.is_some()
+                        || fixture.expected_diagnostic.is_some()
+                        || fixture.expect.get("parse").map(String::as_str) != Some("pass")
+                        || fixture.expect.get("resolve").map(String::as_str) != Some("pass")
+                        || fixture.expect.get("typecheck").map(String::as_str) != Some("pass")
+                        || fixture.expect.get("load_rows").map(String::as_str) != Some("pass")
+                    {
+                        return Err(CorpusError(format!(
+                            "project fixture schema is invalid: {}",
+                            fixture.path
+                        )));
+                    }
+                }
+                "invalid" => {
+                    if fixture.failing_phase.is_none()
+                        || fixture.diagnostic.is_none()
+                        || fixture.expected_diagnostic.is_none()
+                    {
+                        return Err(CorpusError(format!(
+                            "invalid fixture lacks diagnostic metadata: {}",
+                            fixture.path
+                        )));
+                    }
+                }
+                _ => unreachable!("fixture kind validated above"),
             }
             if fixture.kind == "invalid" {
                 let metadata = self
