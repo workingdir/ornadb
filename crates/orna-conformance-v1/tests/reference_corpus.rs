@@ -435,6 +435,46 @@ fn engine_witnesses_require_an_exact_expectation_satisfied_fixture_stage() {
     );
 }
 
+#[test]
+fn engine_witnesses_reject_non_repository_provenance_references() {
+    let harness = Harness::new(Corpus::load_default().expect("reference corpus loads"));
+    let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
+    let report = harness.run(&mut adapter);
+    let mut binding = FixtureStageBinding {
+        requirement_id: "ORNA-SOURCE-001".into(),
+        fixture_id: "valid/minimal-root.orna".into(),
+        fixture_path: "examples/valid/minimal-root.orna".into(),
+        stage: Stage::Parse,
+        implementation_ref: "crates/orna-conformance-v1/src/lib.rs::Harness::engine_witnesses".into(),
+        test_ref: "crates/orna-conformance-v1/tests/reference_corpus.rs::engine_witnesses_reject_non_repository_provenance_references".into(),
+    };
+
+    for (field, invalid) in [
+        (
+            "implementation",
+            "/tmp/implementation.rs::Harness::engine_witnesses",
+        ),
+        (
+            "test",
+            "crates/orna-conformance-v1/tests/../tests/reference_corpus.rs::regression",
+        ),
+    ] {
+        if field == "implementation" {
+            binding.implementation_ref = invalid.into();
+        } else {
+            binding.test_ref = invalid.into();
+        }
+        let error = harness
+            .engine_witnesses(&report, std::slice::from_ref(&binding))
+            .expect_err("engine witness provenance must remain repository-relative");
+        assert_eq!(error, format!("invalid repository-relative {field} reference"));
+        binding.implementation_ref =
+            "crates/orna-conformance-v1/src/lib.rs::Harness::engine_witnesses".into();
+        binding.test_ref =
+            "crates/orna-conformance-v1/tests/reference_corpus.rs::engine_witnesses_reject_non_repository_provenance_references".into();
+    }
+}
+
 fn date_range_implementation_bindings(
     publication_digests: &std::collections::BTreeMap<String, String>,
 ) -> Vec<ImplementationEvidenceBinding> {

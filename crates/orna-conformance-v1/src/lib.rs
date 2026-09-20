@@ -2034,6 +2034,8 @@ impl Harness {
                     binding.fixture_id
                 ));
             }
+            validate_repository_reference(&binding.implementation_ref, "implementation")?;
+            validate_repository_reference(&binding.test_ref, "test")?;
             let key = (
                 binding.requirement_id.as_str(),
                 binding.fixture_id.as_str(),
