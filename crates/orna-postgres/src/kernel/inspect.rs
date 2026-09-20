@@ -38,10 +38,13 @@ use access::{
 use payload::encode_epoch_payload;
 use projection::model_payload_for;
 use storage::{
-    decode_inspect_snapshot_row, inspect_id, inspect_value_registry, row_invocation_record,
+    decode_inspect_snapshot_row, inspect_codec_context, inspect_id, row_invocation_record,
 };
 
-use std::time::{Duration, SystemTime};
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime},
+};
 
 use orna_core::{
     CallSiteId, CatalogueRevisionId, FunctionId, InspectEpochId, InvocationId, PrincipalId,
@@ -58,7 +61,7 @@ use orna_core::{
     invocation::{
         InvocationClientOffer, InvocationEventBody, InvocationOutputRequirement, InvokeValue,
     },
-    revision::ActiveDatabaseRevision,
+    revision::{ActiveDatabaseRevision, RevisionPair},
     security::{
         AuthenticatedSession, InspectDecision, InspectDenial, InspectEpochScope,
         SecurityAuditDecision, SecuritySnapshot, authorise_inspect,
@@ -82,6 +85,7 @@ use crate::{
     bootstrap::require_current_migrations,
     is_sealed_inspect_type_id,
     physical::establish_trusted_search_path,
+    recovery::recover_revision_for_pair,
     security::{append_security_audit_event, recover_security_snapshot_for_active},
     security_admin::inspect_privileges_for_session,
     server_runtime::configure_and_recover,
