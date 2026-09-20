@@ -1249,6 +1249,63 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn transaction_transport_and_live_families_remain_non_executed() {
+        let report = generate(corpus()).expect("valid corpus");
+        let families: &[(&str, &[&str])] = &[
+            (
+                "execution",
+                &[
+                    "ORNA-TXN-001",
+                    "ORNA-TXN-002",
+                    "ORNA-TXN-003",
+                    "ORNA-TXN-004",
+                    "ORNA-TXN-005",
+                    "ORNA-TXN-006",
+                    "ORNA-TXN-007",
+                    "ORNA-TXN-008",
+                ],
+            ),
+            (
+                "protocol",
+                &[
+                    "ORNA-PROTO-001",
+                    "ORNA-PROTO-002",
+                    "ORNA-PROTO-003",
+                    "ORNA-PROTO-004",
+                ],
+            ),
+            (
+                "pages",
+                &[
+                    "ORNA-LIVE-001",
+                    "ORNA-LIVE-002",
+                    "ORNA-LIVE-003",
+                    "ORNA-LIVE-004",
+                ],
+            ),
+        ];
+
+        for &(chapter, requirement_ids) in families {
+            for &requirement_id in requirement_ids {
+                let requirement = report
+                    .requirements
+                    .iter()
+                    .find(|item| item.requirement_id == requirement_id)
+                    .expect("published boundary requirement");
+                assert_eq!(requirement.chapter, chapter, "{requirement_id}");
+                assert_eq!(requirement.status, Status::JustifiedGap, "{requirement_id}");
+                assert!(
+                    requirement.boundaries.iter().all(|boundary| {
+                        boundary.kind != "engine-witness" && boundary.status != Status::Executed
+                    }),
+                    "{requirement_id} must not claim Orna-engine execution"
+                );
+            }
+        }
+    }
+
     #[test]
     fn digest_bound_engine_witnesses_add_only_explicit_executed_boundaries() {
         let root = corpus();
