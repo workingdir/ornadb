@@ -137,6 +137,21 @@ def main() -> None:
             raise AssertionError("installed executable mode changed")
         if stat.S_IMODE(installed_manifest.stat().st_mode) != 0o644:
             raise AssertionError("installed manifest mode changed")
+        package.install_archive(first, install_root)
+        foreign_root = scratch / "foreign-root"
+        foreign_binary = foreign_root / ARCHIVE_EXECUTABLE
+        foreign_binary.parent.mkdir(mode=0o755, parents=True)
+        shutil.copyfile("/bin/true", foreign_binary)
+        foreign_binary.chmod(0o755)
+        expect_failure(lambda: package.install_archive(first, foreign_root))
+        if foreign_binary.read_bytes() != Path("/bin/true").read_bytes():
+            raise AssertionError("package install overwrote a foreign executable")
+        partial_root = scratch / "partial-root"
+        partial_manifest = partial_root / ARCHIVE_DISTRIBUTION_MANIFEST
+        partial_manifest.parent.mkdir(mode=0o755, parents=True)
+        partial_manifest.write_bytes(installed_manifest.read_bytes())
+        partial_manifest.chmod(0o644)
+        expect_failure(lambda: package.install_archive(first, partial_root))
         wrong_mode_root = scratch / "wrong-mode-root"
         wrong_mode_root.mkdir(mode=0o700)
         wrong_mode_root.chmod(0o700)
