@@ -1106,9 +1106,10 @@ mod tests {
     #[test]
     fn oversized_adapter_payload_is_rejected_before_decode() {
         let mut io = MemoryIo::default();
-        io.incoming.push_back(vec![0; 129]);
+        let message_limit = Limits::default().max_message_bytes;
+        io.incoming.push_back(vec![0; message_limit + 1]);
         let limits = Limits {
-            max_message_bytes: 128,
+            max_message_bytes: message_limit,
             ..Limits::default()
         };
         let mut driver = LiveSessionDriver::new(
@@ -1123,7 +1124,7 @@ mod tests {
             block_on(driver.receive_once()),
             Ok(LiveSessionEvent::ResyncSent { .. })
         ));
-        assert_eq!(driver.io.requested_limits, vec![128]);
+        assert_eq!(driver.io.requested_limits, vec![message_limit]);
     }
 
     #[test]

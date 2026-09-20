@@ -278,24 +278,24 @@ fn protocol_violations_close_without_consuming_or_resyncing() {
 
 #[test]
 fn fragmented_oversize_input_closes_with_1009() {
-    let mut small = Limits::default();
-    small.max_message_bytes = 1;
+    let limits = Limits::default();
+    let websocket_limit = 1;
     let (client_io, mut server_io) = duplex(4096);
     let client = block_on(WebSocketStream::from_raw_socket(
         client_io,
         Role::Client,
         Some(
             WebSocketConfig::default()
-                .max_message_size(Some(small.max_message_bytes))
-                .max_frame_size(Some(small.max_message_bytes)),
+                .max_message_size(Some(websocket_limit))
+                .max_frame_size(Some(websocket_limit)),
         ),
     ));
     let mut transport =
-        AuthenticatedWebSocketTransport::from_authenticated_socket(client, small).unwrap();
+        AuthenticatedWebSocketTransport::from_authenticated_socket(client, limits).unwrap();
 
     block_on(server_io.write_all(&[0x02, 0x01, 1, 0x80, 0x01, 2])).unwrap();
     assert!(matches!(
-        block_on(transport.receive_binary(small.max_message_bytes)),
+        block_on(transport.receive_binary(limits.max_message_bytes)),
         Err(LiveTransportError::Protocol(orna_protocol_v1::Error::Limit))
     ));
     let mut header = [0; 8];
@@ -306,7 +306,7 @@ fn fragmented_oversize_input_closes_with_1009() {
     let code = u16::from_be_bytes([header[6] ^ header[2], header[7] ^ header[3]]);
     assert_eq!(code, 1009);
     assert!(matches!(
-        block_on(transport.receive_binary(small.max_message_bytes)),
+        block_on(transport.receive_binary(limits.max_message_bytes)),
         Err(LiveTransportError::WebSocket(
             tokio_tungstenite::tungstenite::Error::ConnectionClosed
         ))

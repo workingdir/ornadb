@@ -346,6 +346,14 @@ mod tests {
         try_frame(code, watch, body).unwrap()
     }
 
+    fn frame_with_limits(code: u8, watch: [u8; 16], body: Vec<u8>, limits: Limits) -> Envelope {
+        let mut bytes = vec![0xa5, 0x00, 0x01, 0x01, code, 0x02, 0xf6, 0x03, 0x50];
+        bytes.extend(watch);
+        bytes.extend([0x04]);
+        bytes.extend(body);
+        Envelope::decode(&bytes, limits).unwrap()
+    }
+
     fn snapshot(revision: u8, property: &str) -> Vec<u8> {
         snapshot_tree(revision, present(property))
     }
@@ -414,9 +422,37 @@ mod tests {
         encoded
     }
 
-    fn bytes(value: usize) -> Vec<u8> {
-        assert!(value < 256);
-        let mut encoded = vec![0x58, value as u8];
+    fn bytes_with_len(value: usize) -> Vec<u8> {
+        let mut encoded = if value <= 23 {
+            vec![value as u8]
+        } else if value <= u8::MAX as usize {
+            vec![0x58, value as u8]
+        } else if value <= u16::MAX as usize {
+            let length = value as u16;
+            vec![0x59, (length >> 8) as u8, length as u8]
+        } else if value <= u32::MAX as usize {
+            let length = value as u32;
+            vec![
+                0x5a,
+                (length >> 24) as u8,
+                (length >> 16) as u8,
+                (length >> 8) as u8,
+                length as u8,
+            ]
+        } else {
+            let length = value as u64;
+            vec![
+                0x5b,
+                (length >> 56) as u8,
+                (length >> 48) as u8,
+                (length >> 40) as u8,
+                (length >> 32) as u8,
+                (length >> 24) as u8,
+                (length >> 16) as u8,
+                (length >> 8) as u8,
+                length as u8,
+            ]
+        };
         encoded.extend(vec![3; value]);
         encoded
     }
@@ -720,25 +756,35 @@ mod tests {
         assert!(state.take_resync_request().is_some());
     }
     #[test]
-    fn direct_snapshot_install_rejects_snapshot_over_negotiated_message_limit() {
+    fn negotiated_message_limit_rejects_an_oversized_snapshot_before_install() {
         let watch = [7; 16];
+        let message_limit = Limits::default().max_message_bytes;
         let limits = Limits {
-            max_message_bytes: 32,
+            max_message_bytes: message_limit,
+            max_collection_items: message_limit + 1,
             ..Limits::default()
         };
         let mut state = WatchPresentation::new(watch, limits).expect("limits are valid");
-        let source = frame(16, watch, snapshot(1, "bounded"));
-        let Message::Snapshot {
-            revision,
-            present,
-            snapshot,
-        } = source.message
-        else {
-            panic!("fixture must be a snapshot");
-        };
+        let source = frame_with_limits(
+            16,
+            watch,
+            snapshot_tree(
+                1,
+                present_node(
+                    vec![0xf6],
+                    vec![(text("payload"), bytes_with_len(message_limit))],
+                    vec![],
+                ),
+            ),
+            Limits {
+                max_message_bytes: message_limit + 1024,
+                max_collection_items: message_limit + 1,
+                ..limits
+            },
+        );
 
         assert_eq!(
-            state.install_snapshot(revision, present, snapshot),
+            state.receive(&source).unwrap(),
             LivePresentationUpdate::ResyncRequired
         );
         assert!(state.published().is_none());
@@ -1129,9 +1175,9 @@ mod tests {
     fn negotiated_collection_limits_reject_repeated_small_adds_atomically() {
         let watch = [7; 16];
         let limits = Limits {
-            max_message_bytes: 1024,
-            max_depth: 64,
-            max_nodes: 100,
+            max_message_bytes: Limits::default().max_message_bytes,
+            max_depth: Limits::default().max_depth,
+            max_nodes: Limits::default().max_nodes,
             max_collection_items: 5,
         };
         let mut state = WatchPresentation::with_limits(watch, limits).unwrap();
@@ -1186,9 +1232,9 @@ mod tests {
     fn transient_over_limit_add_then_remove_is_rejected_atomically() {
         let watch = [7; 16];
         let limits = Limits {
-            max_message_bytes: 2048,
-            max_depth: 64,
-            max_nodes: 1_000,
+            max_message_bytes: Limits::default().max_message_bytes,
+            max_depth: Limits::default().max_depth,
+            max_nodes: Limits::default().max_nodes,
             max_collection_items: 5,
         };
         let initial = present_node(
@@ -1232,11 +1278,11 @@ mod tests {
     fn negotiated_receive_boundary_rejects_an_oversized_frame_before_patching() {
         let watch = [7; 16];
         let initial = frame(16, watch, snapshot(0, "current"));
-        let initial_bytes = initial.encode(Limits::default()).unwrap().len();
+        let message_limit = Limits::default().max_message_bytes;
         let limits = Limits {
-            max_message_bytes: initial_bytes + 1,
-            max_depth: 64,
-            max_nodes: 1_000,
+            max_message_bytes: message_limit,
+            max_depth: Limits::default().max_depth,
+            max_nodes: Limits::default().max_nodes,
             max_collection_items: 100,
         };
         let mut state = WatchPresentation::with_limits(watch, limits).unwrap();
@@ -1245,12 +1291,34 @@ mod tests {
             LivePresentationUpdate::SnapshotInstalled
         );
         let visible = state.published().cloned();
-        let oversized = frame(
+        let oversized = frame_with_limits(
             17,
             watch,
-            delta(0, 1, vec![replace(property_path("text"), bytes(255))]),
+            delta(
+                0,
+                1,
+                vec![replace(
+                    property_path("text"),
+                    bytes_with_len(message_limit),
+                )],
+            ),
+            Limits {
+                max_message_bytes: message_limit + 1024,
+                max_collection_items: message_limit + 1,
+                ..limits
+            },
         );
-        assert!(oversized.encode(Limits::default()).unwrap().len() > limits.max_message_bytes);
+        assert!(
+            oversized
+                .encode(Limits {
+                    max_message_bytes: message_limit + 1024,
+                    max_collection_items: message_limit + 1,
+                    ..limits
+                })
+                .unwrap()
+                .len()
+                > limits.max_message_bytes
+        );
         assert_eq!(
             state.receive(&oversized).unwrap(),
             LivePresentationUpdate::ResyncRequired
