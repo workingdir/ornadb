@@ -602,7 +602,7 @@ ORNA_REFERENCE_DIR=<reference-bundle> cargo test --locked --offline \
 ```
 
 The exact-bundle traceability command and the focused `reference_corpus` suite
-passed in this audit; the latter ran 11 tests. The `runtime_scenarios` command
+passed in this audit; the latter ran 18 tests. The `runtime_scenarios` command
 is shown for reproducibility, but its status is not claimed here. The passing
 checks verify corpus loading, evidence redaction, witness fencing, and the rule
 that skipped or unimplemented work is not a pass. They do not establish full
