@@ -792,6 +792,7 @@ pub(super) fn supports_equality_type(
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid
         )
     ) || matches!(
         resolve_runtime_type(context, resolved_type),
@@ -827,6 +828,7 @@ pub(super) fn supports_distinct_projection_type(
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid
         )
     ) || matches!(
         resolve_runtime_type(context, resolved_type),
@@ -857,6 +859,7 @@ pub(super) fn supports_result_type(
                 | StandardScalar::Float
                 | StandardScalar::CharacterLargeObject
                 | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid
         )
     ) || matches!(
         resolve_catalogue_runtime_type(catalogue, context, resolved_type),
