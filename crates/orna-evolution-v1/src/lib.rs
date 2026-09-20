@@ -338,6 +338,13 @@ fn validate_schema(
                         reason: "field introduction fallback is not canonical",
                     });
                 }
+                if !fallback_matches_field_type(fallback, &field.ty) {
+                    return Err(PlanningError::IncompatibleField {
+                        table: table.id,
+                        field: field.id,
+                        reason: "field introduction fallback does not match field type",
+                    });
+                }
                 if field.optional || field.role != FieldRole::Stored {
                     return Err(PlanningError::IncompatibleField {
                         table: table.id,
@@ -349,6 +356,23 @@ fn validate_schema(
         }
     }
     Ok(())
+}
+
+/// An introduction fallback is a frozen value for pre-existing rows, so it
+/// must be admitted against the same closed scalar vocabulary as the field.
+/// Custom types deliberately reject here: this planner has no descriptor-wide
+/// nominal authority with which to prove their membership.
+fn fallback_matches_field_type(value: &CanonicalValue, field_type: &FieldType) -> bool {
+    match (field_type, value.raw()) {
+        (FieldType::Bool, orna_foundation_v1::OvbRaw::Bool(_))
+        | (FieldType::Int, orna_foundation_v1::OvbRaw::Int(_))
+        | (FieldType::Float, orna_foundation_v1::OvbRaw::Float(_))
+        | (FieldType::Str, orna_foundation_v1::OvbRaw::Text(_)) => true,
+        (FieldType::Uuid, orna_foundation_v1::OvbRaw::Tag(37, payload)) => {
+            matches!(payload.as_ref(), orna_foundation_v1::OvbRaw::Bytes(bytes) if bytes.len() == 16)
+        }
+        (FieldType::Custom(_), _) | (_, _) => false,
+    }
 }
 
 fn compare_fields(
@@ -789,6 +813,80 @@ mod tests {
                     ..
                 })
             ));
+        }
+    }
+
+    #[test]
+    fn introduction_fallbacks_must_match_the_closed_field_scalar_type() {
+        let old = schema(table(true, vec![field(2, "name", false)]));
+        let mismatches = [
+            (
+                FieldType::Bool,
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Text("true".into())).unwrap(),
+            ),
+            (
+                FieldType::Int,
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Bool(true)).unwrap(),
+            ),
+            (FieldType::Float, CanonicalValue::uuid([3; 16])),
+            (
+                FieldType::Str,
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Int(7.into())).unwrap(),
+            ),
+            (
+                FieldType::Uuid,
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Text("not-a-uuid".into())).unwrap(),
+            ),
+            (
+                FieldType::Custom("Country".into()),
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Text("GB".into())).unwrap(),
+            ),
+        ];
+
+        for (ty, fallback) in mismatches {
+            let mut candidate = field_with_fallback(3, "country");
+            candidate.ty = ty;
+            candidate.introduction_fallback = Some(fallback);
+            let next = schema(table(true, vec![field(2, "name", false), candidate]));
+            assert!(matches!(
+                plan(&old, &next, &request(vec![])),
+                Err(PlanningError::IncompatibleField {
+                    reason: "field introduction fallback does not match field type",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn scalar_and_canonical_uuid_introduction_fallbacks_are_admitted() {
+        let old = schema(table(true, vec![field(2, "name", false)]));
+        let cases = [
+            (
+                FieldType::Bool,
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Bool(true)).unwrap(),
+            ),
+            (
+                FieldType::Int,
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Int(7.into())).unwrap(),
+            ),
+            (
+                FieldType::Float,
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Float(1.5f64.to_bits())).unwrap(),
+            ),
+            (
+                FieldType::Str,
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Text("GB".into())).unwrap(),
+            ),
+            (FieldType::Uuid, CanonicalValue::uuid([3; 16])),
+        ];
+
+        for (ty, fallback) in cases {
+            let mut candidate = field_with_fallback(3, "country");
+            candidate.ty = ty;
+            candidate.introduction_fallback = Some(fallback);
+            let next = schema(table(true, vec![field(2, "name", false), candidate]));
+            assert!(plan(&old, &next, &request(vec![])).is_ok());
         }
     }
 
