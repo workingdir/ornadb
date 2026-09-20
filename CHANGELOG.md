@@ -63,9 +63,11 @@ release gate has passed.
   constructors. The [accepted demo inventory](examples/accepted-demos.toml)
   is the authoritative list of checked-in examples; it is not a replacement
   for the missing canonical spec.
-- The CLI exposes function invocation, the function-backed REPL, daemon/server
-  administration, runtime description, source check/diff/apply, raw calls,
-  USER state, inspection, and security administration. `--explain`, argument
+- The CLI exposes function invocation, a bounded local function-backed REPL
+  route, daemon/server administration, runtime description, source
+  check/diff/apply, raw calls, USER state, inspection, and security
+  administration. The local REPL route does not establish engine execution for
+  the canonical `ORNA-REPL-001..006` requirements. `--explain`, argument
   files, canonical output, JSON/table/CSV presenters, and bounded invocation
   tracing are implemented where the selected route supports them.
 - USER state is principal-scoped and typed. Local peer authentication supplies
