@@ -347,14 +347,17 @@ impl ResolvedSourceCatalogue {
             .collect();
 
         let mut functions = Vec::new();
-        for revision in self.candidate.new_function_revisions() {
-            let definition = self
-                .candidate
-                .candidate()
-                .function_by_id(revision.function())
-                .ok_or(ResolvedSourceCatalogueError::MissingCandidateFunction {
-                    function: revision.function(),
-                    revision: revision.id(),
+        for definition in self.candidate.candidate().functions() {
+            let (_, revision, _, _) = self
+                .function_artifacts()
+                .find(|(artifact_definition, revision, _, _)| {
+                    artifact_definition.id() == definition.id()
+                        && revision.function() == definition.id()
+                        && revision.id() == definition.current_revision()
+                })
+                .ok_or(ResolvedSourceCatalogueError::MissingFunctionRevision {
+                    function: definition.id(),
+                    revision: definition.current_revision(),
                 })?;
             let parameters = definition
                 .parameters()
@@ -907,8 +910,9 @@ mod tests {
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
             CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity,
             DefinitionReferenceKind, DefinitionReferenceTarget, DeployableRevision,
-            ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord, RevisionPair,
-            SourceOrigin, StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
+            DeployableRevisionContent, DeployableRevisionInput, ExecutableArtifact,
+            ExecutableArtifactKind, FunctionRevisionRecord, RevisionPair, SourceOrigin,
+            StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
         },
         source::{SourceBundle, SourceUnit},
         types::StandardScalar,
@@ -1216,6 +1220,85 @@ mod tests {
     }
 
     #[test]
+    fn admission_artifact_includes_carried_forward_unchanged_functions() {
+        let initial_active = empty_active();
+        let revision = FunctionRevisionId::from_bytes([0x84; 16]);
+        let initial = candidate_with_function(
+            &initial_active,
+            revision,
+            vec![valid_function_revision(
+                revision,
+                artifact_payload_digest(&[0x01, 0x02]).unwrap(),
+            )],
+        );
+        let active = activate(&initial);
+        let reused = candidate_with_function(&active, revision, Vec::new());
+
+        assert!(reused.new_function_revisions().is_empty());
+        let artifact = materialize_prepared_source_catalogue(reused, &active, Vec::new())
+            .unwrap()
+            .admission_artifact()
+            .unwrap();
+
+        let [function] = artifact.functions() else {
+            panic!("expected one carried-forward function");
+        };
+        assert_eq!(function.function_id(), FunctionId::from_bytes([0x81; 16]));
+        assert_eq!(
+            function.revision_id(),
+            active.function_revisions()[0]
+                .declaration_content_hash()
+                .to_bytes()
+        );
+    }
+
+    #[test]
+    fn admission_artifact_uses_changed_revision_and_preserves_rename_metadata() {
+        let initial_active = empty_active();
+        let original_revision = FunctionRevisionId::from_bytes([0x85; 16]);
+        let initial = candidate_with_named_function(
+            &initial_active,
+            "echo",
+            original_revision,
+            vec![valid_function_revision(
+                original_revision,
+                artifact_payload_digest(&[0x01, 0x02]).unwrap(),
+            )],
+        );
+        let active = activate(&initial);
+        let changed_revision = FunctionRevisionId::from_bytes([0x86; 16]);
+        let changed = candidate_with_named_function(
+            &active,
+            "renamed",
+            changed_revision,
+            vec![valid_function_revision(
+                changed_revision,
+                artifact_payload_digest(&[0x01, 0x02]).unwrap(),
+            )],
+        );
+        let expected = changed.new_function_revisions()[0].clone();
+
+        let artifact = materialize_prepared_source_catalogue(changed, &active, Vec::new())
+            .unwrap()
+            .admission_artifact()
+            .unwrap();
+
+        let [function] = artifact.functions() else {
+            panic!("expected one changed function");
+        };
+        assert_eq!(function.qualified_name(), "app.renamed");
+        assert_eq!(
+            function.revision_id(),
+            expected.declaration_content_hash().to_bytes()
+        );
+        assert_eq!(
+            function.semantic_hash(),
+            expected.semantic_hash().to_bytes()
+        );
+        assert_eq!(function.rename_from(), Some("app.echo"));
+    }
+
+    #[test]
     fn formatting_only_reuse_produces_no_artifact_handoff() {
         let initial_source =
             "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.first() RETURNS BOOLEAN RETURN TRUE;";
@@ -1444,25 +1527,38 @@ mod tests {
         revision: FunctionRevisionId,
         revisions: Vec<FunctionRevisionRecord>,
     ) -> DeployableRevision {
+        candidate_with_named_function(active, "echo", revision, revisions)
+    }
+
+    fn candidate_with_named_function(
+        active: &ActiveDatabaseRevision,
+        function_name: &str,
+        revision: FunctionRevisionId,
+        revisions: Vec<FunctionRevisionRecord>,
+    ) -> DeployableRevision {
         let source_unit_id = SourceUnitId::from_bytes([0x84; 16]);
-        let source_text = "CREATE CLIENT FUNCTION app.echo() RETURNS app.item RETURN app.item;";
+        let source_text = format!(
+            "CREATE CLIENT FUNCTION app.{function_name}() RETURNS app.item RETURN app.item;"
+        );
         let source_unit = StoredSourceUnit::new(
             source_unit_id,
             0,
             "candidate.orna",
-            source_text,
-            orna_core::canonical_hash::source_unit_content_digest(source_text).unwrap(),
+            &source_text,
+            orna_core::canonical_hash::source_unit_content_digest(&source_text).unwrap(),
         )
         .unwrap();
         let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
+        let source_bundle_id = SourceBundleId::new();
+        let source_revision_id = SourceRevisionId::new();
         let source = StoredSourceRevision::new(
-            SourceBundleId::from_bytes([0x85; 16]),
-            SourceRevisionId::from_bytes([0x86; 16]),
+            source_bundle_id,
+            source_revision_id,
             Some(active.source().id()),
             vec![source_unit],
             bundle_hash,
             source_revision_record_digest(
-                SourceBundleId::from_bytes([0x85; 16]),
+                source_bundle_id,
                 Some(active.source().id()),
                 bundle_hash,
             )
@@ -1477,7 +1573,7 @@ mod tests {
         let function_id = FunctionId::from_bytes([0x81; 16]);
         let function = FunctionDefinition::new(
             function_id,
-            orna_core::catalogue::QualifiedSemanticName::new(["app", "echo"]).unwrap(),
+            orna_core::catalogue::QualifiedSemanticName::new(["app", function_name]).unwrap(),
             orna_core::catalogue::FunctionDomain::Client,
             Vec::new(),
             FunctionReturn::Single(ResolvedType::Named(object_type_id)),
@@ -1492,7 +1588,7 @@ mod tests {
             Vec::new(),
         );
         let catalogue = CatalogueSnapshot::new_with_functions(
-            CatalogueRevisionId::from_bytes([0x89; 16]),
+            CatalogueRevisionId::new(),
             vec![schema],
             vec![object],
             vec![function.clone()],
@@ -1507,7 +1603,7 @@ mod tests {
             DefinitionOrigin::new(DefinitionIdentity::ObjectType(object_type_id), origin),
             DefinitionOrigin::new(DefinitionIdentity::Function(function_id), origin),
         ];
-        let revisions = revisions
+        let new_revisions = revisions
             .into_iter()
             .map(|revision_record| {
                 let semantic_hash = orna_core::canonical_hash::function_semantic_digest(
@@ -1531,17 +1627,24 @@ mod tests {
                 .unwrap()
             })
             .collect::<Vec<_>>();
-        let catalogue_hash = catalogue_digest(&catalogue, &revisions, &[], &origins, &[]).unwrap();
-        DeployableRevision::new(
-            active.pair(),
-            source,
-            active.catalogue().revision(),
-            catalogue,
-            catalogue_hash,
-            origins,
-            Vec::new(),
-            revisions,
-            Vec::new(),
+        let current_revisions = if new_revisions.is_empty() {
+            active.function_revisions().to_vec()
+        } else {
+            new_revisions.clone()
+        };
+        let catalogue_hash =
+            catalogue_digest(&catalogue, &current_revisions, &[], &origins, &[]).unwrap();
+        DeployableRevision::new_with_catalogue_hash_context(
+            DeployableRevisionInput::new(
+                active.pair(),
+                source,
+                active.catalogue().revision(),
+                catalogue,
+                catalogue_hash,
+                DeployableRevisionContent::new(origins, Vec::new(), new_revisions, Vec::new())
+                    .with_current_function_revisions(current_revisions),
+            ),
+            CatalogueHashContext::version_one(),
         )
         .unwrap()
     }
