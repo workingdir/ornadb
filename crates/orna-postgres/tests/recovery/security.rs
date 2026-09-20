@@ -184,17 +184,17 @@ async fn protected_argument_observations_withhold_retained_digest_and_fail_close
         )?;
 
         let durable = kernel
-            .load_durable_sys_invocation_observation(invocation)
+            .load_durable_sys_invocation_observation(&session, invocation)
             .await?
             .ok_or_else(|| failure("durable protected invocation observation is missing"))?;
         let current = kernel
-            .load_current_runtime_sys_invocation_observations(&capture)
+            .load_current_runtime_sys_invocation_observations(&session, &capture)
             .await?;
         let durable_arguments = kernel
-            .load_durable_sys_invocation_argument_observations()
+            .load_durable_sys_invocation_argument_observations(&session)
             .await?;
         let current_arguments = kernel
-            .load_current_runtime_sys_invocation_argument_observations(&capture)
+            .load_current_runtime_sys_invocation_argument_observations(&session, &capture)
             .await?;
         require(
             durable.id == invocation
@@ -257,11 +257,11 @@ async fn protected_argument_observations_withhold_retained_digest_and_fail_close
         )?;
 
         let durable_error = kernel
-            .load_durable_sys_invocation_observation(invocation)
+            .load_durable_sys_invocation_observation(&session, invocation)
             .await
             .expect_err("malformed private digest must fail durable observation loading");
         let current_error = kernel
-            .load_current_runtime_sys_invocation_observations(&capture)
+            .load_current_runtime_sys_invocation_observations(&session, &capture)
             .await
             .expect_err("malformed private digest must fail current observation loading");
         require(

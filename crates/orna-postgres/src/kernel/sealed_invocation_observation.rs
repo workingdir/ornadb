@@ -2,7 +2,14 @@ use super::{PostgresKernel, PostgresKernelError};
 
 use std::{collections::BTreeSet, time::SystemTime};
 
-use orna_core::{CatalogueRevisionId, FunctionId, InvocationId, SourceRevisionId};
+use orna_core::{
+    CatalogueRevisionId, FunctionId, InvocationId, PrincipalId, SourceRevisionId,
+    inspect::InspectPrivilege,
+    security::{
+        AuthenticatedSession, InspectDecision, InspectDenial, SecurityAuditDecision,
+        authorise_inspect,
+    },
+};
 use orna_foundation_v1::{
     CwdCapture, FunctionRef, InvocationArgumentRef, InvocationRef, InvocationStatus, OvbRaw,
     RowRef, Snapshot, SnapshotRef, TypeRef, Value, invocation_argument_reference,
@@ -12,7 +19,12 @@ use orna_foundation_v1::{
 };
 use tokio_postgres::{IsolationLevel, Row, types::FromSqlOwned};
 
-use crate::kernel::bootstrap::require_current_migrations;
+use crate::kernel::{
+    bootstrap::require_current_migrations,
+    security::{append_security_audit_event, recover_security_snapshot_for_active},
+    security_admin::inspect_privileges_for_session,
+    server_runtime::configure_and_recover,
+};
 
 /// Read-only durable observation of one resolved sealed invocation.
 ///
@@ -331,9 +343,10 @@ impl PostgresKernel {
     /// excluded fail-closed. This does not make a `sys.rt` membership claim.
     pub async fn load_durable_sys_invocation_observation(
         &self,
+        authenticated_session: &AuthenticatedSession,
         invocation: InvocationId,
     ) -> Result<Option<DurableSysInvocationObservation>, PostgresKernelError> {
-        self.load_retained_sealed_invocation_observation(invocation)
+        self.load_retained_sealed_invocation_observation(authenticated_session, invocation)
             .await?
             .map(|observation| observation.durable_sys_projection())
             .transpose()
@@ -347,9 +360,10 @@ impl PostgresKernel {
     /// does not filter for current-runtime membership.
     pub async fn load_durable_sys_invocation_observations(
         &self,
+        authenticated_session: &AuthenticatedSession,
     ) -> Result<Vec<DurableSysInvocationObservation>, PostgresKernelError> {
         project_durable_sys_invocation_collection(
-            self.load_retained_sealed_invocation_observation_collection()
+            self.load_retained_sealed_invocation_observation_collection(authenticated_session)
                 .await?,
         )
     }
@@ -364,10 +378,11 @@ impl PostgresKernel {
     /// invocation's admission-pinned reference or snapshot.
     pub async fn load_current_runtime_sys_invocation_observations(
         &self,
+        authenticated_session: &AuthenticatedSession,
         current_capture: &CwdCapture,
     ) -> Result<Vec<DurableSysInvocationObservation>, PostgresKernelError> {
         project_current_runtime_sys_invocation_collection(
-            self.load_retained_sealed_invocation_observation_collection()
+            self.load_retained_sealed_invocation_observation_collection(authenticated_session)
                 .await?,
             current_capture,
         )
@@ -385,9 +400,10 @@ impl PostgresKernel {
     /// `sys.Value` fields remain unavailable rather than being fabricated.
     pub async fn load_durable_sys_invocation_argument_observations(
         &self,
+        authenticated_session: &AuthenticatedSession,
     ) -> Result<Vec<DurableSysInvocationArgumentObservation>, PostgresKernelError> {
         project_durable_sys_invocation_argument_collection(
-            self.load_retained_sealed_invocation_observation_collection()
+            self.load_retained_sealed_invocation_observation_collection(authenticated_session)
                 .await?,
         )
     }
@@ -400,10 +416,11 @@ impl PostgresKernel {
     /// from `sys.rt.invocations`.
     pub async fn load_current_runtime_sys_invocation_argument_observations(
         &self,
+        authenticated_session: &AuthenticatedSession,
         current_capture: &CwdCapture,
     ) -> Result<Vec<DurableSysInvocationArgumentObservation>, PostgresKernelError> {
         project_current_runtime_sys_invocation_argument_collection(
-            self.load_retained_sealed_invocation_observation_collection()
+            self.load_retained_sealed_invocation_observation_collection(authenticated_session)
                 .await?,
             current_capture,
         )
@@ -412,20 +429,22 @@ impl PostgresKernel {
     /// Loads one durable observation without starting, resuming, or otherwise
     /// mutating its invocation. The returned source, catalogue, and target
     /// coordinates are pinned at admission, not the database's current active
-    /// revision. The supplied capture is deliberately not used to construct
-    /// public references: each row is reconstructed from its durable admission
-    /// capture, so a later CWD change cannot rewrite retained identity.
+    /// revision. The caller is authenticated against the current security
+    /// snapshot, but public references are reconstructed from durable
+    /// admission evidence so a later CWD change cannot rewrite retained
+    /// identity.
     pub async fn load_sealed_invocation_observation(
         &self,
-        _caller_capture: &CwdCapture,
+        authenticated_session: &AuthenticatedSession,
         invocation: InvocationId,
     ) -> Result<Option<SealedInvocationObservation>, PostgresKernelError> {
-        self.load_retained_sealed_invocation_observation(invocation)
+        self.load_retained_sealed_invocation_observation(authenticated_session, invocation)
             .await
     }
 
     async fn load_retained_sealed_invocation_observation(
         &self,
+        authenticated_session: &AuthenticatedSession,
         invocation: InvocationId,
     ) -> Result<Option<SealedInvocationObservation>, PostgresKernelError> {
         let mut session = self.open().await?;
@@ -439,7 +458,15 @@ impl PostgresKernel {
                 .await
                 .map_err(PostgresKernelError::Database)?;
             require_current_migrations(&transaction).await?;
-            let result = load_observation_by_id(&transaction, invocation).await?;
+            let (bound_session, granted) = self
+                .authorised_sealed_invocation_observation_session(
+                    &transaction,
+                    authenticated_session,
+                )
+                .await?;
+            let result =
+                load_observation_by_id(self, &transaction, &bound_session, &granted, invocation)
+                    .await?;
             transaction
                 .rollback()
                 .await
@@ -457,20 +484,21 @@ impl PostgresKernel {
     /// Durable admission evidence pins retained identity, but it does not by
     /// itself establish current runtime ownership or membership.
     ///
-    /// The supplied capture is deliberately ignored for retained rows. Rows
-    /// with incomplete target or admission coordinates are intentionally
+    /// Rows with incomplete target or admission coordinates are intentionally
     /// excluded: they are private unresolved-denial or legacy evidence, not
-    /// public observations.
+    /// public observations. Without `AnyInvocation`, this collection is
+    /// limited to the authenticated principal's durable owner rows.
     pub async fn load_sealed_invocation_observations(
         &self,
-        _caller_capture: &CwdCapture,
+        authenticated_session: &AuthenticatedSession,
     ) -> Result<Vec<SealedInvocationObservation>, PostgresKernelError> {
-        self.load_retained_sealed_invocation_observation_collection()
+        self.load_retained_sealed_invocation_observation_collection(authenticated_session)
             .await
     }
 
     async fn load_retained_sealed_invocation_observation_collection(
         &self,
+        authenticated_session: &AuthenticatedSession,
     ) -> Result<Vec<SealedInvocationObservation>, PostgresKernelError> {
         let mut session = self.open().await?;
         let operation = async {
@@ -483,9 +511,16 @@ impl PostgresKernel {
                 .await
                 .map_err(PostgresKernelError::Database)?;
             require_current_migrations(&transaction).await?;
-            let rows = transaction
-                .query(
-                    "SELECT invocation_id FROM _orna_kernel.sealed_invocation_lifecycle \
+            let (bound_session, granted) = self
+                .authorised_sealed_invocation_observation_session(
+                    &transaction,
+                    authenticated_session,
+                )
+                .await?;
+            let rows = if granted.contains(&InspectPrivilege::AnyInvocation) {
+                transaction
+                    .query(
+                        "SELECT invocation_id FROM _orna_kernel.sealed_invocation_lifecycle \
                      WHERE source_revision_id IS NOT NULL \
                        AND catalogue_revision_id IS NOT NULL \
                        AND function_id IS NOT NULL \
@@ -495,10 +530,30 @@ impl PostgresKernel {
                        AND admission_runtime_id IS NOT NULL \
                        AND admission_runtime_generation IS NOT NULL \
                      ORDER BY started_at ASC, invocation_id ASC",
-                    &[],
-                )
-                .await
-                .map_err(PostgresKernelError::Database)?;
+                        &[],
+                    )
+                    .await
+                    .map_err(PostgresKernelError::Database)?
+            } else {
+                let owner = bound_session.principal().to_bytes().to_vec();
+                transaction
+                    .query(
+                        "SELECT invocation_id FROM _orna_kernel.sealed_invocation_lifecycle \
+                     WHERE owner_principal_id = $1 \
+                       AND source_revision_id IS NOT NULL \
+                       AND catalogue_revision_id IS NOT NULL \
+                       AND function_id IS NOT NULL \
+                       AND function_reference IS NOT NULL \
+                       AND admission_snapshot IS NOT NULL \
+                       AND admission_generation_digest IS NOT NULL \
+                       AND admission_runtime_id IS NOT NULL \
+                       AND admission_runtime_generation IS NOT NULL \
+                     ORDER BY started_at ASC, invocation_id ASC",
+                        &[&owner],
+                    )
+                    .await
+                    .map_err(PostgresKernelError::Database)?
+            };
             let mut observations = Vec::with_capacity(rows.len());
             for row in rows {
                 let invocation = InvocationId::from_bytes(observation_id(
@@ -506,14 +561,20 @@ impl PostgresKernel {
                     "sealed invocation observation collection",
                     "invocation_id",
                 )?);
-                let observation = load_observation_by_id(&transaction, invocation)
-                    .await?
-                    .ok_or_else(|| {
-                        observation_invariant(
-                            &invocation.canonical(),
-                            "collection row disappeared during repeatable read",
-                        )
-                    })?;
+                let observation = load_observation_by_id(
+                    self,
+                    &transaction,
+                    &bound_session,
+                    &granted,
+                    invocation,
+                )
+                .await?
+                .ok_or_else(|| {
+                    observation_invariant(
+                        &invocation.canonical(),
+                        "collection row disappeared during repeatable read",
+                    )
+                })?;
                 observations.push(observation);
             }
             validate_observation_collection_capture(&observations)?;
@@ -522,6 +583,70 @@ impl PostgresKernel {
                 .await
                 .map_err(PostgresKernelError::Database)?;
             Ok(observations)
+        }
+        .await;
+        finish_observation_session(operation, session.shutdown().await)
+    }
+
+    /// Rebinds the caller against the current security snapshot and resolves
+    /// only class-wide INSPECT grants. Durable lifecycle rows retain no
+    /// session identity, so `SessionInvocations` cannot be claimed here.
+    async fn authorised_sealed_invocation_observation_session(
+        &self,
+        transaction: &tokio_postgres::Transaction<'_>,
+        authenticated_session: &AuthenticatedSession,
+    ) -> Result<(AuthenticatedSession, Vec<InspectPrivilege>), PostgresKernelError> {
+        let active = configure_and_recover(transaction).await?;
+        let security = recover_security_snapshot_for_active(transaction, &active).await?;
+        let bound_session = match security.bind_authenticated_session(
+            authenticated_session.principal(),
+            authenticated_session.active_roles().to_vec(),
+        ) {
+            Ok(session) => session,
+            Err(_) => {
+                self.append_sealed_invocation_observation_denial_audit(
+                    authenticated_session,
+                    None,
+                    InspectDenial::MissingPrivilege,
+                )
+                .await?;
+                return Err(PostgresKernelError::InspectDenied {
+                    reason: InspectDenial::MissingPrivilege,
+                });
+            }
+        };
+        let mut granted = vec![InspectPrivilege::OwnInvocation];
+        granted.extend(inspect_privileges_for_session(&security, &bound_session));
+        Ok((bound_session, granted))
+    }
+
+    async fn append_sealed_invocation_observation_denial_audit(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        owner: Option<PrincipalId>,
+        reason: InspectDenial,
+    ) -> Result<(), PostgresKernelError> {
+        let mut session = self.open().await?;
+        let operation = async {
+            let transaction = session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(false)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            append_security_audit_event(
+                &transaction,
+                SecurityAuditDecision::inspect_denied(authenticated_session, owner, reason),
+            )
+            .await?;
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(())
         }
         .await;
         finish_observation_session(operation, session.shutdown().await)
@@ -612,13 +737,16 @@ fn validate_observation_collection_capture(
 }
 
 async fn load_observation_by_id(
+    kernel: &PostgresKernel,
     transaction: &tokio_postgres::Transaction<'_>,
+    authenticated_session: &AuthenticatedSession,
+    granted: &[InspectPrivilege],
     invocation: InvocationId,
 ) -> Result<Option<SealedInvocationObservation>, PostgresKernelError> {
     let invocation_bytes = invocation.to_bytes().to_vec();
     let row = transaction
         .query_opt(
-            "SELECT source_revision_id, catalogue_revision_id, function_id, status, \
+            "SELECT owner_principal_id, source_revision_id, catalogue_revision_id, function_id, status, \
                     started_at, ended_at, admission_snapshot, \
                     admission_generation_digest, admission_runtime_id, \
                     admission_runtime_generation, admission_writer_lease_owner, \
@@ -642,6 +770,9 @@ async fn load_observation_by_id(
         return Ok(None);
     };
     let record = invocation.canonical();
+    let owner = observation_owner(&row, &record)?;
+    require_sealed_invocation_observation_access(kernel, authenticated_session, owner, granted)
+        .await?;
     validate_writer_lease_evidence(&row, &record)?;
     let capture = decode_admission_capture(&row, &record)?;
     let reference = invocation_observation_reference(&capture, invocation, &record)?;
@@ -727,6 +858,43 @@ async fn load_observation_by_id(
         ended,
         arguments,
     }))
+}
+
+async fn require_sealed_invocation_observation_access(
+    kernel: &PostgresKernel,
+    authenticated_session: &AuthenticatedSession,
+    owner: PrincipalId,
+    granted: &[InspectPrivilege],
+) -> Result<(), PostgresKernelError> {
+    match authorise_inspect(
+        authenticated_session.principal(),
+        InspectPrivilege::OwnInvocation,
+        Some(owner),
+        granted,
+    ) {
+        InspectDecision::Allowed { .. } => Ok(()),
+        InspectDecision::Denied(reason) => {
+            kernel
+                .append_sealed_invocation_observation_denial_audit(
+                    authenticated_session,
+                    Some(owner),
+                    reason,
+                )
+                .await?;
+            Err(PostgresKernelError::InspectDenied { reason })
+        }
+    }
+}
+
+fn observation_owner(row: &Row, record: &str) -> Result<PrincipalId, PostgresKernelError> {
+    let owner = observation_id(row, record, "owner_principal_id")?;
+    if owner.iter().all(|byte| *byte == 0) {
+        return Err(observation_invariant(
+            record,
+            "retained lifecycle row contains an empty owner principal identity",
+        ));
+    }
+    Ok(PrincipalId::from_bytes(owner))
 }
 
 fn validate_writer_lease_evidence(row: &Row, record: &str) -> Result<(), PostgresKernelError> {
