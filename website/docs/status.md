@@ -48,7 +48,7 @@ release. Environment-gated proofs remain deferred.
 - **Scalar and `STREAM<T>` resources — ACCEPTED (BOUNDED).** Explicit typed resource construction is executable for scalar targets and `STREAM<T>` targets. `TABLE`/`ROWS` resource transport is deferred.
 - **`std.json`/UI/action — ACCEPTED (BOUNDED).** `std.json.Value`, transient UI contracts, and bounded `std.action.call` are accepted. Sequence and parallel actions remain deferred.
 - **V8 Rows/table presentation — ACCEPTED (BOUNDED).** `std.data.Rows` V8 codecs and retained table/CSV presentation are accepted. General Rows/object-value semantics remain deferred.
-- **Bounded populated Inspector slices — ACCEPTED (BOUNDED).** Headless Inspector v1 includes bounded resource, UI, presentation, and runtime projections.
+- **Bounded populated Inspector slices — ACCEPTED (BOUNDED).** ADR 0086 records the headless Inspector v1 resource kind/status, UI identity, final-presentation, and runtime-offer projections captured at the immutable epoch boundary. It does not accept resource request/value or stream identity, a full UI tree, native runtime handles, models, live refresh, gateways, or Studio semantics.
 
 ## Not yet implemented
 
