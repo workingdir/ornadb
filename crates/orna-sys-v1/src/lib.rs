@@ -42,6 +42,12 @@ identity!(RuntimeId);
 identity!(InvocationId);
 identity!(TypeId);
 
+/// Descriptive reference to an invocation. It deliberately has no decoding
+/// path back to an operational handle.
+pub type InvocationRef = InvocationId;
+/// Descriptive reference to a static result type.
+pub type TypeRef = TypeId;
+
 /// Opaque identity for one immutable semantic revision.
 ///
 /// Its 32 bytes are supplied by the authoritative revision producer. This
@@ -253,9 +259,10 @@ pub struct ExecutionBoundary {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvocationHandle<T> {
-    invocation: InvocationId,
-    runtime: RuntimeId,
-    result_type: TypeId,
+    pub invocation: InvocationRef,
+    pub runtime: RuntimeId,
+    pub result_type: TypeRef,
+    pub resumable: bool,
     marker: PhantomData<fn() -> T>,
 }
 impl<T> InvocationHandle<T> {
@@ -293,12 +300,79 @@ pub enum TerminalClass {
     Cancelled,
     Orphaned,
 }
+/// Complete, terminal result returned by `sys.await`.
+///
+/// `value` is present only for `Succeeded`; `failure` is present only for
+/// `Failed` or may explain `Cancelled`/`Orphaned`. `Queued` and `Running` are
+/// deliberately not constructible through this result type.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum InvocationResult<T> {
-    Success(T),
-    OrdinaryFailure(Diagnostic),
-    Cancelled(Option<Diagnostic>),
-    Orphaned(Option<Diagnostic>),
+pub struct InvocationResult<T> {
+    pub invocation: InvocationRef,
+    pub status: InvocationStatus,
+    pub value: Option<T>,
+    pub failure: Option<Diagnostic>,
+    pub started: Option<Instant>,
+    pub ended: Instant,
+    pub duration: Option<Duration>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum InvocationStatus {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Orphaned,
+}
+
+impl InvocationStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Orphaned
+        )
+    }
+}
+
+/// Compatibility name for executor-side terminal completions. The supervisor
+/// replaces its placeholder observation/timing fields before publishing the
+/// result from `sys.await`.
+pub type ExecutionResult<T> = InvocationResult<T>;
+
+#[allow(non_snake_case)]
+impl<T> InvocationResult<T> {
+    fn executor_terminal(
+        status: InvocationStatus,
+        value: Option<T>,
+        failure: Option<Diagnostic>,
+    ) -> Self {
+        Self {
+            invocation: InvocationRef::new("executor-completion"),
+            status,
+            value,
+            failure,
+            started: None,
+            ended: Instant::now(),
+            duration: None,
+        }
+    }
+
+    pub fn Success(value: T) -> Self {
+        Self::executor_terminal(InvocationStatus::Succeeded, Some(value), None)
+    }
+
+    pub fn OrdinaryFailure(failure: Diagnostic) -> Self {
+        Self::executor_terminal(InvocationStatus::Failed, None, Some(failure))
+    }
+
+    pub fn Cancelled(failure: Option<Diagnostic>) -> Self {
+        Self::executor_terminal(InvocationStatus::Cancelled, None, failure)
+    }
+
+    pub fn Orphaned(failure: Option<Diagnostic>) -> Self {
+        Self::executor_terminal(InvocationStatus::Orphaned, None, failure)
+    }
 }
 
 #[derive(Clone)]
@@ -397,7 +471,6 @@ pub enum RetainedInvocationResult {
     OrdinaryFailure(Diagnostic),
     Cancelled(Option<Diagnostic>),
     Orphaned(Option<Diagnostic>),
-    ClassificationOnly(TerminalClass),
 }
 impl RetainedInvocationResult {
     pub fn terminal_class(&self) -> TerminalClass {
@@ -406,7 +479,6 @@ impl RetainedInvocationResult {
             Self::OrdinaryFailure(_) => TerminalClass::Failed,
             Self::Cancelled(_) => TerminalClass::Cancelled,
             Self::Orphaned(_) => TerminalClass::Orphaned,
-            Self::ClassificationOnly(outcome) => outcome.clone(),
         }
     }
 }
@@ -418,17 +490,19 @@ pub enum InvocationState {
 }
 impl<T> InvocationResult<T> {
     pub fn ordinary_failure(&self) -> Option<&Diagnostic> {
-        match self {
-            Self::OrdinaryFailure(diagnostic) => Some(diagnostic),
-            _ => None,
-        }
+        (self.status == InvocationStatus::Failed)
+            .then_some(self.failure.as_ref())
+            .flatten()
     }
     pub fn terminal_class(&self) -> TerminalClass {
-        match self {
-            Self::Success(_) => TerminalClass::Succeeded,
-            Self::OrdinaryFailure(_) => TerminalClass::Failed,
-            Self::Cancelled(_) => TerminalClass::Cancelled,
-            Self::Orphaned(_) => TerminalClass::Orphaned,
+        match self.status {
+            InvocationStatus::Succeeded => TerminalClass::Succeeded,
+            InvocationStatus::Failed => TerminalClass::Failed,
+            InvocationStatus::Cancelled => TerminalClass::Cancelled,
+            InvocationStatus::Orphaned => TerminalClass::Orphaned,
+            InvocationStatus::Queued | InvocationStatus::Running => {
+                panic!("an executor completion must be terminal")
+            }
         }
     }
 }
@@ -466,9 +540,8 @@ impl Runtime {
         self.id = RuntimeId::new(format!("{}@{}", self.id.as_str(), self.generation));
         for invocation in self.invocations.values_mut() {
             if invocation.terminal.is_none() {
-                invocation.terminal = Some(RetainedInvocationResult::ClassificationOnly(
-                    TerminalClass::Orphaned,
-                ));
+                invocation.terminal = Some(RetainedInvocationResult::Orphaned(None));
+                invocation.ended = Some(Instant::now());
             }
         }
         for entry in self.idempotency.values_mut() {
@@ -525,6 +598,8 @@ impl Runtime {
             StoredInvocation {
                 result_type: request.witness.static_type().clone(),
                 terminal: None,
+                started: Instant::now(),
+                ended: None,
                 cancellation_requested: false,
                 cancellation_reason: None,
                 cancellation: CancellationToken::new(),
@@ -574,9 +649,16 @@ impl Runtime {
         handle: &InvocationHandle<T>,
         outcome: TerminalClass,
     ) -> Result<(), AdmissionError> {
+        if matches!(outcome, TerminalClass::Succeeded | TerminalClass::Failed) {
+            return Err(AdmissionError::TerminalInvariant);
+        }
         self.store_terminal(
             handle,
-            RetainedInvocationResult::ClassificationOnly(outcome),
+            match outcome {
+                TerminalClass::Cancelled => RetainedInvocationResult::Cancelled(None),
+                TerminalClass::Orphaned => RetainedInvocationResult::Orphaned(None),
+                TerminalClass::Succeeded | TerminalClass::Failed => unreachable!("validated above"),
+            },
         )
     }
     pub fn retain_terminal<T>(
@@ -601,7 +683,12 @@ impl Runtime {
             return Ok(());
         }
         let result = match result {
-            InvocationResult::Success(value) => {
+            InvocationResult {
+                status: InvocationStatus::Succeeded,
+                value: Some(value),
+                failure: None,
+                ..
+            } => {
                 if value.static_type() != handle.result_type() {
                     self.store_terminal(
                         handle,
@@ -615,15 +702,25 @@ impl Runtime {
                 }
                 RetainedInvocationResult::Success(RetainedValue::new(value))
             }
-            InvocationResult::OrdinaryFailure(diagnostic) => {
-                RetainedInvocationResult::OrdinaryFailure(diagnostic)
-            }
-            InvocationResult::Cancelled(diagnostic) => {
-                RetainedInvocationResult::Cancelled(diagnostic.or(cancellation_reason))
-            }
-            InvocationResult::Orphaned(diagnostic) => {
-                RetainedInvocationResult::Orphaned(diagnostic)
-            }
+            InvocationResult {
+                status: InvocationStatus::Failed,
+                value: None,
+                failure: Some(diagnostic),
+                ..
+            } => RetainedInvocationResult::OrdinaryFailure(diagnostic),
+            InvocationResult {
+                status: InvocationStatus::Cancelled,
+                value: None,
+                failure: diagnostic,
+                ..
+            } => RetainedInvocationResult::Cancelled(diagnostic.or(cancellation_reason)),
+            InvocationResult {
+                status: InvocationStatus::Orphaned,
+                value: None,
+                failure: diagnostic,
+                ..
+            } => RetainedInvocationResult::Orphaned(diagnostic),
+            _ => return Err(AdmissionError::TerminalInvariant),
         };
         self.store_terminal(handle, result)
     }
@@ -644,6 +741,40 @@ impl Runtime {
                 None => InvocationState::Active,
             },
         )
+    }
+    fn terminal_result<T>(
+        &self,
+        handle: &InvocationHandle<T>,
+    ) -> Result<Option<InvocationResult<RetainedValue>>, AdmissionError> {
+        self.check_handle(handle)?;
+        let stored = self.invocations.get(&handle.invocation).expect("checked");
+        let Some(result) = stored.terminal.as_ref() else {
+            return Ok(None);
+        };
+        let ended = stored.ended.expect("terminal results have an end time");
+        let (status, value, failure) = match result {
+            RetainedInvocationResult::Success(value) => {
+                (InvocationStatus::Succeeded, Some(value.clone()), None)
+            }
+            RetainedInvocationResult::OrdinaryFailure(failure) => {
+                (InvocationStatus::Failed, None, Some(failure.clone()))
+            }
+            RetainedInvocationResult::Cancelled(failure) => {
+                (InvocationStatus::Cancelled, None, failure.clone())
+            }
+            RetainedInvocationResult::Orphaned(failure) => {
+                (InvocationStatus::Orphaned, None, failure.clone())
+            }
+        };
+        Ok(Some(InvocationResult {
+            invocation: handle.invocation.clone(),
+            status,
+            value,
+            failure,
+            started: Some(stored.started),
+            ended,
+            duration: ended.checked_duration_since(stored.started),
+        }))
     }
     /// Requests cancellation without converting an active invocation into an
     /// ordinary failure. The target remains active until its owner records a
@@ -731,6 +862,7 @@ impl Runtime {
             result
         };
         stored.terminal = Some(result.clone());
+        stored.ended = Some(Instant::now());
         for entry in self
             .idempotency
             .values_mut()
@@ -755,13 +887,13 @@ impl Runtime {
     }
     pub fn expire<T>(&mut self, handle: &InvocationHandle<T>) -> Result<(), AdmissionError> {
         self.check_handle(handle)?;
-        let Some(outcome) = self
+        let Some(result) = self
             .invocations
             .get(&handle.invocation)
             .expect("checked")
             .terminal
             .as_ref()
-            .map(RetainedInvocationResult::terminal_class)
+            .cloned()
         else {
             return Ok(());
         };
@@ -770,9 +902,7 @@ impl Runtime {
             .values_mut()
             .filter(|entry| entry.invocation == handle.invocation)
         {
-            entry.terminal = Some(RetainedInvocationResult::ClassificationOnly(
-                outcome.clone(),
-            ));
+            entry.terminal = Some(result.clone());
         }
         self.invocations.remove(&handle.invocation);
         Ok(())
@@ -782,6 +912,7 @@ impl Runtime {
             invocation: invocation.clone(),
             runtime: self.id.clone(),
             result_type,
+            resumable: false,
             marker: PhantomData,
         }
     }
@@ -1125,7 +1256,7 @@ impl RuntimeSupervisor {
                     executor.execute_controlled(&boundary, &cancellation)
                 }))
                 .unwrap_or_else(|_| {
-                    InvocationResult::Orphaned(Some(Diagnostic {
+                    ExecutionResult::Orphaned(Some(Diagnostic {
                         code: "sys.invoke.orphaned",
                         message: "invocation executor panicked",
                         fields: BTreeMap::new(),
@@ -1203,7 +1334,7 @@ impl RuntimeSupervisor {
                         executor.execute_controlled(&boundary, &cancellation)
                     }))
                     .unwrap_or_else(|_| {
-                        InvocationResult::Orphaned(Some(Diagnostic {
+                        ExecutionResult::Orphaned(Some(Diagnostic {
                             code: "sys.invoke.orphaned",
                             message: "invocation executor panicked",
                             fields: BTreeMap::new(),
@@ -1265,7 +1396,7 @@ impl RuntimeSupervisor {
         &self,
         handle: &InvocationHandle<T>,
         timeout: Option<Duration>,
-    ) -> Result<RetainedInvocationResult, AwaitError> {
+    ) -> Result<InvocationResult<RetainedValue>, AwaitError> {
         let deadline = timeout.map(|duration| {
             Instant::now()
                 .checked_add(duration)
@@ -1277,13 +1408,13 @@ impl RuntimeSupervisor {
                     .runtime
                     .lock()
                     .map_err(|_| AwaitError::Admission(AdmissionError::RuntimeUnavailable))?;
-                let state = runtime
-                    .invocation_state(handle)
+                let terminal = runtime
+                    .terminal_result(handle)
                     .map_err(AwaitError::Admission)?;
                 drop(runtime);
-                match state {
-                    InvocationState::Active => None,
-                    InvocationState::Terminal(result) => {
+                match terminal {
+                    None => None,
+                    Some(result) => {
                         let worker = self
                             .workers
                             .lock()
@@ -1332,6 +1463,8 @@ impl RuntimeSupervisor {
 struct StoredInvocation {
     result_type: TypeId,
     terminal: Option<RetainedInvocationResult>,
+    started: Instant,
+    ended: Option<Instant>,
     cancellation_requested: bool,
     cancellation_reason: Option<Diagnostic>,
     cancellation: CancellationToken,
@@ -1481,6 +1614,7 @@ pub enum AdmissionError {
     StartMode,
     ForeignRuntime,
     ExpiredHandle,
+    TerminalInvariant,
     RuntimeUnavailable,
 }
 impl AdmissionError {
@@ -1498,6 +1632,7 @@ impl AdmissionError {
             Self::StartMode => "sys.invoke.start_mode",
             Self::ForeignRuntime => "sys.handle.foreign_runtime",
             Self::ExpiredHandle => "sys.handle.expired",
+            Self::TerminalInvariant => "sys.runtime.unavailable",
             Self::RuntimeUnavailable => "sys.runtime.unavailable",
         }
     }
@@ -2080,7 +2215,12 @@ mod tests {
         cancel_thread.join().unwrap();
         assert!(matches!(
             supervisor.await_invocation(&active_handle, Some(Duration::from_secs(1))),
-            Ok(RetainedInvocationResult::Cancelled(Some(_)))
+            Ok(super::InvocationResult {
+                status: InvocationStatus::Cancelled,
+                value: None,
+                failure: Some(_),
+                ..
+            })
         ));
         let run_result = run_thread.join().unwrap();
         assert!(matches!(run_result, Ok(InvocationState::Terminal(_))));
@@ -2405,12 +2545,12 @@ mod tests {
         *open.lock().unwrap() = true;
         wake.notify_one();
 
-        assert_eq!(
-            supervisor.await_invocation(&handle, Some(Duration::from_secs(1))),
-            Ok(RetainedInvocationResult::Cancelled(Some(diagnostic(
-                "cancelled"
-            ))))
-        );
+        let result = supervisor
+            .await_invocation(&handle, Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(result.status, InvocationStatus::Cancelled);
+        assert_eq!(result.value, None);
+        assert_eq!(result.failure, Some(diagnostic("cancelled")));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(supervisor.cancel(&handle, None), Ok(true));
 
@@ -2468,15 +2608,18 @@ mod tests {
         assert!(matches!(
             supervisor.state(&replay),
             Ok(InvocationState::Terminal(
-                RetainedInvocationResult::ClassificationOnly(TerminalClass::Orphaned)
+                RetainedInvocationResult::Orphaned(None)
             ))
         ));
-        assert_eq!(
+        assert!(matches!(
             supervisor.await_invocation(&replay, Some(Duration::ZERO)),
-            Ok(RetainedInvocationResult::ClassificationOnly(
-                TerminalClass::Orphaned
-            ))
-        );
+            Ok(super::InvocationResult {
+                status: InvocationStatus::Orphaned,
+                value: None,
+                failure: None,
+                ..
+            })
+        ));
         assert!(supervisor.restart().is_ok());
         assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
 
@@ -2494,7 +2637,12 @@ mod tests {
             .unwrap();
         assert!(matches!(
             supervisor.await_invocation(&fresh_handle, Some(Duration::from_secs(1))),
-            Ok(RetainedInvocationResult::Success(_))
+            Ok(super::InvocationResult {
+                status: InvocationStatus::Succeeded,
+                value: Some(_),
+                failure: None,
+                ..
+            })
         ));
         assert_eq!(fresh_calls.load(Ordering::SeqCst), 1);
     }
@@ -2517,10 +2665,48 @@ mod tests {
 
         assert!(matches!(
             supervisor.await_invocation(&handle, Some(Duration::from_secs(1))),
-            Ok(RetainedInvocationResult::Success(ref retained))
-                if retained.canonical() == Some(b"answer".as_slice())
+            Ok(super::InvocationResult {
+                status: InvocationStatus::Succeeded,
+                value: Some(ref retained),
+                failure: None,
+                ..
+            }) if retained.canonical() == Some(b"answer".as_slice())
         ));
         assert!(supervisor.workers.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn public_handle_and_await_result_have_the_portable_terminal_shape() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("r"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.mode = InvocationMode::Start;
+        request.transaction = TransactionMode::Separate;
+        let handle = supervisor
+            .start(
+                request,
+                Executor {
+                    calls: 0,
+                    result: InvocationResult::Success(value("Str", "answer")),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(handle.invocation, handle.invocation().clone());
+        assert_eq!(handle.runtime, handle.runtime().clone());
+        assert_eq!(handle.result_type, handle.result_type().clone());
+        assert!(!handle.resumable);
+
+        let result = supervisor
+            .await_invocation(&handle, Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(result.invocation, handle.invocation);
+        assert_eq!(result.status, InvocationStatus::Succeeded);
+        assert!(result.status.is_terminal());
+        assert!(result.value.is_some());
+        assert_eq!(result.failure, None);
+        assert!(result.started.is_some());
+        assert!(result.ended >= result.started.unwrap());
+        assert!(result.duration.is_some());
     }
 
     #[test]
@@ -2546,10 +2732,12 @@ mod tests {
         *open.lock().unwrap() = true;
         wake.notify_one();
 
-        assert_eq!(
-            supervisor.await_invocation(&handle, Some(Duration::from_secs(1))),
-            Ok(RetainedInvocationResult::Cancelled(Some(reason)))
-        );
+        let result = supervisor
+            .await_invocation(&handle, Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(result.status, InvocationStatus::Cancelled);
+        assert_eq!(result.value, None);
+        assert_eq!(result.failure, Some(reason));
     }
     #[test]
     fn supervised_cancellation_token_reaches_running_executor() {
@@ -2568,10 +2756,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(supervisor.cancel(&handle, None), Ok(true));
-        assert_eq!(
-            supervisor.await_invocation(&handle, Some(Duration::from_secs(1))),
-            Ok(RetainedInvocationResult::Cancelled(None))
-        );
+        let result = supervisor
+            .await_invocation(&handle, Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(result.status, InvocationStatus::Cancelled);
+        assert_eq!(result.value, None);
+        assert_eq!(result.failure, None);
         assert!(observed.load(Ordering::SeqCst));
     }
     #[test]
@@ -2652,7 +2842,7 @@ mod tests {
             Admission::Terminal {
                 handle,
                 outcome: TerminalClass::Orphaned,
-                result: RetainedInvocationResult::ClassificationOnly(TerminalClass::Orphaned),
+                result: RetainedInvocationResult::Orphaned(None),
             } => handle,
             _ => panic!("a restarted owner must retain the orphaned operation"),
         };
@@ -2666,7 +2856,7 @@ mod tests {
         assert!(matches!(
             runtime.run(active_request, &mut executor),
             Ok(InvocationState::Terminal(
-                RetainedInvocationResult::ClassificationOnly(TerminalClass::Orphaned)
+                RetainedInvocationResult::Orphaned(None)
             ))
         ));
         assert_eq!(executor.calls, 0);
@@ -2808,7 +2998,7 @@ mod tests {
         ));
     }
     #[test]
-    fn terminal_expiration_retains_classification_without_operational_handle() {
+    fn terminal_expiration_retains_complete_result_without_operational_handle() {
         let mut runtime = Runtime::new(RuntimeId::new("r"));
         let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
         request.idempotency_key = Some("key".into());
@@ -2831,7 +3021,7 @@ mod tests {
             replay,
             Admission::Terminal {
                 outcome: TerminalClass::Succeeded,
-                result: RetainedInvocationResult::ClassificationOnly(TerminalClass::Succeeded),
+                result: RetainedInvocationResult::Success(_),
                 ..
             }
         ));
@@ -2843,7 +3033,7 @@ mod tests {
         assert!(matches!(
             runtime.run(request.clone(), &mut executor),
             Ok(InvocationState::Terminal(
-                RetainedInvocationResult::ClassificationOnly(TerminalClass::Succeeded)
+                RetainedInvocationResult::Success(_)
             ))
         ));
         assert_eq!(executor.calls, 0);
@@ -2856,7 +3046,7 @@ mod tests {
         ));
     }
     #[test]
-    fn terminal_expiration_retains_classification_across_restart() {
+    fn terminal_expiration_retains_complete_result_across_restart() {
         let mut runtime = Runtime::new(RuntimeId::new("r"));
         let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
         request.idempotency_key = Some("key".into());
@@ -2877,7 +3067,7 @@ mod tests {
         assert!(matches!(
             runtime.run(request, &mut executor),
             Ok(InvocationState::Terminal(
-                RetainedInvocationResult::ClassificationOnly(TerminalClass::Succeeded)
+                RetainedInvocationResult::Success(_)
             ))
         ));
         assert_eq!(executor.calls, 0);
@@ -2999,7 +3189,7 @@ mod tests {
             .cancel(&handle, Some(diagnostic("cancelled")))
             .unwrap();
         runtime
-            .classify_terminal(&handle, TerminalClass::Succeeded)
+            .retain_terminal(&handle, InvocationResult::Success(value("Str", "late")))
             .unwrap();
 
         assert_eq!(
@@ -3020,7 +3210,7 @@ mod tests {
         };
 
         runtime
-            .classify_terminal(&handle, TerminalClass::Succeeded)
+            .retain_terminal(&handle, InvocationResult::Success(value("Str", "done")))
             .unwrap();
         runtime
             .classify_terminal(&handle, TerminalClass::Cancelled)
@@ -3030,10 +3220,33 @@ mod tests {
             runtime.admit(first).unwrap(),
             Admission::Terminal {
                 outcome: TerminalClass::Succeeded,
-                result: RetainedInvocationResult::ClassificationOnly(TerminalClass::Succeeded),
+                result: RetainedInvocationResult::Success(_),
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn incomplete_terminal_classification_cannot_publish_success_or_failure() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let handle = match runtime
+            .admit(request(Some(value("Int", "1")), ArgumentMap::default()))
+            .unwrap()
+        {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+
+        for outcome in [TerminalClass::Succeeded, TerminalClass::Failed] {
+            assert_eq!(
+                runtime.classify_terminal(&handle, outcome),
+                Err(AdmissionError::TerminalInvariant)
+            );
+            assert_eq!(
+                runtime.invocation_state(&handle),
+                Ok(InvocationState::Active)
+            );
+        }
     }
     #[test]
     fn retained_terminal_result_is_absorbing() {
