@@ -167,6 +167,12 @@ impl TypedValue {
         out.push(u8::from(self.redacted));
         append(out, &self.canonical);
     }
+
+    fn metadata_digest(&self) -> [u8; 32] {
+        let mut bytes = Vec::new();
+        self.append_identity(&mut bytes);
+        Sha256::digest(bytes).into()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -207,6 +213,42 @@ impl ArgumentMap {
             value.append_identity(out);
         }
     }
+
+    /// Returns the retained, redaction-safe metadata for the bound arguments.
+    ///
+    /// `ArgumentMap` is backed by a `BTreeMap`, so positions follow the same
+    /// canonical name order used for invocation identity hashing. Public
+    /// values retain their canonical bytes; protected values retain only a
+    /// digest and never expose their payload.
+    fn metadata(&self) -> Vec<InvocationArgumentMetadata> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(position, (name, value))| InvocationArgumentMetadata {
+                name: name.clone(),
+                position,
+                static_type: value.static_type.clone(),
+                value: (!value.is_redacted()).then(|| value.canonical.clone()),
+                digest: value.is_redacted().then(|| value.metadata_digest()),
+                redacted: value.is_redacted(),
+            })
+            .collect()
+    }
+}
+
+/// Safe metadata retained for one admitted invocation argument.
+///
+/// This is a local observation helper, not a portable `sys.InvocationArgument`
+/// row: it deliberately carries no synthesized row reference. Protected
+/// payloads are represented by `digest` and are never returned in `value`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct InvocationArgumentMetadata {
+    name: String,
+    position: usize,
+    static_type: TypeId,
+    value: Option<Vec<u8>>,
+    digest: Option<[u8; 32]>,
+    redacted: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -658,6 +700,7 @@ impl Runtime {
                 None => Admission::Active { handle },
             });
         }
+        let metadata = bound.metadata();
         let next_invocation = self
             .next_invocation
             .checked_add(1)
@@ -677,6 +720,7 @@ impl Runtime {
             invocation.clone(),
             StoredInvocation {
                 result_type: request.witness.static_type().clone(),
+                arguments: metadata,
                 terminal: None,
                 started: Instant::now(),
                 ended: None,
@@ -824,6 +868,7 @@ impl Runtime {
             },
         )
     }
+
     fn terminal_result<T>(
         &self,
         handle: &InvocationHandle<T>,
@@ -1550,6 +1595,7 @@ impl RuntimeSupervisor {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StoredInvocation {
     result_type: TypeId,
+    arguments: Vec<InvocationArgumentMetadata>,
     terminal: Option<RetainedInvocationResult>,
     started: Instant,
     ended: Option<Instant>,
@@ -2037,6 +2083,66 @@ mod tests {
             Err(AdmissionError::IdempotencyMismatch)
         ));
     }
+
+    #[test]
+    fn retained_argument_metadata_is_ordered_and_redaction_safe() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let mut request = request(
+            None,
+            args(vec![
+                Argument {
+                    name: "b".into(),
+                    value: TypedValue::protected(ty("Str"), "super-secret"),
+                },
+                Argument {
+                    name: "a".into(),
+                    value: value("Int", "42"),
+                },
+            ]),
+        );
+        request.function.parameters = vec![
+            Parameter {
+                name: "b".into(),
+                static_type: ty("Str"),
+                default: None,
+            },
+            Parameter {
+                name: "a".into(),
+                static_type: ty("Int"),
+                default: None,
+            },
+        ];
+
+        let handle = match runtime.admit(request).unwrap() {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!("a new request must create one retained observation"),
+        };
+        let metadata = runtime
+            .invocations
+            .get(handle.invocation.id())
+            .expect("admitted invocation row")
+            .arguments
+            .clone();
+
+        assert_eq!(metadata.len(), 2);
+        assert_eq!(metadata[0].name, "a");
+        assert_eq!(metadata[0].position, 0);
+        assert_eq!(metadata[0].static_type, ty("Int"));
+        assert_eq!(metadata[0].value, Some(b"42".to_vec()));
+        assert_eq!(metadata[0].digest, None);
+        assert!(!metadata[0].redacted);
+
+        assert_eq!(metadata[1].name, "b");
+        assert_eq!(metadata[1].position, 1);
+        assert_eq!(metadata[1].static_type, ty("Str"));
+        assert_eq!(metadata[1].value, None);
+        assert!(metadata[1].digest.is_some());
+        assert!(metadata[1].redacted);
+
+        let rendered = format!("{metadata:?}");
+        assert!(!rendered.contains("super-secret"));
+    }
+
     #[test]
     fn rejects_before_effect_boundary() {
         let map = args(vec![Argument {
