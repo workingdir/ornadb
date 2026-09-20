@@ -910,6 +910,93 @@ fn report_canonicalizes_equivalent_claim_order_for_reproducibility() {
     );
 }
 
+#[test]
+fn reviewed_evidence_bindings_canonicalize_equivalent_input_order() {
+    let corpus = Corpus::load_default().expect("reference corpus loads");
+    let harness = Harness::new(corpus.clone());
+    let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
+    let report = harness.run(&mut adapter);
+
+    let engine_bindings = vec![
+        FixtureStageBinding {
+            requirement_id: "ORNA-SOURCE-002".into(),
+            fixture_id: "valid/minimal-root.orna".into(),
+            fixture_path: "examples/valid/minimal-root.orna".into(),
+            stage: Stage::Resolve,
+            implementation_ref: "crates/orna-conformance-v1/src/lib.rs::Harness::engine_witnesses".into(),
+            test_ref: "crates/orna-conformance-v1/tests/reference_corpus.rs::reviewed_evidence_bindings_canonicalize_equivalent_input_order".into(),
+        },
+        FixtureStageBinding {
+            requirement_id: "ORNA-SOURCE-001".into(),
+            fixture_id: "valid/minimal-root.orna".into(),
+            fixture_path: "examples/valid/minimal-root.orna".into(),
+            stage: Stage::Parse,
+            implementation_ref: "crates/orna-conformance-v1/src/lib.rs::Harness::engine_witnesses".into(),
+            test_ref: "crates/orna-conformance-v1/tests/reference_corpus.rs::reviewed_evidence_bindings_canonicalize_equivalent_input_order".into(),
+        },
+    ];
+    let first_engine = harness
+        .engine_witnesses(&report, &engine_bindings)
+        .expect("approved engine witness bindings are accepted");
+    let mut reversed_engine = engine_bindings;
+    reversed_engine.reverse();
+    let second_engine = harness
+        .engine_witnesses(&report, &reversed_engine)
+        .expect("reordered engine witness bindings are accepted");
+    assert_eq!(
+        serde_json::to_vec(&first_engine).expect("engine witnesses serialize"),
+        serde_json::to_vec(&second_engine).expect("engine witnesses serialize"),
+    );
+
+    let mut production_bindings = date_range_implementation_bindings(&corpus.publication_digests);
+    let first_production = harness
+        .implementation_evidence_overlay(&production_bindings)
+        .expect("approved production evidence is accepted");
+    production_bindings.reverse();
+    let second_production = harness
+        .implementation_evidence_overlay(&production_bindings)
+        .expect("reordered production evidence is accepted");
+    assert_eq!(
+        serde_json::to_vec(&first_production).expect("production evidence serializes"),
+        serde_json::to_vec(&second_production).expect("production evidence serializes"),
+    );
+
+    let declared_harness = Harness::new(corpus).with_claim(ImplementationClaim {
+        implementation_id: "test-runner".into(),
+        profile: "bounded-expression-runtime".into(),
+        command: "test-runner".into(),
+        environment: std::collections::BTreeMap::new(),
+        executed_scenario_contracts: vec!["PIPE-001".into(), "PIPE-002".into()],
+    });
+    let declared_report = declared_harness.run(&mut adapter);
+    let scenario_bindings = vec![
+        ScenarioExecutionBinding {
+            requirement_id: "ORNA-PIPE-002".into(),
+            scenario_id: "PIPE-002".into(),
+            implementation_ref: "crates/orna-conformance-v1/src/main.rs::pipeline_precedence_contract".into(),
+            test_ref: "crates/orna-conformance-v1/tests/reference_corpus.rs::reviewed_evidence_bindings_canonicalize_equivalent_input_order".into(),
+        },
+        ScenarioExecutionBinding {
+            requirement_id: "ORNA-PIPE-001".into(),
+            scenario_id: "PIPE-001".into(),
+            implementation_ref: "crates/orna-conformance-v1/src/main.rs::pipeline_insertion_contract".into(),
+            test_ref: "crates/orna-conformance-v1/tests/reference_corpus.rs::reviewed_evidence_bindings_canonicalize_equivalent_input_order".into(),
+        },
+    ];
+    let first_scenarios = declared_harness
+        .scenario_execution_witnesses(&declared_report, &scenario_bindings)
+        .expect("approved scenario witnesses are accepted");
+    let mut reversed_scenarios = scenario_bindings;
+    reversed_scenarios.reverse();
+    let second_scenarios = declared_harness
+        .scenario_execution_witnesses(&declared_report, &reversed_scenarios)
+        .expect("reordered scenario witnesses are accepted");
+    assert_eq!(
+        serde_json::to_vec(&first_scenarios).expect("scenario witnesses serialize"),
+        serde_json::to_vec(&second_scenarios).expect("scenario witnesses serialize"),
+    );
+}
+
 struct FailedScenario;
 impl ConformanceAdapter for FailedScenario {
     type Diagnostic = serde_json::Value;
