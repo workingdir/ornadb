@@ -43,7 +43,6 @@ issuance, or operating-system isolation.
 The following source and contract slices are accepted, but do not imply a public
 release. Environment-gated proofs remain deferred.
 
-- **Qt v1 runtime/provider/package — ACCEPTED (BOUNDED).** The first production non-TTY provider is `orna-runtime-qt` on Linux x86_64: Qt 6 Widgets, ABI v1.0, and caller-pumps. It is a separately installed package with a fixed path and Debian repository authentication; the local `orna` client selects an installed offer. A test-only headless fixture shares the ABI v1 semantic contract.
 - **TTY/presenter/output — ACCEPTED (BOUNDED).** `orna-runtime-tty` is the accepted terminal renderer. Typed presenter planning and optional `--output` are accepted; TTY is a runtime, while JSON, CSV, and XML are encoded outputs.
 - **Scalar and `STREAM<T>` resources — ACCEPTED (BOUNDED).** Explicit typed resource construction is executable for scalar targets and `STREAM<T>` targets. `TABLE`/`ROWS` resource transport is deferred.
 - **`std.json`/UI/action — ACCEPTED (BOUNDED).** `std.json.Value`, transient UI contracts, and bounded `std.action.call` are accepted. Sequence and parallel actions remain deferred.
@@ -55,12 +54,15 @@ release. Environment-gated proofs remain deferred.
 | Area | Item | Status |
 |---|---|---|
 | Protocol | Public protocol, authorisation, and exposure slices | DEFERRED |
+| CLI | Remote database and profile selection, `--output-file`, and output/trace configuration beyond accepted local invocation paths | DEFERRED |
 | Types | Enum, record, and opaque value types beyond standard primitives; general `VALUE` semantics | DEFERRED |
 | CLIENT VM | Production sandbox, concrete filesystem/network/secret host capabilities, host-effect broker, and process isolation | DEFERRED |
 | Security | Protected audit path and production/integration audit proof for CLIENT host effects | DEFERRED |
+| Security | Credential/provider/secret enrollment and verification, durable-session lifecycle, role selection, effective-principal transitions, delegation, federated principals, and remote gateway authentication | DEFERRED (ADR 0090 local-session boundary) |
 | Trust | Signed artifact identity/provenance, keyring, and cryptographic attestation | DEFERRED |
 | Gateways | Reflective JSON-RPC/MCP gateway implementation and exposure dispatch | DEFERRED |
-| Launch | `std.launch` and launch/application execution | DEFERRED |
+| Launch | `std.launch` and launch/application execution | DEFERRED — canonical 1.0 defines entry execution through `orna run` only; it defines no `std.launch` identity, metadata, or lifecycle |
+| Runtime | Native graphical runtime/provider packaging, fixed host paths, and installed-runtime selection | DEFERRED |
 | Data | Virtual models and `TABLE`/`ROWS` resource transport | DEFERRED |
 | Dogfooding | Full Studio and security/DBA UI | DEFERRED |
 | Proof | Environment-gated Compose, installed-runtime, and clean-host proofs | DEFERRED |
@@ -76,10 +78,28 @@ released and remain outside the accepted bounded slices:
 - signed identity-bound artifact attestation and provenance;
 - process isolation for any future untrusted native, JIT, FFI, or plugin surface;
 - reflective JSON-RPC/MCP gateways and `std.launch`;
+- remote CLI database/profile resolution, `--output-file`, and the remaining output/trace surface beyond accepted local invocation paths;
 - virtual `TableModel`/`TreeModel` models and `TABLE`/`ROWS` resource transport;
 - general `VALUE` and object-value semantics beyond the accepted Rows contract;
-- presenter registry/ranking and runtime ABI/toolkit extensions beyond Qt v1;
-- module and package distribution beyond the fixed Qt runtime package.
+- presenter registry/ranking and native runtime ABI/toolkit/package selection;
+- module and package distribution.
+
+### Reflective gateway boundary
+
+The canonical Orna 1.0.0 system chapter defines reflective invocation only as
+`sys.invoke` and `sys.start`; it is not a public gateway contract. Its serving
+and live-protocol chapters define `orna serve`, the trusted deployment
+perimeter, and the `orna.present.v1` session protocol. They do not define
+public `Endpoint`, `Exposure`, or `Service` identities; `std.protocol` or
+`std.service` catalogue entries; or JSON-RPC/MCP framing, authentication,
+conversion, redaction, and lifecycle rules.
+
+Accordingly, a JSON-RPC or MCP adapter cannot be derived from reflective
+invocation, the local serving endpoints, or examples. That surface remains
+deferred until an accepted contract names its identities, authority model,
+wire/error mapping, redaction rules, lifecycle, and executable proof. The
+source of truth for this boundary is the canonical Orna 1.0.0 handbook:
+chapters 15 (system), 28 (serving), and 30 (live protocol).
 
 ## Locked design decisions
 
@@ -93,14 +113,14 @@ released and remain outside the accepted bounded slices:
 | UI entry | `std.ui.window(title TEXT, content std.ui.UI)` as `std.ui.window@1` |
 | JSON value | Immutable transient `std.json.Value` |
 | Invocation | Root calls go through inspectable `sys.invoke` |
-| Runtime | Local `orna` selects an installed runtime offer; the first production non-TTY provider is bounded `orna-runtime-qt` |
+| Runtime | `orna-runtime-tty` is the accepted terminal renderer; native graphical runtime selection is deferred |
 | Identity | `sys.security.session_principal()` and related functions; no `CURRENT_USER` keyword |
 | State | Durable `USER` state keyed by authenticated principal |
 | Resources | Typed `std.data.Resource<T>` and `std.data.StreamResource<T>` with explicit `AWAIT` |
 | Actions | Executable v1 action is `std.action.call`; sequence and parallel remain deferred |
 | Inspector | An ordinary CLIENT function using public introspection APIs |
 | Security | Principals are first-class catalog data with kernel enforcement |
-| Runtimes | Explicitly installed client libraries; server never selects native code |
+| Runtimes | Server never selects native code; native client-library installation policy is deferred |
 
 ## Open questions
 
