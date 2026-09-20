@@ -1,6 +1,9 @@
-# Accepted API demos. Sources remain in the canonical test fixture directory.
+# Implementation-scoped accepted API demos. Sources remain in the dogfood
+# fixture directory, not the Orna 1.0.0 canonical conformance corpus
+# (`examples/valid`, `examples/invalid`, and `examples/reference`).
 #
-# `mode = "source-check"` invokes the public offline source checker.
+# `mode = "source-check"` invokes the public offline source checker; it proves
+# parse, resolution, and type checking, not runtime behaviour or conformance.
 # `mode = "offline-test"` invokes the named focused offline proof.
 # `mode = "compose-only"` is listed for discoverability but not run locally.
 
