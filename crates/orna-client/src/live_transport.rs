@@ -932,7 +932,7 @@ where
         })
     }
 
-    async fn reject_inbound<T>(
+    async fn reject_with_close<T>(
         &mut self,
         code: CloseCode,
         error: LiveTransportError,
@@ -986,7 +986,7 @@ where
                         let bytes = bytes.to_vec();
                         if bytes.len() > bound {
                             return self
-                                .reject_inbound(
+                                .reject_with_close(
                                     CloseCode::Size,
                                     LiveTransportError::Protocol(orna_protocol_v1::Error::Limit),
                                 )
@@ -996,7 +996,7 @@ where
                             Ok(envelope) => envelope,
                             Err(error) => {
                                 return self
-                                    .reject_inbound(
+                                    .reject_with_close(
                                         CloseCode::Protocol,
                                         LiveTransportError::Protocol(error),
                                     )
@@ -1005,7 +1005,7 @@ where
                         };
                         if !Self::is_host_message(&envelope.message) {
                             return self
-                                .reject_inbound(
+                                .reject_with_close(
                                     CloseCode::Protocol,
                                     LiveTransportError::Protocol(
                                         orna_protocol_v1::Error::InvalidMessage,
@@ -1030,7 +1030,7 @@ where
                     }
                     Some(Ok(Message::Text(_))) => {
                         return self
-                            .reject_inbound(
+                            .reject_with_close(
                                 CloseCode::Unsupported,
                                 LiveTransportError::Response("text WebSocket message rejected"),
                             )
@@ -1047,7 +1047,7 @@ where
                             )
                         ) {
                             return self
-                                .reject_inbound(
+                                .reject_with_close(
                                     CloseCode::Size,
                                     LiveTransportError::Protocol(orna_protocol_v1::Error::Limit),
                                 )
@@ -1069,7 +1069,12 @@ where
                 return Err(Self::closed_error());
             }
             if bytes.len() > self.max_message_bytes {
-                return Err(LiveTransportError::Protocol(orna_protocol_v1::Error::Limit));
+                return self
+                    .reject_with_close(
+                        CloseCode::Size,
+                        LiveTransportError::Protocol(orna_protocol_v1::Error::Limit),
+                    )
+                    .await;
             }
             self.socket
                 .send(Message::Binary(bytes.into()))
