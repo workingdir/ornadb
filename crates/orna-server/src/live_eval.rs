@@ -27,7 +27,8 @@ use orna_foundation_v1::{
 use orna_live_v1::{Error, LiveApplication, Result};
 use orna_project_v1::ProjectLoader;
 use orna_protocol_v1::{
-    DatabaseContext, Envelope, Limits as ProtocolLimits, Message, PresentationContext, ResultStatus,
+    DatabaseContext, Envelope, Limits as ProtocolLimits, Message, PresentNode, PresentationContext,
+    ResultStatus,
 };
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
@@ -43,6 +44,7 @@ struct SessionState {
     repl: AdmittedReplSession,
     snapshot: CanonicalSnapshot,
     terminal: BTreeMap<[u8; 16], ([u8; 32], Envelope)>,
+    watches: BTreeMap<[u8; 16], String>,
 }
 
 /// The immutable durable CWD pin captured for one admitted operation.
@@ -281,6 +283,7 @@ impl PureEvalApplication {
                     repl,
                     snapshot: snapshot.clone(),
                     terminal: BTreeMap::new(),
+                    watches: BTreeMap::new(),
                 },
             );
         }
@@ -373,26 +376,6 @@ impl PureEvalApplication {
             ),
         ]))
     }
-
-    /// Watch remains outside this pure Eval adapter, but its rejection is a
-    /// terminal, request-correlated host response rather than an uncorrelated
-    /// transport error. This lets the durable transport retain and replay the
-    /// exact rejection without allocating a watch or evaluator session.
-    fn watch_failure(&self, request: [u8; 16]) -> Result<Envelope> {
-        let diagnostic = diagnostic_raw(
-            diagnostic_for_code("live.unsupported_operation")?.with_reference(request),
-        )?;
-        decode_envelope(OvbRaw::Map(vec![
-            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
-            (OvbRaw::Int(1.into()), OvbRaw::Int(19.into())),
-            (OvbRaw::Int(2.into()), OvbRaw::Bytes(request.to_vec())),
-            (OvbRaw::Int(3.into()), OvbRaw::Null),
-            (
-                OvbRaw::Int(4.into()),
-                OvbRaw::Map(vec![(OvbRaw::Int(0.into()), diagnostic)]),
-            ),
-        ]))
-    }
 }
 
 impl LiveApplication for PureEvalApplication {
@@ -458,15 +441,152 @@ impl LiveApplication for PureEvalApplication {
         })
     }
 
-    fn watch(&mut self, _: [u8; 16], request: [u8; 16], message: &Message) -> Result<Envelope> {
-        if !matches!(message, Message::Watch { .. }) {
+    fn watch(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &Message,
+    ) -> Result<Envelope> {
+        let Message::Watch { .. } = message else {
             return Err(Error::InvalidMessage);
-        }
-        self.watch_failure(request)
+        };
+        futures::executor::block_on(self.watch_with_snapshot(session, request, message))
+    }
+
+    fn resync(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        watch: [u8; 16],
+        _: &Message,
+    ) -> Result<Envelope> {
+        futures::executor::block_on(self.resync_snapshot(session, request, watch))
     }
 }
 
 impl PureEvalApplication {
+    async fn watch_with_snapshot(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &Message,
+    ) -> Result<Envelope> {
+        let Message::Watch {
+            source,
+            database,
+            presentation,
+            ..
+        } = message
+        else {
+            return Err(Error::InvalidMessage);
+        };
+        if let Err(code) = self.session(session, database, presentation).await {
+            return self
+                .watch_diagnostic(request, diagnostic_for_code(code)?.with_reference(request));
+        }
+        let (value, snapshot) = match self.preview_session(session, source).await {
+            Ok(result) => result,
+            Err(error) => {
+                return self.watch_diagnostic(request, (*error).with_reference(request));
+            }
+        };
+        let watch = self.allocate_watch(session, source.clone())?;
+        let present = PresentNode::from_value(value).map_err(|_| Error::ApplicationRejected)?;
+        Ok(Envelope {
+            request: Some(request),
+            watch: Some(watch),
+            message: Message::Snapshot {
+                revision: 0,
+                present,
+                snapshot,
+            },
+            extensions: BTreeMap::new(),
+        })
+    }
+
+    async fn resync_snapshot(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        watch: [u8; 16],
+    ) -> Result<Envelope> {
+        let session_id = SessionId::new(session);
+        let source = self
+            .sessions
+            .get(&session_id)
+            .and_then(|state| state.watches.get(&watch))
+            .cloned()
+            .ok_or(Error::Denied)?;
+        let (value, snapshot) = match self.preview_session(session, &source).await {
+            Ok(result) => result,
+            Err(error) => {
+                return self.watch_diagnostic(request, (*error).with_reference(request));
+            }
+        };
+        let present = PresentNode::from_value(value).map_err(|_| Error::ApplicationRejected)?;
+        Ok(Envelope {
+            request: Some(request),
+            watch: Some(watch),
+            message: Message::Snapshot {
+                revision: 0,
+                present,
+                snapshot,
+            },
+            extensions: BTreeMap::new(),
+        })
+    }
+
+    async fn preview_session(
+        &mut self,
+        session: [u8; 16],
+        source: &str,
+    ) -> std::result::Result<
+        (orna_foundation_v1::CanonicalValue, CanonicalSnapshot),
+        Box<FoundationDiagnostic>,
+    > {
+        let session_id = SessionId::new(session);
+        let state = self.sessions.get_mut(&session_id).ok_or_else(|| {
+            diagnostic_for_code("wire.session_expired").expect("stable diagnostic")
+        })?;
+        let snapshot = state.snapshot.clone();
+        let value = state
+            .repl
+            .preview(source)
+            .map_err(|error| Box::new(error.diagnostic().clone()))?;
+        Ok((value, snapshot))
+    }
+
+    fn watch_diagnostic(
+        &self,
+        request: [u8; 16],
+        diagnostic: FoundationDiagnostic,
+    ) -> Result<Envelope> {
+        let diagnostic = diagnostic_raw(diagnostic)?;
+        decode_envelope(OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (OvbRaw::Int(1.into()), OvbRaw::Int(19.into())),
+            (OvbRaw::Int(2.into()), OvbRaw::Bytes(request.to_vec())),
+            (OvbRaw::Int(3.into()), OvbRaw::Null),
+            (
+                OvbRaw::Int(4.into()),
+                OvbRaw::Map(vec![(OvbRaw::Int(0.into()), diagnostic)]),
+            ),
+        ]))
+    }
+
+    fn allocate_watch(&mut self, session: [u8; 16], source: String) -> Result<[u8; 16]> {
+        let session_id = SessionId::new(session);
+        let state = self.sessions.get_mut(&session_id).ok_or(Error::Denied)?;
+        for _ in 0..8 {
+            let mut watch = [0; 16];
+            getrandom::fill(&mut watch).map_err(|_| Error::RuntimeUnavailable)?;
+            if watch != [0; 16] && !state.watches.contains_key(&watch) {
+                state.watches.insert(watch, source);
+                return Ok(watch);
+            }
+        }
+        Err(Error::Limit)
+    }
     async fn eval_with_cancellation(
         &mut self,
         session: [u8; 16],
@@ -770,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn watch_is_explicitly_unsupported_without_creating_session_state() {
+    fn watch_evaluates_a_read_only_snapshot_and_resyncs() {
         let (mut application, expiries, database_id, _, _, _) = application();
         let session = [6; 16];
         expiries.borrow_mut().insert(SessionId::new(session), 100);
@@ -786,13 +906,26 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(matches!(response.message, Message::Diagnostic { .. }));
-        assert_eq!(
-            response_diagnostic(&response).code(),
-            "live.unsupported_operation"
-        );
+        let watch = response.watch.expect("watch response must bind a watch");
+        assert!(matches!(
+            response.message,
+            Message::Snapshot { revision: 0, .. }
+        ));
         let session_id = SessionId::new(session);
-        assert!(!application.sessions.contains_key(&session_id));
+        assert!(
+            application
+                .sessions
+                .get(&session_id)
+                .is_some_and(|state| state.watches.contains_key(&watch))
+        );
+        let resync = application
+            .resync(session, [8; 16], watch, &Message::Resync)
+            .unwrap();
+        assert_eq!(resync.watch, Some(watch));
+        assert!(matches!(
+            resync.message,
+            Message::Snapshot { revision: 0, .. }
+        ));
     }
 
     #[test]
