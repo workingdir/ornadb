@@ -75,6 +75,13 @@ pub(crate) async fn capture_inspect_snapshot_in_transaction(
     let payload = encode_epoch_payload(active, registry, &epoch)?;
     let summary_bytes = encode_constructed_value(active, registry, &RuntimeValue::Bytes(payload))
         .map_err(PostgresKernelError::InspectValueCodec)?;
+    if summary_bytes.is_empty() || summary_bytes.len() > MAX_INSPECT_EVIDENCE_BYTES {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: INSPECT_SNAPSHOT_RELATION,
+            record: epoch_id.canonical(),
+            rule: "inspection summary must be non-empty and fit the durable evidence bound",
+        });
+    }
     let invocation_id = invocation.to_bytes().to_vec();
     let observer_context = epoch.observer_context();
     let observer_root =
@@ -260,6 +267,13 @@ async fn persist_trace_row(
     observer_invocation: Option<InvocationId>,
     recorded_at: SystemTime,
 ) -> Result<(), PostgresKernelError> {
+    if payload.is_empty() || payload.len() > MAX_INSPECT_EVIDENCE_BYTES {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: INSPECT_TRACE_RELATION,
+            record: invocation.canonical(),
+            rule: "trace payload must be non-empty and fit the durable evidence bound",
+        });
+    }
     let sequence = i64::try_from(sequence).map_err(|_| PostgresKernelError::DurableInvariant {
         relation: INSPECT_TRACE_RELATION,
         record: invocation.canonical(),
