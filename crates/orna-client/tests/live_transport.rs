@@ -312,3 +312,36 @@ fn fragmented_oversize_input_closes_with_1009() {
         ))
     ));
 }
+
+#[test]
+fn outbound_oversize_input_closes_with_1009() {
+    let limits = Limits::default();
+    let (client_io, server_io) = duplex(4096);
+    let client = block_on(WebSocketStream::from_raw_socket(
+        client_io,
+        Role::Client,
+        None,
+    ));
+    let mut server = block_on(WebSocketStream::from_raw_socket(
+        server_io,
+        Role::Server,
+        None,
+    ));
+    let mut transport =
+        AuthenticatedWebSocketTransport::from_authenticated_socket(client, limits).unwrap();
+
+    assert!(matches!(
+        block_on(transport.send_binary(vec![0; limits.max_message_bytes + 1])),
+        Err(LiveTransportError::Protocol(orna_protocol_v1::Error::Limit))
+    ));
+    assert_eq!(
+        close_code(block_on(server.next()).unwrap().unwrap()),
+        CloseCode::Size
+    );
+    assert!(matches!(
+        block_on(transport.send_binary(vec![1])),
+        Err(LiveTransportError::WebSocket(
+            tokio_tungstenite::tungstenite::Error::ConnectionClosed
+        ))
+    ));
+}
