@@ -3057,6 +3057,7 @@ const fn supports_record_value_scalar(scalar: StandardScalar) -> bool {
             | StandardScalar::Float
             | StandardScalar::CharacterLargeObject
             | StandardScalar::BinaryLargeObject
+            | StandardScalar::Uuid
     )
 }
 

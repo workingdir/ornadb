@@ -1845,7 +1845,8 @@ fn supported_semantic_type<T>(semantic_type: SemanticType<T>) -> bool {
             | StandardScalar::BigInt
             | StandardScalar::Float
             | StandardScalar::CharacterLargeObject
-            | StandardScalar::BinaryLargeObject,
+            | StandardScalar::BinaryLargeObject
+            | StandardScalar::Uuid,
         )
         | SemanticType::Reference { .. } => true,
         SemanticType::Scalar(_) | SemanticType::Named(_) => false,
