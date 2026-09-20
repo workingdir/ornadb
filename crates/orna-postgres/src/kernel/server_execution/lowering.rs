@@ -347,7 +347,7 @@ pub(super) fn variable_payload_limit(
     Ok(available / variable_count)
 }
 
-fn maximum_fixed_payload_len(
+pub(super) fn maximum_fixed_payload_len(
     catalogue: &CatalogueSnapshot,
     context: &CatalogueHashContext,
     resolved_type: ResolvedType,
@@ -363,6 +363,7 @@ fn maximum_fixed_payload_len(
         {
             8
         }
+        runtime if runtime.compatibility_scalar() == Some(StandardScalar::Uuid) => 16,
         ResolvedRuntimeType::Reference(_) => 16,
         ResolvedRuntimeType::CatalogueEnum(_) | ResolvedRuntimeType::Record(_) => 0,
         ResolvedRuntimeType::LegacyScalar(_)
