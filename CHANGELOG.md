@@ -143,6 +143,10 @@ from the implementation inventory:
   inventory, support period, SLA, backup/DR policy, or recovery guarantee.
   CI retention artifacts and local build outputs are not production
   distribution authorities.
+- The canonical live `sys.Session` relation, `sys.SessionRef`,
+  `sys.rt.sessions`, and `sys.RuntimeView.sessions` projection. Commit
+  `78301153` pins that schema in `sys_api_contract`, but it does not supply
+  authoritative session-field provenance or runtime projection evidence.
 - An in-place upgrade from a 0.x or development engine. The first-release
   decision defines empty accepted predecessor/forward-edge sets; no package
   predecessor migration is implemented. There is no `orna server upgrade`

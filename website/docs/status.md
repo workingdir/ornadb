@@ -62,6 +62,7 @@ release. Environment-gated proofs remain deferred.
 | Trust | Signed artifact identity/provenance, keyring, and cryptographic attestation | DEFERRED |
 | Gateways | Reflective JSON-RPC/MCP gateway implementation and exposure dispatch | DEFERRED |
 | Launch | `std.launch` and launch/application execution | DEFERRED — canonical 1.0 defines entry execution through `orna run` only; it defines no `std.launch` identity, metadata, or lifecycle |
+| System runtime | Live read-only `sys.Session`/`sys.SessionRef` projection through `sys.rt.sessions` and `sys.RuntimeView.sessions` | BLOCKED — `api/sys.json` is schema-pinned, but authoritative session-field provenance and the epoch/session-fenced runtime projection are not implemented |
 | Runtime | Native graphical runtime/provider packaging, fixed host paths, and installed-runtime selection | DEFERRED |
 | Data | Virtual models and `TABLE`/`ROWS` resource transport | DEFERRED |
 | Dogfooding | Full Studio and security/DBA UI | DEFERRED |
