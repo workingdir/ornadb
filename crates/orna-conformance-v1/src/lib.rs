@@ -2098,8 +2098,9 @@ impl Harness {
             .count();
         // The claim is metadata supplied by the runner, not evidence.  Only
         // scenarios that actually passed through this adapter may appear as
-        // executed contracts in the published report.  Preserve the caller's
-        // order while removing unknown, duplicate, skipped, and failed claims.
+        // executed contracts in the published report.  Derive their order
+        // from the frozen corpus rather than caller input so equivalent
+        // claims produce byte-for-byte reproducible reports.
         let passed_scenarios = report
             .scenarios
             .iter()
@@ -2109,15 +2110,19 @@ impl Harness {
             })
             .map(|scenario| scenario.scenario.as_str())
             .collect::<BTreeSet<_>>();
-        let mut seen = BTreeSet::new();
-        let executed = report
+        let claimed_scenarios = report
             .implementation_claim
             .executed_scenario_contracts
             .iter()
             .filter(|scenario| passed_scenarios.contains(scenario.as_str()))
-            .filter(|scenario| seen.insert(scenario.as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let executed = report
+            .scenarios
+            .iter()
+            .filter(|scenario| claimed_scenarios.contains(scenario.scenario.as_str()))
+            .map(|scenario| scenario.scenario.clone())
+            .collect();
         report.implementation_claim.executed_scenario_contracts = executed;
         report
     }
