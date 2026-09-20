@@ -599,7 +599,7 @@ fn rejects_an_unused_delete_parameter_outside_the_runtime_types() {
     assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
     assert_eq!(
         diagnostic.message(),
-        "DELETE does not yet support the type of parameter unused; supported types are BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, and REF"
+        "DELETE does not yet support the type of parameter unused; supported types are BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, UUID, and REF"
     );
     let start = source.find("unused DECIMAL").unwrap();
     assert_eq!(diagnostic.location().span().start(), start);

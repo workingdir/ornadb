@@ -496,7 +496,7 @@ fn record_constructor_rejects_a_record_typed_parameter_for_a_nested_child() {
     assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
     assert_eq!(
         diagnostic.message(),
-        "INSERT does not yet support the type of parameter p_inner; supported types are BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, and REF"
+        "INSERT does not yet support the type of parameter p_inner; supported types are BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, UUID, and REF"
     );
     let value_start = source.find("p_inner").unwrap();
     assert_eq!(diagnostic.location().span().start(), value_start);
