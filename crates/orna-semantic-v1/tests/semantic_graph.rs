@@ -1777,6 +1777,31 @@ fn module_assertion_dependencies_count_resolved_tables_not_uppercase_values() {
 }
 
 #[test]
+fn module_assertion_dependencies_follow_resolved_lowercase_table_names() {
+    let result = analyze(&[ModuleInput::new(
+        "lowercase-tables.orna",
+        r#"
+            pub table users(id: Int) { name: Str, }
+            pub table accounts(id: Int) { user_id: Int, }
+            assert every(accounts, account =>
+                exists(users, user => user.id == account.user_id)
+            );
+        "#,
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let plans = result
+        .assertions
+        .values()
+        .next()
+        .expect("module assertion plan");
+    assert_eq!(
+        plans[0].dependencies,
+        std::collections::BTreeSet::from(["accounts".into(), "users".into()])
+    );
+}
+
+#[test]
 fn legacy_system_and_result_forms_keep_phase_specific_diagnostics() {
     let runtime = analyze(&[ModuleInput::new(
         "runtime.orna",
