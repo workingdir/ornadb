@@ -364,3 +364,155 @@ fn sys_runtime_info_schema_matches_the_published_compatibility_contract() {
     assert_eq!(info["signature"], "fn sys.rt.info(): sys.RuntimeInfo");
     assert_eq!(info["effect"], "read");
 }
+
+#[test]
+fn sys_client_lease_listener_schemas_match_the_published_contract() {
+    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+
+    let assert_relation = |name: &str,
+                           grouped_handle: &str,
+                           availability: &str,
+                           key: &str,
+                           reference_type: &str,
+                           fields: &[(&str, &str)]| {
+        let relation = document["relations"]
+            .as_array()
+            .expect("relations")
+            .iter()
+            .find(|value| value["name"] == name)
+            .unwrap_or_else(|| panic!("{name} relation"));
+
+        assert_eq!(relation["grouped_handle"], grouped_handle);
+        assert_eq!(relation["kind"], "relation");
+        assert_eq!(relation["availability"], availability);
+        assert_eq!(relation["key"], key);
+        assert_eq!(relation["writable"], false);
+        assert_eq!(relation["reference_type"], reference_type);
+        assert_eq!(relation["key_fields"], serde_json::json!([key]));
+        assert_eq!(
+            relation["fields"],
+            serde_json::Value::Array(
+                fields
+                    .iter()
+                    .map(|(field_name, field_type)| {
+                        serde_json::json!({"name": field_name, "type": field_type})
+                    })
+                    .collect()
+            )
+        );
+    };
+
+    assert_relation(
+        "sys.Client",
+        "sys.rt.clients",
+        "live",
+        "id",
+        "sys.ClientRef",
+        &[
+            ("reference", "sys.ClientRef"),
+            ("id", "sys.ClientId"),
+            ("kind", "sys.ClientKind"),
+            ("connected", "Instant"),
+            ("last_seen", "Instant"),
+            ("protocol_version", "Str?"),
+            ("remote", "Str?"),
+            ("redacted", "Bool"),
+        ],
+    );
+    assert_relation(
+        "sys.Lease",
+        "sys.rt.leases",
+        "local-durable",
+        "name",
+        "sys.LeaseRef",
+        &[
+            ("reference", "sys.LeaseRef"),
+            ("name", "Str"),
+            ("holder", "sys.RuntimeId"),
+            ("status", "sys.LeaseStatus"),
+            ("acquired", "Instant"),
+            ("expires", "Instant?"),
+            ("generation", "Int"),
+        ],
+    );
+    assert_relation(
+        "sys.Listener",
+        "sys.rt.listeners",
+        "live",
+        "id",
+        "sys.ListenerRef",
+        &[
+            ("reference", "sys.ListenerRef"),
+            ("id", "Str"),
+            ("kind", "sys.ListenerKind"),
+            ("address", "Str"),
+            ("started", "Instant"),
+            ("clients", "Int"),
+            ("tls", "Bool"),
+            ("authenticated", "Bool"),
+        ],
+    );
+
+    for (name, target, definition) in [
+        ("sys.ClientRef", "sys.Client", "sys.RowRef<sys.Client>"),
+        ("sys.LeaseRef", "sys.Lease", "sys.RowRef<sys.Lease>"),
+        (
+            "sys.ListenerRef",
+            "sys.Listener",
+            "sys.RowRef<sys.Listener>",
+        ),
+    ] {
+        let reference = document["reference_aliases"]
+            .as_array()
+            .expect("reference aliases")
+            .iter()
+            .find(|value| value["name"] == name)
+            .unwrap_or_else(|| panic!("{name} alias"));
+        assert_eq!(reference["target"], target);
+        assert_eq!(reference["definition"], definition);
+    }
+
+    for (name, expected) in [
+        (
+            "sys.ClientKind",
+            serde_json::json!(["cli", "repl", "server", "renderer", "embedded", "tool"]),
+        ),
+        (
+            "sys.LeaseStatus",
+            serde_json::json!(["acquiring", "held", "releasing", "expired", "lost"]),
+        ),
+        (
+            "sys.ListenerKind",
+            serde_json::json!([
+                "git_http",
+                "query_http",
+                "websocket",
+                "renderer",
+                "admin",
+                "custom"
+            ]),
+        ),
+    ] {
+        assert_eq!(document["enums"][name], expected, "{name} values");
+    }
+
+    let runtime_view = document["value_types"]
+        .as_array()
+        .expect("value types")
+        .iter()
+        .find(|value| value["name"] == "sys.RuntimeView")
+        .expect("sys.RuntimeView");
+    for (field_name, field_type) in [
+        ("clients", "Relation<sys.Client>"),
+        ("leases", "Relation<sys.Lease>"),
+        ("listeners", "Relation<sys.Listener>"),
+    ] {
+        let field = runtime_view["fields"]
+            .as_array()
+            .expect("runtime view fields")
+            .iter()
+            .find(|field| field["name"] == field_name)
+            .unwrap_or_else(|| panic!("sys.RuntimeView.{field_name}"));
+        assert_eq!(field["type"], field_type);
+    }
+}
