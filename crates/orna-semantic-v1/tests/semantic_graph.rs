@@ -1,8 +1,9 @@
 use orna_semantic_v1::{
     Catalogue, DIAG_AMBIGUOUS, DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT,
-    DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, DIAG_IMPORT, DIAG_LEGACY_SYS_RUNTIME,
-    DIAG_LEGACY_TRYFROM, DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED, ModuleInput,
-    StandardDependencyProfile, Type, analyze, analyze_with_catalogue,
+    DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, DIAG_IMPORT, DIAG_LEGACY_RESULT,
+    DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED,
+    DIAG_UNSUPPORTED, ModuleInput, StandardDependencyProfile, Type, analyze,
+    analyze_with_catalogue,
 };
 
 fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
@@ -10,6 +11,43 @@ fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code() == code)
+}
+
+#[test]
+fn unresolved_legacy_result_plumbing_uses_the_targeted_diagnostic() {
+    for source in [
+        "pub fn legacy(value: Result<Int, Str>) = value;",
+        "pub fn legacy() = Ok(1);",
+        "pub fn legacy() = Err(\"nope\");",
+    ] {
+        let analysis = analyze(&[ModuleInput::new("legacy-result.orna", source)]);
+        assert!(
+            has(&analysis, DIAG_LEGACY_RESULT),
+            "{source}: {:?}",
+            analysis.diagnostics
+        );
+        assert!(
+            !has(&analysis, DIAG_UNRESOLVED),
+            "legacy control plumbing must have a targeted diagnostic: {source}: {:?}",
+            analysis.diagnostics
+        );
+    }
+}
+
+#[test]
+fn declared_result_and_ok_names_remain_ordinary_user_declarations() {
+    for source in [
+        "pub fn Ok(value: Int): Int = value; pub fn use_ok(): Int = Ok(1);",
+        "pub type Result { value: Int, } pub fn result(value: Int): Result = Result { value: value };",
+    ] {
+        let analysis = analyze(&[ModuleInput::new("ordinary-result.orna", source)]);
+        assert!(analysis.is_ok(), "{source}: {:?}", analysis.diagnostics);
+        assert!(
+            !has(&analysis, DIAG_LEGACY_RESULT),
+            "declared user names must not be treated as legacy plumbing: {source}: {:?}",
+            analysis.diagnostics
+        );
+    }
 }
 
 fn collection_catalogue() -> Catalogue {
