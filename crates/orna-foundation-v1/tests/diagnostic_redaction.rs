@@ -168,6 +168,33 @@ fn diagnostic_spans_reject_unsafe_repository_paths() {
 }
 
 #[test]
+fn redacted_span_marker_requires_a_matching_diagnostic_redaction_claim() {
+    let snapshot = Snapshot::Commit {
+        database: [7; 16],
+        algorithm: GitHash::Sha256,
+        oid: vec![9; 32],
+    };
+    let span = DiagnosticSpan::new(snapshot, "<redacted>", 0.into(), 0.into()).unwrap();
+    let diagnostic = Diagnostic::new(
+        SafeText::new("ORNA-E-REDACTED-SPAN").unwrap(),
+        DiagnosticSeverity::Error,
+        SafeText::new("safe message").unwrap(),
+    )
+    .unwrap()
+    .with_span(span);
+
+    assert!(diagnostic.encode_ovb().is_err());
+    assert!(serde_json::to_value(&diagnostic).is_err());
+
+    let encoded = diagnostic.redacted().encode_ovb().unwrap();
+    assert!(Diagnostic::decode_ovb(&encoded).is_ok());
+
+    let mut contradictory = encoded;
+    *contradictory.last_mut().unwrap() = 0xf4; // `redacted: false`
+    assert!(Diagnostic::decode_ovb(&contradictory).is_err());
+}
+
+#[test]
 fn diagnostic_decode_rejects_invalid_utf8_in_a_span_path() {
     let diagnostic = Diagnostic::new(
         SafeText::new("ORNA-E-UTF8").unwrap(),
