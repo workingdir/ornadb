@@ -1851,7 +1851,6 @@ impl Repository {
         &self,
         journal: &PublicationJournal,
     ) -> Result<(), RepositoryError> {
-        let _lock = self.acquire_coordination_lock()?;
         let current = self
             .read_publication_journal_locked()?
             .ok_or(RepositoryError::GitIndexLockPresent)?;
@@ -1977,6 +1976,7 @@ impl Repository {
             self.verify_compact_publication_binding(journal, candidate)?;
         }
         let _coordination_lock = self.acquire_coordination_lock()?;
+        self.require_no_pending_checkout_recovery_locked()?;
         let paths = journal
             .entries()
             .iter()
@@ -2046,6 +2046,8 @@ impl Repository {
         {
             return Err(RepositoryError::RuntimeCompletionRequired);
         }
+        let _coordination_lock = self.acquire_coordination_lock()?;
+        self.require_no_pending_checkout_recovery_locked()?;
         // A normal Git writer may have moved HEAD after reconciliation but
         // before the separately durable runtime completion.  Do not discard
         // the journal in that state: PUB-1 recovery must retain it to
@@ -2054,17 +2056,19 @@ impl Repository {
             return Err(RepositoryError::StaleHead);
         }
         journal.advance(PublicationJournalStage::RuntimeCompleted)?;
-        self.write_publication_journal(journal)?;
+        self.write_publication_journal_locked(journal)?;
         journal.advance(PublicationJournalStage::Complete)?;
-        self.write_publication_journal(journal)?;
-        self.clear_publication_journal()
+        self.write_publication_journal_locked(journal)?;
+        self.clear_publication_journal_locked()
     }
 
     /// Resumes a persisted publication after a process interruption. The
     /// journal is advanced only after each observable boundary is verified;
     /// unexpected ref, index, or worktree state remains a typed conflict.
     pub fn recover_publication(&self) -> Result<Option<IndexGeneration>, RepositoryError> {
-        let Some(mut journal) = self.read_publication_journal()? else {
+        let _coordination_lock = self.acquire_coordination_lock()?;
+        self.require_no_pending_checkout_recovery_locked()?;
+        let Some(mut journal) = self.read_publication_journal_locked()? else {
             return Ok(None);
         };
         self.reclaim_abandoned_publication_index_lock(&journal)?;
@@ -2100,7 +2104,6 @@ impl Repository {
             if self.head()?.as_ref() != Some(journal.new_head()) {
                 return Err(RepositoryError::StaleHead);
             }
-            let _coordination_lock = self.acquire_coordination_lock()?;
             let index = self.git_path("index")?;
             let git_lock =
                 GitIndexLock::acquire_owned(index.with_extension("lock"), journal.lock_binding()?)?;
@@ -2161,10 +2164,10 @@ impl Repository {
         }
         if journal.stage() == PublicationJournalStage::RuntimeCompleted {
             journal.advance(PublicationJournalStage::Complete)?;
-            self.write_publication_journal(&journal)?;
+            self.write_publication_journal_locked(&journal)?;
         }
         if journal.stage() == PublicationJournalStage::Complete {
-            self.clear_publication_journal()?;
+            self.clear_publication_journal_locked()?;
             return Ok(Some(self.index_generation()?));
         }
         Err(RepositoryError::InvalidPublicationJournal)
@@ -2971,6 +2974,7 @@ impl Repository {
         plan: &CheckoutPreflight,
     ) -> Result<(), RepositoryError> {
         let _lock = self.acquire_coordination_lock()?;
+        self.require_no_pending_publication_recovery_locked()?;
         self.require_no_pending_checkout_recovery_locked()?;
         self.verify_checkout_preflight_locked(plan)?;
         if plan.expected_head.as_ref() != Some(plan.target.commit()) {
@@ -3034,6 +3038,8 @@ impl Repository {
     {
         let _lock = self
             .acquire_coordination_lock()
+            .map_err(CheckoutExecutionError::Repository)?;
+        self.require_no_pending_publication_recovery_locked()
             .map_err(CheckoutExecutionError::Repository)?;
         self.require_no_pending_checkout_recovery_locked()
             .map_err(CheckoutExecutionError::Repository)?;
@@ -3277,6 +3283,18 @@ impl Repository {
         }
     }
 
+    /// A publication journal retains the exact ref/index/worktree generation
+    /// that its own recovery protocol must reconcile. A force-checkout cannot
+    /// journal or mutate a competing before-state until publication recovery
+    /// has resolved that durable boundary.
+    fn require_no_pending_publication_recovery_locked(&self) -> Result<(), RepositoryError> {
+        if self.read_publication_journal_locked()?.is_some() {
+            Err(RepositoryError::PublicationPending)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Durably records a verified force-discard capability before a future
     /// destructive executor can alter Git state. The record is intentionally
     /// not an execution command: restart recovery may only clear it after
@@ -3286,6 +3304,7 @@ impl Repository {
         discard: &ValidatedCheckoutDiscard,
     ) -> Result<(), RepositoryError> {
         let _lock = self.acquire_coordination_lock()?;
+        self.require_no_pending_publication_recovery_locked()?;
         self.verify_validated_checkout_discard_locked(discard)?;
         let journal = CheckoutRecoveryJournal::from_validated(discard);
         match self.read_checkout_recovery_journal_locked()? {
@@ -3350,6 +3369,7 @@ impl Repository {
         mut after_applied: Option<&mut dyn FnMut() -> Result<(), RepositoryError>>,
     ) -> Result<(), RepositoryError> {
         let _lock = self.acquire_coordination_lock()?;
+        self.require_no_pending_publication_recovery_locked()?;
         let mut journal = match self.read_checkout_recovery_journal_locked()? {
             Some(journal)
                 if journal.matches_validated(discard)
@@ -3443,6 +3463,7 @@ impl Repository {
     /// resetting files that no longer match its recorded generations.
     pub fn recover_pre_execution_checkout(&self) -> Result<(), RepositoryError> {
         let _lock = self.acquire_coordination_lock()?;
+        self.require_no_pending_publication_recovery_locked()?;
         let Some(mut journal) = self.read_checkout_recovery_journal_locked()? else {
             return Ok(());
         };
