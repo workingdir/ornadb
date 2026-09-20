@@ -2185,7 +2185,10 @@ impl RuntimeState {
         &self,
         reference: &FailureRef,
     ) -> Result<Option<FailureRecord>, RuntimeError> {
-        let capture = self.capture().await?;
+        let current_capture = self.capture().await?;
+        let capture =
+            retained_failure_reference_capture(&self.connection, reference, &current_capture)
+                .await?;
         let reference = validate_failure_reference(reference.as_row_ref().clone(), &capture)
             .map_err(|_| RuntimeError::InvalidObservationReference)?;
         let OvbRaw::Array(key) = &reference.as_row_ref().key else {
@@ -2253,6 +2256,20 @@ impl RuntimeState {
         let Some(record) = record else {
             return Err(RuntimeError::RecoveryInvalid);
         };
+        if record.identity.0.consumer != consumer
+            || record.identity.0.source.as_str() != source.as_str()
+            || record
+                .identity
+                .0
+                .partition
+                .as_ref()
+                .map(|value| value.as_str())
+                != partition
+            || record.identity.0.position_format.as_str() != position_format.as_str()
+            || record.identity.0.position.token.as_str() != position.as_str()
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
         Ok(Some(record))
     }
 
@@ -9306,6 +9323,64 @@ fn decode_capture(bytes: Vec<u8>, digest: [u8; 32]) -> Result<CwdCapture, Runtim
     CwdCapture::new(snapshot, digest).map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
+/// Recovers the exact retained CWD capture named by a `sys.FailureRef`.
+///
+/// A failure is local-durable, so its reference remains bound to the CWD
+/// observation that produced it even after the runtime advances. The current
+/// capture supplies this evidence only when it names the same snapshot;
+/// otherwise the retained-capture ledger must supply the database, runtime,
+/// generation, and digest together. A missing or inconsistent retained pin is
+/// not authority to reinterpret the reference at the current CWD.
+async fn retained_failure_reference_capture(
+    connection: &Connection,
+    reference: &FailureRef,
+    current_capture: &CwdCapture,
+) -> Result<CwdCapture, RuntimeError> {
+    let snapshot = reference.as_row_ref().snapshot.clone();
+    if snapshot == *current_capture.snapshot() {
+        return Ok(current_capture.clone());
+    }
+    let snapshot_bytes = Value::new(snapshot.raw())
+        .and_then(|value| value.encode())
+        .map_err(|_| RuntimeError::InvalidObservationReference)?;
+    let mut rows = connection
+        .query(
+            "SELECT database_id, runtime_id, generation, generation_digest
+             FROM runtime_catalogue_capture WHERE snapshot = ?1",
+            params![snapshot_bytes],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Err(RuntimeError::RecoveryInvalid);
+    };
+    let database_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let runtime_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let generation: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let generation_digest = fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    if rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some()
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    let capture = CwdCapture::new(snapshot, generation_digest)
+        .map_err(|_| RuntimeError::InvalidObservationReference)?;
+    if capture.database_id() != database_id
+        || capture.runtime_id() != runtime_id
+        || bigint_to_i64(capture.generation())? != generation
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok(capture)
+}
+
 fn decode_consumer_identity(value: &str) -> Result<ConsumerIdentity, RuntimeError> {
     let parts = value.split('|').collect::<Vec<_>>();
     if parts.len() != 5 || parts[0] != "consumer/v1" {
@@ -14428,6 +14503,11 @@ mod tests {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(28)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        state
+            .admit_catalogue_at(writer, &capture, activation_catalogue(None, 28))
+            .await
+            .unwrap();
         let delivery = stream_delivery("resolve-reference", "resolve-successor");
         let expected = CheckpointPrecondition {
             version: 0,
@@ -14463,7 +14543,6 @@ mod tests {
                 other => panic!("unexpected failure result: {other:?}"),
             }
         };
-        let capture = state.capture().await.unwrap();
         let reference = failure_reference(
             capture.database_id(),
             capture.snapshot().clone(),
@@ -14480,6 +14559,15 @@ mod tests {
         )
         .unwrap();
 
+        state
+            .connection
+            .execute("UPDATE runtime_meta SET generation = generation + 1", ())
+            .await
+            .unwrap();
+        assert_ne!(
+            state.capture().await.unwrap().snapshot(),
+            capture.snapshot()
+        );
         assert_eq!(
             state.resolve_failure_reference(&reference).await.unwrap(),
             Some(failure.clone())
@@ -14532,6 +14620,73 @@ mod tests {
                     stream_identity_id(&failure.identity),
                 ],
             )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.resolve_failure_reference(&reference).await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_reference_resolution_rejects_an_unretained_pinned_capture() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(29)).await.unwrap();
+        let delivery = stream_delivery("unretained-reference", "unretained-successor");
+        let failure = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: CheckpointPrecondition {
+                        version: 0,
+                        committed: None,
+                    },
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected acquire result: {other:?}"),
+            };
+            match stream
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(vec![29]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected failure result: {other:?}"),
+            }
+        };
+        let capture = state.capture().await.unwrap();
+        let reference = failure_reference(
+            capture.database_id(),
+            capture.snapshot().clone(),
+            failure.identity.0.consumer.canonical(),
+            failure.identity.0.source.as_str().to_owned(),
+            failure
+                .identity
+                .0
+                .partition
+                .as_ref()
+                .map(|value| value.as_str().to_owned()),
+            failure.identity.0.position_format.as_str().to_owned(),
+            failure.identity.0.position.token.as_str().to_owned(),
+        )
+        .unwrap();
+
+        state
+            .connection
+            .execute("UPDATE runtime_meta SET generation = generation + 1", ())
             .await
             .unwrap();
         assert_eq!(
