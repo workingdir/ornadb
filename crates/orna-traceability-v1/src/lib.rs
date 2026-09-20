@@ -651,7 +651,10 @@ fn apply_scenario_execution_witnesses(
             logical_id: witness.scenario_id().into(),
             implementation_ref: Some(witness.implementation_ref().into()),
             test_ref: Some(witness.test_ref().into()),
-            status: Status::Executed,
+            // A bounded implementation scenario is concrete evidence, but it
+            // is expressly not execution by an Orna engine. Keep that
+            // distinction machine-readable at the boundary itself.
+            status: Status::PartiallyExecuted,
         });
         requirement.status = aggregate(
             &requirement
@@ -1565,7 +1568,7 @@ mod tests {
         assert!(requirement.boundaries.iter().any(|boundary| {
             boundary.kind == "implementation-scenario-witness"
                 && boundary.logical_id == "LET-REBIND-091"
-                && boundary.status == Status::Executed
+                && boundary.status == Status::PartiallyExecuted
         }));
         assert!(
             requirement
@@ -1622,7 +1625,7 @@ mod tests {
         assert!(requirement.boundaries.iter().any(|boundary| {
             boundary.kind == "implementation-scenario-witness"
                 && boundary.logical_id == "CFLOW-001"
-                && boundary.status == Status::Executed
+                && boundary.status == Status::PartiallyExecuted
         }));
         assert!(
             requirement
