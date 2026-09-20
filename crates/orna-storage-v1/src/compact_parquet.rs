@@ -223,7 +223,8 @@ fn decode_verified_bytes_for_role(
         }
         let rows = usize::try_from(rows).map_err(|_| CompactParquetError::InvalidParquet)?;
         for column in 0..row_group.num_columns() {
-            validate_physical_column(&*row_group, column, rows)?;
+            let is_key = key_columns.iter().any(|key| key.index == column);
+            validate_physical_column(&*row_group, column, rows, is_key)?;
         }
         let mut group_values: Vec<Vec<OvbRaw>> = Vec::with_capacity(key_columns.len());
         for column in &key_columns {
@@ -304,6 +305,7 @@ fn validate_physical_column(
     row_group: &dyn parquet::file::reader::RowGroupReader,
     index: usize,
     expected_rows: usize,
+    is_key: bool,
 ) -> Result<(), CompactParquetError> {
     let metadata = row_group.metadata().column(index);
     if !matches!(metadata.compression(), Compression::ZSTD(_)) {
@@ -311,8 +313,12 @@ fn validate_physical_column(
     }
     let observed =
         u64::try_from(metadata.num_values()).map_err(|_| CompactParquetError::InvalidParquet)?;
-    let expected = u64::try_from(expected_rows).map_err(|_| CompactParquetError::InvalidParquet)?;
-    if observed != expected {
+    let expected = if is_key {
+        u64::try_from(expected_rows).map_err(|_| CompactParquetError::InvalidParquet)?
+    } else {
+        observed
+    };
+    if is_key && observed != expected {
         return Err(CompactParquetError::RowCountMismatch { expected, observed });
     }
     if metadata.encodings().any(|encoding| {
@@ -3203,6 +3209,25 @@ mod tests {
             date_value(2_932_897),
             Err(CompactParquetError::InvalidMetadata)
         ));
+    }
+
+    #[test]
+    fn key_reader_ignores_nulls_in_unprojected_optional_columns() {
+        let profile = profile_with_stored_field();
+        let stored = [0_i64, 1_i64];
+        let keys = [10_i64, 11_i64];
+        let bytes = mixed_parquet(
+            &profile,
+            &[STORED_A, KEY_A],
+            &[TestColumn::Int(&stored), TestColumn::Int(&keys)],
+            true,
+            None,
+        );
+
+        assert_eq!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 2).unwrap(),
+            vec![expected_scalar(10), expected_scalar(11)]
+        );
     }
 
     #[test]

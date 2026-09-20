@@ -14,6 +14,8 @@ use orna_repository_v1::{
 use tempfile::TempDir;
 
 const INTERNAL_REF: &str = "refs/orna/ids/0123456789abcdef";
+const OTHER_INTERNAL_REF: &str = "refs/orna/checkpoints/0123456789abcdef";
+const STALE_INTERNAL_REF: &str = "refs/orna/runs/0123456789abcdef";
 const FETCH_CHILD_LOCAL: &str = "ORNA_FETCH_ROUTING_LOCAL";
 const FETCH_CHILD_OTHER: &str = "ORNA_FETCH_ROUTING_OTHER";
 
@@ -260,11 +262,15 @@ impl Fixture {
     }
 }
 
-fn internal_witness(object_id: &str) -> RequiredInternalRef {
+fn internal_witness_for(reference: &str, object_id: &str) -> RequiredInternalRef {
     RequiredInternalRef::new(
-        OrnaInternalRef::new(INTERNAL_REF).unwrap(),
+        OrnaInternalRef::new(reference).unwrap(),
         NativeObjectId::new(object_id).unwrap(),
     )
+}
+
+fn internal_witness(object_id: &str) -> RequiredInternalRef {
+    internal_witness_for(INTERNAL_REF, object_id)
 }
 
 fn request(
@@ -586,6 +592,138 @@ fn fetch_reports_stale_internal_ref_and_preserves_the_local_ref() {
         git(&fixture.local, &["rev-parse", "refs/remotes/origin/main"]),
         next
     );
+}
+
+#[test]
+fn fetch_synchronizes_matching_internal_refs_when_another_witness_is_missing() {
+    let fixture = Fixture::new();
+    let repository = fixture.repository();
+    let initial = fixture.initial_head();
+    fixture.install_local_internal(&initial);
+    git(
+        &fixture.source,
+        &["update-ref", OTHER_INTERNAL_REF, &initial],
+    );
+    let other_refspec = format!("{OTHER_INTERNAL_REF}:{OTHER_INTERNAL_REF}");
+    git(&fixture.source, &["push", "origin", &other_refspec]);
+    let next = fixture.advance_branch_and_internal();
+    git(&fixture.remote, &["update-ref", "-d", OTHER_INTERNAL_REF]);
+
+    fs::write(fixture.local.join("unrelated.txt"), "staged\n").unwrap();
+    git(&fixture.local, &["add", "unrelated.txt"]);
+    fs::write(
+        fixture.local.join("unrelated.txt"),
+        "staged plus unstaged\n",
+    )
+    .unwrap();
+    let staged_before = git(&fixture.local, &["show", ":unrelated.txt"]);
+    let worktree_before = fs::read(fixture.local.join("unrelated.txt")).unwrap();
+    let index_before = repository.index_generation().unwrap();
+    let state_before = repository.worktree_state().unwrap();
+
+    let report = repository
+        .fetch(&request(
+            [RequestedRef::branch("main").unwrap()],
+            [
+                internal_witness(&next),
+                internal_witness_for(OTHER_INTERNAL_REF, &initial),
+            ],
+        ))
+        .unwrap();
+
+    assert_eq!(report.continuity(), Some(RemoteContinuity::Missing));
+    assert_eq!(report.internal().len(), 1);
+    assert_eq!(report.internal()[0].destination(), INTERNAL_REF);
+    assert!(report.internal()[0].updated());
+    assert_eq!(git(&fixture.local, &["rev-parse", INTERNAL_REF]), next);
+    assert!(!git_status(
+        &fixture.local,
+        &["show-ref", "--verify", "--quiet", "--", OTHER_INTERNAL_REF]
+    ));
+    assert_eq!(
+        git(&fixture.local, &["show", ":unrelated.txt"]),
+        staged_before
+    );
+    assert_eq!(
+        fs::read(fixture.local.join("unrelated.txt")).unwrap(),
+        worktree_before
+    );
+    assert_eq!(repository.index_generation().unwrap(), index_before);
+    assert_eq!(repository.worktree_state().unwrap(), state_before);
+}
+
+#[test]
+fn fetch_synchronizes_matching_refs_while_missing_and_stale_witnesses_fail_closed() {
+    let fixture = Fixture::new();
+    let repository = fixture.repository();
+    let initial = fixture.initial_head();
+    fixture.install_local_internal(&initial);
+    git(
+        &fixture.source,
+        &["update-ref", OTHER_INTERNAL_REF, &initial],
+    );
+    git(
+        &fixture.source,
+        &["update-ref", STALE_INTERNAL_REF, &initial],
+    );
+    let other_refspec = format!("{OTHER_INTERNAL_REF}:{OTHER_INTERNAL_REF}");
+    let stale_refspec = format!("{STALE_INTERNAL_REF}:{STALE_INTERNAL_REF}");
+    git(
+        &fixture.source,
+        &["push", "origin", &other_refspec, &stale_refspec],
+    );
+    let next = fixture.advance_branch_and_internal();
+    git(&fixture.remote, &["update-ref", "-d", OTHER_INTERNAL_REF]);
+    git(
+        &fixture.local,
+        &["update-ref", STALE_INTERNAL_REF, &initial],
+    );
+
+    fs::write(fixture.local.join("unrelated.txt"), "staged\n").unwrap();
+    git(&fixture.local, &["add", "unrelated.txt"]);
+    fs::write(
+        fixture.local.join("unrelated.txt"),
+        "staged plus unstaged\n",
+    )
+    .unwrap();
+    let staged_before = git(&fixture.local, &["show", ":unrelated.txt"]);
+    let worktree_before = fs::read(fixture.local.join("unrelated.txt")).unwrap();
+    let index_before = repository.index_generation().unwrap();
+    let state_before = repository.worktree_state().unwrap();
+
+    let report = repository
+        .fetch(&request(
+            [RequestedRef::branch("main").unwrap()],
+            [
+                internal_witness(&next),
+                internal_witness_for(OTHER_INTERNAL_REF, &initial),
+                internal_witness_for(STALE_INTERNAL_REF, &next),
+            ],
+        ))
+        .unwrap();
+
+    assert_eq!(report.continuity(), Some(RemoteContinuity::Missing));
+    assert_eq!(report.internal().len(), 1);
+    assert_eq!(report.internal()[0].destination(), INTERNAL_REF);
+    assert_eq!(git(&fixture.local, &["rev-parse", INTERNAL_REF]), next);
+    assert_eq!(
+        git(&fixture.local, &["rev-parse", STALE_INTERNAL_REF]),
+        initial
+    );
+    assert!(!git_status(
+        &fixture.local,
+        &["show-ref", "--verify", "--quiet", "--", OTHER_INTERNAL_REF]
+    ));
+    assert_eq!(
+        git(&fixture.local, &["show", ":unrelated.txt"]),
+        staged_before
+    );
+    assert_eq!(
+        fs::read(fixture.local.join("unrelated.txt")).unwrap(),
+        worktree_before
+    );
+    assert_eq!(repository.index_generation().unwrap(), index_before);
+    assert_eq!(repository.worktree_state().unwrap(), state_before);
 }
 
 #[test]

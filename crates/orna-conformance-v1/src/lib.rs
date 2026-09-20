@@ -713,6 +713,11 @@ impl Corpus {
                     .into(),
             ));
         }
+        for entry in &self.requirement_evidence.requirements {
+            for test in &entry.tests {
+                validate_requirement_evidence_test(test, &entry.requirement)?;
+            }
+        }
         self.validate_project_assets()?;
         let scenarios = self
             .scenarios
@@ -2086,9 +2091,15 @@ impl Harness {
             });
         }
         let stages = report.fixtures.iter().flat_map(|fixture| &fixture.stages);
+        // "mapped" counts only stage rows with an executed outcome. A
+        // requirement association on a skipped row remains serialized in
+        // `requirement_mapping`, but must not look like executed coverage.
         report.coverage.mapped_stage_evidence = stages
             .clone()
-            .filter(|e| matches!(e.requirement_mapping, RequirementMapping::Mapped { .. }))
+            .filter(|e| {
+                e.status != EvidenceStatus::Skipped
+                    && matches!(e.requirement_mapping, RequirementMapping::Mapped { .. })
+            })
             .count();
         report.coverage.unmapped_stage_evidence = report
             .fixtures
@@ -2481,12 +2492,16 @@ impl Harness {
         };
         let mut halted = false;
         let mut evidence = Vec::new();
-        let requirement_mapping = self.requirement_mapping(fixture);
-        let requirements = match &requirement_mapping {
-            RequirementMapping::Mapped { requirements } => requirements.clone(),
-            RequirementMapping::Unmapped { .. } => Vec::new(),
-        };
+        // Requirement mappings are resolved per stage. A fixture-level link
+        // cannot prove which parser/checker/runtime obligation was exercised.
+        // Expected `not-run` stages remain visible without acquiring a
+        // blanket fixture mapping.
         for stage in stages {
+            let mapping = self.requirement_mapping(fixture, &stage);
+            let requirements = match &mapping {
+                RequirementMapping::Mapped { requirements } => requirements.clone(),
+                RequirementMapping::Unmapped { .. } => Vec::new(),
+            };
             let expected = expected_stage(fixture, &stage);
             let outcome = if halted {
                 StageOutcome::Skipped {
@@ -2551,7 +2566,7 @@ impl Harness {
                 expectation_satisfied: correct,
                 diagnostic: failed_diagnostic(&outcome),
                 requirements: requirements.clone(),
-                requirement_mapping: requirement_mapping.clone(),
+                requirement_mapping: mapping,
             });
         }
         let passed = evidence.iter().all(|e| !e.detail.contains("NOT satisfied"))
@@ -2564,31 +2579,86 @@ impl Harness {
             stages: evidence,
         }
     }
-    fn requirement_mapping(&self, fixture: &Fixture) -> RequirementMapping {
-        let linked = self
+    fn requirement_mapping(&self, fixture: &Fixture, stage: &Stage) -> RequirementMapping {
+        let source_requirements = self
             .corpus
-            .requirement_evidence
             .requirements
             .iter()
-            .filter(|entry| {
-                entry.tests.iter().any(|test| {
-                    test.get("fixture").and_then(Value::as_str) == Some(fixture.id.as_str())
-                        || test.get("path").and_then(Value::as_str) == Some(fixture.path.as_str())
-                })
-            })
-            .map(|entry| entry.requirement.clone())
-            .collect::<Vec<_>>();
-        if linked.is_empty() {
-            RequirementMapping::Unmapped {
-                reason: "authoritative requirement-evidence/tests contains no fixture or path link"
-                    .into(),
+            .map(|requirement| requirement.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut linked = Vec::new();
+        let mut saw_fixture_link_without_stage = false;
+        let mut seen = BTreeSet::new();
+        let mut saw_malformed_link = false;
+        for entry in &self.corpus.requirement_evidence.requirements {
+            if !source_requirements.contains(entry.requirement.as_str()) {
+                continue;
             }
+            for test in &entry.tests {
+                let fixture_matches = match (
+                    test.get("fixture").and_then(Value::as_str),
+                    test.get("path").and_then(Value::as_str),
+                ) {
+                    (Some(fixture_id), Some(path)) => {
+                        fixture_id == fixture.id && path == fixture.path
+                    }
+                    (Some(fixture_id), None) => fixture_id == fixture.id,
+                    (None, Some(path)) => path == fixture.path,
+                    (None, None) => false,
+                };
+                if !fixture_matches {
+                    continue;
+                }
+                if let Some(subject) = test.get("subject") {
+                    if subject.as_str() != Some(entry.requirement.as_str()) {
+                        saw_malformed_link = true;
+                        continue;
+                    }
+                }
+                let stage_values = match evidence_test_stages(test) {
+                    Ok(Some(stages)) => stages,
+                    Ok(None) => {
+                        saw_fixture_link_without_stage = true;
+                        continue;
+                    }
+                    Err(_) => {
+                        saw_malformed_link = true;
+                        continue;
+                    }
+                };
+                if stage_values.iter().any(|value| {
+                    *value == stage.expectation_key() || *value == stage.phase_name()
+                }) && seen.insert(entry.requirement.clone())
+                {
+                    linked.push(entry.requirement.clone());
+                }
+            }
+        }
+        if linked.is_empty() {
+            let reason = if saw_malformed_link {
+                format!(
+                    "authoritative requirement-evidence fixture/path link is malformed for stage: {}",
+                    stage.phase_name()
+                )
+            } else if saw_fixture_link_without_stage {
+                format!(
+                    "authoritative requirement-evidence fixture/path link does not identify stage: {}",
+                    stage.phase_name()
+                )
+            } else {
+                format!(
+                    "authoritative requirement-evidence/tests contains no fixture/path link for stage: {}",
+                    stage.phase_name()
+                )
+            };
+            RequirementMapping::Unmapped { reason }
         } else {
             RequirementMapping::Mapped {
                 requirements: linked,
             }
         }
     }
+
     fn project_unit(&self, fixture: &Fixture) -> ProjectUnit {
         let root = self.corpus.root.join(&fixture.path);
         let manifest: ProjectManifest = read_json(&self.corpus.root, "tests/project-manifest.json")
@@ -2615,6 +2685,71 @@ impl Harness {
         }
     }
 }
+
+fn evidence_test_stages(test: &Value) -> Result<Option<Vec<&str>>, &'static str> {
+    let Some(object) = test.as_object() else {
+        return Err("requirement evidence test must be an object");
+    };
+    if object.contains_key("stage") && object.contains_key("stages") {
+        return Err("requirement evidence stage and stages are mutually exclusive");
+    }
+    if let Some(stage) = object.get("stage") {
+        let Some(stage) = stage.as_str() else {
+            return Err("requirement evidence stage must be a string");
+        };
+        if !is_evidence_stage(stage) {
+            return Err("requirement evidence stage is unknown");
+        }
+        return Ok(Some(vec![stage]));
+    }
+    let Some(stages) = object.get("stages") else {
+        return Ok(None);
+    };
+    let Some(stages) = stages.as_array() else {
+        return Err("requirement evidence stages must be an array");
+    };
+    if stages.is_empty() {
+        return Err("requirement evidence stages must contain known stages");
+    }
+    let mut names = Vec::with_capacity(stages.len());
+    for stage in stages {
+        let Some(stage) = stage.as_str() else {
+            return Err("requirement evidence stages must contain strings");
+        };
+        if !is_evidence_stage(stage) {
+            return Err("requirement evidence stages must contain known stages");
+        }
+        names.push(stage);
+    }
+    Ok(Some(names))
+}
+
+fn is_evidence_stage(stage: &str) -> bool {
+    matches!(
+        stage,
+        "parse" | "resolve" | "typecheck" | "evaluate" | "load_rows" | "row-validation"
+    )
+}
+
+fn validate_requirement_evidence_test(
+    test: &Value,
+    requirement: &str,
+) -> Result<(), CorpusError> {
+    let object = test
+        .as_object()
+        .ok_or_else(|| CorpusError("requirement evidence test must be an object".into()))?;
+    if let Some(subject) = object.get("subject") {
+        if subject.as_str() != Some(requirement) {
+            return Err(CorpusError(
+                "requirement evidence test subject must match requirement".into(),
+            ));
+        }
+    }
+    evidence_test_stages(test)
+        .map(|_| ())
+        .map_err(|message| CorpusError(message.into()))
+}
+
 
 /// Reports expose only the diagnostic identity.  Adapter diagnostics may have
 /// spans, labels or native payloads containing source observations; preserving
