@@ -362,7 +362,8 @@ fn action_result_type_is_durable(
                 | StandardScalar::BigInt
                 | StandardScalar::Float
                 | StandardScalar::CharacterLargeObject
-                | StandardScalar::BinaryLargeObject,
+                | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid,
         ) if result_type.standard_value_type.is_some()
     ) || matches!(result_type.semantic_type, SemanticType::Reference { .. })
         || matches!(
@@ -421,6 +422,7 @@ fn action_argument_type_is_orv3_encodable(
                 | StandardScalar::Float
                 | StandardScalar::CharacterLargeObject
                 | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid
         ) if expression_type.standard_value_type.is_some()
     ) || matches!(
         expression_type.semantic_type,
@@ -917,7 +919,7 @@ fn client_resource_call_site_id(
 /// Returns whether a STREAM item can be materialised as the runtime
 /// canonical `OPTION<LIST<T>>` resource value.
 ///
-/// The client runtime collection representation admits the six legacy scalar
+/// The client runtime collection representation admits the seven legacy scalar
 /// values, active enum/record identities, and active object references.
 /// Other scalar identities and opaque values may be valid function types but
 /// cannot be represented inside the list descriptor used for stream batches.
@@ -935,6 +937,7 @@ pub(super) fn client_resource_stream_type_is_supported(
                 | StandardScalar::Float
                 | StandardScalar::CharacterLargeObject
                 | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid
         ),
         SemanticType::Named(CheckedTypeId::Provisional(_)) => true,
         SemanticType::Reference {
@@ -1110,6 +1113,7 @@ fn client_expression_type_is_evaluable(
                 | StandardScalar::Float
                 | StandardScalar::CharacterLargeObject
                 | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid
         ),
         SemanticType::Named(CheckedTypeId::Existing(type_id))
             if is_sealed_inspect_type_id(type_id)
@@ -1135,6 +1139,7 @@ fn client_expression_type_is_evaluable(
                             | "orna.kernel.value.float@1"
                             | "orna.kernel.value.character-large-object@1"
                             | "orna.kernel.value.binary-large-object@1"
+                            | "orna.kernel.value.uuid@1"
                     )
             }),
         SemanticType::Named(CheckedTypeId::Provisional(_)) | SemanticType::Reference { .. } => {

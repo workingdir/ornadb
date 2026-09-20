@@ -892,7 +892,7 @@ fn rejects_unsupported_distinct_projections_with_the_relational_diagnostic() {
     assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
     assert_eq!(
         diagnostic.message(),
-        "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values"
+        "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, UUID, and REF values"
     );
     assert_eq!(diagnostic.location().logical_path(), "distinct_domain.orna");
     let projection_start = source.rfind("t.title").unwrap();
