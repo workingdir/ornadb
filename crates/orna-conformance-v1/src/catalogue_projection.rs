@@ -74,7 +74,11 @@ pub async fn commit_resolved_source_catalogue_activation(
 ) -> Result<RequestActivationCommit, SourceCatalogueActivationError> {
     let admission = project_source_catalogue(catalogue, Some(request.context.capture().clone()))?;
     runtime
-        .commit_validated_catalogue_table_request_activation(request, &admission)
+        .commit_validated_catalogue_table_request_activation_with_revision_pair(
+            request,
+            &admission,
+            catalogue.candidate_pair(),
+        )
         .await
         .map_err(SourceCatalogueActivationError::Runtime)
 }
