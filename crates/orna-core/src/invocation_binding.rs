@@ -21,13 +21,14 @@
 //! | `BOOLEAN` | `true` / `false` (case-sensitive) | [`RuntimeValue::Boolean`] |
 //! | `TEXT` | literal text | [`RuntimeValue::Text`] |
 //! | `BYTES` | base64 | [`RuntimeValue::Bytes`] |
-//! | `UUID` | canonical UUID text | [`RuntimeValue::Bytes`] (16 raw bytes) |
+//! | `UUID` | canonical UUID text | [`RuntimeValue::Uuid`] |
 //! | reference (`REF T`) | `@<type-name>/<object-id>` | [`RuntimeValue::Reference`] |
 //!
-//! A UUID value converts to its 16 raw bytes. orna-core cannot name the
-//! standard `std.types.uuid` identity, so the caller resolves the UUID
-//! value-type identity and representation when encoding through the sealed
-//! route (ADR 0056 step 3). Named and opaque value types are likewise
+//! A UUID value converts to its 16 network-order bytes while retaining the
+//! UUID runtime type. orna-core cannot name the standard `std.types.uuid`
+//! identity, so the caller resolves the UUID value-type identity and
+//! representation when encoding through the sealed route (ADR 0056 step 3).
+//! Named and opaque value types are likewise
 //! caller-resolved: [`convert_cli_string`] reports
 //! [`InvocationConversionError::UnsupportedType`] for `ResolvedType::Named`
 //! and `ResolvedType::Value`, and the caller maps a resolved standard
@@ -333,7 +334,7 @@ pub fn convert_cli_string(
             if parsed.to_string() != input {
                 return Err(InvocationConversionError::InvalidUuid);
             }
-            Ok(RuntimeValue::Bytes(parsed.as_bytes().to_vec()))
+            Ok(RuntimeValue::Uuid(*parsed.as_bytes()))
         }
         ResolvedType::Scalar(
             StandardScalar::Decimal
@@ -606,14 +607,14 @@ mod tests {
     }
 
     #[test]
-    fn converts_uuid_canonical_text_to_sixteen_raw_bytes() {
+    fn converts_uuid_canonical_text_to_typed_bytes() {
         assert_eq!(
             convert_cli_string(
                 ResolvedType::scalar(StandardScalar::Uuid),
                 "123e4567-e89b-12d3-a456-426614174000"
             )
             .unwrap(),
-            RuntimeValue::Bytes(vec![
+            RuntimeValue::Uuid([
                 0x12, 0x3e, 0x45, 0x67, 0xe8, 0x9b, 0x12, 0xd3, 0xa4, 0x56, 0x42, 0x66, 0x14, 0x17,
                 0x40, 0x00,
             ])
@@ -1194,7 +1195,7 @@ mod tests {
         .unwrap();
 
         let expected = [
-            RuntimeValue::Bytes(vec![
+            RuntimeValue::Uuid([
                 0x12, 0x3e, 0x45, 0x67, 0xe8, 0x9b, 0x12, 0xd3, 0xa4, 0x56, 0x42, 0x66, 0x14, 0x17,
                 0x40, 0x00,
             ]),

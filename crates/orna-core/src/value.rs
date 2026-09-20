@@ -376,6 +376,8 @@ pub enum RuntimeValue {
     Text(String),
     /// A BYTES or BINARY LARGE OBJECT value.
     Bytes(Vec<u8>),
+    /// A UUID value in network byte order.
+    Uuid([u8; 16]),
     /// A typed durable object reference.
     Reference { target: TypeId, object: ObjectId },
     /// A catalogue-validated enum value.
@@ -412,6 +414,7 @@ impl RuntimeValue {
             Self::Bytes(_) => {
                 RuntimeType::Flat(ResolvedType::scalar(StandardScalar::BinaryLargeObject))
             }
+            Self::Uuid(_) => RuntimeType::Flat(ResolvedType::scalar(StandardScalar::Uuid)),
             Self::Reference { target, .. } => RuntimeType::Flat(ResolvedType::reference(*target)),
             Self::Enum(value) => RuntimeType::Flat(ResolvedType::named(value.enum_type)),
             Self::Record(value) => RuntimeType::Flat(ResolvedType::named(value.record_type)),
@@ -679,6 +682,7 @@ fn count_runtime_value_nodes(
         | RuntimeValue::Float(_)
         | RuntimeValue::Text(_)
         | RuntimeValue::Bytes(_)
+        | RuntimeValue::Uuid(_)
         | RuntimeValue::Reference { .. }
         | RuntimeValue::Enum(_)
         | RuntimeValue::Opaque(_)
@@ -771,6 +775,7 @@ pub(crate) fn count_invocation_runtime_value_nodes(
             | RuntimeValue::Float(_)
             | RuntimeValue::Text(_)
             | RuntimeValue::Bytes(_)
+            | RuntimeValue::Uuid(_)
             | RuntimeValue::Reference { .. }
             | RuntimeValue::Enum(_)
             | RuntimeValue::Opaque(_) => add(total, 1),
@@ -1235,6 +1240,7 @@ fn compare_standard_primitive_map_key(left: &RuntimeValue, right: &RuntimeValue)
             left.as_bytes().cmp(right.as_bytes())
         }
         (RuntimeValue::Bytes(left), RuntimeValue::Bytes(right)) => left.cmp(right),
+        (RuntimeValue::Uuid(left), RuntimeValue::Uuid(right)) => left.cmp(right),
         _ => Ordering::Equal,
     }
 }
@@ -1737,6 +1743,7 @@ impl FunctionArgument {
             | RuntimeValue::Float(_)
             | RuntimeValue::Text(_)
             | RuntimeValue::Bytes(_)
+            | RuntimeValue::Uuid(_)
             | RuntimeValue::Reference { .. }
             | RuntimeValue::Enum(_)
             | RuntimeValue::Opaque(_) => Ok(Self { parameter, value }),
@@ -2180,6 +2187,7 @@ const fn supports_runtime_value(resolved_type: ResolvedType) -> bool {
                     | StandardScalar::Float
                     | StandardScalar::CharacterLargeObject
                     | StandardScalar::BinaryLargeObject
+                    | StandardScalar::Uuid
             )
         )
 }
