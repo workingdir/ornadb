@@ -7,6 +7,7 @@
 //! enum, record, binding, and artifact shapes remain explicitly fail-closed.
 
 use std::{
+    collections::BTreeSet,
     error::Error,
     fmt,
     future::Future,
@@ -71,6 +72,22 @@ const SCHEMA: &str = concat!(
     include_str!("../migrations/0001_revision_store.sql"),
     include_str!("../migrations/0002_security_runtime.sql"),
 );
+
+/// The SQLite adapter retains the same durable inspection kind vocabulary as
+/// the PostgreSQL kernel. `invocation.completed` is accepted only as a
+/// compatibility spelling for databases written by the first local runtime
+/// slice; new writers use the closed `completed` spelling.
+const INSPECT_TRACE_KINDS: &[&str] = &[
+    "started",
+    "value_batch",
+    "completed",
+    "diagnostic",
+    "inspect_snapshot",
+    "inspect_projection",
+    "inspect_trace",
+    "security_decision",
+    "invocation.completed",
+];
 
 /// A candidate capability that the SQLite revision store does not yet accept.
 ///
@@ -1916,10 +1933,51 @@ impl SqliteRevisionStore {
             validate_active_catalogue_lineage(&transaction, &active, &ledger)
                 .await
                 .map_err(StorageError::Backend)?;
+            validate_inspect_relations(&transaction)
+                .await
+                .map_err(StorageError::Backend)?;
             Ok(active)
         }
         .await;
 
+        match result {
+            Ok(active) => {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(SqliteError::from)
+                    .map_err(StorageError::Backend)?;
+                Ok(active)
+            }
+            Err(error) => match transaction.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(StorageError::Backend(SqliteError::from(rollback))),
+            },
+        }
+    }
+
+    /// Recovers one exact retained revision pair without rebinding it to the
+    /// current active CWD.
+    ///
+    /// The pair is resolved through the immutable source/catalogue registries
+    /// and its stored semantic snapshot. A missing snapshot, mismatched
+    /// lineage, or invalid historical payload is an error; an older pair is
+    /// never substituted with the current active revision.
+    pub async fn recover_at(
+        &self,
+        pair: RevisionPair,
+    ) -> Result<ActiveDatabaseRevision, StorageError<SqliteError>> {
+        let mut connection = self.connection.lock().await;
+        let transaction = turso::transaction::Transaction::new(
+            &mut connection,
+            turso::transaction::TransactionBehavior::Deferred,
+        )
+        .await
+        .map_err(SqliteError::from)
+        .map_err(StorageError::Backend)?;
+        let result = load_revision_at(&transaction, pair)
+            .await
+            .map_err(StorageError::Backend);
         match result {
             Ok(active) => {
                 transaction
@@ -2149,7 +2207,7 @@ impl SqliteRevisionStore {
             &SqliteInspectTraceEvent {
                 invocation,
                 sequence: 1,
-                kind: "invocation.completed".to_owned(),
+                kind: "completed".to_owned(),
                 payload,
                 observer_invocation: None,
             },
@@ -2511,6 +2569,180 @@ async fn load_inspect_snapshot_on(
         )?),
         summary: row.get(4)?,
     }))
+}
+
+/// Validates SQLite's redacted inspection relations during recovery.
+///
+/// PostgreSQL performs the equivalent check in its kernel recovery path. The
+/// local adapter does not decode the richer PostgreSQL epoch envelope, but it
+/// still owns the durable identity and lineage fence: every inspection row
+/// must belong to a recorded invocation, agree with that invocation's pinned
+/// revision pair, and point at a recoverable historical revision. Trace rows
+/// are checked in the same pass so a corrupt local tail cannot be presented as
+/// an empty or partially valid inspection stream after reopen.
+async fn validate_inspect_relations(connection: &Connection) -> Result<(), SqliteError> {
+    let mut snapshot_rows = connection
+        .query(
+            "SELECT epoch_id, invocation_id, owner_principal_id,
+                    source_revision_id, catalogue_revision_id, summary_bytes
+             FROM orna_inspect_snapshots ORDER BY rowid",
+            (),
+        )
+        .await?;
+    let mut validated_pairs = BTreeSet::new();
+    while let Some(row) = snapshot_rows.next().await? {
+        let epoch = InspectEpochId::from_bytes(id16(row.get(0)?, "inspection epoch")?);
+        let invocation = InvocationId::from_bytes(id16(row.get(1)?, "inspection invocation")?);
+        let _owner = PrincipalId::from_bytes(id16(row.get(2)?, "inspection owner")?);
+        let source = SourceRevisionId::from_bytes(id16(row.get(3)?, "inspection source revision")?);
+        let catalogue =
+            CatalogueRevisionId::from_bytes(id16(row.get(4)?, "inspection catalogue revision")?);
+        let summary: Vec<u8> = row.get(5)?;
+        ensure_evidence_size(&summary, "inspection summary")?;
+
+        let audit = load_inspection_audit_pair(connection, invocation)
+            .await?
+            .ok_or(SqliteError::InvalidPersistedData(
+                "inspection snapshot has no invocation audit event",
+            ))?;
+        if audit != (Some(source), Some(catalogue)) {
+            return Err(SqliteError::InvalidPersistedData(
+                "inspection snapshot disagrees with its invocation audit revision pair",
+            ));
+        }
+        if validated_pairs.insert((source, catalogue)) {
+            validate_inspection_revision_pair(connection, source, catalogue).await?;
+        }
+        if epoch == InspectEpochId::from_bytes([0; 16])
+            || invocation == InvocationId::from_bytes([0; 16])
+        {
+            return Err(SqliteError::InvalidPersistedData(
+                "inspection identities must be non-zero",
+            ));
+        }
+    }
+    drop(snapshot_rows);
+
+    let mut trace_rows = connection
+        .query(
+            "SELECT invocation_id, sequence, kind, payload_bytes,
+                    observer_invocation_id
+             FROM orna_inspect_trace_events ORDER BY invocation_id, sequence",
+            (),
+        )
+        .await?;
+    let mut previous = None;
+    while let Some(row) = trace_rows.next().await? {
+        let invocation =
+            InvocationId::from_bytes(id16(row.get(0)?, "inspection trace invocation")?);
+        let sequence = row.get::<i64>(1)?;
+        if sequence < 0 {
+            return Err(SqliteError::InvalidPersistedData(
+                "inspection trace sequence must be non-negative",
+            ));
+        }
+        let kind: String = row.get(2)?;
+        if !INSPECT_TRACE_KINDS.contains(&kind.as_str()) {
+            return Err(SqliteError::InvalidPersistedData(
+                "inspection trace kind is outside the closed durable set",
+            ));
+        }
+        let payload: Vec<u8> = row.get(3)?;
+        ensure_evidence_size(&payload, "inspection trace payload")?;
+        if payload.is_empty() {
+            return Err(SqliteError::InvalidPersistedData(
+                "inspection trace payload must not be empty",
+            ));
+        }
+        let observer = row
+            .get::<Option<Vec<u8>>>(4)?
+            .map(|bytes| id16(bytes, "inspection observer invocation"))
+            .transpose()?;
+        if let Some(observer) = observer
+            && observer == [0; 16]
+        {
+            return Err(SqliteError::InvalidPersistedData(
+                "inspection observer invocation must be non-zero",
+            ));
+        }
+        if load_inspection_audit_pair(connection, invocation)
+            .await?
+            .is_none()
+        {
+            return Err(SqliteError::InvalidPersistedData(
+                "inspection trace has no invocation audit event",
+            ));
+        }
+        let current = (invocation, sequence);
+        if previous.is_some_and(|previous| previous > current) {
+            return Err(SqliteError::InvalidPersistedData(
+                "inspection trace rows are not ordered by invocation and sequence",
+            ));
+        }
+        previous = Some(current);
+    }
+    Ok(())
+}
+
+async fn load_inspection_audit_pair(
+    connection: &Connection,
+    invocation: InvocationId,
+) -> Result<Option<(Option<SourceRevisionId>, Option<CatalogueRevisionId>)>, SqliteError> {
+    let mut rows = connection
+        .query(
+            "SELECT source_revision_id, catalogue_revision_id
+             FROM orna_invocation_audit_events WHERE invocation_id = ?1",
+            [Value::Blob(invocation.to_bytes().to_vec())],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        row.get::<Option<Vec<u8>>>(0)?
+            .map(|bytes| id16(bytes, "inspection audit source revision"))
+            .transpose()?
+            .map(SourceRevisionId::from_bytes),
+        row.get::<Option<Vec<u8>>>(1)?
+            .map(|bytes| id16(bytes, "inspection audit catalogue revision"))
+            .transpose()?
+            .map(CatalogueRevisionId::from_bytes),
+    )))
+}
+
+async fn validate_inspection_revision_pair(
+    connection: &Connection,
+    source: SourceRevisionId,
+    catalogue: CatalogueRevisionId,
+) -> Result<(), SqliteError> {
+    let source_identity = load_source_revision_registry(connection, source)
+        .await?
+        .ok_or(SqliteError::InvalidPersistedData(
+            "inspection source revision has no registry record",
+        ))?;
+    let catalogue_identity = load_catalogue_revision_registry(connection, catalogue)
+        .await?
+        .ok_or(SqliteError::InvalidPersistedData(
+            "inspection catalogue revision has no registry record",
+        ))?;
+    let lineage = load_catalogue_revision_lineage(connection, catalogue)
+        .await?
+        .ok_or(SqliteError::InvalidPersistedData(
+            "inspection catalogue revision has no lineage record",
+        ))?;
+    if lineage.source != Some(source) {
+        return Err(SqliteError::InvalidPersistedData(
+            "inspection revision pair has mismatched source lineage",
+        ));
+    }
+    let source_revision = load_source_revision_from(connection, source, source_identity).await?;
+    validate_catalogue_revision(connection, catalogue, &source_revision, lineage.parent).await?;
+    if catalogue_identity.hash == Sha256Digest::from_bytes([0; 32]) {
+        return Err(SqliteError::InvalidPersistedData(
+            "inspection catalogue revision hash must be non-zero",
+        ));
+    }
+    Ok(())
 }
 
 async fn load_inspect_trace_events_on(
@@ -3058,6 +3290,9 @@ fn runtime_value_from_sql(
             (StandardScalar::BinaryLargeObject, Value::Blob(value)) => {
                 Ok(RuntimeValue::Bytes(value))
             }
+            (StandardScalar::Uuid, Value::Blob(value)) => {
+                Ok(RuntimeValue::Uuid(id16(value, "SQLite UUID field")?))
+            }
             (scalar, value) => Err(SqliteError::Domain(format!(
                 "SQLite value {value:?} does not match {scalar:?}"
             ))),
@@ -3077,6 +3312,18 @@ fn runtime_value_from_sql(
     ))
 }
 async fn ensure_schema(connection: &mut Connection) -> Result<(), SqliteError> {
+    // The local CWD owner is a file-backed durable store. WAL keeps readers
+    // from observing a partially committed writer transaction, while FULL
+    // synchronous mode asks SQLite/Turso to flush the WAL before commit is
+    // reported. This covers committed process/OS-crash recovery; the product
+    // does not claim protection from storage hardware that lies about flushes
+    // or from power loss without an honest durable filesystem.
+    let mut journal_mode = connection.query("PRAGMA journal_mode = WAL", ()).await?;
+    while journal_mode.next().await?.is_some() {}
+    drop(journal_mode);
+    let mut synchronous = connection.query("PRAGMA synchronous = FULL", ()).await?;
+    while synchronous.next().await?.is_some() {}
+    drop(synchronous);
     connection.execute("PRAGMA foreign_keys = ON", ()).await?;
     connection.execute_batch(SCHEMA).await?;
 
@@ -3960,6 +4207,127 @@ async fn load_active_from(connection: &Connection) -> Result<ActiveDatabaseRevis
     .map_err(|error| SqliteError::Domain(error.to_string()))
 }
 
+async fn load_revision_at(
+    connection: &Connection,
+    pair: RevisionPair,
+) -> Result<ActiveDatabaseRevision, SqliteError> {
+    let current = load_active_identity_metadata(connection).await?;
+    if current
+        .is_some_and(|active| RevisionPair::new(active.source_id, active.catalogue_id) == pair)
+    {
+        return load_active_from(connection).await;
+    }
+
+    let source_identity = load_source_revision_registry(connection, pair.source())
+        .await?
+        .ok_or(SqliteError::InvalidPersistedData(
+            "historical source revision has no registry record",
+        ))?;
+    if let Some(parent) = source_identity.parent
+        && load_source_revision_registry(connection, parent)
+            .await?
+            .is_none()
+    {
+        return Err(SqliteError::InvalidPersistedData(
+            "historical source parent revision has no registry record",
+        ));
+    }
+    let catalogue_identity = load_catalogue_revision_registry(connection, pair.catalogue())
+        .await?
+        .ok_or(SqliteError::InvalidPersistedData(
+            "historical catalogue revision has no registry record",
+        ))?;
+    let lineage = load_catalogue_revision_lineage(connection, pair.catalogue())
+        .await?
+        .ok_or(SqliteError::InvalidPersistedData(
+            "historical catalogue revision has no lineage record",
+        ))?;
+    if lineage.source != Some(pair.source()) {
+        return Err(SqliteError::InvalidPersistedData(
+            "historical revision pair has mismatched source lineage",
+        ));
+    }
+    let source = load_source_revision_from(connection, pair.source(), source_identity).await?;
+    let metadata = ActiveIdentityMetadata {
+        source_id: pair.source(),
+        source: source_identity,
+        catalogue_id: pair.catalogue(),
+        catalogue: catalogue_identity,
+    };
+    validate_catalogue_revision(connection, pair.catalogue(), &source, lineage.parent).await?;
+    if let Some(active) = load_persisted_active(connection, metadata).await? {
+        if active.source() != &source || active.pair() != pair {
+            return Err(SqliteError::InvalidPersistedData(
+                "historical revision snapshot does not match its registry pair",
+            ));
+        }
+        return Ok(active);
+    }
+
+    // The bootstrap revision predates semantic snapshot rows. Preserve the
+    // legacy loader's bounded schema-only reconstruction for that root while
+    // still requiring the registry, source lineage, and catalogue hash fence
+    // above. Any richer historical revision must have its immutable payload.
+    let mut rows = connection
+        .query(
+            "SELECT schema_id, name_parts, source_unit_id, source_start, source_end
+             FROM orna_catalogue_schemas
+             WHERE catalogue_revision_id = ?1 ORDER BY rowid ASC",
+            [Value::Blob(pair.catalogue().to_bytes().to_vec())],
+        )
+        .await?;
+    let mut schemas = Vec::new();
+    let mut origins = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let schema_id = SchemaId::from_bytes(id16(row.get(0)?, "historical schema id")?);
+        let source_origin = SourceOrigin::new(
+            SourceUnitId::from_bytes(id16(row.get(2)?, "historical schema source unit id")?),
+            u32::try_from(row.get::<i64>(3)?).map_err(|_| {
+                SqliteError::InvalidPersistedData("historical schema source start must fit u32")
+            })?,
+            u32::try_from(row.get::<i64>(4)?).map_err(|_| {
+                SqliteError::InvalidPersistedData("historical schema source end must fit u32")
+            })?,
+        )
+        .map_err(|error| SqliteError::Domain(error.to_string()))?;
+        if !source
+            .units()
+            .iter()
+            .any(|unit| unit.id() == source_origin.source_unit())
+        {
+            return Err(SqliteError::InvalidPersistedData(
+                "historical schema source unit is not in its source revision",
+            ));
+        }
+        let name = decode_qualified_semantic_name(&row.get::<String>(1)?)?;
+        schemas.push(SchemaDefinition::new(schema_id, name));
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Schema(schema_id),
+            source_origin,
+        ));
+    }
+    let catalogue = CatalogueSnapshot::new(pair.catalogue(), schemas, Vec::new())
+        .map_err(|error| SqliteError::Domain(error.to_string()))?;
+    let computed_hash = catalogue_digest(&catalogue, &[], &[], &origins, &[])
+        .map_err(|error| SqliteError::Domain(error.to_string()))?;
+    if computed_hash != catalogue_identity.hash {
+        return Err(SqliteError::InvalidPersistedData(
+            "historical catalogue hash mismatch",
+        ));
+    }
+    ActiveDatabaseRevision::new(
+        pair,
+        source,
+        catalogue,
+        catalogue_identity.hash,
+        Vec::new(),
+        Vec::new(),
+        origins,
+        Vec::new(),
+    )
+    .map_err(|error| SqliteError::Domain(error.to_string()))
+}
+
 async fn load_ledger_from(
     connection: &Connection,
 ) -> Result<Vec<MigrationLedgerEntry>, SqliteError> {
@@ -4426,12 +4794,11 @@ fn sqlite_scalar_type(scalar: StandardScalar) -> Result<&'static str, SqliteErro
         StandardScalar::Boolean | StandardScalar::Integer | StandardScalar::BigInt => Ok("INTEGER"),
         StandardScalar::Float => Ok("REAL"),
         StandardScalar::CharacterLargeObject => Ok("TEXT"),
-        StandardScalar::BinaryLargeObject => Ok("BLOB"),
+        StandardScalar::BinaryLargeObject | StandardScalar::Uuid => Ok("BLOB"),
         StandardScalar::Void => Err(SqliteError::Domain(
             "SQLite object fields cannot use VOID".to_owned(),
         )),
         StandardScalar::Decimal
-        | StandardScalar::Uuid
         | StandardScalar::Date
         | StandardScalar::Time
         | StandardScalar::Timestamp
@@ -4507,6 +4874,7 @@ fn ensure_supported_candidate(candidate: &DeployableRevision) -> Result<(), Sqli
                             | StandardScalar::Float
                             | StandardScalar::CharacterLargeObject
                             | StandardScalar::BinaryLargeObject
+                            | StandardScalar::Uuid
                     )
             )
         })
@@ -5250,6 +5618,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn uuid_sqlite_storage_round_trips_exactly_sixteen_blob_bytes() {
+        let bytes = [
+            0x12, 0x3e, 0x45, 0x67, 0xe8, 0x9b, 0x12, 0xd3, 0xa4, 0x56, 0x42, 0x66, 0x14, 0x17,
+            0x40, 0x00,
+        ];
+
+        assert!(matches!(
+            sqlite_scalar_type(StandardScalar::Uuid),
+            Ok("BLOB")
+        ));
+        assert_eq!(
+            runtime_value_from_sql(
+                Value::Blob(bytes.to_vec()),
+                ResolvedType::scalar(StandardScalar::Uuid),
+                false,
+            )
+            .unwrap(),
+            RuntimeValue::Uuid(bytes)
+        );
+        assert!(matches!(
+            runtime_value_from_sql(
+                Value::Blob(vec![0; 15]),
+                ResolvedType::scalar(StandardScalar::Uuid),
+                false,
+            ),
+            Err(SqliteError::InvalidPersistedData("SQLite UUID field"))
+        ));
+    }
+
     #[tokio::test]
     async fn rejects_unsupported_capabilities_without_mutation() {
         let path = temp_path();
@@ -5485,6 +5883,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_rejects_an_orphaned_inspection_snapshot() {
+        let path = temp_path();
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(&path))
+            .await
+            .expect("open SQLite store");
+        store.bootstrap().await.expect("bootstrap SQLite store");
+        let active = store.recover().await.expect("recover empty revision");
+        let invocation = InvocationId::new();
+        let owner = PrincipalId::from_bytes([0x71; 16]);
+        store
+            .record_invocation_audit(&SqliteInvocationAuditEvent {
+                invocation,
+                outcome: "completed".to_owned(),
+                session_principal: owner,
+                effective_principal: None,
+                authorising_principal: None,
+                function: None,
+                source_revision: Some(active.pair().source()),
+                catalogue_revision: Some(active.pair().catalogue()),
+                error_code: None,
+            })
+            .await
+            .expect("record inspection audit");
+        store
+            .record_inspect_snapshot(&SqliteInspectSnapshotRecord {
+                epoch: InspectEpochId::new(),
+                invocation,
+                owner,
+                source_revision: active.pair().source(),
+                catalogue_revision: active.pair().catalogue(),
+                summary: br#"{"record":"inspect_summary"}"#.to_vec(),
+            })
+            .await
+            .expect("record inspection snapshot");
+        drop(store);
+
+        let database = Builder::new_local(path.to_str().expect("UTF-8 database path"))
+            .build()
+            .await
+            .expect("open raw SQLite database");
+        let connection = database.connect().expect("connect raw SQLite database");
+        connection
+            .execute(
+                "DELETE FROM orna_invocation_audit_events WHERE invocation_id = ?1",
+                [Value::Blob(invocation.to_bytes().to_vec())],
+            )
+            .await
+            .expect("delete orphaned inspection audit");
+        drop(connection);
+
+        let reopened = SqliteRevisionStore::open(&SqliteConfig::new(&path))
+            .await
+            .expect("reopen SQLite store");
+        let error = reopened
+            .recover()
+            .await
+            .expect_err("orphaned inspection evidence must fail recovery");
+        assert!(error.to_string().contains("no invocation audit event"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn rejects_malformed_source_hash_with_null_parent_on_recovery() {
         let path = temp_path();
         let store = SqliteRevisionStore::open(&SqliteConfig::new(&path))
@@ -5592,6 +6052,9 @@ mod tests {
         assert_eq!(recovered.source().units().len(), 1);
         assert_eq!(recovered.catalogue().schemas().len(), 1);
         assert_eq!(recovered.origins().len(), 1);
+        let historical = reopened.recover_at(initial.pair()).await.unwrap();
+        assert_eq!(historical.pair(), initial.pair());
+        assert!(historical.catalogue().schemas().is_empty());
         assert_eq!(reopened.read_ledger().await.unwrap(), ledger);
         let _ = std::fs::remove_file(path);
     }
