@@ -869,6 +869,7 @@ fn validate_mutation_parameters_with_catalogue(
                     | StandardScalar::Float
                     | StandardScalar::CharacterLargeObject
                     | StandardScalar::BinaryLargeObject
+                    | StandardScalar::Uuid
             ) {
                 continue;
             }
@@ -1331,6 +1332,7 @@ fn accepted_record_standard_scalar(
         "orna.kernel.value.float@1" => Some(StandardScalar::Float),
         "orna.kernel.value.character-large-object@1" => Some(StandardScalar::CharacterLargeObject),
         "orna.kernel.value.binary-large-object@1" => Some(StandardScalar::BinaryLargeObject),
+        "orna.kernel.value.uuid@1" => Some(StandardScalar::Uuid),
         _ => None,
     }
 }

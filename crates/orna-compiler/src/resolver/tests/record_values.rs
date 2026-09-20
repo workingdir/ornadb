@@ -1169,12 +1169,12 @@ fn record_value_scalar_family_is_exact() {
         StandardScalar::Float,
         StandardScalar::CharacterLargeObject,
         StandardScalar::BinaryLargeObject,
+        StandardScalar::Uuid,
     ] {
         assert!(supports_record_value_scalar(scalar));
     }
     for scalar in [
         StandardScalar::Decimal,
-        StandardScalar::Uuid,
         StandardScalar::Date,
         StandardScalar::Time,
         StandardScalar::Timestamp,
