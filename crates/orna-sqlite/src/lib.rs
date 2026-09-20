@@ -89,6 +89,14 @@ const INSPECT_TRACE_KINDS: &[&str] = &[
     "invocation.completed",
 ];
 
+// The local adapter executes supported server plans in-process. Keep its
+// result and scan bounds aligned with the PostgreSQL server-execution route:
+// a plan that needs a larger relation window must use a resource/streaming
+// authority instead of materialising an unbounded local result.
+const SQLITE_SERVER_PLAN_ROW_LIMIT: usize = 10_000;
+const SQLITE_SERVER_PLAN_CELL_LIMIT: usize = 1_000_000;
+const SQLITE_SERVER_PLAN_PAYLOAD_LIMIT: usize = 16 * 1024 * 1024;
+
 /// A candidate capability that the SQLite revision store does not yet accept.
 ///
 /// The first SQLite persistence slice accepts schemas, objects, functions,
@@ -2356,7 +2364,9 @@ impl SqliteRevisionStore {
         );
         let mut rows = connection.query(&query, ()).await?;
         let mut output_rows: Vec<Vec<RuntimeValue>> = Vec::new();
+        let mut budget = SqliteServerPlanBudget::default();
         while let Some(row) = rows.next().await? {
+            budget.observe_candidate()?;
             let object_id = ObjectId::from_bytes(id16(row.get::<Vec<u8>>(0)?, "object id")?);
             let mut fields = Vec::with_capacity(object.fields().len());
             for (index, field) in object.fields().iter().enumerate() {
@@ -2395,6 +2405,7 @@ impl SqliteRevisionStore {
             if decoded.distinct && output_rows.contains(&projected) {
                 continue;
             }
+            budget.observe_result(&projected)?;
             output_rows.push(projected);
         }
         Ok(output_rows.into_iter().flatten().collect())
@@ -2451,6 +2462,71 @@ impl SqliteRevisionStore {
                 Err(rollback) => Err(StorageError::Backend(SqliteError::from(rollback))),
             },
         }
+    }
+}
+
+/// Bounded accounting for the local materialised server-plan subset.
+///
+/// SQLite evaluates predicates locally for this deliberately small adapter
+/// surface, so the candidate fence is separate from the returned-row fence:
+/// it prevents a predicate that rejects every row from turning a bounded
+/// request into an unbounded table scan. Encoded value bytes are the durable
+/// transport representation exposed by this route, rather than an estimate
+/// based on host string sizes.
+#[derive(Default)]
+struct SqliteServerPlanBudget {
+    candidates: usize,
+    rows: usize,
+    cells: usize,
+    payload: usize,
+}
+
+impl SqliteServerPlanBudget {
+    fn observe_candidate(&mut self) -> Result<(), SqliteError> {
+        if self.candidates == SQLITE_SERVER_PLAN_ROW_LIMIT {
+            return Err(SqliteError::Domain(format!(
+                "SQLite server plan candidate row limit is {SQLITE_SERVER_PLAN_ROW_LIMIT}"
+            )));
+        }
+        self.candidates += 1;
+        Ok(())
+    }
+
+    fn observe_result(&mut self, values: &[RuntimeValue]) -> Result<(), SqliteError> {
+        if self.rows == SQLITE_SERVER_PLAN_ROW_LIMIT {
+            return Err(SqliteError::Domain(format!(
+                "SQLite server plan result row limit is {SQLITE_SERVER_PLAN_ROW_LIMIT}"
+            )));
+        }
+        self.cells = self.cells.checked_add(values.len()).ok_or_else(|| {
+            SqliteError::Domain(format!(
+                "SQLite server plan cell limit is {SQLITE_SERVER_PLAN_CELL_LIMIT}"
+            ))
+        })?;
+        if self.cells > SQLITE_SERVER_PLAN_CELL_LIMIT {
+            return Err(SqliteError::Domain(format!(
+                "SQLite server plan cell limit is {SQLITE_SERVER_PLAN_CELL_LIMIT}"
+            )));
+        }
+        for value in values {
+            let encoded = encode_value(value).map_err(|error| {
+                SqliteError::Domain(format!(
+                    "could not encode SQLite server result value: {error}"
+                ))
+            })?;
+            self.payload = self.payload.checked_add(encoded.len()).ok_or_else(|| {
+                SqliteError::Domain(format!(
+                    "SQLite server plan payload limit is {SQLITE_SERVER_PLAN_PAYLOAD_LIMIT}"
+                ))
+            })?;
+            if self.payload > SQLITE_SERVER_PLAN_PAYLOAD_LIMIT {
+                return Err(SqliteError::Domain(format!(
+                    "SQLite server plan payload limit is {SQLITE_SERVER_PLAN_PAYLOAD_LIMIT}"
+                )));
+            }
+        }
+        self.rows += 1;
+        Ok(())
     }
 }
 
@@ -5305,6 +5381,48 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("orna-sqlite-{nonce}.db"))
+    }
+
+    #[test]
+    fn local_server_plan_budget_fences_candidate_result_and_cell_growth() {
+        let mut candidate = SqliteServerPlanBudget {
+            candidates: SQLITE_SERVER_PLAN_ROW_LIMIT,
+            ..SqliteServerPlanBudget::default()
+        };
+        assert!(matches!(
+            candidate.observe_candidate(),
+            Err(SqliteError::Domain(message)) if message.contains("candidate row limit")
+        ));
+
+        let mut rows = SqliteServerPlanBudget {
+            rows: SQLITE_SERVER_PLAN_ROW_LIMIT,
+            ..SqliteServerPlanBudget::default()
+        };
+        assert!(matches!(
+            rows.observe_result(&[RuntimeValue::Boolean(true)]),
+            Err(SqliteError::Domain(message)) if message.contains("result row limit")
+        ));
+
+        let mut cells = SqliteServerPlanBudget {
+            cells: SQLITE_SERVER_PLAN_CELL_LIMIT,
+            ..SqliteServerPlanBudget::default()
+        };
+        assert!(matches!(
+            cells.observe_result(&[RuntimeValue::Boolean(true)]),
+            Err(SqliteError::Domain(message)) if message.contains("cell limit")
+        ));
+    }
+
+    #[test]
+    fn local_server_plan_budget_fences_encoded_payload_growth() {
+        let mut budget = SqliteServerPlanBudget {
+            payload: SQLITE_SERVER_PLAN_PAYLOAD_LIMIT,
+            ..SqliteServerPlanBudget::default()
+        };
+        assert!(matches!(
+            budget.observe_result(&[RuntimeValue::Boolean(true)]),
+            Err(SqliteError::Domain(message)) if message.contains("payload limit")
+        ));
     }
 
     fn schema_candidate(
