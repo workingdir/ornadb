@@ -503,6 +503,16 @@ fn validate_file_metadata(
     {
         return Err(CompactParquetError::InvalidMetadata);
     }
+    // The producer/version text is diagnostic-only, but its presence is part
+    // of the exact compact profile.  Do not accept an unlabelled physical
+    // file merely because its other identity metadata happens to match.
+    if values
+        .get("orna.encoder")
+        .and_then(|value| *value)
+        .is_none()
+    {
+        return Err(CompactParquetError::InvalidMetadata);
+    }
     let Some(schema_hash) = values.get("orna.schema.sha256").and_then(|value| *value) else {
         return Err(CompactParquetError::InvalidMetadata);
     };
@@ -1429,6 +1439,7 @@ mod tests {
                 Some(BASE64.encode(profile.schema().encode().unwrap())),
             ),
             KeyValue::new("orna.columns.ovb".into(), Some(BASE64.encode(columns))),
+            KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
         ];
         let properties = Arc::new(
             WriterProperties::builder()
@@ -1601,6 +1612,7 @@ mod tests {
                 Some(BASE64.encode(profile.schema().encode().unwrap())),
             ),
             KeyValue::new("orna.columns.ovb".into(), Some(BASE64.encode(columns))),
+            KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
         ];
         let properties = Arc::new(
             WriterProperties::builder()
@@ -2029,6 +2041,39 @@ mod tests {
     fn verified_fixture(profile: &CompactOvbProfile) -> Vec<u8> {
         let schema_ovb = profile.schema().encode().unwrap();
         verified_fixture_with_schema_ovb(profile, &schema_ovb)
+    }
+
+    fn verified_fixture_without_encoder(profile: &CompactOvbProfile) -> Vec<u8> {
+        let original = verified_fixture(profile);
+        let reader = SerializedFileReader::new(Bytes::from(original.clone())).unwrap();
+        let file = reader.metadata().file_metadata();
+        let mut metadata = file.key_value_metadata().cloned().unwrap();
+        metadata.retain(|item| item.key != "orna.encoder");
+        let rewritten = parquet::file::metadata::ParquetMetaData::new(
+            parquet::file::metadata::FileMetaData::new(
+                1,
+                file.num_rows(),
+                file.created_by().map(str::to_owned),
+                Some(metadata),
+                file.schema_descr_ptr(),
+                file.column_orders().cloned(),
+            ),
+            reader.metadata().row_groups().to_vec(),
+        );
+        let mut footer = Vec::new();
+        parquet::file::metadata::ParquetMetaDataWriter::new(&mut footer, &rewritten)
+            .finish()
+            .unwrap();
+        let footer_start = original.len()
+            - 8
+            - u32::from_le_bytes(
+                original[original.len() - 8..original.len() - 4]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+        let mut bytes = original[..footer_start].to_vec();
+        bytes.extend(footer);
+        bytes
     }
 
     fn verified_fixture_with_schema_ovb(profile: &CompactOvbProfile, schema_ovb: &[u8]) -> Vec<u8> {
@@ -3044,6 +3089,21 @@ mod tests {
                 "orna.schema.ovb".into(),
                 Some(BASE64.encode(noncanonical)),
             )),
+        ));
+    }
+
+    #[test]
+    fn reader_requires_diagnostic_encoder_metadata() {
+        let profile = profile(&[KEY_A]);
+
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(
+                &profile,
+                TABLE,
+                &verified_fixture_without_encoder(&profile),
+                1,
+            ),
+            Err(CompactParquetError::InvalidMetadata)
         ));
     }
 
