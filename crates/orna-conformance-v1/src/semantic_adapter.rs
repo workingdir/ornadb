@@ -2927,19 +2927,8 @@ impl DurableTransactionalEvaluator {
             {
                 return Err(RuntimeError::RecoveryInvalid);
             }
-            let lease = match stream
-                .apply_async(CommitIntent::Acquire {
-                    delivery: delivery.clone(),
-                    expected: expected.clone(),
-                    purpose: LeasePurpose::Deliver,
-                })
-                .await?
-            {
-                CommitResult::Acquired { lease } => lease,
-                _ => return Err(RuntimeError::RecoveryInvalid),
-            };
             previous = match stream
-                .fail_async(lease, diagnostic, payload.clone())
+                .fail_retry_async(delivery.clone(), diagnostic, payload.clone())
                 .await?
             {
                 CommitResult::Failed { failure } => failure,
