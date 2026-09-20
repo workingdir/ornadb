@@ -387,9 +387,17 @@ impl Repository {
 
         let continuity = continuity_state(&request.continuity, &advertised, object_id_length)?;
         let mut internal_plans = Vec::new();
-        if continuity == Some(RemoteContinuity::Continuous) {
-            for required in &request.continuity {
-                let source = required.reference().as_str().to_owned();
+        for required in &request.continuity {
+            let source = required.reference().as_str().to_owned();
+            // Synchronize every witness whose exact object is present even
+            // when another required witness is missing or stale.  The
+            // aggregate continuity result remains fail-closed, while
+            // available refs still obey ORNA-REMOTE-003 and can be carried
+            // forward for a later continuity-completing fetch.
+            if advertised
+                .get(&source)
+                .is_some_and(|actual| actual.eq_ignore_ascii_case(required.expected().as_str()))
+            {
                 let object_id = advertised
                     .get(&source)
                     .ok_or(FetchError::RequestedRefMissing)?
@@ -401,12 +409,12 @@ impl Repository {
                     RefKind::Internal,
                 )?);
             }
-            // Keep the internal transaction's order stable regardless of the
-            // caller's witness order.  Allocator/checkpoint refs are one
-            // continuity domain, so deterministic ref ordering makes fetch
-            // planning and the subsequent CAS transaction reproducible.
-            internal_plans.sort_by(|left, right| left.destination.cmp(&right.destination));
         }
+        // Keep the internal transaction's order stable regardless of the
+        // caller's witness order. Allocator/checkpoint refs are one
+        // continuity domain, so deterministic ref ordering makes fetch
+        // planning and the subsequent CAS transaction reproducible.
+        internal_plans.sort_by(|left, right| left.destination.cmp(&right.destination));
 
         let mut all_plans = ordinary_plans.clone();
         all_plans.extend(internal_plans.clone());
