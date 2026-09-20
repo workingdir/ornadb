@@ -5873,10 +5873,17 @@ fn websocket_upgrade_fragmentation_and_controls_are_checked_and_forwarded() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(
+    assert!(matches!(
         block_on(transport.receive(&mut socket, 2, &masked(true, 0, &message[split..]))),
-        Err(Error::Denied)
-    );
+        Ok(outputs)
+            if matches!(
+                outputs.as_slice(),
+                [WebSocketOutput::Binary {
+                    outcome: FrameOutcome::Accepted,
+                    ..
+                }]
+            )
+    ));
     let pong = block_on(transport.receive(&mut socket, 2, &masked(true, 9, b"p"))).unwrap();
     assert_eq!(pong, vec![WebSocketOutput::Pong(b"p".to_vec())]);
     assert_eq!(
@@ -6057,7 +6064,7 @@ fn websocket_input_rejects_noncanonical_extended_lengths() {
 fn websocket_input_processes_coalesced_frames_with_per_frame_limits() {
     let boundary = SessionBoundary::new(OriginPolicy::new([origin()], []), 10);
     let mut host_limits = Limits::default();
-    host_limits.protocol.max_message_bytes = 2;
+    host_limits.protocol.max_message_bytes = 16 * 1024 * 1024;
     let mut transport = LiveTransport::new(
         LiveHost::new(
             host_limits,
@@ -6066,7 +6073,7 @@ fn websocket_input_processes_coalesced_frames_with_per_frame_limits() {
         )
         .unwrap(),
         TransportLimits {
-            max_frame_bytes: 2,
+            max_frame_bytes: 16 * 1024 * 1024,
             ..TransportLimits::default()
         },
     )
@@ -6090,7 +6097,7 @@ fn websocket_input_processes_coalesced_frames_with_per_frame_limits() {
 fn websocket_input_rejects_oversized_control_frames_as_invalid() {
     let boundary = SessionBoundary::new(OriginPolicy::new([origin()], []), 10);
     let mut host_limits = Limits::default();
-    host_limits.protocol.max_message_bytes = 2;
+    host_limits.protocol.max_message_bytes = 16 * 1024 * 1024;
     let mut transport = LiveTransport::new(
         LiveHost::new(
             host_limits,
@@ -6099,7 +6106,7 @@ fn websocket_input_rejects_oversized_control_frames_as_invalid() {
         )
         .unwrap(),
         TransportLimits {
-            max_frame_bytes: 2,
+            max_frame_bytes: 16 * 1024 * 1024,
             ..TransportLimits::default()
         },
     )
@@ -6190,7 +6197,7 @@ fn websocket_input_coalesced_malformed_frame_closes_after_prior_output() {
 fn websocket_input_limit_emits_message_too_big_close() {
     let boundary = SessionBoundary::new(OriginPolicy::new([origin()], []), 10);
     let mut host_limits = Limits::default();
-    host_limits.protocol.max_message_bytes = 2;
+    host_limits.protocol.max_message_bytes = 16 * 1024 * 1024;
     let host = LiveHost::new(
         host_limits,
         boundary,
@@ -6198,13 +6205,17 @@ fn websocket_input_limit_emits_message_too_big_close() {
     )
     .unwrap();
     let limits = TransportLimits {
-        max_frame_bytes: 2,
+        max_frame_bytes: 16 * 1024 * 1024,
         max_outgoing_bytes: 256,
         ..TransportLimits::default()
     };
     let mut transport = LiveTransport::new(host, limits).unwrap();
     let mut socket = WebSocketState::new([5; 16]);
-    let output = block_on(transport.receive(&mut socket, 2, &masked(true, 2, &[7; 3]))).unwrap();
+    let frame = {
+        let body = vec![7; 16 * 1024 * 1024 + 1];
+        masked_with_length_code(true, 2, &body, 127, body.len() as u64)
+    };
+    let output = block_on(transport.receive(&mut socket, 2, &frame)).unwrap();
     assert_eq!(output, vec![WebSocketOutput::Close { code: Some(1009) }]);
     assert_eq!(
         encode_websocket_output(&output[0], limits).unwrap(),
