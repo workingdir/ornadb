@@ -2014,6 +2014,7 @@ fn primitive(name: &str) -> Option<Type> {
         "Error" => Type::Named("Error".into()),
         "Duration" => Type::Named("std.DURATION".into()),
         "VOID" => Type::Null,
+        "Uuid" => Type::Named("std.UUID".into()),
         "UUID" => Type::Named("std.UUID".into()),
         "TIME" => Type::Named("std.TIME".into()),
         "DURATION" => Type::Named("std.DURATION".into()),
@@ -2580,6 +2581,9 @@ fn check_item(
                 {
                     diagnostics.push(diag(DIAG_DUPLICATE, "duplicate primary-key field"));
                 }
+                if let Some(annotation) = &key.annotation {
+                    validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
+                }
                 let ty = key
                     .annotation
                     .as_ref()
@@ -2659,6 +2663,7 @@ fn check_item(
                         ty,
                         ..
                     } => {
+                        validate_type_annotation(ty, scope, &BTreeSet::new(), diagnostics);
                         let value = match initializer {
                             FieldInitializer::Default(value)
                             | FieldInitializer::Computed(value) => value,
@@ -2751,6 +2756,7 @@ fn check_item(
                 else {
                     continue;
                 };
+                validate_type_annotation(ty, scope, &BTreeSet::new(), diagnostics);
                 let expected = resolved_type_of(ty, scope);
                 if let Some(initializer) = initializer {
                     let inferred =
