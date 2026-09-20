@@ -841,6 +841,7 @@ impl LiveSessionChildren for LiveApplicationWorkSupervisor {
 /// owns the application lease and is therefore not complete until the
 /// application task explicitly acknowledges its terminal boundary.
 pub struct LiveApplicationTicket {
+    attachment: [u8; 16],
     session: [u8; 16],
     request: [u8; 16],
     message: Message,
@@ -2075,6 +2076,7 @@ impl LiveHost {
         }
         self.application_sessions.insert(session);
         Ok(ApplicationPreparation::Work(LiveApplicationTicket {
+            attachment,
             session,
             request,
             message: envelope.message,
@@ -5130,8 +5132,31 @@ impl LiveTransport {
         &mut self,
         completion: LiveApplicationCompletion,
     ) -> Result<WebSocketOutput> {
-        let outcome = self.host.complete_application(completion).await?;
-        self.websocket_output(outcome)
+        let attachment = completion.ticket.attachment;
+        let envelope = Envelope {
+            request: Some(completion.ticket.request),
+            watch: completion.ticket.watch,
+            message: completion.ticket.message.clone(),
+            extensions: BTreeMap::new(),
+        };
+        match self.host.complete_application(completion).await {
+            Ok(outcome) => self.websocket_output(outcome),
+            Err(error) => {
+                // The supervised worker path completes application work after
+                // the actor has reacquired transport state. Keep the same
+                // operational-error contract as the synchronous receive path:
+                // a well-formed request rejection is a correlated diagnostic,
+                // while framing, attachment, and stale-completion failures
+                // remain transport errors owned by the caller.
+                if let Some(outcome) =
+                    self.operational_error_outcome(attachment, &envelope, error)?
+                {
+                    self.websocket_output(outcome)
+                } else {
+                    Err(error)
+                }
+            }
+        }
     }
 
     /// Idempotently closes one attachment through the transport-owned host
@@ -7942,6 +7967,32 @@ mod tests {
         );
         assert!(!socket.closed);
         assert!(transport.host.watches.contains(&([1; 16], unrelated_watch)));
+    }
+
+    #[test]
+    fn supervised_application_rejection_is_a_correlated_diagnostic() {
+        let mut transport =
+            LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
+        let mut socket = WebSocketState::new([4; 16]);
+        let prepared = futures::executor::block_on(transport.prepare_websocket_application(
+            &mut socket,
+            2,
+            &masked_binary_frame(&eval_frame([14; 16])),
+        ))
+        .unwrap();
+        let WebSocketApplicationPreparation::Work(ticket) = prepared else {
+            panic!("evaluation must be delegated to application work");
+        };
+        let mut application = UnsupportedApplication;
+        let completion = futures::executor::block_on(ticket.execute(&mut application));
+        let response =
+            futures::executor::block_on(transport.complete_application(completion)).unwrap();
+        let response = diagnostic_output(vec![response]);
+        assert_eq!(
+            response,
+            portable_diagnostic([14; 16], None, "wire.unsupported").unwrap()
+        );
+        assert!(!socket.closed);
     }
 
     fn request_status_frame(request: [u8; 16], target: [u8; 16], fingerprint: [u8; 32]) -> Vec<u8> {
