@@ -96,6 +96,7 @@ const INSPECT_TRACE_KINDS: &[&str] = &[
 const SQLITE_SERVER_PLAN_ROW_LIMIT: usize = 10_000;
 const SQLITE_SERVER_PLAN_CELL_LIMIT: usize = 1_000_000;
 const SQLITE_SERVER_PLAN_PAYLOAD_LIMIT: usize = 16 * 1024 * 1024;
+const SQLITE_SYNCHRONOUS_FULL: i64 = 2;
 
 /// A candidate capability that the SQLite revision store does not yet accept.
 ///
@@ -3394,13 +3395,52 @@ async fn ensure_schema(connection: &mut Connection) -> Result<(), SqliteError> {
     // reported. This covers committed process/OS-crash recovery; the product
     // does not claim protection from storage hardware that lies about flushes
     // or from power loss without an honest durable filesystem.
-    let mut journal_mode = connection.query("PRAGMA journal_mode = WAL", ()).await?;
-    while journal_mode.next().await?.is_some() {}
-    drop(journal_mode);
-    let mut synchronous = connection.query("PRAGMA synchronous = FULL", ()).await?;
-    while synchronous.next().await?.is_some() {}
-    drop(synchronous);
+    let mut journal_rows = connection.query("PRAGMA journal_mode = WAL", ()).await?;
+    let journal_mode = journal_rows
+        .next()
+        .await?
+        .ok_or(SqliteError::InvalidPersistedData(
+            "SQLite did not report a journal mode after requesting WAL",
+        ))?
+        .get::<String>(0)?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        return Err(SqliteError::InvalidPersistedData(
+            "SQLite refused the required WAL journal mode",
+        ));
+    }
+    drop(journal_rows);
+    let mut synchronous_set_rows = connection.query("PRAGMA synchronous = FULL", ()).await?;
+    while synchronous_set_rows.next().await?.is_some() {}
+    drop(synchronous_set_rows);
+    let mut synchronous_rows = connection.query("PRAGMA synchronous", ()).await?;
+    let synchronous = synchronous_rows
+        .next()
+        .await?
+        .ok_or(SqliteError::InvalidPersistedData(
+            "SQLite did not report a synchronous mode after requesting FULL",
+        ))?
+        .get::<i64>(0)?;
+    if synchronous != SQLITE_SYNCHRONOUS_FULL {
+        return Err(SqliteError::InvalidPersistedData(
+            "SQLite refused the required FULL synchronous mode",
+        ));
+    }
+    drop(synchronous_rows);
     connection.execute("PRAGMA foreign_keys = ON", ()).await?;
+    let mut foreign_key_rows = connection.query("PRAGMA foreign_keys", ()).await?;
+    let foreign_keys = foreign_key_rows
+        .next()
+        .await?
+        .ok_or(SqliteError::InvalidPersistedData(
+            "SQLite did not report foreign-key enforcement after enabling it",
+        ))?
+        .get::<i64>(0)?;
+    if foreign_keys != 1 {
+        return Err(SqliteError::InvalidPersistedData(
+            "SQLite refused required foreign-key enforcement",
+        ));
+    }
+    drop(foreign_key_rows);
     connection.execute_batch(SCHEMA).await?;
 
     let transaction = turso::transaction::Transaction::new(
