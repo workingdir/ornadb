@@ -234,6 +234,13 @@ integration target. These recipes provide a dedicated SQLite adoption proof;
 the standalone adapter example remains a library smoke and does not exercise
 the socket by itself.
 
+The SQLite owner configures WAL journaling and `synchronous = FULL` before
+schema setup. The claimed durability boundary covers committed transactions
+across a process or operating-system crash when the filesystem honors flushes;
+Orna does not claim power-loss durability against a filesystem or storage
+device that lies about flush completion. The writable local database has one
+owner process; other commands use the private socket when that owner exists.
+
 The accepted standard-library compatibility record currently covers V1 through
 V9. The implementation contains V10/V11 paths, but they have no accepted 1.0
 compatibility promise until the release evidence and product baseline are
