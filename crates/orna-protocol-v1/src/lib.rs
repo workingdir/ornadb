@@ -1316,10 +1316,19 @@ fn validate_present(node: &Node) -> Result<()> {
     validate_present_key(&fields[1])?;
 
     let properties = map(&fields[2]).ok_or(Error::InvalidValue)?;
+    let mut property_keys = Vec::with_capacity(properties.len());
     for (key, value) in properties {
         if !matches!(key, Node::Text(_)) && uuid(key).is_err() {
             return Err(Error::InvalidValue);
         }
+        // A typed Present tree is a renderer input, not a multimap. Keep the
+        // invariant here as well as in canonical CBOR decoding: callers that
+        // construct or transform a private tree must not be able to hand an
+        // ambiguous property map to a renderer.
+        if property_keys.iter().any(|current| current == key) {
+            return Err(Error::InvalidValue);
+        }
+        property_keys.push(key.clone());
         let _ = canonical_value(value)?;
         if matches!(value, Node::Tag(60012, _)) {
             validate_present(value)?;
@@ -2728,6 +2737,65 @@ mod tests {
         assert_eq!(
             Envelope::decode(&bytes, Limits::default()),
             Err(Error::InvalidValue)
+        );
+    }
+    #[test]
+    fn present_rejects_duplicate_typed_property_keys() {
+        let duplicate = Node::Tag(
+            60012,
+            Box::new(Node::Array(vec![
+                Node::Text("text".into()),
+                Node::Null,
+                Node::Map(vec![
+                    (Node::Text("label".into()), Node::Text("first".into())),
+                    (Node::Text("label".into()), Node::Text("second".into())),
+                ]),
+                Node::Array(vec![]),
+            ])),
+        );
+
+        assert_eq!(PresentNode::decode(&duplicate), Err(Error::InvalidValue));
+
+        let valid = Node::Tag(
+            60012,
+            Box::new(Node::Array(vec![
+                Node::Text("text".into()),
+                Node::Null,
+                Node::Map(vec![(
+                    Node::Text("label".into()),
+                    Node::Text("first".into()),
+                )]),
+                Node::Array(vec![]),
+            ])),
+        );
+        let mut bytes = wire(
+            16,
+            Some(id(1)),
+            Some(id(2)),
+            Node::Map(vec![
+                (uint(0), uint(0)),
+                (uint(1), valid),
+                (uint(2), snapshot_node(&snapshot()).unwrap()),
+            ]),
+        );
+        let single = [
+            0xa1, 0x65, b'l', b'a', b'b', b'e', b'l', 0x65, b'f', b'i', b'r', b's', b't',
+        ];
+        let position = bytes
+            .windows(single.len())
+            .position(|window| window == single)
+            .expect("test fixture contains the Present property map");
+        bytes.splice(
+            position..position + single.len(),
+            [
+                0xa2, 0x65, b'l', b'a', b'b', b'e', b'l', 0x65, b'f', b'i', b'r', b's', b't', 0x65,
+                b'l', b'a', b'b', b'e', b'l', 0x66, b's', b'e', b'c', b'o', b'n', b'd',
+            ],
+        );
+
+        assert_eq!(
+            Envelope::decode(&bytes, Limits::default()),
+            Err(Error::NonCanonical)
         );
     }
     #[test]
