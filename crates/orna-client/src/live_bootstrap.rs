@@ -221,6 +221,7 @@ where
 
     /// Transfers the authenticated binary transport and preserved first
     /// snapshot to the existing bounded presentation lifecycle owner.
+    #[allow(clippy::type_complexity)]
     pub fn into_driver<R, A>(
         self,
         renderer: R,
@@ -289,6 +290,7 @@ impl LiveClient {
     /// Resumes the HTTP session, opens a new authenticated WebSocket, and
     /// resubscribes with `request`, receiving a complete snapshot for a new
     /// watch before replacing the driver.
+    #[allow(clippy::result_large_err)]
     pub async fn reconnect_driver<R, A>(
         &self,
         session: &LiveSession,
@@ -363,6 +365,7 @@ impl LiveClient {
     /// Resumes the HTTP session and reattaches the existing session-owned
     /// watch. The host sends a null-request automatic snapshot; no client
     /// request is written to the replacement WebSocket.
+    #[allow(clippy::result_large_err)]
     pub async fn resume_driver<R, A>(
         &self,
         session: &LiveSession,
