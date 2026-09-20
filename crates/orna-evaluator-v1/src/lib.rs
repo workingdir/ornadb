@@ -5283,6 +5283,55 @@ mod tests {
     }
 
     #[test]
+    fn function_defaults_bind_in_declaration_order_and_only_when_omitted() {
+        let parsed = orna_syntax_v1::parse_module(
+            "fn run(seed: Int = 3, doubled: Int = seed * 2) = doubled;",
+        );
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+        let orna_syntax_v1::Declaration::Function { signature, body } =
+            &parsed.value.items[0].declaration
+        else {
+            panic!("function expected");
+        };
+        let functions = Functions::from([(
+            signature.name.clone(),
+            PureFunction {
+                parameters: signature.parameters.clone(),
+                body: body.clone(),
+                environment: Environment::new(),
+            },
+        )]);
+
+        assert_eq!(
+            invoke_named("run", &functions, &Environment::new(), Limits::default()).unwrap(),
+            integer(6)
+        );
+        assert_eq!(
+            invoke_named(
+                "run",
+                &functions,
+                &Environment::from([(String::from("seed"), integer(4))]),
+                Limits::default(),
+            )
+            .unwrap(),
+            integer(8)
+        );
+        assert_eq!(
+            invoke_named(
+                "run",
+                &functions,
+                &Environment::from([
+                    (String::from("seed"), integer(4)),
+                    (String::from("doubled"), integer(99)),
+                ]),
+                Limits::default(),
+            )
+            .unwrap(),
+            integer(99)
+        );
+    }
+
+    #[test]
     fn nominal_decode_rejects_duplicate_selected_and_unselected_field_keys() {
         let functions = Functions::new();
         for fields in [
