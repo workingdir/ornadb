@@ -33,9 +33,10 @@ use orna_protocol_v1::{
     TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime_v1::{
-    Component, ConsumerIdentity, RecoveryDisposition, RequestIdentity, RequestOwner,
+    Component, ConsumerIdentity, FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
     RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
-    RunObservationRegistration, RuntimeError, RuntimeState, TerminalOutcome, WriterLease,
+    RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState, TableMutation,
+    TerminalOutcome, WriterLease,
 };
 use orna_security_v1::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
@@ -715,6 +716,57 @@ impl Default for LiveApplicationWorkSupervisor {
         Self::new()
     }
 }
+/// A staged, Orna-controlled table activation returned by a transactional
+/// remote Eval adapter. The host supplies the admitted CWD context and owns
+/// the writer-fenced commit; application code never commits a wire result
+/// directly.
+pub struct LiveEvalTransaction {
+    pub mutations: Vec<TableMutation>,
+    pub next_digest: [u8; 32],
+    pub faults: Arc<dyn FaultInjector>,
+}
+
+impl LiveEvalTransaction {
+    #[must_use]
+    pub fn new(
+        mutations: Vec<TableMutation>,
+        next_digest: [u8; 32],
+        faults: Arc<dyn FaultInjector>,
+    ) -> Self {
+        Self {
+            mutations,
+            next_digest,
+            faults,
+        }
+    }
+}
+
+/// The result of a remote Eval admission. `Pure` preserves the existing
+/// read-only path. `Transaction` is only executable when the host is backed by
+/// a durable runtime and therefore can connect the request owner, pinned CWD
+/// context, table writes, and terminal outcome in one runtime transaction.
+pub enum LiveEvalResponse {
+    Pure(Envelope),
+    Transaction {
+        response: Envelope,
+        transaction: LiveEvalTransaction,
+    },
+}
+
+impl LiveEvalResponse {
+    #[must_use]
+    pub fn pure(response: Envelope) -> Self {
+        Self::Pure(response)
+    }
+
+    #[must_use]
+    pub fn transaction(response: Envelope, transaction: LiveEvalTransaction) -> Self {
+        Self::Transaction {
+            response,
+            transaction,
+        }
+    }
+}
 
 /// Narrow seam for application-owned source execution. The adapter owns wire
 /// admission and response identity; implementations must return a canonical
@@ -725,6 +777,24 @@ pub trait LiveApplication {
     /// Returns a stable redacted error when evaluation cannot admit the input.
     fn eval(&mut self, session: [u8; 16], request: [u8; 16], message: &Message)
     -> Result<Envelope>;
+
+    /// Stages a remote Eval response under the transport's request ownership
+    /// boundary. The default delegates to [`Self::eval`] and is deliberately
+    /// pure-only.
+    fn eval_with_transaction<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        _context: Option<&'a RuntimeActivationContext>,
+        _work: &'a mut LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse>> + 'a>> {
+        Box::pin(async move {
+            self.eval(session, request, message)
+                .map(LiveEvalResponse::pure)
+        })
+    }
+
     /// # Errors
     ///
     /// Returns a stable redacted error when watching cannot admit the input.
@@ -784,6 +854,34 @@ pub trait LiveApplication {
     /// Returns a stable redacted error when the cancellation cannot be applied.
     fn cancel(&mut self, _: [u8; 16], _: [u8; 16], _: [u8; 32], _: &Message) -> Result<Envelope> {
         Err(Error::UnsupportedOperation)
+    }
+
+    /// Dispatches an Eval under the transaction seam. Existing applications
+    /// inherit a pure response; transactional adapters return a staged plan
+    /// for the host-owned runtime commit.
+    fn dispatch_eval_with_work<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        _context: Option<&'a RuntimeActivationContext>,
+        work: &'a mut LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse>> + 'a>> {
+        Box::pin(async move {
+            // Route the default pure path through the existing compatibility
+            // dispatcher so custom cancellation-aware implementations retain
+            // their work lease and join semantics. Transactional adapters
+            // override this hook and must perform the same bounded checks
+            // around `eval_with_transaction`.
+            let fingerprint = match message {
+                Message::Eval { fingerprint, .. } => *fingerprint,
+                _ => [0; 32],
+            };
+            let response = self
+                .dispatch_with_work(session, request, message, None, fingerprint, work)
+                .await?;
+            Ok(LiveEvalResponse::pure(response))
+        })
     }
 
     /// Dispatches an admitted application operation under its ownership
@@ -847,6 +945,7 @@ pub struct LiveApplicationTicket {
     message: Message,
     watch: Option<[u8; 16]>,
     fingerprint: [u8; 32],
+    eval_context: Option<RuntimeActivationContext>,
     work: LiveApplicationWorkLease,
     invoke_callback: bool,
     resync_revisions: usize,
@@ -856,7 +955,7 @@ pub struct LiveApplicationTicket {
 /// Result returned by the application task to the transport actor.
 pub struct LiveApplicationCompletion {
     ticket: LiveApplicationTicket,
-    response: Result<Envelope>,
+    response: Result<LiveEvalResponse>,
 }
 
 pub enum ApplicationPreparation {
@@ -922,18 +1021,34 @@ impl LiveApplicationTicket {
         application: &mut impl LiveApplication,
     ) -> LiveApplicationCompletion {
         let response = if self.invoke_callback {
-            application
-                .dispatch_with_work(
-                    self.session,
-                    self.request,
-                    &self.message,
-                    self.watch,
-                    self.fingerprint,
-                    &mut self.work,
-                )
-                .await
+            if matches!(self.message, Message::Eval { .. }) {
+                application
+                    .dispatch_eval_with_work(
+                        self.session,
+                        self.request,
+                        &self.message,
+                        self.eval_context.as_ref(),
+                        &mut self.work,
+                    )
+                    .await
+            } else {
+                application
+                    .dispatch_with_work(
+                        self.session,
+                        self.request,
+                        &self.message,
+                        self.watch,
+                        self.fingerprint,
+                        &mut self.work,
+                    )
+                    .await
+                    .map(LiveEvalResponse::pure)
+            }
         } else {
-            Ok(unit_result_response(self.request, self.fingerprint))
+            Ok(LiveEvalResponse::pure(unit_result_response(
+                self.request,
+                self.fingerprint,
+            )))
         };
         self.work.complete();
         LiveApplicationCompletion {
@@ -2043,6 +2158,20 @@ impl LiveHost {
             self.retain_failure(session, request, fingerprint).await?;
             return Err(error);
         }
+        let eval_context = if self.runtime.is_some()
+            && matches!(envelope.message, Message::Eval { .. })
+        {
+            Some(
+                self.runtime
+                    .as_ref()
+                    .ok_or(Error::RuntimeUnavailable)?
+                    .begin_activation()
+                    .await
+                    .map_err(|error| map_runtime(&error))?,
+            )
+        } else {
+            None
+        };
         if let Some((target, target_kind, target_active, durable_request)) = cancel_target
             && target_active
         {
@@ -2082,13 +2211,13 @@ impl LiveHost {
             message: envelope.message,
             watch: envelope.watch,
             fingerprint,
+            eval_context,
             work,
             invoke_callback,
             resync_revisions,
             cancel_target,
         }))
     }
-
     /// Validates and publishes a completed application ticket after the actor
     /// has reacquired its transport state. A stale completion is rejected by
     /// the durable terminal claim and the session/application fence.
@@ -2109,6 +2238,7 @@ impl LiveHost {
             message,
             watch,
             fingerprint,
+            eval_context,
             work,
             resync_revisions,
             cancel_target,
@@ -2132,6 +2262,45 @@ impl LiveHost {
         // terminal claim is stale, even if its payload is otherwise valid.
         self.validate_application_completion_parts(session, request, fingerprint)
             .await?;
+        let response = match response {
+            LiveEvalResponse::Pure(response) => response,
+            LiveEvalResponse::Transaction {
+                response,
+                transaction,
+            } => {
+                if !matches!(message, Message::Eval { .. }) {
+                    return Err(Error::ApplicationRejected);
+                }
+                let validated =
+                    validate_result_response(request, fingerprint, response, self.limits.protocol)?;
+                let response = validated.response.ok_or(Error::ApplicationRejected)?;
+                let Some(context) = eval_context.as_ref() else {
+                    if !self.deleted_sessions.contains_key(&session) {
+                        self.retain_failure(session, request, fingerprint).await?;
+                    }
+                    return Err(Error::UnsupportedOperation);
+                };
+                let committed = self
+                    .commit_eval_transaction(
+                        session,
+                        request,
+                        fingerprint,
+                        context,
+                        response,
+                        transaction,
+                    )
+                    .await;
+                match committed {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if !self.deleted_sessions.contains_key(&session) {
+                            self.retain_failure(session, request, fingerprint).await?;
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+        };
         let envelope = Envelope {
             request: Some(request),
             watch,
@@ -2232,7 +2401,7 @@ impl LiveHost {
                 self.serving
                     .close_watch(session, watch)
                     .map_err(map_serving)?;
-                self.watches.remove(&(ticket.session, watch));
+                self.watches.remove(&(session, watch));
             }
         }
         Ok(outcome)
@@ -2571,7 +2740,7 @@ impl LiveHost {
                             self.watches.remove(&(session, watch));
                             self.complete(session, request, &envelope, outcome).await
                         }
-                        Message::Event { .. } | Message::Eval { .. } => {
+                        Message::Event { .. } => {
                             let response = self
                                 .application_call(
                                     application,
@@ -2579,6 +2748,24 @@ impl LiveHost {
                                     request,
                                     &envelope.message,
                                     envelope.watch,
+                                    fingerprint,
+                                )
+                                .await?;
+                            let outcome = validate_result_response(
+                                request,
+                                fingerprint,
+                                response,
+                                self.limits.protocol,
+                            )?;
+                            self.complete(session, request, &envelope, outcome).await
+                        }
+                        Message::Eval { .. } => {
+                            let response = self
+                                .application_eval_call(
+                                    application,
+                                    session,
+                                    request,
+                                    &envelope.message,
                                     fingerprint,
                                 )
                                 .await?;
@@ -2716,6 +2903,62 @@ impl LiveHost {
                     self.retain_failure(session, request, fingerprint).await?;
                 }
                 dispatched
+            }
+        }
+    }
+
+    async fn application_eval_call(
+        &mut self,
+        application: &mut impl LiveApplication,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &Message,
+        fingerprint: [u8; 32],
+    ) -> Result<Envelope> {
+        let context = if self.runtime.is_some() {
+            Some(
+                self.runtime
+                    .as_ref()
+                    .ok_or(Error::RuntimeUnavailable)?
+                    .begin_activation()
+                    .await
+                    .map_err(|error| map_runtime(&error))?,
+            )
+        } else {
+            None
+        };
+        let mut work = self.application_work.admit(session, request)?;
+        let result = application
+            .dispatch_eval_with_work(
+                session,
+                request,
+                message,
+                context.as_ref(),
+                &mut work,
+            )
+            .await;
+        work.complete();
+        let result = result?;
+        match result {
+            LiveEvalResponse::Pure(response) => Ok(response),
+            LiveEvalResponse::Transaction {
+                response,
+                transaction,
+            } => {
+                let validated =
+                    validate_result_response(request, fingerprint, response, self.limits.protocol)?;
+                let response = validated.response.ok_or(Error::ApplicationRejected)?;
+                self.commit_eval_transaction(
+                    session,
+                    request,
+                    fingerprint,
+                    context
+                        .as_ref()
+                        .ok_or(Error::UnsupportedOperation)?,
+                    response,
+                    transaction,
+                )
+                .await
             }
         }
     }
@@ -3260,6 +3503,59 @@ impl LiveHost {
             self.requests.remove(&(session, request));
         }
         started
+    }
+
+    async fn commit_eval_transaction(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        context: &RuntimeActivationContext,
+        response: Envelope,
+        transaction: LiveEvalTransaction,
+    ) -> Result<Envelope> {
+        if !matches!(
+            &response.message,
+            Message::Result {
+                status: ResultStatus::Success,
+                ..
+            }
+        ) {
+            return Err(Error::ApplicationRejected);
+        }
+        let lease = self.writer_lease().await?;
+        let runtime = self.runtime.as_ref().ok_or(Error::UnsupportedOperation)?;
+        let identity = RequestIdentity {
+            session_id: session,
+            request_id: request,
+        };
+        let terminal = self.terminal_outcome(&DispatchOutcome {
+            outcome: FrameOutcome::Accepted,
+            response: Some(response),
+        })?;
+        let committed = runtime
+            .commit_table_request_activation(
+                lease,
+                identity,
+                fingerprint,
+                context,
+                &transaction.mutations,
+                transaction.next_digest,
+                terminal,
+                transaction.faults.as_ref(),
+            )
+            .await
+            .map_err(|error| map_runtime(&error))?;
+        let retained = committed
+            .request
+            .terminal_outcome
+            .as_ref()
+            .ok_or(Error::RuntimeUnavailable)?;
+        let response = self.decode(retained.as_bytes())?;
+        self.validate_recovered_response(&committed.request, &response)
+            .await?;
+        validate_result_response(request, fingerprint, response, self.limits.protocol)
+            .map(|validated| validated.response.ok_or(Error::ApplicationRejected))?
     }
 
     async fn complete(
