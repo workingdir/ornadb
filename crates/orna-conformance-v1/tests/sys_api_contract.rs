@@ -246,3 +246,69 @@ fn portable_sys_api_has_exact_declared_counts_and_surface() {
                     .any(|invariant| invariant == "resumable is false in 1.0"))
     );
 }
+
+#[test]
+fn sys_session_schema_binds_the_live_runtime_relation_without_runtime_claims() {
+    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+    let relation = document["relations"]
+        .as_array()
+        .expect("relations")
+        .iter()
+        .find(|value| value["name"] == "sys.Session")
+        .expect("sys.Session relation");
+
+    assert_eq!(relation["grouped_handle"], "sys.rt.sessions");
+    assert_eq!(relation["availability"], "live");
+    assert_eq!(relation["key"], "id");
+    assert_eq!(relation["writable"], false);
+    assert_eq!(relation["reference_type"], "sys.SessionRef");
+    assert_eq!(relation["key_fields"], serde_json::json!(["id"]));
+
+    let fields = relation["fields"]
+        .as_array()
+        .expect("sys.Session fields")
+        .iter()
+        .map(|field| {
+            (
+                field["name"].as_str().expect("session field name"),
+                field["type"].as_str().expect("session field type"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fields,
+        vec![
+            ("reference", "sys.SessionRef"),
+            ("id", "sys.SessionId"),
+            ("started", "Instant"),
+            ("last_seen", "Instant"),
+            ("client", "sys.ClientRef?"),
+            ("locale", "Locale"),
+            ("timezone", "TimeZone"),
+            ("renderer", "Str?"),
+        ]
+    );
+
+    let session_ref = document["reference_aliases"]
+        .as_array()
+        .expect("reference aliases")
+        .iter()
+        .find(|value| value["name"] == "sys.SessionRef")
+        .expect("sys.SessionRef alias");
+    assert_eq!(session_ref["target"], "sys.Session");
+    assert_eq!(session_ref["definition"], "sys.RowRef<sys.Session>");
+
+    let runtime_view = document["value_types"]
+        .as_array()
+        .expect("value types")
+        .iter()
+        .find(|value| value["name"] == "sys.RuntimeView")
+        .expect("sys.RuntimeView");
+    let session_handle = runtime_view["fields"]
+        .as_array()
+        .expect("runtime view fields")
+        .iter()
+        .find(|field| field["name"] == "sessions")
+        .expect("runtime session handle");
+    assert_eq!(session_handle["type"], "Relation<sys.Session>");
+}
