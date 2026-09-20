@@ -69,7 +69,6 @@ impl PostgresKernel {
                 rebind_inspect_session(self, &security, authenticated_session).await?;
             let mut granted = vec![InspectPrivilege::OwnInvocation];
             granted.extend(inspect_privileges_for_session(&security, &bound_session));
-            let registry = inspect_value_registry(&active)?;
             let row = transaction
                 .query_opt(INSPECT_SNAPSHOT_SELECT, &[&epoch_id.to_bytes().to_vec()])
                 .await
@@ -93,7 +92,22 @@ impl PostgresKernel {
                 "owner_principal_id",
             )?);
             require_inspect_epoch_access(self, &bound_session, owner, &granted).await?;
-            let epoch = decode_inspect_snapshot_row(&row, &active, &registry)?;
+            let source = SourceRevisionId::from_bytes(inspect_id(
+                INSPECT_SNAPSHOT_RELATION,
+                &row,
+                epoch_id.canonical().as_str(),
+                "source_revision_id",
+            )?);
+            let catalogue = CatalogueRevisionId::from_bytes(inspect_id(
+                INSPECT_SNAPSHOT_RELATION,
+                &row,
+                epoch_id.canonical().as_str(),
+                "catalogue_revision_id",
+            )?);
+            let (historical, registry) =
+                inspect_codec_context(&transaction, &active, RevisionPair::new(source, catalogue))
+                    .await?;
+            let epoch = decode_inspect_snapshot_row(&row, &historical, &registry)?;
             transaction
                 .commit()
                 .await
@@ -159,7 +173,6 @@ impl PostgresKernel {
             }
             let mut granted = vec![InspectPrivilege::OwnInvocation];
             granted.extend(inspect_privileges_for_session(&security, &bound_session));
-            let registry = inspect_value_registry(&active)?;
             let row = transaction
                 .query_opt(INSPECT_SNAPSHOT_SELECT, &[&epoch_id.to_bytes().to_vec()])
                 .await
@@ -183,10 +196,25 @@ impl PostgresKernel {
                 "owner_principal_id",
             )?);
             require_inspect_epoch_access(self, &bound_session, owner, &granted).await?;
-            let target = decode_inspect_snapshot_row(&row, &active, &registry)?;
+            let source = SourceRevisionId::from_bytes(inspect_id(
+                INSPECT_SNAPSHOT_RELATION,
+                &row,
+                epoch_id.canonical().as_str(),
+                "source_revision_id",
+            )?);
+            let catalogue = CatalogueRevisionId::from_bytes(inspect_id(
+                INSPECT_SNAPSHOT_RELATION,
+                &row,
+                epoch_id.canonical().as_str(),
+                "catalogue_revision_id",
+            )?);
+            let (historical, registry) =
+                inspect_codec_context(&transaction, &active, RevisionPair::new(source, catalogue))
+                    .await?;
+            let target = decode_inspect_snapshot_row(&row, &historical, &registry)?;
             let snapshot = persist_inspect_snapshot_clone(
                 &transaction,
-                &active,
+                &historical,
                 &registry,
                 target,
                 observer_context,
@@ -239,7 +267,6 @@ impl PostgresKernel {
                 rebind_inspect_session(self, &security, authenticated_session).await?;
             let mut granted = vec![InspectPrivilege::OwnInvocation];
             granted.extend(inspect_privileges_for_session(&security, &bound_session));
-            let registry = inspect_value_registry(&active)?;
             let row = transaction
                 .query_opt(INSPECT_SNAPSHOT_SELECT, &[&epoch_id.to_bytes().to_vec()])
                 .await
@@ -263,10 +290,25 @@ impl PostgresKernel {
                 "owner_principal_id",
             )?);
             require_inspect_epoch_access(self, &bound_session, owner, &granted).await?;
-            let target = decode_inspect_snapshot_row(&row, &active, &registry)?;
+            let source = SourceRevisionId::from_bytes(inspect_id(
+                INSPECT_SNAPSHOT_RELATION,
+                &row,
+                epoch_id.canonical().as_str(),
+                "source_revision_id",
+            )?);
+            let catalogue = CatalogueRevisionId::from_bytes(inspect_id(
+                INSPECT_SNAPSHOT_RELATION,
+                &row,
+                epoch_id.canonical().as_str(),
+                "catalogue_revision_id",
+            )?);
+            let (historical, registry) =
+                inspect_codec_context(&transaction, &active, RevisionPair::new(source, catalogue))
+                    .await?;
+            let target = decode_inspect_snapshot_row(&row, &historical, &registry)?;
             let snapshot = persist_inspect_snapshot_clone(
                 &transaction,
-                &active,
+                &historical,
                 &registry,
                 target,
                 observer_context,
@@ -678,7 +720,11 @@ impl PostgresKernel {
                 .map_err(PostgresKernelError::Database)?;
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
-            let registry = inspect_value_registry(&active)?;
+            let pair = RevisionPair::new(
+                snapshot.epoch.source_revision_id(),
+                snapshot.epoch.catalogue_revision_id(),
+            );
+            let (historical, registry) = inspect_codec_context(&transaction, &active, pair).await?;
             // `after_sequence` is a resume cursor: 0 (the spec default) means
             // "from the start" and returns the full stream including sequence
             // 0; any positive value returns only rows strictly after it.
@@ -722,7 +768,7 @@ impl PostgresKernel {
                     continue;
                 }
                 let RuntimeValue::InvokeEvent(event) =
-                    decode_constructed_value(&active, &registry, &record.payload_bytes)
+                    decode_constructed_value(&historical, &registry, &record.payload_bytes)
                         .map_err(PostgresKernelError::InspectValueCodec)?
                 else {
                     return Err(PostgresKernelError::DurableInvariant {
