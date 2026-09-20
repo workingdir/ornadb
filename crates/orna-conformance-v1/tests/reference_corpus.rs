@@ -467,7 +467,10 @@ fn engine_witnesses_reject_non_repository_provenance_references() {
         let error = harness
             .engine_witnesses(&report, std::slice::from_ref(&binding))
             .expect_err("engine witness provenance must remain repository-relative");
-        assert_eq!(error, format!("invalid repository-relative {field} reference"));
+        assert_eq!(
+            error,
+            format!("invalid repository-relative {field} reference")
+        );
         binding.implementation_ref =
             "crates/orna-conformance-v1/src/lib.rs::Harness::engine_witnesses".into();
         binding.test_ref =
