@@ -8,7 +8,8 @@ use orna_foundation_v1::{
 use orna_live_v1::{
     CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpConnection,
     HttpConnectionError, HttpEncodeError, HttpIoError, HttpParseError, Limits, ListenerBindError,
-    ListenerExposure, LiveApplication, LiveCredentialIssuer, LiveHost, LiveListenerAcceptor,
+    ListenerExposure, LiveApplication, LiveCredentialIssuer, LiveEvalResponse,
+    LiveEvalTransaction, LiveHost, LiveListenerAcceptor,
     LiveSessionAuthority, LiveSessionChildren, LiveTransport, ResumeRequest, SUBPROTOCOL,
     SessionCredential, SessionMetadata, TransportLimits, WebSocketOutput, WebSocketState,
     WireRequest, WireResponse, encode_websocket_output, parse_http_request,
@@ -36,7 +37,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     process::Command,
-    sync::mpsc,
+    sync::{Arc, mpsc},
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -502,6 +503,153 @@ impl LiveApplication for CompetingTerminalApplication {
         .join()
         .unwrap();
         Ok(unit_result(request, fingerprint))
+    }
+    fn eval_with_transaction<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        _: Option<&'a orna_runtime_v1::RuntimeActivationContext>,
+        _: &'a mut orna_live_v1::LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
+        let Message::Eval { fingerprint, .. } = message else {
+            return Box::pin(async { Err(Error::ApplicationRejected) });
+        };
+        self.calls += 1;
+        let malformed_winner = Envelope {
+            request: Some([99; 16]),
+            watch: None,
+            message: Message::Result {
+                status: ResultStatus::Success,
+                value: Some(CanonicalValue::unit()),
+                fingerprint: *fingerprint,
+                diagnostic: None,
+            },
+            extensions: BTreeMap::new(),
+        };
+        let repository = self.repository.clone();
+        let owner = self.owner;
+        let fingerprint = *fingerprint;
+        std::thread::spawn(move || {
+            let runtime = open_durable_state(&repository);
+            let writer = block_on(runtime.acquire_lease(owner)).unwrap();
+            block_on(
+                runtime.complete_observed_request_with_owner(
+                    RequestIdentity {
+                        session_id: session,
+                        request_id: request,
+                    },
+                    fingerprint,
+                    writer,
+                    TerminalOutcome::new(
+                        malformed_winner.encode(Limits::default().protocol).unwrap(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        })
+        .join()
+        .unwrap();
+        let transaction = LiveEvalTransaction::new(
+            vec![TableMutation::new(
+                [8; 16],
+                "books",
+                vec![8],
+                Some(vec![9]),
+            )
+            .unwrap()],
+            [4; 32],
+            Arc::new(NoFault),
+        );
+        let response = unit_result(request, fingerprint);
+        Box::pin(async move { Ok(LiveEvalResponse::transaction(response, transaction)) })
+    }
+
+    fn dispatch_eval_with_work<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        context: Option<&'a orna_runtime_v1::RuntimeActivationContext>,
+        work: &'a mut orna_live_v1::LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
+        Box::pin(async move {
+            work.check_active()?;
+            let response = self
+                .eval_with_transaction(session, request, message, context, work)
+                .await?;
+            work.complete();
+            work.check_active()?;
+            Ok(response)
+        })
+    }
+
+    fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
+    }
+}
+struct NoFault;
+
+impl FaultInjector for NoFault {
+    fn check(&self, _: FaultPoint) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
+struct TransactionalApplication {
+    calls: usize,
+    faults: Arc<dyn FaultInjector>,
+    mutations: Vec<TableMutation>,
+}
+
+impl LiveApplication for TransactionalApplication {
+    fn eval(
+        &mut self,
+        _: [u8; 16],
+        _: [u8; 16],
+        _: &Message,
+    ) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
+    }
+
+    fn eval_with_transaction<'a>(
+        &'a mut self,
+        _: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        _: Option<&'a orna_runtime_v1::RuntimeActivationContext>,
+        _: &'a mut orna_live_v1::LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
+        let Message::Eval { fingerprint, .. } = message else {
+            return Box::pin(async { Err(Error::ApplicationRejected) });
+        };
+        self.calls += 1;
+        let response = unit_result(request, *fingerprint);
+        let transaction = LiveEvalTransaction::new(
+            self.mutations.clone(),
+            [3; 32],
+            Arc::clone(&self.faults),
+        );
+        Box::pin(async move { Ok(LiveEvalResponse::transaction(response, transaction)) })
+    }
+    fn dispatch_eval_with_work<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        context: Option<&'a orna_runtime_v1::RuntimeActivationContext>,
+        work: &'a mut orna_live_v1::LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
+        Box::pin(async move {
+            work.check_active()?;
+            let response = self
+                .eval_with_transaction(session, request, message, context, work)
+                .await?;
+            work.complete();
+            work.check_active()?;
+            Ok(response)
+        })
     }
 
     fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
@@ -3585,6 +3733,125 @@ fn rejected_requests_retain_failure_identity_and_do_not_reexecute() {
 }
 
 #[test]
+fn durable_transactional_eval_commits_or_rolls_back_and_replays_terminally() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    let mut committed = TransactionalApplication {
+        calls: 0,
+        faults: Arc::new(NoFault),
+        mutations: vec![
+            TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap(),
+        ],
+    };
+    let request = eval([1; 16], [23; 16], "insert");
+    let first = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(request.clone()),
+        &mut committed,
+    ))
+    .unwrap();
+    assert!(matches!(
+        first.response.as_ref().unwrap().message,
+        Message::Result {
+            status: ResultStatus::Success,
+            fingerprint,
+            ..
+        } if fingerprint == request_fingerprint(&request, [1; 16])
+    ));
+    assert_eq!(committed.calls, 1);
+    assert_eq!(
+        block_on(open_durable_state(&repository).committed_table_row("books", &[1])),
+        Ok(Some(vec![2]))
+    );
+    let status = block_on(open_durable_state(&repository).request_status_for_identity(
+        RequestIdentity {
+            session_id: [1; 16],
+            request_id: [23; 16],
+        },
+    ))
+    .unwrap()
+    .unwrap();
+    assert_eq!(status.state, RequestState::Completed);
+    let replay = block_on(host.dispatch_frame(
+        [5; 16],
+        3,
+        Frame::Binary(request),
+        &mut committed,
+    ))
+    .unwrap();
+    assert_eq!(replay, first);
+    assert_eq!(committed.calls, 1);
+
+    let failed_request = eval([1; 16], [24; 16], "rollback");
+    let mut failed = TransactionalApplication {
+        calls: 0,
+        faults: Arc::new(FailAt(FaultPoint::AfterTableWrite)),
+        mutations: vec![
+            TableMutation::new([2; 16], "books", vec![2], Some(vec![3])).unwrap(),
+        ],
+    };
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [5; 16],
+            4,
+            Frame::Binary(failed_request.clone()),
+            &mut failed,
+        )),
+        Err(Error::RuntimeUnavailable)
+    );
+    assert_eq!(failed.calls, 1);
+    assert_eq!(
+        block_on(open_durable_state(&repository).committed_table_row("books", &[2])),
+        Ok(None)
+    );
+    let failed_status = block_on(open_durable_state(&repository).request_status_for_identity(
+        RequestIdentity {
+            session_id: [1; 16],
+            request_id: [24; 16],
+        },
+    ))
+    .unwrap()
+    .unwrap();
+    assert_eq!(failed_status.state, RequestState::Completed);
+    let mut replay_application = TransactionalApplication {
+        calls: 0,
+        faults: Arc::new(NoFault),
+        mutations: vec![
+            TableMutation::new([9; 16], "books", vec![9], Some(vec![9])).unwrap(),
+        ],
+    };
+    let failed_replay = block_on(host.dispatch_frame(
+        [5; 16],
+        5,
+        Frame::Binary(failed_request),
+        &mut replay_application,
+    ))
+    .unwrap();
+    assert!(matches!(
+        failed_replay.response.as_ref().unwrap().message,
+        Message::Result {
+            status: ResultStatus::Failure,
+            ..
+        }
+    ));
+    assert_eq!(replay_application.calls, 0);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn durable_runtime_replays_a_terminal_request_after_host_reconstruction() {
     let (root, repository) = durable_repository();
     let mut first_host = durable_host(open_durable_state(&repository));
@@ -4383,6 +4650,168 @@ fn durable_runtime_recovers_an_owned_running_request_after_takeover() {
 }
 
 #[test]
+fn durable_live_host_does_not_recover_a_request_owned_by_another_runtime() {
+    let (root, repository) = durable_repository();
+    let active_runtime = open_durable_state(&repository);
+    let request = eval([1; 16], [78; 16], "1");
+    let fingerprint = request_fingerprint(&request, [1; 16]);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [78; 16],
+    };
+    let active_owner = block_on(active_runtime.acquire_lease([75; 16])).unwrap();
+    let (_, capability) =
+        block_on(active_runtime.reserve_request_with_admission(identity, fingerprint)).unwrap();
+    let capability = capability.expect("fresh owner-bound capability");
+    block_on(active_runtime.start_request_with_owner_and_admission(
+        identity,
+        fingerprint,
+        active_owner,
+        capability,
+    ))
+    .unwrap();
+
+    // This host has no takeover proof for the active writer. It may observe
+    // the request, but must not terminally recover or execute a second copy.
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [76; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [10; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+
+    let first = block_on(host.dispatch_frame(
+        [10; 16],
+        2,
+        Frame::Binary(request.clone()),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(first.outcome, FrameOutcome::Accepted);
+    assert!(first.response.is_none());
+    assert_eq!(application.calls, 0);
+
+    let status = block_on(
+        open_durable_state(&repository).request_status_for_identity(identity),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(status.state, RequestState::Running);
+    assert_eq!(status.fingerprint, fingerprint);
+    assert!(status.terminal_outcome.is_none());
+    assert_eq!(
+        block_on(
+            open_durable_state(&repository).request_owner(identity, fingerprint),
+        )
+        .unwrap(),
+        Some(RequestOwner::from(active_owner))
+    );
+
+    // Repeated delivery remains an active observation, never a recovery
+    // permission, while the other owner still holds the durable lease.
+    let second =
+        block_on(host.dispatch_frame([10; 16], 3, Frame::Binary(request), &mut application))
+            .unwrap();
+    assert_eq!(second.outcome, FrameOutcome::Accepted);
+    assert!(second.response.is_none());
+    assert_eq!(application.calls, 0);
+    drop(host);
+    drop(active_runtime);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_live_host_replays_proven_rollback_without_reexecution() {
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let request = eval([1; 16], [79; 16], "1");
+    let fingerprint = request_fingerprint(&request, [1; 16]);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [79; 16],
+    };
+    let old = block_on(runtime.acquire_lease([73; 16])).unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(identity, fingerprint)).unwrap();
+    let capability = capability.expect("fresh owner-bound capability");
+    block_on(runtime.start_request_with_owner_and_admission(
+        identity,
+        fingerprint,
+        old,
+        capability,
+    ))
+    .unwrap();
+    let activation = block_on(runtime.begin_activation()).unwrap();
+    let mutation = TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap();
+    assert_eq!(
+        block_on(runtime.commit_table_request_activation(
+            old,
+            identity,
+            fingerprint,
+            &activation,
+            &[mutation],
+            [3; 32],
+            TerminalOutcome::new(vec![4]).unwrap(),
+            &FailAt(FaultPoint::AfterTerminalClaim),
+        )),
+        Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
+    );
+    block_on(runtime.recover_abandoned(old.owner_id, [74; 16])).unwrap();
+    drop(runtime);
+
+    let mut host = durable_host_after_takeover(
+        open_durable_state(&repository),
+        [74; 16],
+        RequestOwner::from(old),
+    );
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [11; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    let first =
+        block_on(host.dispatch_frame([11; 16], 2, Frame::Binary(request.clone()), &mut application))
+            .unwrap();
+    assert!(matches!(
+        first.response.as_ref().unwrap().message,
+        Message::Result {
+            status: ResultStatus::Failure,
+            value: None,
+            fingerprint: returned,
+            diagnostic: None,
+        } if returned == fingerprint
+    ));
+    assert_eq!(application.calls, 0);
+    let second =
+        block_on(host.dispatch_frame([11; 16], 3, Frame::Binary(request), &mut application))
+            .unwrap();
+    assert_eq!(second, first);
+    assert_eq!(application.calls, 0);
+    assert_eq!(
+        block_on(open_durable_state(&repository).request_recovery_disposition(
+            identity,
+            fingerprint,
+        ))
+        .unwrap(),
+        Some(orna_runtime_v1::RecoveryDisposition::RollbackProven)
+    );
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn durable_replay_rejects_an_uncertain_payload_for_a_proven_rollback() {
     let (root, repository) = durable_repository();
     let request = eval([1; 16], [77; 16], "1");
@@ -4916,6 +5345,10 @@ fn completion_race_rejects_a_terminal_winner_with_mismatched_request_bytes() {
         .unwrap()
         .request,
         Some([99; 16])
+    );
+    assert_eq!(
+        block_on(runtime.committed_table_row("books", &[8])),
+        Ok(None)
     );
     assert_eq!(
         block_on(host.dispatch_frame([9; 16], 3, Frame::Binary(request), &mut application)),
