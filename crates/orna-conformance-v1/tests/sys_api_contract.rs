@@ -630,3 +630,36 @@ fn sys_client_lease_listener_schemas_match_the_published_contract() {
         assert_eq!(field["type"], field_type);
     }
 }
+
+#[test]
+fn sys_source_span_schema_matches_the_published_contract() {
+    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+    let source_span = document["value_types"]
+        .as_array()
+        .expect("value types")
+        .iter()
+        .find(|value| value["name"] == "sys.SourceSpan")
+        .expect("sys.SourceSpan");
+
+    assert_eq!(source_span["kind"], "record");
+    assert_eq!(source_span["type_parameters"], serde_json::json!([]));
+    assert_eq!(
+        source_span["fields"],
+        serde_json::json!([
+            {"name": "file", "type": "sys.FileRef"},
+            {"name": "start_byte", "type": "Int"},
+            {"name": "end_byte", "type": "Int"},
+            {"name": "start_line", "type": "Int"},
+            {"name": "start_column", "type": "Int"},
+            {"name": "end_line", "type": "Int"},
+            {"name": "end_column", "type": "Int"}
+        ])
+    );
+    assert_eq!(
+        source_span["invariants"],
+        serde_json::json!([
+            "0 <= start_byte <= end_byte",
+            "line and column values are one-based"
+        ])
+    );
+}
