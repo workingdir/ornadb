@@ -188,6 +188,21 @@ fn undeclared_annotation_name_requires_unresolved_diagnostic() {
 }
 
 #[test]
+fn undeclared_table_and_nominal_field_types_require_unresolved_diagnostic() {
+    let result = analyze_main(
+        r#"
+            pub table Reading(id: Missing) {
+                payload: Missing,
+            }
+            pub type Sample {
+                payload: Missing,
+            }
+        "#,
+    );
+    expect_diagnostics(&result, &[DIAG_UNRESOLVED]);
+}
+
+#[test]
 fn declared_nominal_annotation_name_is_accepted() {
     let result = analyze_main(
         r#"
