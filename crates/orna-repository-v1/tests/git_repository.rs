@@ -18,7 +18,7 @@ use orna_repository_v1::{
 use parquet::{
     basic::{Compression, Encoding, PageType},
     column::reader::ColumnReader,
-    data_type::{BoolType, Int32Type, Int64Type},
+    data_type::{BoolType, ByteArray, ByteArrayType, Int32Type, Int64Type},
     file::{
         metadata::{KeyValue, ParquetMetaDataWriter},
         properties::{WriterProperties, WriterVersion},
@@ -453,6 +453,20 @@ fn date_columns() -> Vec<u8> {
 }
 
 fn compact_columns_for_mapping(field_id: Uuid, type_name: &str, encoding: &str) -> Vec<u8> {
+    let parameters = if encoding == "ovb" {
+        vec![OvbRaw::Int(1.into())]
+    } else {
+        Vec::new()
+    };
+    compact_columns_for_mapping_with_parameters(field_id, type_name, encoding, parameters)
+}
+
+fn compact_columns_for_mapping_with_parameters(
+    field_id: Uuid,
+    type_name: &str,
+    encoding: &str,
+    parameters: Vec<OvbRaw>,
+) -> Vec<u8> {
     CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Array(vec![
         OvbRaw::Array(vec![OvbRaw::Tag(
             37,
@@ -464,7 +478,7 @@ fn compact_columns_for_mapping(field_id: Uuid, type_name: &str, encoding: &str) 
             OvbRaw::Text(type_name.to_owned()),
         ]),
         OvbRaw::Text(encoding.to_owned()),
-        OvbRaw::Array(Vec::new()),
+        OvbRaw::Array(parameters),
     ])]))
     .unwrap()
     .encode()
@@ -472,6 +486,14 @@ fn compact_columns_for_mapping(field_id: Uuid, type_name: &str, encoding: &str) 
 }
 
 fn compact_schema_with_roles(table: Uuid, fields: &[(Uuid, &str, u8)]) -> SchemaDescriptor {
+    compact_schema_with_roles_type(table, fields, "Int")
+}
+
+fn compact_schema_with_roles_type(
+    table: Uuid,
+    fields: &[(Uuid, &str, u8)],
+    type_name: &str,
+) -> SchemaDescriptor {
     let mut fields = fields.to_vec();
     fields.sort_by_key(|(field, _, _)| *field);
     SchemaDescriptor::new(OvbRaw::Map(vec![
@@ -503,7 +525,7 @@ fn compact_schema_with_roles(table: Uuid, fields: &[(Uuid, &str, u8)]) -> Schema
                             OvbRaw::Text(name.to_owned()),
                             OvbRaw::Array(vec![
                                 OvbRaw::Int(0.into()),
-                                OvbRaw::Text("Int".to_owned()),
+                                OvbRaw::Text(type_name.to_owned()),
                             ]),
                             OvbRaw::Int(role.into()),
                             if role == 2 {
@@ -599,6 +621,76 @@ fn compact_primitive_parquet(
     with_page_checksums(bytes)
 }
 
+fn compact_ovb_parquet(
+    table: Uuid,
+    schema: &SchemaDescriptor,
+    physical_field: Uuid,
+    columns: &[u8],
+    values: &[Vec<u8>],
+    annotation: Option<&str>,
+) -> Vec<u8> {
+    let annotation = annotation.unwrap_or_default();
+    let schema_descriptor = Arc::new(
+        parse_message_type(&format!(
+            "message schema {{ REQUIRED BYTE_ARRAY f_{}{}; }}",
+            physical_field.simple(),
+            annotation
+        ))
+        .unwrap(),
+    );
+    let metadata = vec![
+        KeyValue::new(
+            "orna.profile".to_owned(),
+            Some("compact-storage-v1".to_owned()),
+        ),
+        KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
+        KeyValue::new(
+            "orna.schema.sha256".to_owned(),
+            Some(hex_digest(&schema_fingerprint(schema))),
+        ),
+        KeyValue::new(
+            "orna.schema.ovb".to_owned(),
+            Some(base64(&schema.encode().unwrap())),
+        ),
+        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
+        KeyValue::new(
+            "orna.encoder".to_owned(),
+            Some("test-encoder-v1".to_owned()),
+        ),
+    ];
+    let properties = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::ZSTD(Default::default()))
+            .set_dictionary_enabled(false)
+            .set_encoding(Encoding::PLAIN)
+            .set_writer_version(WriterVersion::PARQUET_2_0)
+            .set_key_value_metadata(Some(metadata))
+            .build(),
+    );
+    let mut bytes = Vec::new();
+    let mut writer = SerializedFileWriter::new(&mut bytes, schema_descriptor, properties).unwrap();
+    let mut row_group = writer.next_row_group().unwrap();
+    let mut column = row_group.next_column().unwrap().unwrap();
+    let values = values
+        .iter()
+        .map(|value| ByteArray::from(value.as_slice()))
+        .collect::<Vec<_>>();
+    column
+        .typed::<ByteArrayType>()
+        .write_batch(&values, None, None)
+        .unwrap();
+    column.close().unwrap();
+    row_group.close().unwrap();
+    writer.close().unwrap();
+
+    let footer_length =
+        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
+    let footer = bytes.len() - 8 - footer_length;
+    assert_eq!(&bytes[footer..footer + 2], &[0x15, 0x04]);
+    bytes[footer + 1] = 0x02;
+    with_page_checksums(bytes)
+}
+
 fn compact_segment_for_schema(
     table: Uuid,
     ordinal: u64,
@@ -628,6 +720,42 @@ fn compact_segment_for_schema(
         key.clone(),
         key,
         1,
+        columns,
+        true,
+        false,
+    )
+    .unwrap()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compact_ovb_segment_for_schema(
+    table: Uuid,
+    ordinal: u64,
+    role: CompactSegmentRole,
+    schema: &SchemaDescriptor,
+    physical_field: Uuid,
+    columns: Vec<u8>,
+    values: &[Vec<u8>],
+    min_key: Vec<u8>,
+    max_key: Vec<u8>,
+    annotation: Option<&str>,
+) -> CompactSegment {
+    let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, ordinal | 0x8000_0000_0000_0000);
+    let path = ManagedPath::new(format!(
+        ".orna/storage/{table}/data/{}/{segment_id}.parquet",
+        &segment_id.to_string()[..2]
+    ))
+    .unwrap();
+    CompactSegment::new(
+        segment_id,
+        role,
+        schema_fingerprint(schema),
+        "test-encoder-v1",
+        path,
+        compact_ovb_parquet(table, schema, physical_field, &columns, values, annotation),
+        min_key,
+        max_key,
+        u64::try_from(values.len()).unwrap(),
         columns,
         true,
         false,
@@ -5580,6 +5708,155 @@ fn compact_publication_rejects_schema_identity_and_type_substitution() {
                 [ordinal as u8; 32],
                 &[segment],
                 "reject compact schema substitution",
+            ),
+            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
+        ));
+    }
+}
+
+#[test]
+fn compact_publication_accepts_immutable_ovb_int_and_bool_key_fallbacks() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+
+    let int_table = Uuid::new_v4();
+    let int_field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0741);
+    let int_schema = compact_schema_with_roles_type(int_table, &[(int_field, "key", 0)], "Int");
+    let int_value = CanonicalValue::new(OvbRaw::Int(
+        "123456789012345678901234567890".parse().unwrap(),
+    ))
+    .unwrap()
+    .encode()
+    .unwrap();
+    let int_segment = compact_ovb_segment_for_schema(
+        int_table,
+        741,
+        CompactSegmentRole::Data,
+        &int_schema,
+        int_field,
+        compact_columns_for_mapping(int_field, "Int", "ovb"),
+        std::slice::from_ref(&int_value),
+        int_value.clone(),
+        int_value.clone(),
+        None,
+    );
+    assert!(
+        repo.prepare_compact_publication(
+            &head,
+            repo.index_generation().unwrap(),
+            CompactManifest::empty(int_table, schema_fingerprint(&int_schema)),
+            [74; 16],
+            [74; 32],
+            &[int_segment],
+            "accept immutable ovb int fallback",
+        )
+        .is_ok()
+    );
+
+    let bool_table = Uuid::new_v4();
+    let bool_field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0742);
+    let bool_schema = compact_schema_with_roles_type(bool_table, &[(bool_field, "key", 0)], "Bool");
+    let bool_values = [
+        CanonicalValue::new(OvbRaw::Bool(false))
+            .unwrap()
+            .encode()
+            .unwrap(),
+        CanonicalValue::new(OvbRaw::Bool(true))
+            .unwrap()
+            .encode()
+            .unwrap(),
+    ];
+    let bool_segment = compact_ovb_segment_for_schema(
+        bool_table,
+        742,
+        CompactSegmentRole::Data,
+        &bool_schema,
+        bool_field,
+        compact_columns_for_mapping(bool_field, "Bool", "ovb"),
+        &bool_values,
+        bool_values[0].clone(),
+        bool_values[1].clone(),
+        None,
+    );
+    assert!(
+        repo.prepare_compact_publication(
+            &head,
+            repo.index_generation().unwrap(),
+            CompactManifest::empty(bool_table, schema_fingerprint(&bool_schema)),
+            [75; 16],
+            [75; 32],
+            &[bool_segment],
+            "accept immutable ovb bool fallback",
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn compact_publication_rejects_immutable_ovb_fallback_mismatches() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    let field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0743);
+    let schema = compact_schema_with_roles_type(table, &[(field, "key", 0)], "Int");
+    let head = repo.head().unwrap().unwrap();
+    let canonical_int = CanonicalValue::new(OvbRaw::Int(7.into()))
+        .unwrap()
+        .encode()
+        .unwrap();
+    let canonical_bool = CanonicalValue::new(OvbRaw::Bool(true))
+        .unwrap()
+        .encode()
+        .unwrap();
+    let cases = [
+        (
+            743,
+            vec![0x18, 0x07],
+            compact_columns_for_mapping(field, "Int", "ovb"),
+            None,
+        ),
+        (
+            744,
+            canonical_bool,
+            compact_columns_for_mapping(field, "Int", "ovb"),
+            None,
+        ),
+        (
+            745,
+            canonical_int.clone(),
+            compact_columns_for_mapping_with_parameters(field, "Int", "ovb", Vec::new()),
+            None,
+        ),
+        (
+            746,
+            canonical_int.clone(),
+            compact_columns_for_mapping(field, "Int", "ovb"),
+            Some(" (UTF8)"),
+        ),
+    ];
+    for (ordinal, value, columns, annotation) in cases {
+        let segment = compact_ovb_segment_for_schema(
+            table,
+            ordinal,
+            CompactSegmentRole::Data,
+            &schema,
+            field,
+            columns,
+            std::slice::from_ref(&value),
+            canonical_int.clone(),
+            canonical_int.clone(),
+            annotation,
+        );
+        assert!(matches!(
+            repo.prepare_compact_publication(
+                &head,
+                repo.index_generation().unwrap(),
+                CompactManifest::empty(table, schema_fingerprint(&schema)),
+                [ordinal as u8; 16],
+                [ordinal as u8; 32],
+                &[segment],
+                "reject immutable ovb fallback mismatch",
             ),
             Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
         ));
