@@ -5856,6 +5856,7 @@ fn malformed_resume_json_is_rejected_before_attachment_replacement() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn websocket_upgrade_fragmentation_and_controls_are_checked_and_forwarded() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);

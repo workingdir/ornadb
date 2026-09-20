@@ -1722,7 +1722,7 @@ impl LiveHost {
         let terminal = self.terminal_outcome(&outcome)?;
         let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
         match runtime
-            .cancel_observed_request_with_owner(identity, fingerprint, lease, terminal)
+            .cancel_request_with_owner(identity, fingerprint, lease, terminal)
             .await
         {
             Ok(cancelled) if cancelled.state == DurableRequestState::Cancelled => {}
@@ -7715,7 +7715,7 @@ mod tests {
                     &[],
                     orna_serving_v1::RetainedPin {
                         revision,
-                        fingerprint: [revision as u8; 32],
+                        fingerprint: [u8::try_from(revision).expect("test revision fits"); 32],
                     },
                 )
                 .unwrap();
@@ -7860,7 +7860,7 @@ mod tests {
     }
 
     fn masked_binary_frame(payload: &[u8]) -> Vec<u8> {
-        assert!(payload.len() <= usize::from(u16::MAX));
+        assert!(u16::try_from(payload.len()).is_ok());
         let mut frame = vec![0x82];
         if payload.len() < 126 {
             frame.push(0x80 | u8::try_from(payload.len()).unwrap());
