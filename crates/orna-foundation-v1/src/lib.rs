@@ -10,6 +10,7 @@ use serde::{Serialize, Serializer, ser::SerializeStruct};
 
 pub use orna_value_v1::{
     Error as ValueError, GitHash, OVB_VERSION, Raw as OvbRaw, SchemaDescriptor, Snapshot, Value,
+    canonical_uuid_text, parse_canonical_uuid_text,
 };
 
 /// Canonical values, closed descriptors and snapshot encodings are owned by
@@ -1045,6 +1046,9 @@ impl DiagnosticSpan {
             OvbRaw::Int(self.end_byte.clone()),
         ])
     }
+    fn is_redacted(&self) -> bool {
+        self.file_path == "<redacted>"
+    }
     fn from_raw(raw: &OvbRaw) -> Result<Self, FoundationError> {
         let values = array(raw)?;
         if values.len() != 4 {
@@ -1161,7 +1165,18 @@ impl Diagnostic {
     pub fn decode_ovb(bytes: &[u8]) -> Result<Self, FoundationError> {
         Self::from_raw(Value::decode(bytes).map_err(FoundationError::Value)?.raw())
     }
+    fn validate_redaction_consistency(&self) -> Result<(), FoundationError> {
+        // The explicit span marker is itself a redaction claim. Do not let a
+        // producer retain that marker while asserting that the enclosing
+        // diagnostic is unredacted: consumers use the boolean to determine
+        // whether the record crossed a protected boundary.
+        if !self.redacted && self.spans.iter().any(DiagnosticSpan::is_redacted) {
+            return Err(FoundationError::InvalidDiagnostic);
+        }
+        Ok(())
+    }
     fn raw(&self) -> Result<OvbRaw, FoundationError> {
+        self.validate_redaction_consistency()?;
         let mut fields = vec![
             (0, OvbRaw::Text(self.code.as_str().into())),
             (1, OvbRaw::Int(self.severity.wire().into())),
@@ -1211,7 +1226,7 @@ impl Diagnostic {
         if fields.keys().any(|key| *key > 7) {
             return Err(FoundationError::InvalidDiagnosticEncoding);
         }
-        Ok(Self {
+        let diagnostic = Self {
             code: SafeText::new(text(required(&fields, 0)?)?)?,
             severity: DiagnosticSeverity::parse(natural(required(&fields, 1)?)?)?,
             message: SafeText::new(text(required(&fields, 2)?)?)?,
@@ -1230,7 +1245,11 @@ impl Diagnostic {
                 .collect::<Result<_, _>>()?,
             redacted: boolean(required(&fields, 6)?)?,
             reference: fields.get(&7).map(|value| uuid_bytes(value)).transpose()?,
-        })
+        };
+        diagnostic
+            .validate_redaction_consistency()
+            .map_err(|_| FoundationError::InvalidDiagnosticEncoding)?;
+        Ok(diagnostic)
     }
 }
 
@@ -1243,6 +1262,8 @@ impl Diagnostic {
 /// ten text, and canonical OVB values are lower-case hexadecimal bytes.
 impl Serialize for Diagnostic {
     fn serialize<T: Serializer>(&self, serializer: T) -> Result<T::Ok, T::Error> {
+        self.validate_redaction_consistency()
+            .map_err(|_| <T::Error as serde::ser::Error>::custom("invalid diagnostic redaction"))?;
         let mut state = serializer.serialize_struct("Diagnostic", 8)?;
         state.serialize_field("code", self.code.as_str())?;
         state.serialize_field("severity", diagnostic_severity_name(self.severity))?;
@@ -1311,15 +1332,7 @@ fn hex(bytes: &[u8]) -> String {
     text
 }
 fn uuid_text(value: [u8; 16]) -> String {
-    let hex = hex(&value);
-    format!(
-        "{}-{}-{}-{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..32]
-    )
+    canonical_uuid_text(value)
 }
 
 /// Identity supplied before CWD admission, preventing cross-repository CAS.
