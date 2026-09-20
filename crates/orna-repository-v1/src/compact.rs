@@ -21,7 +21,10 @@ use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use parquet::{
     basic::{Compression, ConvertedType, Encoding, PageType, Type},
-    column::reader::ColumnReader,
+    column::{
+        page::Page,
+        reader::ColumnReader,
+    },
     file::reader::{FileReader, SerializedFileReader},
 };
 use sha2::{Digest, Sha256};
@@ -584,7 +587,8 @@ fn verify_physical_metadata(
     if schema_descriptor_table(&descriptor)? != table {
         return Err(RepositoryError::InvalidCompactManifest);
     }
-    let ovb_columns = verify_physical_columns(columns, metadata.schema_descr(), &descriptor, role)?;
+    let (ovb_columns, physical_columns) =
+        verify_physical_columns(columns, metadata.schema_descr(), &descriptor, role)?;
     verify_ovb_values(&reader, &ovb_columns)?;
     if reader.num_row_groups() == 0 {
         return Err(RepositoryError::InvalidCompactManifest);
@@ -594,25 +598,51 @@ fn verify_physical_metadata(
         if row_group.num_rows() <= 0
             || row_group.num_rows() > MAX_COMPACT_ROW_GROUP_ROWS
             || row_group.num_columns() == 0
-            || row_group.columns().iter().any(|column| {
-                !matches!(column.compression(), Compression::ZSTD(_))
-                    || column.encodings().any(|encoding| {
-                        !matches!(
-                            encoding,
-                            Encoding::PLAIN | Encoding::RLE | Encoding::RLE_DICTIONARY
-                        )
-                    })
-                    || column.num_values() != row_group.num_rows()
-                    || column.compressed_size() <= 0
-                    || column.uncompressed_size() <= 0
-                    || column.statistics().is_none()
-            })
         {
             return Err(RepositoryError::InvalidCompactManifest);
+        }
+        for (column_index, column) in row_group.columns().iter().enumerate() {
+            let physical = physical_columns
+                .get(&column_index)
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            let schema_column = metadata
+                .schema_descr()
+                .columns()
+                .get(column_index)
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            // Primary-key leaves are one required value per complete row. A
+            // repeated or nullable key column would make key ordering and
+            // exact-key admission ambiguous, so reject either physical level
+            // even when an all-Some/one-element fixture happens to have one
+            // encoded value per row.
+            if physical.is_key
+                && (column.num_values() != row_group.num_rows()
+                    || schema_column.max_def_level() != 0
+                    || schema_column.max_rep_level() != 0)
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            if !matches!(column.compression(), Compression::ZSTD(_))
+                || column.encodings().any(|encoding| {
+                    !matches!(
+                        encoding,
+                        Encoding::PLAIN | Encoding::RLE | Encoding::RLE_DICTIONARY
+                    )
+                })
+                || column.compressed_size() <= 0
+                || column.uncompressed_size() <= 0
+                || column.statistics().is_none()
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
         }
     }
     // Drive every compressed page through parquet-rs so malformed compressed
     // data and any supplied page checksum are rejected before publication.
+    // Data-page V2 exposes the number of logical rows represented by each
+    // page.  That is the correct cardinality check for optional/repeated
+    // leaves; their encoded value count can legitimately differ from the
+    // row-group count.
     for row_group in 0..reader.num_row_groups() {
         let group = reader
             .get_row_group(row_group)
@@ -623,6 +653,7 @@ fn verify_physical_metadata(
                 .map_err(|_| RepositoryError::InvalidCompactManifest)?;
             let mut data_pages = 0usize;
             let mut page_values = 0_i64;
+            let mut page_rows = 0_i64;
             for page in pages {
                 let page = page.map_err(|_| RepositoryError::InvalidCompactManifest)?;
                 if page.is_data_page() {
@@ -631,6 +662,12 @@ fn verify_physical_metadata(
                         .ok_or(RepositoryError::InvalidCompactManifest)?;
                     page_values = page_values
                         .checked_add(i64::from(page.num_values()))
+                        .ok_or(RepositoryError::InvalidCompactManifest)?;
+                    let Page::DataPageV2 { num_rows, .. } = &page else {
+                        return Err(RepositoryError::InvalidCompactManifest);
+                    };
+                    page_rows = page_rows
+                        .checked_add(i64::from(*num_rows))
                         .ok_or(RepositoryError::InvalidCompactManifest)?;
                     if page.page_type() != PageType::DATA_PAGE_V2 {
                         return Err(RepositoryError::InvalidCompactManifest);
@@ -645,7 +682,10 @@ fn verify_physical_metadata(
             if data_pages == 0 {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
-            if page_values != group.metadata().column(column).num_values() {
+            let column_metadata = group.metadata().column(column);
+            if page_values != column_metadata.num_values()
+                || page_rows != group.metadata().num_rows()
+            {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
         }
@@ -686,8 +726,14 @@ fn verify_physical_columns(
     schema: &parquet::schema::types::SchemaDescriptor,
     descriptor: &SchemaDescriptor,
     segment_role: CompactSegmentRole,
-) -> Result<BTreeMap<usize, OvbFallbackKind>, RepositoryError> {
-    let required_fields = required_physical_fields(descriptor, segment_role)?;
+) -> Result<
+    (
+        BTreeMap<usize, OvbFallbackKind>,
+        BTreeMap<usize, PhysicalColumnInfo>,
+    ),
+    RepositoryError,
+> {
+    let required_fields = required_physical_leaves(descriptor, segment_role)?;
     let value =
         CanonicalValue::decode(columns).map_err(|_| RepositoryError::InvalidCompactManifest)?;
     let OvbRaw::Array(descriptors) = value.raw() else {
@@ -699,6 +745,7 @@ fn verify_physical_columns(
     let mut previous = None;
     let mut mapped_fields = BTreeSet::new();
     let mut ovb_columns = BTreeMap::new();
+    let mut physical_columns = BTreeMap::new();
     for (column_index, (descriptor, column)) in descriptors.iter().zip(schema.columns()).enumerate()
     {
         let OvbRaw::Array(fields) = descriptor else {
@@ -710,45 +757,39 @@ fn verify_physical_columns(
         let OvbRaw::Array(field_id_path) = &fields[0] else {
             return Err(RepositoryError::InvalidCompactManifest);
         };
-        let [OvbRaw::Tag(37, field_id)] = field_id_path.as_slice() else {
-            return Err(RepositoryError::InvalidCompactManifest);
-        };
-        let OvbRaw::Bytes(field_id) = field_id.as_ref() else {
-            return Err(RepositoryError::InvalidCompactManifest);
-        };
-        let field_id =
-            Uuid::from_slice(field_id).map_err(|_| RepositoryError::InvalidCompactManifest)?;
-        let (expected_type, is_key) = required_fields
-            .get(&field_id)
-            .ok_or(RepositoryError::InvalidCompactManifest)?;
-        if !mapped_fields.insert(field_id) {
-            return Err(RepositoryError::InvalidCompactManifest);
-        }
+        let (field_id, field_id_suffix) = parse_physical_field_id_path(field_id_path)?;
         let OvbRaw::Array(path) = &fields[1] else {
             return Err(RepositoryError::InvalidCompactManifest);
         };
         let path = path
             .iter()
             .map(|part| match part {
-                OvbRaw::Text(part) if !part.is_empty() => Ok(part.as_str()),
+                OvbRaw::Text(part) if !part.is_empty() => Ok(part.clone()),
                 _ => Err(RepositoryError::InvalidCompactManifest),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if path.is_empty()
-            || path
-                != column
-                    .path()
-                    .parts()
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
+        let expected = required_fields
+            .iter()
+            .find(|expected| {
+                expected.field_id == field_id
+                    && expected.field_id_path == field_id_suffix
+                    && expected.physical_path == path
+            })
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        if !mapped_fields.insert((field_id, field_id_suffix.clone())) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        if path
+            != column
+                .path()
+                .parts()
+                .iter()
+                .map(|part| part.to_owned())
+                .collect::<Vec<_>>()
         {
             return Err(RepositoryError::InvalidCompactManifest);
         }
-        if path.len() != 1 || path[0] != format!("f_{}", field_id.simple()) {
-            return Err(RepositoryError::InvalidCompactManifest);
-        }
-        if &fields[2] != *expected_type {
+        if &fields[2] != &expected.logical_type {
             return Err(RepositoryError::InvalidCompactManifest);
         }
         let OvbRaw::Array(logical_type) = &fields[2] else {
@@ -783,7 +824,7 @@ fn verify_physical_columns(
             && encoding == "date"
             && column.physical_type() == Type::INT32
             && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Date);
-        if ovb_kind.is_some() && !is_key {
+        if ovb_kind.is_some() && !expected.is_key {
             return Err(RepositoryError::InvalidCompactManifest);
         }
         if type_code.to_string() != "0"
@@ -801,13 +842,20 @@ fn verify_physical_columns(
             })
             || (!(string_mapping || date_mapping) && column.logical_type_ref().is_some())
             || (ovb_kind.is_some() && column.converted_type() != ConvertedType::NONE)
-            || column.max_rep_level() != 0
+            || column.max_def_level() != expected.max_def_level
+            || column.max_rep_level() != expected.max_rep_level
         {
             return Err(RepositoryError::InvalidCompactManifest);
         }
         if let Some(kind) = ovb_kind {
             ovb_columns.insert(column_index, kind);
         }
+        physical_columns.insert(
+            column_index,
+            PhysicalColumnInfo {
+                is_key: expected.is_key,
+            },
+        );
         let path = path.join(".");
         if previous
             .as_ref()
@@ -820,9 +868,13 @@ fn verify_physical_columns(
     if mapped_fields.len() != required_fields.len() {
         return Err(RepositoryError::InvalidCompactManifest);
     }
-    Ok(ovb_columns)
+    Ok((ovb_columns, physical_columns))
 }
 
+#[derive(Clone, Copy)]
+struct PhysicalColumnInfo {
+    is_key: bool,
+}
 #[derive(Clone, Copy)]
 enum OvbFallbackKind {
     Int,
@@ -879,15 +931,42 @@ fn verify_ovb_values(
     Ok(())
 }
 
-/// Returns the top-level fields that must have an exact physical mapping for
-/// this segment role.  The compact reader currently admits only scalar leaf
-/// mappings, so nested paths fail closed here rather than being inferred from
-/// Parquet structure.  Computed fields never occupy row storage; deletion
-/// segments enumerate primary-key fields only.
-fn required_physical_fields(
+
+struct ExpectedPhysicalLeaf {
+    field_id: Uuid,
+    field_id_path: Vec<String>,
+    physical_path: Vec<String>,
+    logical_type: OvbRaw,
+    is_key: bool,
+    max_def_level: i16,
+    max_rep_level: i16,
+}
+
+fn parse_physical_field_id_path(
+    path: &[OvbRaw],
+) -> Result<(Uuid, Vec<String>), RepositoryError> {
+    let Some((OvbRaw::Tag(37, field_id), suffix)) = path.split_first() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let OvbRaw::Bytes(field_id) = field_id.as_ref() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let field_id =
+        Uuid::from_slice(field_id).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let suffix = suffix
+        .iter()
+        .map(|part| match part {
+            OvbRaw::Text(part) if !part.is_empty() => Ok(part.clone()),
+            _ => Err(RepositoryError::InvalidCompactManifest),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((field_id, suffix))
+}
+
+fn required_physical_leaves(
     descriptor: &SchemaDescriptor,
     segment_role: CompactSegmentRole,
-) -> Result<BTreeMap<Uuid, (&OvbRaw, bool)>, RepositoryError> {
+) -> Result<Vec<ExpectedPhysicalLeaf>, RepositoryError> {
     let OvbRaw::Map(entries) = descriptor.raw() else {
         return Err(RepositoryError::InvalidCompactManifest);
     };
@@ -901,7 +980,7 @@ fn required_physical_fields(
             _ => None,
         })
         .ok_or(RepositoryError::InvalidCompactManifest)?;
-    let mut required = BTreeMap::new();
+    let mut required = Vec::new();
     for field in fields {
         let OvbRaw::Array(parts) = field else {
             return Err(RepositoryError::InvalidCompactManifest);
@@ -912,11 +991,11 @@ fn required_physical_fields(
         let OvbRaw::Tag(37, field_id) = field_id else {
             return Err(RepositoryError::InvalidCompactManifest);
         };
-        let OvbRaw::Bytes(field_id) = field_id.as_ref() else {
+        let OvbRaw::Bytes(field_id_bytes) = field_id.as_ref() else {
             return Err(RepositoryError::InvalidCompactManifest);
         };
         let field_id =
-            Uuid::from_slice(field_id).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            Uuid::from_slice(field_id_bytes).map_err(|_| RepositoryError::InvalidCompactManifest)?;
         let role_is_key = role.to_string() == "0";
         let required_for_segment = match (segment_role, role.to_string().as_str()) {
             (CompactSegmentRole::Data | CompactSegmentRole::Replacement, "0" | "1")
@@ -925,15 +1004,105 @@ fn required_physical_fields(
             | (CompactSegmentRole::Deletion, "1" | "2") => false,
             _ => return Err(RepositoryError::InvalidCompactManifest),
         };
-        if required_for_segment
-            && required
-                .insert(field_id, (logical_type, role_is_key))
-                .is_some()
-        {
-            return Err(RepositoryError::InvalidCompactManifest);
+        if !required_for_segment {
+            continue;
         }
+        let mut field_id_path = Vec::new();
+        let mut physical_path = vec![format!("f_{}", field_id.simple())];
+        flatten_physical_type(
+            field_id,
+            logical_type,
+            &mut field_id_path,
+            &mut physical_path,
+            0,
+            0,
+            &mut required,
+            role_is_key,
+        )?;
     }
     Ok(required)
+}
+
+fn flatten_physical_type(
+    field_id: Uuid,
+    logical_type: &OvbRaw,
+    field_id_path: &mut Vec<String>,
+    physical_path: &mut Vec<String>,
+    max_def_level: i16,
+    max_rep_level: i16,
+    output: &mut Vec<ExpectedPhysicalLeaf>,
+    is_key: bool,
+) -> Result<(), RepositoryError> {
+    if field_id_path.len() > 64 {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let OvbRaw::Array(node) = logical_type else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let Some(OvbRaw::Int(code)) = node.first() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    match code.to_string().as_str() {
+        "0" => {
+            if node.len() != 2 {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            output.push(ExpectedPhysicalLeaf {
+                field_id,
+                field_id_path: field_id_path.clone(),
+                physical_path: physical_path.clone(),
+                logical_type: logical_type.clone(),
+                is_key,
+                max_def_level,
+                max_rep_level,
+            });
+            Ok(())
+        }
+        "1" => {
+            if node.len() != 2 {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            // The repeated `list` node contributes one definition level as
+            // well as one repetition level, even when the outer list and
+            // element are both required.
+            field_id_path.extend(["list".to_owned(), "element".to_owned()]);
+            physical_path.extend(["list".to_owned(), "element".to_owned()]);
+            flatten_physical_type(
+                field_id,
+                &node[1],
+                field_id_path,
+                physical_path,
+                max_def_level + 1,
+                max_rep_level + 1,
+                output,
+                is_key,
+            )?;
+            field_id_path.truncate(field_id_path.len().saturating_sub(2));
+            physical_path.truncate(physical_path.len().saturating_sub(2));
+            Ok(())
+        }
+        "2" => {
+            if node.len() != 2 {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            field_id_path.push("value".to_owned());
+            physical_path.push("value".to_owned());
+            flatten_physical_type(
+                field_id,
+                &node[1],
+                field_id_path,
+                physical_path,
+                max_def_level + 1,
+                max_rep_level,
+                output,
+                is_key,
+            )?;
+            field_id_path.pop();
+            physical_path.pop();
+            Ok(())
+        }
+        _ => Err(RepositoryError::InvalidCompactManifest),
+    }
 }
 
 /// The Parquet reader verifies a present CRC while decoding a page, but the
@@ -3801,7 +3970,7 @@ mod tests {
     use parquet::{
         basic::{Compression, PageType},
         column::reader::ColumnReader,
-        data_type::BoolType,
+        data_type::{BoolType, Int64Type},
         file::{
             metadata::{KeyValue, ParquetMetaDataWriter},
             properties::{WriterProperties, WriterVersion},
@@ -3862,6 +4031,273 @@ mod tests {
         .unwrap()
     }
 
+    const NESTED_TABLE: Uuid = Uuid::from_u128(3);
+    const NESTED_KEY: Uuid =
+        Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0010);
+    const NESTED_OPTION: Uuid =
+        Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0011);
+    const NESTED_LIST: Uuid =
+        Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0012);
+
+    fn nested_schema() -> SchemaDescriptor {
+        nested_schema_with_list_type(
+            OvbRaw::Array(vec![
+                OvbRaw::Int(1.into()),
+                OvbRaw::Array(vec![
+                    OvbRaw::Int(0.into()),
+                    OvbRaw::Text("Int".into()),
+                ]),
+            ]),
+            OvbRaw::Int(1.into()),
+        )
+    }
+
+    fn nested_schema_with_list_role(list_role: OvbRaw) -> SchemaDescriptor {
+        nested_schema_with_list_type(
+            OvbRaw::Array(vec![
+                OvbRaw::Int(1.into()),
+                OvbRaw::Array(vec![
+                    OvbRaw::Int(0.into()),
+                    OvbRaw::Text("Int".into()),
+                ]),
+            ]),
+            list_role,
+        )
+    }
+
+    fn nested_schema_with_list_type(list_type: OvbRaw, list_role: OvbRaw) -> SchemaDescriptor {
+        let primitive = OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]);
+        let list_is_key = matches!(&list_role, OvbRaw::Int(value) if value.to_string() == "0");
+        let mut key_fields = vec![OvbRaw::Tag(
+            37,
+            Box::new(OvbRaw::Bytes(NESTED_KEY.as_bytes().to_vec())),
+        )];
+        if list_is_key {
+            key_fields.push(OvbRaw::Tag(
+                37,
+                Box::new(OvbRaw::Bytes(NESTED_LIST.as_bytes().to_vec())),
+            ));
+        }
+        SchemaDescriptor::new(OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (
+                OvbRaw::Int(1.into()),
+                OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(NESTED_TABLE.as_bytes().to_vec()))),
+            ),
+            (
+                OvbRaw::Int(2.into()),
+                OvbRaw::Array(key_fields),
+            ),
+            (
+                OvbRaw::Int(3.into()),
+                OvbRaw::Array(vec![
+                    OvbRaw::Array(vec![
+                        OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(NESTED_KEY.as_bytes().to_vec()))),
+                        OvbRaw::Text("key".into()),
+                        primitive.clone(),
+                        OvbRaw::Int(0.into()),
+                        OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                    ]),
+                    OvbRaw::Array(vec![
+                        OvbRaw::Tag(
+                            37,
+                            Box::new(OvbRaw::Bytes(NESTED_OPTION.as_bytes().to_vec())),
+                        ),
+                        OvbRaw::Text("optional".into()),
+                        OvbRaw::Array(vec![OvbRaw::Int(2.into()), primitive.clone()]),
+                        OvbRaw::Int(1.into()),
+                        OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                    ]),
+                    OvbRaw::Array(vec![
+                        OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(NESTED_LIST.as_bytes().to_vec()))),
+                        OvbRaw::Text("list".into()),
+                        list_type,
+                        list_role,
+                        OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                    ]),
+                ]),
+            ),
+            (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+        ]))
+        .unwrap()
+    }
+    fn nested_columns() -> Vec<u8> {
+        nested_columns_with_list_suffix(&["list", "element"])
+    }
+
+    fn nested_columns_with_list_suffix(list_suffix: &[&str]) -> Vec<u8> {
+        let descriptor = |field: Uuid, suffix: &[&str]| {
+            let mut ids = vec![OvbRaw::Tag(
+                37,
+                Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
+            )];
+            ids.extend(suffix.iter().map(|part| OvbRaw::Text((*part).into())));
+            let mut path = vec![OvbRaw::Text(format!("f_{}", field.simple()))];
+            path.extend(suffix.iter().map(|part| OvbRaw::Text((*part).into())));
+            OvbRaw::Array(vec![
+                OvbRaw::Array(ids),
+                OvbRaw::Array(path),
+                OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]),
+                OvbRaw::Text("int64".into()),
+                OvbRaw::Array(Vec::new()),
+            ])
+        };
+        CanonicalValue::new(OvbRaw::Array(vec![
+            descriptor(NESTED_KEY, &[]),
+            descriptor(NESTED_OPTION, &["value"]),
+            descriptor(NESTED_LIST, list_suffix),
+        ]))
+        .unwrap()
+        .encode()
+        .unwrap()
+    }
+
+    #[derive(Clone, Copy)]
+    enum NestedListShape {
+        Required,
+        OptionList,
+        ListOption,
+    }
+
+    fn nested_parquet(schema: &SchemaDescriptor, columns: &[u8]) -> Vec<u8> {
+        nested_parquet_with_list_values(
+            schema,
+            columns,
+            NestedListShape::Required,
+            false,
+            &[20, 21, 22],
+            &[0, 1, 0],
+        )
+    }
+
+    fn nested_parquet_with_list_element_optional(
+        schema: &SchemaDescriptor,
+        columns: &[u8],
+        optional_element: bool,
+    ) -> Vec<u8> {
+        nested_parquet_with_list_values(
+            schema,
+            columns,
+            NestedListShape::Required,
+            optional_element,
+            &[20, 21, 22],
+            &[0, 1, 0],
+        )
+    }
+
+
+    fn nested_parquet_with_list_values(
+        schema: &SchemaDescriptor,
+        columns: &[u8],
+        shape: NestedListShape,
+        optional_element: bool,
+        list_values: &[i64],
+        list_repetition_levels: &[i16],
+    ) -> Vec<u8> {
+        assert_eq!(list_values.len(), list_repetition_levels.len());
+        let element = if optional_element {
+            "OPTIONAL INT64 element;"
+        } else {
+            "REQUIRED INT64 element;"
+        };
+        let list_schema = match shape {
+            NestedListShape::Required => format!(
+                "REQUIRED group f_{} (LIST) {{
+                    REPEATED group list {{ {element} }}
+                }}",
+                NESTED_LIST.simple(),
+            ),
+            NestedListShape::OptionList => format!(
+                "OPTIONAL group f_{} {{
+                    REQUIRED group value (LIST) {{
+                        REPEATED group list {{ REQUIRED INT64 element; }}
+                    }}
+                }}",
+                NESTED_LIST.simple(),
+            ),
+            NestedListShape::ListOption => format!(
+                "REQUIRED group f_{} (LIST) {{
+                    REPEATED group list {{
+                        OPTIONAL group element {{ REQUIRED INT64 value; }}
+                    }}
+                }}",
+                NESTED_LIST.simple(),
+            ),
+        };
+        let schema_descriptor = Arc::new(
+            parse_message_type(&format!(
+                "message schema {{
+                    REQUIRED INT64 f_{};
+                    OPTIONAL group f_{} {{ REQUIRED INT64 value; }}
+                    {list_schema}
+                }}",
+                NESTED_KEY.simple(),
+                NESTED_OPTION.simple(),
+            ))
+            .unwrap(),
+        );
+        let metadata = vec![
+            KeyValue::new("orna.profile".into(), Some(COMPACT_PROFILE.into())),
+            KeyValue::new("orna.table".into(), Some(NESTED_TABLE.to_string())),
+            KeyValue::new(
+                "orna.schema.sha256".into(),
+                Some(hex(&schema_descriptor_fingerprint(schema).unwrap())),
+            ),
+            KeyValue::new(
+                "orna.schema.ovb".into(),
+                Some(base64(&schema.encode().unwrap())),
+            ),
+            KeyValue::new("orna.columns.ovb".into(), Some(base64(columns))),
+            KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
+        ];
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::ZSTD(Default::default()))
+                .set_dictionary_enabled(false)
+                .set_encoding(Encoding::PLAIN)
+                .set_writer_version(WriterVersion::PARQUET_2_0)
+                .set_key_value_metadata(Some(metadata))
+                .build(),
+        );
+        let mut bytes = Vec::new();
+        let mut writer =
+            SerializedFileWriter::new(&mut bytes, schema_descriptor, properties).unwrap();
+        let mut row_group = writer.next_row_group().unwrap();
+        let mut column = row_group.next_column().unwrap().unwrap();
+        column
+            .typed::<Int64Type>()
+            .write_batch(&[1, 2], None, None)
+            .unwrap();
+        column.close().unwrap();
+        let mut column = row_group.next_column().unwrap().unwrap();
+        column
+            .typed::<Int64Type>()
+            .write_batch(&[10], Some(&[1, 0]), None)
+            .unwrap();
+        column.close().unwrap();
+        let element_definition_level: i16 = match shape {
+            NestedListShape::Required => if optional_element { 2 } else { 1 },
+            NestedListShape::OptionList | NestedListShape::ListOption => 2,
+        };
+        let element_definition_levels = vec![element_definition_level; list_values.len()];
+        let mut column = row_group.next_column().unwrap().unwrap();
+        column
+            .typed::<Int64Type>()
+            .write_batch(
+                list_values,
+                Some(&element_definition_levels),
+                Some(list_repetition_levels),
+            )
+            .unwrap();
+        column.close().unwrap();
+        row_group.close().unwrap();
+        writer.close().unwrap();
+        let footer = footer_start(&bytes);
+        assert_eq!(&bytes[footer..footer + 2], &[0x15, 0x04]);
+        bytes[footer + 1] = 0x02;
+        with_page_checksums_for_all_columns(bytes)
+    }
+
     fn test_repository() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
         test_git(temp.path(), &["init", "-b", "main"]);
@@ -3878,6 +4314,64 @@ mod tests {
         test_git(temp.path(), &["commit", "-m", "initial"]);
         let repository = Repository::discover(temp.path()).unwrap();
         (temp, repository)
+    }
+
+    fn publish_and_read_nested_shape(
+        schema_descriptor: SchemaDescriptor,
+        columns: Vec<u8>,
+        bytes: Vec<u8>,
+        segment_id: Uuid,
+    ) {
+        let schema = schema_descriptor_fingerprint(&schema_descriptor).unwrap();
+        let (root, repository) = test_repository();
+        let path = ManagedPath::new(format!(
+            ".orna/storage/{NESTED_TABLE}/data/{}/{segment_id}.parquet",
+            &segment_id.to_string()[..2]
+        ))
+        .unwrap();
+        let key_min = CanonicalValue::new(OvbRaw::Int(1.into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let key_max = CanonicalValue::new(OvbRaw::Int(2.into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let segment = CompactSegment::new(
+            segment_id,
+            CompactSegmentRole::Data,
+            schema,
+            "test-encoder-v1",
+            path,
+            bytes,
+            key_min,
+            key_max,
+            2,
+            columns,
+            true,
+            false,
+        )
+        .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let plan = repository
+            .prepare_compact_publication(
+                &head,
+                repository.index_generation().unwrap(),
+                CompactManifest::empty(NESTED_TABLE, schema),
+                [11; 16],
+                [11; 32],
+                &[segment],
+                "publish nested List shape",
+            )
+            .unwrap();
+        let manifest = plan.manifest().clone();
+        let pending = repository
+            .publish_compact_repository_boundary(plan)
+            .unwrap();
+        repository
+            .read_verified_compact_segment(pending.commit(), NESTED_TABLE, &manifest.entries()[0])
+            .unwrap();
+        drop(root);
     }
 
     fn test_git(directory: &Path, arguments: &[&str]) {
@@ -4066,6 +4560,75 @@ mod tests {
         assert!(page.is_data_page());
         assert_eq!(page.page_type(), PageType::DATA_PAGE_V2);
         assert!(pages.next().is_none());
+        data
+    }
+
+    fn with_page_checksums_for_all_columns(bytes: Vec<u8>) -> Vec<u8> {
+        let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+        let metadata = reader.metadata().clone();
+        let footer = footer_start(&bytes);
+        let mut insertions = Vec::new();
+        for column in metadata.row_group(0).columns() {
+            let start = usize::try_from(column.data_page_offset()).unwrap();
+            let length = usize::try_from(column.compressed_size()).unwrap();
+            let header = page_header(&bytes[start..start + length]);
+            let body_start = start + header.encoded_len;
+            let body_end = body_start + header.compressed_len;
+            let checksum = crc32(&bytes[body_start..body_end]) as i32;
+            let delta = 4_u8.checked_sub(header.checksum_predecessor).unwrap();
+            let mut field = vec![(delta << 4) | 5];
+            encode_compact_varint(
+                ((i64::from(checksum) << 1) ^ (i64::from(checksum) >> 31)) as u64,
+                &mut field,
+            );
+            insertions.push((
+                start,
+                start + header.next_field_offset.unwrap_or(header.stop_offset),
+                field,
+                header,
+            ));
+        }
+        let mut data = bytes[..footer].to_vec();
+        for (page_start, insertion, field, header) in insertions.iter().rev() {
+            data.splice(*insertion..*insertion, field.iter().copied());
+            if let Some(next) = header.next_field_offset {
+                let position = *page_start + next + field.len();
+                let delta = header.next_field_id.unwrap().checked_sub(4).unwrap();
+                data[position] = (data[position] & 0x0f) | (delta << 4);
+            }
+        }
+        let mut metadata = metadata.into_builder();
+        let mut row_groups = metadata.take_row_groups();
+        let row_group = row_groups.pop().unwrap();
+        let mut row_group = row_group.into_builder();
+        let columns = row_group
+            .take_columns()
+            .into_iter()
+            .enumerate()
+            .map(|(index, column)| {
+                let shift = insertions
+                    .iter()
+                    .take(index)
+                    .map(|(_, _, field, _)| i64::try_from(field.len()).unwrap())
+                    .sum::<i64>();
+                let field_len = i64::try_from(insertions[index].2.len()).unwrap();
+                let start = column.data_page_offset();
+                let compressed_size = column.compressed_size();
+                column
+                    .into_builder()
+                    .set_data_page_offset(start + shift)
+                    .set_total_compressed_size(compressed_size + field_len)
+                    .build()
+                    .unwrap()
+            })
+            .collect();
+        let row_group = row_group.set_column_metadata(columns).build().unwrap();
+        let metadata = metadata.add_row_group(row_group).build();
+        let mut new_footer = Vec::new();
+        ParquetMetaDataWriter::new(&mut new_footer, &metadata)
+            .finish()
+            .unwrap();
+        data.extend(new_footer);
         data
     }
 
@@ -4466,6 +5029,229 @@ mod tests {
         assert_eq!((records, values_read, levels_read), (2, 2, 2));
         assert_eq!(values, [false, true]);
         drop(root);
+    }
+
+    #[test]
+    fn publishes_verified_manifest_with_nullable_and_repeated_non_key_columns() {
+        let schema_descriptor = nested_schema();
+        let schema = schema_descriptor_fingerprint(&schema_descriptor).unwrap();
+        let columns = nested_columns();
+        let bytes = nested_parquet(&schema_descriptor, &columns);
+        let physical_reader =
+            SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+        let physical_group = physical_reader.get_row_group(0).unwrap();
+        assert_eq!(physical_group.metadata().num_rows(), 2);
+        assert_eq!(physical_group.metadata().column(2).num_values(), 3);
+        let (root, repository) = test_repository();
+        let segment_id = Uuid::from_u128(0x13000000000070008000000000000000);
+        let path = ManagedPath::new(format!(
+            ".orna/storage/{NESTED_TABLE}/data/{}/{segment_id}.parquet",
+            &segment_id.to_string()[..2]
+        ))
+        .unwrap();
+        let key_min = CanonicalValue::new(OvbRaw::Int(1.into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let key_max = CanonicalValue::new(OvbRaw::Int(2.into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let segment = CompactSegment::new(
+            segment_id,
+            CompactSegmentRole::Data,
+            schema,
+            "test-encoder-v1",
+            path,
+            bytes,
+            key_min,
+            key_max,
+            2,
+            columns,
+            true,
+            false,
+        )
+        .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let malformed = {
+            let mut malformed = segment.clone();
+            malformed.row_count = 1;
+            malformed
+        };
+        assert!(matches!(
+            repository.prepare_compact_publication(
+                &head,
+                repository.index_generation().unwrap(),
+                CompactManifest::empty(NESTED_TABLE, schema),
+                [9; 16],
+                [9; 32],
+                &[malformed],
+                "reject nested physical row-count mismatch",
+            ),
+            Err(RepositoryError::InvalidCompactManifest)
+        ));
+        let plan = repository
+            .prepare_compact_publication(
+                &head,
+                repository.index_generation().unwrap(),
+                CompactManifest::empty(NESTED_TABLE, schema),
+                [10; 16],
+                [10; 32],
+                &[segment],
+                "publish nested physical columns",
+            )
+            .unwrap();
+        let manifest = plan.manifest().clone();
+        let pending = repository
+            .publish_compact_repository_boundary(plan)
+            .unwrap();
+        repository
+            .read_verified_compact_segment(pending.commit(), NESTED_TABLE, &manifest.entries()[0])
+            .unwrap();
+        drop(root);
+    }
+
+    #[test]
+    fn publishes_and_reads_option_list_and_list_option_shapes() {
+        let primitive = OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]);
+        let option_list = OvbRaw::Array(vec![
+            OvbRaw::Int(2.into()),
+            OvbRaw::Array(vec![OvbRaw::Int(1.into()), primitive.clone()]),
+        ]);
+        let option_list_schema =
+            nested_schema_with_list_type(option_list, OvbRaw::Int(1.into()));
+        let option_list_columns =
+            nested_columns_with_list_suffix(&["value", "list", "element"]);
+        let option_list_bytes = nested_parquet_with_list_values(
+            &option_list_schema,
+            &option_list_columns,
+            NestedListShape::OptionList,
+            false,
+            &[20, 21],
+            &[0, 0],
+        );
+        publish_and_read_nested_shape(
+            option_list_schema,
+            option_list_columns,
+            option_list_bytes,
+            Uuid::from_u128(0x14000000000070008000000000000000),
+        );
+
+        let list_option = OvbRaw::Array(vec![
+            OvbRaw::Int(1.into()),
+            OvbRaw::Array(vec![OvbRaw::Int(2.into()), primitive]),
+        ]);
+        let list_option_schema =
+            nested_schema_with_list_type(list_option, OvbRaw::Int(1.into()));
+        let list_option_columns =
+            nested_columns_with_list_suffix(&["list", "element", "value"]);
+        let list_option_bytes = nested_parquet_with_list_values(
+            &list_option_schema,
+            &list_option_columns,
+            NestedListShape::ListOption,
+            false,
+            &[20, 21],
+            &[0, 0],
+        );
+        publish_and_read_nested_shape(
+            list_option_schema,
+            list_option_columns,
+            list_option_bytes,
+            Uuid::from_u128(0x15000000000070008000000000000000),
+        );
+    }
+
+    #[test]
+    fn rejects_list_leaf_with_malformed_definition_level() {
+        let schema_descriptor = nested_schema();
+        let schema = schema_descriptor_fingerprint(&schema_descriptor).unwrap();
+        let columns = nested_columns();
+        let bytes =
+            nested_parquet_with_list_element_optional(&schema_descriptor, &columns, true);
+
+        assert!(matches!(
+            verify_physical_metadata(
+                NESTED_TABLE,
+                CompactSegmentRole::Data,
+                schema,
+                "test-encoder-v1",
+                &columns,
+                2,
+                &bytes,
+            ),
+            Err(RepositoryError::InvalidCompactManifest)
+        ));
+    }
+
+    #[test]
+    fn rejects_repeated_primary_key_even_when_one_value_per_row() {
+        let schema_descriptor = nested_schema_with_list_role(OvbRaw::Int(0.into()));
+        let schema = schema_descriptor_fingerprint(&schema_descriptor).unwrap();
+        let columns = nested_columns();
+        let bytes = nested_parquet_with_list_values(
+            &schema_descriptor,
+            &columns,
+            NestedListShape::Required,
+            false,
+            &[20, 21],
+            &[0, 0],
+        );
+        let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+        let group = reader.get_row_group(0).unwrap();
+        assert_eq!(group.metadata().num_rows(), 2);
+        assert_eq!(group.metadata().column(2).num_values(), 2);
+
+        assert!(matches!(
+            verify_physical_metadata(
+                NESTED_TABLE,
+                CompactSegmentRole::Data,
+                schema,
+                "test-encoder-v1",
+                &columns,
+                2,
+                &bytes,
+            ),
+            Err(RepositoryError::InvalidCompactManifest)
+        ));
+    }
+
+    #[test]
+    fn list_definition_and_repetition_levels_include_optional_layers() {
+        let primitive = OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]);
+        let levels = |logical_type: OvbRaw| {
+            let mut output = Vec::new();
+            flatten_physical_type(
+                NESTED_LIST,
+                &logical_type,
+                &mut Vec::new(),
+                &mut vec![format!("f_{}", NESTED_LIST.simple())],
+                0,
+                0,
+                &mut output,
+                false,
+            )
+            .unwrap();
+            (output[0].max_def_level, output[0].max_rep_level)
+        };
+
+        assert_eq!(
+            levels(OvbRaw::Array(vec![OvbRaw::Int(1.into()), primitive.clone()])),
+            (1, 1)
+        );
+        assert_eq!(
+            levels(OvbRaw::Array(vec![
+                OvbRaw::Int(2.into()),
+                OvbRaw::Array(vec![OvbRaw::Int(1.into()), primitive.clone()]),
+            ])),
+            (2, 1)
+        );
+        assert_eq!(
+            levels(OvbRaw::Array(vec![
+                OvbRaw::Int(1.into()),
+                OvbRaw::Array(vec![OvbRaw::Int(2.into()), primitive]),
+            ])),
+            (2, 1)
+        );
     }
 
     #[test]
