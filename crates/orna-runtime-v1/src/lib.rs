@@ -12427,6 +12427,23 @@ async fn apply_table_mutation_tx(
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
         }
         None => {
+            let mut rows = connection
+                .query(
+                    "SELECT 1 FROM table_row
+                     WHERE table_id = ?1 AND row_key = ?2
+                     LIMIT 1",
+                    params![mutation.table.clone(), mutation.key.clone()],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            if rows
+                .next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+                .is_none()
+            {
+                return Err(RuntimeError::InvalidTableMutation);
+            }
             connection
                 .execute(
                     "DELETE FROM table_row WHERE table_id = ?1 AND row_key = ?2",
@@ -13508,6 +13525,35 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_table_activation_rejects_a_missing_delete_without_advancing_state() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let before = context.capture().clone();
+
+        assert_eq!(
+            state
+                .commit_table_activation(
+                    lease,
+                    &context,
+                    &[table_mutation(9, 1, None)],
+                    digest(10),
+                    &NoFault,
+                )
+                .await,
+            Err(RuntimeError::InvalidTableMutation)
+        );
+        assert_eq!(state.capture().await.unwrap(), before);
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+        assert!(state.pending().await.unwrap().is_empty());
         assert_eq!(
             state.committed_table_row("books", &[1]).await.unwrap(),
             None
