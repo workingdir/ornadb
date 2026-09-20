@@ -607,7 +607,10 @@ impl SealedInvocationOperation {
 
 #[cfg(test)]
 mod argument_metadata_tests {
-    use super::{SealedInvocationArgumentMetadata, sealed_invocation_argument_type_metadata};
+    use super::{
+        SealedInvocationArgumentMetadata, sealed_invocation_argument_type_metadata,
+        sealed_invocation_argument_type_witness_target,
+    };
     use orna_core::{
         TypeId,
         types::{ResolvedType, StandardScalar},
@@ -651,6 +654,76 @@ mod argument_metadata_tests {
         let debug = format!("{metadata:?}");
         assert!(debug.contains("<withheld>"));
         assert!(!debug.contains(&format!("{digest:?}")));
+    }
+
+    #[test]
+    fn identity_bearing_argument_types_require_their_exact_catalogue_form() {
+        let type_id = TypeId::from_bytes([0x72; 16]);
+        let metadata = |type_kind, target_type_id| SealedInvocationArgumentMetadata {
+            position: 0,
+            parameter_id: vec![0x11; 16],
+            name: "pin".to_owned(),
+            type_kind,
+            scalar_type: None,
+            target_type_id,
+            type_reference: None,
+            value_digest: vec![0x41; 32],
+        };
+
+        assert_eq!(
+            sealed_invocation_argument_type_witness_target(&metadata(
+                "named",
+                Some(type_id.to_bytes().to_vec()),
+            ))
+            .expect("named argument witness target"),
+            Some((type_id, "named")),
+        );
+        assert_eq!(
+            sealed_invocation_argument_type_witness_target(&metadata(
+                "reference",
+                Some(type_id.to_bytes().to_vec()),
+            ))
+            .expect("reference argument witness target"),
+            Some((type_id, "named")),
+        );
+        assert_eq!(
+            sealed_invocation_argument_type_witness_target(&metadata(
+                "value",
+                Some(type_id.to_bytes().to_vec()),
+            ))
+            .expect("value argument witness target"),
+            Some((type_id, "value")),
+        );
+        assert_eq!(
+            sealed_invocation_argument_type_witness_target(&metadata("scalar", None))
+                .expect("legacy scalar has no catalogue identity"),
+            None,
+        );
+    }
+
+    #[test]
+    fn identity_bearing_argument_type_rejects_missing_or_unknown_witness_shape() {
+        let metadata = |type_kind, target_type_id| SealedInvocationArgumentMetadata {
+            position: 0,
+            parameter_id: vec![0x11; 16],
+            name: "pin".to_owned(),
+            type_kind,
+            scalar_type: None,
+            target_type_id,
+            type_reference: None,
+            value_digest: vec![0x41; 32],
+        };
+
+        assert!(
+            sealed_invocation_argument_type_witness_target(&metadata("reference", None)).is_err()
+        );
+        assert!(
+            sealed_invocation_argument_type_witness_target(&metadata(
+                "unknown",
+                Some(vec![0x72; 16]),
+            ))
+            .is_err()
+        );
     }
 }
 
@@ -1226,6 +1299,42 @@ fn sealed_invocation_argument_metadata(
     Ok(metadata)
 }
 
+/// Returns the exact catalogue identity and form required to construct a
+/// `sys.TypeRef` witness for one retained argument type.
+///
+/// Legacy scalar descriptors deliberately carry only a compatibility name,
+/// not a catalogue `TypeId`; they therefore cannot be promoted to a
+/// catalogue-backed public type witness at this boundary. The caller retains
+/// that private metadata without inventing an object identity. All other
+/// sealed argument forms carry an exact type identity and must resolve it in
+/// the pinned catalogue before admission can persist their witness.
+fn sealed_invocation_argument_type_witness_target(
+    argument: &SealedInvocationArgumentMetadata,
+) -> Result<Option<(orna_core::TypeId, &'static str)>, PostgresKernelError> {
+    let type_id = || {
+        argument
+            .target_type_id
+            .as_deref()
+            .and_then(|id| <[u8; 16]>::try_from(id).ok())
+            .map(orna_core::TypeId::from_bytes)
+            .ok_or_else(|| PostgresKernelError::DurableInvariant {
+                relation: "sealed invocation argument metadata",
+                record: argument.name.clone(),
+                rule: "identity-bearing argument type metadata must retain an exact TypeId",
+            })
+    };
+    match argument.type_kind {
+        "scalar" => Ok(None),
+        "named" | "reference" => Ok(Some((type_id()?, "named"))),
+        "value" => Ok(Some((type_id()?, "value"))),
+        _ => Err(PostgresKernelError::DurableInvariant {
+            relation: "sealed invocation argument metadata",
+            record: argument.name.clone(),
+            rule: "argument type metadata must use a closed type family",
+        }),
+    }
+}
+
 async fn authoritative_catalogue_object(
     transaction: &Transaction<'_>,
     catalogue: CatalogueRevisionId,
@@ -1325,18 +1434,19 @@ async fn authoritative_catalogue_function_reference(
         })
 }
 
-async fn authoritative_catalogue_named_type_reference(
+async fn authoritative_catalogue_type_reference(
     transaction: &Transaction<'_>,
     capture: &CwdCapture,
     catalogue: CatalogueRevisionId,
     type_id: orna_core::TypeId,
+    type_form: &'static str,
 ) -> Result<Option<Vec<u8>>, PostgresKernelError> {
     if !authoritative_catalogue_object(
         transaction,
         catalogue,
         type_id.to_bytes(),
         "type",
-        Some("named"),
+        Some(type_form),
     )
     .await?
     {
@@ -1356,7 +1466,7 @@ async fn authoritative_catalogue_named_type_reference(
         .map_err(|_| PostgresKernelError::DurableInvariant {
             relation: "_orna_kernel.sealed_invocation_argument_metadata",
             record: type_id.canonical(),
-            rule: "authoritative named type object must form a valid TypeRef",
+            rule: "authoritative type object must form a valid TypeRef",
         })?
         .as_row_ref()
         .encode()
@@ -1364,7 +1474,7 @@ async fn authoritative_catalogue_named_type_reference(
         .map_err(|_| PostgresKernelError::DurableInvariant {
             relation: "_orna_kernel.sealed_invocation_argument_metadata",
             record: type_id.canonical(),
-            rule: "authoritative named type witness must have a canonical encoding",
+            rule: "authoritative type witness must have a canonical encoding",
         })
 }
 
@@ -1764,34 +1874,27 @@ impl SealedInvocationOperation {
         for mut argument in
             sealed_invocation_argument_metadata(&self.active, definition, self.decoded.arguments())?
         {
-            if argument.type_kind == "named" {
+            if let Some((type_id, type_form)) =
+                sealed_invocation_argument_type_witness_target(&argument)?
+            {
                 let capture = capture.ok_or_else(|| PostgresKernelError::DurableInvariant {
                     relation: "_orna_kernel.sealed_invocation_argument_metadata",
                     record: self.invocation.canonical(),
-                    rule: "named argument type witness requires trusted admission capture",
+                    rule: "identity-bearing argument type witness requires trusted admission capture",
                 })?;
-                let type_id = argument
-                    .target_type_id
-                    .as_deref()
-                    .and_then(|id| <[u8; 16]>::try_from(id).ok())
-                    .map(orna_core::TypeId::from_bytes)
-                    .ok_or_else(|| PostgresKernelError::DurableInvariant {
-                        relation: "_orna_kernel.sealed_invocation_argument_metadata",
-                        record: self.invocation.canonical(),
-                        rule: "named argument type metadata must retain an exact TypeId",
-                    })?;
                 argument.type_reference = Some(
-                    authoritative_catalogue_named_type_reference(
+                    authoritative_catalogue_type_reference(
                         transaction,
                         capture,
                         self.active.pair().catalogue(),
                         type_id,
+                        type_form,
                     )
                     .await?
                     .ok_or_else(|| PostgresKernelError::DurableInvariant {
                         relation: "_orna_kernel.catalogue_objects",
                         record: type_id.canonical(),
-                        rule: "named argument type must have an authoritative catalogue object row",
+                        rule: "identity-bearing argument type must have an authoritative catalogue object row",
                     })?,
                 );
             }
@@ -1890,11 +1993,12 @@ impl SealedInvocationOperation {
                 })?;
                 let result_type = match function_return_named_type(definition) {
                     Some(type_id) => Some(
-                        authoritative_catalogue_named_type_reference(
+                        authoritative_catalogue_type_reference(
                             transaction,
                             capture,
                             target.revision().catalogue(),
                             type_id,
+                            "named",
                         )
                         .await?
                         .ok_or_else(|| PostgresKernelError::DurableInvariant {
