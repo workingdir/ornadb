@@ -1,6 +1,8 @@
 //! Opaque codec registry and framed payload tests.
 
+use super::super::opaque_codec::{ACTION_DOMAIN_CLIENT, ACTION_IDENTITY_BYTES};
 use super::*;
+
 #[test]
 fn opaque_codec_registry_is_complete_unique_and_exact() {
     let active = active_record_revision();
