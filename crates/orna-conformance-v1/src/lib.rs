@@ -2214,6 +2214,25 @@ impl Harness {
                 observed_status: evidence.status.clone(),
             });
         }
+        // Reviewed binding order is caller-controlled metadata. Canonicalize
+        // the published witness collection so equivalent reviewed input has
+        // one reproducible serialization without changing its authority.
+        witnesses.sort_by(|left, right| {
+            (
+                left.requirement_id.as_str(),
+                left.fixture_id.as_str(),
+                left.stage.phase_name(),
+                left.implementation_ref.as_str(),
+                left.test_ref.as_str(),
+            )
+                .cmp(&(
+                    right.requirement_id.as_str(),
+                    right.fixture_id.as_str(),
+                    right.stage.phase_name(),
+                    right.implementation_ref.as_str(),
+                    right.test_ref.as_str(),
+                ))
+        });
         Ok(EngineWitnesses {
             publication_digests: report.publication_digests.clone(),
             witnesses,
@@ -2296,6 +2315,21 @@ impl Harness {
                 observed_status: binding.observed_status.clone(),
             });
         }
+        // Production-unit evidence is not an engine claim. Its ordering is
+        // nevertheless part of its serialized report surface, so normalize
+        // caller order after validation.
+        evidence.sort_by(|left, right| {
+            (
+                left.requirement_id.as_str(),
+                left.implementation_ref.as_str(),
+                left.test_ref.as_str(),
+            )
+                .cmp(&(
+                    right.requirement_id.as_str(),
+                    right.implementation_ref.as_str(),
+                    right.test_ref.as_str(),
+                ))
+        });
         Ok(ImplementationEvidenceOverlay {
             publication_digests: self.corpus.publication_digests.clone(),
             evidence,
@@ -2389,6 +2423,23 @@ impl Harness {
                 observed_status: result.status.clone(),
             });
         }
+        // Scenario witnesses remain implementation-scenario evidence, not
+        // engine execution. Canonical ordering makes equivalent approved
+        // binding sets reproducible without promoting their status.
+        witnesses.sort_by(|left, right| {
+            (
+                left.requirement_id.as_str(),
+                left.scenario_id.as_str(),
+                left.implementation_ref.as_str(),
+                left.test_ref.as_str(),
+            )
+                .cmp(&(
+                    right.requirement_id.as_str(),
+                    right.scenario_id.as_str(),
+                    right.implementation_ref.as_str(),
+                    right.test_ref.as_str(),
+                ))
+        });
         Ok(ScenarioExecutionWitnesses {
             publication_digests: report.publication_digests.clone(),
             witnesses,
