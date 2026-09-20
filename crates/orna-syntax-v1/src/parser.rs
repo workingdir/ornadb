@@ -3757,7 +3757,7 @@ impl Parser {
                     result: Box::new(result),
                 }
             }
-            TokenKind::Identifier { .. } | TokenKind::Keyword(_) => {
+            TokenKind::Identifier { .. } => {
                 let mut path = vec![token.text];
                 self.bump();
                 while self.is_punct(".") {
