@@ -74,6 +74,10 @@ fn materializes_standard_value_function_through_public_catalogue_handoff() {
         definition.return_type(),
         &FunctionReturn::Single(ResolvedType::Value(boolean_id))
     );
+    assert_eq!(definition.domain(), FunctionDomain::Client);
+    assert_eq!(definition.security(), FunctionSecurity::Invoker);
+    assert_eq!(definition.transaction(), None);
+    assert_eq!(definition.volatility(), FunctionVolatility::Immutable);
     assert_eq!(definition.current_revision(), revision.id());
     assert_eq!(revision.function(), definition.id());
     assert_eq!(artifact, revision.artifact());
@@ -89,6 +93,14 @@ fn materializes_standard_value_function_through_public_catalogue_handoff() {
         references[0].target(),
         DefinitionReferenceTarget::ValueType(boolean_id)
     );
+    assert!(matches!(
+        resolved.admission_artifact(),
+        Err(ResolvedSourceCatalogueError::UnsupportedType {
+            function,
+            slot: SignatureSlot::Result,
+            resolved_type: ResolvedType::Value(type_id),
+        }) if function == definition.id() && type_id == boolean_id
+    ));
 }
 
 #[test]
