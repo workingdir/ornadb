@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 use std::io::{self, BufRead, Write};
 
 use orna_conformance_v1::AdmittedReplSession;
-use orna_foundation_v1::CanonicalValue;
+use orna_foundation_v1::{CanonicalValue, canonical_uuid_text};
 use orna_value_v1::Raw;
 
 const MAX_INPUT_BYTES: usize = 65_536;
@@ -211,11 +211,25 @@ fn inspect_raw(raw: &Raw, depth: usize) -> (String, &'static str) {
         Raw::Array(values) => (inspect_sequence(values, depth), "Array"),
         Raw::Map(entries) => (inspect_map(entries, depth), "Map"),
         Raw::Tag(0, _) => ("<redacted>".into(), "Secret"),
+        // OVB tag 37 is the closed 1.0 UUID representation. Keep its
+        // structural fallback human-readable without turning presentation
+        // into an alternate persistence encoding.
+        Raw::Tag(37, value) => inspect_uuid(value),
         Raw::Tag(tag, value) => {
             let (text, _) = inspect_raw(value, depth + 1);
             (format!("Tag<{tag}>({text})"), "Tagged")
         }
     }
+}
+
+fn inspect_uuid(value: &Raw) -> (String, &'static str) {
+    let Raw::Bytes(bytes) = value else {
+        return ("Tag<37>(<invalid>)".into(), "Tagged");
+    };
+    let Ok(bytes) = <[u8; 16]>::try_from(bytes.as_slice()) else {
+        return ("Tag<37>(<invalid>)".into(), "Tagged");
+    };
+    (canonical_uuid_text(bytes), "Uuid")
 }
 
 fn inspect_sequence(values: &[Raw], depth: usize) -> String {
@@ -301,6 +315,25 @@ mod tests {
         assert_eq!(
             truncate(&"x".repeat(MAX_INSPECT_TEXT + 1)),
             format!("{}…", "x".repeat(MAX_INSPECT_TEXT))
+        );
+    }
+
+    #[test]
+    fn inspect_renders_canonical_uuid_text_without_affecting_ovb() {
+        let value = CanonicalValue::uuid([
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ]);
+        assert_eq!(
+            inspect(&value),
+            "00112233-4455-6677-8899-aabbccddeeff : Uuid"
+        );
+        assert_eq!(
+            value.encode().expect("canonical UUID OVB"),
+            vec![
+                0xd8, 0x25, 0x50, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa,
+                0xbb, 0xcc, 0xdd, 0xee, 0xff
+            ]
         );
     }
 
