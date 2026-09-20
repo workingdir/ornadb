@@ -708,6 +708,8 @@ impl PostgresKernel {
                 record: invocation_id.canonical(),
                 rule: "trace sequence must fit PostgreSQL BIGINT",
             })?;
+        let trace_limit = i64::try_from(MAX_INSPECT_CARRIER_ROWS + 1)
+            .expect("the bounded inspect carrier row limit must fit PostgreSQL BIGINT");
         let mut database_session = self.open().await?;
         let operation = Box::pin(async {
             let transaction = database_session
@@ -735,8 +737,9 @@ impl PostgresKernel {
                                 observer_invocation_id, recorded_at
                          FROM _orna_kernel.inspect_trace_events
                          WHERE invocation_id = $1
-                         ORDER BY sequence",
-                        &[&invocation_id.to_bytes().to_vec()],
+                         ORDER BY sequence
+                         LIMIT $2",
+                        &[&invocation_id.to_bytes().to_vec(), &trace_limit],
                     )
                     .await
                     .map_err(PostgresKernelError::Database)?
@@ -747,12 +750,14 @@ impl PostgresKernel {
                                 observer_invocation_id, recorded_at
                          FROM _orna_kernel.inspect_trace_events
                          WHERE invocation_id = $1 AND sequence > $2
-                         ORDER BY sequence",
-                        &[&invocation_id.to_bytes().to_vec(), &after],
+                         ORDER BY sequence
+                         LIMIT $3",
+                        &[&invocation_id.to_bytes().to_vec(), &after, &trace_limit],
                     )
                     .await
                     .map_err(PostgresKernelError::Database)?
             };
+            require_bounded_trace_read(rows.len(), invocation_id)?;
             let mut events = Vec::with_capacity(rows.len());
             for row in &rows {
                 let record = row_invocation_record(row)?;
@@ -829,5 +834,35 @@ impl PostgresKernel {
         })
         .await;
         finish_inspect_session(operation, database_session.shutdown().await)
+    }
+}
+
+fn require_bounded_trace_read(
+    row_count: usize,
+    invocation: InvocationId,
+) -> Result<(), PostgresKernelError> {
+    if row_count > MAX_INSPECT_CARRIER_ROWS {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: INSPECT_TRACE_RELATION,
+            record: invocation.canonical(),
+            rule: "trace read exceeds the bounded inspection carrier row limit",
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trace_read_bound_rejects_an_overflow_row() {
+        let invocation = InvocationId::from_bytes([0x51; 16]);
+        assert!(require_bounded_trace_read(MAX_INSPECT_CARRIER_ROWS, invocation).is_ok());
+        assert!(matches!(
+            require_bounded_trace_read(MAX_INSPECT_CARRIER_ROWS + 1, invocation),
+            Err(PostgresKernelError::DurableInvariant { rule, .. })
+                if rule == "trace read exceeds the bounded inspection carrier row limit"
+        ));
     }
 }
