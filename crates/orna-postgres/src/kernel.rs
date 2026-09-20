@@ -80,8 +80,8 @@ pub use security::{
     AuthenticatedServerResourceProducer, AuthenticatedServerResourceResult,
     AuthenticatedServerResourceStart, RecordArgumentPreflight, ResourceCancellation,
     ResourceCredit, SealedInvocationAdmissionContext, SealedInvocationContinuation,
-    SealedInvocationExecution, SealedInvocationOperation, SealedInvocationPreflight,
-    SealedInvocationResult,
+    SealedInvocationExecution, SealedInvocationLifecycleFinalization, SealedInvocationOperation,
+    SealedInvocationPreflight, SealedInvocationResult, SealedInvocationWriterLease,
 };
 pub use server_execution::{ServerSelectContext, ServerSelectError, ServerSelectResult};
 pub use server_mutation_execution::{
