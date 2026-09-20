@@ -2682,6 +2682,29 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn diagnostics_reject_a_redacted_span_without_a_redaction_claim() {
+        let span = Node::Array(vec![
+            snapshot_node(&snapshot()).unwrap(),
+            Node::Text("<redacted>".into()),
+            uint(1),
+            uint(3),
+        ]);
+        let contradictory = Node::Tag(
+            60011,
+            Box::new(Node::Map(vec![
+                (uint(0), Node::Text("wire.invalid_message".into())),
+                (uint(1), uint(3)),
+                (uint(2), Node::Text("invalid message".into())),
+                (uint(3), Node::Array(vec![span])),
+                (uint(4), Node::Array(vec![])),
+                (uint(5), Node::Array(vec![])),
+                (uint(6), Node::Bool(false)),
+            ])),
+        );
+        assert_eq!(Diagnostic::decode(&contradictory), Err(Error::InvalidValue));
+    }
     #[test]
     fn present_rejects_duplicate_sibling_stable_keys() {
         let stable_key = Node::Array(vec![uint(0), Node::Text("same".into())]);
