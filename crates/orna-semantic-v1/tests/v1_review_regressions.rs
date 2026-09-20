@@ -426,7 +426,7 @@ fn imported_nominal_constructor_accepts_complete_public_fields_and_defaults() {
 
     let local_private_required =
         analyze_main("pub type Vault { value: Int, } pub fn forge(): Vault = Vault { value: 1 };");
-    expect_accepted(&local_private_required);
+    expect_diagnostics(&local_private_required, &[DIAG_TYPE]);
 
     let exported = analyze(&[ModuleInput::new(
         "vault.orna",
@@ -928,6 +928,26 @@ fn nested_impl_body_can_read_private_target_fields() {
             }
         "#,
     ));
+}
+
+#[test]
+fn nested_impl_cannot_construct_other_nominal_private_fields() {
+    let result = analyze_main(
+        r#"
+            pub protocol P {
+                fn make(): Vault;
+            }
+            pub type Vault {
+                value: Int,
+            }
+            pub type Other {
+                impl P {
+                    fn make(): Vault = Vault { value: 1 };
+                }
+            }
+        "#,
+    );
+    expect_diagnostics(&result, &[DIAG_TYPE]);
 }
 
 #[test]
@@ -1864,6 +1884,82 @@ fn nominal_from_requires_a_nominal_constructor_result() {
             }
         "#,
     ));
+}
+
+#[test]
+fn imported_nested_from_metadata_resolves_qualified_targets_and_effects() {
+    let result = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            r#"
+                use first;
+                use target;
+                pub fn convert(): target.Final =
+                    target.Final.from(first.Mid.from("raw"));
+            "#,
+        ),
+        ModuleInput::new(
+            "target.orna",
+            r#"
+                use first;
+                pub type Final {
+                    value: Str,
+                    impl From<first.Mid> {
+                        fn from(value) = Final { value: "final" };
+                    }
+                }
+            "#,
+        ),
+        ModuleInput::new(
+            "first.orna",
+            r#"
+                pub table Audit { value: Str, }
+                pub type Mid {
+                    value: Str,
+                    impl From<Str> {
+                        fn from(value) {
+                            Audit.insert({ value: value });
+                            Mid { value: value }
+                        }
+                    }
+                }
+            "#,
+        ),
+    ]);
+    expect_accepted(&result);
+    let main = result
+        .modules
+        .get(&Namespace(vec!["main".into()]))
+        .expect("main module");
+    let convert = main.symbols.get("convert").expect("conversion function");
+    assert!(convert.effects.effects.contains("database write"));
+    assert!(convert.effects.may_fail);
+}
+
+#[test]
+fn private_nominal_members_are_not_available_to_unrelated_local_functions() {
+    let result = analyze_main(
+        r#"
+            pub type Vault { value: Int, }
+            pub fn leak(value: Vault): Int = value.value;
+        "#,
+    );
+    expect_diagnostics(&result, &[DIAG_TYPE]);
+}
+
+#[test]
+fn nominal_from_requires_inferred_target_value_even_when_spelling_matches() {
+    let result = analyze_main(
+        r#"
+            pub type Box {
+                value: Str,
+                impl From<Str> {
+                    fn from(value) = (Box.from(1));
+                }
+            }
+        "#,
+    );
+    expect_diagnostics(&result, &[DIAG_TYPE]);
 }
 
 #[test]
