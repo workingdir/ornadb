@@ -5269,6 +5269,12 @@ impl LiveTransport {
                     Err(Error::Denied) => return wire_error(404, "live.database_unavailable"),
                     Ok(_) | Err(_) => return wire_error(503, "live.unavailable"),
                 };
+                // The authority owns allocation, but a reused identity must
+                // never replace a retained session's credential, origin, or
+                // attachment state at this transport boundary.
+                if self.sessions.contains_key(&metadata.session) {
+                    return wire_error(503, "live.unavailable");
+                }
                 let credential = match self
                     .host
                     .create(
