@@ -616,6 +616,28 @@ pub(crate) async fn recover_active_revision(
     establish_trusted_search_path(transaction).await?;
     require_current_migrations(transaction).await?;
     let header = load_active_header(transaction).await?;
+    recover_revision_from_header(transaction, header, true).await
+}
+
+/// Reconstructs one retained revision pair without consulting or changing the
+/// durable active marker. Historical codecs must be bound to the revision that
+/// authored their bytes; this path deliberately skips current physical-table
+/// verification because old catalogue layouts are not the current CWD layout.
+pub(crate) async fn recover_revision_for_pair(
+    transaction: &Transaction<'_>,
+    pair: RevisionPair,
+) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
+    establish_trusted_search_path(transaction).await?;
+    require_current_migrations(transaction).await?;
+    let header = load_revision_header(transaction, pair).await?;
+    recover_revision_from_header(transaction, header, false).await
+}
+
+async fn recover_revision_from_header(
+    transaction: &Transaction<'_>,
+    header: RecoveredRevisionHeader,
+    verify_physical: bool,
+) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
     let catalogue_hash_context = load_active_catalogue_hash_context(transaction, &header).await?;
     let active_ancestry =
         validate_revision_ancestry(transaction, header.catalogue, header.source).await?;
@@ -646,7 +668,9 @@ pub(crate) async fn recover_active_revision(
         function_state,
         catalogue_hash_context,
     )?;
-    verify_physical_catalogue(transaction, &active).await?;
+    if verify_physical {
+        verify_physical_catalogue(transaction, &active).await?;
+    }
 
     Ok(active)
 }
@@ -1071,6 +1095,64 @@ async fn load_active_header(
             record: "singleton=true".into(),
             rule: "exactly one active catalogue, source revision, and source bundle join must exist",
         });
+    }
+
+    decode_active_header(&rows[0])
+}
+
+async fn load_revision_header(
+    transaction: &Transaction<'_>,
+    pair: RevisionPair,
+) -> Result<RecoveredRevisionHeader, PostgresKernelError> {
+    let source = pair.source().to_bytes().to_vec();
+    let catalogue = pair.catalogue().to_bytes().to_vec();
+    let rows = transaction
+        .query(
+            "SELECT
+                TRUE AS singleton,
+                $1::bytea AS active_source_id,
+                $2::bytea AS active_catalogue_id,
+                catalogue.id AS catalogue_id,
+                catalogue.source_revision_id AS catalogue_source_id,
+                catalogue.parent_catalogue_revision_id AS catalogue_parent_id,
+                catalogue.content_hash AS catalogue_hash,
+                catalogue.hash_algorithm AS catalogue_algorithm,
+                catalogue.hash_contract_version AS catalogue_contract_version,
+                catalogue.canonical_hash_version AS catalogue_canonical_hash_version,
+                catalogue.standard_library_revision_id AS catalogue_standard_library_revision_id,
+                parent_catalogue.source_revision_id AS parent_catalogue_source_id,
+                source.id AS source_id,
+                source.parent_source_revision_id AS source_parent_id,
+                source.bundle_id AS source_bundle_id,
+                source.content_hash AS source_hash,
+                source.hash_algorithm AS source_algorithm,
+                source.hash_contract_version AS source_contract_version,
+                bundle.id AS bundle_id,
+                bundle.content_hash AS bundle_hash,
+                bundle.hash_algorithm AS bundle_algorithm,
+                bundle.hash_contract_version AS bundle_contract_version
+             FROM _orna_kernel.catalogue_revisions AS catalogue
+             JOIN _orna_kernel.source_revisions AS source
+               ON source.id = catalogue.source_revision_id
+             JOIN _orna_kernel.source_bundles AS bundle
+               ON bundle.id = source.bundle_id
+             LEFT JOIN _orna_kernel.catalogue_revisions AS parent_catalogue
+               ON parent_catalogue.id = catalogue.parent_catalogue_revision_id
+             WHERE catalogue.id = $2
+               AND catalogue.source_revision_id = $1",
+            &[&source, &catalogue],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    if rows.len() != 1 {
+        return Err(DurableRecord::new(
+            CATALOGUE_REVISION_RELATION,
+            pair.catalogue().canonical(),
+        )
+        .invariant(
+            "the requested historical revision pair must join exactly one catalogue, source, and bundle",
+        ));
     }
 
     decode_active_header(&rows[0])

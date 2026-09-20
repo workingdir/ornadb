@@ -50,11 +50,19 @@ pub(crate) async fn recover_inspect_relations(
     if rows.is_empty() && trace_rows.is_empty() {
         return Ok(());
     }
-    let registry = inspect_value_registry(active)?;
-    let registry = &registry;
-
+    let mut contexts = HashMap::new();
+    let mut invocation_pairs = HashMap::new();
     for row in &rows {
-        decode_inspect_snapshot_row(row, active, registry)?;
+        let pair = inspect_snapshot_pair(row)?;
+        if !contexts.keys().any(|candidate| *candidate == pair) {
+            let context = inspect_codec_context(transaction, active, pair).await?;
+            contexts.insert(pair, context);
+        }
+        let (historical, registry) = contexts
+            .get(&pair)
+            .expect("inspection codec context was inserted above");
+        let epoch = decode_inspect_snapshot_row(row, historical, registry)?;
+        remember_inspection_pair(&mut invocation_pairs, epoch.invocation_id(), pair)?;
     }
 
     for record_row in &trace_rows {
@@ -79,8 +87,18 @@ pub(crate) async fn recover_inspect_relations(
         ) {
             continue;
         }
+        let Some(pair) = invocation_pairs.get(&record.invocation) else {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: INSPECT_TRACE_RELATION,
+                record: record.invocation.canonical(),
+                rule: "trace payload must have a pinned inspection snapshot context",
+            });
+        };
+        let (historical, registry) = contexts
+            .get(pair)
+            .expect("trace context must come from its inspection snapshot");
         let RuntimeValue::InvokeEvent(event) =
-            decode_constructed_value(active, registry, &record.payload_bytes)
+            decode_constructed_value(historical, registry, &record.payload_bytes)
                 .map_err(PostgresKernelError::InspectValueCodec)?
         else {
             return Err(PostgresKernelError::DurableInvariant {
@@ -279,6 +297,22 @@ pub(super) fn decode_inspect_snapshot_row(
         });
     }
     Ok(epoch)
+}
+
+fn inspect_snapshot_pair(row: &Row) -> Result<RevisionPair, PostgresKernelError> {
+    let source = SourceRevisionId::from_bytes(inspect_id(
+        INSPECT_SNAPSHOT_RELATION,
+        row,
+        "inspection snapshot context",
+        "source_revision_id",
+    )?);
+    let catalogue = CatalogueRevisionId::from_bytes(inspect_id(
+        INSPECT_SNAPSHOT_RELATION,
+        row,
+        "inspection snapshot context",
+        "catalogue_revision_id",
+    )?);
+    Ok(RevisionPair::new(source, catalogue))
 }
 
 pub(super) fn decode_security_decision_row(
@@ -510,6 +544,28 @@ pub(super) fn inspect_value_registry(
     })
 }
 
+/// Returns the codec context that authored one retained inspection payload.
+///
+/// Inspection bytes are pinned by their source/catalogue pair. Reusing the
+/// current active revision here would allow a later standard-library registry
+/// to reinterpret historical opaque values, or to reject them for the wrong
+/// reason. Historical recovery intentionally does not verify current physical
+/// tables; it reconstructs only the immutable semantic context needed by the
+/// canonical payload codec.
+pub(super) async fn inspect_codec_context(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    pair: RevisionPair,
+) -> Result<(ActiveDatabaseRevision, OpaqueCodecRegistry), PostgresKernelError> {
+    let revision = if pair == active.pair() {
+        active.clone()
+    } else {
+        recover_revision_for_pair(transaction, pair).await?
+    };
+    let registry = inspect_value_registry(&revision)?;
+    Ok((revision, registry))
+}
+
 /// Validates the exact column sets of the inspection relations.
 async fn require_inspect_relation_columns(
     transaction: &Transaction<'_>,
@@ -626,4 +682,71 @@ pub(super) fn inspect_id(
             record: record.to_owned(),
             rule: "inspection identity column must carry exactly 16 bytes",
         })
+}
+
+fn remember_inspection_pair(
+    pairs: &mut HashMap<InvocationId, RevisionPair>,
+    invocation: InvocationId,
+    pair: RevisionPair,
+) -> Result<(), PostgresKernelError> {
+    if let Some(previous) = pairs.get(&invocation) {
+        if *previous != pair {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: INSPECT_SNAPSHOT_RELATION,
+                record: invocation.canonical(),
+                rule: "one invocation must retain one historical inspection codec context",
+            });
+        }
+    } else {
+        pairs.insert(invocation, pair);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remember_inspection_pair;
+    use crate::PostgresKernelError;
+    use orna_core::{CatalogueRevisionId, InvocationId, SourceRevisionId, revision::RevisionPair};
+    use std::collections::HashMap;
+
+    #[test]
+    fn inspection_trace_context_rejects_cross_revision_snapshots_for_one_invocation() {
+        let invocation = InvocationId::from_bytes([1; 16]);
+        let first = RevisionPair::new(
+            SourceRevisionId::from_bytes([2; 16]),
+            CatalogueRevisionId::from_bytes([3; 16]),
+        );
+        let second = RevisionPair::new(
+            SourceRevisionId::from_bytes([4; 16]),
+            CatalogueRevisionId::from_bytes([5; 16]),
+        );
+        let mut pairs = HashMap::new();
+
+        remember_inspection_pair(&mut pairs, invocation, first).expect("first context");
+        let error = remember_inspection_pair(&mut pairs, invocation, second)
+            .expect_err("one invocation cannot switch historical codec contexts");
+        assert!(matches!(
+            error,
+            PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.inspect_snapshots",
+                rule: "one invocation must retain one historical inspection codec context",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn inspection_trace_context_accepts_repeated_snapshots_at_one_revision() {
+        let invocation = InvocationId::from_bytes([1; 16]);
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([2; 16]),
+            CatalogueRevisionId::from_bytes([3; 16]),
+        );
+        let mut pairs = HashMap::new();
+
+        remember_inspection_pair(&mut pairs, invocation, pair).expect("first context");
+        remember_inspection_pair(&mut pairs, invocation, pair)
+            .expect("observer clones retain the same historical context");
+    }
 }
