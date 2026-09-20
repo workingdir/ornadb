@@ -6,9 +6,10 @@ use orna_conformance_v1::StageOutcome;
 use orna_foundation_v1::{
     CanonicalSnapshot, CwdCapture, Diagnostic, FileRef, InvocationStatus, OvbRaw, RowRef,
     SYS_INVOCATION_ARGUMENT_TABLE_ID, SYS_INVOCATION_TABLE_ID, SYS_RUN_TABLE_ID,
-    SYS_STREAM_TABLE_ID, SourceSpan, SystemReferenceError, invocation_argument_reference,
-    invocation_reference, validate_invocation_argument_reference, validate_invocation_reference,
-    validate_run_reference, validate_stream_reference,
+    SYS_STREAM_TABLE_ID, SourceSpan, SystemReferenceError, canonical_uuid_text,
+    invocation_argument_reference, invocation_reference, parse_canonical_uuid_text,
+    validate_invocation_argument_reference, validate_invocation_reference, validate_run_reference,
+    validate_stream_reference,
 };
 use orna_repository_v1::Repository;
 use orna_syntax_v1::parse_expression_with_file;
@@ -400,8 +401,28 @@ fn invocation_reference_constructors_preserve_checked_public_coordinates() {
     let argument =
         invocation_argument_reference(database, snapshot.clone(), [5; 16], 0.into()).unwrap();
     assert_eq!(argument.as_row_ref(), &invocation_argument(&capture));
-    assert!(validate_invocation_reference(invocation_ref.into_row_ref(), &capture).is_ok());
-    assert!(validate_invocation_argument_reference(argument.into_row_ref(), &capture).is_ok());
+    assert!(validate_invocation_reference(invocation_ref.clone().into_row_ref(), &capture).is_ok());
+    assert!(
+        validate_invocation_argument_reference(argument.clone().into_row_ref(), &capture).is_ok()
+    );
+
+    let other_invocation = invocation_reference(database, snapshot.clone(), [6; 16]).unwrap();
+    assert_ne!(
+        invocation_ref.as_row_ref().encode().unwrap(),
+        other_invocation.as_row_ref().encode().unwrap()
+    );
+    let other_argument =
+        invocation_argument_reference(database, snapshot.clone(), [5; 16], 1.into()).unwrap();
+    assert_ne!(
+        argument.as_row_ref().encode().unwrap(),
+        other_argument.as_row_ref().encode().unwrap()
+    );
+    let other_snapshot = CanonicalSnapshot::cwd([1; 16], [9; 16], 8.into()).unwrap();
+    let other_context = invocation_reference(database, other_snapshot, [5; 16]).unwrap();
+    assert_ne!(
+        invocation_ref.as_row_ref().encode().unwrap(),
+        other_context.as_row_ref().encode().unwrap()
+    );
 
     assert_eq!(
         invocation_reference([2; 16], snapshot.clone(), [5; 16]),
@@ -420,6 +441,18 @@ fn invocation_reference_constructors_preserve_checked_public_coordinates() {
         ),
         Err(SystemReferenceError::InvalidInvocationArgumentKey)
     );
+}
+
+#[test]
+fn foundation_reexports_canonical_uuid_text_boundary() {
+    let bytes = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xff,
+    ];
+    let text = canonical_uuid_text(bytes);
+    assert_eq!(text, "00112233-4455-6677-8899-aabbccddeeff");
+    assert_eq!(parse_canonical_uuid_text(&text).unwrap(), bytes);
+    assert!(parse_canonical_uuid_text("00112233-4455-6677-8899-AABBCCDDEEFF").is_err());
 }
 
 #[test]
