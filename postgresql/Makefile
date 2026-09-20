@@ -18,6 +18,22 @@ LIFECYCLE_UID := 61018
 LIFECYCLE_GID := 61018
 LIFECYCLE_PORT := 65432
 
+# Cargo's automatic embedded-engine build may only materialise its evidence
+# beneath this checkout's target directory.  An external CARGO_TARGET_DIR is
+# supported through ORNA_POSTGRES_ENGINE_OUTPUT, which bypasses this Makefile
+# after Cargo has selected an absolute, complete prebuilt output directory.
+define TARGET_ROOT_POLICY
+requested_target_root='$(TARGET_ROOT)'; \
+repository_target_root="$$(realpath -m -- "$(REPOSITORY_ROOT)/target")"; \
+[[ -n "$${requested_target_root}" ]] || { \
+	printf '%s\n' '[postgresql] error: TARGET_ROOT is required below the repository target directory; for an external CARGO_TARGET_DIR, set ORNA_POSTGRES_ENGINE_OUTPUT to an absolute complete engine output directory' >&2; exit 1; }; \
+[[ "$${requested_target_root}" == /* ]] || { \
+	printf '%s\n' '[postgresql] error: TARGET_ROOT must be absolute and resolve below the repository target directory; for an external CARGO_TARGET_DIR, set ORNA_POSTGRES_ENGINE_OUTPUT to an absolute complete engine output directory' >&2; exit 1; }; \
+target_root="$$(realpath -m -- "$${requested_target_root}")"; \
+[[ "$${target_root}" == "$${repository_target_root}/"* ]] || { \
+	printf '%s\n' '[postgresql] error: TARGET_ROOT must resolve below the repository target directory; for an external CARGO_TARGET_DIR, set ORNA_POSTGRES_ENGINE_OUTPUT to an absolute complete engine output directory' >&2; exit 1; };
+endef
+
 CONFIGURE_FLAGS := \
 	--build=x86_64-linux-gnu \
 	--host=x86_64-linux-gnu \
@@ -52,7 +68,7 @@ CONFIGURE_FLAGS := \
 	--without-llvm \
 	--with-zlib
 
-.PHONY: help verify-inputs prepare-source build-image archives support-data lifecycle verify-lifecycle manifest update-source
+.PHONY: help validate-target-root verify-inputs prepare-source build-image archives support-data lifecycle verify-lifecycle manifest update-source
 
 help:
 	@printf '%s\n' \
@@ -65,7 +81,11 @@ help:
 		'  make -C postgresql lifecycle TARGET_ROOT=<absolute-repo-target-path>' \
 		'  make -C postgresql verify-lifecycle TARGET_ROOT=<absolute-repo-target-path>' \
 		'  make -C postgresql manifest TARGET_ROOT=<absolute-repo-target-path>' \
+		'  External CARGO_TARGET_DIR: set ORNA_POSTGRES_ENGINE_OUTPUT=<absolute-complete-engine-output>' \
 		'  make -C postgresql update-source POSTGRESQL_REF=<full-commit>'
+
+validate-target-root:
+	@$(TARGET_ROOT_POLICY)
 
 verify-inputs:
 	@expected_gitlink="$$(git -C "$(REPOSITORY_ROOT)" ls-files --stage -- third_party/postgresql | \
@@ -137,11 +157,8 @@ verify-inputs:
 	printf '%s\n' "[postgresql] inputs valid at $${actual_commit}"
 
 prepare-source: verify-inputs
-	@target_root='$(TARGET_ROOT)'; \
-	[[ "$${target_root}" == "$(REPOSITORY_ROOT)/target/"* ]] || { \
-		printf '%s\n' '[postgresql] error: TARGET_ROOT must be an absolute path below the repository target directory' >&2; exit 1; }; \
+	@$(TARGET_ROOT_POLICY) \
 	mkdir -p -- "$${target_root}"; \
-	target_root="$$(cd "$${target_root}" && pwd -P)"; \
 	candidate="$${target_root}/.prepared-source.$$$$"; \
 	inventory_candidate="$${target_root}/.prepared-source-inventory.$$$$"; \
 	[[ ! -e "$${candidate}" && ! -e "$${inventory_candidate}" ]] || exit 1; \
@@ -182,9 +199,7 @@ prepare-source: verify-inputs
 	printf '%s\n' "[postgresql] prepared $${prepared_count} files below $${target_root}"
 
 build-image:
-	@target_root='$(TARGET_ROOT)'; \
-	[[ "$${target_root}" == "$(REPOSITORY_ROOT)/target/"* ]] || { \
-		printf '%s\n' '[postgresql] error: TARGET_ROOT must be an absolute path below the repository target directory' >&2; exit 1; }; \
+	@$(TARGET_ROOT_POLICY) \
 	mkdir -p -- "$${target_root}/container-context"; \
 	docker build --platform linux/amd64 --provenance=false \
 		--build-arg SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) --tag "$(IMAGE)" \
@@ -326,8 +341,8 @@ lifecycle: archives
 	printf '%s\n' "[postgresql] Docker-isolated build/verifier summary passed below $${target_root}/output"
 
 verify-lifecycle:
-	@target_root='$(TARGET_ROOT)'; \
-	[[ "$${target_root%/*}" == "$(REPOSITORY_ROOT)/target" && "$${target_root##*/}" != "" ]] || { \
+	@$(TARGET_ROOT_POLICY) \
+	[[ "$${target_root%/*}" == "$$(realpath -m -- "$(REPOSITORY_ROOT)/target")" && "$${target_root##*/}" != "" ]] || { \
 		printf '%s\n' '[postgresql] error: TARGET_ROOT must be one direct child of the repository target directory' >&2; exit 1; }; \
 	one="$${target_root}-one"; two="$${target_root}-two"; \
 	$(MAKE) lifecycle TARGET_ROOT="$${one}"; \
