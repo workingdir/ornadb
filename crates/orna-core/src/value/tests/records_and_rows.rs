@@ -344,6 +344,7 @@ fn accepts_every_current_non_null_runtime_value_as_a_function_argument() {
         RuntimeValue::Float(RuntimeFloat::new(9.5).unwrap()),
         RuntimeValue::Text("value".into()),
         RuntimeValue::Bytes(vec![1, 2, 3]),
+        RuntimeValue::Uuid([0x42; 16]),
         RuntimeValue::Reference {
             target: TARGET,
             object: OBJECT,
@@ -485,6 +486,7 @@ fn accepts_every_initial_runtime_value_type_and_typed_null() {
                 ResolvedType::scalar(StandardScalar::BinaryLargeObject),
                 false,
             ),
+            column("uuid", ResolvedType::scalar(StandardScalar::Uuid), false),
             column("reference", ResolvedType::reference(TARGET), false),
         ],
         [ResultRow::new([
@@ -495,6 +497,7 @@ fn accepts_every_initial_runtime_value_type_and_typed_null() {
             RuntimeValue::Text("value".into()),
             RuntimeValue::null(ResolvedType::scalar(StandardScalar::CharacterLargeObject)).unwrap(),
             RuntimeValue::Bytes(vec![1, 2, 3]),
+            RuntimeValue::Uuid([0x42; 16]),
             RuntimeValue::Reference {
                 target: TARGET,
                 object: OBJECT,
@@ -503,8 +506,8 @@ fn accepts_every_initial_runtime_value_type_and_typed_null() {
     )
     .unwrap();
 
-    assert_eq!(rows.columns().len(), 8);
-    assert_eq!(rows.rows()[0].values().len(), 8);
+    assert_eq!(rows.columns().len(), 9);
+    assert_eq!(rows.rows()[0].values().len(), 9);
     assert!(rows.rows()[0].values()[5].is_null());
 }
 
@@ -565,7 +568,6 @@ fn rejects_empty_duplicate_and_unsupported_columns() {
     );
     for resolved_type in [
         ResolvedType::scalar(StandardScalar::Decimal),
-        ResolvedType::scalar(StandardScalar::Uuid),
         ResolvedType::scalar(StandardScalar::Date),
         ResolvedType::scalar(StandardScalar::Time),
         ResolvedType::scalar(StandardScalar::Timestamp),
@@ -581,6 +583,9 @@ fn rejects_empty_duplicate_and_unsupported_columns() {
             Err(ResultRowsError::UnsupportedRuntimeType { resolved_type })
         );
     }
+    let uuid = ResolvedType::scalar(StandardScalar::Uuid);
+    assert!(ResultColumn::new("uuid", uuid, false).is_ok());
+    assert!(RuntimeValue::null(uuid).is_ok());
     assert_eq!(
         ResultRows::new(
             [
