@@ -1540,7 +1540,7 @@ impl SqliteRevisionStore {
         connection: &Connection,
         record: &SqliteInspectSnapshotRecord,
     ) -> Result<(), SqliteError> {
-        ensure_evidence_size(&record.summary, "inspection summary")?;
+        validate_inspect_snapshot_admission(connection, record).await?;
         let changed = connection
             .execute(
                 "INSERT INTO orna_inspect_snapshots
@@ -1719,7 +1719,7 @@ impl SqliteRevisionStore {
         connection: &Connection,
         event: &SqliteInspectTraceEvent,
     ) -> Result<(), SqliteError> {
-        ensure_evidence_size(&event.payload, "inspection trace payload")?;
+        validate_inspect_trace_admission(connection, event).await?;
         let sequence = i64::try_from(event.sequence)
             .map_err(|_| SqliteError::Domain("inspection trace sequence overflow".to_owned()))?;
         let changed = connection
@@ -2121,6 +2121,9 @@ impl SqliteRevisionStore {
                 return Ok(SqliteExecutionResult::Denied { session, reason });
             }
         };
+        // Establish the immutable authorization witness before inspection
+        // evidence. All writes remain inside this immediate transaction, so a
+        // later execution or evidence failure rolls the witness back too.
         Self::record_invocation_audit_on(
             &transaction,
             &SqliteInvocationAuditEvent {
@@ -2170,6 +2173,24 @@ impl SqliteRevisionStore {
                 });
             }
         };
+        // Advance the already-authorized invocation to its terminal outcome
+        // before inspection evidence is admitted. The write remains in this
+        // transaction, so snapshot/trace failure rolls the transition back.
+        Self::record_invocation_audit_on(
+            &transaction,
+            &SqliteInvocationAuditEvent {
+                invocation,
+                outcome: "completed".to_owned(),
+                session_principal: session.principal(),
+                effective_principal: Some(authorisation.effective_principal()),
+                authorising_principal: Some(authorisation.authorising_principal()),
+                function: Some(function_id),
+                source_revision: Some(active.pair().source()),
+                catalogue_revision: Some(active.pair().catalogue()),
+                error_code: None,
+            },
+        )
+        .await?;
         let summary = serde_json::to_vec(&serde_json::json!({
             "record": "inspect_summary",
             "invocation_id": invocation.canonical(),
@@ -2219,21 +2240,6 @@ impl SqliteRevisionStore {
                 kind: "completed".to_owned(),
                 payload,
                 observer_invocation: None,
-            },
-        )
-        .await?;
-        Self::record_invocation_audit_on(
-            &transaction,
-            &SqliteInvocationAuditEvent {
-                invocation,
-                outcome: "completed".to_owned(),
-                session_principal: session.principal(),
-                effective_principal: Some(authorisation.effective_principal()),
-                authorising_principal: Some(authorisation.authorising_principal()),
-                function: Some(function_id),
-                source_revision: Some(active.pair().source()),
-                catalogue_revision: Some(active.pair().catalogue()),
-                error_code: None,
             },
         )
         .await?;
@@ -2646,6 +2652,84 @@ async fn load_inspect_snapshot_on(
         )?),
         summary: row.get(4)?,
     }))
+}
+
+/// Rejects inspection summaries that would make a successfully committed
+/// database unrecoverable.  Recovery performs the same lineage checks for
+/// historical rows, but a new writer must not use restart as its validator.
+async fn validate_inspect_snapshot_admission(
+    connection: &Connection,
+    record: &SqliteInspectSnapshotRecord,
+) -> Result<(), SqliteError> {
+    ensure_evidence_size(&record.summary, "inspection summary")?;
+    if record.epoch == InspectEpochId::from_bytes([0; 16])
+        || record.invocation == InvocationId::from_bytes([0; 16])
+    {
+        return Err(SqliteError::Domain(
+            "inspection identities must be non-zero".to_owned(),
+        ));
+    }
+    let audit = load_inspection_audit_pair(connection, record.invocation)
+        .await?
+        .ok_or(SqliteError::Domain(
+            "inspection snapshot requires an invocation audit event".to_owned(),
+        ))?;
+    if audit
+        != (
+            Some(record.source_revision),
+            Some(record.catalogue_revision),
+        )
+    {
+        return Err(SqliteError::Domain(
+            "inspection snapshot disagrees with its invocation audit revision pair".to_owned(),
+        ));
+    }
+    validate_inspection_revision_pair(
+        connection,
+        record.source_revision,
+        record.catalogue_revision,
+    )
+    .await
+}
+
+/// Rejects malformed trace evidence before it can poison a durable inspection
+/// history.  The trace remains tied to an already recorded invocation; its
+/// revision lineage is established by the audit row and, when present, its
+/// immutable snapshot.
+async fn validate_inspect_trace_admission(
+    connection: &Connection,
+    event: &SqliteInspectTraceEvent,
+) -> Result<(), SqliteError> {
+    ensure_evidence_size(&event.payload, "inspection trace payload")?;
+    if event.invocation == InvocationId::from_bytes([0; 16]) {
+        return Err(SqliteError::Domain(
+            "inspection trace invocation must be non-zero".to_owned(),
+        ));
+    }
+    if !INSPECT_TRACE_KINDS.contains(&event.kind.as_str()) {
+        return Err(SqliteError::Domain(
+            "inspection trace kind is outside the closed durable set".to_owned(),
+        ));
+    }
+    if event.payload.is_empty() {
+        return Err(SqliteError::Domain(
+            "inspection trace payload must not be empty".to_owned(),
+        ));
+    }
+    if event.observer_invocation == Some(InvocationId::from_bytes([0; 16])) {
+        return Err(SqliteError::Domain(
+            "inspection observer invocation must be non-zero".to_owned(),
+        ));
+    }
+    if load_inspection_audit_pair(connection, event.invocation)
+        .await?
+        .is_none()
+    {
+        return Err(SqliteError::Domain(
+            "inspection trace requires an invocation audit event".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Validates SQLite's redacted inspection relations during recovery.
@@ -6099,6 +6183,169 @@ mod tests {
             .await
             .expect_err("orphaned inspection evidence must fail recovery");
         assert!(error.to_string().contains("no invocation audit event"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn inspection_writes_reject_recovery_poison_before_commit() {
+        let path = temp_path();
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(&path))
+            .await
+            .expect("open SQLite store");
+        store.bootstrap().await.expect("bootstrap SQLite store");
+        let active = store.recover().await.expect("recover empty revision");
+        let invocation = InvocationId::new();
+        let owner = PrincipalId::from_bytes([0x72; 16]);
+        store
+            .record_invocation_audit(&SqliteInvocationAuditEvent {
+                invocation,
+                outcome: "completed".to_owned(),
+                session_principal: owner,
+                effective_principal: None,
+                authorising_principal: None,
+                function: None,
+                source_revision: Some(active.pair().source()),
+                catalogue_revision: Some(active.pair().catalogue()),
+                error_code: None,
+            })
+            .await
+            .expect("record invocation audit");
+
+        let snapshot_error = store
+            .record_inspect_snapshot(&SqliteInspectSnapshotRecord {
+                epoch: InspectEpochId::new(),
+                invocation,
+                owner,
+                source_revision: SourceRevisionId::from_bytes([0; 16]),
+                catalogue_revision: active.pair().catalogue(),
+                summary: br#"{"record":"inspect_summary"}"#.to_vec(),
+            })
+            .await
+            .expect_err("mismatched inspection lineage must not commit");
+        assert!(
+            snapshot_error
+                .to_string()
+                .contains("disagrees with its invocation audit revision pair")
+        );
+
+        let trace_error = store
+            .record_inspect_trace_event(&SqliteInspectTraceEvent {
+                invocation,
+                sequence: 1,
+                kind: "unsealed".to_owned(),
+                payload: br#"{"record":"inspect_trace"}"#.to_vec(),
+                observer_invocation: None,
+            })
+            .await
+            .expect_err("unknown trace kind must not commit");
+        assert!(
+            trace_error
+                .to_string()
+                .contains("outside the closed durable set")
+        );
+
+        let connection = store.connection.lock().await;
+        let snapshot_count =
+            row_count(&connection, "SELECT COUNT(*) FROM orna_inspect_snapshots").await;
+        let trace_count = row_count(
+            &connection,
+            "SELECT COUNT(*) FROM orna_inspect_trace_events",
+        )
+        .await;
+        assert_eq!(snapshot_count, 0);
+        assert_eq!(trace_count, 0);
+        drop(connection);
+
+        store
+            .recover()
+            .await
+            .expect("rejected writes must leave a recoverable database");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn authorized_inspection_lifecycle_transitions_before_evidence() {
+        let path = temp_path();
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(&path))
+            .await
+            .expect("open SQLite store");
+        store.bootstrap().await.expect("bootstrap SQLite store");
+        let active = store.recover().await.expect("recover empty revision");
+        let invocation = InvocationId::new();
+        let owner = PrincipalId::from_bytes([0x73; 16]);
+        let allowed = SqliteInvocationAuditEvent {
+            invocation,
+            outcome: "allowed".to_owned(),
+            session_principal: owner,
+            effective_principal: Some(owner),
+            authorising_principal: Some(owner),
+            function: None,
+            source_revision: Some(active.pair().source()),
+            catalogue_revision: Some(active.pair().catalogue()),
+            error_code: None,
+        };
+        let completed = SqliteInvocationAuditEvent {
+            outcome: "completed".to_owned(),
+            ..allowed.clone()
+        };
+
+        let mut connection = store.connection.lock().await;
+        let transaction = turso::transaction::Transaction::new(
+            &mut connection,
+            turso::transaction::TransactionBehavior::Immediate,
+        )
+        .await
+        .expect("start inspection transaction");
+        SqliteRevisionStore::record_invocation_audit_on(&transaction, &allowed)
+            .await
+            .expect("persist allowed audit");
+        SqliteRevisionStore::record_invocation_audit_on(&transaction, &completed)
+            .await
+            .expect("advance audit to completed");
+        SqliteRevisionStore::record_inspect_snapshot_on(
+            &transaction,
+            &SqliteInspectSnapshotRecord {
+                epoch: InspectEpochId::new(),
+                invocation,
+                owner,
+                source_revision: active.pair().source(),
+                catalogue_revision: active.pair().catalogue(),
+                summary: br#"{"record":"inspect_summary"}"#.to_vec(),
+            },
+        )
+        .await
+        .expect("admit inspection snapshot after terminal audit");
+        SqliteRevisionStore::record_inspect_trace_event_on(
+            &transaction,
+            &SqliteInspectTraceEvent {
+                invocation,
+                sequence: 1,
+                kind: "completed".to_owned(),
+                payload: br#"{"record":"inspect_trace"}"#.to_vec(),
+                observer_invocation: None,
+            },
+        )
+        .await
+        .expect("admit inspection trace after terminal audit");
+        transaction
+            .commit()
+            .await
+            .expect("commit inspection transaction");
+        drop(connection);
+
+        assert_eq!(
+            store
+                .load_invocation_audit(invocation)
+                .await
+                .expect("load audit")
+                .expect("audit persists")
+                .outcome,
+            "completed"
+        );
+        store
+            .recover()
+            .await
+            .expect("completed inspection evidence recovers");
         let _ = std::fs::remove_file(path);
     }
 
