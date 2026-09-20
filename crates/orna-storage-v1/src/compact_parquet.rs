@@ -19,6 +19,7 @@ use orna_repository_v1::{
 use parquet::{
     basic::{Compression, ConvertedType, Encoding, Type},
     column::reader::ColumnReader,
+    data_type::AsBytes,
     file::reader::{FileReader, SerializedFileReader},
 };
 
@@ -233,6 +234,7 @@ fn decode_verified_bytes_for_role(
                     .into_iter()
                     .map(|value| OvbRaw::Int(value.into()))
                     .collect(),
+                KeyColumnKind::Uuid => read_uuid_column(&*row_group, column.index, rows)?,
                 KeyColumnKind::OvbInt | KeyColumnKind::OvbBool => {
                     read_ovb_column(&*row_group, column.index, rows, column.kind)?
                 }
@@ -376,9 +378,11 @@ fn key_components(raw: &OvbRaw) -> Result<Vec<OvbRaw>, CompactParquetError> {
             OvbRaw::Array(values) if !values.is_empty() => Ok(values.clone()),
             _ => Err(CompactParquetError::InvalidMetadata),
         },
-        OvbRaw::Int(_) | OvbRaw::Bool(_) | OvbRaw::Text(_) | OvbRaw::Tag(60001, _) => {
-            Ok(vec![raw.clone()])
-        }
+        OvbRaw::Int(_)
+        | OvbRaw::Bool(_)
+        | OvbRaw::Text(_)
+        | OvbRaw::Tag(37, _)
+        | OvbRaw::Tag(60001, _) => Ok(vec![raw.clone()]),
         _ => Err(CompactParquetError::InvalidMetadata),
     }
 }
@@ -395,6 +399,13 @@ fn compare_key_components(
             (OvbRaw::Int(left), OvbRaw::Int(right)) => left.cmp(right),
             (OvbRaw::Bool(left), OvbRaw::Bool(right)) => left.cmp(right),
             (OvbRaw::Text(left), OvbRaw::Text(right)) => left.cmp(right),
+            (OvbRaw::Tag(37, left), OvbRaw::Tag(37, right)) => {
+                let (OvbRaw::Bytes(left), OvbRaw::Bytes(right)) = (left.as_ref(), right.as_ref())
+                else {
+                    return Err(CompactParquetError::InvalidMetadata);
+                };
+                left.cmp(right)
+            }
             (OvbRaw::Tag(60001, left), OvbRaw::Tag(60001, right)) => {
                 let (OvbRaw::Text(left), OvbRaw::Text(right)) = (left.as_ref(), right.as_ref())
                 else {
@@ -432,6 +443,7 @@ struct KeyColumn {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum KeyColumnKind {
+    Uuid,
     Int,
     OvbInt,
     Bool,
@@ -457,6 +469,7 @@ fn ensure_supported_profile(
         .iter()
         .map(|kind| match kind {
             KeyColumnKind::Int | KeyColumnKind::OvbInt => OvbRaw::Int(0.into()),
+            KeyColumnKind::Uuid => OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(vec![0; 16]))),
             KeyColumnKind::Bool | KeyColumnKind::OvbBool => OvbRaw::Bool(false),
             KeyColumnKind::Str => OvbRaw::Text(String::new()),
             KeyColumnKind::Date => OvbRaw::Tag(60001, Box::new(OvbRaw::Text("1970-01-01".into()))),
@@ -606,6 +619,19 @@ fn key_columns(
         .collect()
 }
 
+fn valid_uuid_parameters(raw: &OvbRaw) -> bool {
+    let OvbRaw::Array(parameters) = raw else {
+        return false;
+    };
+    match parameters.as_slice() {
+        [OvbRaw::Null] => true,
+        [OvbRaw::Tag(37, value)] => {
+            matches!(value.as_ref(), OvbRaw::Bytes(bytes) if bytes.len() == 16)
+        }
+        _ => false,
+    }
+}
+
 fn descriptor_field_id(
     descriptor: &OvbRaw,
     column: &parquet::schema::types::ColumnDescriptor,
@@ -656,6 +682,13 @@ fn descriptor_field_id(
             && column.physical_type() == Type::INT64
         {
             KeyColumnKind::Int
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Uuid".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "uuid")
+            && column.physical_type() == Type::FIXED_LEN_BYTE_ARRAY
+            && column.type_length() == 16
+            && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Uuid)
+        {
+            KeyColumnKind::Uuid
         } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]
             && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
             && column.physical_type() == Type::BYTE_ARRAY
@@ -690,13 +723,17 @@ fn descriptor_field_id(
             KeyColumnKind::OvbInt | KeyColumnKind::OvbBool => {
                 matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
             }
+            KeyColumnKind::Uuid => valid_uuid_parameters(&fields[4]),
             _ => matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty()),
         };
         if !valid_parameters
-            || (!(kind == KeyColumnKind::Str || kind == KeyColumnKind::Date)
+            || (!(kind == KeyColumnKind::Str
+                || kind == KeyColumnKind::Date
+                || kind == KeyColumnKind::Uuid)
                 && column.logical_type_ref().is_some())
             || (matches!(kind, KeyColumnKind::OvbInt | KeyColumnKind::OvbBool)
                 && column.converted_type() != ConvertedType::NONE)
+            || (kind == KeyColumnKind::Uuid && column.converted_type() != ConvertedType::NONE)
             || (matches!(kind, KeyColumnKind::OvbInt | KeyColumnKind::OvbBool)
                 && column.max_def_level() != 0)
             || column.max_rep_level() != 0
@@ -839,6 +876,11 @@ fn profile_key_kinds(
                 KeyColumnKind::Int
             }
             OvbRaw::Array(logical_type)
+                if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Uuid".to_owned())] =>
+            {
+                KeyColumnKind::Uuid
+            }
+            OvbRaw::Array(logical_type)
                 if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Bool".to_owned())] =>
             {
                 KeyColumnKind::Bool
@@ -873,7 +915,76 @@ fn profile_key_kinds(
             field_types
                 .get(&id)
                 .copied()
+
                 .ok_or(CompactParquetError::UnsupportedKeyMapping)
+        })
+        .collect()
+}
+fn read_uuid_column(
+    row_group: &dyn parquet::file::reader::RowGroupReader,
+    index: usize,
+    expected_rows: usize,
+) -> Result<Vec<OvbRaw>, CompactParquetError> {
+    let reader = row_group
+        .get_column_reader(index)
+        .map_err(|_| CompactParquetError::InvalidParquet)?;
+    let ColumnReader::FixedLenByteArrayColumnReader(mut reader) = reader else {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    };
+    let descriptor = row_group.metadata().schema_descr().column(index);
+    if descriptor.type_length() != 16 || descriptor.max_rep_level() != 0 {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    }
+    let mut values = Vec::with_capacity(expected_rows);
+    let mut definition_levels = Vec::new();
+    let mut records = 0usize;
+    loop {
+        let remaining = expected_rows.saturating_sub(records);
+        if remaining == 0 {
+            break;
+        }
+        let definition_levels_ref =
+            (descriptor.max_def_level() != 0).then_some(&mut definition_levels);
+        let (read_records, values_read, levels_read) = reader
+            .read_records(remaining, definition_levels_ref, None, &mut values)
+            .map_err(|_| CompactParquetError::InvalidParquet)?;
+        if read_records == 0 {
+            break;
+        }
+        if levels_read != read_records {
+            return Err(CompactParquetError::NullKey);
+        }
+        if descriptor.max_def_level() != 0
+            && definition_levels
+                .iter()
+                .any(|level| *level != descriptor.max_def_level())
+        {
+            return Err(CompactParquetError::NullKey);
+        }
+        if values_read != read_records {
+            return Err(CompactParquetError::NullKey);
+        }
+        records = records
+            .checked_add(read_records)
+            .ok_or(CompactParquetError::InvalidParquet)?;
+    }
+    if records != expected_rows || values.len() != expected_rows {
+        return Err(CompactParquetError::RowCountMismatch {
+            expected: expected_rows as u64,
+            observed: records as u64,
+        });
+    }
+    values
+        .into_iter()
+        .map(|value| {
+            let bytes = value.as_bytes();
+            if bytes.len() != 16 {
+                return Err(CompactParquetError::InvalidMetadata);
+            }
+            Ok(OvbRaw::Tag(
+                37,
+                Box::new(OvbRaw::Bytes(bytes.to_vec())),
+            ))
         })
         .collect()
 }
