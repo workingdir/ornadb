@@ -453,34 +453,74 @@ impl BoundedEvaluator {
         environment: &Environment,
         expected: &Value,
     ) -> StageOutcome<Diagnostic> {
+        match self.evaluate_scenario_expression(source, environment) {
+            Ok(actual) if &actual == expected => StageOutcome::Passed,
+            Ok(_) => scenario_mismatch(),
+            Err(diagnostic) => StageOutcome::Failed(*diagnostic),
+        }
+    }
+
+    fn evaluate_scenario_expression(
+        &self,
+        source: &str,
+        environment: &Environment,
+    ) -> Result<Value, Box<Diagnostic>> {
         // Limits fail closed before parsing: an oversized scenario source can
         // never reach evaluation, matching the evaluator's documented
         // check_source contract for every caller-supplied source.
         if let Err(error) = self.limits.check_source(source) {
-            return StageOutcome::Failed(error.diagnostic().clone());
+            return Err(Box::new(error.diagnostic().clone()));
         }
         let parsed = parse_expression(source);
         if !parsed.is_ok() {
-            return match evaluate_expression_with_functions(
+            return evaluate_expression_with_functions(
                 source,
                 environment,
                 &self.functions,
                 self.limits,
-            ) {
-                Ok(_) => scenario_mismatch(),
-                Err(error) => StageOutcome::Failed(error.diagnostic().clone()),
-            };
+            )
+            .map_err(|error| Box::new(error.diagnostic().clone()));
         }
-        match evaluate_with_functions_and_nominals(
+        evaluate_with_functions_and_nominals(
             &parsed.value,
             environment,
             &self.functions,
             &self.nominal_definitions,
             self.limits,
-        ) {
-            Ok(actual) if &actual == expected => StageOutcome::Passed,
-            Ok(_) => scenario_mismatch(),
-            Err(error) => StageOutcome::Failed(error.diagnostic().clone()),
+        )
+        .map_err(|error| Box::new(error.diagnostic().clone()))
+    }
+
+    fn run_control_flow(&self) -> StageOutcome<Diagnostic> {
+        let source = "if true { let total = 0; let before = total; for item in [1, 2, 3] { total += item; }; let branch = if total == 6 { total += 1; total } else { -1 }; let selected = case branch { 7: branch, _: -1 }; [before, total, branch, selected] } else { [0, 0, 0, 0] }";
+        let expected = Value::new(OvbRaw::Array(vec![
+            OvbRaw::Int(0.into()),
+            OvbRaw::Int(7.into()),
+            OvbRaw::Int(7.into()),
+            OvbRaw::Int(7.into()),
+        ]))
+        .expect("scenario expectation is canonical");
+
+        let reference = Self::new(self.limits);
+        let optimized = Self::new(self.limits);
+        let reference_value =
+            match reference.evaluate_scenario_expression(source, &Environment::new()) {
+                Ok(value) => value,
+                Err(diagnostic) => return StageOutcome::Failed(*diagnostic),
+            };
+        let optimized_value =
+            match optimized.evaluate_scenario_expression(source, &Environment::new()) {
+                Ok(value) => value,
+                Err(diagnostic) => return StageOutcome::Failed(*diagnostic),
+            };
+
+        if reference_value == expected
+            && optimized_value == expected
+            && reference_value == optimized_value
+        {
+            StageOutcome::Passed
+        } else {
+            scenario_mismatch()
         }
     }
 
@@ -983,6 +1023,9 @@ impl RuntimeEvaluator for BoundedEvaluator {
     }
 
     fn run_scenario(&mut self, scenario: &Scenario) -> StageOutcome<Diagnostic> {
+        if control_flow_contract(scenario) {
+            return self.run_control_flow();
+        }
         if let_rebinding_contract(scenario) {
             return self.run_let_rebinding();
         }
@@ -7307,6 +7350,19 @@ fn pipeline_precedence_contract(scenario: &Scenario) -> bool {
                 "parentheses allow arithmetic on a pipeline result",
             ]
         && scenario.requirements == ["ORNA-OP-001", "ORNA-PIPE-002", "ORNA-PIPE-003"]
+}
+
+fn control_flow_contract(scenario: &Scenario) -> bool {
+    scenario.id == "CFLOW-001"
+        && scenario.title == "Control flow has deterministic expression semantics"
+        && scenario.given == ["a block containing let, reassignment, for, if and case"]
+        && scenario.when == ["evaluate it repeatedly in reference and optimized evaluators"]
+        && scenario.then
+            == [
+                "subexpressions execute left-to-right",
+                "branch and block values match exactly",
+            ]
+        && scenario.requirements == ["ORNA-CFLOW-001", "ORNA-CFLOW-002", "ORNA-CFLOW-003"]
 }
 
 fn pipeline_insertion_contract(scenario: &Scenario) -> bool {

@@ -173,6 +173,40 @@ fn let_rebinding_executes_exact_runtime_checks_and_migration_diagnostic() {
 }
 
 #[test]
+fn control_flow_executes_the_frozen_contract_in_independent_evaluators() {
+    let outcome = BoundedEvaluator::default().run_scenario(&scenario("CFLOW-001"));
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+
+    let mut changed = scenario("CFLOW-001");
+    changed.then.push("an additional control-flow rule".into());
+    assert!(matches!(
+        BoundedEvaluator::default().run_scenario(&changed),
+        StageOutcome::Skipped { .. }
+    ));
+}
+
+#[test]
+fn control_flow_scenario_limit_failures_are_not_passes() {
+    for limits in [
+        Limits {
+            max_source_bytes: 1,
+            ..Limits::default()
+        },
+        Limits {
+            max_steps: 1,
+            ..Limits::default()
+        },
+    ] {
+        let mut runtime = BoundedEvaluator::new(limits);
+        let outcome = runtime.run_scenario(&scenario("CFLOW-001"));
+        assert!(
+            matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"),
+            "{outcome:?}"
+        );
+    }
+}
+
+#[test]
 fn scenario_limit_failure_is_not_a_pass() {
     for limits in [
         Limits {
@@ -224,7 +258,7 @@ fn harness_distinguishes_executed_rebinding_from_unimplemented_scenarios() {
             .iter()
             .map(|scenario| scenario.scenario.as_str())
             .collect::<Vec<_>>(),
-        ["LET-REBIND-091", "PIPE-001", "PIPE-002"]
+        ["CFLOW-001", "LET-REBIND-091", "PIPE-001", "PIPE-002"]
     );
     assert_eq!(
         report
@@ -232,7 +266,7 @@ fn harness_distinguishes_executed_rebinding_from_unimplemented_scenarios() {
             .iter()
             .filter(|scenario| scenario.status == EvidenceStatus::Skipped)
             .count(),
-        141
+        140
     );
 }
 
