@@ -2024,7 +2024,15 @@ impl LiveHost {
         }
 
         let resync_revisions = if matches!(envelope.message, Message::Resync) {
-            self.serving.resync(session, 0).map_err(map_serving)?.len()
+            // A resync is an explicit request for a new full snapshot, not a
+            // request to replay every retained delta.  A bounded replay gap
+            // must therefore still reach the application boundary, which is
+            // responsible for returning that snapshot for the existing watch.
+            match self.serving.resync(session, 0) {
+                Ok(revisions) => revisions.len(),
+                Err(ServingError::ReplayRequired) => 0,
+                Err(error) => return Err(map_serving(error)),
+            }
         } else {
             0
         };
@@ -2502,8 +2510,11 @@ impl LiveHost {
                         }
                         Message::Resync => {
                             let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
-                            let revisions =
-                                self.serving.resync(session, 0).map_err(map_serving)?.len();
+                            let revisions = match self.serving.resync(session, 0) {
+                                Ok(revisions) => revisions.len(),
+                                Err(ServingError::ReplayRequired) => 0,
+                                Err(error) => return Err(map_serving(error)),
+                            };
                             let response = self
                                 .application_call(
                                     application,
@@ -7659,6 +7670,52 @@ mod tests {
         }))
         .unwrap();
         host
+    }
+
+    #[test]
+    fn resync_reaches_the_snapshot_application_after_replay_history_expires() {
+        let mut host = subscribed_host(None);
+        for revision in 1..=257 {
+            host.serving
+                .apply_patch(
+                    [1; 16],
+                    revision - 1,
+                    revision,
+                    &[],
+                    orna_serving_v1::RetainedPin {
+                        revision,
+                        fingerprint: [revision as u8; 32],
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            host.serving.resync([1; 16], 0),
+            Err(ServingError::ReplayRequired)
+        );
+        host.watches.insert(([1; 16], [10; 16]));
+
+        let preparation = futures::executor::block_on(
+            host.prepare_application_frame(
+                [4; 16],
+                1,
+                Frame::Binary(
+                    Envelope {
+                        request: Some([9; 16]),
+                        watch: Some([10; 16]),
+                        message: Message::Resync,
+                        extensions: BTreeMap::new(),
+                    }
+                    .encode(Limits::default().protocol)
+                    .unwrap(),
+                ),
+            ),
+        )
+        .unwrap();
+        let ApplicationPreparation::Work(ticket) = preparation else {
+            panic!("resync must be admitted for a fresh application snapshot");
+        };
+        let _ = ticket.reject(Error::ApplicationRejected);
     }
 
     #[test]
