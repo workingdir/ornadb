@@ -78,6 +78,29 @@ No slice may claim remote execution, arbitrary CLIENT artifact execution, or
 interactive action delivery until its transport, trust, and lifecycle tests
 exist.
 
+## Deferred legacy remote artifact exchange
+
+The historical remote-wire proposal is explicitly deferred from the current
+1.0 boundary. It does not add a `HELLO` or version-negotiation message,
+`AUTH` or `SESSION_READY` lifecycle, `CLIENT_ARTIFACT_REQUEST` or chunk
+transfer, an artifact-transfer encoding, or artifact signing, trust-root,
+rotation, revocation, ownership, limit, and portable-error rules. Those names
+and semantics have no accepted 1.0 identity to implement or reserve.
+
+This is distinct from the current `orna.present.v1` live profile: that profile
+admits source `eval` and `watch` through its defined HTTP-session and
+WebSocket operations, subject to complete canonical decoding. It does not
+make a client AST, bytecode, or query plan authoritative
+(`ORNA-EVAL-002`).
+Remote deployment remains behind the trusted SSH, Tailscale, or authenticated
+reverse-proxy/TLS perimeter required by `ORNA-TRUST-002` and `ORNA-WIRE-011`,
+not a new core handshake.
+
+Until a later authoritative decision defines that missing identity, trust,
+lifecycle, interoperability, and conformance surface, the installed CLI keeps
+remote invocation fail-closed. Endpoint parsing is not evidence of remote
+session or artifact-exchange support.
+
 ## Evidence
 
 * `spec/docs/13-invocation-system.md` defines typed root invocation,
