@@ -1260,9 +1260,7 @@ impl RawCallClient {
             ServerFrame::CallAccepted { invocation, .. } => {
                 require_non_zero_invocation_id(invocation)
                     .map_err(|source| RawCallClientError::Frame { source })?;
-                if self.phase != RawCallClientPhase::AwaitingAcceptance
-                    || self.cancellation_requested
-                {
+                if self.phase != RawCallClientPhase::AwaitingAcceptance {
                     return Err(RawCallClientError::WrongState);
                 }
                 self.phase = RawCallClientPhase::Running;
@@ -1549,7 +1547,6 @@ impl InvocationClient {
         match frame {
             ServerFrame::CallAccepted { invocation, .. } => {
                 if self.phase != InvocationClientPhase::AwaitingAcceptance
-                    || self.cancellation_requested
                     || invocation.to_bytes() == [0; 16]
                 {
                     return Err(InvocationClientError::WrongState);
