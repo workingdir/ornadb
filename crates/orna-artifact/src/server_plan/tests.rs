@@ -358,6 +358,7 @@ fn distinct_projection_domain_is_exhaustive_and_ignores_nullability() {
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid
         );
         for nullable in [false, true] {
             let resolved_type = ResolvedType::scalar(scalar);
@@ -1114,7 +1115,7 @@ fn displays_version_neutral_server_plan_errors() {
             ServerPlanError::UnsupportedDistinctProjectionType {
                 resolved_type: ResolvedType::scalar(StandardScalar::CharacterLargeObject),
             },
-            "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values",
+            "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, UUID, and REF values",
         ),
         (
             ServerPlanError::DistinctOrderingNotAllowed { count: 1 },
