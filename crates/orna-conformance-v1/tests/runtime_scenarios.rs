@@ -12,9 +12,80 @@ use orna_protocol_v1::{
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{RequestIdentity, RequestState, RuntimeError, RuntimeIdentity, RuntimeState};
 use orna_storage_v1::LoosePath;
-use std::process::Command;
-use std::{fs, path::Path, process::Command as ProcessCommand};
+use std::process::{Command, Stdio};
+use std::{
+    fs,
+    io::Read,
+    path::Path,
+    process::{Command as ProcessCommand, Output},
+    thread,
+    time::{Duration, Instant},
+};
 use tempfile::TempDir;
+
+const CONFORMANCE_PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn run_conformance_with_timeout() -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("conformance binary starts");
+    let stdout = child.stdout.take().expect("conformance stdout is piped");
+    let stderr = child.stderr.take().expect("conformance stderr is piped");
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut stdout = stdout;
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut stderr = stderr;
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let deadline = Instant::now() + CONFORMANCE_PROCESS_TIMEOUT;
+
+    loop {
+        match child.try_wait().expect("conformance process status") {
+            Some(status) => {
+                let stdout = stdout_reader
+                    .join()
+                    .expect("conformance stdout reader")
+                    .expect("conformance stdout read");
+                let stderr = stderr_reader
+                    .join()
+                    .expect("conformance stderr reader")
+                    .expect("conformance stderr read");
+                return Output {
+                    status,
+                    stdout,
+                    stderr,
+                };
+            }
+            None if Instant::now() >= deadline => {
+                child
+                    .kill()
+                    .expect("terminate timed-out conformance process");
+                let status = child.wait().expect("reap timed-out conformance process");
+                let stdout = stdout_reader
+                    .join()
+                    .expect("conformance stdout reader after timeout")
+                    .expect("conformance stdout read after timeout");
+                let stderr = stderr_reader
+                    .join()
+                    .expect("conformance stderr reader after timeout")
+                    .expect("conformance stderr read after timeout");
+                panic!(
+                    "conformance binary timed out after {:?} (status {status}); partial stdout: {}; stderr: {}",
+                    CONFORMANCE_PROCESS_TIMEOUT,
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr),
+                );
+            }
+            None => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
 
 fn scenario(id: &str) -> Scenario {
     let corpus = Corpus::load_default().expect("frozen corpus loads");
@@ -565,9 +636,7 @@ async fn durable_source_publication_projects_the_frozen_prefix_into_git() {
 
 #[test]
 fn published_report_declares_bounded_runtime_adapter_scenarios_without_an_orna_engine_witness() {
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
-        .output()
-        .expect("conformance binary runs");
+    let output = run_conformance_with_timeout();
     assert!(
         !output.status.success(),
         "partial bounded conformance must fail its process gate"
@@ -719,9 +788,7 @@ fn published_report_declares_bounded_runtime_adapter_scenarios_without_an_orna_e
 
 #[test]
 fn remote_eval_contract_remains_skipped_without_an_authoritative_host_witness() {
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
-        .output()
-        .expect("conformance binary runs");
+    let output = run_conformance_with_timeout();
     assert!(
         !output.status.success(),
         "partial bounded conformance must fail its process gate"
