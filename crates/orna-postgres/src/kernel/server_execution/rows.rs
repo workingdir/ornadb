@@ -196,6 +196,11 @@ pub(super) fn decode_value(
         runtime if runtime.compatibility_scalar() == Some(StandardScalar::BinaryLargeObject) => {
             decode!(Vec<u8>, |value| Ok(RuntimeValue::Bytes(value)))
         }
+        runtime if runtime.compatibility_scalar() == Some(StandardScalar::Uuid) => {
+            decode!(uuid::Uuid, |value| Ok(RuntimeValue::Uuid(
+                *value.as_bytes()
+            )))
+        }
         ResolvedRuntimeType::Reference(target) => decode!(Vec<u8>, |value| {
             let object = value.try_into().map(ObjectId::from_bytes).map_err(|_| {
                 server_error(ServerSelectError::ValueInvariant {
@@ -285,6 +290,7 @@ pub(super) fn logical_payload_len(value: &RuntimeValue) -> Result<usize, Postgre
         RuntimeValue::BigInt(_) | RuntimeValue::Float(_) => 8,
         RuntimeValue::Text(value) => value.len(),
         RuntimeValue::Bytes(value) => value.len(),
+        RuntimeValue::Uuid(_) => 16,
         RuntimeValue::Reference { .. } => 16,
         RuntimeValue::Enum(value) => value.label().len(),
         RuntimeValue::Record(_) => {
