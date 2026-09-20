@@ -6052,8 +6052,15 @@ impl RuntimeState {
             .map_err(StreamTableDeliveryError::Runtime)?;
         validate_table_candidate_scope(mutations, validator.tables())
             .map_err(StreamTableDeliveryError::Runtime)?;
-        let current = self
-            .capture()
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| StreamTableDeliveryError::Runtime(RuntimeError::StorageUnavailable))?;
+        self.require_owner(&tx, writer)
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        let current = capture_tx(&tx)
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
         if &current != expected_capture {
@@ -6063,14 +6070,6 @@ impl RuntimeState {
                 },
             ));
         }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| StreamTableDeliveryError::Runtime(RuntimeError::StorageUnavailable))?;
-        self.require_owner(&tx, writer)
-            .await
-            .map_err(StreamTableDeliveryError::Runtime)?;
         let result = apply_stream_intent_tx(
             &tx,
             CommitIntent::Complete {
@@ -6125,12 +6124,6 @@ impl RuntimeState {
         } = parts;
         validate_id(writer.owner_id)?;
         validate_stream_mutations(mutations, next_digest)?;
-        let current = self.capture().await?;
-        if &current != expected_capture {
-            return Err(RuntimeError::StaleCapture {
-                current: Box::new(current),
-            });
-        }
         if mutations.is_empty() && next_digest != expected_capture.generation_digest() {
             return Err(RuntimeError::InvalidDigest);
         }
@@ -6140,6 +6133,12 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         self.require_owner(&tx, writer).await?;
+        let current = capture_tx(&tx).await?;
+        if &current != expected_capture {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(current),
+            });
+        }
         let result = apply_stream_intent_tx(
             &tx,
             CommitIntent::Complete {
@@ -6190,12 +6189,6 @@ impl RuntimeState {
             // assertion validation is part of the durable transaction.
             return Err(RuntimeError::RecoveryInvalid);
         }
-        let current = self.capture().await?;
-        if &current != expected_capture {
-            return Err(RuntimeError::StaleCapture {
-                current: Box::new(current),
-            });
-        }
         if mutations.is_empty() && next_digest != expected_capture.generation_digest() {
             return Err(RuntimeError::InvalidDigest);
         }
@@ -6205,6 +6198,12 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         self.require_owner(&tx, writer).await?;
+        let current = capture_tx(&tx).await?;
+        if &current != expected_capture {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(current),
+            });
+        }
         let Some(replay_claim) = load_stream_replay_claim(&tx, &grant.failure).await? else {
             return Err(RuntimeError::RecoveryInvalid);
         };
@@ -6261,8 +6260,15 @@ impl RuntimeState {
             .map_err(StreamTableDeliveryError::Runtime)?;
         validate_table_candidate_scope(mutations, validator.tables())
             .map_err(StreamTableDeliveryError::Runtime)?;
-        let current = self
-            .capture()
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| StreamTableDeliveryError::Runtime(RuntimeError::StorageUnavailable))?;
+        self.require_owner(&tx, writer)
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        let current = capture_tx(&tx)
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
         if &current != expected_capture {
@@ -6272,14 +6278,6 @@ impl RuntimeState {
                 },
             ));
         }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| StreamTableDeliveryError::Runtime(RuntimeError::StorageUnavailable))?;
-        self.require_owner(&tx, writer)
-            .await
-            .map_err(StreamTableDeliveryError::Runtime)?;
         let Some(replay_claim) = load_stream_replay_claim(&tx, &grant.failure)
             .await
             .map_err(StreamTableDeliveryError::Runtime)?
@@ -22473,6 +22471,58 @@ mod tests {
         assert_eq!(pending[0].id, [5; 16]);
         assert!(pending[0].payload.starts_with(b"ORNA-TABLE-MUTATION\0"));
         assert_eq!(next.generation_digest(), digest(9));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_only_stream_delivery_rejects_stale_capture_without_completion() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let stale_capture = state.capture().await.unwrap();
+        let delivery = stream_delivery("stale-capture", "stale-capture-next");
+        let expected_stream = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let lease = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Acquire {
+                delivery: delivery.clone(),
+                expected: expected_stream.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected delivery lease result: {other:?}"),
+        };
+        let checkpoint_key = delivery.checkpoint_key();
+        let before_checkpoint = state.stream_checkpoint(&checkpoint_key).await.unwrap();
+
+        state
+            .commit(writer, &stale_capture, &mutation(5), digest(6), &NoFault)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            state
+                .commit_stream_delivery(StreamDeliveryCommit {
+                    writer,
+                    expected_capture: &stale_capture,
+                    mutations: &[],
+                    next_digest: stale_capture.generation_digest(),
+                    delivery: lease,
+                    expected_stream,
+                    faults: &NoFault,
+                })
+                .await,
+            Err(RuntimeError::StaleCapture { .. })
+        ));
+        assert_eq!(
+            state.stream_checkpoint(&checkpoint_key).await.unwrap(),
+            before_checkpoint
+        );
     }
 
     #[tokio::test]
