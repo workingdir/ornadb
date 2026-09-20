@@ -203,6 +203,10 @@ pub enum PlanningError {
         found: EvolutionVersion,
         fence: VersionFence,
     },
+    IncompatibleVersionTransition {
+        from: EvolutionVersion,
+        to: EvolutionVersion,
+    },
     DuplicateTableId {
         side: SchemaSide,
         table: ObjectId,
@@ -263,6 +267,16 @@ pub fn plan(
 ) -> Result<MigrationPlan, PlanningError> {
     validate_schema(from, SchemaSide::From, request.fence)?;
     validate_schema(to, SchemaSide::To, request.fence)?;
+    // A range may describe the versions a caller understands, but it does not
+    // itself authorize an evolution bridge between distinct schema coordinates.
+    // Orna 1.0 defines no such bridge, so retain the exact coordinate rather
+    // than treating two independently permitted endpoints as negotiable.
+    if from.version != to.version {
+        return Err(PlanningError::IncompatibleVersionTransition {
+            from: from.version,
+            to: to.version,
+        });
+    }
     let old_tables: BTreeMap<_, _> = from.tables.iter().map(|table| (table.id, table)).collect();
     let new_tables: BTreeMap<_, _> = to.tables.iter().map(|table| (table.id, table)).collect();
     if let Some(table) = old_tables.keys().find(|id| !new_tables.contains_key(id)) {
@@ -1037,6 +1051,28 @@ mod tests {
             Err(PlanningError::VersionFence {
                 side: SchemaSide::To,
                 ..
+            })
+        ));
+    }
+
+    #[test]
+    fn widened_fence_does_not_negotiate_an_unimplemented_version_bridge() {
+        let source = schema(table(true, vec![]));
+        let mut newer = source.clone();
+        newer.version = EvolutionVersion { major: 1, minor: 1 };
+        let request = PlanningRequest {
+            fence: VersionFence {
+                minimum: EvolutionVersion::V1_0,
+                maximum: newer.version,
+            },
+            rekeys: vec![],
+        };
+
+        assert!(matches!(
+            plan(&source, &newer, &request),
+            Err(PlanningError::IncompatibleVersionTransition {
+                from: EvolutionVersion::V1_0,
+                to: EvolutionVersion { major: 1, minor: 1 },
             })
         ));
     }
