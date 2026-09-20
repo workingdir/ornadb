@@ -13,6 +13,8 @@ use crate::live_presentation::{
     WatchPresentation,
 };
 
+type LiveReceiveFuture<'a, E> = Pin<Box<dyn Future<Output = Result<Vec<u8>, E>> + 'a>>;
+
 /// Async binary I/O for an already-authenticated and negotiated live
 /// attachment. Implementations must bound their read before allocating; the
 /// driver independently checks the returned payload length as defence in
@@ -20,10 +22,7 @@ use crate::live_presentation::{
 pub trait LiveByteDriver {
     type Error;
 
-    fn receive_binary<'a>(
-        &'a mut self,
-        max_bytes: usize,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Self::Error>> + 'a>>;
+    fn receive_binary<'a>(&'a mut self, max_bytes: usize) -> LiveReceiveFuture<'a, Self::Error>;
 
     fn send_binary<'a>(
         &'a mut self,
@@ -317,14 +316,14 @@ where
     async fn flush_resync(
         &mut self,
     ) -> Result<Option<LiveSessionEvent>, LiveSessionError<I::Error, R::Error>> {
-        if self.pending_resync.is_none() {
-            if let Some(request) = self.presentation.take_resync_request() {
-                let request_id = self.request_ids.next_request_id();
-                let encoded = request
-                    .encode(request_id, self.limits)
-                    .map_err(LiveSessionError::Protocol)?;
-                self.pending_resync = Some((request, request_id, encoded));
-            }
+        if self.pending_resync.is_none()
+            && let Some(request) = self.presentation.take_resync_request()
+        {
+            let request_id = self.request_ids.next_request_id();
+            let encoded = request
+                .encode(request_id, self.limits)
+                .map_err(LiveSessionError::Protocol)?;
+            self.pending_resync = Some((request, request_id, encoded));
         }
         let Some((request, request_id, encoded)) = self.pending_resync.clone() else {
             return Ok(None);
@@ -349,12 +348,13 @@ where
         let Ok(frame) = Envelope::decode(encoded, self.limits) else {
             return Ok(());
         };
-        if frame.watch == Some(self.watch) && matches!(frame.message, Message::Snapshot { .. }) {
-            if frame.request != Some(expected) {
-                return Err(LiveSessionError::Protocol(
-                    orna_protocol_v1::Error::InvalidMessage,
-                ));
-            }
+        if frame.watch == Some(self.watch)
+            && matches!(frame.message, Message::Snapshot { .. })
+            && frame.request != Some(expected)
+        {
+            return Err(LiveSessionError::Protocol(
+                orna_protocol_v1::Error::InvalidMessage,
+            ));
         }
         Ok(())
     }
