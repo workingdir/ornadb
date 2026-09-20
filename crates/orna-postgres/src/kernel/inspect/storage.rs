@@ -81,6 +81,13 @@ pub(crate) async fn recover_inspect_relations(
                 rule: "trace payload must not be empty",
             });
         }
+        if record.payload_bytes.len() > MAX_INSPECT_EVIDENCE_BYTES {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: INSPECT_TRACE_RELATION,
+                record: record.invocation.canonical(),
+                rule: "trace payload must fit the durable evidence bound",
+            });
+        }
         if !matches!(
             record.kind.as_str(),
             "started" | "value_batch" | "completed"
@@ -154,6 +161,13 @@ pub(super) fn row_invocation_record(
     let kind: String = inspect_column(INSPECT_TRACE_RELATION, row, &record, "kind")?;
     let payload_bytes: Vec<u8> =
         inspect_column(INSPECT_TRACE_RELATION, row, &record, "payload_bytes")?;
+    if payload_bytes.is_empty() || payload_bytes.len() > MAX_INSPECT_EVIDENCE_BYTES {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: INSPECT_TRACE_RELATION,
+            record: record.clone(),
+            rule: "trace payload must be non-empty and fit the durable evidence bound",
+        });
+    }
     let observer_invocation = inspect_optional_id(
         INSPECT_TRACE_RELATION,
         row,
@@ -213,6 +227,13 @@ pub(super) fn decode_inspect_snapshot_row(
         inspect_column(INSPECT_SNAPSHOT_RELATION, row, &record, "recorded_at")?;
     let summary_bytes: Vec<u8> =
         inspect_column(INSPECT_SNAPSHOT_RELATION, row, &record, "summary_bytes")?;
+    if summary_bytes.is_empty() || summary_bytes.len() > MAX_INSPECT_EVIDENCE_BYTES {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: INSPECT_SNAPSHOT_RELATION,
+            record: record.clone(),
+            rule: "inspection summary must be non-empty and fit the durable evidence bound",
+        });
+    }
     let observer_root = inspect_optional_id(
         INSPECT_SNAPSHOT_RELATION,
         row,
