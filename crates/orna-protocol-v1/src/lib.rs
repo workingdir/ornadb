@@ -837,6 +837,22 @@ impl PresentNode {
         Ok(Self(ValueNode(node.clone())))
     }
 
+    /// Wraps one canonical application value in a renderer-neutral Present
+    /// node. This is the smallest safe presentation fallback: the value is
+    /// retained as one typed property, so renderers can inspect it without
+    /// the protocol inventing a domain-specific widget shape.
+    pub fn from_value(value: CanonicalValue) -> Result<Self> {
+        Self::decode(&Node::Tag(
+            60012,
+            Box::new(Node::Array(vec![
+                Node::Text("value".into()),
+                Node::Null,
+                Node::Map(vec![(Node::Text("value".into()), value_node(&value)?)]),
+                Node::Array(Vec::new()),
+            ])),
+        ))
+    }
+
     /// Applies a patch list while enforcing negotiated resource limits before
     /// and after every operation on the private tree.
     ///
@@ -1823,6 +1839,12 @@ mod tests {
     }
     fn present() -> PresentNode {
         PresentNode::decode(&present_node(Node::Null, vec![])).unwrap()
+    }
+
+    #[test]
+    fn present_from_value_uses_the_renderer_neutral_value_fallback() {
+        let present = PresentNode::from_value(value()).unwrap();
+        present.validate_with_limits(Limits::default()).unwrap();
     }
     fn present_node(key: Node, children: Vec<Node>) -> Node {
         Node::Tag(
