@@ -723,7 +723,7 @@ impl<T, F, G, P> DeleteCheck<T, F, G, P> {
 }
 
 const SUPPORTED_MUTATION_TYPES: &str =
-    "BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, and REF";
+    "BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, UUID, and REF";
 
 /// Checks one parsed INSERT against a caller-supplied identity catalogue.
 pub(crate) fn check_insert_in<T, F, G, P>(
@@ -2787,7 +2787,7 @@ mod tests {
         assert_eq!(unsupported[0].code(), DiagnosticCode::DomainIncompatible);
         assert_eq!(
             unsupported[0].message(),
-            "DELETE does not yet support the type of parameter unused; supported types are BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, and REF"
+            "DELETE does not yet support the type of parameter unused; supported types are BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, UUID, and REF"
         );
         assert_eq!(unsupported[0].location().span().start(), 110);
         assert_eq!(unsupported[0].location().span().end(), 116);
@@ -2956,7 +2956,7 @@ mod tests {
         assert_eq!(error[0].code(), DiagnosticCode::DomainIncompatible);
         assert_eq!(
             error[0].message(),
-            "INSERT does not yet support the type of parameter unused; supported types are BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, and REF"
+            "INSERT does not yet support the type of parameter unused; supported types are BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, UUID, and REF"
         );
         assert_eq!(error[0].location().span().start(), 100);
         assert_eq!(error[0].location().span().end(), 106);
@@ -2989,7 +2989,7 @@ mod tests {
         assert_eq!(error[0].code(), DiagnosticCode::DomainIncompatible);
         assert_eq!(
             error[0].message(),
-            "INSERT does not yet support the type of field name; supported types are BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, and REF"
+            "INSERT does not yet support the type of field name; supported types are BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, UUID, and REF"
         );
     }
 
@@ -3008,6 +3008,12 @@ mod tests {
                 ParameterId::from_bytes([7; 16]),
                 SemanticType::scalar(StandardScalar::Boolean),
                 span(105, 111),
+            ),
+            MutationParameter::new(
+                "uuid_value",
+                ParameterId::from_bytes([8; 16]),
+                SemanticType::scalar(StandardScalar::Uuid),
+                span(112, 122),
             ),
         ];
         let valid = check_insert_in(

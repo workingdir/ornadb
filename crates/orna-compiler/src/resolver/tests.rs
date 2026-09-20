@@ -133,6 +133,7 @@ fn stream_resource_type_guard_matches_runtime_collection_scalar_boundary() {
         StandardScalar::Float,
         StandardScalar::CharacterLargeObject,
         StandardScalar::BinaryLargeObject,
+        StandardScalar::Uuid,
     ] {
         assert!(client_resource_stream_type_is_supported(
             scalar(supported),
@@ -142,7 +143,6 @@ fn stream_resource_type_guard_matches_runtime_collection_scalar_boundary() {
     }
     for unsupported in [
         StandardScalar::Decimal,
-        StandardScalar::Uuid,
         StandardScalar::Date,
         StandardScalar::Time,
         StandardScalar::Timestamp,
