@@ -4494,10 +4494,6 @@ impl RuntimeState {
                 return Ok(StreamStep::Cancelled { checkpoint });
             }
             let _permit = AdmissionPermit(control);
-            let failure_payload = source.failure_payload(&item);
-            if matches!(&failure_payload, StreamFailurePayload::Unavailable) {
-                return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
-            }
             let mut stream = self.stream_backend(writer);
             let lease = match stream
                 .apply_async(CommitIntent::Acquire {
@@ -4517,6 +4513,20 @@ impl RuntimeState {
                     return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
                 }
             };
+            if control.cancelled() {
+                self.release_stream_lease(writer, lease.clone()).await?;
+                return Ok(StreamStep::Cancelled { checkpoint });
+            }
+            let failure_payload = source.failure_payload(&item);
+            if matches!(&failure_payload, StreamFailurePayload::Unavailable) {
+                self.release_stream_lease_best_effort(writer, lease.clone())
+                    .await;
+                return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
+            }
+            if control.cancelled() {
+                self.release_stream_lease(writer, lease.clone()).await?;
+                return Ok(StreamStep::Cancelled { checkpoint });
+            }
             (lease, failure_payload)
         };
         let lease_for_cleanup = lease.clone();
