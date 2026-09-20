@@ -94,6 +94,12 @@ use crate::{
 const INSPECT_SNAPSHOT_RELATION: &str = "_orna_kernel.inspect_snapshots";
 const INSPECT_TRACE_RELATION: &str = "_orna_kernel.inspect_trace_events";
 
+// Keep the PostgreSQL inspection evidence bound identical to the bounded
+// SQLite route. This is a storage safety limit, not a codec limit: the
+// canonical envelope still performs its own structural and round-trip
+// validation below.
+const MAX_INSPECT_EVIDENCE_BYTES: usize = 64 * 1024;
+
 const INSPECT_SNAPSHOT_SELECT: &str = "SELECT epoch_id, invocation_id, recorded_at,
         owner_principal_id, source_revision_id, catalogue_revision_id, summary_bytes,
         observer_root_invocation_id, observer_parent_invocation_id, observer_purpose
@@ -272,6 +278,13 @@ async fn persist_inspect_snapshot_clone(
     let payload = encode_epoch_payload(active, registry, &epoch)?;
     let summary_bytes = encode_constructed_value(active, registry, &RuntimeValue::Bytes(payload))
         .map_err(PostgresKernelError::InspectValueCodec)?;
+    if summary_bytes.is_empty() || summary_bytes.len() > MAX_INSPECT_EVIDENCE_BYTES {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: INSPECT_SNAPSHOT_RELATION,
+            record: epoch_id.canonical(),
+            rule: "inspection summary must be non-empty and fit the durable evidence bound",
+        });
+    }
     let observer_context =
         epoch
             .observer_context()
