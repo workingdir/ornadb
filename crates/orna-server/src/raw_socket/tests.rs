@@ -1102,6 +1102,103 @@ fn sealed_producer_completion(
     }
 }
 
+#[test]
+fn sealed_cancellation_waits_for_worker_terminalization() {
+    let stream = 30;
+    let mut completion = sealed_producer_completion(
+        stream,
+        InvocationId::from_bytes([0xab; 16]),
+        ResourceCancellation::new(),
+    );
+    completion.worker_completed = false;
+
+    queue_cancellation_actions(&mut completion, stream, false);
+
+    assert!(
+        completion.actions.is_empty(),
+        "raw cancellation must wait for the sealed worker's durable terminal record"
+    );
+    assert!(
+        !completion.terminal_claimed,
+        "an unacknowledged cancellation cannot claim a terminal result"
+    );
+}
+
+#[test]
+fn started_sealed_producer_cancellation_waits_for_observed_terminalization() {
+    let stream = 32;
+    let mut completion = sealed_producer_completion(
+        stream,
+        InvocationId::from_bytes([0xae; 16]),
+        ResourceCancellation::new(),
+    );
+
+    // A producer moved into an observed pull task is represented by
+    // `sealed_pull_in_flight`. It must remain owned by that task until it
+    // reports its durable terminal event.
+    queue_cancellation_actions(&mut completion, stream, true);
+
+    assert!(
+        completion.actions.is_empty(),
+        "an active sealed producer cannot publish raw cancellation before observed terminalization"
+    );
+    assert!(
+        !completion.terminal_claimed,
+        "an active sealed producer cannot claim cancellation before its observed terminal"
+    );
+}
+
+#[test]
+fn queued_sealed_cancellation_transfers_worker_terminal_actions_after_worker_boundary() {
+    let stream = 33;
+    let invocation = InvocationId::from_bytes([0xaf; 16]);
+    let cancellation = ResourceCancellation::new();
+    assert!(cancellation.request_cancel());
+
+    let mut pending_completion = sealed_producer_completion(stream, invocation, cancellation);
+    pending_completion.worker_completed = false;
+    queue_cancellation_actions(&mut pending_completion, stream, false);
+    assert!(pending_completion.actions.is_empty());
+
+    let mut pending = BTreeMap::from([(stream, pending_completion)]);
+    let mut cancelled = BTreeSet::new();
+    let mut cancelled_pending = BTreeSet::from([stream]);
+    let mut worker_completion =
+        sealed_producer_completion(stream, invocation, ResourceCancellation::new());
+    worker_completion.actions =
+        cancellation_actions(stream, worker_completion.cancellation.clone());
+
+    merge_dispatch_completion(
+        stream,
+        worker_completion,
+        &mut pending,
+        &mut cancelled,
+        &mut cancelled_pending,
+    );
+
+    let completion = pending
+        .get(&stream)
+        .expect("queued cancellation retains the pending sealed invocation");
+    assert!(completion.worker_completed, "worker boundary has completed");
+    assert_eq!(
+        completion.actions,
+        VecDeque::from([
+            ServerAction::InvokeCancelled { stream },
+            ServerAction::Completed { stream },
+        ]),
+        "the worker-returned cancellation terminal transfers only after the worker boundary"
+    );
+}
+
+#[test]
+fn failed_owner_loss_recovery_does_not_claim_a_terminal_event() {
+    let completion = unresolved_sealed_completion(31, InvocationId::from_bytes([0xac; 16]));
+
+    assert!(completion.actions.is_empty());
+    assert!(!completion.terminal_claimed);
+    assert!(!completion.terminal_delivered);
+}
+
 #[tokio::test]
 async fn sealed_producer_terminals_finalize_before_queuing_protocol_actions() {
     let dispatcher = TestDispatch::new(Vec::new());
@@ -1195,6 +1292,15 @@ async fn sealed_cancellation_requires_an_explicit_worker_acknowledgement() {
     let cancellation = ResourceCancellation::new();
     assert!(cancellation.request_cancel());
     let mut acknowledged = sealed_producer_completion(stream, invocation, cancellation);
+    assert!(acknowledged.actions.is_empty());
+    assert!(
+        dispatcher
+            .sealed_finalizations
+            .lock()
+            .expect("sealed finalization lock")
+            .is_empty(),
+        "no raw cancellation action may precede durable lifecycle finalization"
+    );
     handle_sealed_producer_event(
         &dispatcher,
         stream,
@@ -1213,6 +1319,14 @@ async fn sealed_cancellation_requires_an_explicit_worker_acknowledgement() {
             .last()
             .copied(),
         Some((invocation, SealedInvocationLifecycleFinalization::Cancelled))
+    );
+    assert_eq!(
+        acknowledged.actions,
+        VecDeque::from([
+            ServerAction::InvokeCancelled { stream },
+            ServerAction::Completed { stream },
+        ]),
+        "the acknowledged worker terminal queues raw cancellation only after finalization"
     );
 }
 

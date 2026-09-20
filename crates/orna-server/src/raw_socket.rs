@@ -51,9 +51,9 @@ use orna_postgres::{
     AuthenticatedServerResourceAccepted, AuthenticatedServerResourceEvent,
     AuthenticatedServerResourceKind, AuthenticatedServerResourceProducer,
     AuthenticatedServerResourceStart, PostgresKernel, PostgresKernelError, ResourceCancellation,
-    ResourceCredit, SealedInvocationAdmissionContext, SealedInvocationContinuation,
-    SealedInvocationExecution, SealedInvocationLifecycleFinalization, SealedInvocationPreflight,
-    SealedInvocationResult,
+    ResourceCredit, SealedInvocationAdmissionContext, SealedInvocationExecution,
+    SealedInvocationLifecycleFinalization, SealedInvocationOperation, SealedInvocationPreflight,
+    SealedInvocationResult, SealedInvocationWriterLease,
 };
 #[cfg(test)]
 use orna_protocol::encode_constructed_value;
@@ -71,6 +71,8 @@ use orna_protocol::{
 };
 use orna_repository_v1::{Repository, RuntimeOwnerLock, inspect_metadata};
 use orna_runtime_v1::{RuntimeError, RuntimeIdentity, RuntimeState, WriterLease};
+#[cfg(test)]
+use orna_runtime_v1::RequestState;
 use orna_standard::{RegisteredOpaqueCodecsError, registered_opaque_codecs};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -878,6 +880,81 @@ struct RawSocketRuntimeAdmissionFence {
     _gate: OwnedMutexGuard<()>,
 }
 
+/// The lease/capture evidence retained until an accepted invocation reaches a
+/// terminal boundary.  It intentionally does not retain the admission gate:
+/// accepted invocations must not serialize unrelated executions for their
+/// entire lifetime, but terminal publication must still re-check ownership.
+#[derive(Clone)]
+struct RawSocketRuntimeAdmissionTerminalFence {
+    admission: RawSocketRuntimeAdmission,
+    lease: WriterLease,
+    capture: orna_foundation_v1::CwdCapture,
+}
+
+impl RawSocketRuntimeAdmissionTerminalFence {
+    fn from_admission_fence(fence: &RawSocketRuntimeAdmissionFence) -> Self {
+        Self {
+            admission: fence.admission.clone(),
+            lease: fence.lease,
+            capture: fence.capture.clone(),
+        }
+    }
+
+    async fn verify(&self) -> Result<(), PostgresKernelError> {
+        let state = RuntimeState::open(
+            &self.admission.repository,
+            self.admission.identity,
+            self.admission.initial_digest,
+        )
+        .await
+        .map_err(|_| raw_admission_error("runtime state"))?;
+        if state
+            .current_lease()
+            .await
+            .map_err(|_| raw_admission_error("runtime owner fence"))?
+            != Some(self.lease)
+        {
+            return Err(raw_admission_error("runtime owner fence"));
+        }
+        if state
+            .capture()
+            .await
+            .map_err(|_| raw_admission_error("runtime capture"))?
+            != self.capture
+        {
+            return Err(raw_admission_error("runtime generation fence"));
+        }
+        Ok(())
+    }
+
+    async fn replacement_lease_after_loss(&self) -> Result<WriterLease, PostgresKernelError> {
+        let state = RuntimeState::open(
+            &self.admission.repository,
+            self.admission.identity,
+            self.admission.initial_digest,
+        )
+        .await
+        .map_err(|_| raw_admission_error("runtime state"))?;
+        let replacement = state
+            .current_lease()
+            .await
+            .map_err(|_| raw_admission_error("runtime owner fence"))?
+            .ok_or_else(|| raw_admission_error("runtime owner fence"))?;
+        if replacement == self.lease || replacement.epoch <= self.lease.epoch {
+            return Err(raw_admission_error("runtime replacement owner fence"));
+        }
+        Ok(replacement)
+    }
+
+    fn admission_context(&self) -> Result<SealedInvocationAdmissionContext, PostgresKernelError> {
+        SealedInvocationAdmissionContext::from_runtime_capture_with_writer_lease(
+            self.capture.clone(),
+            self.lease.owner_id,
+            self.lease.epoch,
+        )
+    }
+}
+
 impl RawSocketRuntimeAdmissionFence {
     async fn verify(&self) -> Result<(), PostgresKernelError> {
         let state = RuntimeState::open(
@@ -905,6 +982,31 @@ impl RawSocketRuntimeAdmissionFence {
         }
         Ok(())
     }
+
+    /// Returns the exact lease that replaced this fence's admission lease.
+    ///
+    /// A changed capture alone is not proof that the writer was replaced: the
+    /// original owner can advance its own generation.  Orphaning is therefore
+    /// available only after the runtime has durably installed a different
+    /// owner/epoch through its lease compare-and-swap.
+    async fn replacement_lease_after_loss(&self) -> Result<WriterLease, PostgresKernelError> {
+        let state = RuntimeState::open(
+            &self.admission.repository,
+            self.admission.identity,
+            self.admission.initial_digest,
+        )
+        .await
+        .map_err(|_| raw_admission_error("runtime state"))?;
+        let replacement = state
+            .current_lease()
+            .await
+            .map_err(|_| raw_admission_error("runtime owner fence"))?
+            .ok_or_else(|| raw_admission_error("runtime owner fence"))?;
+        if replacement == self.lease || replacement.epoch <= self.lease.epoch {
+            return Err(raw_admission_error("runtime replacement owner fence"));
+        }
+        Ok(replacement)
+    }
 }
 
 /// Fences an admitted sealed invocation immediately before execution.
@@ -921,10 +1023,21 @@ async fn finalize_lost_admission_authority<D: DispatchService>(
         Ok(()) => Ok(false),
         Err(source) => {
             report_private_dispatch_source(&source);
+            let replacement = fence.replacement_lease_after_loss().await?;
             dispatcher
-                .finalize_sealed_invocation_lifecycle(
+                .finalize_sealed_invocation_lifecycle_with_runtime_fence(
                     invocation,
-                    SealedInvocationLifecycleFinalization::Orphaned,
+                    SealedInvocationLifecycleFinalization::Orphaned {
+                        lost: SealedInvocationWriterLease {
+                            owner_id: fence.lease.owner_id,
+                            epoch: fence.lease.epoch,
+                        },
+                        replacement: SealedInvocationWriterLease {
+                            owner_id: replacement.owner_id,
+                            epoch: replacement.epoch,
+                        },
+                    },
+                    RawSocketRuntimeAdmissionTerminalFence::from_admission_fence(fence),
                 )
                 .await?;
             Ok(true)
@@ -1303,6 +1416,7 @@ async fn negotiate_and_drive(
             invoke_cancellations: Arc::new(Mutex::new(BTreeMap::new())),
             session_broker,
             resource_broker: broker,
+            sealed_fences: Arc::new(Mutex::new(BTreeMap::new())),
         },
         session,
         version,
@@ -1420,9 +1534,39 @@ fn should_cancel_on_disconnect(completion: &DispatchCompletion) -> bool {
             || !completion.worker_completed)
 }
 
-fn queue_cancellation_actions(completion: &mut DispatchCompletion, stream: u64) {
-    completion.sealed_producer.take();
+#[allow(dead_code)]
+fn should_drain_sealed_on_disconnect(completion: &DispatchCompletion) -> bool {
+    completion.sealed_invocation.is_some()
+        && completion.sealed_producer.is_some()
+        && completion.start_delivered
+        && !completion
+            .cancellation_token
+            .as_ref()
+            .is_some_and(ResourceCancellation::is_requested)
+}
+
+fn queue_cancellation_actions(
+    completion: &mut DispatchCompletion,
+    stream: u64,
+    sealed_pull_in_flight: bool,
+) {
     completion.release_guards_after_worker_completion();
+    // A sealed activation owns the durable cancellation record. Until its
+    // worker acknowledges cancellation, an on-wire CALL_CANCELLED would
+    // falsely claim a terminal outcome (and could race a committed result).
+    // Keep only the required Started event so its gate can release the
+    // worker; its terminalized result supplies the terminal frames below.
+    let sealed_producer_active = completion.sealed_producer.is_some() || sealed_pull_in_flight;
+    if completion.sealed_invocation.is_some()
+        && (!completion.worker_completed || sealed_producer_active)
+    {
+        if completion.start_gate.is_some() && !completion.start_delivered {
+            completion.actions.truncate(1);
+        } else {
+            completion.actions.clear();
+        }
+        return;
+    }
     let cancellation = cancellation_actions(stream, completion.cancellation.clone());
     if completion.start_gate.is_some() && !completion.start_delivered {
         completion.actions.truncate(1);
@@ -1525,6 +1669,23 @@ fn merge_dispatch_completion(
                 }
                 existing.actions.extend(completion.actions);
                 existing.cancellation = completion.cancellation;
+            } else if !completion.actions.is_empty() && !existing.terminal_delivered {
+                // The worker may have durably recorded cancellation without
+                // claiming the raw cancellation marker. Transfer those
+                // terminal frames after the worker boundary; a live sealed
+                // stream has no actions here and remains owned by its
+                // observed producer pull instead.
+                let started = existing
+                    .start_gate
+                    .is_some()
+                    .then(|| existing.actions.front().cloned())
+                    .flatten();
+                existing.actions.clear();
+                if let Some(started) = started {
+                    existing.actions.push_back(started);
+                }
+                existing.actions.extend(completion.actions);
+                existing.cancellation = completion.cancellation;
             }
         } else if completion.sealed_producer.is_some() {
             // The cancellation terminal may have flushed and removed the
@@ -1548,11 +1709,8 @@ fn merge_dispatch_completion(
         existing.terminal_claimed |= completion.terminal_claimed;
         let cancelled_before_completion = cancelled.remove(&stream_id);
         if !completion.terminal_claimed && (cancellation_requested || cancelled_before_completion) {
-            // Queue cancellation before transferring a raced producer: the
-            // queue helper intentionally removes producers from result state,
-            // while the cleanup owner below must retain it for bounded drain.
-            queue_cancellation_actions(existing, stream_id);
             transfer_sealed_completion_state(existing, &mut completion);
+            queue_cancellation_actions(existing, stream_id, false);
             existing.release_guards_after_worker_completion();
             return;
         }
@@ -1585,7 +1743,9 @@ struct StartedDispatch {
 enum InvokePreflight {
     Rejected(CallFailure),
     Accepted {
-        continuation: Option<SealedInvocationContinuation>,
+        /// Durable lifecycle/audit admission completed before this result can
+        /// be turned into `CALL_ACCEPTED`.
+        operation: Option<SealedInvocationOperation>,
         fence: Option<RawSocketRuntimeAdmissionFence>,
     },
 }
@@ -1674,6 +1834,28 @@ fn sealed_presentation_failure_actions(
         ServerAction::Completed { stream },
     ])
 }
+
+/// Recovery did not establish a durable terminal lifecycle.  The caller may
+/// have seen CALL_ACCEPTED, but must inspect the retained invocation rather
+/// than receive a fabricated terminal event.
+fn unresolved_sealed_completion(stream: u64, invocation: InvocationId) -> DispatchCompletion {
+    DispatchCompletion {
+        actions: VecDeque::new(),
+        cancellation: ServerAction::InvokeCancelled { stream },
+        cancellation_token: None,
+        sealed_producer: None,
+        sealed_invocation: Some(invocation),
+        sealed_next_event_sequence: 1,
+        sealed_next_outer_sequence: 2,
+        start_gate: None,
+        start_delivered: false,
+        terminal_delivered: false,
+        terminal_claimed: false,
+        worker_completed: true,
+        _guards: None,
+    }
+}
+
 fn rejected_sealed_dispatch(
     stream: u64,
     invocation: InvocationId,
@@ -1714,6 +1896,7 @@ struct RawDispatchService {
     invoke_cancellations: Arc<Mutex<BTreeMap<u64, ResourceCancellation>>>,
     session_broker: SharedInvokeBroker,
     resource_broker: Option<SharedInvokeBroker>,
+    sealed_fences: Arc<Mutex<BTreeMap<InvocationId, RawSocketRuntimeAdmissionTerminalFence>>>,
 }
 
 trait DispatchService: Clone + Send + Sync + 'static {
@@ -1727,7 +1910,7 @@ trait DispatchService: Clone + Send + Sync + 'static {
     ) -> InvokePreflightFuture {
         Box::pin(async {
             Ok(InvokePreflight::Accepted {
-                continuation: None,
+                operation: None,
                 fence: None,
             })
         })
@@ -1739,7 +1922,7 @@ trait DispatchService: Clone + Send + Sync + 'static {
         stream: u64,
         _request: orna_protocol::RetainedInvokeRequest,
         _version: &RawProtocolVersion,
-        _continuation: Option<SealedInvocationContinuation>,
+        _operation: Option<SealedInvocationOperation>,
         _fence: Option<RawSocketRuntimeAdmissionFence>,
     ) -> StartedDispatch {
         let invocation = InvocationId::new();
@@ -1805,24 +1988,20 @@ trait DispatchService: Clone + Send + Sync + 'static {
         Box::pin(async { Ok(()) })
     }
 
+    fn finalize_sealed_invocation_lifecycle_with_runtime_fence(
+        &self,
+        invocation: InvocationId,
+        finalization: SealedInvocationLifecycleFinalization,
+        _fence: RawSocketRuntimeAdmissionTerminalFence,
+    ) -> SealedLifecycleFinalizationFuture {
+        self.finalize_sealed_invocation_lifecycle(invocation, finalization)
+    }
+
     fn cancelled(&self, _stream: u64) {}
 
     fn session_bridge(&self) -> Option<Arc<crate::invoke::SessionBridge>> {
         None
     }
-}
-
-fn sealed_result_cancellation_won(
-    cancellation: &ResourceCancellation,
-    execution: &Result<SealedInvocationExecution, PostgresKernelError>,
-) -> bool {
-    cancellation.is_requested()
-        && matches!(
-            execution,
-            Ok(SealedInvocationExecution::Result(
-                SealedInvocationResult::Completed { .. }
-            ))
-        )
 }
 
 impl RawDispatchService {
@@ -1868,10 +2047,91 @@ impl DispatchService for RawDispatchService {
         finalization: SealedInvocationLifecycleFinalization,
     ) -> SealedLifecycleFinalizationFuture {
         let kernel = self.kernel.clone();
+        let sealed_fences = Arc::clone(&self.sealed_fences);
+        let fence = sealed_fences
+            .lock()
+            .expect("sealed runtime fence lock")
+            .get(&invocation)
+            .cloned();
         Box::pin(async move {
-            kernel
-                .finalize_sealed_invocation_lifecycle(invocation, finalization)
-                .await
+            let fence = fence.ok_or_else(|| PostgresKernelError::DurableInvariant {
+                relation: "sealed invocation lifecycle",
+                record: invocation.canonical(),
+                rule: "raw terminal finalization requires retained runtime fence evidence",
+            })?;
+            let finalization = match fence.verify().await {
+                Ok(()) => finalization,
+                Err(_) => {
+                    let replacement = fence.replacement_lease_after_loss().await?;
+                    SealedInvocationLifecycleFinalization::Orphaned {
+                        lost: SealedInvocationWriterLease {
+                            owner_id: fence.lease.owner_id,
+                            epoch: fence.lease.epoch,
+                        },
+                        replacement: SealedInvocationWriterLease {
+                            owner_id: replacement.owner_id,
+                            epoch: replacement.epoch,
+                        },
+                    }
+                }
+            };
+            let context = fence.admission_context()?;
+            let result = kernel
+                .finalize_sealed_invocation_lifecycle_with_admission_context(
+                    invocation,
+                    finalization,
+                    Some(&context),
+                )
+                .await;
+            if result.is_ok() {
+                sealed_fences
+                    .lock()
+                    .expect("sealed runtime fence lock")
+                    .remove(&invocation);
+            }
+            result
+        })
+    }
+
+    fn finalize_sealed_invocation_lifecycle_with_runtime_fence(
+        &self,
+        invocation: InvocationId,
+        finalization: SealedInvocationLifecycleFinalization,
+        fence: RawSocketRuntimeAdmissionTerminalFence,
+    ) -> SealedLifecycleFinalizationFuture {
+        let kernel = self.kernel.clone();
+        let sealed_fences = Arc::clone(&self.sealed_fences);
+        Box::pin(async move {
+            let finalization = if fence.verify().await.is_ok() {
+                finalization
+            } else {
+                let replacement = fence.replacement_lease_after_loss().await?;
+                SealedInvocationLifecycleFinalization::Orphaned {
+                    lost: SealedInvocationWriterLease {
+                        owner_id: fence.lease.owner_id,
+                        epoch: fence.lease.epoch,
+                    },
+                    replacement: SealedInvocationWriterLease {
+                        owner_id: replacement.owner_id,
+                        epoch: replacement.epoch,
+                    },
+                }
+            };
+            let context = fence.admission_context()?;
+            let result = kernel
+                .finalize_sealed_invocation_lifecycle_with_admission_context(
+                    invocation,
+                    finalization,
+                    Some(&context),
+                )
+                .await;
+            if result.is_ok() {
+                sealed_fences
+                    .lock()
+                    .expect("sealed runtime fence lock")
+                    .remove(&invocation);
+            }
+            result
         })
     }
 
@@ -1934,8 +2194,17 @@ impl DispatchService for RawDispatchService {
                     else {
                         unreachable!("accepted sealed invocation preflight")
                     };
+                    // INVOKE-1 steps 5–7 require the identity and durable
+                    // observation before user code.  Commit the private
+                    // audit/lifecycle admission while the runtime fence is
+                    // still valid, before exposing CALL_ACCEPTED.
+                    fence.verify().await?;
+                    let mut operation = continuation
+                        .prepare_sealed_sys_invoke_after_accept()
+                        .await?;
+                    operation.admit_sealed_sys_invoke().await?;
                     Ok(InvokePreflight::Accepted {
-                        continuation: Some(continuation),
+                        operation: Some(operation),
                         fence: Some(fence),
                     })
                 }
@@ -1949,14 +2218,69 @@ impl DispatchService for RawDispatchService {
         stream: u64,
         _request: orna_protocol::RetainedInvokeRequest,
         _version: &RawProtocolVersion,
-        continuation: Option<SealedInvocationContinuation>,
+        operation: Option<SealedInvocationOperation>,
         fence: Option<RawSocketRuntimeAdmissionFence>,
     ) -> StartedDispatch {
-        let continuation = continuation.expect("sealed invocation preflight continuation");
-        let invocation = continuation.invocation();
-        let started_events = continuation.started_events().clone();
+        let operation = operation.expect("sealed invocation preflight operation");
+        let invocation = operation.invocation();
+        let started_events = operation.started_events().clone();
+        let lifecycle_active = operation.lifecycle_is_active();
+        if lifecycle_active {
+            let fence = RawSocketRuntimeAdmissionTerminalFence::from_admission_fence(
+                fence
+                    .as_ref()
+                    .expect("active sealed invocation retains runtime fence"),
+            );
+            self.sealed_fences
+                .lock()
+                .expect("sealed runtime fence lock")
+                .insert(invocation, fence);
+        }
         if self.install_session_bridge(invocation, stream).is_err() {
-            return rejected_sealed_dispatch(stream, invocation, started_events);
+            if !lifecycle_active {
+                return rejected_sealed_dispatch(stream, invocation, started_events);
+            }
+            let dispatcher = self.clone();
+            let future = Box::pin(async move {
+                let finalization = dispatcher
+                    .finalize_sealed_invocation_lifecycle(
+                        invocation,
+                        SealedInvocationLifecycleFinalization::Failed {
+                            target_unavailable: false,
+                        },
+                    )
+                    .await;
+                if let Err(source) = &finalization {
+                    report_private_dispatch_source(source);
+                }
+                let finalized = finalization.is_ok();
+                DispatchCompletion {
+                    actions: finalized
+                        .then(|| sealed_presentation_failure_actions(stream, invocation))
+                        .unwrap_or_default(),
+                    cancellation: ServerAction::InvokeCancelled { stream },
+                    cancellation_token: None,
+                    sealed_producer: None,
+                    sealed_invocation: Some(invocation),
+                    sealed_next_event_sequence: 2,
+                    sealed_next_outer_sequence: 3,
+                    start_gate: None,
+                    start_delivered: false,
+                    terminal_delivered: false,
+                    terminal_claimed: finalized,
+                    worker_completed: true,
+                    _guards: None,
+                }
+            });
+            return StartedDispatch {
+                accepted: ServerAction::Accepted { stream, invocation },
+                started: Some(ServerAction::InvokeEvents {
+                    stream,
+                    events: started_events,
+                }),
+                start_gate: None,
+                future,
+            };
         }
         let dispatch_session = _session.clone();
         // The worker below uses a short-lived runtime; stream producers must
@@ -1978,6 +2302,7 @@ impl DispatchService for RawDispatchService {
         let cancellations = self.invoke_cancellations.clone();
         let resource_broker = self.resource_broker.clone();
         let session_broker = self.session_broker.clone();
+        let owner_loss_dispatcher = self.clone();
         let future = Box::pin(async move {
             struct DynamicContextGuard {
                 broker: Option<SharedInvokeBroker>,
@@ -1994,9 +2319,24 @@ impl DispatchService for RawDispatchService {
                 }
             }
 
-            if let Some(fence) = fence.as_ref()
-                && finalize_lost_admission_authority(self, fence, invocation).await?
-            {
+            let owner_lost_before_start = if let Some(fence) = fence.as_ref() {
+                match finalize_lost_admission_authority(&owner_loss_dispatcher, fence, invocation)
+                    .await
+                {
+                    Ok(lost) => lost,
+                    Err(source) => {
+                        report_private_dispatch_source(&source);
+                        cancellations
+                            .lock()
+                            .expect("invocation cancellation lock")
+                            .remove(&stream);
+                        return unresolved_sealed_completion(stream, invocation);
+                    }
+                }
+            } else {
+                false
+            };
+            if owner_lost_before_start {
                 cancellations
                     .lock()
                     .expect("invocation cancellation lock")
@@ -2017,47 +2357,33 @@ impl DispatchService for RawDispatchService {
                     _guards: None,
                 };
             }
-            let mut operation = match continuation.prepare_sealed_sys_invoke_after_accept().await {
-                Ok(operation) => operation,
-                Err(source) => {
-                    report_private_dispatch_source(&source);
-                    cancellations
-                        .lock()
-                        .expect("invocation cancellation lock")
-                        .remove(&stream);
-                    return DispatchCompletion {
-                        sealed_producer: None,
-                        sealed_invocation: Some(invocation),
-                        sealed_next_event_sequence: 1,
-                        sealed_next_outer_sequence: 2,
-                        actions: VecDeque::from([
-                            ServerAction::InvokeEvents {
-                                stream,
-                                events: redacted_invoke_failure(
-                                    invocation,
-                                    InvocationFailurePhase::Internal,
-                                    "INVOKE_INTERNAL_FAILURE",
-                                    "invocation could not complete",
-                                    InvocationRetryability::Unknown,
-                                ),
-                            },
-                            ServerAction::Completed { stream },
-                        ]),
-                        cancellation: ServerAction::InvokeCancelled { stream },
-                        cancellation_token: Some(cancellation_for_task.clone()),
-                        start_gate: None,
-                        start_delivered: false,
-                        terminal_delivered: false,
-                        terminal_claimed: false,
-                        worker_completed: false,
-                        _guards: None,
-                    };
+            let mut operation = operation;
+            let owner_lost_after_admission = if operation.lifecycle_is_active() {
+                if let Some(fence) = fence.as_ref() {
+                    match finalize_lost_admission_authority(
+                        &owner_loss_dispatcher,
+                        fence,
+                        invocation,
+                    )
+                    .await
+                    {
+                        Ok(lost) => lost,
+                        Err(source) => {
+                            report_private_dispatch_source(&source);
+                            cancellations
+                                .lock()
+                                .expect("invocation cancellation lock")
+                                .remove(&stream);
+                            return unresolved_sealed_completion(stream, invocation);
+                        }
+                    }
+                } else {
+                    false
                 }
+            } else {
+                false
             };
-            if operation.lifecycle_is_active()
-                && let Some(fence) = fence.as_ref()
-                && finalize_lost_admission_authority(self, fence, invocation).await?
-            {
+            if owner_lost_after_admission {
                 cancellations
                     .lock()
                     .expect("invocation cancellation lock")
@@ -2140,16 +2466,15 @@ impl DispatchService for RawDispatchService {
                 rule: "sealed invocation worker must not panic",
             })
             .and_then(|result| result);
-            let cancellation_won_after_execution =
-                sealed_result_cancellation_won(&cancellation_for_task, &execution);
+            let execution_terminalized = matches!(
+                &execution,
+                Ok(SealedInvocationExecution::Result(_))
+                    | Ok(SealedInvocationExecution::Cancelled { .. })
+            );
             let (actions, sealed_producer) = match execution {
                 Ok(SealedInvocationExecution::ServerStream(producer)) => {
                     (VecDeque::new(), Some(producer))
                 }
-                Ok(SealedInvocationExecution::Result(_)) if cancellation_won_after_execution => (
-                    cancellation_actions(stream, ServerAction::InvokeCancelled { stream }),
-                    None,
-                ),
                 Ok(SealedInvocationExecution::Result(SealedInvocationResult::Completed {
                     events,
                     ..
@@ -2219,6 +2544,13 @@ impl DispatchService for RawDispatchService {
                 .lock()
                 .expect("invocation cancellation lock")
                 .remove(&stream);
+            if execution_terminalized {
+                owner_loss_dispatcher
+                    .sealed_fences
+                    .lock()
+                    .expect("sealed runtime fence lock")
+                    .remove(&invocation);
+            }
             DispatchCompletion {
                 actions,
                 cancellation: ServerAction::InvokeCancelled { stream },
@@ -2416,23 +2748,60 @@ async fn shutdown_resource_producer(producer: AuthenticatedServerResourceProduce
 /// Completes a started sealed producer after peer loss without retaining any
 /// undeliverable Event. Each pull admits one bounded value and immediately
 /// discards it; the producer owns the durable terminal commit.
-async fn drain_sealed_producer(producer: AuthenticatedServerResourceProducer) {
+async fn drain_sealed_producer<D: DispatchService>(
+    dispatcher: D,
+    invocation: InvocationId,
+    producer: AuthenticatedServerResourceProducer,
+    cancellation: Option<ResourceCancellation>,
+) {
     let mut byte_credit = 1024 * 1024 * 1024;
     loop {
         let Some(credit) = ResourceCredit::new(1, byte_credit) else {
             return;
         };
-        match producer.pull(credit).await {
-            Ok(AuthenticatedServerResourceEvent::Values { .. }) => {}
-            Ok(AuthenticatedServerResourceEvent::Waiting { required_bytes }) => {
+        match producer.pull_observed(credit).await {
+            Ok((AuthenticatedServerResourceEvent::Values { .. }, _)) => {}
+            Ok((AuthenticatedServerResourceEvent::Waiting { required_bytes }, _)) => {
                 byte_credit = required_bytes.min(1024 * 1024 * 1024).max(1);
             }
-            Ok(
-                AuthenticatedServerResourceEvent::Completed { .. }
-                | AuthenticatedServerResourceEvent::Failed { .. }
-                | AuthenticatedServerResourceEvent::Cancelled,
-            )
-            | Err(_) => return,
+            Ok((event, acknowledged)) => {
+                let cancellation_requested = cancellation
+                    .as_ref()
+                    .is_some_and(ResourceCancellation::is_requested);
+                let finalization = match event {
+                    AuthenticatedServerResourceEvent::Completed { .. }
+                        if !cancellation_requested =>
+                    {
+                        Some(SealedInvocationLifecycleFinalization::Completed)
+                    }
+                    AuthenticatedServerResourceEvent::Failed { failure }
+                        if !cancellation_requested =>
+                    {
+                        Some(SealedInvocationLifecycleFinalization::Failed {
+                            target_unavailable: failure == CallFailure::TargetUnavailable,
+                        })
+                    }
+                    AuthenticatedServerResourceEvent::Cancelled if acknowledged => {
+                        Some(SealedInvocationLifecycleFinalization::Cancelled)
+                    }
+                    // A cancellation request must be acknowledged by the
+                    // producer's worker. A closed response, or a terminal
+                    // outcome that raced cancellation, leaves the invocation
+                    // unresolved for recovery instead of fabricating a result.
+                    _ => None,
+                };
+                let Some(finalization) = finalization else {
+                    return;
+                };
+                if let Err(source) = dispatcher
+                    .finalize_sealed_invocation_lifecycle(invocation, finalization)
+                    .await
+                {
+                    report_private_dispatch_source(&source);
+                }
+                return;
+            }
+            Err(_) => return,
         }
     }
 }
@@ -2507,7 +2876,7 @@ fn schedule_pending_sealed_cleanups(
             .cancellation_token
             .as_ref()
             .is_some_and(ResourceCancellation::is_requested);
-        if cancellation_requested {
+        if cancellation_requested && completion.sealed_invocation.is_none() {
             schedule_sealed_completion_shutdown(completion, shutdown_tasks);
         }
     }
@@ -2527,26 +2896,25 @@ fn schedule_sealed_completion_shutdown(
     });
 }
 
-fn should_drain_sealed_on_disconnect(completion: &DispatchCompletion) -> bool {
-    completion.sealed_invocation.is_some()
-        && completion.sealed_producer.is_some()
-        && completion.start_delivered
-        && !completion
-            .cancellation_token
-            .as_ref()
-            .is_some_and(ResourceCancellation::is_requested)
-}
-
-fn schedule_sealed_completion_drain(
+fn schedule_sealed_completion_drain<D: DispatchService>(
+    dispatcher: &D,
     completion: &mut DispatchCompletion,
     shutdown_tasks: &mut JoinSet<()>,
 ) {
     let Some(producer) = completion.sealed_producer.take() else {
         return;
     };
+    let Some(invocation) = completion.sealed_invocation else {
+        schedule_shutdown_task(shutdown_tasks, async move {
+            shutdown_resource_producer(producer).await;
+        });
+        return;
+    };
+    let cancellation = completion.cancellation_token.clone();
+    let dispatcher = dispatcher.clone();
     let guards = completion._guards.take();
     schedule_shutdown_task(shutdown_tasks, async move {
-        drain_sealed_producer(producer).await;
+        drain_sealed_producer(dispatcher, invocation, producer, cancellation).await;
         drop(guards);
     });
 }
@@ -3178,6 +3546,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
                             &mut preflight_cancelled,
                             &mut preflight_tasks,
                             &mut producer_shutdown,
+                            &sealed_pull_in_flight,
                             &mut pending,
                             &mut unstarted,
                             &mut writer,
@@ -3500,17 +3869,28 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     .await
     .is_ok();
     if !sealed_pull_shutdown_completed {
-        // A sealed pull task only owns an abortable producer handle; aborting
-        // it requests producer cancellation through Drop. Drain the JoinSet so
-        // no in-flight task is detached before the producer cleanup pass.
-        sealed_pull_tasks.abort_all();
+        // An in-flight sealed pull owns the only observed terminal event. It
+        // must not be aborted and discarded after the bounded grace window:
+        // retain the task until it returns so cancellation/commit provenance
+        // can still reach the fenced lifecycle finalizer.
         while let Some(result) = sealed_pull_tasks.join_next().await {
-            let _ = result;
+            if let Err(error) = merge_sealed_pull_result(
+                result,
+                &dispatcher,
+                &mut pending,
+                &mut sealed_pull_in_flight,
+                &mut sealed_pull_waiting_bytes,
+                &mut producer_shutdown,
+            )
+            .await
+            {
+                drain_failure.get_or_insert(error);
+            }
         }
     }
     for completion in pending.values_mut() {
-        if should_drain_sealed_on_disconnect(completion) {
-            schedule_sealed_completion_drain(completion, &mut producer_shutdown);
+        if completion.sealed_invocation.is_some() && completion.sealed_producer.is_some() {
+            schedule_sealed_completion_drain(&dispatcher, completion, &mut producer_shutdown);
         } else {
             schedule_sealed_completion_shutdown(completion, &mut producer_shutdown);
         }
@@ -4097,6 +4477,7 @@ async fn handle_client_frame<D: DispatchService>(
     preflight_cancelled: &mut BTreeSet<u64>,
     preflight_tasks: &mut JoinSet<(u64, InvokePreflightCompletion)>,
     producer_shutdown: &mut JoinSet<()>,
+    sealed_pull_in_flight: &BTreeSet<u64>,
 
     pending: &mut BTreeMap<u64, DispatchCompletion>,
     unstarted: &mut VecDeque<UnstartedDispatch>,
@@ -4175,8 +4556,11 @@ async fn handle_client_frame<D: DispatchService>(
             if let Some(completion) = pending.get_mut(&stream) {
                 if !completion.terminal_delivered && !completion.terminal_claimed {
                     dispatcher.cancelled(stream);
-                    schedule_sealed_completion_shutdown(completion, producer_shutdown);
-                    queue_cancellation_actions(completion, stream);
+                    let sealed_pull_active = sealed_pull_in_flight.contains(&stream);
+                    if completion.sealed_invocation.is_none() {
+                        schedule_sealed_completion_shutdown(completion, producer_shutdown);
+                    }
+                    queue_cancellation_actions(completion, stream, sealed_pull_active);
                     if !completion.worker_completed {
                         cancelled_pending.insert(stream);
                     }
@@ -4226,21 +4610,72 @@ async fn finish_invoke_preflight<D: DispatchService>(
             report_private_dispatch_source(&source);
             Some(CallFailure::InternalFailure)
         }
-        Ok(InvokePreflight::Accepted {
-            continuation,
-            fence: _,
-        }) if cancelled_before_accept => {
-            drop(continuation);
+        Ok(InvokePreflight::Accepted { operation, fence }) if cancelled_before_accept => {
+            if let Some(operation) = operation
+                && operation.lifecycle_is_active()
+            {
+                let owner_lost = if let Some(fence) = fence.as_ref() {
+                    match fence.verify().await {
+                        Ok(()) => false,
+                        Err(_) => finalize_lost_admission_authority(
+                            dispatcher,
+                            fence,
+                            operation.invocation(),
+                        )
+                        .await
+                        .map_err(|source| {
+                            LocalRawSocketError::SealedLifecycleFinalization {
+                                source: Box::new(source),
+                            }
+                        })?,
+                    }
+                } else {
+                    false
+                };
+                if !owner_lost {
+                    dispatcher
+                        .finalize_sealed_invocation_lifecycle_with_runtime_fence(
+                            operation.invocation(),
+                            SealedInvocationLifecycleFinalization::Cancelled,
+                            RawSocketRuntimeAdmissionTerminalFence::from_admission_fence(
+                                fence.as_ref().expect("accepted cancellation retains fence"),
+                            ),
+                        )
+                        .await
+                        .map_err(|source| LocalRawSocketError::SealedLifecycleFinalization {
+                            source: Box::new(source),
+                        })?;
+                }
+            }
             None
         }
-        Ok(InvokePreflight::Accepted {
-            continuation,
-            fence,
-        }) => {
+        Ok(InvokePreflight::Accepted { operation, fence }) => {
             if let Some(fence) = fence.as_ref()
-                && let Err(source) = fence.verify().await
+                && fence.verify().await.is_err()
             {
-                report_private_dispatch_source(&source);
+                // Admission already committed. Resolve the durable lifecycle
+                // before returning a call-level failure; if recovery cannot
+                // establish the orphaned terminal state, do not manufacture
+                // an on-wire terminal outcome.
+                if operation
+                    .as_ref()
+                    .is_some_and(SealedInvocationOperation::lifecycle_is_active)
+                {
+                    finalize_lost_admission_authority(
+                        dispatcher,
+                        fence,
+                        operation
+                            .as_ref()
+                            .expect("accepted sealed invocation retains operation")
+                            .invocation(),
+                    )
+                    .await
+                    .map_err(|source| {
+                        LocalRawSocketError::SealedLifecycleFinalization {
+                            source: Box::new(source),
+                        }
+                    })?;
+                }
                 Some(CallFailure::InternalFailure)
             } else {
                 let StartedDispatch {
@@ -4248,7 +4683,7 @@ async fn finish_invoke_preflight<D: DispatchService>(
                     started,
                     start_gate,
                     future,
-                } = dispatcher.start_invoke(session, stream, request, version, continuation, fence);
+                } = dispatcher.start_invoke(session, stream, request, version, operation, fence);
                 let started = started.expect("sealed invocation start event");
                 let sealed_invocation = match &accepted {
                     ServerAction::Accepted { invocation, .. } => *invocation,
@@ -4726,9 +5161,16 @@ async fn flush_pending_with_fairness_boundary(
                 .and_then(|completion| completion.actions.front())
                 .cloned()
             else {
-                if sealed_pull_waiting_bytes
-                    .get(&stream_id)
-                    .is_some_and(|required| *required > SEALED_MAX_VALUE_BYTES)
+                let cancellation_requested = pending.get(&stream_id).is_some_and(|completion| {
+                    completion
+                        .cancellation_token
+                        .as_ref()
+                        .is_some_and(ResourceCancellation::is_requested)
+                });
+                if !cancellation_requested
+                    && sealed_pull_waiting_bytes
+                        .get(&stream_id)
+                        .is_some_and(|required| *required > SEALED_MAX_VALUE_BYTES)
                 {
                     let completion = pending
                         .get_mut(&stream_id)
@@ -4749,19 +5191,29 @@ async fn flush_pending_with_fairness_boundary(
                     continue;
                 }
                 let should_pull = pending.get(&stream_id).is_some_and(|completion| {
-                    completion.start_delivered
+                    (completion.start_delivered || cancellation_requested)
                         && completion.sealed_producer.is_some()
                         && !sealed_pull_in_flight.contains(&stream_id)
                 });
                 if should_pull {
-                    let result_credit = connection
-                        .result_credit(stream_id)
-                        .map_err(|source| LocalRawSocketError::Connection { source })?;
-                    let Some(credit) = sealed_pull_credit(
-                        result_credit,
-                        sealed_pull_waiting_bytes.get(&stream_id).copied(),
-                    ) else {
-                        break;
+                    let credit = if cancellation_requested {
+                        // Cancellation acknowledgement is a control operation,
+                        // not a result publication. It must remain observable
+                        // even after the client has exhausted its result
+                        // window.
+                        ResourceCredit::new(1, SEALED_MAX_VALUE_BYTES)
+                            .expect("sealed cancellation credit is bounded")
+                    } else {
+                        let result_credit = connection
+                            .result_credit(stream_id)
+                            .map_err(|source| LocalRawSocketError::Connection { source })?;
+                        let Some(credit) = sealed_pull_credit(
+                            result_credit,
+                            sealed_pull_waiting_bytes.get(&stream_id).copied(),
+                        ) else {
+                            break;
+                        };
+                        credit
                     };
                     let producer = pending
                         .get_mut(&stream_id)
@@ -5288,7 +5740,8 @@ mod runtime_admission_tests {
         drop(admission);
 
         let replacement =
-            RawSocketRuntimeAdmission::from_repository(repository).expect("replacement admission");
+            RawSocketRuntimeAdmission::from_repository(repository.clone())
+                .expect("replacement admission");
         let replacement_owner = replacement.owner;
         let replacement_identity = replacement.identity;
         let replacement_initial_digest = replacement.initial_digest;
@@ -5439,7 +5892,7 @@ mod runtime_admission_tests {
         )
         .await
         .expect("runtime state");
-        state
+        let replacement = state
             .takeover_lease(fence.lease, [0x45; 16])
             .await
             .expect("test owner handover");
@@ -5456,7 +5909,19 @@ mod runtime_admission_tests {
                 .finalizations
                 .lock()
                 .expect("owner-loss finalization lock"),
-            vec![(invocation, SealedInvocationLifecycleFinalization::Orphaned)]
+            vec![(
+                invocation,
+                SealedInvocationLifecycleFinalization::Orphaned {
+                    lost: SealedInvocationWriterLease {
+                        owner_id: fence.lease.owner_id,
+                        epoch: fence.lease.epoch,
+                    },
+                    replacement: SealedInvocationWriterLease {
+                        owner_id: replacement.owner_id,
+                        epoch: replacement.epoch,
+                    },
+                },
+            )]
         );
     }
 
@@ -5522,6 +5987,7 @@ mod daemon_session_tests {
             invoke_cancellations: Arc::new(Mutex::new(BTreeMap::new())),
             session_broker: SharedInvokeBroker::session_only(),
             resource_broker: None,
+            sealed_fences: Arc::new(Mutex::new(BTreeMap::new())),
         };
         let first_root = InvocationId::from_bytes([0xa1; 16]);
         let first_bridge = dispatcher
