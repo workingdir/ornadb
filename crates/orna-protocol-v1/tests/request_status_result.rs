@@ -150,6 +150,43 @@ fn request_status_result_rejects_noncanonical_result_body_encoding() {
 }
 
 #[test]
+fn request_status_result_rejects_noncanonical_bignum_aliases_before_admission() {
+    // ORNA-PROTO-001 and ORNA-FORMAT-001: the complete nested Result body is
+    // validated before request-status admission. Tags 2/3 may encode only
+    // magnitudes beyond the direct major-type range.
+    for bignum in [
+        [0xc2, 0x40].as_slice(),
+        [0xc2, 0x41, 0x00].as_slice(),
+        [0xc2, 0x48, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff].as_slice(),
+        [
+            0xc2, 0x49, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        ]
+        .as_slice(),
+        [0xc3, 0x40].as_slice(),
+        [0xc3, 0x41, 0x01].as_slice(),
+        [0xc3, 0x48, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff].as_slice(),
+        [
+            0xc3, 0x49, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        ]
+        .as_slice(),
+    ] {
+        let mut result = vec![0xa4, 0x00];
+        result.extend_from_slice(bignum);
+        result.extend([0x01, 0xf6, 0x02, 0x58, 0x20]);
+        result.extend([2; 32]);
+        result.extend([0x03, 0xf6]);
+        assert_eq!(
+            Envelope::decode(
+                &raw_status(4, Some(&[2; 32]), Some(&result)),
+                Limits::default(),
+            ),
+            Err(Error::NonCanonical),
+            "{bignum:02x?}"
+        );
+    }
+}
+
+#[test]
 fn request_status_result_rejects_noncanonical_outer_state_encoding() {
     let mut encoded = raw_status(1, None, None);
     // Locate the state value after body key 1 and expand uint(1) to 0x18 0x01.
