@@ -16,7 +16,7 @@ use orna_core::{
     security::{CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_FUNCTION_NAME},
 };
 
-pub(crate) const USAGE: &str = "Usage:\n  orna\n  orna repl\n  orna --db <target> [command] [options]\n  orna --daemon\n  orna --version\n  orna server run\n  orna server backend-shell\n  orna runtime describe <runtime-shared-library>\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id-1> <canonical-parameter-id-2>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
+pub(crate) const USAGE: &str = "Usage:\n  orna\n  orna repl\n  orna --db <target> [command] [options]\n  orna --daemon\n  orna --version\n  orna serve\n  orna server run\n  orna server backend-shell\n  orna runtime describe <runtime-shared-library>\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id-1> <canonical-parameter-id-2>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
 
 pub(crate) const HELP_TOP_LEVEL: &str = "Orna command line
 
@@ -39,6 +39,7 @@ Host Mode:
   --daemon     Run the local server in the foreground.
 
 Operational Commands:
+  serve        Serve the current clone on loopback.
   server ...   Manage the server and backend shell.
   security ... Manage principals and grants.
   raw-call ... Use the low-level recovery interface.
@@ -49,6 +50,7 @@ Options:
   --color <auto|always|never>  Control terminal colour.
   -h, --help   Show help for a command.
   -V, --version  Show the Orna version.";
+const HELP_SERVE: &str = "Serve the current clone on loopback.\n\nUsage:\n  orna serve\n\nThis command accepts no options. It chooses an available loopback port and prints its URL.\n";
 const HELP_SERVER: &str = "Manage an Orna server.\n\nUsage:\n  orna server run\n  orna server backend-shell\n\nCommands:\n  run            Start the server in the foreground.\n  backend-shell  Open a shell for the ready server.\n\nRun `orna server COMMAND --help` for more information.\n";
 const HELP_SERVER_RUN: &str = "Start the Orna server in the foreground.\n\nUsage:\n  orna server run\n\nThis command accepts no options. Use a service manager to supervise the process.\n";
 const HELP_SERVER_BACKEND_SHELL: &str = "Open a shell for the ready Orna server.\n\nUsage:\n  orna server backend-shell\n\nThis command accepts no options.\n";
@@ -101,6 +103,7 @@ pub(crate) struct ParsedInvocation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HelpTopic {
     TopLevel,
+    Serve,
     Server,
     ServerRun,
     ServerBackendShell,
@@ -159,6 +162,7 @@ pub(crate) struct InvokeArguments {
 pub(crate) enum Command {
     Help(HelpTopic),
     Version,
+    Serve,
     Run,
     BackendShell,
     RuntimeDescribe(PathBuf),
@@ -177,6 +181,7 @@ pub(crate) enum Command {
 pub(crate) fn help_text(topic: HelpTopic) -> &'static str {
     match topic {
         HelpTopic::TopLevel => HELP_TOP_LEVEL,
+        HelpTopic::Serve => HELP_SERVE,
         HelpTopic::Server => HELP_SERVER,
         HelpTopic::ServerRun => HELP_SERVER_RUN,
         HelpTopic::ServerBackendShell => HELP_SERVER_BACKEND_SHELL,
@@ -249,6 +254,7 @@ where
     let mut args = args.into_iter();
     let topic = match args.next().as_deref() {
         None => HelpTopic::TopLevel,
+        Some(value) if value == OsStr::new("serve") => HelpTopic::Serve,
         Some(value) if value == OsStr::new("server") => match args.next().as_deref() {
             None => HelpTopic::Server,
             Some(value) if value == OsStr::new("run") => HelpTopic::ServerRun,
@@ -390,6 +396,7 @@ fn is_command_name(value: &OsStr) -> bool {
                 | "--version"
                 | "-V"
                 | "help"
+                | "serve"
                 | "server"
                 | "runtime"
                 | "source"
@@ -494,6 +501,9 @@ where
                 _ => return None,
             };
             args.next().is_none().then_some(Command::Status(format))
+        }
+        Some(value) if value == OsStr::new("serve") => {
+            parse_server_leaf(&mut args, Command::Serve, HelpTopic::Serve)
         }
 
         Some(value) if value == OsStr::new("server") => match args.next().as_deref() {
