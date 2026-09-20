@@ -3156,6 +3156,10 @@ impl Context<'_, '_> {
         }
         let mut counters = vec![0usize; stages.len()];
         for value in values {
+            // Buffered relation stages can run without a predicate or visitor
+            // that performs its own evaluator step. Keep this materialized
+            // path as cancellation-aware as the paged source path.
+            self.step()?;
             match self.apply_relation_stages(value, stages, &mut counters, depth + 1)? {
                 RelationRow::Skip => {}
                 RelationRow::End => return Ok(()),
@@ -6276,5 +6280,40 @@ mod tests {
 
         assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-CANCELLED");
         assert_eq!(callbacks, 0);
+    }
+
+    #[test]
+    fn buffered_relation_stages_check_cancellation_before_each_value() {
+        let functions = Functions::new();
+        let cancellation = CancellationToken::new();
+        cancellation.request_after_checks(2);
+        let mut context = Context {
+            limits: Limits::default(),
+            steps: 0,
+            functions: &functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: true,
+            restrict_function_names: true,
+            reject_unhandled_field_calls: true,
+            effects: None,
+            namespace: None,
+            transfer: None,
+            cancellation: Some(&cancellation),
+        };
+        let mut callbacks = 0;
+
+        let result = context.for_each_buffered_stages(
+            vec![Value::Int(1.into()), Value::Int(2.into())],
+            &[],
+            0,
+            |_, _| {
+                callbacks += 1;
+                Ok(true)
+            },
+        );
+
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-CANCELLED");
+        assert_eq!(callbacks, 1);
     }
 }
