@@ -11,9 +11,7 @@
 //!   Chapter 30, "Transport and value profile", permits explicitly trusted
 //!   loopback without TLS. Different loopback ports still have different origins.
 //!
-//! Ignored tests assert required behavior and are expected to FAIL on the
-//! reviewed implementation when explicitly run. An ignored result is not a
-//! conformance pass. Ordinary tests are controls. All credentials are synthetic;
+//! All tests assert required behavior. Ordinary tests are controls. All credentials are synthetic;
 //! traffic stays on numeric IPv4 loopback. No temporary files are created.
 //! The UUID panic check requires panic unwinding (the usual Rust test profile).
 //! If proxy environment variables are set, both NO_PROXY and no_proxy must
@@ -326,7 +324,6 @@ fn invalid_runtime_uuid_length_and_nonhex_are_rejected() {
 }
 
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #791; run explicitly for review"]
 fn malformed_runtime_uuid_is_rejected_without_panicking() {
     run(async {
         let result = create_with_body(session_body(
@@ -342,7 +339,6 @@ fn malformed_runtime_uuid_is_rejected_without_panicking() {
 }
 
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #791; run explicitly for review"]
 fn all_hyphen_runtime_uuid_is_rejected() {
     run(async {
         let result = create_with_body(session_body(&"-".repeat(36), &token(b'A'))).await;
@@ -354,7 +350,6 @@ fn all_hyphen_runtime_uuid_is_rejected() {
 }
 
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #791; run explicitly for review"]
 fn noncanonical_base64url_final_symbols_are_rejected() {
     run(async {
         let mut violations = Vec::new();
@@ -471,13 +466,11 @@ async fn resume_redirect_must_not_forward(status: &'static str) {
 }
 
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #791; run explicitly for review"]
 fn resume_307_redirect_is_rejected_without_forwarding_credentials() {
     run(resume_redirect_must_not_forward("307 Temporary Redirect"));
 }
 
 #[test]
-#[ignore = "Known Orna 1.0.0 gap: #791; run explicitly for review"]
 fn resume_308_redirect_is_rejected_without_forwarding_credentials() {
     run(resume_redirect_must_not_forward("308 Permanent Redirect"));
 }
