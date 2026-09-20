@@ -1312,6 +1312,64 @@ mod tests {
             .expect("published scenario");
         assert_eq!(scenario.status, Status::JustifiedGap);
     }
+
+    #[test]
+    fn digest_bound_cflow_witness_preserves_non_engine_gap() {
+        let root = corpus();
+        let harness = orna_conformance_v1::Harness::new(
+            orna_conformance_v1::Corpus::load(&root).expect("conformance corpus loads"),
+        )
+        .with_claim(orna_conformance_v1::ImplementationClaim {
+            implementation_id: "orna-conformance-v1".into(),
+            profile: "bounded-expression-runtime".into(),
+            command: "orna-conformance --profile bounded-expression-runtime".into(),
+            environment: std::collections::BTreeMap::new(),
+            executed_scenario_contracts: vec!["CFLOW-001".into()],
+        });
+        let mut adapter = orna_conformance_v1::RuntimeAdapter::new(
+            orna_conformance_v1::BoundedEvaluator::default(),
+        );
+        let conformance_report = harness.run(&mut adapter);
+        let binding = orna_conformance_v1::ScenarioExecutionBinding {
+            requirement_id: "ORNA-CFLOW-001".into(),
+            scenario_id: "CFLOW-001".into(),
+            implementation_ref:
+                "crates/orna-conformance-v1/src/semantic_adapter.rs::BoundedEvaluator::run_control_flow"
+                    .into(),
+            test_ref:
+                "crates/orna-conformance-v1/tests/runtime_scenarios.rs::control_flow_executes_the_frozen_contract_in_independent_evaluators"
+                    .into(),
+        };
+        let witnesses = harness
+            .scenario_execution_witnesses(&conformance_report, std::slice::from_ref(&binding))
+            .expect("passed CFLOW-001 becomes a digest-bound scenario witness");
+        let report = generate_with_scenario_execution_witnesses(&root, &witnesses)
+            .expect("digest-bound CFLOW-001 witness is accepted");
+        let requirement = report
+            .requirements
+            .iter()
+            .find(|requirement| requirement.requirement_id == "ORNA-CFLOW-001")
+            .expect("witnessed control-flow requirement");
+        assert_eq!(requirement.status, Status::PartiallyExecuted);
+        assert!(requirement.boundaries.iter().any(|boundary| {
+            boundary.kind == "implementation-scenario-witness"
+                && boundary.logical_id == "CFLOW-001"
+                && boundary.status == Status::Executed
+        }));
+        assert!(
+            requirement
+                .boundaries
+                .iter()
+                .all(|boundary| boundary.kind != "engine-witness")
+        );
+        let scenario = report
+            .behavioral_scenarios
+            .iter()
+            .find(|scenario| scenario.scenario_id == "CFLOW-001")
+            .expect("published control-flow scenario");
+        assert_eq!(scenario.status, Status::JustifiedGap);
+    }
+
     #[test]
     fn scenario_witnesses_reject_requirements_not_declared_by_the_scenario() {
         let root = corpus();
