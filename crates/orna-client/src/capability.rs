@@ -178,11 +178,17 @@ pub struct LocalSecretId {
 }
 
 impl LocalSecretId {
-    /// Constructs a secret id, rejecting empty and outer-whitespace ids.
+    /// Constructs a secret id, rejecting empty, control-containing, and
+    /// outer-whitespace ids.
     pub fn new(id: impl Into<String>) -> Result<Self, LocalCapabilityGrantError> {
         let id = id.into();
         if id.trim().is_empty() {
             return Err(LocalCapabilityGrantError::EmptyScope);
+        }
+        if id.chars().any(char::is_control) {
+            return Err(LocalCapabilityGrantError::InvalidScope {
+                detail: "secret id must not contain control characters".to_owned(),
+            });
         }
         if id != id.trim() {
             return Err(LocalCapabilityGrantError::InvalidScope {
@@ -647,6 +653,14 @@ mod tests {
         ));
         assert!(matches!(
             LocalCapabilityScope::secret("key ").unwrap_err(),
+            LocalCapabilityGrantError::InvalidScope { .. }
+        ));
+        assert!(matches!(
+            LocalCapabilityScope::secret("key\nvalue").unwrap_err(),
+            LocalCapabilityGrantError::InvalidScope { .. }
+        ));
+        assert!(matches!(
+            LocalCapabilityScope::secret("key\0value").unwrap_err(),
             LocalCapabilityGrantError::InvalidScope { .. }
         ));
     }
