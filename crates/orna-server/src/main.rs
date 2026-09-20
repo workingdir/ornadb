@@ -81,6 +81,7 @@ fn main() -> ExitCode {
             }
         }
         Command::Status(format) => run_status(format),
+        Command::Serve => run_serve(),
         Command::Run => match endpoint {
             orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
                 match orna_server::run_sqlite_server(path) {
@@ -436,6 +437,53 @@ fn run_status(format: StatusFormat) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => {
             write_stderr_line("orna: E2100: status could not write output");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Serves the repository discovered from the caller's current clone. The
+/// live host owns its loopback listener, CWD-backed runtime authority, and
+/// session state; this CLI boundary deliberately adds no page or query route.
+fn run_serve() -> ExitCode {
+    let current_directory = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(_) => {
+            write_stderr_line("orna: serve could not determine the current directory");
+            return ExitCode::from(1);
+        }
+    };
+    let repository = match orna_repository_v1::Repository::discover(&current_directory) {
+        Ok(repository) => repository,
+        Err(_) => {
+            write_stderr_line("orna: serve requires an Orna Git worktree");
+            return ExitCode::from(1);
+        }
+    };
+    // The normative command defines loopback-only default exposure but no
+    // fixed port. Let the OS choose a free port and report the exact address.
+    let host = match orna_server::LiveOnceHost::bind(&repository, 0) {
+        Ok(host) => host,
+        Err(error) => {
+            write_stderr_line(&error.to_string());
+            return ExitCode::from(1);
+        }
+    };
+    let address = host.address();
+    {
+        let stdout = io::stdout();
+        let mut stdout = stdout.lock();
+        if let Err(error) =
+            writeln!(stdout, "orna: serving at http://{address}").and_then(|()| stdout.flush())
+        {
+            write_stderr_line(&error.to_string());
+            return ExitCode::from(1);
+        }
+    }
+    match host.serve_until_cancellation(futures::future::pending()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            write_stderr_line(&error.to_string());
             ExitCode::from(1)
         }
     }
@@ -859,6 +907,10 @@ mod tests {
     #[test]
     fn accepts_the_user_facing_server_commands() {
         assert_eq!(
+            parse_command(arguments(&["orna", "serve"])),
+            Some(Command::Serve),
+        );
+        assert_eq!(
             parse_command(arguments(&["orna", "server", "run"])),
             Some(Command::Run),
         );
@@ -1085,6 +1137,17 @@ mod tests {
             None,
             "runtime override must be rejected for server run"
         );
+    }
+
+    #[test]
+    fn rejects_options_on_serve() {
+        for values in [
+            vec!["orna", "serve", "--port", "8080"],
+            vec!["orna", "serve", "extra"],
+            vec!["orna", "--runtime", "tty", "serve"],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
     }
 
     #[test]
@@ -2464,6 +2527,7 @@ mod tests {
         for (values, topic) in [
             (vec!["orna", "--help"], HelpTopic::TopLevel),
             (vec!["orna", "help"], HelpTopic::TopLevel),
+            (vec!["orna", "help", "serve"], HelpTopic::Serve),
             (vec!["orna", "help", "server"], HelpTopic::Server),
             (vec!["orna", "help", "server", "run"], HelpTopic::ServerRun),
             (
@@ -2478,6 +2542,7 @@ mod tests {
             (vec!["orna", "help", "security"], HelpTopic::Security),
             (vec!["orna", "help", "raw-call"], HelpTopic::RawCall),
             (vec!["orna", "server", "--help"], HelpTopic::Server),
+            (vec!["orna", "serve", "--help"], HelpTopic::Serve),
             (
                 vec!["orna", "server", "run", "--help"],
                 HelpTopic::ServerRun,
@@ -2511,6 +2576,7 @@ mod tests {
         for values in [
             vec!["orna", "--help", "server"],
             vec!["orna", "help", "unknown"],
+            vec!["orna", "help", "serve", "extra"],
             vec!["orna", "help", "server", "unknown"],
             vec!["orna", "help", "server", "run", "extra"],
             vec!["orna", "help", "source", "extra"],
@@ -2545,6 +2611,7 @@ mod tests {
             "source",
             "inspect",
             "state",
+            "serve",
             "--daemon",
             "--db",
             "--runtime",
@@ -2555,6 +2622,7 @@ mod tests {
             );
         }
         assert!(top_level.contains("Operational Commands:"));
+        assert!(top_level.contains("serve"));
         assert!(top_level.contains("server ..."));
         assert!(top_level.contains("security ..."));
         assert!(top_level.contains("raw-call ..."));
@@ -2563,6 +2631,7 @@ mod tests {
         assert!(help_text(HelpTopic::State).contains("--value-file <path>"));
         assert!(help_text(HelpTopic::Inspect).contains("--projection <name>"));
         assert!(help_text(HelpTopic::Runtime).contains("runtime describe"));
+        assert!(help_text(HelpTopic::Serve).contains("orna serve"));
         assert!(help_text(HelpTopic::Security).contains("security grant-execute"));
         assert!(help_text(HelpTopic::RawCall).contains("raw-call"));
         assert!(top_level.contains("--color <auto|always|never>"));
@@ -2639,7 +2708,7 @@ mod tests {
         assert!(USAGE.starts_with(
             "Usage:\n  orna\n  orna repl\n  orna --db <target> [command] [options]\n"
         ));
-        for command in ["invoke", "repl", "source", "inspect", "raw-call"] {
+        for command in ["invoke", "repl", "source", "inspect", "raw-call", "serve"] {
             assert!(USAGE.contains(command));
         }
         assert!(USAGE.contains("orna raw-call <canonical-function-id>"));
@@ -2667,6 +2736,7 @@ mod tests {
             (vec!["orna", "-h"], Command::Help(HelpTopic::TopLevel)),
             (vec!["orna", "-V"], Command::Version),
             (vec!["orna", "repl", "-h"], Command::Help(HelpTopic::Repl)),
+            (vec!["orna", "serve", "-h"], Command::Help(HelpTopic::Serve)),
             (
                 vec!["orna", "server", "-h"],
                 Command::Help(HelpTopic::Server),
