@@ -619,12 +619,15 @@ ORNA_REFERENCE_DIR=<reference-bundle> cargo test --locked --offline \
 ```
 
 The exact-bundle traceability command and the focused `reference_corpus` suite
-passed in this audit; the latter ran 18 tests. The `runtime_scenarios` command
-is shown for reproducibility, but its status is not claimed here. The passing
-checks verify corpus loading, evidence redaction, witness fencing, and the rule
-that skipped or unimplemented work is not a pass. They do not establish full
-Orna 1.0.0 language, runtime, serving, storage, security, or interoperability
-conformance; those claims still require their own executed evidence.
+passed in this audit; the latter ran 22 tests. The bounded `runtime_scenarios`
+gate was separately observed to pass 15 tests in 290.47 seconds through the
+runtime adapter. That is implementation/runtime-adapter evidence only: remote
+Eval was skipped without an authoritative host witness, and no Orna-engine
+execution witness was produced. The passing checks verify corpus loading,
+evidence redaction, witness fencing, and the rule that skipped or unimplemented
+work is not a pass. They do not establish full Orna 1.0.0 language, runtime,
+serving, storage, security, or interoperability conformance; those claims still
+require their own executed evidence.
 
 ## Linux distribution artifact
 

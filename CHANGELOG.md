@@ -7,9 +7,11 @@ been published.
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
-checkout is not a published production release. The canonical normative
-`spec` bundle is absent from both `./spec/` and `../spec/`, so this inventory
-must not be read as a conformance claim.
+checkout is not a published production release. The audited immutable
+normative reference bundle is maintained outside this checkout at
+`../reference/Orna-1.0.0`; its requirement ledger still records all 870
+requirements as not executed. This inventory must not be read as a conformance
+claim.
 
 The accepted release-mechanics decision reserves a future Debian 12 amd64
 release identity of `orna 1.0.0-1` with a signed `v1.0.0` source tag. That
