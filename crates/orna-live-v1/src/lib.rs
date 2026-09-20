@@ -3624,9 +3624,12 @@ fn redacted_failure_outcome(request: [u8; 16], fingerprint: [u8; 32]) -> Dispatc
     }
 }
 
-fn request_mismatch_diagnostic(request: [u8; 16]) -> Result<Envelope> {
+/// Builds a portable, redacted protocol diagnostic for a decoded client
+/// operation.  Operational rejections are ordinary protocol outputs, unlike
+/// malformed envelopes, so their request correlation is preserved here.
+fn portable_diagnostic(request: [u8; 16], watch: Option<[u8; 16]>, code: &str) -> Result<Envelope> {
     let diagnostic = FoundationDiagnostic::new(
-        SafeText::new(Error::RequestMismatch.code()).map_err(|_| Error::ApplicationRejected)?,
+        SafeText::new(code).map_err(|_| Error::ApplicationRejected)?,
         DiagnosticSeverity::Error,
         SafeText::redacted(),
     )
@@ -3645,7 +3648,10 @@ fn request_mismatch_diagnostic(request: [u8; 16]) -> Result<Envelope> {
         (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
         (OvbRaw::Int(1.into()), OvbRaw::Int(19.into())),
         (OvbRaw::Int(2.into()), OvbRaw::Bytes(request.to_vec())),
-        (OvbRaw::Int(3.into()), OvbRaw::Null),
+        (
+            OvbRaw::Int(3.into()),
+            watch.map_or(OvbRaw::Null, |watch| OvbRaw::Bytes(watch.to_vec())),
+        ),
         (
             OvbRaw::Int(4.into()),
             OvbRaw::Map(vec![(OvbRaw::Int(0.into()), diagnostic)]),
@@ -3655,6 +3661,10 @@ fn request_mismatch_diagnostic(request: [u8; 16]) -> Result<Envelope> {
     .encode()
     .map_err(|_| Error::ApplicationRejected)?;
     Envelope::decode(&bytes, ProtocolLimits::default()).map_err(|_| Error::ApplicationRejected)
+}
+
+fn request_mismatch_diagnostic(request: [u8; 16]) -> Result<Envelope> {
+    portable_diagnostic(request, None, Error::RequestMismatch.code())
 }
 
 fn request_mismatch_outcome(request: [u8; 16]) -> Result<DispatchOutcome> {
@@ -6321,13 +6331,11 @@ impl LiveTransport {
         };
         match event {
             SocketEvent::Binary(message) => {
-                let request_status_request = Envelope::decode(&message, self.host.limits.protocol)
-                    .ok()
-                    .and_then(|envelope| {
-                        matches!(envelope.message, Message::RequestStatus { .. })
-                            .then_some(envelope.request)
-                    })
-                    .flatten();
+                // The dispatcher performs the authoritative decode and
+                // validation. Keeping this decoded copy solely for error
+                // correlation lets well-formed operational failures remain
+                // on the socket instead of becoming transport failures.
+                let decoded = Envelope::decode(&message, self.host.limits.protocol).ok();
                 let dispatched = match self
                     .host
                     .dispatch_frame(socket.attachment, now, Frame::Binary(message), application)
@@ -6344,15 +6352,15 @@ impl LiveTransport {
                             self.close_socket(socket, now, 1002, application).await,
                         ));
                     }
-                    Err(Error::RequestMismatch) if request_status_request.is_some() => {
-                        return Ok(Some(self.websocket_output(DispatchOutcome {
-                            outcome: FrameOutcome::Accepted,
-                            response: Some(request_mismatch_diagnostic(
-                                request_status_request.expect("checked above"),
-                            )?),
-                        })?));
+                    Err(error) => {
+                        if let Some(envelope) = decoded.as_ref()
+                            && let Some(outcome) =
+                                self.operational_error_outcome(socket.attachment, envelope, error)?
+                        {
+                            return Ok(Some(self.websocket_output(outcome)?));
+                        }
+                        return Err(error);
                     }
-                    Err(error) => return Err(error),
                 };
                 Ok(Some(self.websocket_output(dispatched)?))
             }
@@ -6370,6 +6378,50 @@ impl LiveTransport {
                 Ok(Some(WebSocketOutput::Accepted(outcome)))
             }
         }
+    }
+
+    /// Converts decoded operational rejections into their portable diagnostic
+    /// form. This is intentionally narrower than the generic error mapping:
+    /// transport/framing failures must still close the socket, and attachment
+    /// boundary failures must not be misrepresented as a handle rejection.
+    fn operational_error_outcome(
+        &self,
+        attachment: [u8; 16],
+        envelope: &Envelope,
+        error: Error,
+    ) -> Result<Option<DispatchOutcome>> {
+        let Some(request) = envelope.request else {
+            return Ok(None);
+        };
+        let known_watch = self.host.attachments.get(&attachment).and_then(|session| {
+            envelope
+                .watch
+                .filter(|watch| self.host.watches.contains(&(*session, *watch)))
+        });
+        let (code, watch) = match error {
+            Error::RequestMismatch => (Error::RequestMismatch.code(), None),
+            Error::UnsupportedOperation => ("wire.unsupported", None),
+            // A denied event on a live watch is an action-handle rejection;
+            // one without a live watch (including resync) is an unknown
+            // operational handle. Only these request shapes use Denied for
+            // handle validation, keeping attachment-boundary denials outside
+            // the protocol diagnostic path.
+            Error::Denied if matches!(envelope.message, Message::Event { .. }) => {
+                if let Some(watch) = known_watch {
+                    ("wire.stale_action", Some(watch))
+                } else {
+                    ("wire.unknown_handle", None)
+                }
+            }
+            Error::Denied if matches!(envelope.message, Message::Resync) => {
+                ("wire.unknown_handle", None)
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(DispatchOutcome {
+            outcome: FrameOutcome::Accepted,
+            response: Some(portable_diagnostic(request, watch, code)?),
+        }))
     }
 
     async fn close_socket(
@@ -7193,6 +7245,34 @@ mod tests {
         }
     }
 
+    struct DeniedApplication;
+
+    impl LiveApplication for DeniedApplication {
+        fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+
+        fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+
+        fn event(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::Denied)
+        }
+    }
+
+    struct UnsupportedApplication;
+
+    impl LiveApplication for UnsupportedApplication {
+        fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+
+        fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+    }
+
     struct CancellationAwareApplication;
 
     impl LiveApplication for CancellationAwareApplication {
@@ -7598,6 +7678,156 @@ mod tests {
             *sent = fingerprint;
         }
         envelope.encode(Limits::default().protocol).unwrap()
+    }
+
+    fn mismatched_eval_frame(request: [u8; 16]) -> Vec<u8> {
+        let mut envelope =
+            Envelope::decode(&eval_frame(request), Limits::default().protocol).unwrap();
+        let Message::Eval { fingerprint, .. } = &mut envelope.message else {
+            unreachable!();
+        };
+        *fingerprint = [0; 32];
+        envelope.encode(Limits::default().protocol).unwrap()
+    }
+
+    fn event_frame(request: [u8; 16], watch: [u8; 16]) -> Vec<u8> {
+        let mut envelope = Envelope {
+            request: Some(request),
+            watch: Some(watch),
+            message: Message::Event {
+                revision: 0,
+                action: [6; 16],
+                value: CanonicalValue::unit(),
+                fingerprint: [0; 32],
+            },
+            extensions: BTreeMap::new(),
+        };
+        let fingerprint =
+            canonical_request_fingerprint([1; 16], &envelope, Limits::default().protocol).unwrap();
+        let Message::Event {
+            fingerprint: sent, ..
+        } = &mut envelope.message
+        else {
+            unreachable!();
+        };
+        *sent = fingerprint;
+        envelope.encode(Limits::default().protocol).unwrap()
+    }
+
+    fn masked_binary_frame(payload: &[u8]) -> Vec<u8> {
+        assert!(payload.len() <= usize::from(u16::MAX));
+        let mut frame = vec![0x82];
+        if payload.len() < 126 {
+            frame.push(0x80 | u8::try_from(payload.len()).unwrap());
+        } else {
+            frame.push(0xfe);
+            frame.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
+        }
+        let mask = [1, 2, 3, 4];
+        frame.extend(mask);
+        frame.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ mask[index % mask.len()]),
+        );
+        frame
+    }
+
+    fn diagnostic_output(outputs: Vec<WebSocketOutput>) -> Envelope {
+        assert_eq!(outputs.len(), 1);
+        let WebSocketOutput::Binary { outcome, payload } = outputs.into_iter().next().unwrap()
+        else {
+            panic!("expected a binary diagnostic");
+        };
+        assert_eq!(outcome, FrameOutcome::Accepted);
+        Envelope::decode(&payload, Limits::default().protocol).unwrap()
+    }
+
+    #[test]
+    fn websocket_operational_errors_are_correlated_diagnostics_without_closing_watches() {
+        let unrelated_watch = [9; 16];
+
+        let mut transport =
+            LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
+        transport.host.watches.insert(([1; 16], unrelated_watch));
+        let mut socket = WebSocketState::new([4; 16]);
+        let mut application = RejectingApplication;
+        let response = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&mismatched_eval_frame([5; 16])),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            response,
+            portable_diagnostic([5; 16], None, "wire.request_mismatch").unwrap()
+        );
+        assert!(!socket.closed);
+        assert!(transport.host.watches.contains(&([1; 16], unrelated_watch)));
+
+        let response = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&event_frame([6; 16], [7; 16])),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            response,
+            portable_diagnostic([6; 16], None, "wire.unknown_handle").unwrap()
+        );
+        assert!(!socket.closed);
+        assert!(transport.host.watches.contains(&([1; 16], unrelated_watch)));
+
+        let watch = [10; 16];
+        let mut transport =
+            LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
+        transport.host.watches.insert(([1; 16], watch));
+        let mut socket = WebSocketState::new([4; 16]);
+        let mut application = DeniedApplication;
+        let response = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&event_frame([11; 16], watch)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            response,
+            portable_diagnostic([11; 16], Some(watch), "wire.stale_action").unwrap()
+        );
+        assert!(!socket.closed);
+        assert!(transport.host.watches.contains(&([1; 16], watch)));
+
+        let unrelated_watch = [12; 16];
+        let mut transport =
+            LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
+        transport.host.watches.insert(([1; 16], unrelated_watch));
+        let mut socket = WebSocketState::new([4; 16]);
+        let mut application = UnsupportedApplication;
+        let response = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&eval_frame([13; 16])),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            response,
+            portable_diagnostic([13; 16], None, "wire.unsupported").unwrap()
+        );
+        assert!(!socket.closed);
+        assert!(transport.host.watches.contains(&([1; 16], unrelated_watch)));
     }
 
     fn request_status_frame(request: [u8; 16], target: [u8; 16], fingerprint: [u8; 32]) -> Vec<u8> {
