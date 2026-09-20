@@ -20,7 +20,8 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use parquet::{
-    basic::{Compression, Encoding, PageType, Type},
+    basic::{Compression, ConvertedType, Encoding, PageType, Type},
+    column::reader::ColumnReader,
     file::reader::{FileReader, SerializedFileReader},
 };
 use sha2::{Digest, Sha256};
@@ -583,7 +584,8 @@ fn verify_physical_metadata(
     if schema_descriptor_table(&descriptor)? != table {
         return Err(RepositoryError::InvalidCompactManifest);
     }
-    verify_physical_columns(columns, metadata.schema_descr(), &descriptor, role)?;
+    let ovb_columns = verify_physical_columns(columns, metadata.schema_descr(), &descriptor, role)?;
+    verify_ovb_values(&reader, &ovb_columns)?;
     if reader.num_row_groups() == 0 {
         return Err(RepositoryError::InvalidCompactManifest);
     }
@@ -684,7 +686,7 @@ fn verify_physical_columns(
     schema: &parquet::schema::types::SchemaDescriptor,
     descriptor: &SchemaDescriptor,
     segment_role: CompactSegmentRole,
-) -> Result<(), RepositoryError> {
+) -> Result<BTreeMap<usize, OvbFallbackKind>, RepositoryError> {
     let required_fields = required_physical_fields(descriptor, segment_role)?;
     let value =
         CanonicalValue::decode(columns).map_err(|_| RepositoryError::InvalidCompactManifest)?;
@@ -696,7 +698,9 @@ fn verify_physical_columns(
     }
     let mut previous = None;
     let mut mapped_fields = BTreeSet::new();
-    for (descriptor, column) in descriptors.iter().zip(schema.columns()) {
+    let mut ovb_columns = BTreeMap::new();
+    for (column_index, (descriptor, column)) in descriptors.iter().zip(schema.columns()).enumerate()
+    {
         let OvbRaw::Array(fields) = descriptor else {
             return Err(RepositoryError::InvalidCompactManifest);
         };
@@ -714,7 +718,7 @@ fn verify_physical_columns(
         };
         let field_id =
             Uuid::from_slice(field_id).map_err(|_| RepositoryError::InvalidCompactManifest)?;
-        let expected_type = required_fields
+        let (expected_type, is_key) = required_fields
             .get(&field_id)
             .ok_or(RepositoryError::InvalidCompactManifest)?;
         if !mapped_fields.insert(field_id) {
@@ -760,6 +764,17 @@ fn verify_physical_columns(
             type_name == "Int" && encoding == "int64" && column.physical_type() == Type::INT64;
         let bool_mapping =
             type_name == "Bool" && encoding == "bool" && column.physical_type() == Type::BOOLEAN;
+        let ovb_int_mapping =
+            type_name == "Int" && encoding == "ovb" && column.physical_type() == Type::BYTE_ARRAY;
+        let ovb_bool_mapping =
+            type_name == "Bool" && encoding == "ovb" && column.physical_type() == Type::BYTE_ARRAY;
+        let ovb_kind = if ovb_int_mapping {
+            Some(OvbFallbackKind::Int)
+        } else if ovb_bool_mapping {
+            Some(OvbFallbackKind::Bool)
+        } else {
+            None
+        };
         let string_mapping = type_name == "Str"
             && encoding == "utf8"
             && column.physical_type() == Type::BYTE_ARRAY
@@ -768,13 +783,30 @@ fn verify_physical_columns(
             && encoding == "date"
             && column.physical_type() == Type::INT32
             && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Date);
+        if ovb_kind.is_some() && !is_key {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
         if type_code.to_string() != "0"
-            || !(int_mapping || bool_mapping || string_mapping || date_mapping)
-            || !matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty())
+            || !(int_mapping
+                || bool_mapping
+                || ovb_int_mapping
+                || ovb_bool_mapping
+                || string_mapping
+                || date_mapping)
+            || !matches!(&fields[4], OvbRaw::Array(parameters) if
+            if ovb_kind.is_some() {
+                parameters == &[OvbRaw::Int(1.into())]
+            } else {
+                parameters.is_empty()
+            })
             || (!(string_mapping || date_mapping) && column.logical_type_ref().is_some())
+            || (ovb_kind.is_some() && column.converted_type() != ConvertedType::NONE)
             || column.max_rep_level() != 0
         {
             return Err(RepositoryError::InvalidCompactManifest);
+        }
+        if let Some(kind) = ovb_kind {
+            ovb_columns.insert(column_index, kind);
         }
         let path = path.join(".");
         if previous
@@ -788,6 +820,62 @@ fn verify_physical_columns(
     if mapped_fields.len() != required_fields.len() {
         return Err(RepositoryError::InvalidCompactManifest);
     }
+    Ok(ovb_columns)
+}
+
+#[derive(Clone, Copy)]
+enum OvbFallbackKind {
+    Int,
+    Bool,
+}
+
+fn verify_ovb_values(
+    reader: &SerializedFileReader<Bytes>,
+    columns: &BTreeMap<usize, OvbFallbackKind>,
+) -> Result<(), RepositoryError> {
+    for (&column_index, &kind) in columns {
+        for row_group_index in 0..reader.num_row_groups() {
+            let row_group = reader
+                .get_row_group(row_group_index)
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let expected_rows = usize::try_from(row_group.metadata().num_rows())
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let column = row_group
+                .get_column_reader(column_index)
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let ColumnReader::ByteArrayColumnReader(mut column) = column else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            let mut values = Vec::with_capacity(expected_rows);
+            let mut records = 0usize;
+            while records < expected_rows {
+                let remaining = expected_rows - records;
+                let (read_records, values_read, levels_read) = column
+                    .read_records(remaining, None, None, &mut values)
+                    .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                if read_records == 0 || values_read != read_records || levels_read != read_records {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+                records = records
+                    .checked_add(read_records)
+                    .ok_or(RepositoryError::InvalidCompactManifest)?;
+            }
+            if values.len() != expected_rows {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            for value in values {
+                let value = CanonicalValue::decode(value.data())
+                    .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                let supported = match kind {
+                    OvbFallbackKind::Int => matches!(value.raw(), OvbRaw::Int(_)),
+                    OvbFallbackKind::Bool => matches!(value.raw(), OvbRaw::Bool(_)),
+                };
+                if !supported {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -799,7 +887,7 @@ fn verify_physical_columns(
 fn required_physical_fields(
     descriptor: &SchemaDescriptor,
     segment_role: CompactSegmentRole,
-) -> Result<BTreeMap<Uuid, &OvbRaw>, RepositoryError> {
+) -> Result<BTreeMap<Uuid, (&OvbRaw, bool)>, RepositoryError> {
     let OvbRaw::Map(entries) = descriptor.raw() else {
         return Err(RepositoryError::InvalidCompactManifest);
     };
@@ -829,6 +917,7 @@ fn required_physical_fields(
         };
         let field_id =
             Uuid::from_slice(field_id).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        let role_is_key = role.to_string() == "0";
         let required_for_segment = match (segment_role, role.to_string().as_str()) {
             (CompactSegmentRole::Data | CompactSegmentRole::Replacement, "0" | "1")
             | (CompactSegmentRole::Deletion, "0") => true,
@@ -836,7 +925,11 @@ fn required_physical_fields(
             | (CompactSegmentRole::Deletion, "1" | "2") => false,
             _ => return Err(RepositoryError::InvalidCompactManifest),
         };
-        if required_for_segment && required.insert(field_id, logical_type).is_some() {
+        if required_for_segment
+            && required
+                .insert(field_id, (logical_type, role_is_key))
+                .is_some()
+        {
             return Err(RepositoryError::InvalidCompactManifest);
         }
     }
