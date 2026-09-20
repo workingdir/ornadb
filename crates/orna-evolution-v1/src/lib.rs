@@ -224,6 +224,10 @@ pub enum PlanningError {
         field: ObjectId,
         reason: &'static str,
     },
+    IncompatibleTable {
+        table: ObjectId,
+        reason: &'static str,
+    },
     RequiredFieldNeedsBackfill {
         table: ObjectId,
         field: ObjectId,
@@ -270,6 +274,12 @@ pub fn plan(
     let mut operations = Vec::new();
     for (id, old) in old_tables {
         let new = new_tables[&id];
+        if old.explicit_key != new.explicit_key {
+            return Err(PlanningError::IncompatibleTable {
+                table: id,
+                reason: "explicit-key mode changed",
+            });
+        }
         if old.name != new.name {
             operations.push(MigrationOperation::RenameTable {
                 table: id,
@@ -715,6 +725,22 @@ mod tests {
         ];
         for next in cases {
             assert!(plan(&old, &next, &request(vec![])).is_err());
+        }
+    }
+
+    #[test]
+    fn explicit_key_mode_changes_fail_closed_in_both_directions() {
+        let explicit = schema(table(true, vec![field(2, "name", false)]));
+        let automatic = schema(table(false, vec![field(2, "name", false)]));
+
+        for (from, to) in [(&explicit, &automatic), (&automatic, &explicit)] {
+            assert!(matches!(
+                plan(from, to, &request(vec![])),
+                Err(PlanningError::IncompatibleTable {
+                    table,
+                    reason: "explicit-key mode changed",
+                }) if table == id(1)
+            ));
         }
     }
 
