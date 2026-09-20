@@ -121,9 +121,9 @@ pub struct DurableSysInvocationObservation {
     pub ended: Option<SystemTime>,
     /// `sys.Invocation.status`, using the exact 1.0.0 closed vocabulary.
     pub status: InvocationStatus,
-    /// `sys.Invocation.function`, when its catalogue ObjectRef witness was
-    /// retained and revalidated.
-    pub function: Option<FunctionRef>,
+    /// `sys.Invocation.function`, backed by the retained catalogue ObjectRef
+    /// witness and revalidated against the pinned admission capture.
+    pub function: FunctionRef,
     /// `sys.Invocation.result_type`, when its TypeRef witness was retained and
     /// revalidated.
     pub result_type: Option<TypeRef>,
@@ -132,12 +132,11 @@ pub struct DurableSysInvocationObservation {
 /// The currently supportable, durable subset of one public
 /// `sys.InvocationArgument` row.
 ///
-/// The durable metadata is always redacted. It does not retain a
-/// `sys.TypeRef` or recoverable `sys.Value`, so those fields are deliberately
-/// absent rather than represented by fabricated references or values. The
-/// private value digest is also absent here: hashes of protected,
-/// low-entropy values remain dictionary-testable and must not cross the
-/// public system-value boundary.
+/// The durable metadata is always redacted. It retains a `sys.TypeRef` only
+/// when the persisted catalogue witness is authoritative; otherwise the
+/// argument is not projected. It never exposes a recoverable `sys.Value` or
+/// the private value digest: hashes of protected, low-entropy values remain
+/// dictionary-testable and must not cross the public system-value boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableSysInvocationArgumentObservation {
     /// `sys.InvocationArgument.reference`.
@@ -148,9 +147,9 @@ pub struct DurableSysInvocationArgumentObservation {
     pub name: String,
     /// `sys.InvocationArgument.position`.
     pub position: u64,
-    /// `sys.InvocationArgument.type`, when a checked type witness was
-    /// retained. Missing evidence remains unavailable.
-    pub type_reference: Option<TypeRef>,
+    /// `sys.InvocationArgument.type`, backed by a checked retained catalogue
+    /// witness. An argument without this required evidence is not projected.
+    pub type_reference: TypeRef,
     /// `sys.InvocationArgument.digest`; protected argument observations do not
     /// expose the private value digest.
     pub digest: Option<[u8; 32]>,
@@ -205,15 +204,20 @@ impl SealedInvocationObservation {
         let function = self
             .function_reference
             .as_ref()
-            .map(|reference| {
+            .ok_or_else(|| {
+                observation_invariant(
+                    &record,
+                    "public invocation observation requires an authoritative function reference",
+                )
+            })
+            .and_then(|reference| {
                 validate_catalogue_function_reference(
                     reference,
                     &self.admission_capture,
                     self.function,
                     &record,
                 )
-            })
-            .transpose()?;
+            })?;
         let result_type = self
             .result_type_reference
             .as_ref()
@@ -234,15 +238,19 @@ impl SealedInvocationObservation {
                     "argument reference disagrees with persisted admission capture",
                 ));
             }
-            if let Some(type_reference) = &argument.type_reference {
-                let expected_type = argument_type_reference_target(&argument.type_kind, &record)?;
-                validate_catalogue_type_reference(
-                    type_reference,
-                    &self.admission_capture,
-                    Some(expected_type),
+            let type_reference = argument.type_reference.as_ref().ok_or_else(|| {
+                observation_invariant(
                     &record,
-                )?;
-            }
+                    "public invocation argument requires an authoritative type reference",
+                )
+            })?;
+            let expected_type = argument_type_reference_target(&argument.type_kind, &record)?;
+            validate_catalogue_type_reference(
+                type_reference,
+                &self.admission_capture,
+                Some(expected_type),
+                &record,
+            )?;
         }
         Ok(DurableSysInvocationObservation {
             reference: self.reference.clone(),
@@ -251,16 +259,23 @@ impl SealedInvocationObservation {
             arguments: self
                 .arguments
                 .iter()
-                .map(|argument| DurableSysInvocationArgumentObservation {
-                    reference: argument.reference.clone(),
-                    invocation: self.reference.clone(),
-                    name: argument.name.clone(),
-                    position: argument.position,
-                    type_reference: argument.type_reference.clone(),
-                    digest: None,
-                    redacted: argument.redacted,
+                .map(|argument| {
+                    Ok(DurableSysInvocationArgumentObservation {
+                        reference: argument.reference.clone(),
+                        invocation: self.reference.clone(),
+                        name: argument.name.clone(),
+                        position: argument.position,
+                        type_reference: argument.type_reference.clone().ok_or_else(|| {
+                            observation_invariant(
+                                &record,
+                                "public invocation argument requires an authoritative type reference",
+                            )
+                        })?,
+                        digest: None,
+                        redacted: argument.redacted,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, PostgresKernelError>>()?,
             started: Some(self.started),
             ended: self.ended,
             status: self.status.into(),
@@ -1312,8 +1327,8 @@ mod tests {
     use super::*;
     use orna_foundation_v1::{
         CanonicalSnapshot, OvbRaw, RowRef, SYS_INVOCATION_ARGUMENT_TABLE_ID,
-        SYS_INVOCATION_TABLE_ID, SystemReferenceError, Value, object_reference, type_reference,
-        validate_invocation_argument_reference, validate_invocation_reference,
+        SYS_INVOCATION_TABLE_ID, SystemReferenceError, Value, function_reference, object_reference,
+        type_reference, validate_invocation_argument_reference, validate_invocation_reference,
     };
     use sha2::{Digest, Sha256};
 
@@ -1458,14 +1473,16 @@ mod tests {
         status: SealedInvocationObservationStatus,
     ) -> SealedInvocationObservation {
         let invocation = InvocationId::from_bytes([invocation_byte; 16]);
+        let function = FunctionId::from_bytes([5; 16]);
+        let argument_type = orna_core::TypeId::from_bytes([8; 16]);
         SealedInvocationObservation {
             admission_capture: capture.clone(),
             reference: invocation_observation_reference(capture, invocation, "test").unwrap(),
             invocation,
             source_revision: SourceRevisionId::from_bytes([3; 16]),
             catalogue_revision: CatalogueRevisionId::from_bytes([4; 16]),
-            function: FunctionId::from_bytes([5; 16]),
-            function_reference: None,
+            function,
+            function_reference: Some(retained_function_reference(capture, function)),
             result_type_reference: None,
             status,
             started: SystemTime::UNIX_EPOCH,
@@ -1478,11 +1495,23 @@ mod tests {
                 position: 0,
                 parameter: orna_core::ParameterId::from_bytes([6; 16]),
                 name: "value".to_owned(),
-                type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
-                type_reference: None,
+                type_kind: SealedInvocationArgumentTypeKind::Named(argument_type),
+                type_reference: Some(retained_type_reference(capture, argument_type)),
                 redacted: true,
             }],
         }
+    }
+
+    fn retained_function_reference(capture: &CwdCapture, function_id: FunctionId) -> FunctionRef {
+        function_reference(
+            object_reference(
+                capture.database_id(),
+                function_id.to_bytes(),
+                capture.snapshot().clone(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
     }
 
     fn retained_type_reference(capture: &CwdCapture, type_id: orna_core::TypeId) -> TypeRef {
@@ -1541,6 +1570,24 @@ mod tests {
     }
 
     #[test]
+    fn durable_sys_projection_rejects_missing_required_function_witness() {
+        let mut internal =
+            observation(&capture(1), 2, SealedInvocationObservationStatus::Succeeded);
+        internal.function_reference = None;
+
+        assert!(internal.durable_sys_projection().is_err());
+    }
+
+    #[test]
+    fn durable_sys_projection_rejects_missing_required_argument_type_witness() {
+        let mut internal =
+            observation(&capture(1), 2, SealedInvocationObservationStatus::Succeeded);
+        internal.arguments[0].type_reference = None;
+
+        assert!(internal.durable_sys_projection().is_err());
+    }
+
+    #[test]
     fn durable_sys_projection_retains_matching_named_argument_type_witness() {
         let admitted = capture(1);
         let type_id = orna_core::TypeId::from_bytes([8; 16]);
@@ -1552,7 +1599,7 @@ mod tests {
 
         assert_eq!(
             projection.arguments[0].type_reference,
-            internal.arguments[0].type_reference
+            internal.arguments[0].type_reference.clone().unwrap()
         );
     }
 
@@ -1642,20 +1689,16 @@ mod tests {
     }
 
     #[test]
-    fn durable_sys_projection_does_not_substitute_implementation_ids_for_catalogue_references() {
+    fn durable_sys_projection_rejects_private_ids_that_disagree_with_catalogue_witnesses() {
         let admitted = capture(1);
         let retained = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
-        let expected = retained.durable_sys_projection().unwrap();
 
         let mut different_private_ids = retained;
         different_private_ids.function = FunctionId::from_bytes([9; 16]);
         different_private_ids.arguments[0].type_kind =
             SealedInvocationArgumentTypeKind::Named(orna_core::TypeId::from_bytes([8; 16]));
 
-        assert_eq!(
-            different_private_ids.durable_sys_projection().unwrap(),
-            expected
-        );
+        assert!(different_private_ids.durable_sys_projection().is_err());
     }
 
     #[test]
@@ -1691,8 +1734,13 @@ mod tests {
             position: 1,
             parameter: orna_core::ParameterId::from_bytes([8; 16]),
             name: "next".to_owned(),
-            type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
-            type_reference: None,
+            type_kind: SealedInvocationArgumentTypeKind::Named(orna_core::TypeId::from_bytes(
+                [8; 16],
+            )),
+            type_reference: Some(retained_type_reference(
+                &admitted,
+                orna_core::TypeId::from_bytes([8; 16]),
+            )),
             redacted: true,
         });
         let retained = vec![
@@ -1877,8 +1925,13 @@ mod tests {
                 position: position + 1,
                 parameter: orna_core::ParameterId::from_bytes([3; 16]),
                 name: "later".to_owned(),
-                type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
-                type_reference: None,
+                type_kind: SealedInvocationArgumentTypeKind::Named(orna_core::TypeId::from_bytes(
+                    [8; 16],
+                )),
+                type_reference: Some(retained_type_reference(
+                    &admitted,
+                    orna_core::TypeId::from_bytes([8; 16]),
+                )),
                 redacted: true,
             });
         internal.arguments.swap(0, 1);
@@ -1904,8 +1957,8 @@ mod tests {
                 position: first.position + 1,
                 parameter: first.parameter,
                 name: "same-parameter".to_owned(),
-                type_kind: first.type_kind,
-                type_reference: None,
+                type_kind: first.type_kind.clone(),
+                type_reference: first.type_reference.clone(),
                 redacted: true,
             });
 

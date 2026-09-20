@@ -127,7 +127,9 @@ pub use sealed_invocation::{
     SealedInvocationAdmissionContext, SealedInvocationContinuation, SealedInvocationExecution,
     SealedInvocationOperation, SealedInvocationPreflight, SealedInvocationResult,
 };
-pub use sealed_lifecycle_finalization::SealedInvocationLifecycleFinalization;
+pub use sealed_lifecycle_finalization::{
+    SealedInvocationLifecycleFinalization, SealedInvocationWriterLease,
+};
 #[cfg(test)]
 use sealed_server_contract::{
     bind_authenticated_resource_arguments, classify_sealed_server_error,
