@@ -51,7 +51,7 @@ fn canonical_key_order(left: &[u8], right: &[u8]) -> Result<Ordering, Repository
         CanonicalValue::decode(left).map_err(|_| RepositoryError::InvalidCompactManifest)?;
     let right_value =
         CanonicalValue::decode(right).map_err(|_| RepositoryError::InvalidCompactManifest)?;
-    compare_canonical_key_raw(left_value.raw(), right_value.raw()).or_else(|_| Ok(left.cmp(right)))
+    compare_canonical_key_raw(left_value.raw(), right_value.raw())
 }
 
 fn compare_canonical_key_raw(left: &OvbRaw, right: &OvbRaw) -> Result<Ordering, RepositoryError> {
@@ -4093,6 +4093,27 @@ mod tests {
             value >>= 7;
         }
         output.push(value as u8);
+    }
+
+    #[test]
+    fn compact_key_order_rejects_incompatible_canonical_types() {
+        let integer = CanonicalValue::new(OvbRaw::Int(1.into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let text = CanonicalValue::new(OvbRaw::Text("1".to_owned()))
+            .unwrap()
+            .encode()
+            .unwrap();
+
+        assert!(matches!(
+            canonical_key_order(&integer, &text),
+            Err(RepositoryError::InvalidCompactManifest)
+        ));
+        assert!(matches!(
+            canonical_key_order(&text, &integer),
+            Err(RepositoryError::InvalidCompactManifest)
+        ));
     }
 
     #[test]
