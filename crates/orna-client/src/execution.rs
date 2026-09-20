@@ -2150,6 +2150,7 @@ fn resource_type_matches_id(
                         StandardScalar::BinaryLargeObject => {
                             "orna.kernel.value.binary-large-object@1"
                         }
+                        StandardScalar::Uuid => "orna.kernel.value.uuid@1",
                         _ => return false,
                     }
             }),
@@ -3469,6 +3470,7 @@ pub(super) fn runtime_scalar_matches(scalar: StandardScalar, value: &RuntimeValu
             | (StandardScalar::Float, RuntimeValue::Float(_))
             | (StandardScalar::CharacterLargeObject, RuntimeValue::Text(_))
             | (StandardScalar::BinaryLargeObject, RuntimeValue::Bytes(_))
+            | (StandardScalar::Uuid, RuntimeValue::Uuid(_))
     )
 }
 
@@ -3489,6 +3491,7 @@ pub(super) fn runtime_value_matches(
                 | (StandardScalar::Float, RuntimeValue::Float(_))
                 | (StandardScalar::CharacterLargeObject, RuntimeValue::Text(_))
                 | (StandardScalar::BinaryLargeObject, RuntimeValue::Bytes(_))
+                | (StandardScalar::Uuid, RuntimeValue::Uuid(_))
         )
     };
     match expected {
@@ -3524,6 +3527,7 @@ pub(super) fn runtime_value_matches(
                 "orna.kernel.value.binary-large-object@1" => {
                     scalar_matches(StandardScalar::BinaryLargeObject)
                 }
+                "orna.kernel.value.uuid@1" => scalar_matches(StandardScalar::Uuid),
                 _ => false,
             }
         }

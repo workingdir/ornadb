@@ -1800,9 +1800,9 @@ impl ClientResourceValueKind {
                 | StandardScalar::BigInt
                 | StandardScalar::Float
                 | StandardScalar::CharacterLargeObject
-                | StandardScalar::BinaryLargeObject => Self::Scalar(scalar),
+                | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid => Self::Scalar(scalar),
                 StandardScalar::Decimal
-                | StandardScalar::Uuid
                 | StandardScalar::Date
                 | StandardScalar::Time
                 | StandardScalar::Timestamp
@@ -1840,6 +1840,7 @@ impl ClientResourceValueKind {
                     "orna.kernel.value.binary-large-object@1" => {
                         Self::Scalar(StandardScalar::BinaryLargeObject)
                     }
+                    "orna.kernel.value.uuid@1" => Self::Scalar(StandardScalar::Uuid),
                     _ => Self::Reject,
                 }
             }
@@ -2758,8 +2759,8 @@ fn stream_item_descriptor(expected: ResolvedType) -> Option<TypeDescriptor> {
                     orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID
                 }
                 StandardScalar::BinaryLargeObject => orna_standard::BINARY_LARGE_OBJECT_TYPE_ID,
+                StandardScalar::Uuid => orna_standard::UUID_TYPE_ID,
                 StandardScalar::Decimal
-                | StandardScalar::Uuid
                 | StandardScalar::Date
                 | StandardScalar::Time
                 | StandardScalar::Timestamp
@@ -2944,6 +2945,7 @@ fn supported_stream_item_descriptor(
                     | "orna.kernel.value.float@1"
                     | "orna.kernel.value.character-large-object@1"
                     | "orna.kernel.value.binary-large-object@1"
+                    | "orna.kernel.value.uuid@1"
             )
             .then_some(descriptor)
         }
@@ -3638,6 +3640,9 @@ fn client_reference_field_value_matches(
         }
         "orna.kernel.value.binary-large-object@1" => {
             execution::runtime_scalar_matches(StandardScalar::BinaryLargeObject, value)
+        }
+        "orna.kernel.value.uuid@1" => {
+            execution::runtime_scalar_matches(StandardScalar::Uuid, value)
         }
         _ => false,
     }
