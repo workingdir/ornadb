@@ -3,9 +3,10 @@
 **Status:** Accepted
 
 **Implementation status:** The test-only headless fixture and focused conformance
-proof described here are implemented. Production runtime loading, toolkit, and
-ABI decisions remain deferred; accepted CLIENT resource successors are governed
-by work ADRs 0077 and 0078.
+proof described here are implemented. Work ADR 0082 separately accepts the
+bounded Qt v1 production provider. Production runtime loading, toolkit, and
+ABI decisions beyond that boundary remain deferred; accepted CLIENT resource
+successors are governed by work ADRs 0077 and 0078.
 
 ## Decision
 
@@ -229,8 +230,9 @@ selection, event-loop integration, native ownership, and toolkit-specific
 behaviour.
 
 The canonical status change, header update, work ADR acceptance, private
-fixture, and focused proof are complete. Remaining work is the separate
-production runtime contract and implementation.
+fixture, and focused proof are complete. Production runtime work beyond the
+bounded Qt v1 provider accepted by work ADR 0082 remains separate and
+deferred.
 
 ## Alternatives considered
 
@@ -239,7 +241,8 @@ production runtime contract and implementation.
 This would force unresolved allocator, thread, callback, shutdown, and event
 semantics into a toolkit adapter. It would also add native deployment and
 platform failures before the semantic contract is testable. Rejected for this
-slice; production runtimes remain deferred.
+slice; production runtime work beyond the bounded Qt v1 provider accepted by
+work ADR 0082 remains deferred.
 
 ### Add a public runtime loader now
 
