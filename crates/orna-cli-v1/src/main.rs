@@ -452,10 +452,21 @@ impl Session {
             return Ok(false);
         }
         self.state = SessionState::Closing;
+        let mut first_error = None;
         for child in self.owned.iter().copied() {
-            if !adapter.is_terminal(child)? {
-                adapter.cancel(child)?;
+            let should_cancel = match adapter.is_terminal(child) {
+                Ok(terminal) => !terminal,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    true
+                }
+            };
+            if should_cancel && let Err(error) = adapter.cancel(child) {
+                first_error.get_or_insert(error);
             }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         adapter.drain_terminal()?;
         adapter.close_transport()?;
@@ -2442,6 +2453,7 @@ mod tests {
     struct Recording {
         calls: Vec<String>,
         terminal: BTreeSet<u64>,
+        fail_cancel: BTreeSet<u64>,
         fail_drain: bool,
     }
     impl SessionAdapter for Recording {
@@ -2451,6 +2463,13 @@ mod tests {
         }
         fn cancel(&mut self, child: u64) -> Result<(), Diagnostic> {
             self.calls.push(format!("cancel:{child}"));
+            if self.fail_cancel.contains(&child) {
+                return Err(Diagnostic::target(
+                    "E1203",
+                    "session child cancellation is incomplete",
+                    "retry close after child cancellation becomes available",
+                ));
+            }
             Ok(())
         }
         fn drain_terminal(&mut self) -> Result<(), Diagnostic> {
@@ -2513,6 +2532,47 @@ mod tests {
                 "cancel:2",
                 "drain",
                 "close"
+            ]
+        );
+    }
+    #[test]
+    fn failed_child_cancellation_still_attempts_every_owned_child() {
+        let mut session = Session::new();
+        session.own(2).expect("open");
+        session.own(3).expect("open");
+        let mut adapter = Recording {
+            fail_cancel: BTreeSet::from([2]),
+            ..Recording::default()
+        };
+
+        assert_eq!(
+            session
+                .close(&mut adapter)
+                .expect_err("first cancellation fails")
+                .code,
+            "E1203"
+        );
+        assert_eq!(
+            adapter.calls,
+            ["terminal:2", "cancel:2", "terminal:3", "cancel:3"]
+        );
+        assert_eq!(session.own(4).expect_err("admission sealed").code, "E1201");
+
+        adapter.fail_cancel.clear();
+        assert_eq!(session.close(&mut adapter), Ok(true));
+        assert_eq!(
+            adapter.calls,
+            [
+                "terminal:2",
+                "cancel:2",
+                "terminal:3",
+                "cancel:3",
+                "terminal:2",
+                "cancel:2",
+                "terminal:3",
+                "cancel:3",
+                "drain",
+                "close",
             ]
         );
     }
