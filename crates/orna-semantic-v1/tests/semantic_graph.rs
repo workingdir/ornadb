@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
+
 use orna_semantic_v1::{
     Catalogue, DIAG_AMBIGUOUS, DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT,
     DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, DIAG_IMPORT, DIAG_LEGACY_RESULT,
     DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED,
-    DIAG_UNSUPPORTED, ModuleInput, StandardDependencyProfile, Type, analyze,
+    DIAG_UNSUPPORTED, EffectSummary, ModuleHeader, ModuleInput, Namespace, Symbol, SymbolKind,
+    StandardDependencyProfile, Type, analyze,
     analyze_with_catalogue,
 };
 
@@ -1569,6 +1572,66 @@ fn nominal_targets_reject_overlapping_protocol_implementations() {
 }
 
 #[test]
+fn frozen_nominal_nested_impl_uses_authoritative_fixture_surface() {
+    let source = r#"
+        pub type EmailAddress {
+            value: Str,
+
+            impl From<Str> {
+                fn from(value): EmailAddress {
+                    if !valid_email(value) {
+                        fail(error(
+                            code: "email.invalid",
+                            message: "invalid email address",
+                        ));
+                    }
+                    EmailAddress { value: value }
+                }
+            }
+
+            impl From<EmailHeader> {
+                fn from(header) = EmailAddress.from(header.address);
+            }
+
+            impl Display {
+                fn display(self, context): Str = self.value;
+            }
+        }
+    "#;
+    let valid =
+        analyze_with_catalogue(&[ModuleInput::new("nominal-type-nested-impl.orna", source)], &Catalogue::authoritative_fixture());
+    assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
+
+    let unresolved_helper = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "nominal-type-nested-impl-missing-helper.orna",
+            source.replace("valid_email", "missing_email"),
+        )],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(has(&unresolved_helper, DIAG_UNRESOLVED));
+
+    let invalid_source = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "nominal-type-nested-impl-missing-source.orna",
+            source.replace("EmailHeader", "MissingHeader"),
+        )],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(has(&invalid_source, DIAG_TYPE));
+    assert!(!has(&invalid_source, DIAG_UNRESOLVED));
+    let nonexact_source = format!("{source}\npub fn bad() = EmailAddress.from(null);");
+    let nonexact = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "nominal-type-nested-impl-nonexact-source.orna",
+            nonexact_source,
+        )],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(has(&nonexact, DIAG_TYPE));
+}
+
+#[test]
 fn table_rows_reject_overlapping_protocol_implementations() {
     let distinct = analyze(&[ModuleInput::new(
         "distinct-table-conversions.orna",
@@ -2197,6 +2260,118 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
 }
 
 #[test]
+fn frozen_historical_program_resolves_through_authoritative_projection() {
+    let source = include_str!(
+        "../../../../reference/Orna-1.0.0/examples/valid/historical-program.orna"
+    );
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("historical-program.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
+    let catalogue = Catalogue::authoritative_fixture();
+    for source in [
+        r#"
+            pub fn missing() {
+                let old = sys.database.as_of(sys.snapshot("HEAD~10"));
+                old.energy.missing()
+            }
+        "#,
+        r#"
+            pub fn unknown_system_member() {
+                let old = sys.database.as_of(sys.snapshot("HEAD~10"));
+                old.sys.Unknown
+            }
+        "#,
+        r#"
+            pub fn mixed() {
+                let old = sys.database.as_of(sys.snapshot("HEAD~10"));
+                old.energy.Reading.as_of(sys.snapshot("HEAD"))
+            }
+        "#,
+        r#"
+            pub fn wrong_arity() {
+                let old = sys.database.as_of(sys.snapshot("HEAD~10"));
+                old.energy.daily(1)
+            }
+        "#,
+    ] {
+        let result = analyze_with_catalogue(
+            &[ModuleInput::new("historical-negative.orna", source)],
+            &catalogue,
+        );
+        assert!(!result.is_ok(), "{source}: {:?}", result.diagnostics);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic.code() == DIAG_TYPE || diagnostic.code() == DIAG_UNRESOLVED
+                }),
+            "{source}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+fn historical_effect_catalogue(effect: &str) -> Catalogue {
+    let symbol = Symbol {
+        kind: SymbolKind::Function,
+        ty: Type::Function {
+            parameters: Vec::new(),
+            parameter_names: Some(Vec::new()),
+            default_parameters: std::collections::BTreeSet::new(),
+            result: Box::new(Type::Null),
+        },
+        public: true,
+        effects: EffectSummary {
+            effects: std::collections::BTreeSet::from([effect.to_owned()]),
+            may_fail: true,
+        },
+        table_schema: None,
+    };
+    let symbols = std::collections::BTreeMap::from([("run".to_owned(), symbol)]);
+    Catalogue::authoritative_core().with_historical_modules([ModuleHeader {
+        namespace: Namespace(vec!["unsafe".into()]),
+        exports: symbols.clone(),
+        symbols,
+        prelude_exports: std::collections::BTreeSet::new(),
+        implicit: true,
+    }])
+}
+
+#[test]
+fn historical_callables_are_read_effect_only() {
+    for effect in ["database write", "checkpoint", "secret", "network", "external"] {
+        let result = analyze_with_catalogue(
+            &[ModuleInput::new(
+                "historical-effect.orna",
+                r#"
+                    pub fn invoke() {
+                        let old = sys.database.as_of(sys.snapshot("HEAD~10"));
+                        old.unsafe.run()
+                    }
+                "#,
+            )],
+            &historical_effect_catalogue(effect),
+        );
+        assert!(!result.is_ok(), "{effect}: {:?}", result.diagnostics);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code() == DIAG_UNSUPPORTED),
+            "{effect}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
 fn qualified_kwh_units_share_the_closed_cross_database_identity() {
     let result = analyze(&[ModuleInput::new(
         "units.orna",
@@ -2246,6 +2421,100 @@ fn parenthesized_pipeline_lambdas_receive_the_input_type_context() {
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+#[test]
+fn authoritative_lambda_fixture_infers_comparison_shapes_and_connector_effects() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "lambda.orna",
+            r#"
+                pub fn over(limit: Money<GBP>) =
+                    transaction => transaction.amount > limit;
+                pub fn direct(limit: Money<GBP>) =
+                    transaction => transaction > limit;
+                pub fn between(min: Int, max: Int) =
+                    value => value >= min && value <= max;
+                pub fn sync_selected(account: Account) =
+                    () => finance.openbanking.sync(account);
+            "#,
+        )],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "lambda")
+        .expect("lambda module");
+    assert!(matches!(
+        &module.exports["over"].ty,
+        Type::Function { result, .. }
+            if matches!(
+                result.as_ref(),
+                Type::Function { parameters, result, .. }
+                    if parameters == &[Type::Record(BTreeMap::from([(
+                        "amount".into(),
+                        Type::Applied {
+                            base: "Money".into(),
+                            arguments: vec![Type::Named("GBP".into())],
+                        },
+                    )]))]
+                        && result.as_ref() == &Type::Bool
+            )
+    ));
+    assert!(matches!(
+        &module.exports["direct"].ty,
+        Type::Function { result, .. }
+            if matches!(
+                result.as_ref(),
+                Type::Function { parameters, result, .. }
+                    if parameters == &[Type::Applied {
+                        base: "Money".into(),
+                        arguments: vec![Type::Named("GBP".into())],
+                    }]
+                        && result.as_ref() == &Type::Bool
+            )
+    ));
+    assert!(matches!(
+        &module.exports["between"].ty,
+        Type::Function { result, .. }
+            if matches!(
+                result.as_ref(),
+                Type::Function { parameters, result, .. }
+                    if parameters == &[Type::Int] && result.as_ref() == &Type::Bool
+            )
+    ));
+    let sync = &module.exports["sync_selected"];
+    assert!(sync.effects.effects.contains("network"));
+    assert!(sync.effects.may_fail);
+
+    let invalid = analyze(&[ModuleInput::new(
+        "invalid-lambda.orna",
+        "pub fn bad() = value => value.field;",
+    )]);
+    assert!(
+        invalid
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_ANNOTATION),
+        "{:?}",
+        invalid.diagnostics
+    );
+    let invalid_equality = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "invalid-lambda-equality.orna",
+            "pub fn bad() = (value: Money<GBP>) => value == 1;",
+        )],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(
+        invalid_equality
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:?}",
+        invalid_equality.diagnostics
+    );
 }
 
 #[test]
@@ -3628,9 +3897,9 @@ fn authoritative_ranges_fixture_accepts_numeric_membership_and_integer_list_slic
             "table-take.orna",
             "table Reading(id: Int) { value: Int, } fn bad() = Reading | take(0..10);",
         ),
-        ModuleInput::new("range-take.orna", "fn bad() = [1, 2, 3] | take(0..10);"),
+        ModuleInput::new("range-take.orna", "fn bad() = [1, 2, 3] | take(0..10.5);"),
         ModuleInput::new("negative-take.orna", "fn bad() = [1, 2, 3] | take(-1);"),
-        ModuleInput::new("range-drop.orna", "fn bad() = [1, 2, 3] | drop(0..10);"),
+        ModuleInput::new("range-drop.orna", "fn bad() = [1, 2, 3] | drop(0..10.5);"),
         ModuleInput::new("negative-drop.orna", "fn bad() = [1, 2, 3] | drop(-1);"),
     ]);
     assert!(has(&invalid, DIAG_TYPE));
@@ -3638,7 +3907,7 @@ fn authoritative_ranges_fixture_accepts_numeric_membership_and_integer_list_slic
 }
 
 #[test]
-fn immutable_ranges_fixture_exposes_the_published_take_signature_conflict() {
+fn authoritative_ranges_fixture_accepts_transparent_integer_range_slices() {
     let result = analyze(&[ModuleInput::new(
         "ranges.orna",
         r#"
@@ -3647,12 +3916,19 @@ fn immutable_ranges_fixture_exposes_the_published_take_signature_conflict() {
         "#,
     )]);
 
-    let diagnostic = result
-        .diagnostics
-        .iter()
-        .find(|diagnostic| diagnostic.code() == DIAG_TYPE)
-        .expect("range fixture must expose its signature conflict");
-    assert_eq!(diagnostic.message(), "take requires an integer count");
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result.modules.values().next().unwrap();
+    assert!(matches!(
+        &module.symbols["first_ten"].ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::List(Box::new(Type::Int))
+    ));
+
+    let invalid = analyze(&[ModuleInput::new(
+        "invalid-range-slice.orna",
+        "pub fn bad(values: [Int]) = values | take(0..10.5);",
+    )]);
+    assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
 }
 
 #[test]
