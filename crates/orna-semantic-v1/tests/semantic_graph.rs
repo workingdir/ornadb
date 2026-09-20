@@ -1388,6 +1388,110 @@ fn generic_ordering_pipeline_keeps_element_and_optional_types() {
 }
 
 #[test]
+fn imported_generic_calls_preserve_declared_effects_and_failure_metadata() {
+    let result = analyze(&[
+        ModuleInput::new(
+            "library.orna",
+            "pub fn lookup<T>(value: T) = sys.meta<T>(value);",
+        ),
+        ModuleInput::new(
+            "consumer.orna",
+            "use library; pub fn read(value: Int) = library.lookup<Int>(value);",
+        ),
+    ]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let consumer = result
+        .modules
+        .get(&Namespace(vec!["consumer".into()]))
+        .expect("consumer module");
+    let read = consumer.exports.get("read").expect("read export");
+    assert!(matches!(
+        &read.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Applied {
+                base: "sys.ValueMetadata".into(),
+                arguments: vec![Type::Int],
+            }
+    ));
+    assert_eq!(
+        read.effects.effects,
+        std::collections::BTreeSet::from(["database read".into()])
+    );
+    assert!(read.effects.may_fail);
+}
+
+#[test]
+fn imported_generic_calls_reject_invalid_explicit_type_arguments() {
+    for (name, body) in [
+        (
+            "too_many",
+            "pub fn too_many(value: Int) = library.lookup<Int, Str>(value);",
+        ),
+        (
+            "unknown",
+            "pub fn unknown(value: Int) = library.lookup<Missing>(value);",
+        ),
+    ] {
+        let result = analyze(&[
+            ModuleInput::new(
+                "library.orna",
+                "pub fn lookup<T>(value: T) = sys.meta<T>(value);",
+            ),
+            ModuleInput::new("consumer.orna", format!("use library; {body}")),
+        ]);
+        assert!(
+            has(&result, DIAG_TYPE),
+            "{name}: {:?}",
+            result.diagnostics
+        );
+        let consumer = result
+            .modules
+            .get(&Namespace(vec!["consumer".into()]))
+            .expect("consumer module");
+        assert!(
+            !consumer.exports.contains_key(name),
+            "{name} must not be admitted as an exported callable: {:?}",
+            consumer.exports
+        );
+    }
+}
+
+#[test]
+fn imported_generic_calls_reject_unsupported_protocol_bound_substitutions() {
+    let result = analyze(&[
+        ModuleInput::new(
+            "library.orna",
+            r#"
+                pub protocol Order {
+                    fn compare(self, other: Self): Ordering;
+                }
+                pub fn choose<T impl Order>(value: T) = sys.meta<T>(value);
+            "#,
+        ),
+        ModuleInput::new(
+            "consumer.orna",
+            "use library; pub fn invalid(value: Str) = library.choose<Str>(value);",
+        ),
+    ]);
+
+    assert!(
+        has(&result, DIAG_TYPE) || has(&result, DIAG_UNSUPPORTED),
+        "{:?}",
+        result.diagnostics
+    );
+    let consumer = result
+        .modules
+        .get(&Namespace(vec!["consumer".into()]))
+        .expect("consumer module");
+    assert!(
+        !consumer.exports.contains_key("invalid"),
+        "unsupported bound substitution must not be admitted as a callable: {:?}",
+        consumer.exports
+    );
+}
+
+#[test]
 fn relation_pairs_preserve_element_type_in_overlapping_tuples() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
@@ -2332,6 +2436,7 @@ fn historical_effect_catalogue(effect: &str) -> Catalogue {
             effects: std::collections::BTreeSet::from([effect.to_owned()]),
             may_fail: true,
         },
+        generic_parameters: Vec::new(),
         table_schema: None,
     };
     let symbols = std::collections::BTreeMap::from([("run".to_owned(), symbol)]);
@@ -2339,6 +2444,7 @@ fn historical_effect_catalogue(effect: &str) -> Catalogue {
         namespace: Namespace(vec!["unsafe".into()]),
         exports: symbols.clone(),
         symbols,
+        generic_functions: std::collections::BTreeMap::new(),
         prelude_exports: std::collections::BTreeSet::new(),
         implicit: true,
     }])

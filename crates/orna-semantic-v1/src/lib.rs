@@ -325,12 +325,21 @@ pub enum SymbolKind {
     Unit,
     Let,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenericParameterMetadata {
+    pub name: String,
+    /// Protocol identities retained beside exported generic declarations.
+    pub bounds: Vec<Type>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Symbol {
     pub kind: SymbolKind,
     pub ty: Type,
     pub public: bool,
     pub effects: EffectSummary,
+    pub generic_parameters: Vec<GenericParameterMetadata>,
     /// Declaration-backed write admission, retained through module exports.
     /// None means the caller supplied no field-admission metadata.
     pub table_schema: Option<TableSchema>,
@@ -373,6 +382,7 @@ pub struct ModuleHeader {
     pub namespace: Namespace,
     pub exports: BTreeMap<String, Symbol>,
     pub symbols: BTreeMap<String, Symbol>,
+    pub generic_functions: BTreeMap<String, Vec<GenericParameterMetadata>>,
     pub prelude_exports: BTreeSet<String>,
     /// Attached catalogue modules may be available without a source `use`.
     /// Source modules remain explicit by default.
@@ -1126,6 +1136,7 @@ where
                     },
                     public: true,
                     effects,
+                    generic_parameters: Vec::new(),
                     ty,
                 },
             )
@@ -1135,6 +1146,7 @@ where
         namespace,
         exports: symbols.clone(),
         symbols,
+        generic_functions: BTreeMap::new(),
         prelude_exports: prelude_exports.into_iter().map(Into::into).collect(),
         implicit: false,
     }
@@ -1181,6 +1193,7 @@ where
         namespace,
         exports: symbols.clone(),
         symbols,
+        generic_functions: BTreeMap::new(),
         prelude_exports: BTreeSet::new(),
         implicit,
     }
@@ -1193,6 +1206,7 @@ fn fixture_symbol(kind: SymbolKind, ty: Type) -> Symbol {
         ty,
         public: true,
         effects: EffectSummary::default(),
+        generic_parameters: Vec::new(),
     }
 }
 
@@ -1579,6 +1593,7 @@ fn collect_header(
                     ty,
                     public,
                     effects: EffectSummary::default(),
+                    generic_parameters: declared_generic_parameters(item),
                 },
             )
             .is_some()
@@ -1596,6 +1611,21 @@ fn collect_header(
         exports,
         symbols,
         prelude_exports: prelude.clone(),
+        generic_functions: tree
+            .items
+            .iter()
+            .filter_map(|item| {
+                let Declaration::Function { signature, .. } = &item.declaration else {
+                    return None;
+                };
+                (!signature.generics.is_empty()).then(|| {
+                    (
+                        signature.name.clone(),
+                        declared_generic_parameters(item),
+                    )
+                })
+            })
+            .collect(),
         implicit: false,
     }
 }
@@ -1612,6 +1642,20 @@ fn rejects_portable_sys_shadow(name: &str, diagnostics: &mut Vec<Diagnostic>) ->
         "`sys` is an implementation-provided namespace and cannot be shadowed",
     ));
     true
+}
+
+fn declared_generic_parameters(item: &Item) -> Vec<GenericParameterMetadata> {
+    let Declaration::Function { signature, .. } = &item.declaration else {
+        return Vec::new();
+    };
+    signature
+        .generics
+        .iter()
+        .map(|generic| GenericParameterMetadata {
+            name: generic.name.clone(),
+            bounds: generic.bounds.iter().map(type_of).collect(),
+        })
+        .collect()
 }
 
 fn declared_symbol(item: &Item) -> Option<(String, SymbolKind, Type)> {
@@ -2451,6 +2495,7 @@ fn resolve_imports(
                 ty: Type::Named(target.display()),
                 public: true,
                 effects: EffectSummary::default(),
+                generic_parameters: Vec::new(),
             };
             match tail {
                 UseTail::None => {
@@ -2504,6 +2549,7 @@ fn resolve_imports(
                         ty: Type::Named(target.display()),
                         public: true,
                         effects: EffectSummary::default(),
+                        generic_parameters: Vec::new(),
                     },
                     diagnostics,
                 );
@@ -2545,6 +2591,7 @@ fn resolve_imports(
                         ty: Type::Named(target.display()),
                         public: true,
                         effects: EffectSummary::default(),
+                        generic_parameters: Vec::new(),
                     },
                     diagnostics,
                 );
@@ -2982,6 +3029,7 @@ fn check_item(
                                 ty: ty.clone(),
                                 public: false,
                                 effects: EffectSummary::default(),
+                                generic_parameters: Vec::new(),
                             },
                         )
                     })
@@ -3137,6 +3185,7 @@ fn check_item(
                         ty: expected,
                         public: false,
                         effects: EffectSummary::default(),
+                        generic_parameters: Vec::new(),
                     },
                 );
             }
@@ -4439,6 +4488,7 @@ fn implementation_has_write(
                             ty: Type::Error,
                             public: false,
                             effects: EffectSummary::default(),
+                            generic_parameters: Vec::new(),
                         },
                     )),
                     _ => None,
@@ -5265,9 +5315,101 @@ fn type_implements_protocol(ty: &Type, protocol: &Type, scope: &Scope) -> bool {
         })
 }
 
-/// Typecheck a source-local generic function call.  The declaration remains
-/// an ordinary function symbol for catalogue compatibility; this path carries
-/// only the local generic metadata needed for static substitution and bounds.
+fn resolved_generic_parameters(
+    callee: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> Option<Vec<GenericParameterMetadata>> {
+    if let Expr::Name { text, .. } = callee {
+        if local.contains_key(text) {
+            return None;
+        }
+        if let Some(symbol) = scope.names.get(text) {
+            if !symbol.generic_parameters.is_empty() {
+                return Some(symbol.generic_parameters.clone());
+            }
+        }
+        return scope.generic_functions.get(text).map(|signature| {
+            signature
+                .generics
+                .iter()
+                .map(|generic| GenericParameterMetadata {
+                    name: generic.name.clone(),
+                    bounds: generic.bounds.iter().map(type_of).collect(),
+                })
+                .collect()
+        });
+    }
+    let path = qualified_path(callee)?;
+    if path.len() < 2 || local.contains_key(path[0]) {
+        return None;
+    }
+    let root = scope.modules.get(path[0])?;
+    let namespace = Namespace(
+        root.0
+            .iter()
+            .cloned()
+            .chain(path[1..path.len() - 1].iter().map(|part| (*part).to_owned()))
+            .collect(),
+    );
+    scope
+        .available_modules
+        .get(&namespace)
+        .and_then(|module| module.generic_functions.get(path[path.len() - 1]))
+        .cloned()
+}
+
+fn generic_bound_protocol(bound: &Type, scope: &Scope) -> Option<Type> {
+    let Type::Named(name) = bound else {
+        return None;
+    };
+    if scope.local_protocols.contains_key(name)
+        || scope
+            .names
+            .get(name)
+            .is_some_and(|symbol| symbol.kind == SymbolKind::Protocol)
+        || qualified_export(scope, name)
+            .is_some_and(|symbol| symbol.kind == SymbolKind::Protocol)
+        || matches!(name.as_str(), "Display" | "Present")
+    {
+        Some(bound.clone())
+    } else {
+        None
+    }
+}
+
+fn qualified_export<'a>(scope: &'a Scope, name: &str) -> Option<&'a Symbol> {
+    let parts = name.split('.').collect::<Vec<_>>();
+    if parts.len() < 2 {
+        return None;
+    }
+    let direct_namespace = Namespace(
+        parts[..parts.len() - 1]
+            .iter()
+            .map(|part| (*part).to_owned())
+            .collect(),
+    );
+    if let Some(module) = scope.available_modules.get(&direct_namespace) {
+        if let Some(symbol) = module.exports.get(parts[parts.len() - 1]) {
+            return Some(symbol);
+        }
+    }
+    let root = scope.modules.get(parts[0])?;
+    let namespace = Namespace(
+        root.0
+            .iter()
+            .cloned()
+            .chain(parts[1..parts.len() - 1].iter().map(|part| (*part).to_owned()))
+            .collect(),
+    );
+    scope
+        .available_modules
+        .get(&namespace)
+        .and_then(|module| module.exports.get(parts[parts.len() - 1]))
+}
+
+/// Typecheck a generic call from declaration metadata carried by its resolved
+/// function symbol.
 fn infer_local_generic_call(
     callee: &Expr,
     explicit_type_arguments: Option<&[TypeExpr]>,
@@ -5276,66 +5418,54 @@ fn infer_local_generic_call(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
-    let Expr::Name { text, .. } = callee else {
-        return None;
-    };
-    if local.contains_key(text) {
+    let symbol = resolved_callable_symbol(callee, scope, local)?;
+    let generic_parameters = resolved_generic_parameters(callee, scope, local)?;
+    if symbol.kind != SymbolKind::Function || generic_parameters.is_empty() {
         return None;
     }
-    let signature = scope.generic_functions.get(text)?;
-    let generic_names = signature
-        .generics
+    let Type::Function {
+        parameters: raw_parameters,
+        parameter_names,
+        default_parameters,
+        result,
+    } = &symbol.ty
+    else {
+        return None;
+    };
+    let generic_names = generic_parameters
         .iter()
         .map(|generic| generic.name.clone())
         .collect::<BTreeSet<_>>();
     let mut substitutions = BTreeMap::new();
+    let mut valid_substitution = true;
     if let Some(type_arguments) = explicit_type_arguments {
-        if type_arguments.len() != signature.generics.len() {
+        if type_arguments.len() != generic_parameters.len() {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "generic argument count does not match the function signature",
             ));
+            valid_substitution = false;
         }
-        for (generic, argument) in signature.generics.iter().zip(type_arguments) {
+        for (generic, argument) in generic_parameters.iter().zip(type_arguments) {
             let Some(argument) = valid_static_type(argument, scope) else {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     "generic type argument is not a valid static type",
                 ));
+                valid_substitution = false;
                 continue;
             };
             substitutions.insert(generic.name.clone(), argument);
         }
     }
-    let raw_parameters = signature
-        .parameters
-        .iter()
-        .map(|parameter| {
-            parameter
-                .annotation
-                .as_ref()
-                .map(|annotation| resolved_type_of(annotation, scope))
-                .unwrap_or(Type::Error)
-        })
-        .collect::<Vec<_>>();
-    let parameter_names = signature
-        .parameters
-        .iter()
-        .map(|parameter| match &parameter.pattern {
-            Pattern::Name(name, _) => name.clone(),
-            _ => String::new(),
-        })
-        .collect::<Vec<_>>();
     let mut effects = intrinsic_call_effects(callee);
-    if let Some(symbol) = resolved_callable_symbol(callee, scope, local) {
-        effects.join(&symbol.effects);
-    }
+    effects.join(&symbol.effects);
     let values = arguments
         .iter()
         .enumerate()
         .map(|(index, argument)| {
             let expected =
-                expected_call_parameter(&raw_parameters, Some(&parameter_names), arguments, index);
+                expected_call_parameter(raw_parameters, parameter_names.as_deref(), arguments, index);
             let inferred = if let Some(expected) = expected {
                 if type_mentions_generic(expected, &generic_names) {
                     infer(&argument.value, scope, local, diagnostics)
@@ -5358,14 +5488,16 @@ fn infer_local_generic_call(
             inferred.ty
         })
         .collect::<Vec<_>>();
-    for generic in &signature.generics {
+    for generic in &generic_parameters {
         let Some(actual) = substitutions.get(&generic.name) else {
             diagnostics.push(diag(DIAG_TYPE, "generic type argument cannot be inferred"));
+            valid_substitution = false;
             continue;
         };
         for bound in &generic.bounds {
-            let Some(protocol) = bound_protocol_type(bound, scope) else {
+            let Some(protocol) = generic_bound_protocol(bound, scope) else {
                 diagnostics.push(diag(DIAG_TYPE, "generic bound must name a protocol"));
+                valid_substitution = false;
                 continue;
             };
             if !type_implements_protocol(actual, &protocol, scope) {
@@ -5373,6 +5505,7 @@ fn infer_local_generic_call(
                     DIAG_TYPE,
                     "generic type argument does not satisfy its protocol bound",
                 ));
+                valid_substitution = false;
             }
         }
     }
@@ -5380,27 +5513,21 @@ fn infer_local_generic_call(
         .iter()
         .map(|parameter| substitute_generic_type(parameter, &substitutions))
         .collect::<Vec<_>>();
-    let defaults = signature
-        .parameters
-        .iter()
-        .enumerate()
-        .filter_map(|(index, parameter)| parameter.default.as_ref().map(|_| index))
-        .collect::<BTreeSet<_>>();
     check_call_arguments(
         &parameters,
-        Some(&parameter_names),
-        &defaults,
+        parameter_names.as_deref(),
+        default_parameters,
         arguments,
         &values,
         None,
         diagnostics,
     );
     Some(Inferred {
-        ty: signature
-            .result
-            .as_ref()
-            .map(|result| substitute_generic_type(&resolved_type_of(result, scope), &substitutions))
-            .unwrap_or(Type::Error),
+        ty: if valid_substitution {
+            substitute_generic_type(result, &substitutions)
+        } else {
+            Type::Error
+        },
         effects,
     })
 }
@@ -5653,6 +5780,7 @@ fn insert_local_binding(
             ty,
             public: false,
             effects: EffectSummary::default(),
+            generic_parameters: Vec::new(),
         },
     );
 }
