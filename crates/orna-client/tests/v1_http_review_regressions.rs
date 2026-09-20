@@ -522,7 +522,7 @@ fn same_origin_resume_with_rotated_credentials_succeeds() {
 #[test]
 fn declared_oversized_session_response_is_rejected_before_body_accumulation() {
     run(async {
-        let max_message_bytes = 1024;
+        let max_message_bytes = Limits::default().max_message_bytes;
         let (listener, endpoint) = listener().await;
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept oversized create");
@@ -560,7 +560,7 @@ fn declared_oversized_session_response_is_rejected_before_body_accumulation() {
 #[test]
 fn streamed_oversized_session_response_is_rejected_during_receipt() {
     run(async {
-        let max_message_bytes = 1024;
+        let max_message_bytes = Limits::default().max_message_bytes;
         let (listener, endpoint) = listener().await;
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept streamed create");
