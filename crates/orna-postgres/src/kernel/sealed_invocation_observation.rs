@@ -812,8 +812,14 @@ async fn load_observation_by_id(
                     metadata.type_kind, metadata.scalar_type, metadata.target_type_id, \
                     metadata.type_reference, \
                     metadata.value_digest, metadata.redacted, \
+                    type_witness.object_id AS type_witness_object_id, \
+                    type_witness.type_form AS type_witness_type_form, \
                     declared.parameter_id AS declared_parameter_id \
              FROM _orna_kernel.sealed_invocation_argument_metadata AS metadata \
+             LEFT JOIN _orna_kernel.catalogue_objects AS type_witness \
+               ON type_witness.catalogue_revision_id = $2 \
+              AND type_witness.object_id = metadata.target_type_id \
+              AND type_witness.object_kind = 'type' \
              LEFT JOIN _orna_kernel.catalogue_function_parameters AS declared \
                ON declared.catalogue_revision_id = $2 \
               AND declared.function_id = $3 \
@@ -1063,12 +1069,15 @@ fn decode_argument_observation(
         record,
     )?;
     let type_reference = match observation_optional_bytes(row, record, "type_reference")? {
-        Some(encoded) => decode_catalogue_type_reference(
-            Some(encoded),
-            capture,
-            Some(argument_type_reference_target(&type_kind, record)?),
-            record,
-        )?,
+        Some(encoded) => {
+            let expected_type = validate_argument_catalogue_type_witness(
+                &type_kind,
+                observation_optional_id(row, record, "type_witness_object_id")?,
+                observation_column(row, record, "type_witness_type_form")?,
+                record,
+            )?;
+            decode_catalogue_type_reference(Some(encoded), capture, Some(expected_type), record)?
+        }
         None => None,
     };
     // This private storage digest supports neither observation identity nor a
@@ -1161,20 +1170,46 @@ fn decode_argument_type_kind(
 }
 
 /// Returns the exact catalogue identity a retained argument type witness must
-/// prove. Only named arguments have an authoritative type witness at this
-/// boundary; all other retained type families stay unavailable.
+/// prove. `Reference` types are witnessed by their named target, while
+/// `Value` types are witnessed by their value-form target. The loader checks
+/// that form at the admission-pinned catalogue revision before this identity
+/// is accepted for public projection.
 fn argument_type_reference_target(
     type_kind: &SealedInvocationArgumentTypeKind,
     record: &str,
 ) -> Result<[u8; 16], PostgresKernelError> {
+    argument_type_reference_witness_target(type_kind, record).map(|(type_id, _)| type_id)
+}
+
+fn argument_type_reference_witness_target(
+    type_kind: &SealedInvocationArgumentTypeKind,
+    record: &str,
+) -> Result<([u8; 16], &'static str), PostgresKernelError> {
     match type_kind {
-        SealedInvocationArgumentTypeKind::Named(type_id) => Ok(type_id.to_bytes()),
-        SealedInvocationArgumentTypeKind::Reference(_)
-        | SealedInvocationArgumentTypeKind::Value(_)
-        | SealedInvocationArgumentTypeKind::Scalar(_) => Err(observation_invariant(
+        SealedInvocationArgumentTypeKind::Named(type_id)
+        | SealedInvocationArgumentTypeKind::Reference(type_id) => Ok((type_id.to_bytes(), "named")),
+        SealedInvocationArgumentTypeKind::Value(type_id) => Ok((type_id.to_bytes(), "value")),
+        SealedInvocationArgumentTypeKind::Scalar(_) => Err(observation_invariant(
             record,
-            "argument type witness requires an authoritative named type",
+            "argument type witness requires an identity-bearing type",
         )),
+    }
+}
+
+fn validate_argument_catalogue_type_witness(
+    type_kind: &SealedInvocationArgumentTypeKind,
+    witnessed_type: Option<[u8; 16]>,
+    witnessed_form: Option<String>,
+    record: &str,
+) -> Result<[u8; 16], PostgresKernelError> {
+    let (expected_type, expected_form) = argument_type_reference_witness_target(type_kind, record)?;
+    if witnessed_type == Some(expected_type) && witnessed_form.as_deref() == Some(expected_form) {
+        Ok(expected_type)
+    } else {
+        Err(observation_invariant(
+            record,
+            "argument type witness lacks the exact pinned catalogue type form",
+        ))
     }
 }
 
@@ -1772,25 +1807,118 @@ mod tests {
     }
 
     #[test]
-    fn durable_sys_projection_rejects_type_witness_for_reference_argument() {
+    fn durable_sys_projection_retains_matching_reference_argument_type_witness() {
         let admitted = capture(1);
         let type_id = orna_core::TypeId::from_bytes([8; 16]);
         let mut internal = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
         internal.arguments[0].type_kind = SealedInvocationArgumentTypeKind::Reference(type_id);
         internal.arguments[0].type_reference = Some(retained_type_reference(&admitted, type_id));
 
-        assert!(internal.durable_sys_projection().is_err());
+        let projection = internal.durable_sys_projection().unwrap();
+
+        assert_eq!(
+            projection.arguments[0].type_reference,
+            internal.arguments[0].type_reference.clone().unwrap()
+        );
     }
 
     #[test]
-    fn durable_sys_projection_rejects_type_witness_for_value_argument() {
+    fn durable_sys_projection_retains_matching_value_argument_type_witness() {
         let admitted = capture(1);
         let type_id = orna_core::TypeId::from_bytes([8; 16]);
         let mut internal = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
         internal.arguments[0].type_kind = SealedInvocationArgumentTypeKind::Value(type_id);
         internal.arguments[0].type_reference = Some(retained_type_reference(&admitted, type_id));
 
-        assert!(internal.durable_sys_projection().is_err());
+        let projection = internal.durable_sys_projection().unwrap();
+
+        assert_eq!(
+            projection.arguments[0].type_reference,
+            internal.arguments[0].type_reference.clone().unwrap()
+        );
+    }
+
+    #[test]
+    fn argument_type_witness_requires_the_exact_pinned_catalogue_form() {
+        let type_id = orna_core::TypeId::from_bytes([8; 16]);
+
+        assert_eq!(
+            validate_argument_catalogue_type_witness(
+                &SealedInvocationArgumentTypeKind::Reference(type_id),
+                Some(type_id.to_bytes()),
+                Some("named".to_owned()),
+                "test",
+            )
+            .unwrap(),
+            type_id.to_bytes()
+        );
+        assert_eq!(
+            validate_argument_catalogue_type_witness(
+                &SealedInvocationArgumentTypeKind::Value(type_id),
+                Some(type_id.to_bytes()),
+                Some("value".to_owned()),
+                "test",
+            )
+            .unwrap(),
+            type_id.to_bytes()
+        );
+        assert!(
+            validate_argument_catalogue_type_witness(
+                &SealedInvocationArgumentTypeKind::Reference(type_id),
+                Some(type_id.to_bytes()),
+                Some("value".to_owned()),
+                "test",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_argument_catalogue_type_witness(
+                &SealedInvocationArgumentTypeKind::Value(type_id),
+                Some(type_id.to_bytes()),
+                Some("named".to_owned()),
+                "test",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn durable_sys_projection_rejects_mismatched_reference_and_value_type_witnesses() {
+        let admitted = capture(1);
+        let type_id = orna_core::TypeId::from_bytes([8; 16]);
+        let mismatched_type = orna_core::TypeId::from_bytes([9; 16]);
+
+        for type_kind in [
+            SealedInvocationArgumentTypeKind::Reference(type_id),
+            SealedInvocationArgumentTypeKind::Value(type_id),
+        ] {
+            let mut internal =
+                observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
+            internal.arguments[0].type_kind = type_kind;
+            internal.arguments[0].type_reference =
+                Some(retained_type_reference(&admitted, mismatched_type));
+
+            assert!(internal.durable_sys_projection().is_err());
+        }
+    }
+
+    #[test]
+    fn durable_sys_projection_rejects_cross_capture_reference_and_value_type_witnesses() {
+        let admitted = capture(1);
+        let type_id = orna_core::TypeId::from_bytes([8; 16]);
+
+        for type_kind in [
+            SealedInvocationArgumentTypeKind::Reference(type_id),
+            SealedInvocationArgumentTypeKind::Value(type_id),
+        ] {
+            let mut internal =
+                observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
+            internal.arguments[0].type_kind = type_kind;
+            internal.arguments[0].type_reference =
+                Some(retained_type_reference(&capture(2), type_id));
+
+            assert!(internal.durable_sys_projection().is_err());
+        }
     }
 
     #[test]
