@@ -138,7 +138,8 @@ pub struct LocalHostScope {
 }
 
 impl LocalHostScope {
-    /// Constructs a host scope, rejecting empty and whitespace-containing hosts.
+    /// Constructs a host scope, rejecting empty, whitespace-containing, and
+    /// control-containing hosts.
     pub fn new(host: impl Into<String>) -> Result<Self, LocalCapabilityGrantError> {
         let host = host.into();
         if host.trim().is_empty() {
@@ -154,6 +155,11 @@ impl LocalHostScope {
         if host.chars().any(char::is_whitespace) {
             return Err(LocalCapabilityGrantError::InvalidScope {
                 detail: format!("host scope must not contain whitespace, got `{host}`"),
+            });
+        }
+        if host.chars().any(char::is_control) {
+            return Err(LocalCapabilityGrantError::InvalidScope {
+                detail: "host scope must not contain control characters".to_owned(),
             });
         }
         Ok(Self { host })
@@ -647,6 +653,12 @@ mod tests {
             LocalCapabilityScope::host(" db.internal").unwrap_err(),
             LocalCapabilityGrantError::InvalidScope { .. }
         ));
+        for host in ["db.internal\nproxy.internal", "db.internal\0"] {
+            assert!(matches!(
+                LocalCapabilityScope::host(host).unwrap_err(),
+                LocalCapabilityGrantError::InvalidScope { .. }
+            ));
+        }
         assert!(matches!(
             LocalCapabilityScope::secret(" key").unwrap_err(),
             LocalCapabilityGrantError::InvalidScope { .. }
