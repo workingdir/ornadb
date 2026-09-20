@@ -5258,7 +5258,13 @@ impl LiveTransport {
                     credential,
                     origin: origin.clone(),
                 };
-                let response = session_response(&record.metadata, token, self.limits, 201);
+                let response = session_response(
+                    &record.metadata,
+                    token,
+                    self.limits,
+                    self.host.limits.protocol,
+                    201,
+                );
                 self.sessions.insert(record.metadata.session, record);
                 response
             }
@@ -5305,7 +5311,13 @@ impl LiveTransport {
                         } else {
                             return wire_error(410, "live.expired");
                         }
-                        session_response(&metadata, replacement, self.limits, 200)
+                        session_response(
+                            &metadata,
+                            replacement,
+                            self.limits,
+                            self.host.limits.protocol,
+                            200,
+                        )
                     }
                     Err(Error::Closed | Error::Denied) => wire_error(410, "live.expired"),
                     Err(error) => host_error(error),
@@ -6804,6 +6816,7 @@ fn session_response(
     metadata: &SessionMetadata,
     token: [u8; 32],
     limits: TransportLimits,
+    protocol: ProtocolLimits,
     status: u16,
 ) -> WireResponse {
     let path = format!("/orna/live/{}", uuid(metadata.session));
@@ -6815,7 +6828,7 @@ fn session_response(
         encode_token(token),
         path,
         limits.lease_ms,
-        limits.max_frame_bytes,
+        protocol.max_message_bytes,
         limits.max_outgoing_bytes,
         limits.request_retention_ms
     );
@@ -7646,6 +7659,50 @@ mod tests {
         }))
         .unwrap();
         host
+    }
+
+    #[test]
+    fn session_metadata_advertises_decoder_message_limit_when_frame_limit_is_larger() {
+        let protocol = ProtocolLimits::default();
+        let frame_limit = protocol.max_message_bytes + 1;
+        let origin = Origin::parse("https://app.example").unwrap();
+        let host = LiveHost::new(
+            Limits {
+                protocol,
+                ..Limits::default()
+            },
+            SessionBoundary::new(orna_security_v1::OriginPolicy::new([origin], []), 10),
+            Serving::new(orna_serving_v1::Limits::default()).unwrap(),
+        )
+        .unwrap();
+        let transport = LiveTransport::new(
+            host,
+            TransportLimits {
+                max_frame_bytes: frame_limit,
+                ..TransportLimits::default()
+            },
+        )
+        .unwrap();
+
+        let response = session_response(
+            &SessionMetadata {
+                session: [1; 16],
+                database: [2; 16],
+                runtime: [3; 16],
+                expires_at: 10,
+                subscribe: Vec::new(),
+            },
+            [7; 32],
+            transport.limits,
+            transport.host.limits.protocol,
+            201,
+        );
+        let body = String::from_utf8(response.body).unwrap();
+        assert!(body.contains(&format!(
+            "\"max_message_bytes\":{}",
+            protocol.max_message_bytes
+        )));
+        assert!(!body.contains(&format!("\"max_message_bytes\":{frame_limit}")));
     }
 
     fn eval_frame(request: [u8; 16]) -> Vec<u8> {
