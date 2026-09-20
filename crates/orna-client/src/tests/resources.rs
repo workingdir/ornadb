@@ -1636,7 +1636,6 @@ fn assert_boolean_stream_terminal(value: RuntimeValue) {
 fn stream_descriptor_rejects_unsupported_scalar_items() {
     for scalar in [
         StandardScalar::Decimal,
-        StandardScalar::Uuid,
         StandardScalar::Date,
         StandardScalar::Time,
         StandardScalar::Timestamp,
@@ -1645,6 +1644,22 @@ fn stream_descriptor_rejects_unsupported_scalar_items() {
     ] {
         assert!(super::super::stream_item_descriptor(ResolvedType::Scalar(scalar)).is_none());
     }
+}
+
+#[test]
+fn stream_descriptor_accepts_uuid_scalar_items() {
+    assert_eq!(
+        super::super::stream_item_descriptor(ResolvedType::Scalar(StandardScalar::Uuid)),
+        Some(TypeDescriptor::named(orna_standard::UUID_TYPE_ID))
+    );
+    assert!(super::super::runtime_scalar_matches(
+        StandardScalar::Uuid,
+        &RuntimeValue::Uuid([0x42; 16])
+    ));
+    assert!(!super::super::runtime_scalar_matches(
+        StandardScalar::Uuid,
+        &RuntimeValue::Bytes(vec![0x42; 16])
+    ));
 }
 
 #[test]
