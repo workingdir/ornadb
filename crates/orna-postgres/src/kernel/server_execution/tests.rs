@@ -27,8 +27,8 @@ use orna_core::{
     types::TypeDescriptor,
 };
 
-use super::*;
 use super::lowering::maximum_fixed_payload_len;
+use super::*;
 #[path = "tests/presenters.rs"]
 mod presenters;
 
@@ -2802,7 +2802,10 @@ fn payload_accounting_has_stable_fixed_width_values() {
         logical_payload_len(&RuntimeValue::Bytes(vec![1, 2])).unwrap(),
         2
     );
-    assert_eq!(logical_payload_len(&RuntimeValue::Uuid([0x57; 16])).unwrap(), 16);
+    assert_eq!(
+        logical_payload_len(&RuntimeValue::Uuid([0x57; 16])).unwrap(),
+        16
+    );
     assert_eq!(
         logical_payload_len(
             &RuntimeValue::null(ResolvedType::scalar(StandardScalar::Boolean)).unwrap()
