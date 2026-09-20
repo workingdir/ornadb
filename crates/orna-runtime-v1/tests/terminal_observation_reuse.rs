@@ -116,6 +116,7 @@ async fn terminal_observation_releases_checkpoint_for_a_new_run() {
         })
         .await
         .expect("register second run");
+    assert_ne!(first_run.id, second_run.id);
     let second_stream = state
         .register_stream_observation(StreamObservationRegistration {
             run: second_run.id,
