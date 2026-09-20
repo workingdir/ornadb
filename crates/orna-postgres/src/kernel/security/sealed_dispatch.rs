@@ -1,6 +1,4 @@
-use super::sealed_invocation::{
-    SealedInvocationLifecycleTerminal, transition_sealed_invocation_lifecycle,
-};
+use super::sealed_invocation::SealedInvocationLifecycleTerminal;
 use super::*;
 
 impl PostgresKernel {
@@ -86,6 +84,7 @@ impl PostgresKernel {
             None,
             None,
             None,
+            None,
             false,
             None,
         )
@@ -105,6 +104,7 @@ impl PostgresKernel {
         pinned_context: Option<(&ActiveDatabaseRevision, &SecuritySnapshot)>,
         pinned_registry: Option<&OpaqueCodecRegistry>,
         prepared_outcome: Option<&SealedInvocationPreparedOutcome>,
+        admission_context: Option<&SealedInvocationAdmissionContext>,
         pre_audited: bool,
         cancellation: Option<&ResourceCancellation>,
     ) -> Result<SealedInvocationResult, PostgresKernelError> {
@@ -875,10 +875,11 @@ impl PostgresKernel {
                 }
             };
             if pre_audited {
-                transition_sealed_invocation_lifecycle(
+                super::sealed_invocation::transition_sealed_invocation_lifecycle_with_admission_context(
                     &transaction,
                     invocation,
                     SealedInvocationLifecycleTerminal::for_result(&result),
+                    admission_context,
                 )
                 .await?;
             }
