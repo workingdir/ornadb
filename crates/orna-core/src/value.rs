@@ -36,9 +36,6 @@ use crate::{
 
 mod opaque_codec;
 
-#[cfg(test)]
-use opaque_codec::{ACTION_DOMAIN_CLIENT, ACTION_IDENTITY_BYTES};
-
 pub use opaque_codec::{
     MAX_OPAQUE_CODEC_ACTION_ARGUMENTS, MAX_OPAQUE_CODEC_PAYLOAD_LENGTH, MAX_ROWS_CELLS,
     MAX_ROWS_COLUMNS, MAX_ROWS_PAYLOAD_LENGTH, MAX_ROWS_ROWS, OpaqueCodecRegistration,
