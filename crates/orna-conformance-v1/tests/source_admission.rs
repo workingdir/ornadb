@@ -230,6 +230,13 @@ async fn real_source_candidate_commits_through_combined_runtime_activation() {
     assert_eq!(committed.capture.generation(), &num_bigint::BigInt::from(1));
     assert_eq!(committed.capture.generation_digest(), [19; 32]);
     assert_eq!(runtime.capture().await.unwrap(), committed.capture);
+    assert_eq!(
+        runtime
+            .catalogue_revision_pair_at(&committed.capture)
+            .await
+            .unwrap(),
+        Some(resolved.candidate_pair())
+    );
     assert!(
         runtime
             .catalogue_type("app.item", orna_runtime_v1::CatalogueTypeForm::Named,)
