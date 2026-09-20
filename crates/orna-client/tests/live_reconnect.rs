@@ -238,6 +238,7 @@ async fn respond(stream: &mut TcpStream, status: &str, token: &str, runtime: &st
     stream.write_all(response.as_bytes()).await.unwrap();
 }
 
+#[allow(clippy::result_large_err)]
 async fn websocket_snapshot(
     stream: TcpStream,
     response: ReplacementResponse,
