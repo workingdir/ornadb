@@ -47,6 +47,7 @@ pub const DIAG_ASSERTION_SCOPE: &str = "ORNA-A091-012";
 pub const DIAG_ASSERTION_EFFECT: &str = "ORNA-A091-007";
 pub const DIAG_LEGACY_SYS_RUNTIME: &str = "ORNA100-E-SYS-RUNTIME";
 pub const DIAG_LEGACY_TRYFROM: &str = "ORNA091-E-TRYFROM";
+pub const DIAG_LEGACY_RESULT: &str = "ORNA091-E-RESULT";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModuleInput {
@@ -4323,7 +4324,18 @@ fn validate_type_annotation(
             let dimensional_constructor = path.len() == 1
                 && matches!(path[0].as_str(), "Int" | "Decimal" | "Float" | "Money");
             if !annotation_type_name_is_declared(path, scope, generic_names) {
-                diagnostics.push(diag(DIAG_UNRESOLVED, "type name cannot be resolved"));
+                diagnostics.push(diag(
+                    if path.len() == 1 && path[0] == "Result" {
+                        DIAG_LEGACY_RESULT
+                    } else {
+                        DIAG_UNRESOLVED
+                    },
+                    if path.len() == 1 && path[0] == "Result" {
+                        "Result/Ok/Err control plumbing was removed; return the success type directly"
+                    } else {
+                        "type name cannot be resolved"
+                    },
+                ));
             }
             if dimensional_constructor && !arguments.is_empty() {
                 if arguments.len() != 1
@@ -5602,7 +5614,18 @@ fn infer(
                         effects: EffectSummary::default(),
                     },
                     None => {
-                        diagnostics.push(diag(DIAG_UNRESOLVED, "name cannot be resolved"));
+                        diagnostics.push(diag(
+                            if matches!(text.as_str(), "Ok" | "Err") {
+                                DIAG_LEGACY_RESULT
+                            } else {
+                                DIAG_UNRESOLVED
+                            },
+                            if matches!(text.as_str(), "Ok" | "Err") {
+                                "Result/Ok/Err control plumbing was removed; return the success type directly"
+                            } else {
+                                "name cannot be resolved"
+                            },
+                        ));
                         Inferred {
                             ty: Type::Error,
                             effects: EffectSummary::default(),
@@ -5916,10 +5939,12 @@ fn infer(
             }
             if matches!(
                 callee.as_ref(),
-                Expr::Name { text, .. } if matches!(text.as_str(), "Ok" | "Err")
+                Expr::Name { text, .. }
+                    if matches!(text.as_str(), "Ok" | "Err")
+                        && local.get(text).or_else(|| scope.names.get(text)).is_none()
             ) {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_LEGACY_RESULT,
                     "Result/Ok/Err control plumbing was removed; return the success type directly",
                 ));
                 return Inferred {
