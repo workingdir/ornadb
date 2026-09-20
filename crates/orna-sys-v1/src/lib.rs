@@ -167,12 +167,6 @@ impl TypedValue {
         out.push(u8::from(self.redacted));
         append(out, &self.canonical);
     }
-
-    fn metadata_digest(&self) -> [u8; 32] {
-        let mut bytes = Vec::new();
-        self.append_identity(&mut bytes);
-        Sha256::digest(bytes).into()
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -218,8 +212,8 @@ impl ArgumentMap {
     ///
     /// `ArgumentMap` is backed by a `BTreeMap`, so positions follow the same
     /// canonical name order used for invocation identity hashing. Public
-    /// values retain their canonical bytes; protected values retain only a
-    /// digest and never expose their payload.
+    /// values retain their canonical bytes; protected values retain only
+    /// presence, type and redaction metadata and never expose their payload.
     fn metadata(&self) -> Vec<InvocationArgumentMetadata> {
         self.entries
             .iter()
@@ -229,7 +223,6 @@ impl ArgumentMap {
                 position,
                 static_type: value.static_type.clone(),
                 value: (!value.is_redacted()).then(|| value.canonical.clone()),
-                digest: value.is_redacted().then(|| value.metadata_digest()),
                 redacted: value.is_redacted(),
             })
             .collect()
@@ -240,14 +233,13 @@ impl ArgumentMap {
 ///
 /// This is a local observation helper, not a portable `sys.InvocationArgument`
 /// row: it deliberately carries no synthesized row reference. Protected
-/// payloads are represented by `digest` and are never returned in `value`.
+/// payloads are never retained in observation metadata.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct InvocationArgumentMetadata {
     name: String,
     position: usize,
     static_type: TypeId,
     value: Option<Vec<u8>>,
-    digest: Option<[u8; 32]>,
     redacted: bool,
 }
 
@@ -2129,18 +2121,17 @@ mod tests {
         assert_eq!(metadata[0].position, 0);
         assert_eq!(metadata[0].static_type, ty("Int"));
         assert_eq!(metadata[0].value, Some(b"42".to_vec()));
-        assert_eq!(metadata[0].digest, None);
         assert!(!metadata[0].redacted);
 
         assert_eq!(metadata[1].name, "b");
         assert_eq!(metadata[1].position, 1);
         assert_eq!(metadata[1].static_type, ty("Str"));
         assert_eq!(metadata[1].value, None);
-        assert!(metadata[1].digest.is_some());
         assert!(metadata[1].redacted);
 
         let rendered = format!("{metadata:?}");
         assert!(!rendered.contains("super-secret"));
+        assert!(!format!("{runtime:?}").contains("digest:"));
     }
 
     #[test]
