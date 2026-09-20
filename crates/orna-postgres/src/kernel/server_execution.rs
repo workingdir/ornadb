@@ -186,12 +186,12 @@ const JOIN_LIMIT: usize = 1_024;
 const SQL_LIMIT: usize = 1024 * 1024;
 const TARGET_ENTRY_LIMIT: usize = 1_600;
 const ACTIVE_VALUE_ENVELOPE_LENGTH: usize = 25;
-const VERSION_ONE_EQUALITY_RULE: &str = "version 1 SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and references";
-const PARAMETERISED_EQUALITY_RULE: &str = "parameterised SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and references";
+const VERSION_ONE_EQUALITY_RULE: &str = "version 1 SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, UUID, and references";
+const PARAMETERISED_EQUALITY_RULE: &str = "parameterised SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, UUID, and references";
 const DISTINCT_EQUALITY_RULE: &str =
-    "SELECT DISTINCT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and references";
+    "SELECT DISTINCT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, UUID, and references";
 const DISTINCT_PROJECTION_RULE: &str =
-    "projections support only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values";
+    "projections support only BOOLEAN, INTEGER, BIGINT, BYTES, UUID, and REF values";
 const DISTINCT_REFERENCE_COUNT_RULE: &str = "its dependencies do not match its signature and query";
 const DISTINCT_REFERENCE_SEQUENCE_RULE: &str =
     "its dependencies are not in the same order as its signature and query";
