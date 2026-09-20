@@ -13468,56 +13468,80 @@ fn tables_referenced(
     resolved_tables: Option<&BTreeMap<String, Type>>,
 ) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
-    fn visit(e: &Expr, names: &mut BTreeSet<String>) {
-        match e {
-            Expr::Name { text, .. } if text.chars().next().is_some_and(char::is_uppercase) => {
+    fn visit(
+        e: &Expr,
+        names: &mut BTreeSet<String>,
+        resolved_tables: Option<&BTreeMap<String, Type>>,
+    ) {
+        // Dependency extraction must follow the resolver's table identities,
+        // not the spelling convention that examples usually use for table
+        // names. A lower-case table is still a table, and a qualified table
+        // path must be compared with the same resolved key used for its row
+        // type. Stop descending once the whole expression is a table
+        // reference so `User.id` records `User`, not a fictitious `User.id`.
+        if let Some(path) = qualified_path(e).map(|path| path.join(".")) {
+            if resolved_tables.is_some_and(|tables| tables.contains_key(&path)) {
+                names.insert(path);
+                return;
+            }
+            if resolved_tables.is_none()
+                && matches!(
+                    e,
+                    Expr::Name { text, .. } if text.chars().next().is_some_and(char::is_uppercase)
+                )
+                && let Expr::Name { text, .. } = e
+            {
                 names.insert(text.clone());
             }
+        }
+        match e {
             Expr::InterpolatedString { segments, .. } => {
                 for segment in segments {
                     if let StringSegment::Expression { value, .. } = segment {
-                        visit(value, names);
+                        visit(value, names, resolved_tables);
                     }
                 }
             }
-            Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => visit(rhs, names),
+            Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
+                visit(rhs, names, resolved_tables)
+            }
             Expr::Binary { lhs, rhs, .. } => {
-                visit(lhs, names);
-                visit(rhs, names);
+                visit(lhs, names, resolved_tables);
+                visit(rhs, names, resolved_tables);
             }
             Expr::Call {
                 callee, arguments, ..
             } => {
-                visit(callee, names);
+                visit(callee, names, resolved_tables);
                 for a in arguments {
-                    visit(&a.value, names);
+                    visit(&a.value, names, resolved_tables);
                 }
             }
             Expr::GenericCall {
                 callee, arguments, ..
             } => {
-                visit(callee, names);
+                visit(callee, names, resolved_tables);
                 for a in arguments {
-                    visit(&a.value, names);
+                    visit(&a.value, names, resolved_tables);
                 }
             }
-            Expr::Field { base, .. } => visit(base, names),
+            Expr::Field { base, .. } => visit(base, names, resolved_tables),
             Expr::Index { base, index, .. } => {
-                visit(base, names);
-                visit(index, names);
+                visit(base, names, resolved_tables);
+                visit(index, names, resolved_tables);
             }
             Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
                 for x in elements {
-                    visit(x, names);
+                    visit(x, names, resolved_tables);
                 }
             }
             Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
                 for x in fields {
-                    visit(&x.value, names);
+                    visit(&x.value, names, resolved_tables);
                 }
             }
-            Expr::Lambda { body, .. } => visit(body, names),
-            Expr::Block { tail: Some(x), .. } => visit(x, names),
+            Expr::Lambda { body, .. } => visit(body, names, resolved_tables),
+            Expr::Block { tail: Some(x), .. } => visit(x, names, resolved_tables),
             Expr::Control {
                 condition,
                 body,
@@ -13526,32 +13550,26 @@ fn tables_referenced(
                 ..
             } => {
                 if let Some(x) = condition {
-                    visit(x, names)
+                    visit(x, names, resolved_tables)
                 }
                 if let Some(x) = body {
-                    visit(x, names)
+                    visit(x, names, resolved_tables)
                 }
                 if let Some(x) = alternate {
-                    visit(x, names)
+                    visit(x, names, resolved_tables)
                 }
                 for arm in arms {
                     if let Some(guard) = &arm.guard {
-                        visit(guard, names);
+                        visit(guard, names, resolved_tables);
                     }
-                    visit(&arm.body, names);
+                    visit(&arm.body, names, resolved_tables);
                 }
             }
             _ => {}
         }
     }
-    visit(expr, &mut names);
-    match resolved_tables {
-        Some(tables) => names
-            .into_iter()
-            .filter(|name| tables.contains_key(name))
-            .collect(),
-        None => names,
-    }
+    visit(expr, &mut names, resolved_tables);
+    names
 }
 fn diag(code: &'static str, message: impl Into<String>) -> Diagnostic {
     Diagnostic::new(
