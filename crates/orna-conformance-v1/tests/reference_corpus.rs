@@ -876,6 +876,40 @@ fn report_reconciles_claimed_scenarios_with_passed_runtime_evidence() {
     );
 }
 
+#[test]
+fn report_canonicalizes_equivalent_claim_order_for_reproducibility() {
+    let corpus = Corpus::load_default().expect("reference corpus loads");
+    let claim = |executed_scenario_contracts| ImplementationClaim {
+        implementation_id: "test-runner".into(),
+        profile: "test".into(),
+        command: "test-runner".into(),
+        environment: std::collections::BTreeMap::new(),
+        executed_scenario_contracts,
+    };
+    let mut first_adapter = RuntimeAdapter::new(BoundedEvaluator::default());
+    let first = Harness::new(corpus.clone())
+        .with_claim(claim(vec![
+            "PIPE-002".into(),
+            "PIPE-001".into(),
+            "PIPE-002".into(),
+        ]))
+        .run(&mut first_adapter);
+    let mut second_adapter = RuntimeAdapter::new(BoundedEvaluator::default());
+    let second = Harness::new(corpus)
+        .with_claim(claim(vec!["PIPE-001".into(), "PIPE-002".into()]))
+        .run(&mut second_adapter);
+
+    assert_eq!(
+        first.implementation_claim.executed_scenario_contracts,
+        ["PIPE-001", "PIPE-002"]
+    );
+    assert_eq!(
+        serde_json::to_vec(&first).expect("first report serializes"),
+        serde_json::to_vec(&second).expect("second report serializes"),
+        "claim ordering and duplication must not change report bytes"
+    );
+}
+
 struct FailedScenario;
 impl ConformanceAdapter for FailedScenario {
     type Diagnostic = serde_json::Value;
