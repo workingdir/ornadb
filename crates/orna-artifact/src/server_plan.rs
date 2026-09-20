@@ -409,7 +409,7 @@ impl fmt::Display for ServerPlanError {
                 formatter.write_str("server plan expression count exceeds server-plan limit")
             }
             Self::UnsupportedDistinctProjectionType { .. } => formatter.write_str(
-                "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values",
+                "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, UUID, and REF values",
             ),
             Self::DistinctOrderingNotAllowed { .. } => formatter.write_str(
                 "SELECT DISTINCT queries do not allow ORDER BY; remove the ORDER BY clause",
