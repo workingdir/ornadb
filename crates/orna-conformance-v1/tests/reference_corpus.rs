@@ -836,13 +836,17 @@ fn scenario_witnesses_bind_only_declared_passed_implementation_scenarios() {
     let witnesses = declared_harness
         .scenario_execution_witnesses(&declared_report, &bindings)
         .expect("declared passed scenarios become implementation witnesses");
+    // Reviewed bindings are caller ordered, but the published bounded
+    // implementation-scenario evidence is canonicalized by requirement and
+    // scenario identity. This only makes the serialized evidence
+    // reproducible; it does not turn it into an Orna-engine witness.
     assert_eq!(
         witnesses
             .witnesses()
             .iter()
             .map(ScenarioExecutionWitness::scenario_id)
             .collect::<Vec<_>>(),
-        ["LET-REBIND-091", "PIPE-001", "PIPE-002"]
+        ["PIPE-001", "PIPE-002", "LET-REBIND-091"]
     );
 }
 
