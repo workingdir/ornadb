@@ -223,7 +223,7 @@ pub(super) fn decode_inspect_snapshot_row(
         &record,
         "catalogue_revision_id",
     )?);
-    let _recorded_at: SystemTime =
+    let recorded_at: SystemTime =
         inspect_column(INSPECT_SNAPSHOT_RELATION, row, &record, "recorded_at")?;
     let summary_bytes: Vec<u8> =
         inspect_column(INSPECT_SNAPSHOT_RELATION, row, &record, "summary_bytes")?;
@@ -306,9 +306,19 @@ pub(super) fn decode_inspect_snapshot_row(
             rule: "the snapshot row must agree with its canonical epoch payload",
         });
     }
-    // The recorded_at column is not cross-checked: PostgreSQL timestamptz
-    // truncates to microseconds while the canonical payload retains the
-    // full capture time.
+    // PostgreSQL retains timestamptz at microsecond precision, whereas the
+    // canonical payload retains the complete capture time.  Bind the stored
+    // ordering key to the immutable payload at the precision PostgreSQL can
+    // represent.  `find_latest_inspect_epoch` orders on this column, so
+    // accepting a different value would let a durable timestamp tamper pick
+    // a different epoch without changing the captured evidence.
+    if recorded_at != postgres_timestamp_precision(epoch.recorded_at()) {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: INSPECT_SNAPSHOT_RELATION,
+            record: record.clone(),
+            rule: "inspection snapshot timestamp must agree with its canonical epoch payload",
+        });
+    }
     let reencoded = encode_epoch_payload(active, registry, &epoch)?;
     if reencoded != payload {
         return Err(PostgresKernelError::DurableInvariant {
@@ -318,6 +328,24 @@ pub(super) fn decode_inspect_snapshot_row(
         });
     }
     Ok(epoch)
+}
+
+/// Returns the exact value PostgreSQL can retain for a `timestamptz` written
+/// from the canonical epoch timestamp.
+///
+/// The protocol codec represents pre-epoch times as the epoch, and the
+/// PostgreSQL driver stores only whole microseconds. Keeping this conversion
+/// beside recovery makes that lossy storage boundary explicit and testable.
+fn postgres_timestamp_precision(time: SystemTime) -> SystemTime {
+    let duration = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let microseconds = duration.as_micros();
+    let seconds = u64::try_from(microseconds / 1_000_000)
+        .expect("a SystemTime duration has a u64 seconds component");
+    let nanoseconds = u32::try_from((microseconds % 1_000_000) * 1_000)
+        .expect("a sub-second microsecond count always fits in u32 nanoseconds");
+    SystemTime::UNIX_EPOCH + Duration::new(seconds, nanoseconds)
 }
 
 fn inspect_snapshot_pair(row: &Row) -> Result<RevisionPair, PostgresKernelError> {
@@ -726,10 +754,35 @@ fn remember_inspection_pair(
 
 #[cfg(test)]
 mod tests {
-    use super::remember_inspection_pair;
+    use super::{postgres_timestamp_precision, remember_inspection_pair};
     use crate::PostgresKernelError;
     use orna_core::{CatalogueRevisionId, InvocationId, SourceRevisionId, revision::RevisionPair};
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        time::{Duration, SystemTime},
+    };
+
+    #[test]
+    fn inspection_timestamp_binding_uses_postgres_microsecond_precision() {
+        let captured = SystemTime::UNIX_EPOCH + Duration::new(17, 987_654_321);
+
+        assert_eq!(
+            postgres_timestamp_precision(captured),
+            SystemTime::UNIX_EPOCH + Duration::new(17, 987_654_000),
+            "the durable ordering key must match PostgreSQL's exact precision"
+        );
+    }
+
+    #[test]
+    fn inspection_timestamp_binding_matches_the_canonical_pre_epoch_encoding() {
+        let pre_epoch = SystemTime::UNIX_EPOCH - Duration::from_nanos(1);
+
+        assert_eq!(
+            postgres_timestamp_precision(pre_epoch),
+            SystemTime::UNIX_EPOCH,
+            "recovery must use the same pre-epoch normalization as the payload codec"
+        );
+    }
 
     #[test]
     fn inspection_trace_context_rejects_cross_revision_snapshots_for_one_invocation() {
