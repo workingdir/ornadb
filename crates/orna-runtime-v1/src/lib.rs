@@ -9806,9 +9806,7 @@ async fn load_stream_observation_tx(
     let run_status = decode_run_status(row.get(20).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let runtime_id = fixed(row.get(18).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let generation: i64 = row.get(19).map_err(|_| RuntimeError::RecoveryInvalid)?;
-    if runtime_id != parent_run.runtime_id || generation != parent_run.runtime_generation {
-        return Err(RuntimeError::RecoveryInvalid);
-    }
+    validate_stream_parent_run_evidence(run_status, runtime_id, generation, &parent_run)?;
     let partition: Option<String> = row.get(23).map_err(|_| RuntimeError::RecoveryInvalid)?;
     let checkpoint_partition = checkpoint
         .partition
@@ -9887,6 +9885,25 @@ async fn load_stream_observation_tx(
         observed_ms,
         live,
     }))
+}
+
+/// A stream's joined parent fields are evidence for the same retained Run that
+/// was independently decoded above.  Do not mix an older joined lifecycle
+/// state with a newer Run observation when a concurrent recovery update races
+/// this read.
+fn validate_stream_parent_run_evidence(
+    joined_status: RunObservationStatus,
+    joined_runtime_id: [u8; 16],
+    joined_generation: i64,
+    parent_run: &RunObservation,
+) -> Result<(), RuntimeError> {
+    if joined_status != parent_run.status
+        || joined_runtime_id != parent_run.runtime_id
+        || joined_generation != parent_run.runtime_generation
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok(())
 }
 
 async fn load_stream_observation_failure_reference(
@@ -26763,6 +26780,25 @@ mod tests {
             })
             .await
             .unwrap();
+
+        assert_eq!(
+            validate_stream_parent_run_evidence(
+                run.status,
+                run.runtime_id,
+                run.runtime_generation,
+                &run,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_stream_parent_run_evidence(
+                RunObservationStatus::Running,
+                run.runtime_id,
+                run.runtime_generation,
+                &run,
+            ),
+            Err(RuntimeError::RecoveryInvalid)
+        );
 
         state
             .connection
