@@ -3609,6 +3609,7 @@ fn accepted_record_scalar(value_type: &ValueTypeDefinition) -> Option<StandardSc
         "orna.kernel.value.float@1" => Some(StandardScalar::Float),
         "orna.kernel.value.character-large-object@1" => Some(StandardScalar::CharacterLargeObject),
         "orna.kernel.value.binary-large-object@1" => Some(StandardScalar::BinaryLargeObject),
+        "orna.kernel.value.uuid@1" => Some(StandardScalar::Uuid),
         _ => None,
     }
 }

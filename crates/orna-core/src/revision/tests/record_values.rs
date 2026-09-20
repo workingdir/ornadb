@@ -1030,6 +1030,7 @@ fn record_value_field_type_policy_is_closed_and_uses_pinned_standard_primitives(
             "orna.kernel.value.binary-large-object@1",
             StandardScalar::BinaryLargeObject,
         ),
+        ("orna.kernel.value.uuid@1", StandardScalar::Uuid),
     ];
     let accepted_values = accepted_contracts
         .iter()
@@ -1067,7 +1068,6 @@ fn record_value_field_type_policy_is_closed_and_uses_pinned_standard_primitives(
 
     for contract in [
         "orna.kernel.value.decimal@1",
-        "orna.kernel.value.uuid@1",
         "orna.kernel.value.date@1",
         "orna.kernel.value.time@1",
         "orna.kernel.value.timestamp@1",
