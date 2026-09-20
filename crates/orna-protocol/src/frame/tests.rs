@@ -190,9 +190,10 @@ fn test_registry() -> OpaqueCodecRegistry {
 }
 fn resource_hex(input: &str) -> Vec<u8> {
     assert_eq!(input.len() % 2, 0);
-    input
-        .as_bytes()
-        .chunks_exact(2)
+    let (pairs, remainder) = input.as_bytes().as_chunks::<2>();
+    assert!(remainder.is_empty());
+    pairs
+        .iter()
         .map(|pair| {
             let high = (pair[0] as char).to_digit(16).unwrap();
             let low = (pair[1] as char).to_digit(16).unwrap();
