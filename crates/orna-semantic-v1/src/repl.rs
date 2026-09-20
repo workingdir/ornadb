@@ -249,6 +249,7 @@ impl ReplContext {
             &header,
             &self.modules,
             &BTreeMap::new(),
+            &BTreeMap::new(),
             diagnostics,
         )
     }
