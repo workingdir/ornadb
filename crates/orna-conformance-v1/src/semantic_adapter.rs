@@ -1387,6 +1387,289 @@ impl PartialOrd for TransactionKey {
 // property in numeric order.
 const TRANSACTION_INT_CURSOR_PREFIX: &[u8] = b"ORNA-TXN-INT-CURSOR\0";
 const TRANSACTION_CURSOR_PREFIX: &[u8] = b"ORNA-TXN-CURSOR\0";
+const TRANSACTION_TYPED_CURSOR_VERSION: u8 = 1;
+
+fn ordered_integer_cursor(value: &BigInt) -> Vec<u8> {
+    let (sign, magnitude) = value.to_bytes_be();
+    let length = u64::try_from(magnitude.len())
+        .expect("bounded cursor integer magnitude fits a u64 length")
+        .to_be_bytes();
+    let mut encoded = Vec::new();
+    match sign {
+        Sign::Minus => {
+            encoded.push(0);
+            encoded.extend(length.map(|byte| !byte));
+            encoded.extend(magnitude.into_iter().map(|byte| !byte));
+        }
+        Sign::NoSign => encoded.push(1),
+        Sign::Plus => {
+            encoded.push(2);
+            encoded.extend_from_slice(&length);
+            encoded.extend_from_slice(&magnitude);
+        }
+    }
+    encoded
+}
+
+fn decode_ordered_integer_cursor(
+    encoded: &[u8],
+    complemented: bool,
+) -> Result<(BigInt, usize), EvaluationError> {
+    let decode = |byte: u8| if complemented { !byte } else { byte };
+    let Some(&kind) = encoded.first() else {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    };
+    let kind = decode(kind);
+    if kind == 1 {
+        return Ok((BigInt::ZERO, 1));
+    }
+    if kind != 0 && kind != 2 || encoded.len() < 9 {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    }
+    let mut length_bytes = [0; 8];
+    for (index, byte) in length_bytes.iter_mut().enumerate() {
+        *byte = decode(encoded[index + 1]);
+    }
+    if kind == 0 {
+        length_bytes.iter_mut().for_each(|byte| *byte = !*byte);
+    }
+    let length = usize::try_from(u64::from_be_bytes(length_bytes))
+        .map_err(|_| transaction_error("ORNA-EVAL-VALUE"))?;
+    let end = 9usize
+        .checked_add(length)
+        .ok_or_else(|| transaction_error("ORNA-EVAL-VALUE"))?;
+    if length == 0 || encoded.len() < end {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    }
+    let mut magnitude = encoded[9..end].to_vec();
+    if complemented {
+        magnitude.iter_mut().for_each(|byte| *byte = !*byte);
+    }
+    if kind == 0 {
+        magnitude.iter_mut().for_each(|byte| *byte = !*byte);
+    }
+    if magnitude.first() == Some(&0) {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    }
+    let sign = if kind == 0 { Sign::Minus } else { Sign::Plus };
+    Ok((BigInt::from_bytes_be(sign, &magnitude), end))
+}
+
+fn encode_ordered_string_cursor(value: &str, output: &mut Vec<u8>) {
+    for byte in value.bytes() {
+        match byte {
+            0..=253 => output.push(byte + 1),
+            254 => output.extend_from_slice(&[255, 0]),
+            255 => output.extend_from_slice(&[255, 1]),
+        }
+    }
+    output.push(0);
+}
+
+fn decode_ordered_string_cursor(encoded: &[u8]) -> Result<(String, usize), EvaluationError> {
+    let mut bytes = Vec::new();
+    let mut index = 0;
+    while index < encoded.len() {
+        match encoded[index] {
+            0 => {
+                let value =
+                    String::from_utf8(bytes).map_err(|_| transaction_error("ORNA-EVAL-VALUE"))?;
+                return Ok((value, index + 1));
+            }
+            1..=254 => bytes.push(encoded[index] - 1),
+            255 => {
+                let Some(&escape) = encoded.get(index + 1) else {
+                    return Err(transaction_error("ORNA-EVAL-VALUE"));
+                };
+                match escape {
+                    0 => bytes.push(254),
+                    1 => bytes.push(255),
+                    _ => return Err(transaction_error("ORNA-EVAL-VALUE")),
+                }
+                index += 1;
+            }
+        }
+        index += 1;
+    }
+    Err(transaction_error("ORNA-EVAL-VALUE"))
+}
+
+fn encode_ordered_decimal_cursor(
+    value: &Value,
+    output: &mut Vec<u8>,
+) -> Result<(), EvaluationError> {
+    let OvbRaw::Tag(60000, value) = value.raw() else {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    };
+    let OvbRaw::Array(parts) = value.as_ref() else {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    };
+    let [OvbRaw::Int(coefficient), OvbRaw::Int(exponent)] = parts.as_slice() else {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    };
+    let sign = coefficient.sign();
+    let negative = sign == Sign::Minus;
+    output.push(match sign {
+        Sign::Minus => 0,
+        Sign::NoSign => 1,
+        Sign::Plus => 2,
+    });
+    if sign == Sign::NoSign {
+        return Ok(());
+    }
+    let digits = coefficient
+        .to_str_radix(10)
+        .trim_start_matches('-')
+        .as_bytes()
+        .to_vec();
+    let adjusted = exponent + BigInt::from(digits.len());
+    let mut exponent_cursor = ordered_integer_cursor(&adjusted);
+    if negative {
+        exponent_cursor.iter_mut().for_each(|byte| *byte = !*byte);
+    }
+    output.extend(exponent_cursor);
+    for digit in digits {
+        let digit = digit - b'0' + 1;
+        output.push(if negative { !digit } else { digit });
+    }
+    output.push(if negative { 255 } else { 0 });
+    Ok(())
+}
+
+fn decode_ordered_decimal_cursor(encoded: &[u8]) -> Result<(Value, usize), EvaluationError> {
+    let Some(&sign) = encoded.first() else {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    };
+    if sign == 1 {
+        return Value::decimal(BigInt::ZERO, BigInt::ZERO)
+            .map(|value| (value, 1))
+            .map_err(|_| transaction_error("ORNA-EVAL-VALUE"));
+    }
+    if sign != 0 && sign != 2 {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    }
+    let negative = sign == 0;
+    let (adjusted, exponent_bytes) = decode_ordered_integer_cursor(&encoded[1..], negative)?;
+    let digits_start = 1usize
+        .checked_add(exponent_bytes)
+        .ok_or_else(|| transaction_error("ORNA-EVAL-VALUE"))?;
+    let terminal = if negative { 255 } else { 0 };
+    let mut digits = Vec::new();
+    let mut digits_end = digits_start;
+    while let Some(&encoded_byte) = encoded.get(digits_end) {
+        if encoded_byte == terminal {
+            break;
+        }
+        let byte = if negative {
+            !encoded_byte
+        } else {
+            encoded_byte
+        };
+        if !(1..=10).contains(&byte) {
+            return Err(transaction_error("ORNA-EVAL-VALUE"));
+        }
+        digits.push(b'0' + byte - 1);
+        digits_end += 1;
+    }
+    if digits.is_empty() || encoded.get(digits_end) != Some(&terminal) {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    }
+    digits_end += 1;
+    let mut coefficient =
+        BigInt::parse_bytes(&digits, 10).ok_or_else(|| transaction_error("ORNA-EVAL-VALUE"))?;
+    if negative {
+        coefficient = -coefficient;
+    }
+    let exponent = adjusted - BigInt::from(digits.len());
+    Value::decimal(coefficient, exponent)
+        .map(|value| (value, digits_end))
+        .map_err(|_| transaction_error("ORNA-EVAL-VALUE"))
+}
+
+fn encode_typed_cursor_value(
+    ty: &TransactionKeyType,
+    value: &Value,
+    output: &mut Vec<u8>,
+) -> Result<(), EvaluationError> {
+    ty.validate(value)?;
+    match (ty, value.raw()) {
+        (TransactionKeyType::Bool, OvbRaw::Bool(value)) => output.push(u8::from(*value)),
+        (TransactionKeyType::Int, OvbRaw::Int(value)) => {
+            output.extend(ordered_integer_cursor(value))
+        }
+        (TransactionKeyType::Decimal, _) => encode_ordered_decimal_cursor(value, output)?,
+        (TransactionKeyType::Str, OvbRaw::Text(value)) => {
+            encode_ordered_string_cursor(value, output)
+        }
+        _ => return Err(transaction_error("ORNA-EVAL-VALUE")),
+    }
+    Ok(())
+}
+
+fn decode_typed_cursor_value(
+    ty: &TransactionKeyType,
+    encoded: &[u8],
+) -> Result<(Value, usize), EvaluationError> {
+    match ty {
+        TransactionKeyType::Bool => match encoded.first() {
+            Some(0) => Ok((
+                Value::new(OvbRaw::Bool(false)).expect("false is canonical"),
+                1,
+            )),
+            Some(1) => Ok((
+                Value::new(OvbRaw::Bool(true)).expect("true is canonical"),
+                1,
+            )),
+            _ => Err(transaction_error("ORNA-EVAL-VALUE")),
+        },
+        TransactionKeyType::Int => {
+            let (value, used) = decode_ordered_integer_cursor(encoded, false)?;
+            Ok((Value::int(value), used))
+        }
+        TransactionKeyType::Decimal => decode_ordered_decimal_cursor(encoded),
+        TransactionKeyType::Str => {
+            let (value, used) = decode_ordered_string_cursor(encoded)?;
+            Ok((
+                Value::new(OvbRaw::Text(value)).expect("decoded UTF-8 is canonical"),
+                used,
+            ))
+        }
+    }
+}
+
+fn transaction_typed_cursor(
+    key: &TransactionKey,
+    key_schema: &TransactionTableKey,
+) -> Result<Vec<u8>, EvaluationError> {
+    let values = key_schema.values_from_encoded(key.as_ref())?;
+    let mut encoded = vec![TRANSACTION_TYPED_CURSOR_VERSION];
+    for (value, ty) in values.iter().zip(&key_schema.types) {
+        encode_typed_cursor_value(ty, value, &mut encoded)?;
+    }
+    Ok(encoded)
+}
+
+fn transaction_typed_cursor_key(
+    encoded: &[u8],
+    key_schema: &TransactionTableKey,
+) -> Result<TransactionKey, EvaluationError> {
+    if encoded.first() != Some(&TRANSACTION_TYPED_CURSOR_VERSION) {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    }
+    let mut values = Vec::with_capacity(key_schema.types.len());
+    let mut offset = 1;
+    for ty in &key_schema.types {
+        let (value, used) = decode_typed_cursor_value(ty, &encoded[offset..])?;
+        offset = offset
+            .checked_add(used)
+            .ok_or_else(|| transaction_error("ORNA-EVAL-VALUE"))?;
+        values.push(value);
+    }
+    if offset != encoded.len() {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    }
+    key_schema.key_from_values(&values)
+}
 
 fn transaction_int_cursor(key: &TransactionKey) -> Option<Vec<u8>> {
     let value = Value::decode(key.as_ref()).ok()?;
@@ -1478,7 +1761,7 @@ fn transaction_cursor_key(
     let encoded = if key_schema.types.as_slice() == [TransactionKeyType::Int] {
         transaction_int_cursor_key(encoded)?.into_encoded()
     } else {
-        encoded.to_vec()
+        transaction_typed_cursor_key(encoded, key_schema)?.into_encoded()
     };
     key_schema.key_from_encoded(&encoded)
 }
@@ -1494,7 +1777,9 @@ fn transaction_continuation_cursor(
             &transaction_int_cursor(key).expect("typed Int key has a signed integer cursor"),
         );
     } else {
-        cursor.extend_from_slice(key.as_ref());
+        cursor.extend_from_slice(
+            &transaction_typed_cursor(key, key_schema).expect("typed key has a canonical cursor"),
+        );
     }
     cursor
 }
@@ -1723,14 +2008,21 @@ impl TransactionalEvaluator {
         }
     }
 
-    fn seed_committed(
+    fn seed_committed_from_admission(
         &mut self,
         table: String,
         key: Vec<u8>,
         row: Value,
+        key_fields: &TableKeys,
     ) -> Result<(), RuntimeError> {
+        let schema = key_fields
+            .get(&table)
+            .ok_or(RuntimeError::InvalidTableMutation)?;
+        let key = schema
+            .key_from_encoded(&key)
+            .map_err(|_| RuntimeError::InvalidTableMutation)?;
         self.database
-            .activate(|activation| activation.insert(table, TransactionKey::new(key), row))
+            .activate(|activation| activation.insert(table, key, row))
             .map_err(|_| RuntimeError::InvalidTableMutation)
     }
 }
@@ -1889,7 +2181,12 @@ impl DurableTransactionalEvaluator {
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = Value::decode(row).map_err(|_| RuntimeError::RecoveryInvalid)?;
-                evaluator.seed_committed(table.clone(), key.clone(), row)?;
+                evaluator.seed_committed_from_admission(
+                    table.clone(),
+                    key.clone(),
+                    row,
+                    &admitted.key_fields,
+                )?;
             }
         }
         let mutations = match evaluator.execute_admitted(&admitted) {
@@ -2069,7 +2366,12 @@ impl DurableTransactionalEvaluator {
                     }
                 };
                 if evaluator
-                    .seed_committed(table.clone(), key.clone(), row)
+                    .seed_committed_from_admission(
+                        table.clone(),
+                        key.clone(),
+                        row,
+                        &admitted.key_fields,
+                    )
                     .is_err()
                 {
                     return fail_observed_request_runtime(&state, request, fingerprint, lease)
@@ -2226,7 +2528,12 @@ impl DurableTransactionalEvaluator {
                         );
                     }
                 };
-                if let Err(error) = evaluator.seed_committed(table.clone(), key.clone(), row) {
+                if let Err(error) = evaluator.seed_committed_from_admission(
+                    table.clone(),
+                    key.clone(),
+                    row,
+                    &admitted.key_fields,
+                ) {
                     return RunningTableRequestDisposition::Fenced(error);
                 }
             }
@@ -3084,7 +3391,12 @@ impl DurableTransactionalEvaluator {
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = Value::decode(row).map_err(|_| RuntimeError::RecoveryInvalid)?;
-                evaluator.seed_committed(table.clone(), key.clone(), row)?;
+                evaluator.seed_committed_from_admission(
+                    table.clone(),
+                    key.clone(),
+                    row,
+                    &admitted.key_fields,
+                )?;
             }
         }
         let mutations = match evaluator.execute_admitted_with_arguments(&admitted, arguments) {
@@ -8189,11 +8501,117 @@ mod transaction_admission_tests {
         assert!(zero < one_tenth);
         assert!(one_tenth < one);
         assert!(one < two);
-        let cursor = transaction_continuation_cursor(&one, &schema);
-        assert_eq!(
-            transaction_cursor_key(&cursor, &schema).expect("decimal cursor"),
-            one
-        );
+        let ordered = [&negative, &zero, &one_tenth, &one, &two];
+        let cursors = ordered
+            .iter()
+            .map(|key| transaction_continuation_cursor(key, &schema))
+            .collect::<Vec<_>>();
+        for (key, cursor) in ordered.iter().zip(&cursors) {
+            assert_eq!(
+                transaction_cursor_key(cursor, &schema).expect("decimal cursor"),
+                **key
+            );
+        }
+        for pair in cursors.windows(2) {
+            assert!(pair[0] < pair[1], "decimal cursor does not advance");
+        }
+    }
+
+    #[test]
+    fn admitted_rehydration_keeps_typed_composite_order_for_staged_scan() {
+        let schema = TransactionTableKey::new(
+            "Pair".into(),
+            vec!["left".into(), "right".into()],
+            vec![TransactionKeyType::Int, TransactionKeyType::Int],
+        )
+        .expect("valid composite key schema");
+        let key_fields = BTreeMap::from([("Pair".into(), schema.clone())]);
+        let table_fields = BTreeMap::from([(
+            "Pair".into(),
+            BTreeSet::from(["left".into(), "right".into(), "label".into()]),
+        )]);
+        let row = |left: i64, right: i64, label: &str| {
+            Value::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("left".into()), OvbRaw::Int(left.into())),
+                (OvbRaw::Text("label".into()), OvbRaw::Text(label.into())),
+                (OvbRaw::Text("right".into()), OvbRaw::Int(right.into())),
+            ]))
+            .expect("canonical composite row")
+        };
+        let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
+        for (left, right, label) in [(-1, 0, "committed-negative"), (0, 0, "committed-zero")] {
+            let key = schema
+                .key_from_values(&[Value::int(left.into()), Value::int(right.into())])
+                .expect("typed committed key");
+            evaluator
+                .seed_committed_from_admission(
+                    "Pair".into(),
+                    key.as_ref().to_vec(),
+                    row(left, right, label),
+                    &key_fields,
+                )
+                .expect("rehydrated row retains admitted key types");
+        }
+
+        evaluator
+            .database
+            .activate(|activation| {
+                let staged_key = schema
+                    .key_from_values(&[Value::int(0.into()), Value::int(1.into())])
+                    .expect("typed staged key");
+                activation
+                    .insert("Pair".into(), staged_key, row(0, 1, "staged-zero-one"))
+                    .expect("staged row");
+
+                let mut mutations = Vec::new();
+                let limits = Limits::default();
+                let mut handler = TableEffectHandler {
+                    activation,
+                    key_fields: &key_fields,
+                    table_fields: &table_fields,
+                    mutations: &mut mutations,
+                    next_mutation: 0,
+                    limits,
+                    activation_time: None,
+                };
+                let mut budget = StepBudget::new(limits.max_steps);
+                let first = handler
+                    .scan_relation_page("Pair", None, 1, &mut budget)
+                    .expect("first scan succeeds")
+                    .expect("declared table is scanable");
+                assert_eq!(
+                    record_field(&first.rows[0], "label")
+                        .expect("negative label")
+                        .raw(),
+                    &OvbRaw::Text("committed-negative".into())
+                );
+                let first_cursor = first.next.expect("committed successor exists");
+                let second = handler
+                    .scan_relation_page("Pair", Some(&first_cursor), 1, &mut budget)
+                    .expect("continuation succeeds")
+                    .expect("declared table is scanable");
+                assert_eq!(
+                    record_field(&second.rows[0], "label")
+                        .expect("zero label")
+                        .raw(),
+                    &OvbRaw::Text("committed-zero".into())
+                );
+                let second_cursor = second.next.expect("staged successor exists");
+                assert!(first_cursor < second_cursor);
+                let third = handler
+                    .scan_relation_page("Pair", Some(&second_cursor), 1, &mut budget)
+                    .expect("terminal continuation succeeds")
+                    .expect("declared table is scanable");
+                assert_eq!(
+                    record_field(&third.rows[0], "label")
+                        .expect("staged label")
+                        .raw(),
+                    &OvbRaw::Text("staged-zero-one".into())
+                );
+                assert_eq!(third.next, None);
+                Ok::<_, orna_evaluator_v1::EvaluationError>(())
+            })
+            .expect("typed committed and staged scan activation commits");
     }
 }
 
@@ -8497,8 +8915,9 @@ mod bounded_tests {
 mod durable_tests {
     use super::{
         DurableTransactionalEvaluator, Functions, RunningTableRequestDisposition, SourceUnit,
-        StageOutcome, TransactionalEvaluator, admitted_transaction_module, lower_relation_bindings,
-        replay_request_terminal, request_terminal,
+        StageOutcome, TransactionKeyType, TransactionTableKey, TransactionalEvaluator,
+        admitted_transaction_module, lower_relation_bindings, replay_request_terminal,
+        request_terminal,
     };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use orna_evaluator_v1::Limits;
@@ -8512,6 +8931,7 @@ mod durable_tests {
     use orna_stream_v1::{AssertionOwnerKind, DiagnosticClass, DiagnosticCode, SafeDiagnostic};
     use orna_syntax_v1::{Expr, parse_expression, parse_module};
     use std::{
+        collections::BTreeMap,
         path::Path,
         process::Command,
         sync::{Arc, Mutex},
@@ -9982,13 +10402,23 @@ mod durable_tests {
             (OvbRaw::Text("value".into()), seeded_nan.raw().clone()),
         ]))
         .expect("canonical seeded Float row");
+        let key_schema = TransactionTableKey::new(
+            "Reading".into(),
+            vec!["id".into()],
+            vec![TransactionKeyType::Int],
+        )
+        .expect("valid Reading key schema");
+        let key_fields = BTreeMap::from([("Reading".into(), key_schema.clone())]);
         evaluator
-            .seed_committed(
+            .seed_committed_from_admission(
                 "Reading".into(),
-                Value::int(1.into())
-                    .encode()
-                    .expect("canonical integer key"),
+                key_schema
+                    .key_from_values(&[Value::int(1.into())])
+                    .expect("canonical integer key")
+                    .as_ref()
+                    .to_vec(),
                 row,
+                &key_fields,
             )
             .expect("seeded relation row");
 
