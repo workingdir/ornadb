@@ -2364,6 +2364,16 @@ impl RuntimeState {
         if let Some(status) = request_status_tx(&tx, registration.request).await? {
             require_fingerprint(&status, fingerprint)?;
             if status.state.is_terminal() {
+                // This is the observed lifecycle entrypoint. A terminal replay
+                // without its retained Run witness is not evidence that this
+                // request was ever admitted through the observed boundary.
+                // Validate the witness in the same read transaction before
+                // returning the replay and never manufacture one from the
+                // caller's new registration metadata.
+                let capture = capture_tx(&tx).await?;
+                load_run_observation_for_request_tx(&tx, registration.request, &capture)
+                    .await?
+                    .ok_or(RuntimeError::RecoveryInvalid)?;
                 tx.commit()
                     .await
                     .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -7712,8 +7722,19 @@ impl RuntimeState {
         owner: WriterLease,
         outcome: TerminalOutcome,
     ) -> Result<RequestStatus, RuntimeError> {
-        self.complete_request_with_owner(identity, fingerprint, owner, outcome)
-            .await
+        self.transition_request_with_owner_and_run_status(
+            identity,
+            fingerprint,
+            owner,
+            RequestTerminalTransition {
+                next: RequestState::Completed,
+                terminal_outcome: outcome,
+                observation_status: RunObservationStatus::Completed,
+                diagnostic: None,
+            },
+            true,
+        )
+        .await
     }
 
     /// Retains an ordinary evaluator failure as a completed request terminal
@@ -7738,6 +7759,7 @@ impl RuntimeState {
                 observation_status: RunObservationStatus::Failed,
                 diagnostic: Some(diagnostic),
             },
+            true,
         )
         .await
     }
@@ -7770,8 +7792,19 @@ impl RuntimeState {
         owner: WriterLease,
         outcome: TerminalOutcome,
     ) -> Result<RequestStatus, RuntimeError> {
-        self.cancel_request_with_owner(identity, fingerprint, owner, outcome)
-            .await
+        self.transition_request_with_owner_and_run_status(
+            identity,
+            fingerprint,
+            owner,
+            RequestTerminalTransition {
+                next: RequestState::Cancelled,
+                terminal_outcome: outcome,
+                observation_status: RunObservationStatus::Cancelled,
+                diagnostic: None,
+            },
+            true,
+        )
+        .await
     }
 
     pub async fn complete_request(
@@ -8294,6 +8327,7 @@ impl RuntimeState {
                 observation_status,
                 diagnostic: None,
             },
+            false,
         )
         .await
     }
@@ -8304,6 +8338,7 @@ impl RuntimeState {
         fingerprint: [u8; 32],
         owner: WriterLease,
         transition: RequestTerminalTransition,
+        require_observation: bool,
     ) -> Result<RequestStatus, RuntimeError> {
         let RequestTerminalTransition {
             next,
@@ -8388,8 +8423,12 @@ impl RuntimeState {
         if changed != 1 {
             return Err(RuntimeError::RequestOwnerConflict);
         }
-        sync_run_request_state_with_diagnostic_tx(&tx, identity, observation_status, diagnostic)
-            .await?;
+        let observed =
+            sync_run_request_state_with_diagnostic_tx(&tx, identity, observation_status, diagnostic)
+                .await?;
+        if require_observation && observed != 1 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -9505,13 +9544,34 @@ async fn load_run_observation_tx(
     {
         return Err(RuntimeError::RecoveryInvalid);
     }
+    let request = RequestIdentity {
+        session_id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        request_id: fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+    };
+    // A retained run is lifecycle evidence for exactly one request, rather
+    // than an independently mutable status record.  Keep the ordinary
+    // evaluator-failure mapping explicit: its request is completed while the
+    // observation retains the distinct Failed status and safe diagnostic.
+    let request_status = request_status_tx(connection, request)
+        .await?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    let lifecycle_matches = match request_status.state {
+        RequestState::Reserved => status == RunObservationStatus::Starting,
+        RequestState::Running => status == RunObservationStatus::Running,
+        RequestState::Completed => matches!(
+            status,
+            RunObservationStatus::Completed | RunObservationStatus::Failed
+        ),
+        RequestState::Cancelled => status == RunObservationStatus::Cancelled,
+        RequestState::Orphaned => status == RunObservationStatus::Orphaned,
+    };
+    if !lifecycle_matches {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
     let live = snapshot == *capture && !status.is_terminal();
     Ok(Some(RunObservation {
         id,
-        request: RequestIdentity {
-            session_id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-            request_id: fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        },
+        request,
         consumer_identity: decode_consumer_identity(&row_text(&row, 2)?)?,
         function: row_text(&row, 3)?,
         source_identity: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -10046,7 +10106,7 @@ async fn sync_run_request_state_tx(
     connection: &Connection,
     identity: RequestIdentity,
     status: RunObservationStatus,
-) -> Result<(), RuntimeError> {
+) -> Result<u64, RuntimeError> {
     sync_run_request_state_with_diagnostic_tx(connection, identity, status, None).await
 }
 
@@ -10055,15 +10115,15 @@ async fn sync_run_request_state_with_diagnostic_tx(
     identity: RequestIdentity,
     status: RunObservationStatus,
     diagnostic: Option<SafeDiagnostic>,
-) -> Result<(), RuntimeError> {
+) -> Result<u64, RuntimeError> {
     let now = now_ms()?;
     let code = diagnostic.map(|value| encode_code(value.code));
     let class = diagnostic.map(|value| encode_class(value.class));
-    connection.execute("UPDATE sys_run_observation SET status = ?1, ended_ms = CASE WHEN ?2 THEN ?3 ELSE ended_ms END, observed_ms = ?3, diagnostic_code = COALESCE(?4, diagnostic_code), diagnostic_class = COALESCE(?5, diagnostic_class) WHERE session_id = ?6 AND request_id = ?7 AND status IN (?8, ?9)", params![run_status_code(status), status.is_terminal(), now, code, class, identity.session_id.to_vec(), identity.request_id.to_vec(), run_status_code(RunObservationStatus::Starting), run_status_code(RunObservationStatus::Running)]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    let changed = connection.execute("UPDATE sys_run_observation SET status = ?1, ended_ms = CASE WHEN ?2 THEN ?3 ELSE ended_ms END, observed_ms = ?3, diagnostic_code = COALESCE(?4, diagnostic_code), diagnostic_class = COALESCE(?5, diagnostic_class) WHERE session_id = ?6 AND request_id = ?7 AND status IN (?8, ?9)", params![run_status_code(status), status.is_terminal(), now, code, class, identity.session_id.to_vec(), identity.request_id.to_vec(), run_status_code(RunObservationStatus::Starting), run_status_code(RunObservationStatus::Running)]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
     if status.is_terminal() {
         connection.execute("UPDATE sys_stream_observation SET status = ?1, observed_ms = ?2 WHERE run_id IN (SELECT run_id FROM sys_run_observation WHERE session_id = ?3 AND request_id = ?4) AND status IN (?5, ?6, ?7, ?8)", params![stream_observation_status_code(StreamObservationStatus::Orphaned), now, identity.session_id.to_vec(), identity.request_id.to_vec(), stream_observation_status_code(StreamObservationStatus::Starting), stream_observation_status_code(StreamObservationStatus::Running), stream_observation_status_code(StreamObservationStatus::Paused), stream_observation_status_code(StreamObservationStatus::BackingOff)]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
     }
-    Ok(())
+    Ok(changed)
 }
 
 async fn load_stream_provider_failure(
@@ -25507,6 +25567,137 @@ mod tests {
         assert_eq!(restored.ended_ms, Some(restored.observed_ms));
         assert!(restored.observed_ms >= restored.started_ms);
         assert!(!restored.live);
+    }
+
+    #[tokio::test]
+    async fn run_observation_loader_rejects_request_lifecycle_mismatch() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let request = request(136, 137);
+        state.reserve_request(request, digest(138)).await.unwrap();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: stream_delivery("run-lifecycle", "source").consumer,
+                function: "pkg.run_lifecycle".into(),
+                source_identity: None,
+                invocation_id: id(139),
+            })
+            .await
+            .unwrap();
+
+        // The terminal shape is internally well-formed, but it contradicts
+        // the still-reserved request. A retained run cannot independently
+        // manufacture a terminal lifecycle witness.
+        state
+            .connection
+            .execute(
+                "UPDATE sys_run_observation
+                 SET status = ?1, ended_ms = observed_ms
+                 WHERE run_id = ?2",
+                params![
+                    run_status_code(RunObservationStatus::Completed),
+                    run.id.0.to_vec(),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.run_observation(run.id).await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+    }
+
+    #[tokio::test]
+    async fn observed_terminal_transition_rolls_back_without_its_run_witness() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(140)).await.unwrap();
+        let request = request(141, 142);
+        let fingerprint = digest(143);
+        let run = state
+            .begin_observed_request(
+                RunObservationRegistration {
+                    request,
+                    consumer_identity: stream_delivery("run-witness", "source").consumer,
+                    function: "pkg.run_witness".into(),
+                    source_identity: None,
+                    invocation_id: id(144),
+                },
+                fingerprint,
+                owner,
+            )
+            .await
+            .unwrap()
+            .run
+            .unwrap();
+        state
+            .connection
+            .execute(
+                "DELETE FROM sys_run_observation WHERE run_id = ?1",
+                params![run.id.0.to_vec()],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state
+                .complete_observed_request_with_owner(request, fingerprint, owner, outcome(145))
+                .await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        assert_eq!(
+            state
+                .request_status(request, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            RequestState::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn observed_terminal_replay_rejects_a_non_observed_request() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let request = request(147, 148);
+        let fingerprint = digest(149);
+        state.reserve_request(request, fingerprint).await.unwrap();
+        state
+            .complete_request(request, fingerprint, outcome(150))
+            .await
+            .unwrap();
+        let owner = state.acquire_lease(id(146)).await.unwrap();
+
+        // A terminal request from the compatibility ledger API has no
+        // durable Run. The observed API must not reinterpret it as an
+        // observed replay or synthesize a witness from this new registration.
+        assert_eq!(
+            state
+                .begin_observed_request(
+                    RunObservationRegistration {
+                        request,
+                        consumer_identity: stream_delivery("terminal-replay", "source").consumer,
+                        function: "pkg.terminal_replay".into(),
+                        source_identity: None,
+                        invocation_id: id(151),
+                    },
+                    fingerprint,
+                    owner,
+                )
+                .await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        assert_eq!(
+            state
+                .request_status(request, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .terminal_outcome,
+            Some(outcome(150))
+        );
     }
 
     #[tokio::test]
