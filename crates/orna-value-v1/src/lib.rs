@@ -7,13 +7,14 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    fmt,
+    fmt::{self, Write as _},
 };
 
 use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
 use num_traits::{Signed, Zero};
 use sha2::{Digest as _, Sha256};
+use unicode_normalization::UnicodeNormalization;
 
 pub const OVB_VERSION: &str = "OVB-1";
 pub const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
@@ -522,6 +523,59 @@ impl Snapshot {
 fn uuid_raw(bytes: [u8; 16]) -> Raw {
     tag(37, Raw::Bytes(bytes.to_vec()))
 }
+
+/// Returns the lowercase, hyphenated canonical text form of an OVB UUID.
+///
+/// UUID-backed Orna identifiers are opaque bytes at the value boundary.  This
+/// helper only defines their canonical text spelling; it does not impose UUID
+/// version or variant semantics.
+pub fn canonical_uuid_text(bytes: [u8; 16]) -> String {
+    let mut out = String::with_capacity(36);
+    for (index, byte) in bytes.into_iter().enumerate() {
+        if matches!(index, 4 | 6 | 8 | 10) {
+            out.push('-');
+        }
+        write!(&mut out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
+}
+
+/// Parses only the canonical lowercase, hyphenated UUID text spelling.
+pub fn parse_canonical_uuid_text(text: &str) -> Result<[u8; 16]> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 36 {
+        return Err(Error::InvalidValue);
+    }
+    for index in [8, 13, 18, 23] {
+        if bytes[index] != b'-' {
+            return Err(Error::InvalidValue);
+        }
+    }
+    let mut output = [0u8; 16];
+    let mut source = 0;
+    for destination in &mut output {
+        while source < bytes.len() && bytes[source] == b'-' {
+            source += 1;
+        }
+        let high = hex_digit(bytes.get(source).copied()).ok_or(Error::InvalidValue)?;
+        let low = hex_digit(bytes.get(source + 1).copied()).ok_or(Error::InvalidValue)?;
+        *destination = high << 4 | low;
+        source += 2;
+    }
+    if source != bytes.len() || canonical_uuid_text(output) != text {
+        return Err(Error::InvalidValue);
+    }
+    Ok(output)
+}
+
+fn hex_digit(byte: Option<u8>) -> Option<u8> {
+    match byte? {
+        b'0'..=b'9' => Some(byte? - b'0'),
+        b'a'..=b'f' => Some(byte? - b'a' + 10),
+        _ => None,
+    }
+}
+
 fn uuid_array(r: &Raw) -> Result<[u8; 16]> {
     let Raw::Tag(37, v) = r else {
         return Err(Error::InvalidValue);
@@ -571,7 +625,10 @@ pub fn schema_identity(schema: &SchemaDescriptor) -> Result<[u8; 32]> {
     domain_digest("orna.schema.v1", schema.raw())
 }
 pub fn argument_identity(arguments: Vec<(String, Raw, Raw)>) -> Result<[u8; 32]> {
-    let mut a = arguments;
+    let mut a = arguments
+        .into_iter()
+        .map(|(name, ty, value)| (name.nfc().collect::<String>(), ty, value))
+        .collect::<Vec<_>>();
     a.sort_by(|x, y| x.0.as_bytes().cmp(y.0.as_bytes()));
     if a.windows(2).any(|x| x[0].0 == x[1].0) {
         return Err(Error::InvalidValue);
@@ -2003,6 +2060,52 @@ mod tests {
             .map(|x| u8::from_str_radix(std::str::from_utf8(x).unwrap(), 16).unwrap())
             .collect()
     }
+
+    #[test]
+    fn canonical_uuid_text_is_lowercase_and_round_trips() {
+        let bytes = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        let text = canonical_uuid_text(bytes);
+        assert_eq!(text, "00112233-4455-6677-8899-aabbccddeeff");
+        assert_eq!(parse_canonical_uuid_text(&text).unwrap(), bytes);
+        assert_eq!(
+            Value::uuid(bytes).encode().unwrap(),
+            h("d8255000112233445566778899aabbccddeeff")
+        );
+        for invalid in [
+            "001122334455-6677-8899-aabbccddeeff",
+            "00112233-4455-6677-8899-AABBCCDDEEFF",
+            "00112233-4455-6677-8899-aabbccddeefg",
+            "00112233-4455-6677-8899-aabbccddeeff00",
+        ] {
+            assert!(parse_canonical_uuid_text(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn argument_identity_normalizes_names_before_sorting_and_collision_check() {
+        let composed = "é".to_owned();
+        let decomposed = "e\u{301}".to_owned();
+        let left =
+            argument_identity(vec![(composed, Raw::Int(0.into()), Raw::Int(1.into()))]).unwrap();
+        let right = argument_identity(vec![(
+            decomposed.clone(),
+            Raw::Int(0.into()),
+            Raw::Int(1.into()),
+        )])
+        .unwrap();
+        assert_eq!(left, right);
+        assert!(
+            argument_identity(vec![
+                ("é".to_owned(), Raw::Int(0.into()), Raw::Int(1.into())),
+                (decomposed, Raw::Int(0.into()), Raw::Int(2.into())),
+            ])
+            .is_err()
+        );
+    }
+
     #[test]
     fn values_match_supplied_vectors() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
