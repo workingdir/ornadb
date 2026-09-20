@@ -1392,10 +1392,12 @@ fn main() {
 
 fn report_exit_code(report: &orna_conformance_v1::RunReport) -> i32 {
     let fixture_failed = report.fixtures.iter().any(|fixture| !fixture.passed);
-    let scenario_failed = report
-        .scenarios
-        .iter()
-        .any(|scenario| scenario.status == EvidenceStatus::Failed);
+    let scenario_failed = report.scenarios.iter().any(|scenario| {
+        matches!(
+            scenario.status,
+            EvidenceStatus::Failed | EvidenceStatus::Cancelled | EvidenceStatus::Skipped
+        )
+    });
     if fixture_failed || scenario_failed {
         1
     } else {
@@ -1415,22 +1417,58 @@ mod tests {
         run_live_keyed_update_scenario, run_live_resync_scenario, run_live_unkeyed_update_scenario,
         run_profile, run_sys_rt_rename_scenario,
     };
-    use orna_conformance_v1::EvidenceStatus;
+    use orna_conformance_v1::{
+        CoverageReport, EvidenceClass, EvidenceStatus, ImplementationClaim, RunReport,
+        ScenarioResult,
+    };
+    use std::collections::BTreeMap;
     use std::fs;
 
-    #[test]
-    fn report_exit_code_distinguishes_unsatisfied_evidence_from_skips() {
-        let corpus = Corpus::load_default().expect("reference corpus loads");
-        let mut adapter = RuntimeAdapter::new(CompositeEvaluator::default());
-        let mut report = Harness::new(corpus).run(&mut adapter);
-        assert!(report.fixtures.iter().any(|fixture| !fixture.passed));
-        assert_eq!(report_exit_code(&report), 1);
+    fn report_with_scenario_status(status: EvidenceStatus) -> RunReport {
+        RunReport {
+            specification_version: "1.0.0".into(),
+            implementation_claim: ImplementationClaim {
+                implementation_id: "test".into(),
+                profile: "test".into(),
+                command: "test".into(),
+                environment: BTreeMap::new(),
+                executed_scenario_contracts: Vec::new(),
+            },
+            publication_digests: BTreeMap::new(),
+            fixtures: Vec::new(),
+            scenarios: vec![ScenarioResult {
+                scenario: "test".into(),
+                requirements: Vec::new(),
+                class: EvidenceClass::Runtime,
+                status,
+                detail: "test evidence".into(),
+                diagnostic: None,
+            }],
+            static_evidence: Vec::new(),
+            model_evidence: Vec::new(),
+            semantic_evidence: Vec::new(),
+            runtime_evidence: Vec::new(),
+            skipped_evidence: Vec::new(),
+            coverage: CoverageReport {
+                mapped_stage_evidence: 0,
+                unmapped_stage_evidence: 0,
+            },
+        }
+    }
 
-        report.fixtures.clear();
-        report
-            .scenarios
-            .retain(|scenario| scenario.status != EvidenceStatus::Failed);
-        assert_eq!(report_exit_code(&report), 0);
+    #[test]
+    fn report_exit_code_rejects_failed_cancelled_and_skipped_scenarios() {
+        for status in [
+            EvidenceStatus::Failed,
+            EvidenceStatus::Cancelled,
+            EvidenceStatus::Skipped,
+        ] {
+            assert_eq!(report_exit_code(&report_with_scenario_status(status)), 1);
+        }
+        assert_eq!(
+            report_exit_code(&report_with_scenario_status(EvidenceStatus::Passed)),
+            0
+        );
     }
 
     #[test]
