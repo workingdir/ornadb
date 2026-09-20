@@ -314,6 +314,120 @@ fn sys_session_schema_binds_the_live_runtime_relation_without_runtime_claims() {
 }
 
 #[test]
+fn sys_context_view_schemas_match_the_published_contract() {
+    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+
+    for (name, expected_fields) in [
+        (
+            "sys.CurrentContext",
+            vec![
+                ("snapshot", "sys.SnapshotRef"),
+                ("transaction", "sys.TransactionRef?"),
+                ("invocation", "sys.InvocationRef?"),
+                ("run", "sys.RunRef?"),
+                ("session", "sys.SessionRef?"),
+                ("client", "sys.ClientRef?"),
+                ("logical_cwd", "Path"),
+                ("locale", "Locale"),
+                ("timezone", "TimeZone"),
+                ("trace", "sys.TraceRef?"),
+                ("cancellation", "sys.CancellationView"),
+                ("present_context", "PresentContext"),
+            ],
+        ),
+        (
+            "sys.ReplView",
+            vec![
+                ("session", "sys.SessionRef"),
+                ("renderer", "Str"),
+                ("width", "Int?"),
+                ("height", "Int?"),
+                ("locale", "Locale"),
+                ("timezone", "TimeZone"),
+                (
+                    "presentation_overrides",
+                    "Relation<sys.PresentationOverride>",
+                ),
+                ("watched_expressions", "Relation<sys.Watch>"),
+            ],
+        ),
+    ] {
+        let value_type = document["value_types"]
+            .as_array()
+            .expect("value types")
+            .iter()
+            .find(|value| value["name"] == name)
+            .unwrap_or_else(|| panic!("{name}"));
+        assert_eq!(value_type["kind"], "record", "{name} kind");
+        assert_eq!(value_type["type_parameters"], serde_json::json!([]));
+        let fields = value_type["fields"]
+            .as_array()
+            .expect("context-view fields")
+            .iter()
+            .map(|field| {
+                (
+                    field["name"].as_str().expect("field name"),
+                    field["type"].as_str().expect("field type"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(fields, expected_fields, "{name} fields");
+    }
+
+    let singleton = |name: &str| {
+        document["singletons"]
+            .as_array()
+            .expect("singletons")
+            .iter()
+            .find(|value| value["name"] == name)
+            .unwrap_or_else(|| panic!("{name} singleton"))
+    };
+    assert_eq!(singleton("sys.current")["type"], "sys.CurrentContext");
+    assert_eq!(singleton("sys.current")["availability"], "every activation");
+    assert_eq!(singleton("sys.repl")["type"], "sys.ReplView");
+    assert_eq!(
+        singleton("sys.repl")["availability"],
+        "REPL only; otherwise sys.context.repl_unavailable"
+    );
+}
+
+#[test]
+fn foundation_typed_reference_aliases_match_published_targets() {
+    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+    let aliases = document["reference_aliases"]
+        .as_array()
+        .expect("reference aliases");
+
+    // These are the foundation-v1 TypedRowRef aliases whose published sys
+    // aliases have an exact RowRef target.  This pins schema identity only;
+    // it deliberately does not assert a physical table ID or row authority.
+    for (name, target) in [
+        ("sys.FileRef", "sys.File"),
+        ("sys.SnapshotRef", "sys.Snapshot"),
+        ("sys.DiagnosticRef", "sys.Diagnostic"),
+        ("sys.ObjectRef", "sys.Object"),
+        ("sys.DefinitionRef", "sys.Definition"),
+        ("sys.TypeRef", "sys.Type"),
+        ("sys.TraceRef", "sys.Trace"),
+        ("sys.AssertionRef", "sys.Assertion"),
+        ("sys.FunctionRef", "sys.Function"),
+        ("sys.InvocationRef", "sys.Invocation"),
+        ("sys.InvocationArgumentRef", "sys.InvocationArgument"),
+        ("sys.RunRef", "sys.Run"),
+        ("sys.StreamRef", "sys.Stream"),
+        ("sys.CheckpointRef", "sys.Checkpoint"),
+        ("sys.FailureRef", "sys.Failure"),
+    ] {
+        let alias = aliases
+            .iter()
+            .find(|value| value["name"] == name)
+            .unwrap_or_else(|| panic!("missing published alias {name}"));
+        assert_eq!(alias["target"], target, "target for {name}");
+        assert_eq!(alias["definition"], format!("sys.RowRef<{target}>"));
+    }
+}
+
+#[test]
 fn sys_runtime_info_schema_matches_the_published_compatibility_contract() {
     let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
     let runtime = document["value_types"]
