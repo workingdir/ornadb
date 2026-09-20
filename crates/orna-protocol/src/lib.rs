@@ -79,7 +79,7 @@ use orna_core::{
 };
 use orna_standard::{
     BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID, CHARACTER_LARGE_OBJECT_TYPE_ID,
-    FLOAT_TYPE_ID, INTEGER_TYPE_ID, STANDARD_TYPE_IDS,
+    FLOAT_TYPE_ID, INTEGER_TYPE_ID, STANDARD_TYPE_IDS, UUID_TYPE_ID,
 };
 
 const MARKER: &[u8; 4] = b"ORV1";
@@ -103,13 +103,14 @@ const NULL_ENUM_TAG: u8 = 0x09;
 const ENUM_TAG: u8 = 0x0a;
 const RECORD_TAG: u8 = 0x0b;
 const OPAQUE_TAG: u8 = 0x0c;
+const UUID_TAG: u8 = 0x0e;
 /// The fixed Work ADR 0087 `std.data.Rows` opaque type identity (`...12`).
 const STD_DATA_ROWS_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
 const CONSTRUCTED_TAG: u8 = 0x0d;
 const PAYLOAD_LIMIT: usize = 16 * 1024 * 1024;
 const ROWS_COLUMN_MIN_BYTES: usize = 23;
-const SUPPORTED_SCALAR_TYPES: [(TypeId, StandardScalar, u8); 6] = [
+const SUPPORTED_SCALAR_TYPES: [(TypeId, StandardScalar, u8); 7] = [
     (BOOLEAN_TYPE_ID, StandardScalar::Boolean, BOOLEAN_TAG),
     (INTEGER_TYPE_ID, StandardScalar::Integer, INTEGER_TAG),
     (BIGINT_TYPE_ID, StandardScalar::BigInt, BIGINT_TAG),
@@ -124,6 +125,7 @@ const SUPPORTED_SCALAR_TYPES: [(TypeId, StandardScalar, u8); 6] = [
         StandardScalar::BinaryLargeObject,
         BYTES_TAG,
     ),
+    (UUID_TYPE_ID, StandardScalar::Uuid, UUID_TAG),
 ];
 
 /// An error from canonical runtime value encoding or decoding.
@@ -838,6 +840,7 @@ pub fn encode_value(value: &RuntimeValue) -> Result<Vec<u8>, ValueCodecError> {
         RuntimeValue::Bytes(value) => {
             encode_variable(BYTES_TAG, BINARY_LARGE_OBJECT_TYPE_ID, value)
         }
+        RuntimeValue::Uuid(value) => Ok(encode(UUID_TAG, UUID_TYPE_ID, value)),
         RuntimeValue::Null(value) => {
             let resolved_type = value.resolved_type();
             if let Some(target) = resolved_type.reference_target() {
@@ -2595,6 +2598,12 @@ fn decode_non_enum_value(
             require_type(tag, type_id, BINARY_LARGE_OBJECT_TYPE_ID)?;
             require_payload_limit(payload.len())?;
             Ok(RuntimeValue::Bytes(payload.to_vec()))
+        }
+        UUID_TAG => {
+            require_type(tag, type_id, UUID_TYPE_ID)?;
+            Ok(RuntimeValue::Uuid(require_fixed_payload::<16>(
+                tag, payload,
+            )?))
         }
         REFERENCE_TAG => {
             require_reference_target(type_id)?;
