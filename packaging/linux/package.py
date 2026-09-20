@@ -659,6 +659,82 @@ def destination_is_regular(parent: int, name: str) -> bool:
     return stat.S_ISREG(metadata.st_mode)
 
 
+def read_installed_payload(root: int, relative: PurePosixPath) -> tuple[bytes, os.stat_result] | None:
+    """Read one existing payload file without resolving an untrusted path."""
+    descriptor = os.dup(root)
+    try:
+        for part in relative.parent.parts:
+            try:
+                next_descriptor = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError:
+                return None
+            os.close(descriptor)
+            descriptor = next_descriptor
+        try:
+            metadata = os.stat(relative.name, dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            fail(f"installed package payload is not one regular file: {relative}")
+        try:
+            file_descriptor = os.open(
+                relative.name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+        except OSError as error:
+            fail(f"cannot open installed package payload {relative}: {error}")
+        try:
+            opened = os.fstat(file_descriptor)
+            content = bytearray()
+            while block := os.read(file_descriptor, 1024 * 1024):
+                content.extend(block)
+            final = os.fstat(file_descriptor)
+        finally:
+            os.close(file_descriptor)
+        if (
+            opened.st_dev != metadata.st_dev
+            or opened.st_ino != metadata.st_ino
+            or opened.st_nlink != metadata.st_nlink
+            or final.st_size != metadata.st_size
+            or final.st_mtime_ns != opened.st_mtime_ns
+            or final.st_ctime_ns != opened.st_ctime_ns
+        ):
+            fail(f"installed package payload changed while reading: {relative}")
+        return bytes(content), final
+    finally:
+        os.close(descriptor)
+
+
+def verify_replaceable_payload(root: int) -> None:
+    """Refuse to overwrite a partial or foreign product installation."""
+    present = {
+        relative: read_installed_payload(root, PurePosixPath(relative))
+        for relative in ARCHIVE_MEMBERS
+    }
+    if all(payload is None for payload in present.values()):
+        return
+    if any(payload is None for payload in present.values()):
+        fail("package replacement found a partial installed payload")
+    executable, executable_metadata = present[ARCHIVE_EXECUTABLE]  # type: ignore[misc]
+    manifest, manifest_metadata = present[ARCHIVE_DISTRIBUTION_MANIFEST]  # type: ignore[misc]
+    engine, engine_metadata = present[ARCHIVE_ENGINE_MANIFEST]  # type: ignore[misc]
+    if (
+        stat.S_IMODE(executable_metadata.st_mode) != 0o755
+        or stat.S_IMODE(manifest_metadata.st_mode) != 0o644
+        or stat.S_IMODE(engine_metadata.st_mode) != 0o644
+        or not valid_linux_x86_64_elf(executable)
+    ):
+        fail("installed package payload has an invalid mode or executable")
+    parse_distribution_manifest(
+        manifest, engine_sha256=digest(engine), executable_sha256=digest(executable)
+    )
+
+
 def parent_is_current(root: int, relative: PurePosixPath, expected: int) -> bool:
     """Prove a retained destination descriptor is still reachable from root."""
     descriptor = os.dup(root)
@@ -684,6 +760,7 @@ def install_archive(path: Path, root: Path) -> None:
     members = verify_archive(path)
     root, root_descriptor = prepare_install_root(root)
     try:
+        verify_replaceable_payload(root_descriptor)
         for member, content in members:
             relative = PurePosixPath(member.name)
             if (
