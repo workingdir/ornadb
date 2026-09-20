@@ -4,6 +4,8 @@
 //! binary WebSocket message boundary.  Tokio runtime lifetime remains owned
 //! by the embedding application.
 
+#![allow(clippy::result_large_err)]
+
 use std::{collections::HashSet, fmt, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
@@ -1273,10 +1275,12 @@ mod tests {
 
     #[test]
     fn session_parser_retains_configured_profile_limit_ceilings() {
-        let mut configured = Limits::default();
-        configured.max_message_bytes = MIN_PROFILE_MESSAGE_BYTES + 1;
-        configured.max_depth = MIN_PROFILE_DEPTH + 1;
-        configured.max_nodes = MIN_PROFILE_NODES + 1;
+        let configured = Limits {
+            max_message_bytes: MIN_PROFILE_MESSAGE_BYTES + 1,
+            max_depth: MIN_PROFILE_DEPTH + 1,
+            max_nodes: MIN_PROFILE_NODES + 1,
+            ..Limits::default()
+        };
 
         let mut response = valid_response();
         response["limits"]["max_message_bytes"] = configured.max_message_bytes.into();

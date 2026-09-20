@@ -1158,8 +1158,10 @@ mod tests {
     fn renderer_failure_keeps_latest_tree_and_retries_without_false_success() {
         let mut io = MemoryIo::default();
         io.incoming.push_back(snapshot(0));
-        let mut renderer = Renderer::default();
-        renderer.fail = 1;
+        let renderer = Renderer {
+            fail: 1,
+            ..Renderer::default()
+        };
         let mut driver = LiveSessionDriver::new(
             io,
             [7; 16],
@@ -1184,8 +1186,10 @@ mod tests {
     fn reconnect_drops_old_failed_publication_before_new_snapshot() {
         let mut old = MemoryIo::default();
         old.incoming.push_back(snapshot(0));
-        let mut renderer = Renderer::default();
-        renderer.fail = 1;
+        let renderer = Renderer {
+            fail: 1,
+            ..Renderer::default()
+        };
         let mut driver = LiveSessionDriver::new(
             old,
             [7; 16],
