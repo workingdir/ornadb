@@ -13,8 +13,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
-    CompactManifest, CompactManifestEntry, GitCommitRef, Repository, RepositoryError, Uuid,
-    validate_compact_page_uncompressed_sizes,
+    CompactManifest, CompactManifestEntry, CompactSegmentRole, GitCommitRef, Repository,
+    RepositoryError, Uuid, validate_compact_page_uncompressed_sizes,
 };
 use parquet::{
     basic::{Compression, ConvertedType, Encoding, Type},
@@ -145,103 +145,13 @@ impl CompactParquetKeySource {
         bytes: &[u8],
         expected_row_count: u64,
     ) -> Result<Vec<Vec<u8>>, CompactParquetError> {
-        if table.as_bytes() != &profile.table_id() {
-            return Err(CompactParquetError::Key(CompactKeyError::WrongTable));
-        }
-        ensure_supported_profile(profile)?;
-        let reader = SerializedFileReader::new(Bytes::copy_from_slice(bytes))
-            .map_err(|_| CompactParquetError::InvalidParquet)?;
-        validate_file_metadata(&reader, profile, table, expected_row_count)?;
-        validate_compact_page_uncompressed_sizes(bytes, reader.metadata().row_groups())
-            .map_err(|_| CompactParquetError::InvalidParquet)?;
-        let key_columns = key_columns(&reader, profile)?;
-        let mut values: Vec<Vec<OvbRaw>> = vec![Vec::new(); key_columns.len()];
-        let mut observed = 0u64;
-        for row_group_index in 0..reader.num_row_groups() {
-            let row_group = reader
-                .get_row_group(row_group_index)
-                .map_err(|_| CompactParquetError::InvalidParquet)?;
-            let rows = row_group.metadata().num_rows();
-            if rows <= 0 {
-                return Err(CompactParquetError::InvalidParquet);
-            }
-            let rows = usize::try_from(rows).map_err(|_| CompactParquetError::InvalidParquet)?;
-            for column in 0..row_group.num_columns() {
-                validate_physical_column(&*row_group, column, rows)?;
-            }
-            let mut group_values: Vec<Vec<OvbRaw>> = Vec::with_capacity(key_columns.len());
-            for column in &key_columns {
-                let column_values = match column.kind {
-                    KeyColumnKind::Int => read_int64_column(&*row_group, column.index, rows)?
-                        .into_iter()
-                        .map(|value| OvbRaw::Int(value.into()))
-                        .collect(),
-                    KeyColumnKind::OvbInt | KeyColumnKind::OvbBool => {
-                        read_ovb_column(&*row_group, column.index, rows, column.kind)?
-                    }
-                    KeyColumnKind::Bool => read_bool_column(&*row_group, column.index, rows)?
-                        .into_iter()
-                        .map(OvbRaw::Bool)
-                        .collect(),
-                    KeyColumnKind::Str => read_str_column(&*row_group, column.index, rows)?
-                        .into_iter()
-                        .map(OvbRaw::Text)
-                        .collect(),
-                    KeyColumnKind::Date => read_int32_column(&*row_group, column.index, rows)?
-                        .into_iter()
-                        .map(date_value)
-                        .collect::<Result<_, _>>()?,
-                };
-                group_values.push(column_values);
-            }
-            for (destination, source) in values.iter_mut().zip(group_values) {
-                destination.extend(source);
-            }
-            observed = observed
-                .checked_add(u64::try_from(rows).map_err(|_| CompactParquetError::InvalidParquet)?)
-                .ok_or(CompactParquetError::RowCountMismatch {
-                    expected: expected_row_count,
-                    observed: u64::MAX,
-                })?;
-        }
-        if observed != expected_row_count {
-            return Err(CompactParquetError::RowCountMismatch {
-                expected: expected_row_count,
-                observed,
-            });
-        }
-        let rows =
-            usize::try_from(expected_row_count).map_err(|_| CompactParquetError::InvalidParquet)?;
-        let mut encoded = Vec::with_capacity(rows);
-        let mut previous: Option<Vec<OvbRaw>> = None;
-        let key_rows = (0..rows).map(|row| {
-            values
-                .iter()
-                .map(|column| column[row].clone())
-                .collect::<Vec<_>>()
-        });
-        for components in key_rows {
-            if let Some(previous) = &previous
-                && compare_key_components(previous, &components)? == Ordering::Greater
-            {
-                return Err(CompactParquetError::UnorderedPrimaryKeys);
-            }
-            previous = Some(components.clone());
-            let raw = match components.as_slice() {
-                [value] => value.clone(),
-                [] => return Err(CompactParquetError::UnsupportedKeyMapping),
-                _ => OvbRaw::Tag(60015, Box::new(OvbRaw::Array(components))),
-            };
-            let bytes = CanonicalValue::new(raw)
-                .map_err(|_| CompactParquetError::InvalidMetadata)?
-                .encode()
-                .map_err(|_| CompactParquetError::InvalidMetadata)?;
-            profile
-                .decode_key(&bytes)
-                .map_err(CompactParquetError::Key)?;
-            encoded.push(bytes);
-        }
-        Ok(encoded)
+        decode_verified_bytes_for_role(
+            profile,
+            table,
+            bytes,
+            expected_row_count,
+            CompactSegmentRole::Data,
+        )
     }
 
     fn exact_keys_for_entry(
@@ -252,8 +162,13 @@ impl CompactParquetKeySource {
             .segments
             .get(&entry.segment_id())
             .ok_or_else(|| CompactParquetError::SegmentUnavailable(entry.segment_id()))?;
-        let keys =
-            Self::decode_verified_bytes(&self.profile, self.table, bytes, entry.row_count())?;
+        let keys = decode_verified_bytes_for_role(
+            &self.profile,
+            self.table,
+            bytes,
+            entry.row_count(),
+            entry.role(),
+        )?;
         let Some((first_key, rest)) = keys.split_first() else {
             return Err(CompactParquetError::ManifestKeyBoundsMismatch);
         };
@@ -277,6 +192,112 @@ impl CompactParquetKeySource {
         }
         Ok(keys)
     }
+}
+
+fn decode_verified_bytes_for_role(
+    profile: &CompactOvbProfile,
+    table: Uuid,
+    bytes: &[u8],
+    expected_row_count: u64,
+    segment_role: CompactSegmentRole,
+) -> Result<Vec<Vec<u8>>, CompactParquetError> {
+    if table.as_bytes() != &profile.table_id() {
+        return Err(CompactParquetError::Key(CompactKeyError::WrongTable));
+    }
+    ensure_supported_profile(profile)?;
+    let reader = SerializedFileReader::new(Bytes::copy_from_slice(bytes))
+        .map_err(|_| CompactParquetError::InvalidParquet)?;
+    validate_file_metadata(&reader, profile, table, expected_row_count)?;
+    validate_compact_page_uncompressed_sizes(bytes, reader.metadata().row_groups())
+        .map_err(|_| CompactParquetError::InvalidParquet)?;
+    let key_columns = key_columns(&reader, profile, segment_role)?;
+    let mut values: Vec<Vec<OvbRaw>> = vec![Vec::new(); key_columns.len()];
+    let mut observed = 0u64;
+    for row_group_index in 0..reader.num_row_groups() {
+        let row_group = reader
+            .get_row_group(row_group_index)
+            .map_err(|_| CompactParquetError::InvalidParquet)?;
+        let rows = row_group.metadata().num_rows();
+        if rows <= 0 {
+            return Err(CompactParquetError::InvalidParquet);
+        }
+        let rows = usize::try_from(rows).map_err(|_| CompactParquetError::InvalidParquet)?;
+        for column in 0..row_group.num_columns() {
+            validate_physical_column(&*row_group, column, rows)?;
+        }
+        let mut group_values: Vec<Vec<OvbRaw>> = Vec::with_capacity(key_columns.len());
+        for column in &key_columns {
+            let column_values = match column.kind {
+                KeyColumnKind::Int => read_int64_column(&*row_group, column.index, rows)?
+                    .into_iter()
+                    .map(|value| OvbRaw::Int(value.into()))
+                    .collect(),
+                KeyColumnKind::OvbInt | KeyColumnKind::OvbBool => {
+                    read_ovb_column(&*row_group, column.index, rows, column.kind)?
+                }
+                KeyColumnKind::Bool => read_bool_column(&*row_group, column.index, rows)?
+                    .into_iter()
+                    .map(OvbRaw::Bool)
+                    .collect(),
+                KeyColumnKind::Str => read_str_column(&*row_group, column.index, rows)?
+                    .into_iter()
+                    .map(OvbRaw::Text)
+                    .collect(),
+                KeyColumnKind::Date => read_int32_column(&*row_group, column.index, rows)?
+                    .into_iter()
+                    .map(date_value)
+                    .collect::<Result<_, _>>()?,
+            };
+            group_values.push(column_values);
+        }
+        for (destination, source) in values.iter_mut().zip(group_values) {
+            destination.extend(source);
+        }
+        observed = observed
+            .checked_add(u64::try_from(rows).map_err(|_| CompactParquetError::InvalidParquet)?)
+            .ok_or(CompactParquetError::RowCountMismatch {
+                expected: expected_row_count,
+                observed: u64::MAX,
+            })?;
+    }
+    if observed != expected_row_count {
+        return Err(CompactParquetError::RowCountMismatch {
+            expected: expected_row_count,
+            observed,
+        });
+    }
+    let rows =
+        usize::try_from(expected_row_count).map_err(|_| CompactParquetError::InvalidParquet)?;
+    let mut encoded = Vec::with_capacity(rows);
+    let mut previous: Option<Vec<OvbRaw>> = None;
+    let key_rows = (0..rows).map(|row| {
+        values
+            .iter()
+            .map(|column| column[row].clone())
+            .collect::<Vec<_>>()
+    });
+    for components in key_rows {
+        if let Some(previous) = &previous
+            && compare_key_components(previous, &components)? == Ordering::Greater
+        {
+            return Err(CompactParquetError::UnorderedPrimaryKeys);
+        }
+        previous = Some(components.clone());
+        let raw = match components.as_slice() {
+            [value] => value.clone(),
+            [] => return Err(CompactParquetError::UnsupportedKeyMapping),
+            _ => OvbRaw::Tag(60015, Box::new(OvbRaw::Array(components))),
+        };
+        let bytes = CanonicalValue::new(raw)
+            .map_err(|_| CompactParquetError::InvalidMetadata)?
+            .encode()
+            .map_err(|_| CompactParquetError::InvalidMetadata)?;
+        profile
+            .decode_key(&bytes)
+            .map_err(CompactParquetError::Key)?;
+        encoded.push(bytes);
+    }
+    Ok(encoded)
 }
 
 fn validate_physical_column(
@@ -516,6 +537,7 @@ fn validate_file_metadata(
 fn key_columns(
     reader: &SerializedFileReader<Bytes>,
     profile: &CompactOvbProfile,
+    segment_role: CompactSegmentRole,
 ) -> Result<Vec<KeyColumn>, CompactParquetError> {
     let expected_kinds = ensure_supported_profile(profile)?;
     let expected_by_id = profile
@@ -540,9 +562,10 @@ fn key_columns(
     if descriptors.len() != schema.num_columns() {
         return Err(CompactParquetError::InvalidMetadata);
     }
+    let expected_fields = required_physical_fields(profile, segment_role)?;
     let mut by_id = BTreeMap::new();
     for (index, (descriptor, column)) in descriptors.iter().zip(schema.columns()).enumerate() {
-        let (id, kind) = descriptor_field_id(descriptor, column, profile)?;
+        let (id, kind) = descriptor_field_id(descriptor, column, profile, &expected_fields)?;
         if let Some(expected) = expected_by_id.get(&id)
             && !matches!(kind, Some(kind) if matches_profile_key_kind(*expected, kind))
         {
@@ -551,6 +574,9 @@ fn key_columns(
         if by_id.insert(id, (index, kind)).is_some() {
             return Err(CompactParquetError::DuplicateFieldColumn(id));
         }
+    }
+    if by_id.len() != expected_fields.len() {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
     }
     profile
         .key_field_ids()
@@ -568,6 +594,7 @@ fn descriptor_field_id(
     descriptor: &OvbRaw,
     column: &parquet::schema::types::ColumnDescriptor,
     profile: &CompactOvbProfile,
+    expected_fields: &BTreeMap<[u8; 16], (&OvbRaw, u8)>,
 ) -> Result<([u8; 16], Option<KeyColumnKind>), CompactParquetError> {
     let OvbRaw::Array(fields) = descriptor else {
         return Err(CompactParquetError::InvalidMetadata);
@@ -597,6 +624,12 @@ fn descriptor_field_id(
         || column.path().parts()[0] != format!("f_{}", Uuid::from_bytes(id).simple())
     {
         return Err(CompactParquetError::InvalidMetadata);
+    }
+    let Some((expected_type, _role)) = expected_fields.get(&id) else {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    };
+    if &fields[2] != *expected_type {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
     }
     let kind = if profile.key_field_ids().any(|key| key == id) {
         let OvbRaw::Array(logical_type) = &fields[2] else {
@@ -656,9 +689,95 @@ fn descriptor_field_id(
         }
         Some(kind)
     } else {
+        let OvbRaw::Array(logical_type) = &fields[2] else {
+            return Err(CompactParquetError::UnsupportedKeyMapping);
+        };
+        let kind = if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "int64")
+            && column.physical_type() == Type::INT64
+        {
+            KeyColumnKind::Int
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Bool".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "bool")
+            && column.physical_type() == Type::BOOLEAN
+        {
+            KeyColumnKind::Bool
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Str".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "utf8")
+            && column.physical_type() == Type::BYTE_ARRAY
+            && column.logical_type_ref() == Some(&parquet::basic::LogicalType::String)
+        {
+            KeyColumnKind::Str
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Date".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "date")
+            && column.physical_type() == Type::INT32
+            && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Date)
+        {
+            KeyColumnKind::Date
+        } else {
+            return Err(CompactParquetError::UnsupportedKeyMapping);
+        };
+        if !matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty())
+            || (!(kind == KeyColumnKind::Str || kind == KeyColumnKind::Date)
+                && column.logical_type_ref().is_some())
+            || column.max_rep_level() != 0
+        {
+            return Err(CompactParquetError::UnsupportedKeyMapping);
+        }
         None
     };
     Ok((id, kind))
+}
+
+fn required_physical_fields(
+    profile: &CompactOvbProfile,
+    segment_role: CompactSegmentRole,
+) -> Result<BTreeMap<[u8; 16], (&OvbRaw, u8)>, CompactParquetError> {
+    let OvbRaw::Map(entries) = profile.schema().raw() else {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    };
+    let fields = entries
+        .iter()
+        .find(|(key, _)| *key == OvbRaw::Int(3.into()))
+        .and_then(|(_, value)| match value {
+            OvbRaw::Array(fields) => Some(fields),
+            _ => None,
+        })
+        .ok_or(CompactParquetError::UnsupportedKeyMapping)?;
+    let mut required_fields = BTreeMap::new();
+    for field in fields {
+        let OvbRaw::Array(parts) = field else {
+            return Err(CompactParquetError::UnsupportedKeyMapping);
+        };
+        let [field_id, _, logical_type, OvbRaw::Int(role), _] = parts.as_slice() else {
+            return Err(CompactParquetError::UnsupportedKeyMapping);
+        };
+        let OvbRaw::Tag(37, field_id) = field_id else {
+            return Err(CompactParquetError::UnsupportedKeyMapping);
+        };
+        let OvbRaw::Bytes(field_id) = field_id.as_ref() else {
+            return Err(CompactParquetError::UnsupportedKeyMapping);
+        };
+        let id: [u8; 16] = field_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| CompactParquetError::UnsupportedKeyMapping)?;
+        let role = role
+            .to_string()
+            .parse::<u8>()
+            .map_err(|_| CompactParquetError::UnsupportedKeyMapping)?;
+        let required = match (segment_role, role) {
+            (CompactSegmentRole::Data | CompactSegmentRole::Replacement, 0 | 1)
+            | (CompactSegmentRole::Deletion, 0) => true,
+            (CompactSegmentRole::Data | CompactSegmentRole::Replacement, 2)
+            | (CompactSegmentRole::Deletion, 1 | 2) => false,
+            _ => return Err(CompactParquetError::UnsupportedKeyMapping),
+        };
+        if required && required_fields.insert(id, (logical_type, role)).is_some() {
+            return Err(CompactParquetError::DuplicateFieldColumn(id));
+        }
+    }
+    Ok(required_fields)
 }
 
 fn profile_key_kinds(
@@ -1108,6 +1227,7 @@ mod tests {
         0x01, 0x8f, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 0x01,
     ];
     const KEY_B: [u8; 16] = [0x21; 16];
+    const STORED_A: [u8; 16] = [0x31; 16];
     const SEGMENT_ID: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
 
     fn uuid_raw(id: [u8; 16]) -> OvbRaw {
@@ -1177,6 +1297,29 @@ mod tests {
         let descriptor = SchemaDescriptor::new(schema);
         assert!(descriptor.is_ok(), "schema descriptor: {descriptor:?}");
         CompactOvbProfile::new(descriptor.unwrap()).unwrap()
+    }
+
+    fn profile_with_stored_field() -> CompactOvbProfile {
+        let schema = OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (OvbRaw::Int(1.into()), uuid_raw(*TABLE.as_bytes())),
+            (OvbRaw::Int(2.into()), OvbRaw::Array(vec![uuid_raw(KEY_A)])),
+            (
+                OvbRaw::Int(3.into()),
+                OvbRaw::Array(vec![
+                    field_with_type(KEY_A, int_type()),
+                    OvbRaw::Array(vec![
+                        uuid_raw(STORED_A),
+                        OvbRaw::Text(format!("f_{}", Uuid::from_bytes(STORED_A).simple())),
+                        int_type(),
+                        OvbRaw::Int(1.into()),
+                        OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                    ]),
+                ]),
+            ),
+            (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+        ]);
+        CompactOvbProfile::new(SchemaDescriptor::new(schema).unwrap()).unwrap()
     }
 
     fn descriptor(id: [u8; 16], logical_type: OvbRaw) -> OvbRaw {
@@ -3916,6 +4059,26 @@ mod tests {
                 expected: 2,
                 observed: 1
             })
+        ));
+    }
+
+    #[test]
+    fn rejects_omitted_declared_stored_mapping_before_key_decode() {
+        let profile = profile_with_stored_field();
+        let bytes = parquet(&profile, &[KEY_A], &[vec![7]], false, None);
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 1),
+            Err(CompactParquetError::UnsupportedKeyMapping)
+        ));
+    }
+
+    #[test]
+    fn rejects_substituted_declared_stored_mapping_before_key_decode() {
+        let profile = profile_with_stored_field();
+        let bytes = parquet(&profile, &[KEY_A, KEY_B], &[vec![7], vec![8]], false, None);
+        assert!(matches!(
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 1),
+            Err(CompactParquetError::UnsupportedKeyMapping)
         ));
     }
 }
