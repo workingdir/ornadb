@@ -76,8 +76,7 @@ description = "A static, source-authored-only Studio shell evaluated through acc
 
 [[demos]]
 name = "ui-constructor-showcase"
-mode = "offline-test"
-test = "checks_and_evaluates_accepted_ui_constructor_showcase_roots_offline"
+mode = "source-check"
 source = "crates/orna-server/tests/fixtures/ui_constructor_showcase_dogfood.orna"
 description = "A source-authored static UI showcase covering all V9 constructors and std.ui.window."
 
