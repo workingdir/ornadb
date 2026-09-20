@@ -348,12 +348,13 @@ impl Symbol {
     }
 }
 
-/// Static field shape and insertion rules; defaults are not evaluated here.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableSchema {
     pub fields: BTreeMap<String, Type>,
     /// None preserves a shape-only catalogue without inventing declaration rules.
     pub admission: Option<TableAdmission>,
+    /// Nested nominal From implementations exported with the target type.
+    pub conversions: Vec<(Type, EffectSummary)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -385,10 +386,29 @@ pub struct ModuleHeader {
 pub struct Catalogue {
     modules: BTreeMap<Namespace, ModuleHeader>,
     attached_symbols: BTreeMap<String, Symbol>,
+    /// Declarations retained by an authority for whole-program historical
+    /// evaluation.  These are deliberately separate from `modules`: current
+    /// declarations must never become historical definitions merely because
+    /// they happen to have the same name.
+    historical_modules: BTreeMap<Namespace, ModuleHeader>,
 }
 impl Catalogue {
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// Adds an authority-backed projection of declarations retained for
+    /// whole-program historical calls.  The projection is intentionally
+    /// caller-supplied and never inferred from current modules.
+    pub fn with_historical_modules(
+        mut self,
+        modules: impl IntoIterator<Item = ModuleHeader>,
+    ) -> Self {
+        for module in modules {
+            self.historical_modules
+                .insert(module.namespace.clone(), module);
+        }
+        self
     }
 
     /// Builds a declaration catalogue from source bytes that match one
@@ -782,6 +802,7 @@ impl Catalogue {
         Self {
             modules,
             attached_symbols: BTreeMap::new(),
+            historical_modules: BTreeMap::new(),
         }
     }
 
@@ -865,6 +886,14 @@ impl Catalogue {
             contact_table.clone(),
             fixture_type("Customer", customer),
             fixture_table("Message", Type::Named("Message".into())),
+            fixture_nominal_type(
+                "EmailHeader",
+                Type::Record(BTreeMap::from([("address".into(), Type::Text)])),
+            ),
+            fixture_function(
+                "valid_email",
+                named_function(vec![("value", Type::Text)], Type::Bool),
+            ),
             fixture_table("Note", note),
             fixture_table("Order", order),
             fixture_table("Payment", payment),
@@ -897,6 +926,35 @@ impl Catalogue {
                 true,
             ),
         );
+        // The frozen historical-program example is backed by this explicit
+        // retained projection, not by treating every current fixture module as
+        // historical code.  Its `daily` declaration is intentionally the
+        // historical zero-argument signature.
+        let historical_contact = catalogue
+            .modules
+            .get(&Namespace(vec!["contacts".into()]))
+            .and_then(|module| module.exports.get("Contact"))
+            .cloned()
+            .expect("fixture Contact projection");
+        catalogue.historical_modules.insert(
+            Namespace(vec!["directory".into()]),
+            fixture_module(
+                Namespace(vec!["directory".into()]),
+                [("Contact".into(), historical_contact)],
+                true,
+            ),
+        );
+        catalogue.historical_modules.insert(
+            Namespace(vec!["energy".into()]),
+            fixture_module(
+                Namespace(vec!["energy".into()]),
+                [
+                    fixture_function("daily", function(Vec::new(), Type::Error)),
+                    fixture_table("Reading", reading.clone()),
+                ],
+                true,
+            ),
+        );
         catalogue.modules.insert(
             Namespace(vec!["mail".into()]),
             fixture_module(
@@ -909,7 +967,7 @@ impl Catalogue {
             Namespace(vec!["mail".into(), "google".into()]),
             fixture_module(
                 Namespace(vec!["mail".into(), "google".into()]),
-                [fixture_value("sync", Type::Error)],
+                [fixture_connector_function("sync", Vec::new(), Type::Null)],
                 true,
             ),
         );
@@ -921,7 +979,11 @@ impl Catalogue {
             Namespace(vec!["finance".into(), "openbanking".into()]),
             fixture_module(
                 Namespace(vec!["finance".into(), "openbanking".into()]),
-                [fixture_value("sync", Type::Error)],
+                [fixture_connector_function(
+                    "sync",
+                    vec![("account", Type::Named("Account".into()))],
+                    Type::Null,
+                )],
                 true,
             ),
         );
@@ -969,7 +1031,11 @@ impl Catalogue {
             Namespace(vec!["vehicle".into(), "corsa".into(), "freematics".into()]),
             fixture_module(
                 Namespace(vec!["vehicle".into(), "corsa".into(), "freematics".into()]),
-                [fixture_value("sync", Type::Error)],
+                [fixture_connector_function(
+                    "sync",
+                    vec![("source", Type::Text)],
+                    Type::Null,
+                )],
                 true,
             ),
         );
@@ -1140,6 +1206,7 @@ fn fixture_table(name: &str, row: Type) -> (String, Symbol) {
         symbol.table_schema = Some(TableSchema {
             fields,
             admission: None,
+            conversions: Vec::new(),
         });
     }
     (name.into(), symbol)
@@ -1157,8 +1224,33 @@ fn fixture_table_with_admission(
     (name, symbol)
 }
 
+fn fixture_nominal_type(name: &str, row: Type) -> (String, Symbol) {
+    let (name, mut symbol) = fixture_type(name, Type::Named(name.into()));
+    if let Type::Record(fields) = row {
+        symbol.table_schema = Some(TableSchema {
+            fields,
+            admission: None,
+            conversions: Vec::new(),
+        });
+    }
+    (name, symbol)
+}
+
 fn fixture_type(name: &str, ty: Type) -> (String, Symbol) {
     (name.into(), fixture_symbol(SymbolKind::Type, ty))
+}
+
+fn fixture_connector_function(
+    name: &str,
+    parameters: Vec<(&str, Type)>,
+    result: Type,
+) -> (String, Symbol) {
+    let (name, mut symbol) = fixture_function(name, named_function(parameters, result));
+    symbol.effects = EffectSummary {
+        effects: BTreeSet::from(["network".into()]),
+        may_fail: true,
+    };
+    (name, symbol)
 }
 
 fn fixture_value(name: &str, ty: Type) -> (String, Symbol) {
@@ -1287,7 +1379,12 @@ fn analyze_retaining_context(
         result.modules.insert(namespace.clone(), header);
         parsed.push((namespace, parse.value));
     }
-    stabilize_function_summaries(&parsed, &mut result.modules, &catalogue.attached_symbols);
+    stabilize_function_summaries(
+        &parsed,
+        &mut result.modules,
+        &catalogue.historical_modules,
+        &catalogue.attached_symbols,
+    );
     for (namespace, tree) in &parsed {
         let Some(header) = result.modules.get(namespace).cloned() else {
             continue;
@@ -1297,6 +1394,7 @@ fn analyze_retaining_context(
             tree,
             &header,
             &result.modules,
+            &catalogue.historical_modules,
             &catalogue.attached_symbols,
             &mut result.diagnostics,
         );
@@ -1323,6 +1421,8 @@ fn analyze_retaining_context(
                 &mut result.diagnostics,
             );
         }
+        let conversion_metadata = conversion_metadata(&scope);
+        attach_conversion_metadata(&mut symbols, &conversion_metadata);
         if let Some(module) = result.modules.get_mut(namespace) {
             module.symbols = symbols;
             module.exports = module
@@ -1350,16 +1450,12 @@ fn analyze_retaining_context(
 fn stabilize_function_summaries(
     parsed: &[(Namespace, SyntaxTree)],
     modules: &mut BTreeMap<Namespace, ModuleHeader>,
+    historical_modules: &BTreeMap<Namespace, ModuleHeader>,
     attached_symbols: &BTreeMap<String, Symbol>,
 ) {
     let pass_limit = parsed
         .iter()
-        .map(|(_, tree)| {
-            tree.items
-                .iter()
-                .filter(|item| matches!(item.declaration, Declaration::Function { .. }))
-                .count()
-        })
+        .map(|(_, tree)| tree.items.len())
         .sum::<usize>()
         .saturating_add(1);
     for _ in 0..pass_limit {
@@ -1374,6 +1470,7 @@ fn stabilize_function_summaries(
                 tree,
                 &header,
                 modules,
+                historical_modules,
                 attached_symbols,
                 &mut discarded,
             );
@@ -1386,6 +1483,8 @@ fn stabilize_function_summaries(
                     check_function(item, &mut symbols, &scope, &mut discarded);
                 }
             }
+            let conversion_metadata = conversion_metadata(&scope);
+            attach_conversion_metadata(&mut symbols, &conversion_metadata);
             if let Some(module) = modules.get_mut(namespace) {
                 module.symbols = symbols;
                 module.exports = module
@@ -1467,9 +1566,6 @@ fn collect_header(
         // not admit this invalid declaration into the header, however: it
         // must not shadow the portable root while its declaration check runs.
         if matches!(&item.declaration, Declaration::Table { name, .. } if name == "sys") {
-            continue;
-        }
-        if rejects_portable_sys_shadow(&name, diagnostics) {
             continue;
         }
         let public = matches!(item.visibility, Visibility::Public { .. });
@@ -1937,6 +2033,9 @@ fn canonicalize_symbol(symbol: &mut Symbol, identities: &BTreeMap<String, String
                 *field = canonicalize_type_with_identities(field, identities);
             }
         }
+        for (source, _) in &mut schema.conversions {
+            *source = canonicalize_type_with_identities(source, identities);
+        }
     }
 }
 
@@ -1981,6 +2080,32 @@ fn canonicalize_scope_metadata(scope: &mut Scope, namespace: &Namespace, tree: &
         }
     }
     scope.nominal_rows = nominal_rows;
+    let mut private_fields = BTreeMap::new();
+    for item in &tree.items {
+        let Declaration::Type {
+            name,
+            representation: TypeRepresentation::Nominal { members },
+            ..
+        } = &item.declaration
+        else {
+            continue;
+        };
+        let hidden = members
+            .iter()
+            .filter_map(|member| match member {
+                TypeMember::Field {
+                    visibility: false,
+                    name,
+                    ..
+                } => Some(name.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if !hidden.is_empty() {
+            private_fields.insert(nominal_identity(namespace, name), hidden);
+        }
+    }
+    scope.nominal_private_fields = private_fields;
     for value in scope.refined_types.values_mut() {
         *value = canonicalize_type_with_identities(value, &identities);
     }
@@ -2045,21 +2170,29 @@ struct Scope {
     /// The closed source/catalogue module set used by qualified lookup. This
     /// is data assembled by the caller, never a filesystem loader.
     available_modules: BTreeMap<Namespace, ModuleHeader>,
+    /// Authority-backed declarations available only through a historical
+    /// database snapshot. Current modules are never implicitly projected.
+    historical_modules: BTreeMap<Namespace, ModuleHeader>,
     /// Local table rows are separate from public table identities: a table
     /// expression produces its relation row shape, while table operations
     /// retain the declared nominal table result.
     table_rows: BTreeMap<String, Type>,
+    auto_key_tables: BTreeSet<String>,
     /// Tables without declared keys use the implicit automatic key and cannot
     /// be explicitly re-keyed by source code.
-    auto_key_tables: BTreeSet<String>,
     /// Local nominal record constructors elaborate to their declared row shape
     /// so field access remains structural inside inferred stream pipelines.
     nominal_rows: BTreeMap<String, Type>,
+    /// Private representation fields keyed by canonical nominal identity.
+    /// They are visible only while checking that type's nested implementation.
+    nominal_private_fields: BTreeMap<String, BTreeSet<String>>,
+    /// The nominal owner whose nested implementation body is currently being
+    /// checked. Ordinary module code has no private-field owner.
+    private_field_owner: Option<String>,
     /// Names whose nominal rows belong to this source module. Imported rows
     /// are selected from the explicitly resolved export instead of by short
     /// name alone.
     local_nominal_names: BTreeSet<String>,
-    /// Local refined aliases retain their underlying representation so the
     /// closed `Port.from(value)` constructor can check the source value
     /// without erasing the refined nominal result.
     refined_types: BTreeMap<String, Type>,
@@ -2090,12 +2223,17 @@ struct Scope {
     /// Nested protocol implementations keyed by nominal target. This is the
     /// closed-world evidence used by local generic bound checks.
     protocol_implementations: BTreeMap<String, Vec<Type>>,
+    /// Source types accepted by each locally declared nominal `From` surface.
+    nominal_conversions: BTreeMap<String, Vec<Type>>,
+    /// Effects/failure summaries of each conversion body.
+    nominal_conversion_effects: BTreeMap<String, Vec<(Type, EffectSummary)>>,
 }
 fn resolve_imports(
     namespace: &Namespace,
     tree: &SyntaxTree,
     header: &ModuleHeader,
     modules: &BTreeMap<Namespace, ModuleHeader>,
+    historical_modules: &BTreeMap<Namespace, ModuleHeader>,
     attached_symbols: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Scope {
@@ -2105,6 +2243,7 @@ fn resolve_imports(
         nominal_identities: BTreeMap::new(),
         modules: BTreeMap::new(),
         available_modules: modules.clone(),
+        historical_modules: historical_modules.clone(),
         table_rows: tree
             .items
             .iter()
@@ -2122,6 +2261,8 @@ fn resolve_imports(
             })
             .collect(),
         nominal_rows: tree.items.iter().filter_map(nominal_row_type).collect(),
+        nominal_private_fields: BTreeMap::new(),
+        private_field_owner: None,
         local_nominal_names: tree
             .items
             .iter()
@@ -2218,6 +2359,8 @@ fn resolve_imports(
             .collect(),
         generic_type_bounds: BTreeMap::new(),
         protocol_implementations: BTreeMap::new(),
+        nominal_conversions: BTreeMap::new(),
+        nominal_conversion_effects: BTreeMap::new(),
     };
     for (name, symbol) in attached_symbols {
         scope
@@ -2230,6 +2373,17 @@ fn resolve_imports(
             scope
                 .table_rows
                 .entry(name.clone())
+                .or_insert_with(|| Type::Record(row.clone()));
+        } else if symbol.kind == SymbolKind::Type
+            && let Some(row) = symbol.table_fields()
+        {
+            let identity = match &symbol.ty {
+                Type::Named(identity) => identity.clone(),
+                _ => name.clone(),
+            };
+            scope
+                .nominal_rows
+                .entry(identity)
                 .or_insert_with(|| Type::Record(row.clone()));
         }
     }
@@ -2434,6 +2588,20 @@ fn resolve_imports(
         }
     }
     canonicalize_scope_metadata(&mut scope, namespace, tree);
+    for (name, symbol) in attached_symbols {
+        if symbol.kind == SymbolKind::Type
+            && let Some(row) = symbol.table_fields()
+        {
+            let identity = match &symbol.ty {
+                Type::Named(identity) => identity.clone(),
+                _ => name.clone(),
+            };
+            scope
+                .nominal_rows
+                .entry(identity)
+                .or_insert_with(|| Type::Record(row.clone()));
+        }
+    }
     for item in &tree.items {
         let (target, members) = match &item.declaration {
             Declaration::Type {
@@ -2478,18 +2646,216 @@ fn resolve_imports(
             ),
             _ => continue,
         };
+        let target_identity = canonical_nominal_name(target, &scope);
         let protocols = members
-            .into_iter()
+            .iter()
             .map(|implementation| resolved_type_of(&implementation.protocol, &scope))
             .filter(|protocol| *protocol != Type::Error)
             .collect::<Vec<_>>();
         scope
             .protocol_implementations
-            .entry(canonical_nominal_name(target, &scope))
+            .entry(target_identity.clone())
             .or_default()
             .extend(protocols);
+        for implementation in members {
+            let TypeExpr::Name {
+                path, arguments, ..
+            } = &implementation.protocol
+            else {
+                continue;
+            };
+            if path.as_slice() != ["From"] || arguments.len() != 1 {
+                continue;
+            }
+            if let Some(source) = valid_static_type(&arguments[0], &scope) {
+                scope
+                    .nominal_conversions
+                    .entry(target_identity.clone())
+                    .or_default()
+                    .push(source);
+            }
+        }
     }
+    collect_nominal_conversion_effects(&mut scope, tree);
+    merge_exported_conversion_metadata(&mut scope, modules);
     scope
+}
+fn collect_nominal_conversion_effects(scope: &mut Scope, tree: &SyntaxTree) {
+    for item in &tree.items {
+        let (target, implementations) = match &item.declaration {
+            Declaration::Type {
+                name,
+                representation: TypeRepresentation::Nominal { members },
+                ..
+            } => (
+                name,
+                members
+                    .iter()
+                    .filter_map(|member| match member {
+                        TypeMember::Implementation { implementation, .. } => Some(implementation),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            Declaration::Type {
+                name,
+                representation: TypeRepresentation::Alias { refinements, .. },
+                ..
+            } => (
+                name,
+                refinements
+                    .iter()
+                    .filter_map(|member| match member {
+                        TypeMember::Implementation { implementation, .. } => Some(implementation),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            Declaration::Table { name, members, .. } => (
+                name,
+                members
+                    .iter()
+                    .filter_map(|member| match member {
+                        orna_syntax_v1::TableMember::Implementation { implementation, .. } => {
+                            Some(implementation)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => continue,
+        };
+        let target = canonical_nominal_name(target, scope);
+        for implementation in implementations {
+            let TypeExpr::Name {
+                path, arguments, ..
+            } = &implementation.protocol
+            else {
+                continue;
+            };
+            if path.as_slice() != ["From"] || arguments.len() != 1 {
+                continue;
+            }
+            let Some(source) = valid_static_type(&arguments[0], scope) else {
+                continue;
+            };
+            let Some(orna_syntax_v1::ImplMember::Function { signature, body, .. }) =
+                implementation.members.as_slice().first()
+            else {
+                continue;
+            };
+
+            if implementation.members.len() != 1
+                || signature.name != "from"
+                || signature.parameters.len() != 1
+            {
+                continue;
+            }
+            let source_binding = match &source {
+                Type::Named(name) => scope
+                    .nominal_rows
+                    .get(name)
+                    .or_else(|| scope.table_rows.get(name))
+                    .cloned()
+                    .unwrap_or_else(|| source.clone()),
+                _ => source.clone(),
+            };
+            let mut local = BTreeMap::new();
+            let mut ignored = Vec::new();
+            bind_pattern(
+                &signature.parameters[0].pattern,
+                source_binding,
+                &mut local,
+                &mut ignored,
+            );
+            let inferred = infer(body, scope, &local, &mut ignored);
+            scope
+                .nominal_conversion_effects
+                .entry(target.clone())
+                .or_default()
+                .push((source, inferred.effects));
+        }
+    }
+}
+fn conversion_metadata(
+    scope: &Scope,
+) -> BTreeMap<String, Vec<(Type, EffectSummary)>> {
+    let mut metadata = BTreeMap::new();
+    for (target, sources) in &scope.nominal_conversions {
+        let entries = sources
+            .iter()
+            .map(|source| {
+                let effects = scope
+                    .nominal_conversion_effects
+                    .get(target)
+                    .and_then(|candidates| {
+                        candidates
+                            .iter()
+                            .find(|(candidate, _)| candidate == source)
+                            .map(|(_, effects)| effects.clone())
+                    })
+                    .unwrap_or_default();
+                (source.clone(), effects)
+            })
+            .collect::<Vec<_>>();
+        metadata.insert(target.clone(), entries);
+    }
+    metadata
+}
+fn attach_conversion_metadata(
+    symbols: &mut BTreeMap<String, Symbol>,
+    metadata: &BTreeMap<String, Vec<(Type, EffectSummary)>>,
+) {
+    for symbol in symbols.values_mut() {
+        if symbol.kind != SymbolKind::Type {
+            continue;
+        }
+        let Type::Named(target) = &symbol.ty else {
+            continue;
+        };
+        let Some(schema) = symbol.table_schema.as_mut() else {
+            continue;
+        };
+        schema.conversions = metadata.get(target).cloned().unwrap_or_default();
+    }
+}
+
+fn merge_exported_conversion_metadata(
+    scope: &mut Scope,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+) {
+    for module in modules.values() {
+        for symbol in module.exports.values() {
+            if symbol.kind != SymbolKind::Type {
+                continue;
+            }
+            let Type::Named(target) = &symbol.ty else {
+                continue;
+            };
+            let Some(schema) = symbol.table_schema.as_ref() else {
+                continue;
+            };
+            for (source, effects) in &schema.conversions {
+                let sources = scope
+                    .nominal_conversions
+                    .entry(target.clone())
+                    .or_default();
+                if !sources.contains(source) {
+                    sources.push(source.clone());
+                }
+                let effect_entries = scope
+                    .nominal_conversion_effects
+                    .entry(target.clone())
+                    .or_default();
+                if !effect_entries
+                    .iter()
+                    .any(|(candidate, _)| candidate == source)
+                {
+                    effect_entries.push((source.clone(), effects.clone()));
+                }
+            }
+        }
+    }
 }
 fn insert_explicit(
     map: &mut BTreeMap<String, Symbol>,
@@ -2504,7 +2870,6 @@ fn insert_explicit(
         diagnostics.push(diag(DIAG_AMBIGUOUS, "conflicting explicit imports"));
     }
 }
-
 fn check_item(
     item: &Item,
     symbols: &mut BTreeMap<String, Symbol>,
@@ -2833,7 +3198,6 @@ fn resolve_local_protocol_name(name: &str, scope: &Scope) -> Option<String> {
 
 /// Check the member surface, signature/default contracts, and the available
 /// contextual body shape of a nested implementation when its local protocol
-/// identity is directly available. Custom generic substitution and bounds,
 /// imported-member conformance, complete callable semantics, and full runtime
 /// conversion dispatch remain outside this validator. Unsupported generic,
 /// qualified, imported, unresolved, and non-protocol identities fail closed.
@@ -2851,6 +3215,11 @@ fn validate_nested_implementation_members(
     target_shape: Option<&Type>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    let mut owned_scope = scope.clone();
+    if let Type::Named(target_name) = target {
+        owned_scope.private_field_owner = Some(target_name.clone());
+    }
+    let scope = &owned_scope;
     let TypeExpr::Name {
         path, arguments, ..
     } = &implementation.protocol
@@ -3156,10 +3525,11 @@ fn infer_from_nominal_target(
 ) -> Inferred {
     let expected_shape = target_shape.unwrap_or(target);
     let inferred = infer_contextual(body, expected_shape, scope, local, diagnostics);
-    let Type::Named(target_name) = target else {
+    let Type::Named(_) = target else {
         return inferred;
     };
-    if !expr_constructs_nominal_target(body, target_name) {
+    let constructs_target = inferred.ty == *target;
+    if !constructs_target {
         diagnostics.push(diag(
             DIAG_TYPE,
             "From implementation result must construct its nominal target",
@@ -3175,34 +3545,6 @@ fn infer_from_nominal_target(
     }
 }
 
-/// Return whether the expression's result is visibly produced by the target's
-/// nominal constructor. Blocks and branch expressions preserve the supported
-/// source forms without inferring nominal identity from a same-shaped record.
-fn expr_constructs_nominal_target(expression: &Expr, target_name: &str) -> bool {
-    let short_target = target_name.rsplit('.').next().unwrap_or(target_name);
-    match expression {
-        Expr::Group { inner, .. } => expr_constructs_nominal_target(inner, target_name),
-        Expr::Nominal { path, .. } => path.len() == 1 && path[0].text == short_target,
-        Expr::Block {
-            tail: Some(tail), ..
-        } => expr_constructs_nominal_target(tail, target_name),
-        Expr::Control {
-            kind: ControlKind::If,
-            body,
-            arms,
-            alternate,
-            ..
-        } => {
-            body.as_deref()
-                .is_some_and(|body| expr_constructs_nominal_target(body, target_name))
-                && alternate
-                    .as_deref()
-                    .is_some_and(|alternate| expr_constructs_nominal_target(alternate, target_name))
-                && arms.is_empty()
-        }
-        _ => false,
-    }
-}
 
 /// Resolve only the static type shapes this closed semantic scope can prove.
 /// Unknown nominal names are not accepted merely because `type_of` preserves
@@ -5740,6 +6082,16 @@ fn infer(
                     effects: base.effects,
                 };
             }
+            if let Some(inferred) = infer_historical_member(&base.ty, name, scope, diagnostics) {
+                return Inferred {
+                    ty: inferred.ty,
+                    effects: {
+                        let mut effects = base.effects;
+                        effects.join(&inferred.effects);
+                        effects
+                    },
+                };
+            }
             if let Some(ty) = infer_system_member(&base.ty, name) {
                 return Inferred {
                     ty,
@@ -5803,18 +6155,36 @@ fn infer(
                     diagnostics.push(diag(DIAG_UNRESOLVED, "record field cannot be resolved"));
                     Type::Error
                 }),
-                Type::Named(table) => scope
-                    .table_rows
-                    .get(table)
-                    .or_else(|| scope.nominal_rows.get(table))
-                    .and_then(|row| match row {
-                        Type::Record(fields) => fields.get(name).cloned(),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| {
-                        diagnostics.push(diag(DIAG_TYPE, "field access requires a record"));
+                Type::Named(nominal) => {
+                    if scope
+                        .nominal_private_fields
+                        .get(nominal)
+                        .is_some_and(|fields| fields.contains(name))
+                        && scope.private_field_owner.as_deref() != Some(nominal.as_str())
+                    {
+                        diagnostics.push(diag(
+                            DIAG_TYPE,
+                            "private nominal field is inaccessible outside its owning implementation",
+                        ));
                         Type::Error
-                    }),
+                    } else {
+                        scope
+                            .table_rows
+                            .get(nominal)
+                            .or_else(|| scope.nominal_rows.get(nominal))
+                            .and_then(|row| match row {
+                                Type::Record(fields) => fields.get(name).cloned(),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| {
+                                diagnostics.push(diag(
+                                    DIAG_TYPE,
+                                    "field access requires a record",
+                                ));
+                                Type::Error
+                            })
+                    }
+                }
                 _ => {
                     diagnostics.push(diag(DIAG_TYPE, "field access requires a record"));
                     Type::Error
@@ -5837,7 +6207,8 @@ fn infer(
                     .map(type_of)
                     .unwrap_or_else(|| {
                         if let Pattern::Name(name, _) = &parameter.pattern
-                            && let Some(ty) = inferred_lambda_parameter_type(body, name)
+                            && let Some(ty) =
+                                inferred_lambda_parameter_type(body, name, scope, local)
                         {
                             ty
                         } else {
@@ -5994,6 +6365,11 @@ fn infer(
             }
             if let Some(inferred) =
                 infer_finite_list_collection_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
+                infer_nominal_conversion_call(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
             }
@@ -6328,14 +6704,20 @@ fn infer(
                 };
             }
             let ty = if matches!(op.as_str(), "==" | "!=") {
-                Type::Bool
+                if left.ty == Type::Error || right.ty == Type::Error {
+                    Type::Error
+                } else if !types_match(&left.ty, &right.ty)
+                    && !types_match(&right.ty, &left.ty)
+                {
+                    diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
+                    Type::Error
+                } else {
+                    Type::Bool
+                }
             } else if matches!(op.as_str(), "<" | "<=" | ">" | ">=") {
                 if left.ty == Type::Error || right.ty == Type::Error {
                     Type::Error
                 } else if left.ty != right.ty || !is_evaluator_ordered_comparison_type(&left.ty) {
-                    // The bounded evaluator rejects mixed values and values
-                    // without an ordered representation. Keep equality
-                    // separate: it deliberately has broader semantics.
                     diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
                     Type::Error
                 } else {
@@ -6377,6 +6759,13 @@ fn infer(
                         };
                         effects.join(&x.effects);
                         let ty = x.ty;
+                        if ty == Type::Bottom {
+                            final_control = Some(Inferred {
+                                ty,
+                                effects: EffectSummary::default(),
+                            });
+                            break;
+                        }
                         bind_pattern(pattern, ty, &mut locals, diagnostics);
                     }
                     Statement::Assert { value, .. } => {
@@ -6387,10 +6776,18 @@ fn infer(
                     Statement::Expression { value, .. } => {
                         let x = infer(value, scope, &locals, diagnostics);
                         effects.join(&x.effects);
+                        if x.ty == Type::Bottom {
+                            final_control = Some(x);
+                            break;
+                        }
                     }
                     Statement::Control { value, .. } => {
                         let x = infer(value, scope, &locals, diagnostics);
                         effects.join(&x.effects);
+                        if x.ty == Type::Bottom {
+                            final_control = Some(x);
+                            break;
+                        }
                         if index + 1 == statements.len() && tail.is_none() {
                             final_control = Some(x);
                         }
@@ -6626,13 +7023,141 @@ fn inferred_function_parameter_type(
         .or_else(|| parameter_comparison_usage(body, name).then_some(Type::Error))
 }
 
-fn inferred_lambda_parameter_type(body: &Expr, name: &str) -> Option<Type> {
-    if lambda_numeric_parameter_usage(body, name) {
-        return Some(Type::Int);
-    }
-    inferred_record_parameter_type(body, name)
-        .filter(|ty| !type_contains_error(ty))
+fn inferred_lambda_parameter_type(
+    body: &Expr,
+    name: &str,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> Option<Type> {
+    inferred_comparison_parameter_type(body, name, scope, local)
+        .or_else(|| lambda_numeric_parameter_usage(body, name).then_some(Type::Int))
+        .or_else(|| inferred_record_parameter_type(body, name).filter(|ty| !type_contains_error(ty)))
         .or_else(|| parameter_comparison_usage(body, name).then_some(Type::Error))
+}
+
+fn inferred_comparison_parameter_type(
+    expression: &Expr,
+    name: &str,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> Option<Type> {
+    fn constrained_type(
+        expression: &Expr,
+        scope: &Scope,
+        local: &BTreeMap<String, Symbol>,
+    ) -> Option<Type> {
+        let mut diagnostics = Vec::new();
+        let inferred = infer(expression, scope, local, &mut diagnostics);
+        (diagnostics.is_empty() && inferred.ty != Type::Error).then_some(inferred.ty)
+    }
+
+    fn side_constraint(
+        parameter_side: &Expr,
+        other_side: &Expr,
+        name: &str,
+        scope: &Scope,
+        local: &BTreeMap<String, Symbol>,
+    ) -> Option<Type> {
+        let other = constrained_type(other_side, scope, local)?;
+        match unwrap_group(parameter_side) {
+            Expr::Name { text, .. } if text == name => Some(other),
+            Expr::Field {
+                base,
+                name: field,
+                ..
+            } if is_direct_name(base, name) => Some(Type::Record(BTreeMap::from([(
+                field.clone(),
+                other,
+            )]))),
+            _ => None,
+        }
+    }
+
+    match unwrap_group(expression) {
+        Expr::Binary { lhs, op, rhs, .. }
+            if matches!(op.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=") =>
+        {
+            side_constraint(lhs, rhs, name, scope, local)
+                .or_else(|| side_constraint(rhs, lhs, name, scope, local))
+                .or_else(|| inferred_comparison_parameter_type(lhs, name, scope, local))
+                .or_else(|| inferred_comparison_parameter_type(rhs, name, scope, local))
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            inferred_comparison_parameter_type(lhs, name, scope, local)
+                .or_else(|| inferred_comparison_parameter_type(rhs, name, scope, local))
+        }
+        Expr::Unary { rhs, .. } => inferred_comparison_parameter_type(rhs, name, scope, local),
+        Expr::Field { base, .. } | Expr::Index { base, .. } => {
+            inferred_comparison_parameter_type(base, name, scope, local)
+        }
+        Expr::Call {
+            callee, arguments, ..
+        }
+        | Expr::GenericCall {
+            callee, arguments, ..
+        } => inferred_comparison_parameter_type(callee, name, scope, local).or_else(|| {
+            arguments.iter().find_map(|argument| {
+                inferred_comparison_parameter_type(&argument.value, name, scope, local)
+            })
+        }),
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => elements.iter().find_map(
+            |element| inferred_comparison_parameter_type(element, name, scope, local),
+        ),
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => fields.iter().find_map(
+            |field| inferred_comparison_parameter_type(&field.value, name, scope, local),
+        ),
+        Expr::Lambda { body, .. } => inferred_comparison_parameter_type(body, name, scope, local),
+        Expr::Block {
+            statements, tail, ..
+        } => statements
+            .iter()
+            .find_map(|statement| match statement {
+                Statement::Let { value, .. }
+                | Statement::Assert { value, .. }
+                | Statement::Expression { value, .. }
+                | Statement::Control { value, .. }
+                | Statement::Assignment { value, .. } => {
+                    inferred_comparison_parameter_type(value, name, scope, local)
+                }
+                Statement::Return { value, .. } | Statement::Break { value, .. } => value
+                    .as_ref()
+                    .and_then(|value| {
+                        inferred_comparison_parameter_type(value, name, scope, local)
+                    }),
+                Statement::Continue { .. } => None,
+            })
+            .or_else(|| {
+                tail.as_deref().and_then(|tail| {
+                    inferred_comparison_parameter_type(tail, name, scope, local)
+                })
+            }),
+        Expr::Control {
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => condition
+            .as_deref()
+            .and_then(|condition| {
+                inferred_comparison_parameter_type(condition, name, scope, local)
+            })
+            .or_else(|| {
+                body.as_deref()
+                    .and_then(|body| inferred_comparison_parameter_type(body, name, scope, local))
+            })
+            .or_else(|| {
+                arms.iter().find_map(|arm| {
+                    inferred_comparison_parameter_type(&arm.body, name, scope, local)
+                })
+            })
+            .or_else(|| {
+                alternate.as_deref().and_then(|alternate| {
+                    inferred_comparison_parameter_type(alternate, name, scope, local)
+                })
+            }),
+        _ => None,
+    }
 }
 
 fn type_contains_error(ty: &Type) -> bool {
@@ -7075,12 +7600,18 @@ fn infer_if(
     let body = infer(body, scope, local, diagnostics);
 
     let Some(alternate) = alternate else {
+        let mut effects = condition.effects;
+        effects.join(&body.effects);
+        if body.ty == Type::Bottom {
+            return Inferred {
+                ty: Type::Null,
+                effects,
+            };
+        }
         diagnostics.push(diag(
             DIAG_UNSUPPORTED,
             "if expression requires an else branch in this semantic slice",
         ));
-        let mut effects = condition.effects;
-        effects.join(&body.effects);
         return Inferred {
             ty: Type::Error,
             effects,
@@ -7560,11 +8091,13 @@ fn infer_nominal(
     let mut actual = BTreeMap::new();
     let mut supplied = Vec::with_capacity(fields.len());
     let mut effects = EffectSummary::default();
+    let mut duplicate_field = false;
     for field in fields {
         let value = infer(&field.value, scope, local, diagnostics);
         effects.join(&value.effects);
         supplied.push((field.name.clone(), value.ty.clone()));
         if actual.insert(field.name.clone(), value.ty).is_some() {
+            duplicate_field = true;
             diagnostics.push(diag(DIAG_DUPLICATE, "duplicate nominal constructor field"));
         }
     }
@@ -7618,6 +8151,17 @@ fn infer_nominal(
     let schema = symbol.table_schema.as_ref();
     let admission = schema.and_then(|schema| schema.admission.as_ref());
     let public_fields = schema.map(|schema| &schema.fields);
+    let owning_private = match &constructor_type {
+        Type::Named(identity) => scope.private_field_owner.as_deref() == Some(identity),
+        _ => false,
+    };
+    let private_field_supplied = match &constructor_type {
+        Type::Named(identity) => scope
+            .nominal_private_fields
+            .get(identity)
+            .is_some_and(|private| actual.keys().any(|field| private.contains(field))),
+        _ => false,
+    };
     let invalid_fields = actual.keys().any(|field| !expected.contains_key(field));
     let missing_public_required = admission.is_some_and(|admission| {
         admission
@@ -7626,7 +8170,7 @@ fn infer_nominal(
             .any(|field| !actual.contains_key(field))
     });
     let missing_private_required = admission.is_some_and(|admission| {
-        if !admission.private_required {
+        if !admission.private_required || owning_private {
             return false;
         }
         let Some(public_fields) = public_fields else {
@@ -7648,10 +8192,12 @@ fn infer_nominal(
         }
     });
     let legacy_shape_mismatch = admission.is_none() && expected.keys().ne(actual.keys());
-    if invalid_fields
-        || missing_public_required
-        || missing_private_required
-        || legacy_shape_mismatch
+    if !duplicate_field
+        && (invalid_fields
+            || missing_public_required
+            || missing_private_required
+            || (private_field_supplied && !owning_private)
+            || legacy_shape_mismatch)
     {
         diagnostics.push(diag(
             DIAG_TYPE,
@@ -9697,7 +10243,9 @@ fn infer_success_pipeline(
             [argument] if argument.name.is_none() || argument.name.as_deref() == Some("count") => {
                 let count = infer(&argument.value, scope, local, diagnostics);
                 effects.join(&count.effects);
-                if count.ty == Type::Int && !is_negative_integer_constant(&argument.value) {
+                if count.ty == Type::Int && !is_negative_integer_constant(&argument.value)
+                    || matches!(&count.ty, Type::Range(element) if element.as_ref() == &Type::Int)
+                {
                     Type::List(element.clone())
                 } else if count.ty == Type::Int {
                     diagnostics.push(diag(
@@ -10543,7 +11091,14 @@ fn is_evaluator_ordered_comparison_type(ty: &Type) -> bool {
             | Type::Instant
             | Type::Text
             | Type::Bool
-    ) || matches!(ty, Type::Range(element) if is_ordered_range_bound(element))
+    ) || matches!(
+        ty,
+        Type::Range(element) if is_ordered_range_bound(element)
+    ) || matches!(
+        ty,
+        Type::Applied { base, arguments }
+            if base == "Money" && arguments.len() == 1
+    )
 }
 
 /// Applies the closed affine-absolute aggregation rule for the operations that
@@ -10842,7 +11397,21 @@ fn infer_table_operation(
         let update = name == "update" && index == 1;
         let key_argument =
             matches!(name.as_str(), "update" | "delete") && index == 0 || name == "rekey";
-        let inferred = if insertion || update {
+        let inferred = if name == "as_of" {
+            let inferred = infer_contextual(
+                &argument.value,
+                &Type::Named("sys.SnapshotRef".into()),
+                scope,
+                local,
+                diagnostics,
+            );
+            require_same(
+                &Type::Named("sys.SnapshotRef".into()),
+                &inferred.ty,
+                diagnostics,
+            );
+            inferred
+        } else if insertion || update {
             row.map(|fields| {
                 let inferred =
                     infer_table_row_input(&argument.value, fields, scope, local, diagnostics);
@@ -11276,6 +11845,15 @@ fn infer_descriptor_system_path(
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
                 Type::Relation(Box::new(Type::Named(relation.name.clone()))),
+            ),
+            effects: descriptor_effects(system_api::SystemEffect::Read),
+        });
+    }
+    if path == ["sys", "database", "as_of"] {
+        return DescriptorPathInference::Resolved(Inferred {
+            ty: function(
+                vec![Type::Named("sys.SnapshotRef".into())],
+                historical_database_type(),
             ),
             effects: descriptor_effects(system_api::SystemEffect::Read),
         });
@@ -12758,6 +13336,227 @@ fn infer_system_path(path: &[&str], diagnostics: &mut Vec<Diagnostic>) -> Option
         }),
     }
 }
+fn infer_nominal_conversion_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let Expr::Field { base, name, .. } = callee else {
+        return None;
+    };
+    if name != "from" {
+        return None;
+    }
+    let target_path = qualified_path(base);
+    if target_path.as_ref().is_some_and(|path| {
+        path.first().is_some_and(|root| local.contains_key(*root))
+    }) {
+        return None;
+    }
+    let symbol = if let Expr::Name { text, .. } = base.as_ref() {
+        if local.contains_key(text) {
+            return None;
+        }
+        scope
+            .names
+            .get(text)
+            .filter(|symbol| symbol.kind == SymbolKind::Type)
+    } else {
+        target_path
+            .as_deref()
+            .and_then(|path| qualified_module_symbol(path, scope))
+            .filter(|symbol| symbol.kind == SymbolKind::Type)
+    }?;
+    let Type::Named(target) = &symbol.ty else {
+        return None;
+    };
+    let sources = scope.nominal_conversions.get(target)?;
+    if arguments.len() != 1 {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "nominal conversion requires exactly one source value",
+        ));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        });
+    }
+    let argument = infer(&arguments[0].value, scope, local, diagnostics);
+    if sources.iter().any(|source| source == &argument.ty) {
+        let mut effects = argument.effects;
+        if let Some(conversions) = scope.nominal_conversion_effects.get(target) {
+            for (source, body_effects) in conversions {
+                if source == &argument.ty {
+                    effects.join(body_effects);
+                }
+            }
+        }
+        effects.may_fail = true;
+        return Some(Inferred {
+            ty: Type::Named(target.clone()),
+            effects,
+        });
+    }
+    diagnostics.push(diag(
+        DIAG_TYPE,
+        "no matching From implementation for the source type",
+    ));
+    Some(Inferred {
+        ty: Type::Error,
+        effects: argument.effects,
+    })
+}
+
+fn historical_database_type() -> Type {
+    Type::Applied {
+        base: "sys.DatabaseSnapshot".into(),
+        arguments: vec![Type::Named("sys.SnapshotRef".into())],
+    }
+}
+
+fn historical_namespace_type(snapshot: &Type, namespace: &str) -> Type {
+    Type::Applied {
+        base: "sys.HistoricalNamespace".into(),
+        arguments: vec![snapshot.clone(), Type::Named(namespace.into())],
+    }
+}
+
+fn historical_table_type(snapshot: &Type, table: &str) -> Type {
+    Type::Applied {
+        base: "sys.HistoricalTable".into(),
+        arguments: vec![snapshot.clone(), Type::Named(table.into())],
+    }
+}
+
+fn historical_namespace_parts(ty: &Type) -> Option<(&Type, &str)> {
+    let Type::Applied { base, arguments } = ty else {
+        return None;
+    };
+    (base == "sys.HistoricalNamespace")
+        .then(|| match arguments.as_slice() {
+            [snapshot, Type::Named(namespace)] => Some((snapshot, namespace.as_str())),
+            _ => None,
+        })
+        .flatten()
+}
+
+
+fn infer_historical_member(
+    base: &Type,
+    name: &str,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    if let Type::Applied {
+        base: base_name,
+        arguments,
+    } = base
+        && base_name == "sys.DatabaseSnapshot"
+        && let [snapshot] = arguments.as_slice()
+    {
+        let namespace = name.to_owned();
+        if scope
+            .historical_modules
+            .contains_key(&Namespace(vec![namespace.clone()]))
+            || name == "sys"
+        {
+            return Some(Inferred {
+                ty: historical_namespace_type(snapshot, &namespace),
+                effects: EffectSummary::default(),
+            });
+        }
+        diagnostics.push(diag(DIAG_UNRESOLVED, "historical database member cannot be resolved"));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        });
+    }
+    let Some((snapshot, namespace)) = historical_namespace_parts(base) else {
+        return None;
+    };
+    let module_namespace = Namespace(
+        namespace
+            .split('.')
+            .chain(std::iter::once(name))
+            .map(str::to_owned)
+            .collect(),
+    );
+    if scope.historical_modules.contains_key(&module_namespace) {
+        return Some(Inferred {
+            ty: historical_namespace_type(snapshot, &module_namespace.display()),
+            effects: EffectSummary::default(),
+        });
+    }
+
+    // The portable system surface is descriptor-backed rather than a source
+    // ModuleHeader.  Project only relations explicitly present in api/sys.json
+    // and keep unknown historical system members unresolved.
+    if namespace == "sys"
+        && system_api::embedded_system_api()
+            .relation(&format!("sys.{name}"))
+            .is_some()
+    {
+        return Some(Inferred {
+            ty: historical_table_type(snapshot, &format!("sys.{name}")),
+            effects: EffectSummary {
+                effects: BTreeSet::from(["database read".into()]),
+                may_fail: true,
+            },
+        });
+    }
+
+    let module = scope.historical_modules.get(&Namespace(
+        namespace.split('.').map(str::to_owned).collect(),
+    ));
+    if let Some(symbol) = module.and_then(|module| module.exports.get(name)) {
+        let full_name = if namespace.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{namespace}.{name}")
+        };
+        if symbol.kind == SymbolKind::Table {
+            return Some(Inferred {
+                ty: historical_table_type(snapshot, &full_name),
+                effects: EffectSummary {
+                    effects: BTreeSet::from(["database read".into()]),
+                    may_fail: true,
+                },
+            });
+        }
+        if symbol.kind == SymbolKind::Function
+            && symbol
+                .effects
+                .effects
+                .iter()
+                .any(|effect| !matches!(effect.as_str(), "database read"))
+        {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "historical callable permits only database-read effects",
+            ));
+            return Some(Inferred {
+                ty: Type::Error,
+                effects: EffectSummary::default(),
+            });
+        }
+        return Some(Inferred {
+            ty: symbol.ty.clone(),
+            effects: {
+                let mut effects = symbol.effects.clone();
+                effects.effects.insert("database read".into());
+                effects.may_fail = true;
+                effects
+            },
+        });
+    }
+    diagnostics.push(diag(DIAG_UNRESOLVED, "historical database member cannot be resolved"));
+    Some(Inferred {
+        ty: Type::Error,
+        effects: EffectSummary::default(),
+    })
+}
 
 fn infer_system_member(base: &Type, name: &str) -> Option<Type> {
     if let Type::Named(system_type) = base
@@ -13320,8 +14119,8 @@ fn declared_nominal_schema(item: &Item) -> Option<TableSchema> {
             } else {
                 private_required = true;
             }
+            }
         }
-    }
     Some(TableSchema {
         fields,
         // Only declaration-backed completeness is exported.  Default
@@ -13333,6 +14132,7 @@ fn declared_nominal_schema(item: &Item) -> Option<TableSchema> {
             keys: Vec::new(),
             automatic_key: false,
         }),
+        conversions: Vec::new(),
     })
 }
 
@@ -13389,6 +14189,7 @@ fn declared_table_schema(item: &Item) -> Option<TableSchema> {
             },
             automatic_key: keys.is_empty(),
         }),
+        conversions: Vec::new(),
     })
 }
 
