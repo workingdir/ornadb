@@ -259,6 +259,22 @@ fn binary_repl_recovers_from_malformed_terminal_input() {
 }
 
 #[test]
+fn binary_repl_rejects_remote_endpoints_before_local_evaluation() {
+    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["--db", "orna://host/reference", "repl", "1 + 2"])
+        .output()
+        .expect("CLI process");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"error[E2100]: remote REPL sessions are unavailable\nhelp: use a local Git worktree until the Orna transport is available\n"
+    );
+}
+
+#[test]
 fn binary_check_accepts_a_core_only_project_without_std() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
