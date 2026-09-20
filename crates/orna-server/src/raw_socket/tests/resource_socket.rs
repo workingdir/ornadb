@@ -189,7 +189,7 @@ impl DispatchService for GatedInvokePreflightDispatch {
             release.notified().await;
             match outcome {
                 GatedPreflightOutcome::Accepted => Ok(InvokePreflight::Accepted {
-                    continuation: None,
+                    operation: None,
                     fence: None,
                 }),
                 GatedPreflightOutcome::RejectedInternalFailure => {
@@ -210,7 +210,7 @@ impl DispatchService for GatedInvokePreflightDispatch {
         stream: u64,
         _request: orna_protocol::RetainedInvokeRequest,
         _version: &RawProtocolVersion,
-        _continuation: Option<SealedInvocationContinuation>,
+        _operation: Option<SealedInvocationOperation>,
         _fence: Option<RawSocketRuntimeAdmissionFence>,
     ) -> StartedDispatch {
         self.start_invoked.store(true, Ordering::SeqCst);
@@ -2346,7 +2346,7 @@ async fn server_shutdown_waits_for_application_child_join_acknowledgement() {
         joined: Arc::clone(&joined),
     };
     let (shutdown_sender, shutdown) = watch::channel(false);
-    let (server, _client) = UnixStream::pair().unwrap();
+    let (server, mut client) = UnixStream::pair().unwrap();
     let mut server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
         dispatcher,
         test_session(),

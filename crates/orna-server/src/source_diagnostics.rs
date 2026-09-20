@@ -425,7 +425,7 @@ fn clip_source_line(
 
 fn rendered_boundary_at_or_before(rendered: &str, target_column: usize) -> (usize, usize) {
     let mut byte = 0;
-    let mut column = 0;
+    let mut column: usize = 0;
     for character in rendered.chars() {
         let width = character.width().unwrap_or(0);
         if column.saturating_add(width) > target_column {
@@ -875,6 +875,19 @@ mod tests {
 #[cfg(test)]
 mod source_context_tests {
     use super::*;
+    use orna_core::source::{SourceBundle, SourceUnit};
+
+    fn report_for(source_text: &str) -> orna_compiler::StandardApplicationCheckReport {
+        let source =
+            SourceBundle::new([SourceUnit::new("main.orna", source_text)]).expect("source bundle");
+        let standard = orna_compiler::check_standard_library_source(
+            &orna_standard::retained_standard_library_v11_snapshot()
+                .and_then(orna_standard::verify_standard_library_v11_snapshot)
+                .expect("standard snapshot"),
+        )
+        .expect("standard source");
+        orna_compiler::check_new_application(&source, &standard).expect("source check")
+    }
 
     #[test]
     fn display_column_counts_utf8_scalars_and_expands_tabs() {

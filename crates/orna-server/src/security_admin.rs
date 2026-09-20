@@ -1003,7 +1003,7 @@ mod stream_admin_tests {
             source_format: Component::new("test").expect("source format"),
             source: Component::new("source").expect("source"),
             partition_format: Component::new("test").expect("partition format"),
-            partition: Component::new("partition").expect("partition"),
+            partition: Some(Component::new("partition").expect("partition")),
             position_format: Component::new("test").expect("position format"),
         }
     }
