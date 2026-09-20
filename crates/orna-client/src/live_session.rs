@@ -230,7 +230,10 @@ where
                     LivePresentationError::WrongWatch,
                 ));
             }
-            if frame.request.is_some() && frame.request == self.expected_resync_request {
+            if frame.watch == Some(self.watch)
+                && frame.request.is_some()
+                && frame.request == self.expected_resync_request
+            {
                 self.expected_resync_request = None;
                 return Ok(LiveSessionEvent::ResyncRejected);
             }
@@ -928,6 +931,49 @@ mod tests {
             block_on(driver.receive_once()),
             Ok(LiveSessionEvent::SnapshotPublished { revision: 1 })
         ));
+    }
+
+    #[test]
+    fn resync_request_diagnostic_without_matching_watch_keeps_barrier() {
+        let mut io = MemoryIo::default();
+        io.incoming.push_back(snapshot(0));
+        io.incoming.push_back(delta(9, 10, "invalid"));
+        let mut driver = LiveSessionDriver::new(
+            io,
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
+        ));
+        let LiveSessionEvent::ResyncSent { .. } = block_on(driver.receive_once()).unwrap() else {
+            panic!("invalid delta must send resync")
+        };
+        let request = Envelope::decode(&driver.io.sent[0], Limits::default())
+            .unwrap()
+            .request
+            .unwrap();
+
+        driver
+            .io
+            .incoming
+            .push_back(frame_without_watch(19, Some(request), diagnostic_body()));
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::DiagnosticReceived
+        );
+        assert!(driver.presentation().awaiting_snapshot());
+
+        driver.io.incoming.push_back(delta(0, 1, "stale"));
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::ResyncAwaitingSnapshot { request }
+        );
+        assert_eq!(driver.io.sent.len(), 1);
     }
 
     #[test]
