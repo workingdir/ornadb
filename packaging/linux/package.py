@@ -458,9 +458,13 @@ def write_archive(path: Path, members: Iterable[tuple[str, bytes, int]], epoch: 
 def archive_members(path: Path) -> list[tuple[tarfile.TarInfo, bytes]]:
     try:
         with tarfile.open(path, mode="r:") as archive:
+            if archive.pax_headers:
+                fail("package archive has unsupported PAX metadata")
             members = archive.getmembers()
             result: list[tuple[tarfile.TarInfo, bytes]] = []
             for member in members:
+                if member.pax_headers:
+                    fail(f"package archive member has unsupported PAX metadata: {member.name}")
                 if not member.isfile() or member.issym() or member.islnk():
                     fail(f"package archive member is not a regular file: {member.name}")
                 extracted = archive.extractfile(member)

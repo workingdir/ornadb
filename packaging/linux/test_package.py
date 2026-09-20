@@ -173,6 +173,20 @@ def main() -> None:
         rewrite_archive(first, wrong_owner, owner=package.ARCHIVE_DISTRIBUTION_MANIFEST)
         expect_failure(lambda: package.verify_archive(wrong_owner))
 
+        pax_metadata = scratch / "pax-metadata.tar"
+        with tarfile.open(first, mode="r:") as archive, tarfile.open(
+            pax_metadata,
+            mode="w",
+            format=tarfile.PAX_FORMAT,
+            pax_headers={"comment": "untrusted"},
+        ) as rewritten:
+            for member in archive.getmembers():
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise AssertionError("fixture archive member had no data")
+                rewritten.addfile(copy.copy(member), extracted)
+        expect_failure(lambda: package.verify_archive(pax_metadata))
+
         executable.chmod(0o644)
         expect_failure(lambda: package.make_archive(arguments))
 
