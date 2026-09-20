@@ -129,11 +129,12 @@ smokes remain separate.
 13. `packaging/linux/`: deterministic Linux artifact builder, verifier, installer,
     and focused package tests.
 
-The repository intentionally has no website, Debian release package, or
-generated root status ledger. The Linux artifact recipe is a local provenance
-and install smoke boundary, not a production distribution authority. Keep
-planning and issue state in the issue ledger and maintained documentation rather
-than restoring removed snapshots.
+The repository intentionally has no hosted/public website, Debian release
+package, or generated root status ledger. It does retain the maintained
+`website/docs/status.md` status source. The Linux artifact recipe is a local
+provenance and install smoke boundary, not a production distribution authority.
+Keep planning and issue state in the issue ledger and maintained documentation
+rather than restoring removed snapshots.
 
 ## Local check flow
 
