@@ -1171,6 +1171,49 @@ fn async_http_connection_loop_writes_before_admitting_next_pipelined_request() {
 }
 
 #[test]
+fn create_rejects_a_retained_session_identity_without_rotating_its_credential() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut authority = Authority;
+    let mut issuer = Issuer(7, None);
+    let mut deletion = Delete(true);
+    let body = format!(
+        r#"{{"database":"{}","protocol":"{}"}}"#,
+        uuid(2),
+        SUBPROTOCOL
+    );
+    let first = block_on(transport.handle(
+        wire("POST", "/orna/session", &body),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let credential = token(&first);
+    let second = block_on(transport.handle(
+        wire("POST", "/orna/session", &body),
+        1,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+
+    assert_eq!(second.status, 503);
+    assert_eq!(
+        String::from_utf8(second.body).unwrap(),
+        "{\"code\":\"live.unavailable\",\"message\":\"request rejected\"}"
+    );
+    assert_eq!(
+        issuer.0, 8,
+        "collision must not issue a replacement credential"
+    );
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &credential), [4; 16], 1)).status,
+        101,
+        "the original session credential must remain usable"
+    );
+}
+
+#[test]
 fn async_http_connection_loop_samples_clock_for_each_request() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut connection = HttpConnection::new(TransportLimits::default());
