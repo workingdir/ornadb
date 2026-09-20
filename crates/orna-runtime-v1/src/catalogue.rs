@@ -6,9 +6,10 @@
 //! caller supplies names and semantic hashes; it never supplies an ObjectRef
 //! or an ObjectId to this boundary.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use libsql::{Connection, Transaction, params};
+use orna_core::catalogue::{CatalogueAdmissionArtifact, CatalogueAdmissionTypeForm};
 use orna_foundation_v1::{
     FunctionRef, ObjectRef, Snapshot, TypeRef, Value, function_reference, object_reference,
     type_reference, validate_type_reference,
@@ -1099,6 +1100,104 @@ pub struct CatalogueAdmission {
     pub predecessor_capture: Option<orna_foundation_v1::CwdCapture>,
     pub types: Vec<CatalogueTypeDeclaration>,
     pub functions: Vec<CatalogueFunctionDeclaration>,
+}
+
+impl CatalogueAdmission {
+    /// Converts a compiler-owned identity-preserving artifact into the
+    /// runtime's name-bound admission request. The runtime allocates ObjectIds
+    /// only after this conversion; no core identity is treated as a runtime
+    /// reference.
+    pub fn from_artifact(
+        artifact: &CatalogueAdmissionArtifact,
+        predecessor_capture: Option<orna_foundation_v1::CwdCapture>,
+    ) -> Result<Self, CatalogueError> {
+        let mut names: HashMap<orna_core::TypeId, String> = HashMap::new();
+        let mut type_ids: HashSet<orna_core::TypeId> = HashSet::new();
+        for entry in artifact.types() {
+            if !type_ids.insert(entry.witness().type_id()) {
+                return Err(CatalogueError::CatalogueIdentityMissing);
+            }
+            let name = entry.witness().qualified_name().to_string();
+            if names.insert(entry.witness().type_id(), name).is_some() {
+                return Err(CatalogueError::CatalogueNameConflict);
+            }
+        }
+        let types: Vec<CatalogueTypeDeclaration> = artifact
+            .types()
+            .iter()
+            .map(|entry| {
+                let name = entry.witness().qualified_name().to_string();
+                let form = match entry.form() {
+                    CatalogueAdmissionTypeForm::Named => CatalogueTypeSpec::Named,
+                    CatalogueAdmissionTypeForm::Value => CatalogueTypeSpec::Value,
+                    CatalogueAdmissionTypeForm::Reference { target } => {
+                        let target = names
+                            .get(&target)
+                            .cloned()
+                            .ok_or(CatalogueError::CatalogueTypeMissing)?;
+                        CatalogueTypeSpec::Reference { target }
+                    }
+                };
+                Ok(CatalogueTypeDeclaration {
+                    declaration: CatalogueDeclaration {
+                        qualified_name: name,
+                        kind: CatalogueObjectKind::Type,
+                        revision_id: entry.witness().revision_id(),
+                        semantic_hash: entry.witness().semantic_hash(),
+                        rename_from: entry.rename_from().map(str::to_owned),
+                    },
+                    form,
+                })
+            })
+            .collect::<Result<Vec<CatalogueTypeDeclaration>, CatalogueError>>()?;
+
+        let mut function_ids: HashSet<orna_core::FunctionId> = HashSet::new();
+        let functions: Vec<CatalogueFunctionDeclaration> = artifact
+            .functions()
+            .iter()
+            .map(|entry| {
+                if !function_ids.insert(entry.function_id()) {
+                    return Err(CatalogueError::CatalogueIdentityMissing);
+                }
+                let parameters = entry
+                    .parameters()
+                    .iter()
+                    .map(|parameter| {
+                        let type_name = names
+                            .get(&parameter.type_id())
+                            .cloned()
+                            .ok_or(CatalogueError::CatalogueTypeMissing)?;
+                        Ok(CatalogueParameterDeclaration {
+                            name: parameter.name().to_owned(),
+                            position: parameter.position(),
+                            type_name,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, CatalogueError>>()?;
+                let result_type_name = names
+                    .get(&entry.result_type())
+                    .cloned()
+                    .ok_or(CatalogueError::CatalogueTypeMissing)?;
+                Ok(CatalogueFunctionDeclaration {
+                    declaration: CatalogueDeclaration {
+                        qualified_name: entry.qualified_name().to_owned(),
+                        kind: CatalogueObjectKind::Function,
+                        revision_id: entry.revision_id(),
+                        semantic_hash: entry.semantic_hash(),
+                        rename_from: entry.rename_from().map(str::to_owned),
+                    },
+                    parameters,
+                    result_type_name,
+                })
+            })
+            .collect::<Result<Vec<_>, CatalogueError>>()?;
+
+        Ok(Self {
+            predecessor_capture,
+            types,
+            functions,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
