@@ -1204,6 +1204,13 @@ fn run_repl_submission<W: std::io::Write>(
 }
 
 fn run_repl(endpoint: &Endpoint, expression: Option<&str>) -> Result<(), Diagnostic> {
+    if matches!(endpoint, Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_)) {
+        return Err(Diagnostic::target(
+            "E2100",
+            "remote REPL sessions are unavailable",
+            "use a local Git worktree until the Orna transport is available",
+        ));
+    }
     let mut session = repl_session(endpoint)?;
     if let Some(source) = expression {
         return run_repl_submission(&mut session, source, &mut io::stdout().lock());
