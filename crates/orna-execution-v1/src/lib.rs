@@ -242,6 +242,7 @@ pub enum CoordinationError {
     Cancelled,
     ChildOutstanding,
     InvalidPhase,
+    Exhausted,
 }
 impl fmt::Display for CoordinationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -289,7 +290,7 @@ impl ActivationCoordinator {
         ) {
             return Err(CoordinationError::ChildOutstanding);
         }
-        Ok(self.activate_unchecked(activation))
+        self.activate_unchecked(activation)
     }
     /// Compatibility convenience for fresh coordinators. Starting another
     /// owner while cleanup is pending is rejected before any child is lost.
@@ -297,8 +298,14 @@ impl ActivationCoordinator {
         self.try_activate(activation)
             .expect("activation admission must not discard owned children")
     }
-    fn activate_unchecked(&mut self, activation: ActivationId) -> OwnerLease {
-        self.next_epoch += 1;
+    fn activate_unchecked(
+        &mut self,
+        activation: ActivationId,
+    ) -> Result<OwnerLease, CoordinationError> {
+        self.next_epoch = self
+            .next_epoch
+            .checked_add(1)
+            .ok_or(CoordinationError::Exhausted)?;
         let lease = OwnerLease {
             activation,
             epoch: self.next_epoch,
@@ -308,7 +315,7 @@ impl ActivationCoordinator {
         self.phase = TransactionPhase::Running;
         self.ending = false;
         self.children.clear();
-        lease
+        Ok(lease)
     }
     /// Explicitly takes over a known prior owner; all of its capabilities become stale.
     pub fn replace_stale(
@@ -320,7 +327,7 @@ impl ActivationCoordinator {
         if self.children.values().any(|joined| !joined) {
             return Err(CoordinationError::ChildOutstanding);
         }
-        Ok(self.activate_unchecked(activation))
+        self.activate_unchecked(activation)
     }
     pub fn cancel(&mut self, owner: OwnerLease) -> Result<(), CoordinationError> {
         // A cancellation request revokes the live capability by advancing the
@@ -360,7 +367,10 @@ impl ActivationCoordinator {
     }
     pub fn spawn_child(&mut self, owner: OwnerLease) -> Result<ChildId, CoordinationError> {
         self.require_live(owner)?;
-        self.next_child += 1;
+        self.next_child = self
+            .next_child
+            .checked_add(1)
+            .ok_or(CoordinationError::Exhausted)?;
         let child = ChildId(self.next_child);
         self.children.insert(child, false);
         Ok(child)
@@ -586,14 +596,14 @@ impl ActivationCoordinator {
         };
         // A stale completion belongs to an earlier owner. It must not change
         // the phase of a successor which has already taken the coordinator.
-        if reason == RollbackReason::StaleOwner {
-            Outcome::RolledBack { reason }
-        } else if matches!(
-            self.phase,
-            TransactionPhase::ChildrenJoining
-                | TransactionPhase::Committed
-                | TransactionPhase::RolledBack
-        ) {
+        if reason == RollbackReason::StaleOwner
+            || matches!(
+                self.phase,
+                TransactionPhase::ChildrenJoining
+                    | TransactionPhase::Committed
+                    | TransactionPhase::RolledBack
+            )
+        {
             Outcome::RolledBack { reason }
         } else if self.children.values().any(|joined| !joined) {
             self.phase = TransactionPhase::ChildrenJoining;
@@ -843,6 +853,33 @@ mod tests {
         ));
         assert_eq!(store.visible().len(), 1);
     }
+
+    #[test]
+    fn owner_epoch_exhaustion_fails_closed_before_admission() {
+        let mut coordinator = ActivationCoordinator {
+            next_epoch: u64::MAX,
+            ..ActivationCoordinator::default()
+        };
+
+        assert_eq!(
+            coordinator.try_activate(ActivationId::new(1).unwrap()),
+            Err(CoordinationError::Exhausted)
+        );
+        assert_eq!(coordinator.phase(), TransactionPhase::RolledBack);
+    }
+
+    #[test]
+    fn child_identity_exhaustion_does_not_replace_recorded_children() {
+        let (mut coordinator, owner) = active();
+        coordinator.next_child = u64::MAX;
+
+        assert_eq!(
+            coordinator.spawn_child(owner),
+            Err(CoordinationError::Exhausted)
+        );
+        assert_eq!(coordinator.phase(), TransactionPhase::Running);
+    }
+
     #[test]
     fn children_must_join_before_commit() {
         let (mut c, owner) = active();
