@@ -2132,6 +2132,35 @@ mod tests {
             assert!(Value::decode(&h(x)).is_err(), "{x}")
         }
     }
+
+    #[test]
+    fn bignums_reject_aliases_and_admit_the_first_out_of_range_magnitude() {
+        // ORNA-FORMAT-001: tags 2/3 are only the arbitrary-precision forms.
+        // Empty, zero, leading-zero, and direct-major-range magnitudes are
+        // aliases, so they cannot enter a canonical identity or digest.
+        for x in [
+            "c240",                   // tag 2, empty magnitude
+            "c24100",                 // tag 2, zero magnitude
+            "c24101",                 // tag 2, direct uint(1)
+            "c248ffffffffffffffff",   // tag 2, direct uint(u64::MAX)
+            "c24900ffffffffffffffff", // tag 2, leading-zero magnitude
+            "c340",                   // tag 3, empty magnitude
+            "c34100",                 // tag 3, zero magnitude
+            "c34101",                 // tag 3, direct nint(-2)
+            "c348ffffffffffffffff",   // tag 3, direct nint(-u64::MAX - 1)
+            "c34900ffffffffffffffff", // tag 3, leading-zero magnitude
+        ] {
+            assert_eq!(Value::decode(&h(x)), Err(Error::NonCanonical), "{x}");
+        }
+
+        for x in [
+            "c249010000000000000000", //  2^64
+            "c349010000000000000000", // -2^64 - 1
+        ] {
+            let value = Value::decode(&h(x)).unwrap_or_else(|error| panic!("{x}: {error}"));
+            assert_eq!(value.encode().unwrap(), h(x), "{x}");
+        }
+    }
     #[test]
     fn invocation_handle_requires_canonical_runtime_uuid() {
         let handle = |runtime| {
