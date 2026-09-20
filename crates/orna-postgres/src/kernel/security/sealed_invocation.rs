@@ -536,6 +536,8 @@ pub struct SealedInvocationOperation {
     started_events: InvocationEventBatch,
     admission_context: Option<SealedInvocationAdmissionContext>,
     outcome: SealedInvocationPreparedOutcome,
+    /// Protected audit/lifecycle admission has been committed.
+    admitted: bool,
     consumed: bool,
     #[cfg(test)]
     test_hooks: Option<SealedInvocationTestHooks>,
@@ -589,6 +591,17 @@ impl SealedInvocationOperation {
             self.outcome,
             SealedInvocationPreparedOutcome::Allowed { .. }
         )
+    }
+
+    /// Commits protected audit evidence and lifecycle admission before the
+    /// transport exposes `CALL_ACCEPTED`.
+    #[doc(hidden)]
+    pub async fn admit_sealed_sys_invoke(&mut self) -> Result<(), PostgresKernelError> {
+        if !self.admitted {
+            self.append_prepared_audit().await?;
+            self.admitted = true;
+        }
+        Ok(())
     }
 }
 
@@ -666,6 +679,7 @@ impl SealedInvocationOperation {
             started_events: sealed_started_events(invocation)?,
             admission_context: None,
             outcome,
+            admitted: false,
             consumed: false,
             test_hooks: None,
         })
@@ -762,11 +776,24 @@ pub(super) async fn transition_sealed_invocation_lifecycle(
     invocation: InvocationId,
     terminal: SealedInvocationLifecycleTerminal,
 ) -> Result<(), PostgresKernelError> {
-    // ORNA-TASK-003 requires owner-loss recovery to fence the lost owner
-    // lease. This boundary currently retains the authenticated principal and
-    // runtime capture, but neither proves that a writer lease was replaced.
-    // Keep orphan recovery unavailable until it can atomically compare the
-    // retained lease owner and epoch against an authoritative replacement.
+    transition_sealed_invocation_lifecycle_with_admission_context(
+        transaction,
+        invocation,
+        terminal,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn transition_sealed_invocation_lifecycle_with_admission_context(
+    transaction: &Transaction<'_>,
+    invocation: InvocationId,
+    terminal: SealedInvocationLifecycleTerminal,
+    admission_context: Option<&SealedInvocationAdmissionContext>,
+) -> Result<(), PostgresKernelError> {
+    // Owner-loss uses the dedicated replacement-fenced transition below.  An
+    // ordinary terminal writer must never reinterpret a live invocation as
+    // orphaned merely because it can see its identity.
     if sealed_invocation_orphan_recovery_requires_owner_lease(terminal) {
         return Err(PostgresKernelError::DurableInvariant {
             relation: "_orna_kernel.sealed_invocation_lifecycle",
@@ -777,22 +804,73 @@ pub(super) async fn transition_sealed_invocation_lifecycle(
     let (status, diagnostic_code, diagnostic_class) = terminal.fields();
     let record = invocation.canonical();
     let invocation = invocation.to_bytes().to_vec();
-    let changed = transaction
-        .execute(
-            "UPDATE _orna_kernel.sealed_invocation_lifecycle
-                SET status = $2,
-                    ended_at = transaction_timestamp(),
-                    diagnostic_code = $3,
-                    diagnostic_class = $4
-             WHERE invocation_id = $1
-                AND status IN ('queued', 'running')
-                AND ended_at IS NULL
-                AND diagnostic_code IS NULL
-                AND diagnostic_class IS NULL",
-            &[&invocation, &status, &diagnostic_code, &diagnostic_class],
-        )
-        .await
-        .map_err(PostgresKernelError::Database)?;
+    let changed =
+        if let Some(context) = admission_context {
+            let owner = context.writer_lease_owner().ok_or_else(|| {
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.sealed_invocation_lifecycle",
+                    record: record.clone(),
+                    rule: "fenced terminal transition requires exact writer lease evidence",
+                }
+            })?;
+            let epoch = context.writer_lease_epoch().ok_or_else(|| {
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.sealed_invocation_lifecycle",
+                    record: record.clone(),
+                    rule: "fenced terminal transition requires exact writer lease evidence",
+                }
+            })?;
+            transaction
+                .execute(
+                    "UPDATE _orna_kernel.sealed_invocation_lifecycle
+                    SET status = $2,
+                        ended_at = transaction_timestamp(),
+                        diagnostic_code = $3,
+                        diagnostic_class = $4
+                 WHERE invocation_id = $1
+                    AND status IN ('queued', 'running')
+                    AND ended_at IS NULL
+                    AND diagnostic_code IS NULL
+                    AND diagnostic_class IS NULL
+                    AND admission_snapshot = $5
+                    AND admission_generation_digest = $6
+                    AND admission_runtime_id = $7
+                    AND admission_runtime_generation = $8
+                    AND admission_writer_lease_owner = $9
+                    AND admission_writer_lease_epoch = $10",
+                    &[
+                        &invocation,
+                        &status,
+                        &diagnostic_code,
+                        &diagnostic_class,
+                        &context.encoded_snapshot(),
+                        &context.generation_digest().to_vec(),
+                        &context.runtime_id().to_vec(),
+                        &context.runtime_generation(),
+                        &owner.to_vec(),
+                        &epoch,
+                    ],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?
+        } else {
+            transaction
+                .execute(
+                    "UPDATE _orna_kernel.sealed_invocation_lifecycle
+                    SET status = $2,
+                        ended_at = transaction_timestamp(),
+                        diagnostic_code = $3,
+                        diagnostic_class = $4
+                 WHERE invocation_id = $1
+                    AND status IN ('queued', 'running')
+                    AND ended_at IS NULL
+                    AND diagnostic_code IS NULL
+                    AND diagnostic_class IS NULL",
+                    &[&invocation, &status, &diagnostic_code, &diagnostic_class],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?
+        };
     if changed == 1 {
         return Ok(());
     }
@@ -832,6 +910,146 @@ pub(super) async fn transition_sealed_invocation_lifecycle(
         record,
         rule: "sealed invocation terminal transition requires one active lifecycle row",
     })
+}
+
+pub(super) async fn transition_sealed_invocation_lifecycle_after_owner_replacement(
+    transaction: &Transaction<'_>,
+    invocation: InvocationId,
+    lost: super::sealed_lifecycle_finalization::SealedInvocationWriterLease,
+    replacement: super::sealed_lifecycle_finalization::SealedInvocationWriterLease,
+) -> Result<(), PostgresKernelError> {
+    let invalid = |rule| PostgresKernelError::DurableInvariant {
+        relation: "_orna_kernel.sealed_invocation_lifecycle",
+        record: invocation.canonical(),
+        rule,
+    };
+    validate_sealed_invocation_owner_replacement(lost, replacement, &invalid)?;
+    let invocation_bytes = invocation.to_bytes().to_vec();
+    let lost_owner = lost.owner_id.to_vec();
+    let lost_epoch = i64::try_from(lost.epoch).map_err(|_| {
+        invalid("sealed invocation orphan recovery lease epoch exceeds PostgreSQL range")
+    })?;
+    let replacement_owner = replacement.owner_id.to_vec();
+    let replacement_epoch = i64::try_from(replacement.epoch).map_err(|_| {
+        invalid("sealed invocation orphan recovery lease epoch exceeds PostgreSQL range")
+    })?;
+    let changed = transaction
+        .execute(
+            "UPDATE _orna_kernel.sealed_invocation_lifecycle
+                SET status = 'orphaned',
+                    ended_at = transaction_timestamp(),
+                    diagnostic_code = NULL,
+                    diagnostic_class = NULL,
+                    orphaned_replacement_writer_lease_owner = $4,
+                    orphaned_replacement_writer_lease_epoch = $5
+             WHERE invocation_id = $1
+                AND status IN ('queued', 'running')
+                AND ended_at IS NULL
+                AND diagnostic_code IS NULL
+                AND diagnostic_class IS NULL
+                AND admission_writer_lease_owner = $2
+                AND admission_writer_lease_epoch = $3
+                AND orphaned_replacement_writer_lease_owner IS NULL
+                AND orphaned_replacement_writer_lease_epoch IS NULL",
+            &[
+                &invocation_bytes,
+                &lost_owner,
+                &lost_epoch,
+                &replacement_owner,
+                &replacement_epoch,
+            ],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    if changed == 1 {
+        return Ok(());
+    }
+    let existing = transaction
+        .query_opt(
+            "SELECT status, diagnostic_code, diagnostic_class, ended_at IS NOT NULL AS terminalized, \
+                    admission_writer_lease_owner, admission_writer_lease_epoch, \
+                    orphaned_replacement_writer_lease_owner, \
+                    orphaned_replacement_writer_lease_epoch \
+             FROM _orna_kernel.sealed_invocation_lifecycle WHERE invocation_id = $1",
+            &[&invocation_bytes],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    if let Some(existing) = existing {
+        let owner = existing
+            .try_get::<_, Option<Vec<u8>>>("admission_writer_lease_owner")
+            .map_err(PostgresKernelError::Database)?;
+        let epoch = existing
+            .try_get::<_, Option<i64>>("admission_writer_lease_epoch")
+            .map_err(PostgresKernelError::Database)?;
+        let matches_lost =
+            sealed_invocation_writer_lease_matches(owner.as_deref(), epoch, lost, lost_epoch);
+        let receipt_owner = existing
+            .try_get::<_, Option<Vec<u8>>>("orphaned_replacement_writer_lease_owner")
+            .map_err(PostgresKernelError::Database)?;
+        let receipt_epoch = existing
+            .try_get::<_, Option<i64>>("orphaned_replacement_writer_lease_epoch")
+            .map_err(PostgresKernelError::Database)?;
+        let matches_replacement = sealed_invocation_writer_lease_matches(
+            receipt_owner.as_deref(),
+            receipt_epoch,
+            replacement,
+            replacement_epoch,
+        );
+        let persisted = (
+            existing
+                .try_get::<_, String>("status")
+                .map_err(PostgresKernelError::Database)?,
+            existing
+                .try_get::<_, Option<i16>>("diagnostic_code")
+                .map_err(PostgresKernelError::Database)?,
+            existing
+                .try_get::<_, Option<i16>>("diagnostic_class")
+                .map_err(PostgresKernelError::Database)?,
+            existing
+                .try_get::<_, bool>("terminalized")
+                .map_err(PostgresKernelError::Database)?,
+        );
+        if matches_lost
+            && matches_replacement
+            && sealed_invocation_terminal_matches(
+                (&persisted.0, persisted.1, persisted.2, persisted.3),
+                SealedInvocationLifecycleTerminal::Orphaned.fields(),
+            )
+        {
+            return Ok(());
+        }
+    }
+    Err(invalid(
+        "sealed invocation orphan recovery requires the retained lost writer lease compare-and-set",
+    ))
+}
+
+fn validate_sealed_invocation_owner_replacement(
+    lost: super::sealed_lifecycle_finalization::SealedInvocationWriterLease,
+    replacement: super::sealed_lifecycle_finalization::SealedInvocationWriterLease,
+    invalid: &impl Fn(&'static str) -> PostgresKernelError,
+) -> Result<(), PostgresKernelError> {
+    if lost.owner_id == [0; 16]
+        || replacement.owner_id == [0; 16]
+        || lost.epoch == 0
+        || replacement.epoch <= lost.epoch
+        || replacement == lost
+    {
+        return Err(invalid(
+            "sealed invocation orphan recovery requires a later replacement writer lease",
+        ));
+    }
+    Ok(())
+}
+
+fn sealed_invocation_writer_lease_matches(
+    owner: Option<&[u8]>,
+    epoch: Option<i64>,
+    requested: super::sealed_lifecycle_finalization::SealedInvocationWriterLease,
+    requested_epoch: i64,
+) -> bool {
+    owner == Some(requested.owner_id.as_slice()) && epoch == Some(requested_epoch)
 }
 
 fn sealed_invocation_orphan_recovery_requires_owner_lease(
@@ -1503,6 +1721,7 @@ impl SealedInvocationContinuation {
             started_events,
             admission_context,
             outcome,
+            admitted: false,
             consumed: false,
             #[cfg(test)]
             test_hooks: None,
@@ -1863,7 +2082,13 @@ impl SealedInvocationOperation {
                 .await
                 .map_err(PostgresKernelError::Database)?;
             require_current_migrations(&transaction).await?;
-            transition_sealed_invocation_lifecycle(&transaction, self.invocation, terminal).await?;
+            transition_sealed_invocation_lifecycle_with_admission_context(
+                &transaction,
+                self.invocation,
+                terminal,
+                self.admission_context.as_ref(),
+            )
+            .await?;
             transaction
                 .commit()
                 .await
@@ -1896,7 +2121,7 @@ impl SealedInvocationOperation {
             .reject_unsupported_security_definer(&self.active)?;
 
         self.consumed = true;
-        self.append_prepared_audit().await?;
+        self.admit_sealed_sys_invoke().await?;
         let bind_failure = matches!(
             &self.outcome,
             SealedInvocationPreparedOutcome::BindFailure { .. }
@@ -1990,6 +2215,7 @@ impl SealedInvocationOperation {
                 Some((&self.active, &self.security)),
                 Some(&self.registry),
                 Some(&self.outcome),
+                self.admission_context.as_ref(),
                 true,
                 Some(cancellation),
             )
@@ -2143,5 +2369,66 @@ mod lifecycle_tests {
         assert!(!sealed_invocation_orphan_recovery_requires_owner_lease(
             SealedInvocationLifecycleTerminal::Cancelled
         ));
+    }
+
+    #[test]
+    fn orphan_recovery_rejects_malformed_or_stale_replacement_evidence() {
+        use super::super::sealed_lifecycle_finalization::SealedInvocationWriterLease;
+
+        let lost = SealedInvocationWriterLease {
+            owner_id: [0x41; 16],
+            epoch: 7,
+        };
+        let invalid = |_: &'static str| PostgresKernelError::DurableInvariant {
+            relation: "test",
+            record: "test".into(),
+            rule: "test",
+        };
+        for replacement in [
+            SealedInvocationWriterLease {
+                owner_id: [0; 16],
+                epoch: 8,
+            },
+            SealedInvocationWriterLease {
+                owner_id: [0x42; 16],
+                epoch: 7,
+            },
+            SealedInvocationWriterLease {
+                owner_id: [0x42; 16],
+                epoch: 6,
+            },
+        ] {
+            assert!(
+                validate_sealed_invocation_owner_replacement(lost, replacement, &invalid).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn orphan_recovery_replay_requires_the_exact_replacement_receipt() {
+        use super::super::sealed_lifecycle_finalization::SealedInvocationWriterLease;
+
+        let replacement = SealedInvocationWriterLease {
+            owner_id: [0x52; 16],
+            epoch: 9,
+        };
+        assert!(sealed_invocation_writer_lease_matches(
+            Some(&[0x52; 16]),
+            Some(9),
+            replacement,
+            9,
+        ));
+        assert!(
+            !sealed_invocation_writer_lease_matches(Some(&[0x53; 16]), Some(9), replacement, 9),
+            "a different replacement owner must not acknowledge an orphan replay"
+        );
+        assert!(
+            !sealed_invocation_writer_lease_matches(Some(&[0x52; 16]), Some(10), replacement, 9),
+            "a later replacement epoch must not acknowledge stale replacement evidence"
+        );
+        assert!(
+            !sealed_invocation_writer_lease_matches(None, None, replacement, 9),
+            "a receipt-less legacy orphan must not acknowledge replacement recovery"
+        );
     }
 }
