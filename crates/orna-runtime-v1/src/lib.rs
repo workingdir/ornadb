@@ -21,7 +21,7 @@ use std::{
 };
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use libsql::{Builder, Connection, TransactionBehavior, params};
+use libsql::{Builder, Connection, Transaction, TransactionBehavior, params};
 use num_bigint::{BigInt, Sign};
 use orna_foundation_v1::{
     AssertionRef, CanonicalSnapshot, CheckpointRef, CwdCapture, ExpressionRef, FailureRef,
@@ -4176,6 +4176,79 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         self.require_owner(&transaction, writer).await?;
+        let result = self
+            .fail_stream_delivery_tx(
+                &transaction,
+                lease,
+                diagnostic,
+                assertion_detail,
+                payload,
+                faults,
+            )
+            .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(result)
+    }
+
+    /// Finishes a retry whose `Retry` transition already acquired the
+    /// delivery lease. The retry admission remains a separately committed
+    /// durable boundary before handler code; this helper only avoids a
+    /// redundant second admission transaction when a bounded witness models
+    /// the handler's immediate failure.
+    async fn fail_stream_retry_delivery(
+        &self,
+        writer: WriterLease,
+        delivery: DeliveryIdentity,
+        diagnostic: SafeDiagnostic,
+        payload: StreamFailurePayload,
+    ) -> Result<CommitResult, RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&transaction, writer).await?;
+        let identity = FailureIdentity(delivery.clone());
+        let Some(failure) = load_stream_failure(&transaction, &identity).await? else {
+            return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
+        };
+        if failure.status != FailureStatus::Retrying {
+            return Ok(CommitResult::Rejected(RejectReason::RetryNotAllowed));
+        }
+        let key = delivery.checkpoint_key();
+        let Some(stored) = load_stream_lease(&transaction, &key).await? else {
+            return Ok(CommitResult::Rejected(RejectReason::LeaseFenced));
+        };
+        let lease = DeliveryLease {
+            delivery,
+            fence: stored.fence,
+            purpose: stored.purpose,
+        };
+        if lease.purpose != LeasePurpose::Deliver || !lease_matches(&lease, &stored) {
+            return Ok(CommitResult::Rejected(RejectReason::LeaseFenced));
+        }
+        let result = self
+            .fail_stream_delivery_tx(&transaction, lease, diagnostic, None, payload, &NoFault)
+            .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(result)
+    }
+
+    async fn fail_stream_delivery_tx(
+        &self,
+        transaction: &Transaction,
+        lease: DeliveryLease,
+        diagnostic: SafeDiagnostic,
+        assertion_detail: Option<&AssertionDiagnosticDetail>,
+        payload: StreamFailurePayload,
+        faults: &dyn FaultInjector,
+    ) -> Result<CommitResult, RuntimeError> {
         let (plaintext, reference, digest, retention) = match payload {
             StreamFailurePayload::Unavailable => {
                 return Err(RuntimeError::RecoveryInvalid);
@@ -4191,7 +4264,7 @@ impl RuntimeState {
         let result = match assertion_detail {
             Some(detail) => {
                 apply_stream_intent_tx(
-                    &transaction,
+                    transaction,
                     CommitIntent::FailWithAssertion {
                         lease,
                         diagnostic,
@@ -4201,12 +4274,12 @@ impl RuntimeState {
                 .await?
             }
             None => {
-                apply_stream_intent_tx(&transaction, CommitIntent::Fail { lease, diagnostic })
+                apply_stream_intent_tx(transaction, CommitIntent::Fail { lease, diagnostic })
                     .await?
             }
         };
         if let CommitResult::Failed { failure } = &result {
-            sync_stream_observation_tx(&transaction, &result).await?;
+            sync_stream_observation_tx(transaction, &result).await?;
             faults.check(FaultPoint::AfterFailureRecord)?;
             transaction
                 .execute(
@@ -4226,10 +4299,6 @@ impl RuntimeState {
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
             faults.check(FaultPoint::AfterFailurePayload)?;
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
         Ok(result)
     }
 
@@ -8423,9 +8492,13 @@ impl RuntimeState {
         if changed != 1 {
             return Err(RuntimeError::RequestOwnerConflict);
         }
-        let observed =
-            sync_run_request_state_with_diagnostic_tx(&tx, identity, observation_status, diagnostic)
-                .await?;
+        let observed = sync_run_request_state_with_diagnostic_tx(
+            &tx,
+            identity,
+            observation_status,
+            diagnostic,
+        )
+        .await?;
         if require_observation && observed != 1 {
             return Err(RuntimeError::RecoveryInvalid);
         }
@@ -9078,6 +9151,20 @@ impl RuntimeStreamBackend<'_> {
     ) -> Result<CommitResult, RuntimeError> {
         self.state
             .fail_stream_delivery(self.lease, lease, diagnostic, payload)
+            .await
+    }
+
+    /// Finishes an immediately failed retry using the lease already acquired
+    /// by [`CommitIntent::Retry`]. The retry transition and this failed
+    /// transition remain separate durable transactions.
+    pub async fn fail_retry_async(
+        &self,
+        delivery: DeliveryIdentity,
+        diagnostic: SafeDiagnostic,
+        payload: StreamFailurePayload,
+    ) -> Result<CommitResult, RuntimeError> {
+        self.state
+            .fail_stream_retry_delivery(self.lease, delivery, diagnostic, payload)
             .await
     }
 
