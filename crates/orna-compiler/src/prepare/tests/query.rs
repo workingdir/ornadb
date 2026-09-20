@@ -1835,6 +1835,7 @@ fn distinct_preparation_has_an_exhaustive_projection_domain_and_boolean_selectio
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid
         );
         let result = distinct_query_plan(&malformed, &function, &candidate, &references);
         if accepted {
