@@ -112,22 +112,22 @@ impl<R: BufRead> TerminalInputReader<R> {
                 };
             }
 
-            let take = buffer
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .map_or(buffer.len(), |index| index + 1);
-            let has_newline = buffer[take - 1] == b'\n';
-            let next_length = line.len().saturating_add(take);
+            let newline = buffer.iter().position(|byte| *byte == b'\n');
+            let take = newline.map_or(buffer.len(), |index| index + 1);
+            let content_end = newline.map_or(take, |index| {
+                index - usize::from(index > 0 && buffer[index - 1] == b'\r')
+            });
+            let next_length = line.len().saturating_add(content_end);
             if next_length > MAX_INPUT_LINE_BYTES {
                 self.reader.consume(take);
-                if !has_newline {
+                if newline.is_none() {
                     self.drain_until_newline()?;
                 }
                 return Err(TerminalInputError::LineTooLong);
             }
-            line.extend_from_slice(&buffer[..take]);
+            line.extend_from_slice(&buffer[..content_end]);
             self.reader.consume(take);
-            if has_newline {
+            if newline.is_some() {
                 return Ok(Some(line));
             }
         }
@@ -199,6 +199,42 @@ mod tests {
             reader.read_line(&mut output, ""),
             Err(TerminalInputError::LineTooLong),
         ));
+        assert_eq!(
+            reader.read_line(&mut output, "").expect("next line"),
+            TerminalInput::Line("next".to_owned()),
+        );
+    }
+
+    #[test]
+    fn accepts_the_exact_payload_limit_before_lf() {
+        let mut bytes = vec![b'x'; MAX_INPUT_LINE_BYTES];
+        bytes.extend_from_slice(b"\nnext\n");
+        let input = BufReader::new(Cursor::new(bytes));
+        let mut reader = TerminalInputReader::new(input);
+        let mut output = Vec::new();
+
+        assert_eq!(
+            reader.read_line(&mut output, "").expect("maximum line"),
+            TerminalInput::Line("x".repeat(MAX_INPUT_LINE_BYTES)),
+        );
+        assert_eq!(
+            reader.read_line(&mut output, "").expect("next line"),
+            TerminalInput::Line("next".to_owned()),
+        );
+    }
+
+    #[test]
+    fn accepts_the_exact_payload_limit_before_crlf() {
+        let mut bytes = vec![b'x'; MAX_INPUT_LINE_BYTES];
+        bytes.extend_from_slice(b"\r\nnext\n");
+        let input = BufReader::new(Cursor::new(bytes));
+        let mut reader = TerminalInputReader::new(input);
+        let mut output = Vec::new();
+
+        assert_eq!(
+            reader.read_line(&mut output, "").expect("maximum line"),
+            TerminalInput::Line("x".repeat(MAX_INPUT_LINE_BYTES)),
+        );
         assert_eq!(
             reader.read_line(&mut output, "").expect("next line"),
             TerminalInput::Line("next".to_owned()),
