@@ -364,7 +364,7 @@ fn generate_inner(
         bounded_production_evidence: Vec::new(),
     };
     if let Some(witnesses) = engine_witnesses {
-        apply_engine_witnesses(&mut report, witnesses, &manifest)?;
+        apply_engine_witnesses(&mut report, witnesses, &manifest, &evidence)?;
     }
     if let Some(witnesses) = scenario_execution_witnesses {
         apply_scenario_execution_witnesses(&mut report, witnesses, &scenarios)?;
@@ -505,6 +505,7 @@ fn apply_engine_witnesses(
     report: &mut Report,
     witnesses: &EngineWitnesses,
     manifest: &Manifest,
+    evidence: &EvidenceFile,
 ) -> Result<()> {
     if report.publication_digests != *witnesses.publication_digests() {
         return Err(err(
@@ -516,6 +517,11 @@ fn apply_engine_witnesses(
         .iter()
         .map(|fixture| (fixture.id.as_str(), fixture))
         .collect::<BTreeMap<_, _>>();
+    let evidence_by_requirement = evidence
+        .requirements
+        .iter()
+        .map(|item| (item.requirement.as_str(), item))
+        .collect::<BTreeMap<_, _>>();
     let mut requirements = report
         .requirements
         .iter_mut()
@@ -523,6 +529,23 @@ fn apply_engine_witnesses(
         .collect::<BTreeMap<_, _>>();
     let mut seen = BTreeSet::new();
     for witness in witnesses.witnesses() {
+        let declared_evidence = evidence_by_requirement
+            .get(witness.requirement_id())
+            .ok_or_else(|| {
+                err(format!(
+                    "engine witness requirement evidence is missing: {}",
+                    witness.requirement_id()
+                ))
+            })?;
+        if !declared_evidence.tests.iter().any(|test| {
+            test.fixture.as_deref() == Some(witness.fixture_id())
+                && test.path.as_deref() == Some(witness.fixture_path())
+        }) {
+            return Err(err(format!(
+                "engine witness requirement evidence does not declare fixture: {}",
+                witness.fixture_id()
+            )));
+        }
         let fixture = fixtures.get(witness.fixture_id()).ok_or_else(|| {
             err(format!(
                 "engine witness names unknown fixture: {}",
