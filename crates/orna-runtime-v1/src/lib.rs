@@ -38,12 +38,12 @@ use orna_stream_v1::{
     AssertionDiagnosticCode, AssertionDiagnosticDetail, AssertionOwnerKind,
     AsyncFailurePayloadBackend, CancellationClassification, CheckpointPrecondition, CommitIntent,
     CommitResult, DeliveryIdentity, DeliveryLease, DiagnosticClass, DiagnosticCode,
-    FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, Position, RejectReason,
-    ReplayGrant, SafeAssertionWitness, SafeDiagnostic, StreamState, StreamStatus,
+    FailureIdentity, FailureRecord, LeasePurpose, Position, RejectReason, ReplayGrant,
+    SafeAssertionWitness, SafeDiagnostic, StreamState, StreamStatus,
 };
 pub use orna_stream_v1::{
     AsyncCheckpointBackend, Checkpoint as StreamCheckpoint, CheckpointKey, Component,
-    ConsumerIdentity, StreamFailurePayload,
+    ConsumerIdentity, FailureStatus, StreamFailurePayload,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
@@ -2170,6 +2170,90 @@ impl RuntimeState {
     /// Creates a stream backend whose mutations are fenced by this writer lease.
     pub fn stream_backend(&self, lease: WriterLease) -> RuntimeStreamBackend<'_> {
         RuntimeStreamBackend { state: self, lease }
+    }
+
+    /// Resolves one public `sys.FailureRef` to the complete retained delivery
+    /// identity.  The reference supplies only its public natural key; source
+    /// and partition formats plus the successor position are recovered from
+    /// the durable failure row and are never reconstructed by a caller.
+    ///
+    /// A public reference that is stale, absent, or ambiguous is not an
+    /// authority to select a row.  In particular, if two retained physical
+    /// rows share the public key but differ in their hidden provider formats,
+    /// this returns `RecoveryInvalid` rather than choosing either row.
+    pub async fn resolve_failure_reference(
+        &self,
+        reference: &FailureRef,
+    ) -> Result<Option<FailureRecord>, RuntimeError> {
+        let capture = self.capture().await?;
+        let reference = validate_failure_reference(reference.as_row_ref().clone(), &capture)
+            .map_err(|_| RuntimeError::InvalidObservationReference)?;
+        let OvbRaw::Array(key) = &reference.as_row_ref().key else {
+            return Err(RuntimeError::InvalidObservationReference);
+        };
+        let [consumer, source, partition, position_format, position] = key.as_slice() else {
+            return Err(RuntimeError::InvalidObservationReference);
+        };
+        let OvbRaw::Text(consumer) = consumer else {
+            return Err(RuntimeError::InvalidObservationReference);
+        };
+        let consumer = decode_consumer_identity(consumer)?;
+        let OvbRaw::Text(source) = source else {
+            return Err(RuntimeError::InvalidObservationReference);
+        };
+        let partition = match partition {
+            OvbRaw::Null => None,
+            OvbRaw::Text(partition) => Some(partition.as_str()),
+            _ => return Err(RuntimeError::InvalidObservationReference),
+        };
+        let OvbRaw::Text(position_format) = position_format else {
+            return Err(RuntimeError::InvalidObservationReference);
+        };
+        let OvbRaw::Text(position) = position else {
+            return Err(RuntimeError::InvalidObservationReference);
+        };
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT identity_id FROM stream_failure
+                 WHERE consumer_principal = ?1 AND consumer_root = ?2
+                   AND consumer_function = ?3 AND consumer_binding = ?4
+                   AND source = ?5 AND partition IS ?6
+                   AND position_format = ?7 AND delivery_position = ?8",
+                params![
+                    consumer.principal.as_str(),
+                    consumer.root.as_str(),
+                    consumer.function.as_str(),
+                    consumer.binding.as_str(),
+                    source.as_str(),
+                    partition,
+                    position_format.as_str(),
+                    position.as_str(),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        else {
+            return Ok(None);
+        };
+        let identity = row_text(&row, 0)?;
+        if rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let record = load_stream_failure_by_id(&self.connection, identity).await?;
+        let Some(record) = record else {
+            return Err(RuntimeError::RecoveryInvalid);
+        };
+        Ok(Some(record))
     }
 
     /// Registers a durable `sys.Run` observation before user code is allowed
@@ -10556,9 +10640,20 @@ async fn load_stream_failure(
     connection: &Connection,
     identity: &FailureIdentity,
 ) -> Result<Option<FailureRecord>, RuntimeError> {
-    let identity_id = stream_identity_id(identity);
+    let record = load_stream_failure_by_id(connection, stream_identity_id(identity)).await?;
+    match record {
+        Some(record) if record.identity == *identity => Ok(Some(record)),
+        Some(_) => Err(RuntimeError::RecoveryInvalid),
+        None => Ok(None),
+    }
+}
+
+async fn load_stream_failure_by_id(
+    connection: &Connection,
+    identity_id: String,
+) -> Result<Option<FailureRecord>, RuntimeError> {
     let mut rows = connection
-        .query(STREAM_FAILURE_SELECT, params![identity_id])
+        .query(STREAM_FAILURE_SELECT, params![identity_id.clone()])
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     let Some(row) = rows
@@ -10586,13 +10681,13 @@ async fn load_stream_failure(
         successor: decode_position(row_text(&row, 11)?)?,
     };
     let reconstructed = FailureIdentity(delivery);
-    if reconstructed != *identity
+    if stream_identity_id(&reconstructed) != identity_id
         || row_text(&row, 0)? != stream_key_id(&reconstructed.0.checkpoint_key())
     {
         return Err(RuntimeError::RecoveryInvalid);
     }
     Ok(Some(FailureRecord {
-        identity: reconstructed,
+        identity: reconstructed.clone(),
         version: decode_u64(
             row.get::<i64>(12)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -10606,7 +10701,7 @@ async fn load_stream_failure(
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         )?,
         diagnostic: decode_diagnostic(&row, 15)?,
-        assertion_detail: load_stream_failure_assertion_detail(connection, identity).await?,
+        assertion_detail: load_stream_failure_assertion_detail(connection, &reconstructed).await?,
     }))
 }
 
@@ -14326,6 +14421,123 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn failure_reference_resolution_is_exact_and_fails_closed() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(28)).await.unwrap();
+        let delivery = stream_delivery("resolve-reference", "resolve-successor");
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let failure = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected,
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected acquire result: {other:?}"),
+            };
+            match stream
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(vec![28]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected failure result: {other:?}"),
+            }
+        };
+        let capture = state.capture().await.unwrap();
+        let reference = failure_reference(
+            capture.database_id(),
+            capture.snapshot().clone(),
+            failure.identity.0.consumer.canonical(),
+            failure.identity.0.source.as_str().to_owned(),
+            failure
+                .identity
+                .0
+                .partition
+                .as_ref()
+                .map(|value| value.as_str().to_owned()),
+            failure.identity.0.position_format.as_str().to_owned(),
+            failure.identity.0.position.token.as_str().to_owned(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.resolve_failure_reference(&reference).await.unwrap(),
+            Some(failure.clone())
+        );
+
+        let absent = failure_reference(
+            capture.database_id(),
+            capture.snapshot().clone(),
+            failure.identity.0.consumer.canonical(),
+            failure.identity.0.source.as_str().to_owned(),
+            failure
+                .identity
+                .0
+                .partition
+                .as_ref()
+                .map(|value| value.as_str().to_owned()),
+            failure.identity.0.position_format.as_str().to_owned(),
+            "not-retained".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            state.resolve_failure_reference(&absent).await.unwrap(),
+            None
+        );
+
+        let alternate = FailureIdentity(DeliveryIdentity {
+            source_format: Component::new("alternate-source-format").unwrap(),
+            ..failure.identity.0.clone()
+        });
+        state
+            .connection
+            .execute(
+                "INSERT INTO stream_failure (
+                    identity_id, key_id, consumer_principal, consumer_root,
+                    consumer_function, consumer_binding, source_format, source,
+                    partition_format, partition, position_format,
+                    delivery_position, successor_position, version, attempts,
+                    status, diagnostic_code, diagnostic_class
+                 )
+                 SELECT ?1, ?2, consumer_principal, consumer_root,
+                        consumer_function, consumer_binding, ?3, source,
+                        partition_format, partition, position_format,
+                        delivery_position, successor_position, version, attempts,
+                        status, diagnostic_code, diagnostic_class
+                 FROM stream_failure WHERE identity_id = ?4",
+                params![
+                    stream_identity_id(&alternate),
+                    stream_key_id(&alternate.0.checkpoint_key()),
+                    alternate.0.source_format.as_str().to_owned(),
+                    stream_identity_id(&failure.identity),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.resolve_failure_reference(&reference).await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
     }
 
     async fn protected_replay_fixture(
