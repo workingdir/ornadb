@@ -7,6 +7,9 @@ fn loads_the_complete_unchanged_reference_corpus() {
     assert_eq!(corpus.invalid_metadata.fixtures.len(), 80);
     assert_eq!(corpus.vectors.len(), 6);
     assert_eq!(corpus.requirements.len(), 870);
+    assert!(corpus.diagnostics.values().all(|diagnostic| {
+        diagnostic.version == "1.0.0" && diagnostic.status == "expected-not-executed"
+    }));
     assert_eq!(
         corpus.diagnostics["examples/invalid/unsafe-row-key-repeat.orna"].failing_phase,
         "row-validation"
