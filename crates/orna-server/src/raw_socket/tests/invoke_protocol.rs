@@ -1,5 +1,18 @@
 use super::*;
 
+fn sealed_result_cancellation_won(
+    cancellation: &ResourceCancellation,
+    execution: &Result<SealedInvocationExecution, PostgresKernelError>,
+) -> bool {
+    cancellation.is_requested()
+        && matches!(
+            execution,
+            Ok(SealedInvocationExecution::Result(
+                SealedInvocationResult::Completed { .. }
+            ))
+        )
+}
+
 #[tokio::test]
 async fn catalogue_connection_drives_enum_arguments_and_results() {
     let catalogue = Arc::new(enum_catalogue());
@@ -1037,6 +1050,7 @@ async fn queued_value_and_completion_are_replaced_by_cancel_without_credit() {
             &mut preflight_cancelled,
             &mut preflight_tasks,
             &mut producer_shutdown,
+            &sealed_pull_in_flight,
             &mut pending,
             &mut unstarted,
             &mut writer,
@@ -1264,7 +1278,7 @@ fn pre_start_invoke_terminal_keeps_started_event_before_result() {
             _guards: None,
         },
     )]);
-    queue_cancellation_actions(pending.get_mut(&1).expect("pending invocation"), 1);
+    queue_cancellation_actions(pending.get_mut(&1).expect("pending invocation"), 1, false);
     let mut cancelled_pending = BTreeSet::from([1]);
 
     merge_dispatch_completion(
