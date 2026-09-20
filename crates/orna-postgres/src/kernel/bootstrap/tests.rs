@@ -15,7 +15,7 @@ fn migration_registry_is_a_strict_contiguous_sequence() {
         validated_migration_registry()
             .expect("registry is valid")
             .len(),
-        54
+        55
     );
     assert_eq!(MIGRATIONS[0].version, 1);
     assert_eq!(MIGRATIONS[1].version, 2);
@@ -104,6 +104,10 @@ fn migration_registry_is_a_strict_contiguous_sequence() {
         "sealed invocation writer lease evidence"
     );
     assert_eq!(MIGRATIONS[53].name, "sealed invocation catalogue witnesses");
+    assert_eq!(
+        MIGRATIONS[54].name,
+        "sealed invocation orphan replacement receipt"
+    );
     assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
     assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
     assert_eq!(MIGRATIONS[7].name, "resolved value type storage");

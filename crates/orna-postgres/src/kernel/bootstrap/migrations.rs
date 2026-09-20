@@ -347,6 +347,14 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../../migrations/0054_sealed_invocation_catalogue_witnesses.sql"),
         data_step: None,
     },
+    Migration {
+        version: 55,
+        name: "sealed invocation orphan replacement receipt",
+        sql: include_str!(
+            "../../../migrations/0055_sealed_invocation_orphan_replacement_receipt.sql"
+        ),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
