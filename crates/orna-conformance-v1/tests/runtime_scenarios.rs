@@ -23,7 +23,12 @@ use std::{
 };
 use tempfile::TempDir;
 
-const CONFORMANCE_PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
+// The bounded profile includes the durable FAIL-001 witness, which performs
+// 10,000 fenced retry transitions and reopens the runtime before publishing
+// its report. Keep a finite subprocess bound, but allow slow SQLite/WAL
+// filesystems to complete that bounded setup without changing any evidence
+// status or claim rules.
+const CONFORMANCE_PROCESS_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn run_conformance_with_timeout() -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
