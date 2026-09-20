@@ -176,6 +176,12 @@ def main() -> None:
         executable.chmod(0o644)
         expect_failure(lambda: package.make_archive(arguments))
 
+        malformed_elf = scratch / "malformed-elf"
+        malformed_elf.write_bytes(b"\x7fELF" + b"\x02\x01\x00" + executable.read_bytes()[7:])
+        malformed_elf.chmod(0o755)
+        arguments.executable = str(malformed_elf)
+        expect_failure(lambda: package.make_archive(arguments))
+
     print("linux package tests passed")
 
 
