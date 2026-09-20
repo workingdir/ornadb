@@ -46,4 +46,5 @@ unicode-width = "0.1.14"
 
 [dev-dependencies]
 orna-postgres = { path = "../orna-postgres", features = ["test-hooks"] }
+tempfile = "3.23.0"
 turso = { version = "0.8.0-pre.7", default-features = false }

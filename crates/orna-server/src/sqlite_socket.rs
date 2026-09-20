@@ -14,7 +14,7 @@ use std::{
         fd::AsRawFd,
         unix::{
             fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-            net::UnixStream as StandardUnixStream,
+            net::{UnixListener as StandardUnixListener, UnixStream as StandardUnixStream},
         },
     },
     path::{Path, PathBuf},
