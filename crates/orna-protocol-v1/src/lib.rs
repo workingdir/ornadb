@@ -15,6 +15,9 @@ use sha2::{Digest, Sha256};
 
 pub const PROFILE: &str = "orna.present.v1";
 pub const VERSION: u64 = 1;
+pub const MIN_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+pub const MIN_MAX_DEPTH: usize = 64;
+pub const MIN_MAX_NODES: usize = 100_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
@@ -27,9 +30,9 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_message_bytes: 16 * 1024 * 1024,
-            max_depth: 64,
-            max_nodes: 100_000,
+            max_message_bytes: MIN_MAX_MESSAGE_BYTES,
+            max_depth: MIN_MAX_DEPTH,
+            max_nodes: MIN_MAX_NODES,
             max_collection_items: 100_000,
         }
     }
@@ -37,9 +40,9 @@ impl Default for Limits {
 
 impl Limits {
     pub fn validate(self) -> Result<Self> {
-        if self.max_message_bytes == 0
-            || self.max_depth == 0
-            || self.max_nodes == 0
+        if self.max_message_bytes < MIN_MAX_MESSAGE_BYTES
+            || self.max_depth < MIN_MAX_DEPTH
+            || self.max_nodes < MIN_MAX_NODES
             || self.max_collection_items == 0
         {
             return Err(Error::Limit);
@@ -2014,6 +2017,41 @@ mod tests {
             assert_eq!(message.encode(Limits::default()).unwrap(), bytes);
             assert!(canonical_request_fingerprint(id(9), &message, Limits::default()).is_ok());
         }
+    }
+
+    #[test]
+    fn limits_reject_below_normative_protocol_floors() {
+        for limits in [
+            Limits {
+                max_message_bytes: MIN_MAX_MESSAGE_BYTES - 1,
+                ..Limits::default()
+            },
+            Limits {
+                max_depth: MIN_MAX_DEPTH - 1,
+                ..Limits::default()
+            },
+            Limits {
+                max_nodes: MIN_MAX_NODES - 1,
+                ..Limits::default()
+            },
+        ] {
+            assert_eq!(limits.validate(), Err(Error::Limit));
+        }
+    }
+
+    #[test]
+    fn limits_accept_exact_normative_protocol_floors() {
+        let limits = Limits {
+            max_message_bytes: MIN_MAX_MESSAGE_BYTES,
+            max_depth: MIN_MAX_DEPTH,
+            max_nodes: MIN_MAX_NODES,
+            ..Limits::default()
+        };
+        assert_eq!(limits.validate(), Ok(limits));
+
+        let message = messages().remove(0);
+        let bytes = message.encode(limits).unwrap();
+        assert_eq!(Envelope::decode(&bytes, limits).unwrap(), message);
     }
 
     #[test]
