@@ -66,11 +66,14 @@ def require_linux_x86_64() -> None:
 
 def valid_linux_x86_64_elf(content: bytes) -> bool:
     return (
-        len(content) >= 20
+        len(content) >= 24
         and content[:4] == b"\x7fELF"
         and content[4] == 2
         and content[5] == 1
+        and content[6] == 1
+        and int.from_bytes(content[16:18], "little") in (2, 3)
         and int.from_bytes(content[18:20], "little") == 62
+        and int.from_bytes(content[20:24], "little") == 1
     )
 
 
