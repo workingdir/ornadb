@@ -300,6 +300,10 @@ fn binary_check_accepts_a_core_only_project_without_std() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the process-level regression keeps all command outcomes and host-boundary observations together"
+)]
 fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_substitution() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
@@ -578,6 +582,10 @@ fn binary_run_treats_a_path_like_target_as_an_ordinary_function_name() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the process-level regression retains the complete byte-for-byte status boundary evidence"
+)]
 fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_paths() {
     let repository = tempfile::tempdir().expect("status repository");
     std::fs::write(repository.path().join("tracked.txt"), "before\n").expect("tracked file");
@@ -703,6 +711,10 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the durable workflow scenario must retain each ordered process observation and recovery boundary"
+)]
 async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_failure() {
     let directory = reference_project();
     let init = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
@@ -854,6 +866,10 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the durable mutation scenario keeps invalid and duplicate publication observations adjacent"
+)]
 async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_without_publication() {
     let directory = reference_project();
     let init = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
