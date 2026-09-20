@@ -1100,6 +1100,25 @@ mod tests {
         }
     }
     #[test]
+    fn canonical_run_requirements_remain_explicit_non_executed_gaps() {
+        let report = generate(corpus()).expect("valid corpus");
+        for requirement_id in ["ORNA-RUN-001", "ORNA-RUN-002", "ORNA-RUN-003"] {
+            let requirement = report
+                .requirements
+                .iter()
+                .find(|requirement| requirement.requirement_id == requirement_id)
+                .expect("published run requirement");
+            assert_eq!(requirement.chapter, "expressions", "{requirement_id}");
+            assert_eq!(requirement.status, Status::JustifiedGap, "{requirement_id}");
+            assert!(
+                requirement.boundaries.iter().all(|boundary| {
+                    boundary.kind != "engine-witness" && boundary.status != Status::Executed
+                }),
+                "{requirement_id} must not claim Orna-engine execution"
+            );
+        }
+    }
+    #[test]
     fn aggregate_requires_all_applicable_boundaries_to_execute() {
         let cases = [
             ("empty", vec![], Status::JustifiedGap),
