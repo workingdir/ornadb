@@ -31,12 +31,12 @@ repository:
 | Stage 1 CLIENT VM structural artifact admission with bounded immutable plan evidence | IMPLEMENTED |
 | Stage 1 non-zero invocation identity allocation with in-memory collision and release control | IMPLEMENTED |
 | Stage 1 immutable runtime-offer witness and canonical digest | IMPLEMENTED |
-| Stage 1 ephemeral in-memory capability-lease state machine and policy/cancellation fences | IMPLEMENTED |
+| Stage 1 ephemeral in-memory capability-lease control-plane state machine and policy/cancellation fences | IMPLEMENTED |
 
 These are contract and control-plane slices in the repository. They do not yet
 form a production CLIENT VM or a usable product. Stage 1 performs no production
-host effect, kernel audit call, signature verification, or operating-system
-isolation.
+host effect, kernel audit call, signature verification, production lease
+issuance, or operating-system isolation.
 
 ## Accepted bounded slices
 
@@ -70,7 +70,8 @@ release. Environment-gated proofs remain deferred.
 These are concrete designs for future implementation experiments. They are not
 released and remain outside the accepted bounded slices:
 
-- the production CLIENT VM sandbox and capability host-effect broker;
+- **CURRENT PROPOSAL:** the full production CLIENT VM, including its sandbox and
+  capability host-effect broker;
 - protected audit integration for CLIENT capability decisions and effects;
 - signed identity-bound artifact attestation and provenance;
 - process isolation for any future untrusted native, JIT, FFI, or plugin surface;
