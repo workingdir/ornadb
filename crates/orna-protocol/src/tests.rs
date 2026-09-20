@@ -2170,6 +2170,19 @@ fn text_and_bytes_preserve_payloads_and_enforce_the_shared_limit() {
         Ok(RuntimeValue::Bytes(vec![0, 0xff, 1]))
     );
 
+    let uuid = [
+        0x12, 0x3e, 0x45, 0x67, 0xe8, 0x9b, 0x12, 0xd3, 0xa4, 0x56, 0x42, 0x66, 0x14, 0x17, 0x40,
+        0x00,
+    ];
+    assert_eq!(
+        encode_value(&RuntimeValue::Uuid(uuid)),
+        Ok(encoded_value(0x0e, UUID_TYPE_ID, &uuid))
+    );
+    assert_eq!(
+        decode_value(&encoded_value(0x0e, UUID_TYPE_ID, &uuid)),
+        Ok(RuntimeValue::Uuid(uuid))
+    );
+
     let oversized = vec![b'x'; 16 * 1024 * 1024 + 1];
     assert_eq!(
         encode_value(&RuntimeValue::Bytes(oversized.clone())),
@@ -2225,7 +2238,7 @@ fn typed_nulls_and_references_retain_exact_type_and_object_identity() {
 }
 
 #[test]
-fn runtime_and_codec_accept_exactly_the_six_supported_standard_scalar_families() {
+fn runtime_and_codec_accept_exactly_the_seven_supported_standard_scalar_families() {
     let supported = [
         (StandardScalar::Boolean, BOOLEAN_TYPE_ID),
         (StandardScalar::Integer, INTEGER_TYPE_ID),
@@ -2239,6 +2252,7 @@ fn runtime_and_codec_accept_exactly_the_six_supported_standard_scalar_families()
             StandardScalar::BinaryLargeObject,
             BINARY_LARGE_OBJECT_TYPE_ID,
         ),
+        (StandardScalar::Uuid, UUID_TYPE_ID),
     ];
     for (scalar, type_id) in supported {
         let value = RuntimeValue::null(ResolvedType::scalar(scalar)).unwrap();
@@ -2251,7 +2265,6 @@ fn runtime_and_codec_accept_exactly_the_six_supported_standard_scalar_families()
     // a newly admitted scalar silently widen the contract without changing this proof.
     let unsupported = [
         (StandardScalar::Decimal, DECIMAL_TYPE_ID),
-        (StandardScalar::Uuid, UUID_TYPE_ID),
         (StandardScalar::Date, DATE_TYPE_ID),
         (StandardScalar::Time, TIME_TYPE_ID),
         (StandardScalar::Timestamp, TIMESTAMP_TYPE_ID),
