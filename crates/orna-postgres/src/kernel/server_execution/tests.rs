@@ -28,6 +28,7 @@ use orna_core::{
 };
 
 use super::*;
+use super::lowering::maximum_fixed_payload_len;
 #[path = "tests/presenters.rs"]
 mod presenters;
 
@@ -1521,7 +1522,7 @@ fn distinct_error_display_is_human_facing_without_changing_existing_copy() {
             rule: DISTINCT_PROJECTION_RULE,
         }
         .to_string(),
-        "saved SELECT DISTINCT function cannot run: projections support only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values"
+        "saved SELECT DISTINCT function cannot run: projections support only BOOLEAN, INTEGER, BIGINT, BYTES, UUID, and REF values"
     );
     assert_eq!(
         ServerSelectError::PlanInvariant { rule: "test" }.to_string(),
@@ -2419,6 +2420,7 @@ fn operation_matrix_is_closed_for_equality_and_ordering() {
         ResolvedType::scalar(StandardScalar::Integer),
         ResolvedType::scalar(StandardScalar::BigInt),
         ResolvedType::scalar(StandardScalar::BinaryLargeObject),
+        ResolvedType::scalar(StandardScalar::Uuid),
         ResolvedType::reference(TypeId::from_bytes([0x55; 16])),
     ] {
         assert!(supports_equality_type(&context, resolved_type));
@@ -2427,7 +2429,6 @@ fn operation_matrix_is_closed_for_equality_and_ordering() {
         StandardScalar::Float,
         StandardScalar::CharacterLargeObject,
         StandardScalar::Decimal,
-        StandardScalar::Uuid,
         StandardScalar::Date,
         StandardScalar::Time,
         StandardScalar::Timestamp,
@@ -2472,6 +2473,7 @@ fn distinct_projection_domain_is_exhaustive_and_independent() {
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid
         );
         assert_eq!(
             supports_distinct_projection_type(&context, ResolvedType::scalar(scalar)),
@@ -2480,7 +2482,7 @@ fn distinct_projection_domain_is_exhaustive_and_independent() {
         );
         accepted_scalars += usize::from(expected);
     }
-    assert_eq!(accepted_scalars, 4);
+    assert_eq!(accepted_scalars, 5);
     assert!(supports_distinct_projection_type(
         &context,
         ResolvedType::reference(TypeId::from_bytes([0x55; 16]))
@@ -2800,6 +2802,7 @@ fn payload_accounting_has_stable_fixed_width_values() {
         logical_payload_len(&RuntimeValue::Bytes(vec![1, 2])).unwrap(),
         2
     );
+    assert_eq!(logical_payload_len(&RuntimeValue::Uuid([0x57; 16])).unwrap(), 16);
     assert_eq!(
         logical_payload_len(
             &RuntimeValue::null(ResolvedType::scalar(StandardScalar::Boolean)).unwrap()
@@ -2863,6 +2866,23 @@ fn record_results_require_non_null_bytea_and_guard_the_outer_envelope() {
             .iter()
             .all(|projection| projection.contains(&format!("<= {guarded_limit}")))
     );
+}
+
+#[test]
+fn uuid_results_share_the_admitted_equality_and_projection_domain() {
+    let (catalogue, _, _, _) = catalogue_with_record_field();
+    let context = CatalogueHashContext::version_one();
+    let uuid = ResolvedType::scalar(StandardScalar::Uuid);
+
+    assert!(supports_equality_type(&context, uuid));
+    assert!(supports_distinct_projection_type(&context, uuid));
+    assert!(supports_result_type(&catalogue, &context, uuid, false));
+    assert!(supports_result_type(&catalogue, &context, uuid, true));
+    assert_eq!(
+        expected_postgres_type(&catalogue, &context, uuid).unwrap(),
+        Type::UUID,
+    );
+    assert_eq!(maximum_fixed_payload_len(&catalogue, &context, uuid), 16);
 }
 
 #[test]
