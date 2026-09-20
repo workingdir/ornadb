@@ -1423,7 +1423,7 @@ where
         if !supports_server_select_distinct_value(projection.value_type) {
             diagnostics.push(diagnostic(
                 DiagnosticCode::DomainIncompatible,
-                "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values",
+                "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, UUID, and REF values",
                 logical_path,
                 source.span(),
             ));
@@ -2183,7 +2183,7 @@ where
             if !supports_server_select_equality_value(left.value_type) {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::DomainIncompatible,
-                    "SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values",
+                    "SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, UUID, and REF values",
                     logical_path,
                     span,
                 ));
@@ -2288,11 +2288,13 @@ fn supports_resolved_value<T>(value_type: &ResolvedValueType<T>) -> bool {
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid
         ) | ResolvedValueType::StandardValue {
             compatibility: StandardScalar::Boolean
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
-                | StandardScalar::BinaryLargeObject,
+                | StandardScalar::BinaryLargeObject
+                | StandardScalar::Uuid,
             ..
         } | ResolvedValueType::Reference { .. }
     )
