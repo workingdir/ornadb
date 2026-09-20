@@ -10,8 +10,9 @@ use orna_core::{
 };
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    NoFault, RequestIdentity, RunObservationRegistration, RuntimeIdentity, RuntimeState,
-    TableActivationCandidateValidator, TerminalOutcome, ValidatedTableRequestActivationCommit,
+    CatalogueAdmission, NoFault, RequestIdentity, RunObservationRegistration, RuntimeIdentity,
+    RuntimeState, TableActivationCandidateValidator, TerminalOutcome,
+    ValidatedTableRequestActivationCommit,
 };
 use orna_stream_v1::{Component, SafeDiagnostic};
 use tempfile::TempDir;
@@ -125,9 +126,16 @@ async fn real_source_candidate_projects_and_admits_at_runtime_capture() {
     let resolved = materialize_resolved_source_catalogue(&report, active.pair(), &active).unwrap();
     assert_eq!(resolved.type_witnesses().len(), 1);
     assert!(resolved.type_witness_errors().is_empty());
+    let artifact = resolved.admission_artifact().unwrap();
+    assert_eq!(artifact.types().len(), 1);
+    assert!(artifact.functions().is_empty());
 
     let capture = runtime.capture().await.unwrap();
     let admission = orna_conformance_v1::project_source_catalogue(&resolved, None).unwrap();
+    assert_eq!(
+        admission,
+        CatalogueAdmission::from_artifact(&artifact, None).unwrap()
+    );
     assert_eq!(admission.predecessor_capture, None);
     assert_eq!(admission.types.len(), 1);
     assert!(admission.functions.is_empty());
