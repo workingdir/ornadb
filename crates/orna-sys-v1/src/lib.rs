@@ -16,7 +16,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::Serialize;
+use serde::{
+    Serialize, Serializer,
+    ser::{SerializeSeq, SerializeStruct},
+};
 use sha2::{Digest, Sha256};
 
 pub const CANONICAL_VALUE_CODEC_V1: &str = "OVB-1";
@@ -365,6 +368,78 @@ pub struct FunctionDescriptor {
     pub callable: bool,
     pub generics_resolved: bool,
 }
+/// The authoritative portable descriptor for one intrinsic system function.
+///
+/// Descriptors are catalogue metadata, not executable closures.  Keeping this
+/// metadata here gives semantic and CLI adapters one source of truth while
+/// leaving invocation admission and execution under the existing runtime
+/// boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct SystemFunctionDescriptor {
+    pub name: &'static str,
+    pub effect: SystemEffect,
+    pub signature: &'static str,
+    pub purpose: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum SystemEffect {
+    Read,
+    Invoke,
+    Admin,
+}
+
+/// Exact `api/sys.json` descriptor for `sys.explain(Diagnostic)`.
+pub const SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.explain(Diagnostic)",
+        effect: SystemEffect::Read,
+        signature: "fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation",
+        purpose: "Return structured causal explanation.",
+    };
+
+/// Returns the authoritative descriptor for a portable system function.
+///
+/// The returned descriptor is static catalogue data.  It does not grant
+/// invocation or administrative authority.
+pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionDescriptor> {
+    (name == SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR.name).then_some(&SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR)
+}
+
+/// A descriptive object reference in an explanation.
+///
+/// This is intentionally not a durable `sys.RowRef<sys.Object>`: only a
+/// catalogue/runtime owner can supply row-authoritative references.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
+pub struct ObjectRef(String);
+
+impl ObjectRef {
+    pub fn descriptive(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A descriptive plan reference in an explanation.
+///
+/// A plan is optional because an explanation may be produced before planning;
+/// this type does not make an unverified plan executable.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
+pub struct PlanRef(String);
+
+impl PlanRef {
+    pub fn descriptive(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum InvocationMode {
@@ -981,6 +1056,7 @@ impl Runtime {
                             code: "sys.invoke.return_type",
                             message: "invocation returned a value with an incompatible type",
                             fields: BTreeMap::new(),
+                            causes: Vec::new(),
                         }),
                     )?;
                     return Err(AdmissionError::ReturnType);
@@ -1540,6 +1616,7 @@ impl RuntimeSupervisor {
                         code: "sys.invoke.orphaned",
                         message: "invocation executor panicked",
                         fields: BTreeMap::new(),
+                        causes: Vec::new(),
                     }))
                 });
                 let mut runtime = self
@@ -1618,6 +1695,7 @@ impl RuntimeSupervisor {
                             code: "sys.invoke.orphaned",
                             message: "invocation executor panicked",
                             fields: BTreeMap::new(),
+                            causes: Vec::new(),
                         }))
                     });
                     let Ok(mut runtime) = runtime.lock() else {
@@ -1883,14 +1961,12 @@ fn append(out: &mut Vec<u8>, value: &[u8]) {
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
-
-/// The executor response was structurally unusable.  Do not retain any
-/// caller-provided diagnostic, identity, timing, or value from that response.
 fn malformed_completion_failure() -> RetainedInvocationResult {
     RetainedInvocationResult::OrdinaryFailure(Diagnostic {
         code: "sys.invoke.malformed_completion",
         message: "invocation executor returned an invalid terminal completion",
         fields: BTreeMap::new(),
+        causes: Vec::new(),
     })
 }
 
@@ -1950,6 +2026,7 @@ impl AdmissionError {
             code: self.code(),
             message: "reflective invocation admission rejected",
             fields: BTreeMap::new(),
+            causes: Vec::new(),
         }
     }
 }
@@ -1980,18 +2057,231 @@ impl fmt::Display for AwaitError {
 }
 impl std::error::Error for AwaitError {}
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+/// Local, untrusted diagnostic input accepted by the sys supervisor.
+///
+/// This is intentionally not `sys.Diagnostic`: it has no durable identity,
+/// severity, source references, or system-row authority.  A Foundation
+/// adapter must construct the canonical row before this boundary can be
+/// exposed as the portable relation.  Every text-bearing projection emitted
+/// by this crate is redacted at serialization and explanation time.
+#[derive(Clone, Eq, PartialEq)]
 pub struct Diagnostic {
     pub code: &'static str,
     pub message: &'static str,
     pub fields: BTreeMap<String, DiagnosticField>,
+    pub causes: Vec<Diagnostic>,
 }
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+
+impl fmt::Debug for Diagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Diagnostic")
+            .field("code", &self.code)
+            .field("message", &"<redacted>")
+            .field("fields", &self.fields.values())
+            .field("causes", &self.causes)
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub enum DiagnosticField {
     Text(String),
     Redacted { static_type: TypeId },
 }
+
+impl fmt::Debug for DiagnosticField {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let static_type = match self {
+            Self::Text(_) => TypeId::new("Str"),
+            Self::Redacted { static_type } => static_type.clone(),
+        };
+        formatter
+            .debug_struct("DiagnosticField")
+            .field("kind", &"redacted")
+            .field("static_type", &static_type)
+            .finish()
+    }
+}
+
+impl Serialize for DiagnosticField {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_struct("DiagnosticField", 2)?;
+        state.serialize_field("kind", "redacted")?;
+        let static_type = match self {
+            Self::Text(_) => TypeId::new("Str"),
+            Self::Redacted { static_type } => static_type.clone(),
+        };
+        state.serialize_field("static_type", &static_type)?;
+        state.end()
+    }
+}
+
+struct SafeDiagnosticFields<'a>(&'a BTreeMap<String, DiagnosticField>);
+
+impl Serialize for SafeDiagnosticFields<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for field in self.0.values() {
+            sequence.serialize_element(&("<redacted>", field))?;
+        }
+        sequence.end()
+    }
+}
+
+impl Serialize for Diagnostic {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_struct("Diagnostic", 4)?;
+        state.serialize_field("code", self.code)?;
+        state.serialize_field("message", "<redacted>")?;
+        state.serialize_field("fields", &SafeDiagnosticFields(&self.fields))?;
+        state.serialize_field("causes", &self.causes)?;
+        state.end()
+    }
+}
+
+/// A structured result for the portable `sys.explain(Diagnostic)` call.
+///
+/// The result deliberately carries no fabricated row references or plan
+/// authority.  Its diagnostic and causal text are redacted projections of
+/// the local input boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct Explanation {
+    pub diagnostic: Diagnostic,
+    pub summary: String,
+    pub causes: Vec<Diagnostic>,
+    pub suggestions: Vec<String>,
+    pub related_objects: Vec<ObjectRef>,
+    pub plan: Option<PlanRef>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticExplanationError {
+    EmptyCode,
+    InvalidCode,
+    EmptyMessage,
+    InvalidMessage,
+    InvalidFieldName,
+    InvalidFieldText,
+}
+
+impl fmt::Display for DiagnosticExplanationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::EmptyCode => "diagnostic code is empty",
+            Self::InvalidCode => "diagnostic code contains control or whitespace",
+            Self::EmptyMessage => "diagnostic message is empty",
+            Self::InvalidMessage => "diagnostic message contains control characters",
+            Self::InvalidFieldName => "diagnostic field name contains control characters",
+            Self::InvalidFieldText => "diagnostic field text contains control characters",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for DiagnosticExplanationError {}
+
+impl Diagnostic {
+    fn validate_for_explanation(&self) -> Result<(), DiagnosticExplanationError> {
+        if self.code.is_empty() {
+            return Err(DiagnosticExplanationError::EmptyCode);
+        }
+        if self
+            .code
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+        {
+            return Err(DiagnosticExplanationError::InvalidCode);
+        }
+        if self.message.is_empty() {
+            return Err(DiagnosticExplanationError::EmptyMessage);
+        }
+        if self.message.chars().any(char::is_control) {
+            return Err(DiagnosticExplanationError::InvalidMessage);
+        }
+        for (name, field) in &self.fields {
+            if name.chars().any(char::is_control) {
+                return Err(DiagnosticExplanationError::InvalidFieldName);
+            }
+            if let DiagnosticField::Text(text) = field
+                && text.chars().any(char::is_control)
+            {
+                return Err(DiagnosticExplanationError::InvalidFieldText);
+            }
+        }
+        for cause in &self.causes {
+            cause.validate_for_explanation()?;
+        }
+        Ok(())
+    }
+
+    fn redact_for_explanation(mut self) -> Self {
+        self.message = "<redacted>";
+        self.fields = self
+            .fields
+            .into_iter()
+            .enumerate()
+            .map(|(index, (_name, field))| {
+                let field = match field {
+                    DiagnosticField::Text(_) => DiagnosticField::Redacted {
+                        static_type: TypeId::new("Str"),
+                    },
+                    redacted => redacted,
+                };
+                (format!("<redacted:{index}>"), field)
+            })
+            .collect();
+        self.causes = self
+            .causes
+            .into_iter()
+            .map(Self::redact_for_explanation)
+            .collect();
+        self
+    }
+}
+
+/// Executes the portable `sys.explain(Diagnostic)` read operation over the
+/// local, untrusted input boundary above.  Unknown but well-formed diagnostic
+/// codes are preserved as identity only; this crate does not claim to produce
+/// a canonical `sys.Diagnostic` row or any authoritative references.
+///
+/// All message, field-name, field-text, and causal text leaves are replaced
+/// by explicit redaction markers before the result crosses this boundary.
+/// Invalid input fails before any result is produced.
+pub fn explain_diagnostic(
+    diagnostic: Diagnostic,
+) -> Result<Explanation, DiagnosticExplanationError> {
+    diagnostic.validate_for_explanation()?;
+    let diagnostic = diagnostic.redact_for_explanation();
+    let causes = diagnostic.causes.clone();
+    let suggestions = match diagnostic.code {
+        "sys.invoke.argument_missing" => {
+            vec!["supply every non-default parameter exactly once".to_owned()]
+        }
+        "sys.invoke.argument_unknown" => {
+            vec!["bind only parameters declared by the target function".to_owned()]
+        }
+        "sys.invoke.argument_type" => {
+            vec!["provide a value with the parameter's declared static type".to_owned()]
+        }
+        "sys.invoke.return_type" => {
+            vec!["use an explicit result witness matching the declaration".to_owned()]
+        }
+        "sys.invoke.snapshot_mismatch" => {
+            vec!["resolve the function in the requested pinned snapshot".to_owned()]
+        }
+        _ => Vec::new(),
+    };
+    Ok(Explanation {
+        summary: diagnostic.message.to_owned(),
+        causes,
+        diagnostic,
+        suggestions,
+        related_objects: Vec::new(),
+        plan: None,
+    })
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -2149,6 +2439,7 @@ mod tests {
                     static_type: ty("sys.Secret"),
                 },
             )]),
+            causes: Vec::new(),
         }
     }
     #[test]
@@ -2335,6 +2626,7 @@ mod tests {
             code: "sys.invoke.target",
             message: "target failed",
             fields: BTreeMap::new(),
+            causes: Vec::new(),
         };
         runtime
             .retain_terminal(&handle, InvocationResult::OrdinaryFailure(failure.clone()))
@@ -3556,13 +3848,13 @@ mod tests {
             }) if result.canonical() == Some(b"retained".as_slice())
         ));
     }
-
     #[test]
     fn cancellation_is_not_ordinary_failure() {
         let cancelled: InvocationResult<()> = InvocationResult::Cancelled(Some(Diagnostic {
             code: "cancelled",
             message: "cancelled",
             fields: BTreeMap::new(),
+            causes: Vec::new(),
         }));
         assert_eq!(cancelled.ordinary_failure(), None);
         assert_eq!(cancelled.terminal_class(), TerminalClass::Cancelled);
@@ -3875,6 +4167,7 @@ mod tests {
             code: "sys.invoke.argument_type",
             message: "reflective invocation admission rejected",
             fields,
+            causes: Vec::new(),
         })
         .unwrap();
         assert!(json.contains("redacted"));
