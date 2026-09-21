@@ -238,9 +238,9 @@ impl EffectHandler for DistinctRelationEffects {
     }
 }
 
-fn invoke_relation(
+fn invoke_relation<E: EffectHandler>(
     body: Expr,
-    effects: &mut DistinctRelationEffects,
+    effects: &mut E,
     limits: Limits,
 ) -> Result<Value, EvaluationError> {
     let functions = relation_function(body);
@@ -7806,5 +7806,169 @@ fn pairs_relation_take_bounds_consumption_and_take_zero_skips_source() {
     assert!(
         effects.cursors.is_empty(),
         "take(0) must short-circuit before relation scanning"
+    );
+}
+
+fn relation_named_flat_map_stage(input: Expr, transform: Expr) -> Expr {
+    let span = relation_span();
+    Expr::Call {
+        callee: Box::new(Expr::Name {
+            text: "flat_map".into(),
+            span: span.clone(),
+        }),
+        arguments: vec![
+            orna_syntax_v1::Argument {
+                name: Some("transform".into()),
+                value: transform,
+                span: span.clone(),
+            },
+            orna_syntax_v1::Argument {
+                name: Some("rows".into()),
+                value: input,
+                span: span.clone(),
+            },
+        ],
+        span,
+    }
+}
+
+#[test]
+fn flat_map_relation_invokes_named_callback_once_per_row_and_preserves_inner_order() {
+    let source = relation_source_expression("Note");
+    let transform = parsed_expression("value => [value, value + 10]");
+    let flat_map = relation_named_flat_map_stage(source, transform);
+    let body = relation_terminal(flat_map, "count");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(3.into()),
+        Value::int(1.into()),
+        Value::int(2.into()),
+    ]);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::int(6.into())
+    );
+    assert_eq!(
+        effects.cursors.len(),
+        3,
+        "the callback runs once for each of the three source rows"
+    );
+
+    let source = relation_source_expression("Note");
+    let transform = parsed_expression("value => [value, value + 10]");
+    let flat_map = relation_named_flat_map_stage(source, transform);
+    let pairs = relation_stage(flat_map, "pairs", Vec::new());
+    let second_pair = relation_stage(pairs, "drop", vec![relation_integer(1)]);
+    let body = relation_terminal(second_pair, "first");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(3.into()),
+        Value::int(1.into()),
+        Value::int(2.into()),
+    ]);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::option(Some(relation_pair(13, 1))).expect("option is canonical")
+    );
+}
+#[test]
+fn flat_map_relation_allows_empty_inner_lists_without_skipping_source_pages() {
+    let source = relation_source_expression("Note");
+    let flat_map = relation_stage(
+        source,
+        "flat_map",
+        vec![parsed_expression("value => []")],
+    );
+    let body = relation_terminal(flat_map, "count");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(4.into()),
+        Value::int(5.into()),
+        Value::int(6.into()),
+    ]);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::int(0.into())
+    );
+    assert_eq!(
+        effects.cursors.len(),
+        3,
+        "empty inner output still scans each source page"
+    );
+}
+
+#[test]
+fn flat_map_relation_rejects_non_list_and_unsupported_inner_outputs() {
+    let source = relation_source_expression("Note");
+    let flat_map =
+        relation_named_flat_map_stage(source, parsed_expression("value => value"));
+    let body = relation_terminal(flat_map, "count");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(1.into()),
+        Value::int(2.into()),
+    ]);
+    assert_eq!(
+        code(invoke_relation(body, &mut effects, Limits::default())),
+        "ORNA-EVAL-TYPE"
+    );
+
+    let source = relation_source_expression("Note");
+    let flat_map =
+        relation_named_flat_map_stage(source, parsed_expression("value => [value => value]"));
+    let body = relation_terminal(flat_map, "first");
+    let mut effects = DistinctRelationEffects::new(vec![Value::int(1.into())]);
+    assert_eq!(
+        code(invoke_relation(body, &mut effects, Limits::default())),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
+}
+
+#[test]
+fn flat_map_relation_take_short_circuits_inner_and_upstream_consumption() {
+    let source = relation_source_expression("Note");
+    let flat_map = relation_stage(
+        source,
+        "flat_map",
+        vec![parsed_expression("value => [value, value + 10]")],
+    );
+    let taken = relation_stage(flat_map, "take", vec![relation_integer(2)]);
+    let body = relation_terminal(taken, "count");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(3.into()),
+        Value::int(1.into()),
+        Value::int(2.into()),
+    ]);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::int(2.into())
+    );
+    assert_eq!(
+        effects.cursors,
+        vec![None],
+        "take must stop before the next source page after the inner bound"
+    );
+}
+
+#[test]
+fn flat_map_relation_preserves_sorted_buffered_order() {
+    let source = relation_source_expression("Note");
+    let sorted = relation_stage(source, "sort_by", vec![parsed_expression("value => value")]);
+    let flat_map = relation_stage(
+        sorted,
+        "flat_map",
+        vec![parsed_expression("value => [value, value + 10]")],
+    );
+    let pairs = relation_stage(flat_map, "pairs", Vec::new());
+    let body = relation_terminal(pairs, "first");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(2.into()),
+        Value::int(3.into()),
+        Value::int(1.into()),
+    ]);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::option(Some(relation_pair(1, 11))).expect("option is canonical")
     );
 }
