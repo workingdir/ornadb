@@ -6453,6 +6453,7 @@ fn relation_stage_name<'a>(
         "filter"
             | "map"
             | "sort_by"
+            | "distinct"
             | "take"
             | "drop"
             | "window"
@@ -11067,6 +11068,37 @@ mod durable_tests {
             panic!("committed row does not contain a Float value field");
         };
         assert_eq!(*bits, canonical_nan);
+    }
+    #[test]
+    fn source_relation_distinct_uses_lazy_plan_for_decimal_rows() {
+        let unit = SourceUnit {
+            fixture_id: "txn-relation-distinct".into(),
+            source_id: "txn-relation-distinct.orna".into(),
+            parse_as: "module_unit".into(),
+            source: r#"
+                pub table Reading(id: Int) { value: Decimal, }
+                fn main() {
+                    Reading.insert({ id: 1, value: 18.2500 });
+                    Reading.insert({ id: 2, value: 2.0 });
+                    Reading.insert({ id: 3, value: 18.25 });
+                    assert Reading | map(reading => reading.value) | distinct() | count() == 2;
+                }
+            "#
+            .into(),
+        };
+        let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
+
+        let outcome = evaluator.execute_source(&unit);
+
+        assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+        for id in 1..=3 {
+            assert!(
+                evaluator
+                    .committed_row("Reading", &Value::int(id.into()))
+                    .is_some(),
+                "distinct relation execution did not commit row {id}"
+            );
+        }
     }
 }
 

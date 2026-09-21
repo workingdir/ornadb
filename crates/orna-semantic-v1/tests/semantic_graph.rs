@@ -4159,6 +4159,89 @@ fn finite_list_distinct_and_union_preserve_types_and_reject_invalid_inputs() {
 }
 
 #[test]
+fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks() {
+    let valid = analyze(&[ModuleInput::new(
+        "relation-distinct.orna",
+        r#"
+            table Reading(id: Int) { value: Int, }
+            pub fn readings() = Reading | distinct();
+            pub fn direct() = distinct(Reading);
+        "#,
+    )]);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
+    let module = valid.modules.values().next().expect("relation distinct module");
+    let readings = &module.symbols["readings"];
+    assert!(matches!(
+        &readings.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Relation(Box::new(Type::Named("Reading".into())))
+    ));
+    assert!(readings.effects.effects.contains("database read"));
+    assert!(readings.effects.may_fail);
+    let direct = &module.symbols["direct"];
+    assert!(matches!(
+        &direct.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Relation(Box::new(Type::Named("Reading".into())))
+    ));
+    assert!(direct.effects.effects.contains("database read"));
+    assert!(direct.effects.may_fail);
+
+    let catalogue_valid = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "catalogue-relation-distinct.orna",
+            "pub fn readings() = energy.Reading | distinct();",
+        )],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(
+        catalogue_valid.is_ok(),
+        "{:?}",
+        catalogue_valid.diagnostics
+    );
+    let module = catalogue_valid
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("readings"))
+        .expect("catalogue relation distinct module");
+    let readings = &module.symbols["readings"];
+    assert!(
+        matches!(
+            &readings.ty,
+            Type::Function { result, .. }
+                if result.as_ref() == &Type::Relation(Box::new(Type::Named("energy.Reading".into())))
+        ),
+        "{:?}",
+        readings.ty
+    );
+    assert!(readings.effects.effects.contains("database read"));
+    assert!(readings.effects.may_fail);
+
+    let relation_argument = analyze(&[ModuleInput::new(
+        "relation-distinct-argument.orna",
+        "table Reading(id: Int) { value: Int, } fn bad() = Reading | distinct(1);",
+    )]);
+    assert!(
+        has(&relation_argument, DIAG_UNSUPPORTED),
+        "{:?}",
+        relation_argument.diagnostics
+    );
+
+    let scalar = analyze(&[ModuleInput::new(
+        "scalar-distinct.orna",
+        "fn bad(value: Int) = value | distinct();",
+    )]);
+    assert!(has(&scalar, DIAG_UNSUPPORTED), "{:?}", scalar.diagnostics);
+
+    let float_list = analyze(&[ModuleInput::new(
+        "float-list-distinct.orna",
+        "fn bad(values: [Float]) = values | distinct();",
+    )]);
+    assert!(has(&float_list, DIAG_TYPE), "{:?}", float_list.diagnostics);
+    assert!(!float_list.is_ok(), "{:?}", float_list.diagnostics);
+}
+
+#[test]
 fn finite_list_filter_types_predicate_and_preserves_effects() {
     let valid = analyze(&[ModuleInput::new(
         "filter.orna",
