@@ -309,9 +309,13 @@ fn primary_diagnostic_mismatch_is_evidence_not_a_pass() {
     assert!(!case.passed);
     assert!(case.stages[0].detail.contains("NOT satisfied"));
 }
-fn typed_invoke_report(fixture: Fixture, source: &str) -> orna_conformance_v1::RunReport {
-    let root = tempfile::tempdir().expect("typed invoke fixture root");
-    std::fs::write(root.path().join(&fixture.path), source).expect("typed invoke fixture writes");
+fn invoke_report(
+    fixture: Fixture,
+    source: &str,
+    requirement: &str,
+) -> orna_conformance_v1::RunReport {
+    let root = tempfile::tempdir().expect("invoke fixture root");
+    std::fs::write(root.path().join(&fixture.path), source).expect("invoke fixture writes");
 
     let fixture_id = fixture.id.clone();
     let fixture_path = fixture.path.clone();
@@ -322,19 +326,27 @@ fn typed_invoke_report(fixture: Fixture, source: &str) -> orna_conformance_v1::R
         .requirement_evidence
         .requirements
         .iter_mut()
-        .find(|entry| entry.requirement == "ORNA-SYS-132")
-        .expect("ORNA-SYS-132 requirement exists")
+        .find(|entry| entry.requirement == requirement)
+        .unwrap_or_else(|| panic!("{requirement} requirement exists"))
         .tests
         .push(serde_json::json!({
             "kind": "ordinary source fixture",
             "status": "planned",
-            "subject": "ORNA-SYS-132",
+            "subject": requirement,
             "fixture": fixture_id,
             "path": fixture_path,
             "stage": "typecheck",
         }));
 
     Harness::new(corpus).run(&mut SemanticAdapter::default())
+}
+
+fn typed_invoke_report(fixture: Fixture, source: &str) -> orna_conformance_v1::RunReport {
+    invoke_report(fixture, source, "ORNA-SYS-132")
+}
+
+fn erased_invoke_report(fixture: Fixture, source: &str) -> orna_conformance_v1::RunReport {
+    invoke_report(fixture, source, "ORNA-SYS-077")
 }
 fn typed_start_report(fixture: Fixture, source: &str) -> orna_conformance_v1::RunReport {
     let root = tempfile::tempdir().expect("typed start fixture root");
@@ -660,6 +672,107 @@ fn typed_sys_invoke_report_retains_mismatched_witness_diagnostic() {
             .expect("serialized semantic mismatch evidence")["diagnostic"]["code"],
         "ORNA-S021-TYPE"
     );
+}
+
+#[test]
+fn erased_sys_invoke_report_maps_orna_sys_077_to_semantic_pass_evidence() {
+    let report = erased_invoke_report(
+        typed_invoke_fixture(
+            "erased-invoke-valid",
+            "erased-invoke-valid.orna",
+            &[
+                ("parse", "pass"),
+                ("resolve", "pass"),
+                ("typecheck", "pass"),
+                ("evaluate", "not-run"),
+            ],
+            None,
+            None,
+            None,
+        ),
+        r#"
+            pub fn erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.invoke(function, arguments);
+        "#,
+    );
+    let typecheck = report.fixtures[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Typecheck))
+        .expect("erased invoke typecheck stage");
+    assert_eq!(typecheck.class, EvidenceClass::Semantic);
+    assert_eq!(typecheck.status, EvidenceStatus::Passed);
+    assert_eq!(
+        typecheck.requirements,
+        vec!["ORNA-SYS-077".to_string()]
+    );
+    assert!(matches!(
+        &typecheck.requirement_mapping,
+        RequirementMapping::Mapped { requirements }
+            if requirements == &vec!["ORNA-SYS-077".to_string()]
+    ));
+    assert!(report.semantic_evidence.iter().any(|evidence| {
+        evidence.subject == "erased-invoke-valid"
+            && evidence.stage == Some(Stage::Typecheck)
+            && evidence.status == EvidenceStatus::Passed
+    }));
+    assert!(report.fixtures[0].passed, "{:?}", report.fixtures[0].stages);
+}
+
+#[test]
+fn erased_sys_invoke_report_serializes_missing_witness_diagnostic() {
+    let report = erased_invoke_report(
+        typed_invoke_fixture(
+            "erased-invoke-missing-witness",
+            "erased-invoke-missing-witness.orna",
+            &[
+                ("parse", "pass"),
+                ("resolve", "pass"),
+                ("typecheck", "fail"),
+                ("evaluate", "not-run"),
+            ],
+            Some("typecheck"),
+            Some("ORNA-S021-TYPE"),
+            Some("typed sys.invoke requires an explicit as: T witness"),
+        ),
+        r#"
+            pub fn missing(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.invoke<Int>(function, arguments);
+        "#,
+    );
+    let serialized = serde_json::to_value(&report).expect("erased invoke report serializes");
+    let serialized_typecheck = serialized["fixtures"][0]["stages"]
+        .as_array()
+        .expect("serialized stage array")
+        .iter()
+        .find(|stage| stage["stage"] == "typecheck")
+        .expect("serialized erased invoke typecheck stage");
+    assert_eq!(serialized_typecheck["class"], "semantic");
+    assert_eq!(serialized_typecheck["status"], "failed");
+    assert_eq!(
+        serialized_typecheck["requirement_mapping"]["status"],
+        "mapped"
+    );
+    assert_eq!(
+        serialized_typecheck["requirement_mapping"]["requirements"],
+        serde_json::json!(["ORNA-SYS-077"])
+    );
+    assert_eq!(
+        serialized_typecheck["diagnostic"]["code"],
+        "ORNA-S021-TYPE"
+    );
+    assert!(serialized["semantic_evidence"]
+        .as_array()
+        .expect("serialized semantic evidence")
+        .iter()
+        .any(|evidence| {
+            evidence["subject"] == "erased-invoke-missing-witness"
+                && evidence["stage"] == "typecheck"
+                && evidence["status"] == "failed"
+                && evidence["requirement_mapping"]["requirements"]
+                    == serde_json::json!(["ORNA-SYS-077"])
+                && evidence["diagnostic"]["code"] == "ORNA-S021-TYPE"
+        }));
 }
 
 #[test]
