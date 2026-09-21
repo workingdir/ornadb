@@ -2733,3 +2733,142 @@ fn harness_maps_runtime_info_semantics_and_serializes_runtime_rejection() {
                     == serde_json::json!(["ORNA-SYS-006"])
         }));
 }
+
+#[test]
+fn harness_maps_snapshot_selection_and_serializes_snapshot_type_diagnostic() {
+    let valid = invoke_report(
+        typed_invoke_fixture(
+            "snapshot-valid",
+            "snapshot-valid.orna",
+            &[
+                ("parse", "pass"),
+                ("resolve", "pass"),
+                ("typecheck", "pass"),
+                ("evaluate", "not-run"),
+            ],
+            None,
+            None,
+            None,
+        ),
+        r#"pub fn before_change() = sys.snapshot("HEAD~3");"#,
+        "ORNA-SYS-011",
+    );
+    let valid_fixture = &valid.fixtures[0];
+    assert!(valid_fixture.passed, "{:?}", valid_fixture.stages);
+    let valid_typecheck = valid_fixture
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Typecheck))
+        .expect("snapshot typecheck stage");
+    assert_eq!(valid_typecheck.class, EvidenceClass::Semantic);
+    assert_eq!(valid_typecheck.status, EvidenceStatus::Passed);
+    assert_eq!(
+        valid_typecheck.requirements,
+        vec!["ORNA-SYS-011".to_string()]
+    );
+    assert!(matches!(
+        &valid_typecheck.requirement_mapping,
+        RequirementMapping::Mapped { requirements }
+            if requirements == &vec!["ORNA-SYS-011".to_string()]
+    ));
+    assert!(valid.semantic_evidence.iter().any(|evidence| {
+        evidence.subject == "snapshot-valid"
+            && evidence.stage == Some(Stage::Typecheck)
+            && evidence.class == EvidenceClass::Semantic
+            && evidence.status == EvidenceStatus::Passed
+    }));
+
+    let invalid = invoke_report(
+        typed_invoke_fixture(
+            "snapshot-non-string",
+            "snapshot-non-string.orna",
+            &[
+                ("parse", "pass"),
+                ("resolve", "pass"),
+                ("typecheck", "fail"),
+                ("evaluate", "not-run"),
+            ],
+            Some("typecheck"),
+            Some("ORNA-S021-TYPE"),
+            None,
+        ),
+        r#"pub fn before_change() = sys.snapshot(42);"#,
+        "ORNA-SYS-011",
+    );
+    let invalid_fixture = &invalid.fixtures[0];
+    assert!(invalid_fixture.passed, "{:?}", invalid_fixture.stages);
+    let invalid_typecheck = invalid_fixture
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Typecheck))
+        .expect("snapshot non-string typecheck stage");
+    assert_eq!(invalid_typecheck.class, EvidenceClass::Semantic);
+    assert_eq!(invalid_typecheck.status, EvidenceStatus::Failed);
+    assert_eq!(
+        invalid_typecheck.requirements,
+        vec!["ORNA-SYS-011".to_string()]
+    );
+    assert_eq!(
+        invalid_typecheck
+            .diagnostic
+            .as_ref()
+            .expect("snapshot type diagnostic")["code"],
+        "ORNA-S021-TYPE"
+    );
+
+    let serialized_valid = serde_json::to_value(&valid).expect("valid snapshot report serializes");
+    let serialized_valid_typecheck = serialized_valid["fixtures"][0]["stages"]
+        .as_array()
+        .expect("serialized valid stage array")
+        .iter()
+        .find(|stage| stage["stage"] == "typecheck")
+        .expect("serialized valid snapshot typecheck stage");
+    assert_eq!(serialized_valid_typecheck["class"], "semantic");
+    assert_eq!(serialized_valid_typecheck["status"], "passed");
+    assert_eq!(
+        serialized_valid_typecheck["requirement_mapping"]["requirements"],
+        serde_json::json!(["ORNA-SYS-011"])
+    );
+    assert!(serialized_valid["semantic_evidence"]
+        .as_array()
+        .expect("serialized valid semantic evidence")
+        .iter()
+        .any(|evidence| {
+            evidence["subject"] == "snapshot-valid"
+                && evidence["stage"] == "typecheck"
+                && evidence["status"] == "passed"
+                && evidence["requirement_mapping"]["requirements"]
+                    == serde_json::json!(["ORNA-SYS-011"])
+        }));
+
+    let serialized_invalid =
+        serde_json::to_value(&invalid).expect("invalid snapshot report serializes");
+    let serialized_invalid_typecheck = serialized_invalid["fixtures"][0]["stages"]
+        .as_array()
+        .expect("serialized invalid stage array")
+        .iter()
+        .find(|stage| stage["stage"] == "typecheck")
+        .expect("serialized invalid snapshot typecheck stage");
+    assert_eq!(serialized_invalid_typecheck["class"], "semantic");
+    assert_eq!(serialized_invalid_typecheck["status"], "failed");
+    assert_eq!(
+        serialized_invalid_typecheck["requirement_mapping"]["requirements"],
+        serde_json::json!(["ORNA-SYS-011"])
+    );
+    assert_eq!(
+        serialized_invalid_typecheck["diagnostic"]["code"],
+        "ORNA-S021-TYPE"
+    );
+    assert!(serialized_invalid["semantic_evidence"]
+        .as_array()
+        .expect("serialized invalid semantic evidence")
+        .iter()
+        .any(|evidence| {
+            evidence["subject"] == "snapshot-non-string"
+                && evidence["stage"] == "typecheck"
+                && evidence["status"] == "failed"
+                && evidence["requirement_mapping"]["requirements"]
+                    == serde_json::json!(["ORNA-SYS-011"])
+                && evidence["diagnostic"]["code"] == "ORNA-S021-TYPE"
+        }));
+}
