@@ -5022,6 +5022,7 @@ impl Context<'_, '_> {
         for value in values {
             // Invoke once, in input order. A true boundary starts the next
             // group, except at the beginning where no empty group is lawful.
+            self.step()?;
             match self.invoke_predicate(predicate, value.clone(), depth + 1)? {
                 Value::Bool(true) if !current.is_empty() => {
                     groups.push(Value::List(std::mem::take(&mut current)));
