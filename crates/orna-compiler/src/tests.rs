@@ -2794,3 +2794,42 @@ fn maps_syntax_codes_and_retains_owned_paths_and_byte_spans() {
     assert_eq!(report.diagnostics()[1].location().span().start(), 0);
     assert_eq!(report.diagnostics()[1].location().span().end(), 13);
 }
+
+#[test]
+fn renders_contextual_diagnostics_from_retained_source_without_mutating_raw_data() {
+    let source = "CREATE SCHEMA crm.;";
+    let bundle = SourceBundle::new([SourceUnit::new("syntax.orna", source)]).unwrap();
+    let mut report = parse_bundle(&bundle);
+    let raw = report.diagnostics().to_vec();
+    assert_eq!(raw.len(), 1);
+    assert_eq!(raw[0].code(), DiagnosticCode::UnexpectedToken);
+    assert_eq!(raw[0].location().span().start(), 18);
+    assert_eq!(raw[0].location().span().end(), 19);
+
+    // Keep the diagnostic span and syntax tree fixed while changing the retained
+    // source text.  Human output must use the retained text, not reparse or
+    // reconstruct a different presentation from the private syntax tree.
+    report.units[0].replace_source_text_for_test("CREATE SCHEMA CRM.;");
+    let rendered = report.render_human();
+
+    assert!(rendered.contains("error[ORNA0001]:"));
+    assert!(rendered.contains(" --> syntax.orna:1:19"));
+    assert!(rendered.contains("1 | CREATE SCHEMA CRM.;"));
+    assert!(rendered.contains("  |                   ^ unexpected syntax"));
+    assert!(rendered.contains("  = help: check the syntax at this location"));
+    assert_eq!(report.diagnostics(), raw.as_slice());
+}
+
+#[test]
+fn falls_back_to_raw_location_when_retained_source_cannot_cover_span() {
+    let bundle = SourceBundle::new([SourceUnit::new("syntax.orna", "CREATE SCHEMA crm.;")]).unwrap();
+    let mut report = parse_bundle(&bundle);
+    report.units[0].replace_source_text_for_test("short");
+
+    let rendered = report.render_human();
+
+    assert!(rendered.contains("error[ORNA0001]:"));
+    assert!(rendered.contains(" --> syntax.orna: byte 18..19"));
+    assert!(!rendered.contains("1 |"));
+    assert_eq!(report.diagnostics().len(), 1);
+}
