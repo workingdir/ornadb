@@ -15,10 +15,232 @@ use std::{
 
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{CompactManifest, CompactManifestEntry, CompactSegmentRole};
+use orna_runtime_v1::{
+    PublicationFreeze, PublicationMutationState, PublicationRowEncoding,
+    PublicationValueEncoding,
+};
+use sha2::{Digest, Sha256};
 
 /// Immutable profile coordinates used at this exact-key boundary.
 pub const COMPACT_STORAGE_PROFILE: &str = "compact-storage-v1";
 pub const OVB_PROFILE: &str = "OVB-1";
+
+/// Typed mutation state accepted by the compact writer boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompactWriterMutationState {
+    Replacement { value: Vec<u8> },
+    Deletion,
+}
+
+/// One schema-validated, ordered mutation ready for compact encoding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactWriterMutation {
+    pub sequence: u64,
+    pub mutation_id: [u8; 16],
+    pub key: CompactKeyIdentity,
+    pub state: CompactWriterMutationState,
+}
+
+/// Deterministic, inspectable input for a compact writer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactWriterInput {
+    pub table_id: [u8; 16],
+    pub schema_fingerprint: [u8; 32],
+    pub candidate_generation: u64,
+    pub row_encoding_identity: PublicationRowEncoding,
+    pub value_encoding_identity: PublicationValueEncoding,
+    pub mutations: Vec<CompactWriterMutation>,
+    pub candidate_digest: [u8; 32],
+}
+
+/// Fail-closed validation errors at the runtime-to-compact boundary.
+#[derive(Debug, Eq, PartialEq)]
+pub enum CompactLoweringError {
+    EmptyMutations,
+    EmptyTable,
+    WrongTable,
+    WrongSchema,
+    WrongRowEncoding,
+    WrongValueEncoding,
+    StaleGeneration,
+    GenerationMismatch,
+    SequenceOutOfOrder,
+    DuplicateMutationId,
+    DuplicateKey,
+    InvalidKey(CompactKeyError),
+    KeyWitnessMismatch,
+    ValueWitnessMismatch,
+    CandidateWitnessMismatch,
+    CandidateDigestMismatch,
+}
+
+impl fmt::Display for CompactLoweringError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyMutations => f.write_str("compact freeze contains no mutations"),
+            Self::EmptyTable => f.write_str("compact freeze has an empty table identity"),
+            Self::WrongTable => f.write_str("compact freeze mutation belongs to another table"),
+            Self::WrongSchema => f.write_str("compact freeze mutation belongs to another schema"),
+            Self::WrongRowEncoding => f.write_str("compact freeze uses an unsupported row encoding"),
+            Self::WrongValueEncoding => {
+                f.write_str("compact freeze uses an unsupported value encoding")
+            }
+            Self::StaleGeneration => f.write_str("compact freeze candidate generation is stale"),
+            Self::GenerationMismatch => {
+                f.write_str("compact freeze mutations use different candidate generations")
+            }
+            Self::SequenceOutOfOrder => f.write_str("compact freeze mutation order is invalid"),
+            Self::DuplicateMutationId => f.write_str("compact freeze repeats a mutation identity"),
+            Self::DuplicateKey => f.write_str("compact freeze repeats a logical key"),
+            Self::InvalidKey(error) => error.fmt(f),
+            Self::KeyWitnessMismatch => f.write_str("compact key equivalence witness mismatches"),
+            Self::ValueWitnessMismatch => {
+                f.write_str("compact value equivalence witness mismatches")
+            }
+            Self::CandidateWitnessMismatch => {
+                f.write_str("compact candidate equivalence witness mismatches")
+            }
+            Self::CandidateDigestMismatch => {
+                f.write_str("compact candidate digest mismatches the ordered mutations")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CompactLoweringError {}
+
+/// Validates and lowers one runtime freeze into deterministic writer input.
+///
+/// The runtime freeze is the sole source of mutation order and candidate
+/// generation. This boundary validates every identity before exposing any
+/// writer input; no opaque pre-encoded segment is accepted.
+pub fn lower_publication_freeze(
+    profile: &CompactOvbProfile,
+    freeze: &PublicationFreeze,
+) -> Result<CompactWriterInput, CompactLoweringError> {
+    if freeze.mutations.is_empty() {
+        return Err(CompactLoweringError::EmptyMutations);
+    }
+    let expected_generation = freeze.mutations[0].candidate_generation;
+    let expected_candidate_digest = freeze.candidate_digest;
+    if expected_generation == 0 || expected_generation != freeze.checkpoint.generation {
+        return Err(CompactLoweringError::StaleGeneration);
+    }
+    let expected_schema = profile.schema_fingerprint();
+    let expected_table = profile.table_id();
+    let mut table_name: Option<&str> = None;
+    let mut previous_sequence = 0;
+    let mut mutation_ids = BTreeSet::new();
+    let mut keys = BTreeSet::new();
+    let mut lowered = Vec::with_capacity(freeze.mutations.len());
+    let mut candidate_bytes = Vec::new();
+    candidate_bytes.extend_from_slice(b"ORNA-COMPACT-CANDIDATE-1\0");
+    candidate_bytes.extend_from_slice(&expected_generation.to_be_bytes());
+    for mutation in &freeze.mutations {
+        if mutation.table.is_empty() {
+            return Err(CompactLoweringError::EmptyTable);
+        }
+        if let Some(expected) = table_name {
+            if expected != mutation.table {
+                return Err(CompactLoweringError::WrongTable);
+            }
+        } else {
+            table_name = Some(&mutation.table);
+        }
+        if mutation.table_id != expected_table {
+            return Err(CompactLoweringError::WrongTable);
+        }
+        if mutation.schema_fingerprint != expected_schema {
+            return Err(CompactLoweringError::WrongSchema);
+        }
+        if mutation.row_encoding_identity != PublicationRowEncoding::CompactOvb1 {
+            return Err(CompactLoweringError::WrongRowEncoding);
+        }
+        if mutation.value_encoding_identity != PublicationValueEncoding::Ovb1 {
+            return Err(CompactLoweringError::WrongValueEncoding);
+        }
+        if mutation.candidate_generation != expected_generation {
+            return Err(CompactLoweringError::GenerationMismatch);
+        }
+        if mutation.sequence == 0 || mutation.sequence <= previous_sequence {
+            return Err(CompactLoweringError::SequenceOutOfOrder);
+        }
+        previous_sequence = mutation.sequence;
+        if !mutation_ids.insert(mutation.mutation_id) {
+            return Err(CompactLoweringError::DuplicateMutationId);
+        }
+        let key = profile
+            .decode_key(&mutation.logical_key)
+            .map_err(CompactLoweringError::InvalidKey)?;
+        if !keys.insert(key.clone()) {
+            return Err(CompactLoweringError::DuplicateKey);
+        }
+        let key_digest: [u8; 32] = Sha256::digest(&mutation.logical_key).into();
+        if mutation.equivalence_witness.key_digest != key_digest {
+            return Err(CompactLoweringError::KeyWitnessMismatch);
+        }
+        let (state, state_byte, value) = match &mutation.state {
+            PublicationMutationState::Replacement { value } => {
+                let digest: [u8; 32] = Sha256::digest(value).into();
+                if mutation.equivalence_witness.value_digest != Some(digest) {
+                    return Err(CompactLoweringError::ValueWitnessMismatch);
+                }
+                (
+                    CompactWriterMutationState::Replacement {
+                        value: value.clone(),
+                    },
+                    1u8,
+                    value.as_slice(),
+                )
+            }
+            PublicationMutationState::Deletion => {
+                if mutation.equivalence_witness.value_digest.is_some() {
+                    return Err(CompactLoweringError::ValueWitnessMismatch);
+                }
+                (CompactWriterMutationState::Deletion, 2u8, &[][..])
+            }
+        };
+        candidate_bytes.extend_from_slice(&mutation.sequence.to_be_bytes());
+        candidate_bytes.extend_from_slice(
+            &u64::try_from(mutation.logical_key.len())
+                .map_err(|_| CompactLoweringError::CandidateDigestMismatch)?
+                .to_be_bytes(),
+        );
+        candidate_bytes.extend_from_slice(&mutation.logical_key);
+        candidate_bytes.push(state_byte);
+        candidate_bytes.extend_from_slice(
+            &u64::try_from(value.len())
+                .map_err(|_| CompactLoweringError::CandidateDigestMismatch)?
+                .to_be_bytes(),
+        );
+        candidate_bytes.extend_from_slice(value);
+        lowered.push(CompactWriterMutation {
+            sequence: mutation.sequence,
+            mutation_id: mutation.mutation_id,
+            key,
+            state,
+        });
+    }
+    let candidate_digest: [u8; 32] = Sha256::digest(&candidate_bytes).into();
+    for mutation in &freeze.mutations {
+        if mutation.equivalence_witness.candidate_digest != expected_candidate_digest {
+            return Err(CompactLoweringError::CandidateWitnessMismatch);
+        }
+    }
+    if candidate_digest != expected_candidate_digest {
+        return Err(CompactLoweringError::CandidateDigestMismatch);
+    }
+    Ok(CompactWriterInput {
+        table_id: expected_table,
+        schema_fingerprint: expected_schema,
+        candidate_generation: expected_generation,
+        row_encoding_identity: PublicationRowEncoding::CompactOvb1,
+        value_encoding_identity: PublicationValueEncoding::Ovb1,
+        mutations: lowered,
+        candidate_digest,
+    })
+}
+
 
 /// A validated compact logical schema projection for primary-key admission.
 #[derive(Clone, Debug, Eq, PartialEq)]
