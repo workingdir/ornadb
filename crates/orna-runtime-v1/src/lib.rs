@@ -14460,6 +14460,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reusable_table_activation_runner_rejects_invalid_admission_before_evaluation() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let evaluated = std::cell::Cell::new(false);
+        let result = run_table_activation(
+            &state,
+            lease,
+            &[""],
+            &NoFault,
+            |_| {
+                evaluated.set(true);
+                async {
+                    Ok::<_, &'static str>(ActivationWork::new(
+                        Vec::new(),
+                        digest(31),
+                        (),
+                    ))
+                }
+            },
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(ActivationError::Runtime(RuntimeError::InvalidTableMutation))
+        ));
+        assert!(!evaluated.get());
+        assert_eq!(state.capture().await.unwrap().generation(), &BigInt::from(0));
+    }
+
+    #[tokio::test]
     async fn stale_table_snapshot_cannot_publish_partial_rows() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
