@@ -10,7 +10,7 @@ use orna_runtime_v1::{
     NoFault, RequestIdentity, RequestState, RunObservationStatus, RuntimeIdentity, RuntimeState,
     StreamObservationStatus, StreamRunControl, TableMutation,
 };
-use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
+use orna_semantic_v1::{Catalogue, ModuleInput, Namespace, Type, analyze_with_catalogue};
 use orna_stream_v1::{DiagnosticClass, DiagnosticCode};
 use sha2::Digest;
 use std::{
@@ -245,6 +245,132 @@ fn semantic_project_resolution_uses_project_relative_module_names() {
         adapter.resolve_project(&project),
         StageOutcome::Passed
     ));
+}
+
+#[test]
+fn semantic_adapter_typechecks_imported_generic_sys_meta_with_declared_metadata() {
+    // ORNA-GENERIC-001 requires explicit public generic parameters.  This
+    // project follows the source-level route: the imported generic declaration
+    // invokes the portable api/sys.json `sys.meta<T>` operation.
+    let project = ProjectUnit {
+        fixture_id: "imported-generic-sys-meta".into(),
+        project_id: "logical/project".into(),
+        environment_id: None,
+        modules: vec![
+            SourceUnit {
+                fixture_id: "imported-generic-sys-meta".into(),
+                source_id: "logical/project/library.orna".into(),
+                parse_as: "module_unit".into(),
+                source: "pub fn lookup<T>(value: T) = sys.meta<T>(value);".into(),
+            },
+            SourceUnit {
+                fixture_id: "imported-generic-sys-meta".into(),
+                source_id: "logical/project/main.orna".into(),
+                parse_as: "module_unit".into(),
+                source: "use library; pub fn read(value: Int) = library.lookup<Int>(value);"
+                    .into(),
+            },
+        ],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+    };
+
+    let mut adapter = SemanticAdapter::default();
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.typecheck_project(&project), StageOutcome::Passed);
+
+    // The adapter intentionally exposes only phase outcomes.  Inspect the
+    // same source graph through the native semantic result to prove that the
+    // accepted call retained sys.meta's declared read/failure contract.
+    let analysis = analyze_with_catalogue(
+        &[
+            ModuleInput::new(
+                "library.orna",
+                "pub fn lookup<T>(value: T) = sys.meta<T>(value);",
+            ),
+            ModuleInput::new(
+                "main.orna",
+                "use library; pub fn read(value: Int) = library.lookup<Int>(value);",
+            ),
+        ],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+    let read = analysis
+        .modules
+        .get(&Namespace(Vec::new()))
+        .and_then(|module| module.exports.get("read"))
+        .expect("imported generic read export");
+    assert!(matches!(
+        &read.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Applied {
+                base: "sys.ValueMetadata".into(),
+                arguments: vec![Type::Int],
+            }
+    ));
+    assert_eq!(
+        read.effects.effects,
+        std::collections::BTreeSet::from(["database read".into()])
+    );
+    assert!(read.effects.may_fail);
+}
+
+#[test]
+fn semantic_adapter_rejects_invalid_imported_generic_sys_meta_argument() {
+    // The imported generic declaration is valid; the consumer's explicit
+    // `<Str>` is invalid for its `Int` argument and must fail typechecking.
+    let project = ProjectUnit {
+        fixture_id: "invalid-imported-generic-sys-meta".into(),
+        project_id: "logical/project".into(),
+        environment_id: None,
+        modules: vec![
+            SourceUnit {
+                fixture_id: "invalid-imported-generic-sys-meta".into(),
+                source_id: "logical/project/library.orna".into(),
+                parse_as: "module_unit".into(),
+                source: "pub fn lookup<T>(value: T) = sys.meta<T>(value);".into(),
+            },
+            SourceUnit {
+                fixture_id: "invalid-imported-generic-sys-meta".into(),
+                source_id: "logical/project/main.orna".into(),
+                parse_as: "module_unit".into(),
+                source: "use library; pub fn invalid(value: Int) = library.lookup<Str>(value);"
+                    .into(),
+            },
+        ],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+    };
+
+    let mut adapter = SemanticAdapter::default();
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    let StageOutcome::Failed(diagnostic) = adapter.typecheck_project(&project) else {
+        panic!("invalid explicit imported generic argument must fail typecheck");
+    };
+    assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S021-TYPE");
 }
 
 #[tokio::test]
