@@ -674,7 +674,7 @@ fn verify_physical_metadata(
     }
     let (ovb_columns, physical_columns) =
         verify_physical_columns(columns, metadata.schema_descr(), &descriptor, role)?;
-    verify_ovb_values(&reader, &ovb_columns)?;
+    verify_ovb_values(&reader, &ovb_columns, &physical_columns)?;
     if reader.num_row_groups() == 0 {
         return Err(RepositoryError::InvalidCompactManifest);
     }
@@ -909,9 +909,6 @@ fn verify_physical_columns(
             && encoding == "date"
             && column.physical_type() == Type::INT32
             && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Date);
-        if ovb_kind.is_some() && !expected.is_key {
-            return Err(RepositoryError::InvalidCompactManifest);
-        }
         if type_code.to_string() != "0"
             || !(int_mapping
                 || bool_mapping
@@ -999,8 +996,12 @@ enum OvbFallbackKind {
 fn verify_ovb_values(
     reader: &SerializedFileReader<Bytes>,
     columns: &BTreeMap<usize, OvbFallbackKind>,
+    physical_columns: &BTreeMap<usize, PhysicalColumnInfo>,
 ) -> Result<(), RepositoryError> {
     for (&column_index, &kind) in columns {
+        let physical = physical_columns
+            .get(&column_index)
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
         for row_group_index in 0..reader.num_row_groups() {
             let row_group = reader
                 .get_row_group(row_group_index)
@@ -1013,33 +1014,78 @@ fn verify_ovb_values(
             let ColumnReader::ByteArrayColumnReader(mut column) = column else {
                 return Err(RepositoryError::InvalidCompactManifest);
             };
-            let mut values = Vec::with_capacity(expected_rows);
+            let mut values = Vec::new();
+            let mut definitions = Vec::new();
+            let mut repetitions = Vec::new();
             let mut records = 0usize;
             while records < expected_rows {
                 let remaining = expected_rows - records;
-                let (read_records, values_read, levels_read) = column
-                    .read_records(remaining, None, None, &mut values)
+                let definition_levels =
+                    (physical.max_def_level != 0).then_some(&mut definitions);
+                let repetition_levels =
+                    (physical.max_rep_level != 0).then_some(&mut repetitions);
+                let (read_records, _values_read, levels_read) = column
+                    .read_records(
+                        remaining,
+                        definition_levels,
+                        repetition_levels,
+                        &mut values,
+                    )
                     .map_err(|_| RepositoryError::InvalidCompactManifest)?;
-                if read_records == 0 || values_read != read_records || levels_read != read_records {
+                if read_records == 0 || levels_read != read_records {
                     return Err(RepositoryError::InvalidCompactManifest);
                 }
                 records = records
                     .checked_add(read_records)
                     .ok_or(RepositoryError::InvalidCompactManifest)?;
             }
-            if values.len() != expected_rows {
+            if records != expected_rows {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
-            for value in values {
-                let value = CanonicalValue::decode(value.data())
-                    .map_err(|_| RepositoryError::InvalidCompactManifest)?;
-                let supported = match kind {
-                    OvbFallbackKind::Int => matches!(value.raw(), OvbRaw::Int(_)),
-                    OvbFallbackKind::Bool => matches!(value.raw(), OvbRaw::Bool(_)),
-                };
-                if !supported {
+            let definitions = if physical.max_def_level == 0 {
+                vec![0; expected_rows]
+            } else {
+                definitions
+            };
+            let repetitions = if physical.max_rep_level == 0 {
+                vec![0; definitions.len()]
+            } else {
+                repetitions
+            };
+            if definitions.len() != repetitions.len()
+                || repetitions.first().is_some_and(|level| *level != 0)
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let mut value_index = 0usize;
+            for (definition, repetition) in definitions.into_iter().zip(repetitions) {
+                if definition < 0
+                    || definition > physical.max_def_level
+                    || repetition < 0
+                    || repetition > physical.max_rep_level
+                {
                     return Err(RepositoryError::InvalidCompactManifest);
                 }
+                if definition == physical.max_def_level {
+                    let value = values
+                        .get(value_index)
+                        .ok_or(RepositoryError::InvalidCompactManifest)?;
+                    value_index = value_index
+                        .checked_add(1)
+                        .ok_or(RepositoryError::InvalidCompactManifest)?;
+                    let value = CanonicalValue::decode(value.data())
+                        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                    let supported = match kind {
+                        OvbFallbackKind::Int => matches!(value.raw(), OvbRaw::Int(_)),
+                        OvbFallbackKind::Bool => matches!(value.raw(), OvbRaw::Bool(_)),
+                    };
+                    if !supported {
+                        return Err(RepositoryError::InvalidCompactManifest);
+                    }
+                }
+            }
+            if value_index != values.len() {
+                return Err(RepositoryError::InvalidCompactManifest);
             }
         }
     }
@@ -4686,6 +4732,42 @@ mod tests {
         .encode()
         .unwrap()
     }
+    fn nested_ovb_columns() -> Vec<u8> {
+        let descriptor = |field: Uuid, suffix: &[&str], encoding: &str, parameters: Vec<OvbRaw>| {
+            let mut ids = vec![OvbRaw::Tag(
+                37,
+                Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
+            )];
+            ids.extend(suffix.iter().map(|part| OvbRaw::Text((*part).into())));
+            let mut path = vec![OvbRaw::Text(format!("f_{}", field.simple()))];
+            path.extend(suffix.iter().map(|part| OvbRaw::Text((*part).into())));
+            OvbRaw::Array(vec![
+                OvbRaw::Array(ids),
+                OvbRaw::Array(path),
+                OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]),
+                OvbRaw::Text(encoding.into()),
+                OvbRaw::Array(parameters),
+            ])
+        };
+        CanonicalValue::new(OvbRaw::Array(vec![
+            descriptor(NESTED_KEY, &[], "int64", Vec::new()),
+            descriptor(
+                NESTED_OPTION,
+                &["value"],
+                "ovb",
+                vec![OvbRaw::Int(1.into())],
+            ),
+            descriptor(
+                NESTED_LIST,
+                &["list", "element"],
+                "ovb",
+                vec![OvbRaw::Int(1.into())],
+            ),
+        ]))
+        .unwrap()
+        .encode()
+        .unwrap()
+    }
 
     #[derive(Clone, Copy)]
     enum NestedListShape {
@@ -5771,6 +5853,37 @@ mod tests {
             Err(RepositoryError::InvalidCompactManifest)
         ));
     }
+    #[test]
+    fn accepts_ovb_optional_and_repeated_non_key_mappings() {
+        let descriptor = nested_schema();
+        let parquet_schema = Arc::new(
+            parse_message_type(&format!(
+                "message schema {{
+                    REQUIRED INT64 f_{};
+                    OPTIONAL group f_{} {{ REQUIRED BYTE_ARRAY value; }}
+                    REQUIRED group f_{} (LIST) {{
+                        REPEATED group list {{ REQUIRED BYTE_ARRAY element; }}
+                    }}
+                }}",
+                NESTED_KEY.simple(),
+                NESTED_OPTION.simple(),
+                NESTED_LIST.simple(),
+            ))
+            .unwrap(),
+        );
+        let parquet_schema = parquet::schema::types::SchemaDescriptor::new(parquet_schema);
+        let columns = nested_ovb_columns();
+        let result = verify_physical_columns(
+            &columns,
+            &parquet_schema,
+            &descriptor,
+            CompactSegmentRole::Data,
+        );
+        let (_, physical) = result.unwrap();
+        assert_eq!((physical[&1].max_def_level, physical[&1].max_rep_level), (1, 0));
+        assert_eq!((physical[&2].max_def_level, physical[&2].max_rep_level), (1, 1));
+    }
+
 
     #[test]
     fn list_definition_and_repetition_levels_include_optional_layers() {
