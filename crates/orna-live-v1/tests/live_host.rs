@@ -7,10 +7,11 @@ use orna_foundation_v1::{
     OvbRaw, SafeText, Value,
 };
 use orna_live_v1::{
+    ActionAuthority, ActionAuthorityRegistry, ActionBinding, ActionFuture, ActionHandler,
     CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpConnection,
     HttpConnectionError, HttpEncodeError, HttpIoError, HttpParseError, Limits, ListenerBindError,
-    ListenerExposure, LiveApplication, LiveCredentialIssuer, LiveEvalResponse,
-    LiveEvalTransaction, LiveHost, LiveListenerAcceptor,
+    ListenerExposure, LiveApplication, LiveApplicationWorkLease, LiveApplicationWorkSupervisor,
+    LiveCredentialIssuer, LiveEvalResponse, LiveEvalTransaction, LiveHost, LiveListenerAcceptor,
     LiveSessionAuthority, LiveSessionChildren, LiveTransport, ResumeRequest, SUBPROTOCOL,
     SessionCredential, SessionMetadata, TransportLimits, WebSocketOutput, WebSocketState,
     WireRequest, WireResponse, encode_websocket_output, parse_http_request,
@@ -22,7 +23,8 @@ use orna_protocol_v1::{
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     FaultInjector, FaultPoint, RequestIdentity, RequestOwner, RequestState, RunObservationStatus,
-    RuntimeError, RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
+    RuntimeActivationContext, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation,
+    TerminalOutcome,
 };
 use orna_security_v1::{
     AttachmentId, BoundaryError, CredentialIssuer, Origin, OriginPolicy, SessionBoundary,
@@ -38,11 +40,14 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     process::Command,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc, mpsc,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
     time::{SystemTime, UNIX_EPOCH},
-};
 
+};
 struct FailFirstWriter {
     writes: usize,
 }
@@ -4005,6 +4010,121 @@ fn durable_transactional_event_commits_through_synchronous_dispatch() {
         Ok(Some(vec![2]))
     );
     drop(host);
+    remove_test_repository(&root);
+}
+struct RegistryActionHandler {
+    calls: Arc<AtomicUsize>,
+}
+
+impl ActionHandler for RegistryActionHandler {
+    fn accepts(&self, value: &CanonicalValue) -> bool {
+        *value == CanonicalValue::unit()
+    }
+
+    fn activate<'a>(
+        &'a self,
+        _binding: ActionBinding,
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        _value: &'a CanonicalValue,
+        _context: &'a RuntimeActivationContext,
+        _work: &'a mut LiveApplicationWorkLease,
+    ) -> ActionFuture<'a> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            Ok(LiveEvalResponse::pure(Envelope {
+                request: Some(request),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Success,
+                    value: Some(CanonicalValue::unit()),
+                    fingerprint,
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            }))
+        })
+    }
+}
+
+#[test]
+fn public_action_registry_is_consumable_without_server_dependency() {
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let context = block_on(runtime.begin_activation()).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let binding = ActionBinding {
+        session: [1; 16],
+        watch: [2; 16],
+        page_revision: 7,
+        action: [3; 16],
+    };
+    let mut registry = ActionAuthorityRegistry::new();
+    registry
+        .register(
+            binding,
+            RegistryActionHandler {
+                calls: Arc::clone(&calls),
+            },
+        )
+        .unwrap();
+
+    let invoke = |registry: &ActionAuthorityRegistry,
+                  binding: ActionBinding,
+                  value: CanonicalValue,
+                  request: [u8; 16]|
+     -> Result<LiveEvalResponse, Error> {
+        let supervisor = LiveApplicationWorkSupervisor::new();
+        let mut work = supervisor.admit(binding.session, request)?;
+        block_on(registry.activate(
+            binding,
+            request,
+            [8; 32],
+            &value,
+            &context,
+            &mut work,
+        ))
+    };
+
+    for wrong in [
+        (
+            ActionBinding {
+                session: [4; 16],
+                ..binding
+            },
+            CanonicalValue::unit(),
+            [11; 16],
+        ),
+        (
+            ActionBinding {
+                watch: [5; 16],
+                ..binding
+            },
+            CanonicalValue::unit(),
+            [12; 16],
+        ),
+        (
+            ActionBinding {
+                page_revision: 8,
+                ..binding
+            },
+            CanonicalValue::unit(),
+            [13; 16],
+        ),
+        (binding, CanonicalValue::uuid([9; 16]), [14; 16]),
+    ] {
+        assert!(matches!(
+            invoke(&registry, wrong.0, wrong.1, wrong.2),
+            Err(Error::Denied)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    assert!(matches!(
+        invoke(&registry, binding, CanonicalValue::unit(), [15; 16]),
+        Ok(LiveEvalResponse::Pure(_))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     remove_test_repository(&root);
 }
 
