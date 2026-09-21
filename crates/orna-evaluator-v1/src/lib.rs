@@ -4992,6 +4992,7 @@ impl Context<'_, '_> {
         for value in values {
             // Invoke once, in input order, so a lawful callback's observable
             // behavior is never duplicated by classification.
+            self.step()?;
             match self.invoke_predicate(predicate, value.clone(), depth + 1)? {
                 Value::Bool(true) => {
                     matching.push(value.clone());
