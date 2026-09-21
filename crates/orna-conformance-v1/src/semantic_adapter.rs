@@ -1581,9 +1581,14 @@ fn decode_ordered_decimal_cursor(encoded: &[u8]) -> Result<(Value, usize), Evalu
         coefficient = -coefficient;
     }
     let exponent = adjusted - BigInt::from(digits.len());
-    Value::decimal(coefficient, exponent)
-        .map(|value| (value, digits_end))
-        .map_err(|_| transaction_error("ORNA-EVAL-VALUE"))
+    let value = Value::decimal(coefficient, exponent)
+        .map_err(|_| transaction_error("ORNA-EVAL-VALUE"))?;
+    let mut canonical = Vec::new();
+    encode_ordered_decimal_cursor(&value, &mut canonical)?;
+    if canonical.as_slice() != &encoded[..digits_end] {
+        return Err(transaction_error("ORNA-EVAL-VALUE"));
+    }
+    Ok((value, digits_end))
 }
 
 fn encode_typed_cursor_value(
@@ -8504,6 +8509,11 @@ mod transaction_admission_tests {
         for pair in cursors.windows(2) {
             assert!(pair[0] < pair[1], "decimal cursor does not advance");
         }
+        let mut noncanonical = cursors[3].clone();
+        noncanonical.insert(noncanonical.len() - 1, 1);
+        let error = transaction_cursor_key(&noncanonical, &schema)
+            .expect_err("decimal cursor with a leading zero digit must be rejected");
+        assert_eq!(error.code(), "ORNA-EVAL-VALUE");
     }
 
     #[test]
