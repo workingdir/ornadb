@@ -102,8 +102,8 @@ impl Value {
         }))
     }
     pub fn decimal(coefficient: BigInt, exponent10: BigInt) -> Result<Self> {
-        let (c, e) = normal_decimal(coefficient, exponent10);
-        Self::new(tag(60000, Raw::Array(vec![Raw::Int(c), Raw::Int(e)])))
+        let decimal = Decimal::try_new(coefficient, exponent10)?;
+        Self::new(decimal.raw())
     }
     pub fn option(value: Option<Value>) -> Result<Self> {
         let mut x = vec![Raw::Int(0.into())];
@@ -308,6 +308,37 @@ impl Decimal {
         }
         Ok(decimal)
     }
+    pub fn coefficient(&self) -> &BigInt {
+        &self.coefficient
+    }
+    pub fn exponent10(&self) -> &BigInt {
+        &self.exponent10
+    }
+    fn raw(&self) -> Raw {
+        tag(
+            60000,
+            Raw::Array(vec![
+                Raw::Int(self.coefficient.clone()),
+                Raw::Int(self.exponent10.clone()),
+            ]),
+        )
+    }
+    fn from_raw(raw: &Raw) -> Result<Self> {
+        let Raw::Tag(60000, inner) = raw else {
+            return Err(Error::InvalidTag);
+        };
+        let fields = array(inner)?;
+        if fields.len() != 2 {
+            return Err(Error::InvalidTag);
+        }
+        let coefficient = integer(&fields[0])?.clone();
+        let exponent10 = integer(&fields[1])?.clone();
+        let decimal = Self::try_new(coefficient, exponent10)?;
+        if decimal.raw() != *raw {
+            return Err(Error::NonCanonical);
+        }
+        Ok(decimal)
+    }
     pub fn try_multiply(&self, other: &Self) -> Result<Self> {
         Self::try_new(
             &self.coefficient * &other.coefficient,
@@ -372,6 +403,72 @@ impl Decimal {
             numerator,
             &self.exponent10 - &other.exponent10 - BigInt::from(scale),
         )
+    }
+}
+
+/// An exact amount paired with its opaque nominal currency object identity.
+///
+/// The currency ID is a witness at the value boundary: it is carried in the
+/// canonical tag-60007 payload and is never reduced to a display code.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Money {
+    amount: Decimal,
+    currency: [u8; 16],
+    value: Value,
+}
+
+impl Money {
+    pub fn new(amount: Decimal, currency: [u8; 16]) -> Result<Self> {
+        let value = Value::new(tag(
+            60007,
+            Raw::Array(vec![amount.raw(), uuid_raw(currency)]),
+        ))?;
+        Ok(Self {
+            amount,
+            currency,
+            value,
+        })
+    }
+
+    pub fn from_value(value: Value) -> Result<Self> {
+        let Raw::Tag(60007, inner) = value.raw() else {
+            return Err(Error::InvalidTag);
+        };
+        let fields = array(inner)?;
+        if fields.len() != 2 {
+            return Err(Error::InvalidTag);
+        }
+        let amount = Decimal::from_raw(&fields[0])?;
+        let currency = uuid_array(&fields[1])?;
+        Ok(Self {
+            amount,
+            currency,
+            value,
+        })
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        Self::from_value(Value::decode(bytes)?)
+    }
+
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+
+    pub fn into_value(self) -> Value {
+        self.value
+    }
+
+    pub fn amount(&self) -> &Decimal {
+        &self.amount
+    }
+
+    pub fn currency(&self) -> [u8; 16] {
+        self.currency
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.value.encode()
     }
 }
 fn bounded_exponent(n: &BigInt) -> Result<u64> {
@@ -1157,7 +1254,8 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
                 return Err(Error::InvalidTag);
             }
             let (c, e) = (integer(&a[0])?, integer(&a[1])?);
-            if normal_decimal(c.clone(), e.clone()) != (c.clone(), e.clone()) {
+            let decimal = Decimal::try_new(c.clone(), e.clone())?;
+            if decimal.coefficient() != c || decimal.exponent10() != e {
                 return Err(Error::NonCanonical);
             }
         }
