@@ -777,8 +777,23 @@ impl Catalogue {
                 Namespace(vec!["std".into(), "ui".into()]),
                 [
                     ("UI", ui.clone()),
+                    (
+                        "Action",
+                        Type::Named("std.ui.Action".into()),
+                    ),
                     ("text", function(vec![Type::Text], ui.clone())),
                     ("button", function(vec![Type::Text, Type::Bool], ui.clone())),
+                    (
+                        "action",
+                        named_function(
+                            vec![
+                                ("action_id", Type::Text),
+                                ("as", Type::Error),
+                                ("debug_kind", Type::Optional(Box::new(Type::Text))),
+                            ],
+                            Type::Named("std.ui.Action".into()),
+                        ),
+                    ),
                     (
                         "Page",
                         named_function(
@@ -3631,6 +3646,7 @@ fn static_type_is_known(ty: &Type, scope: &Scope) -> bool {
                     | "std.Document"
                     | "std.ByteStream"
                     | "std.UI"
+                    | "std.ui.Action"
                     | "Error"
             ) || system_api::embedded_system_api().describes_type(name)
                 || scope.generic_type_parameters.contains(name)
@@ -6467,6 +6483,12 @@ fn infer(
                     ty: Type::Error,
                     effects: EffectSummary::default(),
                 };
+            }
+            if let Some(path) = qualified_path(callee)
+                && let Some(inferred) =
+                    infer_ui_action_call(&path, arguments, scope, local, diagnostics)
+            {
+                return inferred;
             }
             if let Some(path) = qualified_path(callee)
                 && path.first() == Some(&"sys")
@@ -13980,6 +14002,88 @@ fn is_money_rate(ty: &Type) -> bool {
     matches!(ty, Type::MoneyPerUnit { .. })
 }
 
+fn infer_ui_action_call(
+    path: &[&str],
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    if path != ["std", "ui", "action"] {
+        return None;
+    }
+
+    let mut effects = EffectSummary::default();
+    let mut action_id = None;
+    let mut input_type = None;
+    let mut debug_kind = None;
+    let mut positional = 0usize;
+    let mut valid = true;
+
+    for argument in arguments {
+        match argument.name.as_deref() {
+            Some("action_id") if action_id.is_none() => {
+                let inferred = infer(&argument.value, scope, local, diagnostics);
+                effects.join(&inferred.effects);
+                if inferred.ty != Type::Text {
+                    valid = false;
+                }
+                action_id = Some(inferred.ty);
+            }
+            Some("as") if input_type.is_none() => {
+                let Some(path) = qualified_path(&argument.value) else {
+                    valid = false;
+                    continue;
+                };
+                let name = path.join(".");
+                let ty = primitive(&name).unwrap_or_else(|| Type::Named(name));
+                let ty = canonicalize_type(&ty, scope);
+                if !static_type_is_known(&ty, scope) {
+                    valid = false;
+                }
+                input_type = Some(ty);
+            }
+            Some("debug_kind") if debug_kind.is_none() => {
+                let inferred = infer(&argument.value, scope, local, diagnostics);
+                effects.join(&inferred.effects);
+                if inferred.ty != Type::Text && inferred.ty != Type::Null {
+                    valid = false;
+                }
+                debug_kind = Some(inferred.ty);
+            }
+            None if positional == 0 && action_id.is_none() => {
+                let inferred = infer(&argument.value, scope, local, diagnostics);
+                effects.join(&inferred.effects);
+                if inferred.ty != Type::Text {
+                    valid = false;
+                }
+                action_id = Some(inferred.ty);
+                positional += 1;
+            }
+            _ => valid = false,
+        }
+    }
+
+    if action_id.is_none() || input_type.is_none() || !valid {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "std.ui.action requires explicit action_id provenance and input type",
+        ));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects,
+        });
+    }
+
+    Some(Inferred {
+        ty: Type::Applied {
+            base: "std.ui.Action".into(),
+            arguments: vec![input_type.expect("checked above")],
+        },
+        effects,
+    })
+}
+
 fn intrinsic_call_effects(callee: &Expr) -> EffectSummary {
     let Some(path) = qualified_path(callee) else {
         return EffectSummary::default();
@@ -15065,5 +15169,26 @@ mod tests {
             }),
             "Float<<type>>"
         );
+    }
+    #[test]
+    fn ui_action_source_requires_explicit_provenance_and_input_type() {
+        let catalogue = Catalogue::authoritative_core();
+        let valid = analyze_with_catalogue(
+            &[ModuleInput::new(
+                "ui.orna",
+                r#"fn render() = std.ui.action("save", as: Text, debug_kind: "button");"#,
+            )],
+            &catalogue,
+        );
+        assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
+
+        let missing_input = analyze_with_catalogue(
+            &[ModuleInput::new(
+                "ui.orna",
+                r#"fn render() = std.ui.action("save");"#,
+            )],
+            &catalogue,
+        );
+        assert!(has(&missing_input, DIAG_TYPE));
     }
 }

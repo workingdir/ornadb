@@ -3844,6 +3844,70 @@ impl Context<'_, '_> {
         Ok(page)
     }
 
+    fn ui_action(
+        &mut self,
+        arguments: &[orna_syntax_v1::Argument],
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(arguments.len())?;
+        let mut action_id = None;
+        let mut input_type = None;
+        let mut debug_kind = None;
+        let mut positional = 0usize;
+        for argument in arguments {
+            match argument.name.as_deref() {
+                Some("action_id") if action_id.is_none() => {
+                    let value = self.evaluate(&argument.value, scope, depth + 1)?;
+                    let Value::String(value) = value else {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    };
+                    action_id = Some(value);
+                }
+                Some("as") if input_type.is_none() => {
+                    let Some(name) = function_name(&argument.value) else {
+                        return Err(error("ORNA-EVAL-ARGUMENT"));
+                    };
+                    input_type = ui_input_type_name(&name).map(str::to_owned);
+                }
+                Some("debug_kind") if debug_kind.is_none() => {
+                    let value = self.evaluate(&argument.value, scope, depth + 1)?;
+                    match value {
+                        Value::String(value) => debug_kind = Some(value),
+                        Value::Null => debug_kind = Some(String::new()),
+                        _ => return Err(error("ORNA-EVAL-TYPE")),
+                    }
+                }
+                None if positional == 0 && action_id.is_none() => {
+                    let value = self.evaluate(&argument.value, scope, depth + 1)?;
+                    let Value::String(value) = value else {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    };
+                    action_id = Some(value);
+                    positional += 1;
+                }
+                _ => return Err(error("ORNA-EVAL-ARGUMENT")),
+            }
+        }
+        let action_id = action_id
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+        let input_type = input_type.ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
+        self.string(action_id.clone())?;
+        self.string(input_type.clone())?;
+        let mut fields = BTreeMap::new();
+        fields.insert("action_id".into(), Value::String(action_id));
+        fields.insert("input_type".into(), Value::String(input_type));
+        fields.insert(
+            "debug_kind".into(),
+            match debug_kind {
+                Some(value) if !value.is_empty() => Value::String(value),
+                _ => Value::Null,
+            },
+        );
+        Ok(Value::Record(fields))
+    }
+
     fn call(
         &mut self,
         callee: &Expr,
@@ -3852,6 +3916,12 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
+        if function_name(callee).as_deref() == Some("std.ui.action") {
+            if input.is_some() {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+            return self.ui_action(arguments, scope, depth);
+        }
         // `now()` is an activation-scoped intrinsic. It is deliberately
         // offered only through the existing effect boundary so the evaluator
         // never reads a wall clock and callers without an activation handler
@@ -6234,6 +6304,16 @@ fn standard_name<'a>(expression: &'a Expr, module: &str) -> Option<&'a str> {
     };
     (text == "std" && selected_module == module).then_some(name.as_str())
 }
+fn ui_input_type_name(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "Text" | "Str" | "String" | "std.text" => "std.text",
+        "Bool" | "BOOLEAN" | "BOOL" | "std.boolean" => "std.boolean",
+        "Int" | "INTEGER" | "BIGINT" | "std.integer" => "std.integer",
+        "Float" | "std.float" => "std.float",
+        "Decimal" | "std.decimal" => "std.decimal",
+        _ => return None,
+    })
+}
 
 fn function_name(expression: &Expr) -> Option<String> {
     match expression {
@@ -7789,11 +7869,18 @@ mod tests {
             cancellation: Some(&cancellation),
         };
         let mut callbacks = 0;
+        let mut distinct_seen = Vec::new();
+        let mut pair_previous = Vec::new();
+        let mut window_states = Vec::new();
 
         let result = context.for_each_buffered_stages(
             vec![Value::Int(1.into()), Value::Int(2.into())],
             &[],
             0,
+            0,
+            &mut distinct_seen,
+            &mut pair_previous,
+            &mut window_states,
             |_, _| {
                 callbacks += 1;
                 Ok(true)
@@ -7802,5 +7889,30 @@ mod tests {
 
         assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-CANCELLED");
         assert_eq!(callbacks, 1);
+    }
+
+    #[test]
+    fn source_ui_action_constructs_canonical_typed_descriptor() {
+        let value = evaluate_expression(
+            r#"std.ui.action("save", as: Text, debug_kind: "button")"#,
+            &Environment::new(),
+            Limits::default(),
+        )
+        .expect("source action descriptor");
+        let Raw::Map(fields) = value.raw() else {
+            panic!("action descriptor must be a canonical map");
+        };
+        let field = |name: &str| {
+            fields
+                .iter()
+                .find_map(|(key, value)| match key {
+                    Raw::Text(key) if key == name => Some(value),
+                    _ => None,
+                })
+                .expect("descriptor field")
+        };
+        assert_eq!(field("action_id"), &Raw::Text("save".into()));
+        assert_eq!(field("input_type"), &Raw::Text("std.text".into()));
+        assert_eq!(field("debug_kind"), &Raw::Text("button".into()));
     }
 }
