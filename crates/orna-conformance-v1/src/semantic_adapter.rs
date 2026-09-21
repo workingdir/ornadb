@@ -6554,6 +6554,13 @@ fn relation_quantifier(
         }
         _ => return None,
     };
+    let Expr::Name {
+        text: table_name,
+        span: table_span,
+    } = table
+    else {
+        return None;
+    };
     if !table_keys.contains_key(table_name)
         || shadowed.contains(table_name)
         || !root_relation_intrinsic_is_unshadowed("filter", functions, namespace, shadowed)
