@@ -42,7 +42,7 @@ pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
     initialize_repository, inspect_metadata,
 };
-pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, RequestedRef};
+pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
 
 /// A verified native Git commit ID. It is intentionally Git-local: the
 /// shared foundation owns the portable Orna `SnapshotRef` row identity and
