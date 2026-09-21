@@ -78,6 +78,17 @@ fn source_with_module_assertion(assertion: &str, parent_body: &str) -> SourceUni
         ),
     }
 }
+fn decimal_module_assertion_source(assertion: &str, parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "txn-decimal-module-assertion".into(),
+        source_id: "txn-decimal-module-assertion.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Invoice(id: Int) {{ amount: Decimal, }} pub table Payment(id: Int) {{ invoice_id: Int, amount: Decimal, }} assert {assertion}; fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
 fn quantifier_source(fixture_id: &str, definitions: &str, parent_body: &str) -> SourceUnit {
     SourceUnit {
         fixture_id: fixture_id.into(),
@@ -871,6 +882,62 @@ fn module_every_exists_assertion_permits_atomic_cross_table_publication() {
             .committed_row("Loan", &Value::int(1.into()))
             .is_some()
     );
+}
+
+#[test]
+fn module_decimal_assertion_accepts_scale_aliases_and_publishes_candidate_rows() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_module_assertion_source(
+        "every(Invoice, invoice => exists(Payment, payment => payment.invoice_id == invoice.id && payment.amount == invoice.amount))",
+        r#"
+            Invoice.insert({ id: 1, amount: 18.25 });
+            Payment.insert({ id: 1, invoice_id: 1, amount: 18.2500 });
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    assert!(
+        runtime
+            .committed_row("Invoice", &Value::int(1.into()))
+            .is_some(),
+        "candidate Invoice row was not published"
+    );
+    assert!(
+        runtime
+            .committed_row("Payment", &Value::int(1.into()))
+            .is_some(),
+        "candidate Payment row was not published"
+    );
+}
+
+#[test]
+fn module_decimal_assertion_rejects_nonmatching_candidate_and_rolls_back_all_writes() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_module_assertion_source(
+        "every(Invoice, invoice => exists(Payment, payment => payment.invoice_id == invoice.id && payment.amount == invoice.amount))",
+        r#"
+            Invoice.insert({ id: 1, amount: 18.25 });
+            Invoice.insert({ id: 2, amount: 9.99 });
+            Payment.insert({ id: 1, invoice_id: 1, amount: 18.26 });
+            Payment.insert({ id: 2, invoice_id: 2, amount: 9.9900 });
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"
+        ),
+        "nonmatching Decimal candidate did not fail module assertion: {outcome:?}"
+    );
+    for (table, id) in [("Invoice", 1), ("Invoice", 2), ("Payment", 1), ("Payment", 2)] {
+        assert_eq!(
+            runtime.committed_row(table, &Value::int(id.into())),
+            None,
+            "failed module assertion published candidate {table} row {id}"
+        );
+    }
 }
 
 #[test]
