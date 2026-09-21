@@ -12,12 +12,14 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     io::Write,
-    process::Stdio,
+    path::Path,
+    process::{Command, Stdio},
 };
 
 use super::{
-    NativeObjectId, RemoteContinuity, Repository, RepositoryError, RequiredInternalRef,
-    scrub_git_routing_environment, trim_output, valid_branch_name, valid_remote_name,
+    NativeObjectId, OrnaInternalRef, RemoteContinuity, Repository, RepositoryError,
+    RequiredInternalRef, scrub_git_routing_environment, trim_output, valid_branch_name,
+    valid_remote_name,
 };
 
 const MAX_FETCH_REFS: usize = 4096;
@@ -130,6 +132,58 @@ impl FetchRequest {
     }
 }
 
+/// A push request whose Orna continuity refs are sent before the ordinary
+/// branch ref. The allocator ref, when present, is sent first so a later
+/// branch advertisement cannot make an allocator watermark visible too soon.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PushRequest {
+    remote: String,
+    branch: String,
+    internal: Vec<String>,
+}
+
+impl PushRequest {
+    pub fn new(
+        remote: impl Into<String>,
+        branch: impl Into<String>,
+        internal: impl IntoIterator<Item = OrnaInternalRef>,
+    ) -> Result<Self, FetchError> {
+        let remote = remote.into();
+        let branch = branch.into();
+        let internal = internal
+            .into_iter()
+            .map(|reference| reference.as_str().to_owned())
+            .collect::<Vec<_>>();
+        if !valid_remote_name(&remote) || !valid_branch_name(&branch) {
+            return Err(FetchError::InvalidRemote);
+        }
+        let mut seen = BTreeSet::new();
+        if internal.iter().any(|reference| {
+            !valid_fetch_full_ref(reference) || !seen.insert(reference.clone())
+        }) {
+            return Err(FetchError::InvalidContinuity);
+        }
+        Ok(Self {
+            remote,
+            branch,
+            internal,
+        })
+    }
+
+    pub fn remote(&self) -> &str {
+        &self.remote
+    }
+
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
+    pub fn internal(&self) -> &[String] {
+        &self.internal
+    }
+}
+
+
 /// Stable failures from the fetch boundary.  No Git command line, URL,
 /// credential, local path, or stderr is retained in this type.
 #[derive(Debug)]
@@ -150,6 +204,7 @@ pub enum FetchError {
     ObjectNotPromised,
     PromisorUnavailable,
     HydrationFailed,
+    PushFailed,
 }
 
 impl fmt::Display for FetchError {
@@ -171,6 +226,7 @@ impl fmt::Display for FetchError {
             Self::ObjectNotPromised => "Git object is not a proven promised object",
             Self::PromisorUnavailable => "no usable Git promisor remote is configured",
             Self::HydrationFailed => "Git promised-object hydration failed",
+            Self::PushFailed => "Git push failed before the requested refs were published",
         })
     }
 }
@@ -447,6 +503,7 @@ impl Repository {
         source: String,
         destination: String,
         object_id: String,
+
         kind: RefKind,
     ) -> Result<RefPlan, FetchError> {
         let old = local_ref_oid(self, &destination)?;
@@ -464,6 +521,82 @@ impl Repository {
             kind,
             updated,
         })
+    }
+    /// Creates a partial clone with no checkout; callers must explicitly
+    /// fetch required ordinary and `refs/orna/*` refs before selecting CWD.
+    pub fn clone_from(
+        remote: impl AsRef<str>,
+        destination: impl AsRef<Path>,
+    ) -> Result<Self, FetchError> {
+        let status = Command::new("git")
+            .args(["clone", "--filter=blob:none", "--no-checkout", "--no-tags"])
+            .arg(remote.as_ref())
+            .arg(destination.as_ref())
+            .status()
+            .map_err(|_| FetchError::RemoteUnavailable)?;
+        if !status.success() {
+            return Err(FetchError::RemoteUnavailable);
+        }
+        Repository::discover(destination).map_err(FetchError::Repository)
+    }
+
+    /// Pulls the requested branch and continuity refs without changing CWD;
+    /// merge/checkout remains an explicit repository operation.
+    pub fn pull(&self, request: &FetchRequest) -> Result<FetchReport, FetchError> {
+        self.fetch(request)
+    }
+
+}
+impl Repository {
+    /// Pushes Orna continuity refs before the ordinary branch ref. The
+    /// allocator ref is isolated in the first push when present, so a later
+    /// branch update cannot become visible before its allocation watermark.
+    pub fn push(&self, request: &PushRequest) -> Result<(), FetchError> {
+        if !self
+            .remote_names()?
+            .iter()
+            .any(|remote| remote == request.remote())
+        {
+            return Err(FetchError::InvalidRemote);
+        }
+        let branch_ref = format!("refs/heads/{}", request.branch());
+        let mut internal = request.internal.clone();
+        internal.sort_by_key(|reference| {
+            if reference.ends_with("/allocator") {
+                0
+            } else {
+                1
+            }
+        });
+        let mut ordered = internal
+            .into_iter()
+            .map(|reference| format!("{reference}:{reference}"))
+            .collect::<Vec<_>>();
+        ordered.push(format!("{branch_ref}:{branch_ref}"));
+        let _lock = self.acquire_coordination_lock()?;
+        let allocator = ordered
+            .iter()
+            .position(|refspec| refspec.starts_with("refs/orna/") && refspec.contains("allocator"));
+        if let Some(index) = allocator {
+            let allocator_ref = ordered.remove(index);
+            self.push_refspecs(request.remote(), std::slice::from_ref(&allocator_ref))?;
+        }
+        self.push_refspecs(request.remote(), &ordered)
+    }
+
+    fn push_refspecs(&self, remote: &str, refspecs: &[String]) -> Result<(), FetchError> {
+        let mut command = self.observer_command();
+        command
+            .args(["push", "--porcelain", "--no-follow-tags", remote])
+            .args(refspecs)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+            .status()
+            .map_err(|_| FetchError::RemoteUnavailable)?
+            .success()
+            .then_some(())
+            .ok_or(FetchError::PushFailed)
     }
 }
 
@@ -830,4 +963,34 @@ fn valid_fetch_ref_name(name: &str) -> bool {
 fn valid_fetch_full_ref(reference: &str) -> bool {
     reference.starts_with("refs/")
         && valid_fetch_ref_name(reference.strip_prefix("refs/").unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_request_validates_internal_refs_and_branch() {
+        let allocator = OrnaInternalRef::new("refs/orna/allocator").unwrap();
+        let checkpoint = OrnaInternalRef::new("refs/orna/checkpoint").unwrap();
+        let request =
+            PushRequest::new("origin", "main", [checkpoint.clone(), allocator.clone()]).unwrap();
+        assert_eq!(request.remote(), "origin");
+        assert_eq!(request.branch(), "main");
+        assert_eq!(
+            request.internal(),
+            &[
+                "refs/orna/checkpoint".to_owned(),
+                "refs/orna/allocator".to_owned()
+            ]
+        );
+        assert!(matches!(
+            PushRequest::new("origin", "bad branch", [allocator.clone()]),
+            Err(FetchError::InvalidRemote)
+        ));
+        assert!(matches!(
+            PushRequest::new("origin", "main", [allocator.clone(), allocator]),
+            Err(FetchError::InvalidContinuity)
+        ));
+    }
 }
