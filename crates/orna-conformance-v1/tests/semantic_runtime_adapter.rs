@@ -594,6 +594,36 @@ fn semantic_project_adapter_admits_sys_database_cwd_as_snapshot_ref_read() {
         cwd.effects
     );
 }
+#[test]
+fn semantic_project_adapter_admits_sys_database_writable_as_bool_read() {
+    let source = "pub fn writable() { let _snapshot = sys.snapshot(sys.database.cwd); sys.database.writable }";
+    let project = database_project(source);
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.typecheck_project(&project), StageOutcome::Passed);
+
+    // The project stages exercise the production adapter route. Inspect the
+    // same admitted native graph to prove the descriptor's Bool result and
+    // database-read effect. The explicit snapshot read models attachment
+    // observation; this witness makes no write or runtime mutation claim.
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("main.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+    let writable = &analysis.modules.values().next().unwrap().exports["writable"];
+    assert!(matches!(
+        &writable.ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Bool
+    ));
+    assert!(
+        writable.effects.effects.contains("database read"),
+        "{:?}",
+        writable.effects
+    );
+}
 
 #[test]
 fn semantic_project_adapter_rejects_unsupported_sys_database_member_at_typecheck() {
