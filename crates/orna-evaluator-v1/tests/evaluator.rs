@@ -179,6 +179,95 @@ fn relation_pair(left: i64, right: i64) -> Value {
     ]))
     .unwrap()
 }
+fn relation_window_row(values: &[i64]) -> Value {
+    Value::new(Raw::Array(
+        values.iter().copied().map(|value| Raw::Int(value.into())).collect(),
+    ))
+    .unwrap()
+}
+
+fn relation_window_direct(source: Expr, size: Expr, step: Option<Expr>) -> Expr {
+    let span = relation_span();
+    let mut arguments = vec![
+        relation_argument(source, &span),
+        relation_argument(size, &span),
+    ];
+    if let Some(step) = step {
+        arguments.push(relation_argument(step, &span));
+    }
+    Expr::Call {
+        callee: Box::new(Expr::Name {
+            text: "window".into(),
+            span: span.clone(),
+        }),
+        arguments,
+        span,
+    }
+}
+
+fn relation_named_window_direct(source: Expr, size: Expr, step: Option<Expr>) -> Expr {
+    let span = relation_span();
+    let mut arguments = vec![
+        orna_syntax_v1::Argument {
+            name: Some("rows".into()),
+            value: source,
+            span: span.clone(),
+        },
+        orna_syntax_v1::Argument {
+            name: Some("size".into()),
+            value: size,
+            span: span.clone(),
+        },
+    ];
+    if let Some(step) = step {
+        arguments.push(orna_syntax_v1::Argument {
+            name: Some("step".into()),
+            value: step,
+            span: span.clone(),
+        });
+    }
+    Expr::Call {
+        callee: Box::new(Expr::Name {
+            text: "window".into(),
+            span: span.clone(),
+        }),
+        arguments,
+        span,
+    }
+}
+
+fn relation_named_window_pipeline(
+    input: Expr,
+    size: Expr,
+    step: Option<Expr>,
+) -> Expr {
+    let span = relation_span();
+    let mut arguments = vec![orna_syntax_v1::Argument {
+        name: Some("size".into()),
+        value: size,
+        span: span.clone(),
+    }];
+    if let Some(step) = step {
+        arguments.push(orna_syntax_v1::Argument {
+            name: Some("step".into()),
+            value: step,
+            span: span.clone(),
+        });
+    }
+    Expr::Binary {
+        lhs: Box::new(input),
+        op: "|".into(),
+        rhs: Box::new(Expr::Call {
+            callee: Box::new(Expr::Name {
+                text: "window".into(),
+                span: span.clone(),
+            }),
+            arguments,
+            span: span.clone(),
+        }),
+        span,
+    }
+}
 
 fn relation_function(body: Expr) -> Functions {
     Functions::from([(
@@ -7970,5 +8059,271 @@ fn flat_map_relation_preserves_sorted_buffered_order() {
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
         Value::option(Some(relation_pair(1, 11))).expect("option is canonical")
+    );
+}
+
+#[test]
+fn window_relation_preserves_overlap_and_omits_trailing_partial_windows() {
+    let source = relation_source_expression("Note");
+    let windows = relation_stage(
+        source,
+        "window",
+        vec![relation_integer(3), relation_integer(1)],
+    );
+    let second = relation_stage(windows, "drop", vec![relation_integer(1)]);
+    let body = relation_terminal(second, "first");
+    let mut effects = DistinctRelationEffects::new(
+        (1..=5).map(|value| Value::int(value.into())).collect(),
+    );
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::option(Some(relation_window_row(&[2, 3, 4]))).expect("option is canonical")
+    );
+
+    let source = relation_source_expression("Note");
+    let windows = relation_stage(
+        source,
+        "window",
+        vec![relation_integer(3), relation_integer(2)],
+    );
+    let body = relation_terminal(windows, "count");
+    let mut effects = DistinctRelationEffects::new(
+        (1..=5).map(|value| Value::int(value.into())).collect(),
+    );
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::int(2.into()),
+        "the trailing [5] suffix is not emitted as a partial window"
+    );
+}
+
+#[test]
+fn window_relation_handles_gaps_without_partial_windows() {
+    let source = relation_source_expression("Note");
+    let windows = relation_stage(
+        source,
+        "window",
+        vec![relation_integer(2), relation_integer(3)],
+    );
+    let second = relation_stage(windows, "drop", vec![relation_integer(1)]);
+    let body = relation_terminal(second, "first");
+    let mut effects = DistinctRelationEffects::new(
+        (1..=7).map(|value| Value::int(value.into())).collect(),
+    );
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::option(Some(relation_window_row(&[4, 5]))).expect("option is canonical")
+    );
+
+    let source = relation_source_expression("Note");
+    let windows = relation_stage(
+        source,
+        "window",
+        vec![relation_integer(2), relation_integer(3)],
+    );
+    let body = relation_terminal(windows, "count");
+    let mut effects = DistinctRelationEffects::new(
+        (1..=7).map(|value| Value::int(value.into())).collect(),
+    );
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::int(2.into()),
+        "the gap after [4, 5] must not create a partial [7] window"
+    );
+}
+
+#[test]
+fn window_relation_empty_and_single_inputs_emit_only_complete_windows() {
+    for (rows, size, expected_count) in [
+        (Vec::new(), 2, 0),
+        (vec![Value::int(7.into())], 2, 0),
+        (vec![Value::int(7.into())], 1, 1),
+    ] {
+        let source = relation_source_expression("Note");
+        let windows = relation_stage(source, "window", vec![relation_integer(size)]);
+        let body = relation_terminal(windows, "count");
+        let mut effects = DistinctRelationEffects::new(rows);
+
+        assert_eq!(
+            invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+            Value::int(expected_count.into())
+        );
+    }
+}
+
+#[test]
+fn window_relation_first_and_bounded_count_stop_after_required_source_pages() {
+    let source = relation_source_expression("Note");
+    let windows = relation_stage(source, "window", vec![relation_integer(3)]);
+    let body = relation_terminal(windows, "first");
+    let rows = (1..=100)
+        .map(|value| Value::int(value.into()))
+        .collect::<Vec<_>>();
+    let mut effects = DistinctRelationEffects::new(rows);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::option(Some(relation_window_row(&[1, 2, 3]))).expect("option is canonical")
+    );
+    assert_eq!(
+        effects.cursors.len(),
+        3,
+        "first window only needs its three source pages"
+    );
+
+    let source = relation_source_expression("Note");
+    let windows = relation_stage(source, "window", vec![relation_integer(3)]);
+    let taken = relation_stage(windows, "take", vec![relation_integer(1)]);
+    let body = relation_terminal(taken, "count");
+    let rows = (1..=100)
+        .map(|value| Value::int(value.into()))
+        .collect::<Vec<_>>();
+    let mut effects = DistinctRelationEffects::new(rows);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::int(1.into())
+    );
+    assert_eq!(
+        effects.cursors.len(),
+        3,
+        "count over take(1) must not scan a second window"
+    );
+}
+
+#[test]
+fn window_relation_accepts_direct_named_and_pipeline_argument_shapes() {
+    let cases = [
+        relation_window_direct(
+            relation_source_expression("Note"),
+            relation_integer(2),
+            Some(relation_integer(2)),
+        ),
+        relation_named_window_direct(
+            relation_source_expression("Note"),
+            relation_integer(2),
+            Some(relation_integer(2)),
+        ),
+        relation_named_window_pipeline(
+            relation_source_expression("Note"),
+            relation_integer(2),
+            Some(relation_integer(2)),
+        ),
+    ];
+
+    for window in cases {
+        let body = relation_terminal(window, "count");
+        let mut effects = DistinctRelationEffects::new(
+            (1..=4).map(|value| Value::int(value.into())).collect(),
+        );
+        assert_eq!(
+            invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+            Value::int(2.into())
+        );
+    }
+}
+
+#[test]
+fn window_relation_rejects_non_positive_and_non_integer_sizes() {
+    for (body, expected) in [
+        (
+            relation_terminal(
+                relation_window_direct(
+                    relation_source_expression("Note"),
+                    relation_integer(0),
+                    None,
+                ),
+                "count",
+            ),
+            "ORNA-EVAL-VALUE",
+        ),
+        (
+            relation_terminal(
+                relation_window_direct(
+                    relation_source_expression("Note"),
+                    relation_integer(-1),
+                    None,
+                ),
+                "count",
+            ),
+            "ORNA-EVAL-VALUE",
+        ),
+        (
+            relation_terminal(
+                relation_window_direct(
+                    relation_source_expression("Note"),
+                    relation_integer(2),
+                    Some(relation_integer(0)),
+                ),
+                "count",
+            ),
+            "ORNA-EVAL-VALUE",
+        ),
+        (
+            relation_terminal(
+                relation_window_direct(
+                    relation_source_expression("Note"),
+                    relation_integer(2),
+                    Some(relation_integer(-1)),
+                ),
+                "count",
+            ),
+            "ORNA-EVAL-VALUE",
+        ),
+        (
+            relation_terminal(
+                relation_window_direct(
+                    relation_source_expression("Note"),
+                    parsed_expression("\"two\""),
+                    None,
+                ),
+                "count",
+            ),
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            relation_terminal(
+                relation_window_direct(
+                    relation_source_expression("Note"),
+                    relation_integer(2),
+                    Some(parsed_expression("\"three\"")),
+                ),
+                "count",
+            ),
+            "ORNA-EVAL-TYPE",
+        ),
+    ] {
+        let mut effects = DistinctRelationEffects::new(vec![Value::int(1.into())]);
+        assert_eq!(
+            code(invoke_relation(body, &mut effects, Limits::default())),
+            expected
+        );
+    }
+}
+
+#[test]
+fn window_relation_preserves_sorted_buffered_order() {
+    let source = relation_source_expression("Note");
+    let sorted = relation_stage(source, "sort_by", vec![parsed_expression("value => value")]);
+    let windows = relation_stage(
+        sorted,
+        "window",
+        vec![relation_integer(2), relation_integer(2)],
+    );
+    let second = relation_stage(windows, "drop", vec![relation_integer(1)]);
+    let body = relation_terminal(second, "first");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(3.into()),
+        Value::int(1.into()),
+        Value::int(2.into()),
+        Value::int(4.into()),
+        Value::int(5.into()),
+    ]);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::option(Some(relation_window_row(&[3, 4]))).expect("option is canonical")
     );
 }

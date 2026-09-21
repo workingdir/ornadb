@@ -32,7 +32,7 @@ mod repl;
 
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use cancellation::CancellationToken;
-use relation::{RelationPlan, RelationStage};
+use relation::{RelationPlan, RelationStage, RelationWindowState};
 pub use repl::{ReplSession, parse_admitted_repl};
 
 /// The verified standard-source bundle used by the bounded local and remote
@@ -2959,6 +2959,14 @@ impl Context<'_, '_> {
                     plan = plan.with_stage(RelationStage::SortBy(ordered[1].clone()));
                     Ok(Value::Relation(plan))
                 }
+                "window" => {
+                    let size = relation_window_argument(&ordered[1])?;
+                    let step = ordered
+                        .get(2)
+                        .map_or(Ok(1), relation_window_argument)?;
+                    plan = plan.with_stage(RelationStage::Window(size, step));
+                    Ok(Value::Relation(plan))
+                }
                 "distinct" => {
                     plan = plan.with_stage(RelationStage::Distinct);
                     Ok(Value::Relation(plan))
@@ -3200,6 +3208,9 @@ impl Context<'_, '_> {
         let mut counters = vec![0usize; plan.stages.len()];
         let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
         let mut pair_previous = vec![None; plan.stages.len()];
+        let mut window_states = (0..plan.stages.len())
+            .map(|_| None)
+            .collect::<Vec<Option<RelationWindowState>>>();
         let mut seen = 0usize;
         loop {
             // Relation work has its own cancellation checkpoints. A plan
@@ -3221,6 +3232,7 @@ impl Context<'_, '_> {
                     &mut counters,
                     &mut distinct_seen,
                     &mut pair_previous,
+                    &mut window_states,
                     0,
                     depth + 1,
                 )?;
@@ -3253,6 +3265,7 @@ impl Context<'_, '_> {
         counters: &mut [usize],
         distinct_seen: &mut [Vec<orna_foundation_v1::CanonicalValue>],
         pair_previous: &mut [Option<Value>],
+        window_states: &mut [Option<RelationWindowState>],
         stage_offset: usize,
         depth: usize,
     ) -> Result<Vec<RelationRow>, EvaluationError> {
@@ -3292,6 +3305,7 @@ impl Context<'_, '_> {
                             counters,
                             distinct_seen,
                             pair_previous,
+                            window_states,
                             index + 1,
                             depth + 1,
                         )?;
@@ -3331,6 +3345,17 @@ impl Context<'_, '_> {
                     };
                     self.items(2)?;
                     value = Value::Tuple(vec![previous, value]);
+                }
+                RelationStage::Window(size, step) => {
+                    self.items(*size)?;
+                    let state = window_states[index].get_or_insert_with(|| {
+                        RelationWindowState::try_new(*size, *step)
+                            .expect("window stage parameters are validated")
+                    });
+                    let Some(window) = state.push(value) else {
+                        return Ok(vec![RelationRow::Skip]);
+                    };
+                    value = Value::List(window);
                 }
                 RelationStage::Drop(count) => {
                     if counters[index] < *count {
@@ -3398,6 +3423,9 @@ impl Context<'_, '_> {
         let suffix = &plan.stages[sort_index + 1..];
         let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
         let mut pair_previous = vec![None; plan.stages.len()];
+        let mut window_states = (0..plan.stages.len())
+            .map(|_| None)
+            .collect::<Vec<Option<RelationWindowState>>>();
         self.for_each_buffered_relation(
             sorted,
             suffix,
@@ -3405,6 +3433,7 @@ impl Context<'_, '_> {
             depth,
             &mut distinct_seen,
             &mut pair_previous,
+            &mut window_states,
             visit,
         )
     }
@@ -3417,6 +3446,7 @@ impl Context<'_, '_> {
         depth: usize,
         distinct_seen: &mut [Vec<orna_foundation_v1::CanonicalValue>],
         pair_previous: &mut [Option<Value>],
+        window_states: &mut [Option<RelationWindowState>],
         visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
     ) -> Result<(), EvaluationError> {
         let Some(sort_index) = stages
@@ -3430,6 +3460,7 @@ impl Context<'_, '_> {
                 depth,
                 distinct_seen,
                 pair_previous,
+                window_states,
                 visit,
             );
         };
@@ -3442,6 +3473,7 @@ impl Context<'_, '_> {
             depth,
             distinct_seen,
             pair_previous,
+            window_states,
             |context, value| {
                 upstream.push(value);
                 context.items(upstream.len())?;
@@ -3462,6 +3494,7 @@ impl Context<'_, '_> {
             depth,
             distinct_seen,
             pair_previous,
+            window_states,
             visit,
         )
     }
@@ -3474,6 +3507,7 @@ impl Context<'_, '_> {
         depth: usize,
         distinct_seen: &mut [Vec<orna_foundation_v1::CanonicalValue>],
         pair_previous: &mut [Option<Value>],
+        window_states: &mut [Option<RelationWindowState>],
         mut visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
     ) -> Result<(), EvaluationError> {
         if stages
@@ -3494,6 +3528,7 @@ impl Context<'_, '_> {
                 &mut counters,
                 distinct_seen,
                 pair_previous,
+                window_states,
                 stage_offset,
                 depth + 1,
             )?;
@@ -5815,6 +5850,16 @@ fn relation_named_arguments(
         .into_iter()
         .map(|value| value.ok_or_else(|| error("ORNA-EVAL-ARGUMENT")))
         .collect()
+}
+
+fn relation_window_argument(value: &Value) -> Result<usize, EvaluationError> {
+    let Value::Int(value) = value else {
+        return Err(error("ORNA-EVAL-TYPE"));
+    };
+    if !value.is_positive() {
+        return Err(error("ORNA-EVAL-VALUE"));
+    }
+    value.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))
 }
 
 fn standard_name<'a>(expression: &'a Expr, module: &str) -> Option<&'a str> {
