@@ -916,3 +916,127 @@ fn ordinary_function_quantifiers_share_collection_limit_and_roll_back() {
         }
     }
 }
+fn decimal_filtered_first_source(parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "txn-decimal-filtered-first".into(),
+        source_id: "txn-decimal-filtered-first.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Reading(id: Int) {{ value: Decimal, }} fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
+#[test]
+fn parsed_decimal_filtered_first_is_scale_insensitive_and_canonical() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_filtered_first_source(
+        r#"
+            Reading.insert({ id: 2, value: 1.2000 });
+            Reading.insert({ id: 1, value: 1.20 });
+            Reading.insert({ id: 3, value: 2.0 });
+            assert ((Reading | filter(reading => reading.value == 1.200) | first())
+                ?? Reading.insert({ id: 99, value: 0.0 })).id == 1;
+        "#,
+    ));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    assert!(runtime.committed_row("Reading", &Value::int(1.into())).is_some());
+    assert!(runtime.committed_row("Reading", &Value::int(2.into())).is_some());
+    assert_eq!(
+        runtime.committed_row("Reading", &Value::int(99.into())),
+        None,
+        "non-empty filtered relation evaluated its fallback"
+    );
+}
+
+#[test]
+fn parsed_decimal_filtered_first_returns_null_for_no_match() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_filtered_first_source(
+        r#"
+            Reading.insert({ id: 1, value: 1.20 });
+            assert ((Reading | filter(reading => reading.value == 9.99) | first())
+                ?? Reading.insert({ id: 99, value: 0.0 })).id == 99;
+        "#,
+    ));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    assert!(runtime.committed_row("Reading", &Value::int(1.into())).is_some());
+    assert!(runtime.committed_row("Reading", &Value::int(99.into())).is_some());
+}
+
+#[test]
+fn parsed_decimal_filtered_first_observes_candidate_writes_and_rolls_back_on_failure() {
+    let mut committed = TransactionalEvaluator::new("parent", Limits::default());
+    let committed_outcome = committed.execute_source(&decimal_filtered_first_source(
+        r#"
+            Reading.insert({ id: 2, value: 2.0 });
+            Reading.insert({ id: 1, value: 1.2000 });
+            assert ((Reading | filter(reading => reading.value == 1.20) | first())
+                ?? Reading.insert({ id: 99, value: 0.0 })).id == 1;
+        "#,
+    ));
+    assert!(
+        matches!(committed_outcome, StageOutcome::Passed),
+        "{committed_outcome:?}"
+    );
+    for id in [1, 2] {
+        assert!(
+            committed
+                .committed_row("Reading", &Value::int(id.into()))
+                .is_some(),
+            "candidate Decimal row {id} was not published"
+        );
+    }
+
+    let mut rolled_back = TransactionalEvaluator::new("parent", Limits::default());
+    let failed = rolled_back.execute_source(&decimal_filtered_first_source(
+        r#"
+            Reading.insert({ id: 2, value: 2.0 });
+            Reading.insert({ id: 1, value: 1.2000 });
+            assert ((Reading | filter(reading => reading.value == 1.20) | first())
+                ?? Reading.insert({ id: 99, value: 0.0 })).id == 1;
+            assert false;
+        "#,
+    ));
+    assert!(matches!(
+        &failed,
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+    ));
+    for id in [1, 2, 99] {
+        assert_eq!(
+            rolled_back.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "row {id} escaped filtered-first rollback"
+        );
+    }
+}
+
+#[test]
+fn parsed_decimal_filtered_first_respects_shared_step_budget() {
+    let limits = Limits {
+        max_steps: 10,
+        ..Limits::default()
+    };
+    let mut runtime = TransactionalEvaluator::new("parent", limits);
+    let outcome = runtime.execute_source(&decimal_filtered_first_source(
+        r#"
+            Reading.insert({ id: 1, value: 1.20 });
+            Reading.insert({ id: 2, value: 2.0 });
+            (Reading | filter(reading => reading.value == 2.00) | first());
+        "#,
+    ));
+
+    assert!(
+        matches!(&outcome, StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"),
+        "{outcome:?}"
+    );
+    for id in [1, 2] {
+        assert_eq!(
+            runtime.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "bounded filtered-first execution published row {id}"
+        );
+    }
+}
