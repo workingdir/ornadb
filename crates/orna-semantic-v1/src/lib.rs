@@ -11982,6 +11982,7 @@ fn table_row_types_match(expected: &Type, actual: &Type, scope: &Scope) -> bool 
 fn intrinsic_value_type(name: &str) -> Option<Type> {
     match name {
         "now" => Some(function(Vec::new(), Type::Instant)),
+        "uuid7" => Some(function(Vec::new(), Type::Named("std.UUID".into()))),
         "log" => Some(function(vec![Type::Text], Type::Null)),
         "parallel" => Some(function(
             vec![Type::List(Box::new(Type::Error))],
