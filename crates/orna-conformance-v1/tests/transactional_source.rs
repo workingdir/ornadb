@@ -1670,3 +1670,146 @@ fn parsed_decimal_primary_key_scale_alias_is_rejected_without_publication() {
         "duplicate Decimal-key activation published a row"
     );
 }
+#[test]
+fn parsed_decimal_rekey_accepts_scale_insensitive_old_key_and_moves_atomically() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 1.2000, label: "before" });
+            assert (Reading | filter(reading => reading.value == 1.20) | one()).label == "before";
+            Reading.rekey(1.20, 2.5000);
+            assert (Reading | filter(reading => reading.value == 2.50) | one()).label == "before";
+            assert (Reading | take(1) | one()).value == 2.5;
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    let old_key = Value::decimal(12.into(), (-1).into()).expect("canonical old Decimal key");
+    let new_key = Value::decimal(25.into(), (-1).into()).expect("canonical new Decimal key");
+    assert_eq!(runtime.committed_row("Reading", &old_key), None);
+    assert!(runtime.committed_row("Reading", &new_key).is_some());
+}
+
+#[test]
+fn parsed_decimal_rekey_treats_scale_aliases_as_the_same_old_and_new_identity() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 1.2000, label: "before" });
+            Reading.rekey(1.20, 1.200);
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-DUPLICATE"
+        ),
+        "scale-alias rekey did not preserve key identity: {outcome:?}"
+    );
+    let key = Value::decimal(12.into(), (-1).into()).expect("canonical Decimal key");
+    assert_eq!(runtime.committed_row("Reading", &key), None);
+}
+
+#[test]
+fn parsed_decimal_rekey_absent_source_rolls_back_candidate_rows() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 1.20, label: "candidate" });
+            Reading.rekey(9.990, 2.0);
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-MISSING"
+        ),
+        "absent Decimal source did not fail with missing-row diagnostic: {outcome:?}"
+    );
+    for key in [
+        Value::decimal(12.into(), (-1).into()).expect("canonical inserted key"),
+        Value::decimal(2.into(), 0.into()).expect("canonical destination key"),
+    ] {
+        assert_eq!(
+            runtime.committed_row("Reading", &key),
+            None,
+            "absent-source failure published a candidate row"
+        );
+    }
+}
+
+#[test]
+fn parsed_decimal_rekey_destination_collision_rolls_back_all_candidate_rows() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 1.20, label: "source" });
+            Reading.insert({ value: 2.000, label: "destination" });
+            Reading.rekey(1.2000, 2.0);
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-DUPLICATE"
+        ),
+        "Decimal destination collision did not fail as duplicate: {outcome:?}"
+    );
+    for key in [
+        Value::decimal(12.into(), (-1).into()).expect("canonical source key"),
+        Value::decimal(2.into(), 0.into()).expect("canonical destination key"),
+    ] {
+        assert_eq!(
+            runtime.committed_row("Reading", &key),
+            None,
+            "destination collision published a candidate row"
+        );
+    }
+}
+
+#[test]
+fn parsed_decimal_rekey_invalid_key_rolls_back_candidate_rows() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 1.20, label: "candidate" });
+            Reading.rekey(1.200, "not-a-decimal");
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-S021-TYPE"
+        ),
+        "invalid Decimal key did not fail during source admission: {outcome:?}"
+    );
+    let key = Value::decimal(12.into(), (-1).into()).expect("canonical inserted key");
+    assert_eq!(
+        runtime.committed_row("Reading", &key),
+        None,
+        "invalid Decimal key published a candidate row"
+    );
+}
+
+#[test]
+fn parsed_decimal_primary_key_filtered_lookup_and_first_use_scale_insensitive_canonical_order() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 2.000, label: "high" });
+            Reading.insert({ value: -1.2000, label: "low" });
+            Reading.insert({ value: 0.00, label: "zero" });
+            assert (Reading | filter(reading => reading.value == 2.0) | one()).label == "high";
+            assert (Reading | take(1) | one()).label == "low";
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+}
