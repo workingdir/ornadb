@@ -336,6 +336,34 @@ fn typed_invoke_report(fixture: Fixture, source: &str) -> orna_conformance_v1::R
 
     Harness::new(corpus).run(&mut SemanticAdapter::default())
 }
+fn typed_start_report(fixture: Fixture, source: &str) -> orna_conformance_v1::RunReport {
+    let root = tempfile::tempdir().expect("typed start fixture root");
+    std::fs::write(root.path().join(&fixture.path), source).expect("typed start fixture writes");
+
+    let fixture_id = fixture.id.clone();
+    let fixture_path = fixture.path.clone();
+    let mut corpus = Corpus::load_default().expect("reference corpus loads");
+    corpus.root = root.path().to_path_buf();
+    corpus.manifest.fixtures = vec![fixture];
+    corpus
+        .requirement_evidence
+        .requirements
+        .iter_mut()
+        .find(|entry| entry.requirement == "ORNA-SYS-132")
+        .expect("ORNA-SYS-132 requirement exists")
+        .tests
+        .push(serde_json::json!({
+            "kind": "ordinary source fixture",
+            "status": "planned",
+            "subject": "ORNA-SYS-132",
+            "fixture": fixture_id,
+            "path": fixture_path,
+            "stage": "typecheck",
+        }));
+
+    Harness::new(corpus).run(&mut SemanticAdapter::default())
+}
+
 fn typed_await_report(fixture: Fixture, source: &str) -> orna_conformance_v1::RunReport {
     let root = tempfile::tempdir().expect("typed await fixture root");
     std::fs::write(root.path().join(&fixture.path), source).expect("typed await fixture writes");
@@ -422,6 +450,35 @@ fn typed_invoke_fixture(
         environment: None,
     }
 }
+fn typed_start_fixture(
+    id: &str,
+    path: &str,
+    expect: &[(&str, &str)],
+    failing_phase: Option<&str>,
+    diagnostic: Option<&str>,
+    message_contains: Option<&str>,
+) -> Fixture {
+    Fixture {
+        id: id.into(),
+        kind: if failing_phase.is_some() {
+            "invalid".into()
+        } else {
+            "valid".into()
+        },
+        path: path.into(),
+        parse_as: "module_unit".into(),
+        expect: expect
+            .iter()
+            .map(|(stage, result)| ((*stage).into(), (*result).into()))
+            .collect(),
+        failing_phase: failing_phase.map(str::to_owned),
+        diagnostic: diagnostic.map(str::to_owned),
+        message_contains: message_contains.map(str::to_owned),
+        expected_diagnostic: None,
+        environment: None,
+    }
+}
+
 
 #[test]
 fn typed_sys_invoke_report_maps_orna_sys_132_to_semantic_pass_evidence() {
@@ -544,6 +601,159 @@ fn typed_sys_invoke_report_retains_mismatched_witness_diagnostic() {
                     && evidence["stage"] == "typecheck"
             })
             .expect("serialized semantic mismatch evidence")["diagnostic"]["code"],
+        "ORNA-S021-TYPE"
+    );
+}
+
+#[test]
+fn typed_sys_start_report_maps_orna_sys_132_to_semantic_pass_evidence() {
+    let report = typed_start_report(
+        typed_start_fixture(
+            "typed-start-valid",
+            "typed-start-valid.orna",
+            &[
+                ("parse", "pass"),
+                ("resolve", "pass"),
+                ("typecheck", "pass"),
+                ("evaluate", "not-run"),
+            ],
+            None,
+            None,
+            None,
+        ),
+        r#"
+            pub fn start(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.start<Int>(function, arguments, as: Int);
+        "#,
+    );
+    let fixture = &report.fixtures[0];
+    let parse = fixture
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Parse))
+        .expect("typed start parse stage");
+    assert_eq!(parse.status, EvidenceStatus::Passed);
+    assert!(parse.requirements.is_empty());
+    let typecheck = fixture
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Typecheck))
+        .expect("typed start typecheck stage");
+    assert_eq!(typecheck.class, EvidenceClass::Semantic);
+    assert_eq!(typecheck.status, EvidenceStatus::Passed);
+    assert_eq!(
+        typecheck.requirements,
+        vec!["ORNA-SYS-132".to_string()]
+    );
+    assert!(matches!(
+        &typecheck.requirement_mapping,
+        RequirementMapping::Mapped { requirements }
+            if requirements == &vec!["ORNA-SYS-132".to_string()]
+    ));
+    assert!(report.semantic_evidence.iter().any(|evidence| {
+        evidence.subject == "typed-start-valid"
+            && evidence.stage == Some(Stage::Typecheck)
+            && evidence.status == EvidenceStatus::Passed
+    }));
+    assert!(fixture.passed, "{:?}", fixture.stages);
+}
+
+#[test]
+fn typed_sys_start_report_retains_mismatched_witness_diagnostic() {
+    let report = typed_start_report(
+        typed_start_fixture(
+            "typed-start-mismatch",
+            "typed-start-mismatch.orna",
+            &[
+                ("parse", "pass"),
+                ("resolve", "pass"),
+                ("typecheck", "fail"),
+                ("evaluate", "not-run"),
+            ],
+            Some("typecheck"),
+            Some("ORNA-S021-TYPE"),
+            Some("sys.start explicit type argument must match the as: witness"),
+        ),
+        r#"
+            pub fn start_wrong(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.start<Str>(function, arguments, as: Int);
+        "#,
+    );
+    let fixture = &report.fixtures[0];
+    let parse = fixture
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Parse))
+        .expect("typed start mismatch parse stage");
+    assert_eq!(parse.status, EvidenceStatus::Passed);
+    assert_eq!(parse.diagnostic, None);
+    let typecheck = fixture
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Typecheck))
+        .expect("typed start mismatch typecheck stage");
+    assert_eq!(typecheck.class, EvidenceClass::Semantic);
+    assert_eq!(typecheck.status, EvidenceStatus::Failed);
+    assert_eq!(
+        typecheck.requirements,
+        vec!["ORNA-SYS-132".to_string()]
+    );
+    assert!(matches!(
+        &typecheck.requirement_mapping,
+        RequirementMapping::Mapped { requirements }
+            if requirements == &vec!["ORNA-SYS-132".to_string()]
+    ));
+    assert_eq!(
+        typecheck.diagnostic,
+        Some(serde_json::json!({
+            "code": "ORNA-S021-TYPE",
+            "spans": [],
+            "redacted": true,
+        }))
+    );
+    assert!(report.semantic_evidence.iter().any(|evidence| {
+        evidence.subject == "typed-start-mismatch"
+            && evidence.stage == Some(Stage::Typecheck)
+            && evidence.status == EvidenceStatus::Failed
+            && evidence.diagnostic.as_ref().is_some_and(|diagnostic| {
+                diagnostic["code"] == "ORNA-S021-TYPE"
+            })
+    }));
+
+    let serialized = serde_json::to_value(&report).expect("typed start report serializes");
+    let serialized_stages = serialized["fixtures"][0]["stages"]
+        .as_array()
+        .expect("serialized typed start stage array");
+    let serialized_parse = serialized_stages
+        .iter()
+        .find(|stage| stage["stage"] == "parse")
+        .expect("serialized typed start parse stage");
+    assert_eq!(serialized_parse["status"], "passed");
+    assert_eq!(serialized_parse["diagnostic"], serde_json::Value::Null);
+    let serialized_typecheck = serialized_stages
+        .iter()
+        .find(|stage| stage["stage"] == "typecheck")
+        .expect("serialized typed start mismatch typecheck stage");
+    assert_eq!(serialized_typecheck["class"], "semantic");
+    assert_eq!(serialized_typecheck["status"], "failed");
+    assert_eq!(
+        serialized_typecheck["requirement_mapping"]["status"],
+        "mapped"
+    );
+    assert_eq!(
+        serialized_typecheck["diagnostic"]["code"],
+        "ORNA-S021-TYPE"
+    );
+    assert_eq!(
+        serialized["semantic_evidence"]
+            .as_array()
+            .expect("serialized semantic evidence")
+            .iter()
+            .find(|evidence| {
+                evidence["subject"] == "typed-start-mismatch"
+                    && evidence["stage"] == "typecheck"
+            })
+            .expect("serialized typed start mismatch evidence")["diagnostic"]["code"],
         "ORNA-S021-TYPE"
     );
 }
