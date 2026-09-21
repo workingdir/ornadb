@@ -124,6 +124,16 @@ fn parquet(
     physical_types: &[OvbRaw],
     values: &[Vec<i64>],
 ) -> Vec<u8> {
+    parquet_with_dictionary(profile, physical_ids, physical_types, values, false)
+}
+
+fn parquet_with_dictionary(
+    profile: &CompactOvbProfile,
+    physical_ids: &[[u8; 16]],
+    physical_types: &[OvbRaw],
+    values: &[Vec<i64>],
+    dictionary_enabled: bool,
+) -> Vec<u8> {
     assert_eq!(physical_ids.len(), values.len());
     assert_eq!(physical_ids.len(), physical_types.len());
     let mut message = String::from("message schema {");
@@ -159,7 +169,7 @@ fn parquet(
     let properties = Arc::new(
         WriterProperties::builder()
             .set_compression(Compression::ZSTD(Default::default()))
-            .set_dictionary_enabled(false)
+            .set_dictionary_enabled(dictionary_enabled)
             .set_encoding(Encoding::PLAIN)
             .set_writer_version(WriterVersion::PARQUET_2_0)
             .set_key_value_metadata(Some(metadata(profile, descriptors)))
@@ -242,6 +252,33 @@ fn composite_instant_uses_declared_key_order_not_physical_column_order() {
     assert_eq!(
         CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 1).unwrap(),
         vec![expected_composite(-1, 7)]
+    );
+}
+
+#[test]
+fn dictionary_instant_int64_timestamp_decodes_canonical_tag_60002_values() {
+    let profile = profile(&[INSTANT], &[instant_type()]);
+    let values = vec![-1_i64, -1, 0, 0, 1_000_000_001, 1_000_000_001];
+    let bytes = parquet_with_dictionary(
+        &profile,
+        &[INSTANT],
+        &[instant_type()],
+        &[values.clone()],
+        true,
+    );
+    let reader = SerializedFileReader::new(Bytes::copy_from_slice(&bytes)).unwrap();
+    assert!(
+        reader
+            .metadata()
+            .row_group(0)
+            .column(0)
+            .encodings()
+            .any(|encoding| encoding == Encoding::RLE_DICTIONARY)
+    );
+    assert_eq!(
+        CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, values.len() as u64)
+            .unwrap(),
+        values.into_iter().map(expected_instant).collect::<Vec<_>>()
     );
 }
 
