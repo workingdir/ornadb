@@ -2925,6 +2925,133 @@ fn std_collection_first_is_callback_free_and_bounded() {
         "ORNA-EVAL-LIMIT"
     );
 }
+#[test]
+fn std_collection_last_returns_option_for_direct_pipeline_named_and_function_calls() {
+    let expected = Value::option(Some(Value::int(3.into()))).expect("option is canonical");
+    for expression in [
+        "last([0, 1, 2, 3])",
+        "std.collection.last([0, 1, 2, 3])",
+        "[0, 1, 2, 3] | last()",
+        "[0, 1, 2, 3] | std.collection.last()",
+        "last(rows: [0, 1, 2, 3])",
+        "std.collection.last(rows: [0, 1, 2, 3])",
+    ] {
+        assert_eq!(
+            evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
+            expected,
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        call_module(
+            "fn pick(rows: [Int]) = last(rows);",
+            "pick([0, 1, 2, 3])",
+            Limits::default(),
+        )
+        .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn std_collection_last_returns_option_none_for_empty_finite_inputs() {
+    let expected = Value::option(None).expect("option is canonical");
+    for expression in [
+        "last([])",
+        "std.collection.last([])",
+        "[] | last()",
+        "[] | std.collection.last()",
+        "last(rows: [])",
+        "std.collection.last(rows: [])",
+    ] {
+        assert_eq!(
+            evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
+            expected,
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn std_collection_last_is_callback_free_and_respects_collection_bounds() {
+    for (expression, expected) in [
+        ("std.collection.last(1)", "ORNA-EVAL-TYPE"),
+        (
+            "std.collection.last([1], value => value / 0)",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            "std.collection.last(rows: [1], callback: value => value)",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        ("std.collection.last(values: [1])", "ORNA-EVAL-UNSUPPORTED"),
+        ("std.collection.last()", "ORNA-EVAL-UNSUPPORTED"),
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            expected,
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        evaluate_expression(
+            "std.collection.last([13])",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 1,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+        Value::option(Some(Value::int(13.into()))).expect("option is canonical")
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.last([13, 14])",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 1,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn root_last_dispatch_respects_local_function_and_relation_shadowing() {
+    assert_eq!(
+        call_module(
+            "fn last(value: Int) = value + 100; fn run() = last(1);",
+            "run()",
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(101.into())
+    );
+    assert_eq!(
+        evaluate_expression(
+            "if true { let last = value => value + 100; last(1) } else { 0 }",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(101.into())
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "Note.last()",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-NAME"
+    );
+}
+
 
 #[test]
 fn std_collection_sum_accepts_direct_named_pipeline_and_function_calls() {
@@ -8325,5 +8452,163 @@ fn window_relation_preserves_sorted_buffered_order() {
     assert_eq!(
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
         Value::option(Some(relation_window_row(&[3, 4]))).expect("option is canonical")
+    );
+}
+fn relation_direct_stage(input: Expr, name: &str) -> Expr {
+    let span = relation_span();
+    Expr::Call {
+        callee: Box::new(Expr::Name {
+            text: name.into(),
+            span: span.clone(),
+        }),
+        arguments: vec![relation_argument(input, &span)],
+        span,
+    }
+}
+
+#[test]
+fn last_relation_returns_the_final_value_through_filter_map_flat_map_sort_and_window() {
+    let source = relation_source_expression("Note");
+    let filtered = relation_stage(
+        source,
+        "filter",
+        vec![parsed_expression("value => value > 1")],
+    );
+    let mapped = relation_stage(
+        filtered,
+        "map",
+        vec![parsed_expression("value => value * 10")],
+    );
+    let expanded = relation_stage(
+        mapped,
+        "flat_map",
+        vec![parsed_expression("value => [value, value + 1]")],
+    );
+    let sorted = relation_stage(
+        expanded,
+        "sort_by",
+        vec![parsed_expression("value => value")],
+    );
+    let windows = relation_stage(
+        sorted,
+        "window",
+        vec![relation_integer(2), relation_integer(2)],
+    );
+    let body = relation_terminal(windows, "last");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(4.into()),
+        Value::int(1.into()),
+        Value::int(3.into()),
+        Value::int(2.into()),
+    ]);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::option(Some(relation_window_row(&[40, 41]))).expect("option is canonical")
+    );
+    assert_eq!(
+        effects.cursors.len(),
+        4,
+        "sorted last must scan the complete upstream relation before returning the final window"
+    );
+}
+
+#[test]
+fn last_relation_scans_unsorted_pages_lazily_and_obeys_item_bounds() {
+    let source = relation_source_expression("Note");
+    let body = relation_terminal(source, "last");
+    let mut effects = DistinctRelationEffects::new(
+        (1..=4).map(|value| Value::int(value.into())).collect(),
+    );
+
+    assert_eq!(
+        invoke_relation(body.clone(), &mut effects, Limits::default()).unwrap(),
+        Value::option(Some(Value::int(4.into()))).expect("option is canonical")
+    );
+    assert_eq!(
+        effects.cursors,
+        vec![None, Some(vec![1]), Some(vec![2]), Some(vec![3])],
+        "unsorted last must advance one source page at a time without an eager source shortcut"
+    );
+
+    let mut bounded = DistinctRelationEffects::new(
+        (1..=4).map(|value| Value::int(value.into())).collect(),
+    );
+    assert_eq!(
+        code(invoke_relation(
+            body,
+            &mut bounded,
+            Limits {
+                max_collection_items: 3,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn last_relation_accepts_direct_pipeline_and_named_rows_forms_and_empty_inputs() {
+    let cases = [
+        relation_direct_stage(relation_source_expression("Note"), "last"),
+        relation_named_stage(relation_source_expression("Note"), "last", "rows"),
+        relation_terminal(relation_source_expression("Note"), "last"),
+    ];
+    for body in cases {
+        let mut effects = DistinctRelationEffects::new(vec![
+            Value::int(1.into()),
+            Value::int(2.into()),
+            Value::int(3.into()),
+        ]);
+        assert_eq!(
+            invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+            Value::option(Some(Value::int(3.into()))).expect("option is canonical")
+        );
+    }
+
+    let empty_cases = [
+        relation_direct_stage(relation_source_expression("Empty"), "last"),
+        relation_named_stage(relation_source_expression("Empty"), "last", "rows"),
+        relation_terminal(relation_source_expression("Empty"), "last"),
+    ];
+    for body in empty_cases {
+        let mut effects = DistinctRelationEffects::new(Vec::new());
+        assert_eq!(
+            invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+            Value::option(None).expect("option is canonical")
+        );
+    }
+}
+
+#[test]
+fn last_relation_rejects_extra_and_unknown_arguments_like_first() {
+    let span = relation_span();
+    let source = relation_source_expression("Note");
+    let extra = Expr::Call {
+        callee: Box::new(Expr::Name {
+            text: "last".into(),
+            span: span.clone(),
+        }),
+        arguments: vec![
+            relation_argument(source, &span),
+            relation_argument(relation_integer(1), &span),
+        ],
+        span: span.clone(),
+    };
+    let mut effects = DistinctRelationEffects::new(vec![Value::int(1.into())]);
+    assert_eq!(
+        code(invoke_relation(extra, &mut effects, Limits::default())),
+        "ORNA-EVAL-ARGUMENT"
+    );
+
+    let unknown = relation_named_stage(
+        relation_source_expression("Note"),
+        "last",
+        "values",
+    );
+    let mut effects = DistinctRelationEffects::new(vec![Value::int(1.into())]);
+    assert_eq!(
+        code(invoke_relation(unknown, &mut effects, Limits::default())),
+        "ORNA-EVAL-ARGUMENT"
     );
 }

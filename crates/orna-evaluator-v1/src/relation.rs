@@ -89,6 +89,31 @@ impl RelationWindowState {
         Some(window)
     }
 }
+/// Incremental state for a relation `last` observation.
+///
+/// The terminal retains only the most recently emitted value while the
+/// relation source is scanned. This keeps unsorted relation traversal lazy and
+/// bounded by one retained row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RelationLastState {
+    last: Option<Value>,
+}
+
+impl RelationLastState {
+    /// Creates an empty terminal state.
+    pub(super) fn new() -> Self {
+        Self { last: None }
+    }
+    /// Retains the latest emitted relation value.
+    pub(super) fn push(&mut self, value: Value) {
+        self.last = Some(value);
+    }
+
+    /// Consumes the state and returns the final emitted value, if any.
+    pub(super) fn finish(self) -> Option<Value> {
+        self.last
+    }
+}
 
 impl RelationPlan {
     pub(super) fn new(source: String) -> Self {
