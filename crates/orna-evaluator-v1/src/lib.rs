@@ -3855,7 +3855,7 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
-    fn text(&self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+    fn text(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
             ("trim", [Value::String(value)]) => {
                 self.string(value.trim().to_owned()).map(Value::String)
@@ -3867,17 +3867,18 @@ impl Context<'_, '_> {
                     value.split(separator).count()
                 };
                 self.items(count)?;
-                let fields = if separator.is_empty() {
-                    value
-                        .chars()
-                        .map(|scalar| Value::String(scalar.to_string()))
-                        .collect()
+                let mut fields = Vec::with_capacity(count);
+                if separator.is_empty() {
+                    for scalar in value.chars() {
+                        self.step()?;
+                        fields.push(Value::String(scalar.to_string()));
+                    }
                 } else {
-                    value
-                        .split(separator)
-                        .map(|field| Value::String(field.to_owned()))
-                        .collect()
-                };
+                    for field in value.split(separator) {
+                        self.step()?;
+                        fields.push(Value::String(field.to_owned()));
+                    }
+                }
                 Ok(Value::List(fields))
             }
             ("join", [Value::List(values), Value::String(separator)]) => {
@@ -3887,6 +3888,7 @@ impl Context<'_, '_> {
                     let Value::String(value) = value else {
                         return Err(error("ORNA-EVAL-TYPE"));
                     };
+                    self.step()?;
                     if index > 0 {
                         output.push_str(separator);
                     }

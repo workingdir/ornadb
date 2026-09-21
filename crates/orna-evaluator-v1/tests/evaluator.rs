@@ -1986,6 +1986,82 @@ fn std_text_fallback_rejects_invalid_arguments_and_enforces_existing_limits() {
 }
 
 #[test]
+fn std_text_split_and_join_charge_step_budget_without_changing_outputs() {
+    assert_eq!(
+        evaluate_expression(
+            "std.text.split(\"aβ\", \"\")",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::new(Raw::Array(vec![
+            Raw::Text("a".into()),
+            Raw::Text("β".into()),
+        ]))
+        .unwrap()
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.text.split(\"aβ\", \"\")",
+            &Environment::new(),
+            Limits {
+                max_steps: 3,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+
+    assert_eq!(
+        evaluate_expression(
+            "std.text.split(\"alpha,,β,\", \",\")",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::new(Raw::Array(vec![
+            Raw::Text("alpha".into()),
+            Raw::Text("".into()),
+            Raw::Text("β".into()),
+            Raw::Text("".into()),
+        ]))
+        .unwrap()
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.text.split(\"alpha,,β,\", \",\")",
+            &Environment::new(),
+            Limits {
+                max_steps: 3,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+
+    assert_eq!(
+        evaluate_expression(
+            "std.text.join([\"a\", \"β\", \"\"], \":\")",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::new(Raw::Text("a:β:".into())).unwrap()
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.text.join([\"a\", \"β\", \"\"], \":\")",
+            &Environment::new(),
+            Limits {
+                max_steps: 6,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
 fn std_collection_fallback_preserves_finite_list_ordering() {
     for (expression, expected) in [
         (
