@@ -592,10 +592,70 @@ pub struct Checkpoint {
     pub mutation_sequence: u64,
 }
 
+/// The canonical row encoding selected by the compact publication profile.
+///
+/// This is deliberately a closed type: publication must not silently accept
+/// an arbitrary encoder label from an adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicationRowEncoding {
+    CompactOvb1,
+}
+
+/// The canonical value encoding selected by the compact publication profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicationValueEncoding {
+    Ovb1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PublicationMutationState {
+    Replacement { value: Vec<u8> },
+    Deletion,
+}
+
+/// Evidence tying one published key/value to the exact candidate generated
+/// from the frozen, ordered mutation prefix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublicationEquivalenceWitness {
+    pub key_digest: [u8; 32],
+    pub value_digest: Option<[u8; 32]>,
+    pub candidate_digest: [u8; 32],
+}
+
+/// One validated runtime mutation in a compact-publication freeze.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicationFreezeMutation {
+    pub table_id: [u8; 16],
+    pub sequence: u64,
+    pub mutation_id: [u8; 16],
+    pub table: String,
+    pub logical_key: Vec<u8>,
+    pub state: PublicationMutationState,
+    pub schema_fingerprint: [u8; 32],
+    pub row_encoding_identity: PublicationRowEncoding,
+    pub value_encoding_identity: PublicationValueEncoding,
+    pub candidate_generation: u64,
+    pub equivalence_witness: PublicationEquivalenceWitness,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublicationFreeze {
     pub intent_id: [u8; 16],
     pub checkpoint: Checkpoint,
+    pub candidate_digest: [u8; 32],
+    pub mutations: Vec<PublicationFreezeMutation>,
+}
+
+/// Authoritative compact profile identity supplied by schema admission.
+///
+/// Runtime table rows intentionally do not invent a schema or physical table
+/// identity. Compact publication must receive this checked profile explicitly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicationTableIdentity {
+    pub table: String,
+    pub table_id: [u8; 16],
+    pub schema_fingerprint: [u8; 32],
+    pub candidate_generation: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -6919,6 +6979,30 @@ impl RuntimeState {
             .collect()
     }
 
+    /// Returns the typed compact payload retained on a typed freeze.
+    pub async fn frozen_pending_mutations(
+        &self,
+        freeze: &PublicationFreeze,
+    ) -> Result<Vec<PublicationFreezeMutation>, RuntimeError> {
+        validate_id(freeze.intent_id)?;
+        validate_digest(freeze.checkpoint.digest)?;
+        let stored = self
+            .frozen_intent(freeze.intent_id)
+            .await?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        if stored != freeze.checkpoint {
+            return Err(RuntimeError::ConflictingPublicationIntent);
+        }
+        if freeze.mutations.is_empty()
+            || freeze.mutations.iter().any(|mutation| {
+                mutation.equivalence_witness.candidate_digest != freeze.candidate_digest
+            })
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        Ok(freeze.mutations.clone())
+    }
+
     /// Returns the newest durable checkpoint, if this runtime has committed
     /// one. Checkpoints are never inferred from a pending mutation.
     pub async fn latest_checkpoint(&self) -> Result<Option<Checkpoint>, RuntimeError> {
@@ -6958,9 +7042,12 @@ impl RuntimeState {
             if &stored != checkpoint {
                 return Err(RuntimeError::ConflictingPublicationIntent);
             }
+            let candidate_digest = publication_candidate_digest(stored.generation, &[]);
             return Ok(PublicationFreeze {
                 intent_id,
                 checkpoint: stored,
+                candidate_digest,
+                mutations: Vec::new(),
             });
         }
         if self.latest_checkpoint().await?.as_ref() != Some(checkpoint) {
@@ -6989,10 +7076,50 @@ impl RuntimeState {
         if &stored != checkpoint {
             return Err(RuntimeError::ConflictingPublicationIntent);
         }
+        let candidate_digest = publication_candidate_digest(stored.generation, &[]);
         Ok(PublicationFreeze {
             intent_id,
             checkpoint: stored,
+            candidate_digest,
+            mutations: Vec::new(),
         })
+    }
+
+    /// Freezes a compact publication using schema admission's authoritative
+    /// table/profile identities. The legacy [`Self::freeze`] API intentionally
+    /// carries no synthetic identity and therefore cannot produce compact
+    /// mutations.
+    pub async fn freeze_compact(
+        &self,
+        intent_id: [u8; 16],
+        checkpoint: &Checkpoint,
+        identities: &[PublicationTableIdentity],
+    ) -> Result<PublicationFreeze, RuntimeError> {
+        if checkpoint.generation == 0 || identities.is_empty() {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let mut seen = BTreeMap::new();
+        for identity in identities {
+            validate_table_name(&identity.table)?;
+            if identity.candidate_generation != checkpoint.generation
+                || identity.table_id == [0; 16]
+                || identity.schema_fingerprint == [0; 32]
+                || identity.candidate_generation == 0
+                || seen.insert(identity.table.clone(), ()).is_some()
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+        }
+        let mut freeze = self.freeze(intent_id, checkpoint).await?;
+        freeze.mutations = self
+            .load_publication_mutations(checkpoint, identities)
+            .await?;
+        freeze.candidate_digest = freeze
+            .mutations
+            .first()
+            .map(|mutation| mutation.equivalence_witness.candidate_digest)
+            .ok_or(RuntimeError::EmptyMutationBatch)?;
+        Ok(freeze)
     }
 
     /// Durably binds a freeze to one compact candidate before receipt
@@ -8560,6 +8687,71 @@ impl RuntimeState {
         })
     }
 
+    async fn load_publication_mutations(
+        &self,
+        checkpoint: &Checkpoint,
+        identities: &[PublicationTableIdentity],
+    ) -> Result<Vec<PublicationFreezeMutation>, RuntimeError> {
+        let upper = i64::try_from(checkpoint.mutation_sequence)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT sequence, mutation_id, payload, digest
+                 FROM pending_mutation WHERE sequence <= ?1 ORDER BY sequence",
+                params![upper],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut previous = 0_u64;
+        let mut decoded = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let sequence = u64::try_from(
+                row.get::<i64>(0)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if sequence == 0 || sequence <= previous {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let mutation = Mutation {
+                id: fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+                payload: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                digest: fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+            };
+            decoded.push((sequence, TableMutation::decode(&mutation)?));
+            previous = sequence;
+        }
+        if checkpoint.mutation_sequence != 0
+            && decoded.last().map(|(sequence, _)| *sequence)
+                != Some(checkpoint.mutation_sequence)
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let candidate_digest =
+            publication_candidate_digest(checkpoint.generation, &decoded);
+        decoded
+            .iter()
+            .map(|(sequence, mutation)| {
+                let identity = identities
+                    .iter()
+                    .find(|identity| identity.table == mutation.table())
+                    .ok_or(RuntimeError::RecoveryInvalid)?;
+                publication_freeze_mutation(
+                    *sequence,
+                    mutation,
+                    checkpoint.generation,
+                    candidate_digest,
+                    identity,
+                )
+            })
+            .collect()
+    }
+
     async fn frozen_intent(&self, intent_id: [u8; 16]) -> Result<Option<Checkpoint>, RuntimeError> {
         let mut rows = self.connection.query("SELECT checkpoint_generation, checkpoint_mutation_sequence, checkpoint_digest FROM publication_freeze WHERE intent_id = ?1", params![intent_id.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
         let Some(row) = rows
@@ -8593,8 +8785,24 @@ impl RuntimeState {
             .ok_or(RuntimeError::RecoveryInvalid)?;
         Ok(PublicationFreeze {
             intent_id,
+            candidate_digest: publication_candidate_digest(checkpoint.generation, &[]),
+            mutations: Vec::new(),
             checkpoint,
         })
+    }
+
+    /// Reconstructs a typed compact freeze after restart using the same
+    /// schema-admission identities supplied to the original producer.
+    pub async fn publication_freeze_compact(
+        &self,
+        intent_id: [u8; 16],
+        identities: &[PublicationTableIdentity],
+    ) -> Result<PublicationFreeze, RuntimeError> {
+        let checkpoint = self
+            .frozen_intent(intent_id)
+            .await?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        self.freeze_compact(intent_id, &checkpoint, identities).await
     }
 
     fn verify_compact_receipt(&self, receipt: &CompactRuntimeReceipt) -> Result<(), RuntimeError> {
@@ -12635,6 +12843,79 @@ async fn capture_tx(connection: &Connection) -> Result<CwdCapture, RuntimeError>
         digest,
     )
     .map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn publication_freeze_mutation(
+    sequence: u64,
+    mutation: &TableMutation,
+    candidate_generation: u64,
+    candidate_digest: [u8; 32],
+    identity: &PublicationTableIdentity,
+) -> Result<PublicationFreezeMutation, RuntimeError> {
+    if sequence == 0
+        || candidate_generation == 0
+        || identity.table != mutation.table()
+        || identity.candidate_generation != candidate_generation
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    let state = publication_mutation_state(mutation);
+    let value_digest = mutation
+        .value()
+        .map(|value| Sha256::digest(value).into());
+    let witness = PublicationEquivalenceWitness {
+        key_digest: Sha256::digest(mutation.key()).into(),
+        value_digest,
+        candidate_digest,
+    };
+    Ok(PublicationFreezeMutation {
+        table_id: identity.table_id,
+        sequence,
+        mutation_id: mutation.id(),
+        table: mutation.table().to_owned(),
+        logical_key: mutation.key().to_vec(),
+        state,
+        schema_fingerprint: identity.schema_fingerprint,
+        row_encoding_identity: PublicationRowEncoding::CompactOvb1,
+        value_encoding_identity: PublicationValueEncoding::Ovb1,
+        candidate_generation,
+        equivalence_witness: witness,
+    })
+}
+
+fn publication_mutation_state(mutation: &TableMutation) -> PublicationMutationState {
+    match mutation.value() {
+        Some(value) => PublicationMutationState::Replacement {
+            value: value.to_vec(),
+        },
+        None => PublicationMutationState::Deletion,
+    }
+}
+
+fn publication_candidate_digest(
+    generation: u64,
+    mutations: &[(u64, TableMutation)],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ORNA-COMPACT-CANDIDATE-1\0");
+    hasher.update(generation.to_be_bytes());
+    for (sequence, mutation) in mutations {
+        hasher.update(sequence.to_be_bytes());
+        hasher.update((mutation.key().len() as u64).to_be_bytes());
+        hasher.update(mutation.key());
+        match mutation.value() {
+            Some(value) => {
+                hasher.update([1]);
+                hasher.update((value.len() as u64).to_be_bytes());
+                hasher.update(value);
+            }
+            None => {
+                hasher.update([2]);
+                hasher.update(0_u64.to_be_bytes());
+            }
+        }
+    }
+    hasher.finalize().into()
 }
 
 async fn current_writer_lease_tx(
