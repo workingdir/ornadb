@@ -3995,6 +3995,30 @@ impl Context<'_, '_> {
                 Value::Option(Some(Box::new(Value::Float(value))))
             }));
         }
+        if !values.is_empty() && values.iter().all(|value| matches!(value, Value::Decimal(_))) {
+            let mut candidate = None;
+            for value in values {
+                let replace = match candidate.as_ref() {
+                    None => true,
+                    Some(current) => {
+                        let ordering = compare_values(value, current)?;
+                        if name == "min" {
+                            ordering.is_lt()
+                        } else {
+                            ordering.is_gt()
+                        }
+                    }
+                };
+                if replace {
+                    // Strict comparison retains the first equal Decimal,
+                    // including values that differ only by representational scale.
+                    candidate = Some(value.clone());
+                }
+            }
+            return Ok(candidate.map_or(Value::Null, |value| {
+                Value::Option(Some(Box::new(value)))
+            }));
+        }
         let temporal_kind = values.first().and_then(range_endpoint_kind);
         if matches!(temporal_kind, Some("Date" | "Instant" | "Duration"))
             && values

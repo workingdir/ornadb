@@ -1,6 +1,10 @@
-use orna_conformance_v1::{SourceUnit, StageOutcome, TransactionalEvaluator};
+use std::collections::BTreeMap;
+
+use orna_conformance_v1::{
+    BoundedEvaluator, RuntimeEvaluator, SourceUnit, StageOutcome, TransactionalEvaluator,
+};
 use orna_evaluator_v1::Limits;
-use orna_foundation_v1::Value;
+use orna_foundation_v1::{OvbRaw, Value};
 
 fn source(body: &str) -> SourceUnit {
     SourceUnit {
@@ -32,7 +36,36 @@ fn decimal_source(body: &str) -> SourceUnit {
         ),
     }
 }
+fn decimal_extrema_source(body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "relation-decimal-extrema".into(),
+        source_id: "relation-decimal-extrema.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            r#"
+                pub table Reading(id: Int) {{ value: Decimal, }}
+                fn minimum(): Decimal? = Reading | map(reading => reading.value) | min();
+                fn maximum(): Decimal? = Reading | map(reading => reading.value) | max();
+                fn parent() {{ {body} }}
+            "#
+        ),
+    }
+}
 
+fn finite_decimal_extrema_source() -> SourceUnit {
+    SourceUnit {
+        fixture_id: "finite-decimal-extrema".into(),
+        source_id: "finite-decimal-extrema.orna".into(),
+        parse_as: "module_unit".into(),
+        source: r#"
+            fn minimum(): Decimal? = min([1.20, 1.2000, 2.003]);
+            fn maximum(): Decimal? = max([1.20, 2.003, 2.0030]);
+            fn empty_minimum(): Decimal? = min([]);
+            fn empty_maximum(): Decimal? = max([]);
+        "#
+        .into(),
+    }
+}
 
 fn table_assertion_source(assertion: &str, body: &str) -> SourceUnit {
     SourceUnit {
@@ -629,5 +662,118 @@ fn relation_decimal_sum_rejects_too_many_candidate_rows_at_the_limit() {
             None,
             "Decimal row {id} escaped aggregate-limit rollback"
         );
+    }
+}
+
+#[test]
+fn relation_decimal_min_max_use_exact_order_and_preserve_first_equal_candidate() {
+    let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = evaluator.execute_source(&decimal_extrema_source(
+        r#"
+            assert minimum() == null;
+            assert maximum() == null;
+            Reading.insert({ id: 2, value: 2.003 });
+            assert (minimum() ?? 0.000) == 2.0030;
+            assert (maximum() ?? 0.000) == 2.0030;
+            Reading.insert({ id: 1, value: 1.20 });
+            Reading.insert({ id: 3, value: 1.2000 });
+            Reading.insert({ id: 4, value: 2.0030 });
+            assert (minimum() ?? 0.000) == 1.200;
+            assert (maximum() ?? 0.000) == 2.003;
+        "#,
+    ));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    for id in [1, 2, 3, 4] {
+        assert!(
+            evaluator
+                .committed_row("Reading", &Value::int(id.into()))
+                .is_some(),
+            "Decimal extrema row {id} was not published"
+        );
+    }
+}
+
+#[test]
+fn relation_decimal_min_max_roll_back_candidate_rows_after_assertion_failure() {
+    let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = evaluator.execute_source(&decimal_extrema_source(
+        r#"
+            Reading.insert({ id: 2, value: 2.003 });
+            Reading.insert({ id: 1, value: 1.20 });
+            assert (minimum() ?? 0.000) == 1.200;
+            assert (maximum() ?? 0.000) == 2.0030;
+            assert false;
+        "#,
+    ));
+
+    assert!(matches!(
+        &outcome,
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+    ));
+    for id in [1, 2] {
+        assert_eq!(
+            evaluator.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "Decimal extrema row {id} escaped assertion rollback"
+        );
+    }
+}
+
+#[test]
+fn relation_decimal_min_max_reject_too_many_candidate_rows_without_publication() {
+    let limits = Limits {
+        max_collection_items: 2,
+        ..Default::default()
+    };
+    let mut evaluator = TransactionalEvaluator::new("parent", limits);
+    let outcome = evaluator.execute_source(&decimal_extrema_source(
+        r#"
+            Reading.insert({ id: 1, value: 1.0 });
+            Reading.insert({ id: 2, value: 2.0 });
+            Reading.insert({ id: 3, value: 3.0 });
+            minimum();
+        "#,
+    ));
+
+    assert!(matches!(
+        &outcome,
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+    ));
+    for id in [1, 2, 3] {
+        assert_eq!(
+            evaluator.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "Decimal extrema row {id} escaped aggregate-limit rollback"
+        );
+    }
+}
+
+#[test]
+fn finite_list_decimal_min_max_execute_from_source_with_exact_and_empty_results() {
+    let mut evaluator = BoundedEvaluator::new(Limits::default());
+    let unit = finite_decimal_extrema_source();
+    assert!(matches!(evaluator.evaluate(&unit), StageOutcome::Passed));
+
+    let expected_min = Value::option(Some(
+        Value::decimal(12.into(), (-1).into()).expect("canonical Decimal minimum"),
+    ))
+    .expect("canonical minimum option");
+    let expected_max = Value::option(Some(
+        Value::decimal(2003.into(), (-3).into()).expect("canonical Decimal maximum"),
+    ))
+    .expect("canonical maximum option");
+    let empty = Value::new(OvbRaw::Null).expect("canonical empty aggregate result");
+
+    for (function, expected) in [
+        ("minimum", expected_min),
+        ("maximum", expected_max),
+        ("empty_minimum", empty.clone()),
+        ("empty_maximum", empty),
+    ] {
+        let actual = evaluator
+            .invoke_value_with(function, &BTreeMap::new())
+            .unwrap_or_else(|diagnostic| panic!("{function} failed: {diagnostic:?}"));
+        assert_eq!(actual, expected, "{function} returned an unexpected Decimal extrema");
     }
 }

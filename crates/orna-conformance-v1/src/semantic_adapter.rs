@@ -4956,11 +4956,12 @@ impl TableEffectHandler<'_, '_> {
             if !self.key_fields.contains_key(table)
                 || !matches!(operation, "min" | "max" | "sum")
                 || !matches!(kind, "integer" | "float" | "decimal")
-                || matches!(kind, "float" | "decimal") && operation != "sum"
+                || kind == "float" && operation != "sum"
             {
                 return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
             }
             let mut integer_extreme = None;
+            let mut decimal_extreme = None;
             let mut integer_total = BigInt::ZERO;
             let mut float_total = None;
             let mut decimal_total = Value::decimal(BigInt::ZERO, BigInt::ZERO)
@@ -5024,6 +5025,24 @@ impl TableEffectHandler<'_, '_> {
                         float_total = Some(float_total.map_or(value, |total: f64| total + value));
                     }
                     OvbRaw::Tag(60000, _) if kind == "decimal" => {
+                        if operation != "sum" {
+                            let replace = decimal_extreme.as_ref().is_none_or(|current: &Value| {
+                                let (
+                                    OvbRaw::Tag(60000, left),
+                                    OvbRaw::Tag(60000, right),
+                                ) = (value.raw(), current.raw())
+                                else {
+                                    unreachable!("validated Decimal extrema retain Decimal tags");
+                                };
+                                let ordering = decimal_key_cmp(left, right);
+                                (operation == "min" && ordering == Ordering::Less)
+                                    || (operation == "max" && ordering == Ordering::Greater)
+                            });
+                            if replace {
+                                decimal_extreme = Some(value.clone());
+                            }
+                            continue;
+                        }
                         let mut environment = Environment::new();
                         environment.insert("left".into(), decimal_total.clone());
                         environment.insert("right".into(), value);
@@ -5053,16 +5072,21 @@ impl TableEffectHandler<'_, '_> {
                 ))),
                 "sum" if kind == "decimal" => Ok(Some(decimal_total)),
                 "sum" => Ok(Some(Value::int(integer_total))),
-                "min" | "max" => match integer_extreme {
-                    Some(value) => Value::option(Some(Value::int(value)))
-                        .map(Some)
-                        .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ARGUMENT")),
-                    None => {
-                        Ok(Some(Value::new(OvbRaw::Null).map_err(|_| {
+                "min" | "max" => {
+                    let extreme = match kind {
+                        "integer" => integer_extreme.map(Value::int),
+                        "decimal" => decimal_extreme,
+                        _ => None,
+                    };
+                    match extreme {
+                        Some(value) => Value::option(Some(value))
+                            .map(Some)
+                            .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ARGUMENT")),
+                        None => Ok(Some(Value::new(OvbRaw::Null).map_err(|_| {
                             transaction_error("ORNA-EVAL-TABLE-ARGUMENT")
-                        })?))
+                        })?)),
                     }
-                },
+                }
                 _ => unreachable!("aggregate operation was checked above"),
             };
         }
@@ -5974,9 +5998,9 @@ fn applicable_module_assertions(
 /// `Table | count` / `Table | count()` form becomes `Table.count()`. All read
 /// the active candidate relation; other relation operators stay unsupported
 /// rather than being materialized by this seam. Aggregate lowering is
-/// deliberately shape-limited: the effect handler admits Int `min`/`max`/`sum`
-/// and Float `sum`, while Decimal, Money, affine, and other unsupported values
-/// fail closed.
+/// deliberately shape-limited: the effect handler admits Int and Decimal
+/// `min`/`max`/`sum` and Float `sum`, while Money, affine, and other
+/// unsupported values fail closed.
 /// Internal forms use a ReplBinding AST marker which ordinary source cannot
 /// spell, rather than an undocumented table member.
 fn lower_relation_bindings(
@@ -6519,7 +6543,7 @@ fn relation_aggregate(
             .is_some_and(|fields| fields.contains(field))
     {
         "float"
-    } else if operation == "sum" && float_fields.contains_decimal(table, field) {
+    } else if float_fields.contains_decimal(table, field) {
         "decimal"
     } else {
         "integer"
