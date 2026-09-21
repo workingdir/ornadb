@@ -33,7 +33,10 @@ mod repl;
 
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use cancellation::CancellationToken;
-use relation::{RelationLastState, RelationPlan, RelationStage, RelationWindowState};
+use relation::{
+    BucketBySpec, BucketPeriod, RelationBucket, RelationBucketError, RelationBucketState,
+    RelationLastState, RelationPlan, RelationStage, RelationWindowState,
+};
 pub use timezone::{
     Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError,
     TIMEZONE_DATASET_VERSION, ZonedLocalDateTime, resolve_time_zone,
@@ -1130,6 +1133,8 @@ enum Value {
         seconds: BigInt,
         nanosecond: u32,
     },
+    /// Calendar periods remain distinct from elapsed durations.
+    Period { days: BigInt },
     Error(EvaluationError),
     Range {
         lower: Option<Box<Value>>,
@@ -1372,7 +1377,9 @@ impl Value {
             Self::Function { .. } | Self::Closure(_) => {
                 return Err(error("ORNA-EVAL-UNSUPPORTED"));
             }
-            Self::Relation(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+            Self::Relation(_) | Self::Period { .. } => {
+                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+            }
             // Error values are only available to the handling side of `|?`.
             // They must not cross the successful canonical-value boundary,
             // but a containing value must preserve the original failure while
@@ -1907,6 +1914,29 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-FIELD")),
         }
     }
+    fn numeric_postfix(&self, value: BigInt, name: &str) -> Result<Value, EvaluationError> {
+        let unit = name.rsplit('.').next().unwrap_or(name);
+        match unit {
+            "day" | "days" => Ok(Value::Period { days: value }),
+            "hour" | "hours" => Ok(Value::Duration {
+                seconds: value
+                    .checked_mul(&BigInt::from(3_600u32))
+                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?,
+                nanosecond: 0,
+            }),
+            "minute" | "minutes" | "min" => Ok(Value::Duration {
+                seconds: value
+                    .checked_mul(&BigInt::from(60u32))
+                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?,
+                nanosecond: 0,
+            }),
+            "second" | "seconds" | "s" => Ok(Value::Duration {
+                seconds: value,
+                nanosecond: 0,
+            }),
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
+    }
     fn integer(&self, value: BigInt) -> Result<BigInt, EvaluationError> {
         if value.to_str_radix(10).len() > self.limits.max_integer_digits {
             Err(error("ORNA-EVAL-LIMIT"))
@@ -2052,18 +2082,22 @@ impl Context<'_, '_> {
                 }
                 self.index(base, index)
             }
-            Expr::Field { base, name, .. } => match self.evaluate(base, scope, depth + 1)? {
-                Value::Record(fields) => fields
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| error("ORNA-EVAL-FIELD")),
-                Value::NominalRecord { type_id, fields } => {
-                    self.nominal_field(&type_id, &fields, name, scope)
+            Expr::Field { base, name, .. } => {
+                let base = self.evaluate(base, scope, depth + 1)?;
+                match base {
+                    Value::Record(fields) => fields
+                        .get(name)
+                        .cloned()
+                        .ok_or_else(|| error("ORNA-EVAL-FIELD")),
+                    Value::NominalRecord { type_id, fields } => {
+                        self.nominal_field(&type_id, &fields, name, scope)
+                    }
+                    Value::Error(failure) => self.error_field(&failure, name, depth + 1),
+                    Value::Int(value) => self.numeric_postfix(value, name),
+                    _ if self.transfer.is_some() => Ok(Value::Null),
+                    _ => Err(error("ORNA-EVAL-TYPE")),
                 }
-                Value::Error(failure) => self.error_field(&failure, name, depth + 1),
-                _ if self.transfer.is_some() => Ok(Value::Null),
-                _ => Err(error("ORNA-EVAL-TYPE")),
-            },
+            }
             Expr::Control {
                 kind: ControlKind::If,
                 condition: Some(condition),
@@ -2976,6 +3010,11 @@ impl Context<'_, '_> {
                     plan = plan.with_stage(RelationStage::SortBy(ordered[1].clone()));
                     Ok(Value::Relation(plan))
                 }
+                "bucket_by" => {
+                    let spec = bucket_by_spec(&ordered[1], ordered.get(2))?;
+                    plan = plan.with_stage(RelationStage::BucketBy(spec));
+                    Ok(Value::Relation(plan))
+                }
                 "window" => {
                     let size = relation_window_argument(&ordered[1])?;
                     let step = ordered
@@ -3015,6 +3054,197 @@ impl Context<'_, '_> {
         })())
     }
 
+    fn for_each_bucket_group(
+        &mut self,
+        plan: &RelationPlan,
+        bucket_index: usize,
+        depth: usize,
+        mut visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
+    ) -> Result<(), EvaluationError> {
+        self.for_each_bucket_group_inner(plan, bucket_index, depth, &mut visit)
+    }
+
+    fn for_each_bucket_group_inner(
+        &mut self,
+        plan: &RelationPlan,
+        bucket_index: usize,
+        depth: usize,
+        visit: &mut dyn FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
+    ) -> Result<(), EvaluationError> {
+        let RelationStage::BucketBy(spec) = &plan.stages[bucket_index] else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        let mut state = RelationBucketState::try_new(spec.clone()).map_err(bucket_error)?;
+        let prefix = RelationPlan {
+            source: plan.source.clone(),
+            stages: plan.stages[..bucket_index].to_vec(),
+        };
+        let suffix = &plan.stages[bucket_index + 1..];
+        if let Some(sort_pos) = suffix
+            .iter()
+            .position(|stage| matches!(stage, RelationStage::SortBy(_)))
+        {
+            let RelationStage::SortBy(key) = &suffix[sort_pos] else {
+                unreachable!("sort stage index");
+            };
+            let group_plan = RelationPlan {
+                source: plan.source.clone(),
+                stages: plan.stages[..bucket_index + 1 + sort_pos].to_vec(),
+            };
+            let mut groups = Vec::new();
+            let mut collect = |context: &mut Self, value: Value| {
+                groups.push(value);
+                context.items(groups.len())?;
+                Ok(true)
+            };
+            self.for_each_bucket_group_inner(&group_plan, bucket_index, depth, &mut collect)?;
+            let Value::List(sorted) =
+                self.collection("sort_by", vec![Value::List(groups), key.clone()], depth)?
+            else {
+                unreachable!("sort_by returns a list");
+            };
+            let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
+            let mut pair_previous = vec![None; plan.stages.len()];
+            let mut window_states = (0..plan.stages.len())
+                .map(|_| None)
+                .collect::<Vec<Option<RelationWindowState>>>();
+            return self.for_each_buffered_relation(
+                sorted,
+                &suffix[sort_pos + 1..],
+                bucket_index + sort_pos + 2,
+                depth,
+                &mut distinct_seen,
+                &mut pair_previous,
+                &mut window_states,
+                visit,
+            );
+        }
+        let mut counters = vec![0usize; plan.stages.len()];
+        let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
+        let mut pair_previous = vec![None; plan.stages.len()];
+        let mut window_states = (0..plan.stages.len())
+            .map(|_| None)
+            .collect::<Vec<Option<RelationWindowState>>>();
+        let mut emit = |context: &mut Self, bucket: RelationBucket| -> Result<bool, EvaluationError> {
+            let rows = context.apply_relation_stages(
+                Value::List(bucket.values),
+                suffix,
+                &mut counters,
+                &mut distinct_seen,
+                &mut pair_previous,
+                &mut window_states,
+                bucket_index + 1,
+                depth + 1,
+            )?;
+            for row in rows {
+                match row {
+                    RelationRow::Skip => {}
+                    RelationRow::End => return Ok(false),
+                    RelationRow::Yield(value) => {
+                        if !visit(context, value)? {
+                            return Ok(false);
+                        }
+                    }
+                }
+            }
+            Ok(true)
+        };
+        let mut ended = false;
+        self.for_each_sorted_relation(&prefix, depth, |context, value| {
+            let flushed = state.push(value).map_err(bucket_error)?;
+            if let Some(bucket) = flushed {
+                if !emit(context, bucket)? {
+                    ended = true;
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })?;
+        if !ended {
+            if let Some(bucket) = state.finish() {
+                emit(self, bucket)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn observe_bucket_relation(
+        &mut self,
+        plan: &RelationPlan,
+        bucket_index: usize,
+        operation: &str,
+        arguments: &[Value],
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        match operation {
+            "count" => {
+                let mut count = 0usize;
+                self.for_each_bucket_group(plan, bucket_index, depth, |context, _| {
+                    count = count.checked_add(1).ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                    context.items(count)?;
+                    Ok(true)
+                })?;
+                Ok(Value::Int(BigInt::from(count)))
+            }
+            "first" => {
+                let mut first = None;
+                self.for_each_bucket_group(plan, bucket_index, depth, |_, value| {
+                    first = Some(value);
+                    Ok(false)
+                })?;
+                Ok(Value::Option(first.map(Box::new)))
+            }
+            "last" => {
+                let mut state = RelationLastState::new();
+                self.for_each_bucket_group(plan, bucket_index, depth, |_, value| {
+                    state.push(value);
+                    Ok(true)
+                })?;
+                Ok(Value::Option(state.finish().map(Box::new)))
+            }
+            "one" => {
+                let mut found = None;
+                self.for_each_bucket_group(plan, bucket_index, depth, |_, value| {
+                    if found.is_some() {
+                        return Err(error("ORNA-EVAL-RELATION-ONE-MULTIPLE"));
+                    }
+                    found = Some(value);
+                    Ok(true)
+                })?;
+                found.ok_or_else(|| error("ORNA-EVAL-RELATION-ONE-ZERO"))
+            }
+            "sum" | "min" | "max" | "window" => {
+                let mut values = Vec::new();
+                self.for_each_bucket_group(plan, bucket_index, depth, |context, value| {
+                    values.push(value);
+                    context.items(values.len())?;
+                    Ok(true)
+                })?;
+                self.observe_list_relation(operation, values, arguments, depth)
+            }
+            "every" | "exists" => {
+                let predicate = arguments.first().ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
+                let want_exists = operation == "exists";
+                let mut result = !want_exists;
+                self.for_each_bucket_group(plan, bucket_index, depth, |context, value| {
+                    context.step()?;
+                    let Value::Bool(value) =
+                        context.invoke_predicate(predicate, value, depth + 1)?
+                    else {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    };
+                    if value == want_exists {
+                        result = value;
+                        return Ok(false);
+                    }
+                    Ok(true)
+                })?;
+                Ok(Value::Bool(result))
+            }
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+
     fn observe_relation(
         &mut self,
         plan: &RelationPlan,
@@ -3022,6 +3252,13 @@ impl Context<'_, '_> {
         arguments: &[Value],
         depth: usize,
     ) -> Result<Value, EvaluationError> {
+        if let Some(bucket_index) = plan
+            .stages
+            .iter()
+            .position(|stage| matches!(stage, RelationStage::BucketBy(_)))
+        {
+            return self.observe_bucket_relation(plan, bucket_index, operation, arguments, depth);
+        }
         if plan
             .stages
             .iter()
@@ -3360,6 +3597,7 @@ impl Context<'_, '_> {
                     }
                     return Ok(rows);
                 }
+                RelationStage::BucketBy(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
                 RelationStage::Distinct => {
                     if value.contains_float() {
                         return Err(error("ORNA-EVAL-UNSUPPORTED"));
@@ -5805,6 +6043,7 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
             | "map"
             | "flat_map"
             | "sort_by"
+            | "bucket_by"
             | "rank"
             | "filter"
             | "distinct"
@@ -5870,6 +6109,11 @@ fn relation_named_arguments(
         "filter" => &["rows", "predicate"],
         "map" | "flat_map" => &["rows", "transform"],
         "sort_by" => &["rows", "key"],
+        "bucket_by" => match values.len() {
+            2 => &["rows", "period"],
+            3 => &["rows", "period", "zone"],
+            _ => return Err(error("ORNA-EVAL-ARGUMENT")),
+        },
         "distinct" | "pairs" => &["rows"],
         "take" | "drop" => &["rows", "count"],
         "window" => match values.len() {
@@ -5919,6 +6163,48 @@ fn relation_named_arguments(
         .into_iter()
         .map(|value| value.ok_or_else(|| error("ORNA-EVAL-ARGUMENT")))
         .collect()
+}
+fn bucket_by_spec(period: &Value, zone: Option<&Value>) -> Result<BucketBySpec, EvaluationError> {
+    let zone = match zone {
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => return Err(error("ORNA-EVAL-TYPE")),
+        None => None,
+    };
+    match period {
+        Value::Duration {
+            seconds,
+            nanosecond,
+        } => Ok(BucketBySpec {
+            period: BucketPeriod::Elapsed {
+                seconds: seconds.clone(),
+                nanosecond: *nanosecond,
+            },
+            zone,
+        }),
+        Value::Period { days } => {
+            let days = days.to_u32().ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+            if days == 0 {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+            Ok(BucketBySpec {
+                period: BucketPeriod::CalendarDays { days },
+                zone,
+            })
+        }
+        _ => Err(error("ORNA-EVAL-TYPE")),
+    }
+}
+fn bucket_error(failure: RelationBucketError) -> EvaluationError {
+    match failure {
+        RelationBucketError::TypeMismatch => error("ORNA-EVAL-TYPE"),
+        RelationBucketError::InvalidPeriod
+        | RelationBucketError::MissingZone
+        | RelationBucketError::OutOfOrder
+        | RelationBucketError::BoundaryOverflow
+        | RelationBucketError::AmbiguousBoundary
+        | RelationBucketError::NonexistentBoundary
+        | RelationBucketError::TimeZone(_) => error("ORNA-EVAL-VALUE"),
+    }
 }
 
 fn relation_window_argument(value: &Value) -> Result<usize, EvaluationError> {

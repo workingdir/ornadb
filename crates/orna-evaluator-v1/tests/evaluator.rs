@@ -9154,3 +9154,376 @@ fn uuid7_rejects_arguments_and_preserves_function_shadowing() {
     );
     assert_eq!(effects.calls, 0);
 }
+fn relation_function_with_environment(body: Expr, environment: Environment) -> Functions {
+    Functions::from([(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body,
+            environment,
+        },
+    )])
+}
+
+fn invoke_relation_with_environment<E: EffectHandler>(
+    body: Expr,
+    environment: &Environment,
+    effects: &mut E,
+    limits: Limits,
+) -> Result<Value, EvaluationError> {
+    let functions = relation_function_with_environment(body, environment.clone());
+    invoke_named_with_effects("run", &functions, &Environment::new(), limits, effects)
+}
+
+fn relation_bucket_by(
+    input: Expr,
+    period: Expr,
+    zone: Option<Expr>,
+) -> Expr {
+    let span = relation_span();
+    let mut arguments = vec![
+        relation_argument(input, &span),
+        relation_argument(period, &span),
+    ];
+    if let Some(zone) = zone {
+        arguments.push(orna_syntax_v1::Argument {
+            name: Some("zone".into()),
+            value: zone,
+            span: span.clone(),
+        });
+    }
+    Expr::Call {
+        callee: Box::new(Expr::Name {
+            text: "bucket_by".into(),
+            span: span.clone(),
+        }),
+        arguments,
+        span,
+    }
+}
+
+fn relation_bucket_by_pipeline(
+    input: Expr,
+    period: Expr,
+    zone: Option<Expr>,
+) -> Expr {
+    let span = relation_span();
+    let mut arguments = vec![relation_argument(period, &span)];
+    if let Some(zone) = zone {
+        arguments.push(orna_syntax_v1::Argument {
+            name: Some("zone".into()),
+            value: zone,
+            span: span.clone(),
+        });
+    }
+    Expr::Binary {
+        lhs: Box::new(input),
+        op: "|".into(),
+        rhs: Box::new(Expr::Call {
+            callee: Box::new(Expr::Name {
+                text: "bucket_by".into(),
+                span: span.clone(),
+            }),
+            arguments,
+            span: span.clone(),
+        }),
+        span,
+    }
+}
+
+fn relation_bucket_by_named(
+    input: Expr,
+    period: Expr,
+    zone: Option<Expr>,
+) -> Expr {
+    let span = relation_span();
+    let mut arguments = vec![
+        orna_syntax_v1::Argument {
+            name: Some("rows".into()),
+            value: input,
+            span: span.clone(),
+        },
+        orna_syntax_v1::Argument {
+            name: Some("period".into()),
+            value: period,
+            span: span.clone(),
+        },
+    ];
+    if let Some(zone) = zone {
+        arguments.push(orna_syntax_v1::Argument {
+            name: Some("zone".into()),
+            value: zone,
+            span: span.clone(),
+        });
+    }
+    Expr::Call {
+        callee: Box::new(Expr::Name {
+            text: "bucket_by".into(),
+            span: span.clone(),
+        }),
+        arguments,
+        span,
+    }
+}
+
+fn bucket_instant(seconds: i64) -> Value {
+    Value::new(Raw::Tag(
+        60002,
+        Box::new(Raw::Array(vec![
+            Raw::Int(seconds.into()),
+            Raw::Int(0.into()),
+        ])),
+    ))
+    .unwrap()
+}
+
+fn bucket_group(rows: &[Value]) -> Value {
+    Value::new(Raw::Array(
+        rows.iter().map(|row| row.raw().clone()).collect(),
+    ))
+    .unwrap()
+}
+
+#[test]
+fn bucket_by_elapsed_utc_preserves_group_and_row_order_for_all_call_forms() {
+    let period = duration(86_400, 0);
+    let environment = Environment::from([("period".into(), period)]);
+    let rows = vec![
+        bucket_instant(1_704_067_200 + 43_200),
+        bucket_instant(1_704_067_200 + 3_600),
+        bucket_instant(1_704_067_200 + 86_400 + 3_600),
+    ];
+    let expected = Value::option(Some(bucket_group(&rows[..2]))).unwrap();
+    let source = relation_source_expression("Reading");
+    let cases = [
+        relation_bucket_by(source.clone(), parsed_expression("period"), None),
+        relation_bucket_by_pipeline(source.clone(), parsed_expression("period"), None),
+        relation_bucket_by_named(source, parsed_expression("period"), None),
+    ];
+    for body in cases {
+        let mut effects = DistinctRelationEffects::new(rows.clone());
+        assert_eq!(
+            invoke_relation_with_environment(
+                relation_terminal(body, "first"),
+                &environment,
+                &mut effects,
+                Limits::default(),
+            )
+            .unwrap(),
+            expected
+        );
+        assert_eq!(
+            effects.cursors.len(),
+            3,
+            "first bucket must read only through the first row of the next bucket"
+        );
+    }
+}
+
+#[test]
+fn bucket_by_preserves_filter_map_flat_map_window_and_sort_suffixes() {
+    let period = duration(86_400, 0);
+    let environment = Environment::from([("period".into(), period)]);
+    let rows = vec![
+        bucket_instant(1_704_110_400 + 3_600),
+        bucket_instant(1_704_110_400 + 7_200),
+        bucket_instant(1_704_110_400 + 86_400 + 3_600),
+    ];
+    let source = relation_source_expression("Reading");
+    let bucket = || {
+        relation_bucket_by(source.clone(), parsed_expression("period"), None)
+    };
+
+    let mapped = relation_stage(bucket(), "map", vec![parsed_expression("group => count(group)")]);
+    let mut effects = DistinctRelationEffects::new(rows.clone());
+    assert_eq!(
+        invoke_relation_with_environment(
+            relation_terminal(mapped, "first"),
+            &environment,
+            &mut effects,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::option(Some(Value::int(2.into()))).unwrap()
+    );
+
+    let filtered = relation_stage(
+        bucket(),
+        "filter",
+        vec![parsed_expression("group => count(group) == 2")],
+    );
+    let mut effects = DistinctRelationEffects::new(rows.clone());
+    assert_eq!(
+        invoke_relation_with_environment(
+            relation_terminal(filtered, "first"),
+            &environment,
+            &mut effects,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::option(Some(bucket_group(&rows[..2]))).unwrap()
+    );
+
+    let flattened = relation_stage(bucket(), "flat_map", vec![parsed_expression("group => group")]);
+    let mut effects = DistinctRelationEffects::new(rows.clone());
+    assert_eq!(
+        invoke_relation_with_environment(
+            relation_terminal(flattened, "first"),
+            &environment,
+            &mut effects,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::option(Some(rows[0].clone())).unwrap()
+    );
+
+    let windowed = relation_stage(bucket(), "window", vec![relation_integer(1)]);
+    let mut effects = DistinctRelationEffects::new(rows.clone());
+    assert_eq!(
+        invoke_relation_with_environment(
+            relation_terminal(windowed, "first"),
+            &environment,
+            &mut effects,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::option(Some(Value::new(Raw::Array(vec![
+            bucket_group(&rows[..2]).raw().clone(),
+        ]))
+        .unwrap()))
+        .unwrap()
+    );
+
+    let sorted = relation_stage(bucket(), "sort_by", vec![parsed_expression("group => count(group)")]);
+    let mut effects = DistinctRelationEffects::new(rows);
+    assert_eq!(
+        invoke_relation_with_environment(
+            relation_terminal(sorted, "first"),
+            &environment,
+            &mut effects,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::option(Some(bucket_group(&[bucket_instant(
+            1_704_110_400 + 86_400 + 3_600,
+        )])))
+        .unwrap()
+    );
+}
+
+#[test]
+fn bucket_by_calendar_utc_groups_by_local_day_not_elapsed_duration() {
+    let environment = Environment::new();
+    let rows = vec![
+        bucket_instant(1_709_164_800 + 23 * 3_600 + 30 * 60),
+        bucket_instant(1_709_164_800 + 86_400 + 30 * 60),
+    ];
+    let body = relation_bucket_by(
+        relation_source_expression("Reading"),
+        parsed_expression("1.day"),
+        Some(parsed_expression("\"UTC\"")),
+    );
+    let mut effects = DistinctRelationEffects::new(rows.clone());
+    assert_eq!(
+        invoke_relation_with_environment(
+            relation_terminal(body, "count"),
+            &environment,
+            &mut effects,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(2.into())
+    );
+}
+
+#[test]
+fn bucket_by_london_calendar_days_cover_23_24_and_25_elapsed_hours() {
+    let environment = Environment::new();
+    let cases = [
+        (
+            vec![
+                bucket_instant(1_711_843_200 + 22 * 3_600 + 30 * 60),
+                bucket_instant(1_711_843_200 + 23 * 3_600 + 30 * 60),
+            ],
+            2,
+        ),
+        (
+            vec![
+                bucket_instant(1_711_756_800 + 23 * 3_600 + 30 * 60),
+                bucket_instant(1_711_843_200 + 30 * 60),
+            ],
+            2,
+        ),
+        (
+            vec![
+                bucket_instant(1_729_987_200 + 23 * 3_600 + 30 * 60),
+                bucket_instant(1_730_077_200 + 30 * 60),
+            ],
+            2,
+        ),
+    ];
+    for (rows, expected_count) in cases {
+        let body = relation_bucket_by(
+            relation_source_expression("Reading"),
+            parsed_expression("1.day"),
+            Some(parsed_expression("\"Europe/London\"")),
+        );
+        let mut effects = DistinctRelationEffects::new(rows);
+        assert_eq!(
+            invoke_relation_with_environment(
+                relation_terminal(body, "count"),
+                &environment,
+                &mut effects,
+                Limits::default(),
+            )
+            .unwrap(),
+            Value::int(expected_count.into())
+        );
+    }
+}
+
+#[test]
+fn bucket_by_empty_input_is_empty_and_first_is_bounded() {
+    let body = relation_bucket_by(
+        relation_source_expression("Reading"),
+        parsed_expression("1.day"),
+        Some(parsed_expression("\"UTC\"")),
+    );
+    let mut effects = DistinctRelationEffects::new(Vec::new());
+    assert_eq!(
+        invoke_relation_with_environment(
+            relation_terminal(body, "count"),
+            &Environment::new(),
+            &mut effects,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(0.into())
+    );
+    assert_eq!(effects.cursors, vec![None]);
+}
+
+#[test]
+fn bucket_by_rejects_invalid_zone_and_period() {
+    for (period, zone, expected) in [
+        ("1.day", "\"Mars/Phobos\"", "ORNA-EVAL-VALUE"),
+        ("42", "\"UTC\"", "ORNA-EVAL-TYPE"),
+    ] {
+        let body = relation_bucket_by(
+            relation_source_expression("Reading"),
+            parsed_expression(period),
+            Some(parsed_expression(zone)),
+        );
+        let mut effects = DistinctRelationEffects::new(vec![bucket_instant(0)]);
+        assert_eq!(
+            code(invoke_relation_with_environment(
+                relation_terminal(body, "count"),
+                &Environment::new(),
+                &mut effects,
+                Limits::default(),
+            )),
+            expected,
+            "{period} / {zone}"
+        );
+    }
+}
