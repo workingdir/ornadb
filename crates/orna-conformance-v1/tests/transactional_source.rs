@@ -414,7 +414,7 @@ fn parsed_relation_windows_reject_dynamic_non_positive_parameters_without_publis
 
     assert!(matches!(
         runtime.execute_source(&unit),
-        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ARGUMENT"
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-VALUE"
     ));
     assert_eq!(runtime.committed_row("Note", &Value::int(1.into())), None);
 }
@@ -439,7 +439,7 @@ fn parsed_relation_windows_reject_dynamic_negative_parameters_without_publish() 
 
     assert!(matches!(
         runtime.execute_source(&unit),
-        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ARGUMENT"
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-VALUE"
     ));
     assert_eq!(runtime.committed_row("Note", &Value::int(1.into())), None);
 }
@@ -565,6 +565,46 @@ fn parsed_relation_filter_and_map_preserve_candidate_values() {
             .is_some()
     );
 }
+#[test]
+fn parsed_map_window_count_preserves_order_before_late_failure_rolls_back() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let unit = SourceUnit {
+        fixture_id: "relation-map-window-rollback".into(),
+        source_id: "relation-map-window-rollback.orna".into(),
+        parse_as: "module_unit".into(),
+        source: r#"
+            pub table Note(id: Int) { value: Int, }
+            fn parent() {
+                Note.insert({ id: 2, value: 20 });
+                Note.insert({ id: 1, value: 10 });
+                Note.insert({ id: 3, value: 30 });
+
+                assert (Note | map(note => note.id) | take(1) | one()) == 1;
+                assert (Note | map(note => note.value)
+                    | window(2, step: 1) | count()) == 2;
+                assert false;
+            }
+        "#
+        .into(),
+    };
+
+    let outcome = runtime.execute_source(&unit);
+    assert!(
+        matches!(
+            outcome,
+            StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+        ),
+        "late assertion should fail after relation observation: {outcome:?}"
+    );
+    for id in [1, 2, 3] {
+        assert_eq!(
+            runtime.committed_row("Note", &Value::int(id.into())),
+            None,
+            "candidate row {id} escaped the failed source activation"
+        );
+    }
+}
+
 
 #[test]
 fn parsed_delete_removes_the_candidate_row() {
