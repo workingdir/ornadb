@@ -8612,3 +8612,440 @@ fn last_relation_rejects_extra_and_unknown_arguments_like_first() {
         "ORNA-EVAL-ARGUMENT"
     );
 }
+
+fn relation_predicate_direct(input: Expr, name: &str, predicate: Expr) -> Expr {
+    let span = relation_span();
+    Expr::Call {
+        callee: Box::new(Expr::Name {
+            text: name.into(),
+            span: span.clone(),
+        }),
+        arguments: vec![
+            relation_argument(input, &span),
+            relation_argument(predicate, &span),
+        ],
+        span,
+    }
+}
+
+fn relation_predicate_pipeline(input: Expr, name: &str, predicate: Expr) -> Expr {
+    relation_stage(input, name, vec![predicate])
+}
+
+fn relation_predicate_named(input: Expr, name: &str, predicate: Expr) -> Expr {
+    let span = relation_span();
+    Expr::Call {
+        callee: Box::new(Expr::Name {
+            text: name.into(),
+            span: span.clone(),
+        }),
+        arguments: vec![
+            orna_syntax_v1::Argument {
+                name: Some("predicate".into()),
+                value: predicate,
+                span: span.clone(),
+            },
+            orna_syntax_v1::Argument {
+                name: Some("rows".into()),
+                value: input,
+                span: span.clone(),
+            },
+        ],
+        span,
+    }
+}
+
+#[test]
+fn relation_every_and_exists_accept_direct_pipeline_and_named_rows_forms() {
+    let true_value = Value::new(Raw::Bool(true)).unwrap();
+    let false_value = Value::new(Raw::Bool(false)).unwrap();
+    for (name, predicate, expected) in [
+        (
+            "every",
+            "value => value > 0",
+            true_value.clone(),
+        ),
+        (
+            "exists",
+            "value => value == 2",
+            true_value.clone(),
+        ),
+    ] {
+        let predicate = parsed_expression(predicate);
+        let cases = [
+            relation_predicate_direct(
+                relation_source_expression("Note"),
+                name,
+                predicate.clone(),
+            ),
+            relation_predicate_pipeline(
+                relation_source_expression("Note"),
+                name,
+                predicate.clone(),
+            ),
+            relation_predicate_named(
+                relation_source_expression("Note"),
+                name,
+                predicate,
+            ),
+        ];
+        for body in cases {
+            let mut effects = DistinctRelationEffects::new(vec![
+                Value::int(1.into()),
+                Value::int(2.into()),
+                Value::int(3.into()),
+            ]);
+            assert_eq!(
+                invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+                expected,
+                "{name} relation call form"
+            );
+        }
+    }
+
+    for (name, expected) in [("every", true_value), ("exists", false_value)] {
+        let predicate = parsed_expression("value => value > 0");
+        let cases = [
+            relation_predicate_direct(
+                relation_source_expression("Empty"),
+                name,
+                predicate.clone(),
+            ),
+            relation_predicate_pipeline(
+                relation_source_expression("Empty"),
+                name,
+                predicate.clone(),
+            ),
+            relation_predicate_named(relation_source_expression("Empty"), name, predicate),
+        ];
+        for body in cases {
+            let mut effects = DistinctRelationEffects::new(Vec::new());
+            assert_eq!(
+                invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+                expected,
+                "{name} empty relation identity"
+            );
+        }
+    }
+}
+
+#[test]
+fn relation_every_and_exists_short_circuit_before_later_pages() {
+    let cases = [
+        (
+            "every",
+            "value => if value == 1 { false } else { 1 / 0 == 0 }",
+            Value::new(Raw::Bool(false)).unwrap(),
+        ),
+        (
+            "exists",
+            "value => if value == 1 { true } else { 1 / 0 == 0 }",
+            Value::new(Raw::Bool(true)).unwrap(),
+        ),
+    ];
+    for (name, predicate, expected) in cases {
+        let body = relation_predicate_direct(
+            relation_source_expression("Note"),
+            name,
+            parsed_expression(predicate),
+        );
+        let mut effects = DistinctRelationEffects::new(vec![
+            Value::int(1.into()),
+            Value::int(2.into()),
+            Value::int(3.into()),
+        ]);
+        assert_eq!(
+            invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+            expected,
+            "{name} should stop after its decisive predicate"
+        );
+        assert_eq!(
+            effects.cursors,
+            vec![None],
+            "{name} must not eagerly scan later relation pages"
+        );
+    }
+}
+
+#[test]
+fn relation_sum_min_and_max_accept_all_argument_forms_and_supported_numeric_types() {
+    let integer_rows = vec![
+        Value::int(3.into()),
+        Value::int((-1).into()),
+        Value::int(2.into()),
+    ];
+    for (name, expected) in [
+        ("sum", Value::int(4.into())),
+        (
+            "min",
+            Value::option(Some(Value::int((-1).into()))).expect("option is canonical"),
+        ),
+        (
+            "max",
+            Value::option(Some(Value::int(3.into()))).expect("option is canonical"),
+        ),
+    ] {
+        let cases = [
+            relation_direct_stage(relation_source_expression("Note"), name),
+            relation_terminal(relation_source_expression("Note"), name),
+            relation_named_stage(relation_source_expression("Note"), name, "rows"),
+        ];
+        for body in cases {
+            let mut effects = DistinctRelationEffects::new(integer_rows.clone());
+            assert_eq!(
+                invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+                expected,
+                "{name} relation argument form"
+            );
+        }
+    }
+
+    let typed_cases = [
+        (
+            "sum",
+            vec![
+                evaluate("1.25"),
+                evaluate("2.50"),
+                evaluate("-0.75"),
+            ],
+            evaluate("3.00"),
+        ),
+        (
+            "min",
+            vec![
+                evaluate("1.25"),
+                evaluate("2.50"),
+                evaluate("-0.75"),
+            ],
+            Value::option(Some(evaluate("-0.75"))).expect("option is canonical"),
+        ),
+        (
+            "max",
+            vec![
+                evaluate("1.25"),
+                evaluate("2.50"),
+                evaluate("-0.75"),
+            ],
+            Value::option(Some(evaluate("2.50"))).expect("option is canonical"),
+        ),
+        (
+            "sum",
+            vec![
+                Value::float_bits(1.5f64.to_bits()),
+                Value::float_bits((-2.0f64).to_bits()),
+                Value::float_bits(0.25f64.to_bits()),
+            ],
+            Value::float_bits((-0.25f64).to_bits()),
+        ),
+        (
+            "min",
+            vec![
+                Value::float_bits(1.5f64.to_bits()),
+                Value::float_bits((-2.0f64).to_bits()),
+                Value::float_bits(0.25f64.to_bits()),
+            ],
+            Value::option(Some(Value::float_bits((-2.0f64).to_bits())))
+                .expect("option is canonical"),
+        ),
+        (
+            "max",
+            vec![
+                Value::float_bits(1.5f64.to_bits()),
+                Value::float_bits((-2.0f64).to_bits()),
+                Value::float_bits(0.25f64.to_bits()),
+            ],
+            Value::option(Some(Value::float_bits(1.5f64.to_bits())))
+                .expect("option is canonical"),
+        ),
+    ];
+    for (name, rows, expected) in typed_cases {
+        let body = relation_direct_stage(relation_source_expression("Typed"), name);
+        let mut effects = DistinctRelationEffects::new(rows);
+        assert_eq!(
+            invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+            expected,
+            "{name} typed relation aggregate"
+        );
+    }
+}
+
+#[test]
+fn relation_sum_min_and_max_use_empty_identities_and_preserve_item_bounds() {
+    for (name, expected) in [
+        ("sum", Value::int(0.into())),
+        ("min", Value::new(Raw::Null).unwrap()),
+        ("max", Value::new(Raw::Null).unwrap()),
+    ] {
+        for body in [
+            relation_direct_stage(relation_source_expression("Empty"), name),
+            relation_terminal(relation_source_expression("Empty"), name),
+            relation_named_stage(relation_source_expression("Empty"), name, "rows"),
+        ] {
+            let mut effects = DistinctRelationEffects::new(Vec::new());
+            assert_eq!(
+                invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+                expected,
+                "{name} empty identity"
+            );
+        }
+
+        let body = relation_terminal(relation_source_expression("Note"), name);
+        let mut effects = DistinctRelationEffects::new(vec![
+            Value::int(1.into()),
+            Value::int(2.into()),
+            Value::int(3.into()),
+        ]);
+        assert_eq!(
+            code(invoke_relation(
+                body,
+                &mut effects,
+                Limits {
+                    max_collection_items: 2,
+                    ..Limits::default()
+                },
+            )),
+            "ORNA-EVAL-LIMIT",
+            "{name} must retain relation item bounds"
+        );
+    }
+}
+
+#[test]
+fn relation_aggregates_support_sorted_transformed_suffixes_without_changing_order() {
+    for (name, expected) in [
+        ("sum", Value::int(204.into())),
+        (
+            "min",
+            Value::option(Some(Value::int(10.into()))).expect("option is canonical"),
+        ),
+        (
+            "max",
+            Value::option(Some(Value::int(41.into()))).expect("option is canonical"),
+        ),
+    ] {
+        let source = relation_source_expression("Note");
+        let sorted = relation_stage(
+            source,
+            "sort_by",
+            vec![parsed_expression("value => value")],
+        );
+        let mapped = relation_stage(
+            sorted,
+            "map",
+            vec![parsed_expression("value => value * 10")],
+        );
+        let expanded = relation_stage(
+            mapped,
+            "flat_map",
+            vec![parsed_expression("value => [value, value + 1]")],
+        );
+        let body = relation_terminal(expanded, name);
+        let mut effects = DistinctRelationEffects::new(vec![
+            Value::int(4.into()),
+            Value::int(1.into()),
+            Value::int(3.into()),
+            Value::int(2.into()),
+        ]);
+        assert_eq!(
+            invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+            expected,
+            "{name} sorted transformed suffix"
+        );
+        assert_eq!(
+            effects.cursors.len(),
+            4,
+            "{name} must read each source page exactly once"
+        );
+    }
+}
+
+#[test]
+fn relation_aggregate_calls_reject_invalid_arguments_and_values() {
+    let missing_predicate = relation_terminal(relation_source_expression("Note"), "every");
+    let mut effects = DistinctRelationEffects::new(vec![Value::int(1.into())]);
+    assert_eq!(
+        code(invoke_relation(
+            missing_predicate,
+            &mut effects,
+            Limits::default()
+        )),
+        "ORNA-EVAL-ARGUMENT"
+    );
+
+    let invalid_predicate = relation_predicate_direct(
+        relation_source_expression("Note"),
+        "exists",
+        parsed_expression("value => value"),
+    );
+    let mut effects = DistinctRelationEffects::new(vec![Value::int(1.into())]);
+    assert_eq!(
+        code(invoke_relation(
+            invalid_predicate,
+            &mut effects,
+            Limits::default()
+        )),
+        "ORNA-EVAL-TYPE"
+    );
+
+    let mixed_sum = relation_direct_stage(relation_source_expression("Note"), "sum");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(1.into()),
+        Value::float_bits(2.0f64.to_bits()),
+    ]);
+    assert_eq!(
+        code(invoke_relation(mixed_sum, &mut effects, Limits::default())),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
+
+    let text_min = relation_direct_stage(relation_source_expression("Note"), "min");
+    let mut effects =
+        DistinctRelationEffects::new(vec![Value::new(Raw::Text("x".into())).unwrap()]);
+    assert_eq!(
+        code(invoke_relation(text_min, &mut effects, Limits::default())),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
+
+    let extra = relation_stage(
+        relation_source_expression("Note"),
+        "sum",
+        vec![relation_integer(1)],
+    );
+    let mut effects = DistinctRelationEffects::new(vec![Value::int(1.into())]);
+    assert_eq!(
+        code(invoke_relation(extra, &mut effects, Limits::default())),
+        "ORNA-EVAL-ARGUMENT"
+    );
+
+    let unknown = relation_named_stage(
+        relation_source_expression("Note"),
+        "max",
+        "values",
+    );
+    let mut effects = DistinctRelationEffects::new(vec![Value::int(1.into())]);
+    assert_eq!(
+        code(invoke_relation(unknown, &mut effects, Limits::default())),
+        "ORNA-EVAL-ARGUMENT"
+    );
+}
+
+#[test]
+fn root_sum_and_min_remain_shadowable_by_admitted_functions() {
+    assert_eq!(
+        call_module(
+            "fn sum(value: Int) = value + 100; fn run() = sum(1);",
+            "run()",
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(101.into())
+    );
+    assert_eq!(
+        call_module(
+            "fn min(value: Int) = value + 100; fn run() = min(1);",
+            "run()",
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(101.into())
+    );
+}
