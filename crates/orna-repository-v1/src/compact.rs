@@ -386,6 +386,23 @@ impl CompactManifestEntry {
         self.row_count
     }
 
+    /// Returns the schema fingerprint authenticated by the committed
+    /// segment's manifest entry.
+    pub const fn schema_id(&self) -> [u8; 32] {
+        self.schema
+    }
+
+    /// Returns the canonical physical-column descriptor bytes authenticated
+    /// by the committed segment's manifest entry.
+    pub fn columns(&self) -> &[u8] {
+        &self.columns
+    }
+
+    /// Returns the encoder identity recorded by the committed manifest.
+    pub fn encoder_version(&self) -> &str {
+        &self.encoder_version
+    }
+
     pub fn relative_path(&self) -> &ManagedPath {
         &self.relative_path
     }
@@ -4858,6 +4875,9 @@ mod tests {
         assert_eq!(entry.role(), CompactSegmentRole::Replacement);
         assert_eq!(entry.generation(), 9);
         assert_eq!(entry.row_count(), 37);
+        assert_eq!(entry.schema_id(), [0x42; 32]);
+        assert!(entry.columns().is_empty());
+        assert_eq!(entry.encoder_version(), "test");
     }
 
     #[test]
