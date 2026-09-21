@@ -9,10 +9,11 @@ mod compact;
 mod compact_parquet;
 
 pub use compact::{
-    lower_publication_freeze, CompactExactKeyIndex, CompactExactKeySource, CompactKeyError,
-    CompactKeyIdentity, CompactLogicalKeyError, CompactLogicalReader, CompactLoweringError,
-    CompactOvbProfile, CompactWriterInput, CompactWriterMutation, CompactWriterMutationState,
-    COMPACT_STORAGE_PROFILE, OVB_PROFILE,
+    fold_compact_committed_base, lower_publication_freeze, CompactBaseProjectionError,
+    CompactBaseRow, CompactBaseState, CompactExactKeyIndex, CompactExactKeySource,
+    CompactKeyError, CompactKeyIdentity, CompactLogicalKeyError, CompactLogicalReader,
+    CompactLoweringError, CompactOvbProfile, CompactWriterInput, CompactWriterMutation,
+    CompactWriterMutationState, COMPACT_STORAGE_PROFILE, OVB_PROFILE,
 };
 pub use compact_parquet::{CompactParquetError, CompactParquetKeySource};
 
@@ -25,7 +26,7 @@ use orna_foundation_v1::{CwdCapture, RepositoryGenerationAdapter, RepositoryIden
 use orna_repository_v1::{
     CompactPublicationPlan, CompactPublicationRecovery, GitCommitRef, IndexGeneration,
     ManagedFileChange, ManagedPath, PrivateCommit, PublicationJournal, PublicationJournalEntry,
-    Repository, RepositoryError,
+    Repository, RepositoryError, Uuid,
 };
 use orna_runtime_v1::{
     PublicationCommitId, PublicationFreeze, RuntimeError, RuntimeState, TableMutation,
@@ -552,6 +553,42 @@ impl RuntimePublicationCoordinator {
         repository
             .finish_compact_with_receipt(&receipt)
             .map_err(map_publication_repository_error)
+    }
+
+    /// Validates and consumes the schema-bound committed base and generated
+    /// writer input before repository publication consumes the sealed prefix.
+    pub async fn publish_compact_and_complete_validated(
+        repository: &Repository,
+        runtime: &RuntimeState,
+        profile: &CompactOvbProfile,
+        freeze: &PublicationFreeze,
+        plan: CompactPublicationPlan,
+    ) -> Result<IndexGeneration, Error> {
+        let writer_input = lower_compact_freeze(profile, freeze)?;
+        let table = Uuid::from_bytes(profile.table_id());
+        if plan.manifest().table() != table
+            || plan.manifest().schema() != profile.schema_fingerprint()
+        {
+            return Err(Error::InvalidTransition);
+        }
+        let expected_head = repository
+            .head()
+            .map_err(map_publication_repository_error)?
+            .ok_or(Error::InvalidTransition)?;
+        let projections = repository
+            .read_compact_committed_base(
+                &expected_head,
+                table,
+                profile.schema_fingerprint(),
+                COMPACT_STORAGE_PROFILE,
+                |_entry, projection| Ok(projection.clone()),
+            )
+            .map_err(map_publication_repository_error)?;
+        let base = fold_compact_committed_base(profile, projections.iter())
+            .map_err(|_| Error::InvalidTransition)?;
+        base.consume_writer_input(&writer_input)
+            .map_err(|_| Error::InvalidTransition)?;
+        Self::publish_compact_and_complete(repository, runtime, freeze, plan).await
     }
 
     /// Reads the exact typed prefix named by `freeze`, then prepares its
@@ -1152,6 +1189,17 @@ pub fn capture_runtime<A: RepositoryGenerationAdapter>(
 /// The caller retains responsibility for reading and consuming the frozen range.
 pub const fn runtime_freeze_id(freeze: &orna_runtime_v1::PublicationFreeze) -> [u8; 16] {
     freeze.intent_id
+}
+
+/// Lowers a runtime compact freeze through the schema-bound storage
+/// consumer. Callers must supply the authoritative schema profile; the
+/// lowerer rejects mismatched identity, ordering, witness, and generation
+/// state before any repository publication step.
+pub fn lower_compact_freeze(
+    profile: &CompactOvbProfile,
+    freeze: &PublicationFreeze,
+) -> Result<CompactWriterInput, Error> {
+    lower_publication_freeze(profile, freeze).map_err(|_| Error::InvalidTransition)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
