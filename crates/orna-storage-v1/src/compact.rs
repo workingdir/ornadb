@@ -14,7 +14,9 @@ use std::{
 };
 
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
-use orna_repository_v1::{CompactManifest, CompactManifestEntry, CompactSegmentRole};
+use orna_repository_v1::{
+    CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry, CompactSegmentRole,
+};
 use orna_runtime_v1::{
     PublicationFreeze, PublicationMutationState, PublicationRowEncoding,
     PublicationValueEncoding,
@@ -51,6 +53,163 @@ pub struct CompactWriterInput {
     pub value_encoding_identity: PublicationValueEncoding,
     pub mutations: Vec<CompactWriterMutation>,
     pub candidate_digest: [u8; 32],
+}
+
+/// One complete logical row folded from a verified committed segment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactBaseRow {
+    key: CanonicalValue,
+    value: Option<CanonicalValue>,
+    generation: u64,
+    role: CompactSegmentRole,
+}
+
+impl CompactBaseRow {
+    pub fn key(&self) -> &CanonicalValue {
+        &self.key
+    }
+
+    pub fn value(&self) -> Option<&CanonicalValue> {
+        self.value.as_ref()
+    }
+
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub const fn role(&self) -> CompactSegmentRole {
+        self.role
+    }
+}
+
+/// The schema-bound logical base state consumed before compact publication.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactBaseState {
+    table_id: [u8; 16],
+    schema_fingerprint: [u8; 32],
+    rows: BTreeMap<CompactKeyIdentity, CompactBaseRow>,
+}
+
+impl CompactBaseState {
+    pub const fn table_id(&self) -> [u8; 16] {
+        self.table_id
+    }
+
+    pub const fn schema_fingerprint(&self) -> [u8; 32] {
+        self.schema_fingerprint
+    }
+
+    pub fn rows(&self) -> impl Iterator<Item = &CompactBaseRow> {
+        self.rows.values()
+    }
+
+    /// Consumes the generated writer input at the same schema/generation
+    /// boundary used by the committed base provider.
+    pub fn consume_writer_input(
+        &self,
+        input: &CompactWriterInput,
+    ) -> Result<(), CompactBaseProjectionError> {
+        if input.table_id != self.table_id {
+            return Err(CompactBaseProjectionError::WrongTable);
+        }
+        if input.schema_fingerprint != self.schema_fingerprint {
+            return Err(CompactBaseProjectionError::WrongSchema);
+        }
+        let maximum_generation = self
+            .rows
+            .values()
+            .map(CompactBaseRow::generation)
+            .max()
+            .unwrap_or(0);
+        if input.candidate_generation <= maximum_generation {
+            return Err(CompactBaseProjectionError::StaleGeneration);
+        }
+        Ok(())
+    }
+}
+
+/// Fail-closed errors while projecting and folding committed compact rows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompactBaseProjectionError {
+    Empty,
+    WrongTable,
+    WrongSchema,
+    WrongProfile,
+    DuplicateKeyGeneration,
+    StaleGeneration,
+}
+
+impl fmt::Display for CompactBaseProjectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Empty => "compact committed base contains no segments",
+            Self::WrongTable => "compact committed base has the wrong table",
+            Self::WrongSchema => "compact committed base has the wrong schema",
+            Self::WrongProfile => "compact committed base has the wrong profile",
+            Self::DuplicateKeyGeneration => {
+                "compact committed base repeats a key at one generation"
+            }
+            Self::StaleGeneration => "compact writer generation is not newer than the base",
+        })
+    }
+}
+
+impl std::error::Error for CompactBaseProjectionError {}
+
+/// Folds complete rows from verified committed segments by generation.
+pub fn fold_compact_committed_base<'a, I>(
+    profile: &CompactOvbProfile,
+    projections: I,
+) -> Result<CompactBaseState, CompactBaseProjectionError>
+where
+    I: IntoIterator<Item = &'a CompactCommittedSegmentProjection>,
+{
+    let mut rows: BTreeMap<CompactKeyIdentity, CompactBaseRow> = BTreeMap::new();
+    let mut seen_segment = false;
+    for projection in projections {
+        seen_segment = true;
+        if projection.table_id().as_bytes() != &profile.table_id() {
+            return Err(CompactBaseProjectionError::WrongTable);
+        }
+        if projection.schema_id() != profile.schema_fingerprint() {
+            return Err(CompactBaseProjectionError::WrongSchema);
+        }
+        if projection.profile() != COMPACT_STORAGE_PROFILE {
+            return Err(CompactBaseProjectionError::WrongProfile);
+        }
+        for row in projection.rows() {
+            let key_bytes = row
+                .key()
+                .encode()
+                .map_err(|_| CompactBaseProjectionError::WrongSchema)?;
+            let key = profile
+                .decode_key(&key_bytes)
+                .map_err(|_| CompactBaseProjectionError::WrongSchema)?;
+            let candidate = CompactBaseRow {
+                key: row.key().clone(),
+                value: row.value().cloned(),
+                generation: projection.generation(),
+                role: projection.role(),
+            };
+            if let Some(existing) = rows.get(&key) {
+                if existing.generation == candidate.generation {
+                    return Err(CompactBaseProjectionError::DuplicateKeyGeneration);
+                }
+                if existing.generation > candidate.generation {
+                    continue;
+                }
+            }
+            rows.insert(key, candidate);
+        }
+    }
+    if !seen_segment {
+        return Err(CompactBaseProjectionError::Empty);
+    }
+    Ok(CompactBaseState {
+        table_id: profile.table_id(),
+        schema_fingerprint: profile.schema_fingerprint(),
+        rows,
+    })
 }
 
 /// Fail-closed validation errors at the runtime-to-compact boundary.
@@ -1633,6 +1792,32 @@ mod tests {
             CompactLogicalReader::new(profile)
                 .validate_key_against_index(&scalar_key(43), &index)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn committed_base_consumes_generated_writer_input_identity() {
+        let state = CompactBaseState {
+            table_id: TABLE,
+            schema_fingerprint: [0x41; 32],
+            rows: BTreeMap::new(),
+        };
+        let input = CompactWriterInput {
+            table_id: TABLE,
+            schema_fingerprint: [0x41; 32],
+            candidate_generation: 1,
+            row_encoding_identity: PublicationRowEncoding::CompactOvb1,
+            value_encoding_identity: PublicationValueEncoding::Ovb1,
+            mutations: Vec::new(),
+            candidate_digest: [0x42; 32],
+        };
+        assert!(state.consume_writer_input(&input).is_ok());
+        assert_eq!(
+            state.consume_writer_input(&CompactWriterInput {
+                table_id: OTHER_TABLE,
+                ..input
+            }),
+            Err(CompactBaseProjectionError::WrongTable)
         );
     }
 }
