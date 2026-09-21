@@ -1797,6 +1797,127 @@ fn parsed_decimal_rekey_invalid_key_rolls_back_candidate_rows() {
         "invalid Decimal key published a candidate row"
     );
 }
+#[test]
+fn parsed_decimal_primary_key_update_selects_scale_insensitive_source_and_mutates_non_key_field() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 1.2000, label: "before" });
+            Reading.update(1.20, { label: "after" });
+            assert (Reading | filter(reading => reading.value == 1.200) | one()).label == "after";
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    let key = Value::decimal(12.into(), (-1).into()).expect("canonical Decimal primary key");
+    let row = runtime
+        .committed_row("Reading", &key)
+        .expect("updated Decimal-key row");
+    assert!(matches!(
+        row.raw(),
+        orna_foundation_v1::OvbRaw::Map(fields)
+            if fields.iter().any(|(field, value)| field
+                == &orna_foundation_v1::OvbRaw::Text("label".into())
+                && value == &orna_foundation_v1::OvbRaw::Text("after".into()))
+    ));
+}
+
+#[test]
+fn parsed_decimal_primary_key_update_is_visible_to_following_relation_reads() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 1.2000, label: "before" });
+            Reading.update(1.2, { label: "after" });
+            assert (Reading | filter(reading => reading.value == 1.2000) | count()) == 1;
+            assert (Reading | filter(reading => reading.label == "after") | one()).value == 1.20;
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+}
+
+#[test]
+fn parsed_decimal_primary_key_update_absent_source_rolls_back_candidate_rows() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 1.20, label: "candidate" });
+            Reading.update(9.990, { label: "missing" });
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-MISSING"
+        ),
+        "absent Decimal update source did not fail with missing-row diagnostic: {outcome:?}"
+    );
+    let key = Value::decimal(12.into(), (-1).into()).expect("canonical inserted key");
+    assert_eq!(
+        runtime.committed_row("Reading", &key),
+        None,
+        "absent Decimal update source published a candidate row"
+    );
+}
+
+#[test]
+fn parsed_decimal_primary_key_update_invalid_source_key_rolls_back_candidate_rows() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 1.20, label: "candidate" });
+            Reading.update("not-a-decimal", { label: "invalid" });
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-S021-TYPE"
+        ),
+        "invalid Decimal update key did not fail during source admission: {outcome:?}"
+    );
+    let key = Value::decimal(12.into(), (-1).into()).expect("canonical inserted key");
+    assert_eq!(
+        runtime.committed_row("Reading", &key),
+        None,
+        "invalid Decimal update key published a candidate row"
+    );
+}
+
+#[test]
+fn parsed_decimal_primary_key_update_rejects_key_patch_and_rolls_back_candidate_rows() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 1.20, label: "candidate" });
+            Reading.update(1.2000, { value: 2.0 });
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-S021-TYPE"
+        ),
+        "Decimal update key patch did not fail during source admission: {outcome:?}"
+    );
+    for key in [
+        Value::decimal(12.into(), (-1).into()).expect("canonical source key"),
+        Value::decimal(2.into(), 0.into()).expect("canonical destination key"),
+    ] {
+        assert_eq!(
+            runtime.committed_row("Reading", &key),
+            None,
+            "Decimal update key patch published a candidate row"
+        );
+    }
+}
+
 
 #[test]
 fn parsed_decimal_primary_key_filtered_lookup_and_first_use_scale_insensitive_canonical_order() {
