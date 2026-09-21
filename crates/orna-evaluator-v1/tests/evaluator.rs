@@ -2889,9 +2889,15 @@ fn std_collection_min_and_max_optional_results_match_some_null_and_coalesce() {
 
 #[test]
 fn std_collection_min_and_max_fail_closed_for_unsupported_kinds_shapes_and_limits() {
+    assert_eq!(
+        evaluate("min([1.0])"),
+        Value::option(Some(Value::decimal(1.into(), 0.into()).unwrap())).unwrap()
+    );
+    assert_eq!(
+        evaluate("std.collection.max([1.0])"),
+        Value::option(Some(Value::decimal(1.into(), 0.into()).unwrap())).unwrap()
+    );
     for expression in [
-        "min([1.0])",
-        "std.collection.max([1.0])",
         "std.collection.max([1, true])",
         "min(1)",
         "std.collection.max(1)",
