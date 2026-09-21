@@ -2951,6 +2951,10 @@ impl Context<'_, '_> {
                     plan = plan.with_stage(RelationStage::Map(ordered[1].clone()));
                     Ok(Value::Relation(plan))
                 }
+                "flat_map" => {
+                    plan = plan.with_stage(RelationStage::FlatMap(ordered[1].clone()));
+                    Ok(Value::Relation(plan))
+                }
                 "sort_by" => {
                     plan = plan.with_stage(RelationStage::SortBy(ordered[1].clone()));
                     Ok(Value::Relation(plan))
@@ -3211,7 +3215,7 @@ impl Context<'_, '_> {
                     .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
                 self.items(seen)?;
                 let value = Value::from_canonical(&canonical, self, depth + 1)?;
-                match self.apply_relation_stages(
+                let rows = self.apply_relation_stages(
                     value,
                     &plan.stages,
                     &mut counters,
@@ -3219,17 +3223,15 @@ impl Context<'_, '_> {
                     &mut pair_previous,
                     0,
                     depth + 1,
-                )? {
-                    RelationRow::Skip => {}
-                    RelationRow::End => return Ok(()),
-                    RelationRow::Yield(value) => {
-                        if !visit(self, value)? {
-                            return Ok(());
-                        }
-                        if plan.stages.iter().enumerate().any(|(index, stage)| {
-                            matches!(stage, RelationStage::Take(count) if counters[index] >= *count)
-                        }) {
-                            return Ok(());
+                )?;
+                for row in rows {
+                    match row {
+                        RelationRow::Skip => {}
+                        RelationRow::End => return Ok(()),
+                        RelationRow::Yield(value) => {
+                            if !visit(self, value)? {
+                                return Ok(());
+                            }
                         }
                     }
                 }
@@ -3253,7 +3255,7 @@ impl Context<'_, '_> {
         pair_previous: &mut [Option<Value>],
         stage_offset: usize,
         depth: usize,
-    ) -> Result<RelationRow, EvaluationError> {
+    ) -> Result<Vec<RelationRow>, EvaluationError> {
         for (local_index, stage) in stages.iter().enumerate() {
             let index = stage_offset + local_index;
             match stage {
@@ -3264,11 +3266,52 @@ impl Context<'_, '_> {
                         return Err(error("ORNA-EVAL-TYPE"));
                     };
                     if !result {
-                        return Ok(RelationRow::Skip);
+                        return Ok(vec![RelationRow::Skip]);
                     }
                 }
                 RelationStage::Map(transform) => {
                     value = self.invoke_predicate(transform, value, depth + 1)?;
+                }
+                RelationStage::FlatMap(transform) => {
+                    self.step()?;
+                    let mapped = self.invoke_predicate(transform, value, depth + 1)?;
+                    let Value::List(inner) = mapped else {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    };
+                    self.items(inner.len())?;
+                    let suffix = &stages[local_index + 1..];
+                    let mut rows = Vec::new();
+                    for inner_value in inner {
+                        if inner_value.contains_callable() {
+                            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                        }
+                        self.step()?;
+                        let inner_rows = self.apply_relation_stages(
+                            inner_value,
+                            suffix,
+                            counters,
+                            distinct_seen,
+                            pair_previous,
+                            index + 1,
+                            depth + 1,
+                        )?;
+                        let ended = inner_rows
+                            .iter()
+                            .any(|row| matches!(row, RelationRow::End));
+                        rows.extend(inner_rows);
+                        self.items(rows.len())?;
+                        if ended {
+                            break;
+                        }
+                    }
+                    if !rows.iter().any(|row| matches!(row, RelationRow::End))
+                        && stages.iter().enumerate().any(|(offset, stage)| {
+                            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
+                        })
+                    {
+                        rows.push(RelationRow::End);
+                    }
+                    return Ok(rows);
                 }
                 RelationStage::Distinct => {
                     if value.contains_float() {
@@ -3277,36 +3320,42 @@ impl Context<'_, '_> {
                     let key = value.clone().canonical()?;
                     let seen = &mut distinct_seen[index];
                     if seen.iter().any(|existing| existing == &key) {
-                        return Ok(RelationRow::Skip);
+                        return Ok(vec![RelationRow::Skip]);
                     }
                     seen.push(key);
                     self.items(seen.len())?;
                 }
                 RelationStage::Pairs => {
                     let Some(previous) = pair_previous[index].replace(value.clone()) else {
-                        return Ok(RelationRow::Skip);
+                        return Ok(vec![RelationRow::Skip]);
                     };
                     self.items(2)?;
                     value = Value::Tuple(vec![previous, value]);
                 }
                 RelationStage::Drop(count) => {
-                    if counters[local_index] < *count {
-                        counters[local_index] += 1;
-                        return Ok(RelationRow::Skip);
+                    if counters[index] < *count {
+                        counters[index] += 1;
+                        return Ok(vec![RelationRow::Skip]);
                     }
                 }
                 RelationStage::Take(count) => {
-                    if counters[local_index] >= *count {
-                        return Ok(RelationRow::End);
+                    if counters[index] >= *count {
+                        return Ok(vec![RelationRow::End]);
                     }
-                    counters[local_index] += 1;
+                    counters[index] += 1;
                 }
                 RelationStage::SortBy(_) => {
                     return Err(error("ORNA-EVAL-UNSUPPORTED"));
                 }
             }
         }
-        Ok(RelationRow::Yield(value))
+        let mut rows = vec![RelationRow::Yield(value)];
+        if stages.iter().enumerate().any(|(offset, stage)| {
+            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
+        }) {
+            rows.push(RelationRow::End);
+        }
+        Ok(rows)
     }
 
     fn for_each_sorted_relation(
@@ -3433,13 +3482,13 @@ impl Context<'_, '_> {
         {
             return Ok(());
         }
-        let mut counters = vec![0usize; stages.len()];
+        let mut counters = vec![0usize; stage_offset + stages.len()];
         for value in values {
             // Buffered relation stages can run without a predicate or visitor
             // that performs its own evaluator step. Keep this materialized
             // path as cancellation-aware as the paged source path.
             self.step()?;
-            match self.apply_relation_stages(
+            let rows = self.apply_relation_stages(
                 value,
                 stages,
                 &mut counters,
@@ -3447,17 +3496,15 @@ impl Context<'_, '_> {
                 pair_previous,
                 stage_offset,
                 depth + 1,
-            )? {
-                RelationRow::Skip => {}
-                RelationRow::End => return Ok(()),
-                RelationRow::Yield(value) => {
-                    if !visit(self, value)? {
-                        return Ok(());
-                    }
-                    if stages.iter().enumerate().any(|(index, stage)| {
-                        matches!(stage, RelationStage::Take(count) if counters[index] >= *count)
-                    }) {
-                        return Ok(());
+            )?;
+            for row in rows {
+                match row {
+                    RelationRow::Skip => {}
+                    RelationRow::End => return Ok(()),
+                    RelationRow::Yield(value) => {
+                        if !visit(self, value)? {
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -5717,7 +5764,7 @@ fn relation_named_arguments(
 ) -> Result<Vec<Value>, EvaluationError> {
     let expected: &[&str] = match function {
         "filter" => &["rows", "predicate"],
-        "map" => &["rows", "transform"],
+        "map" | "flat_map" => &["rows", "transform"],
         "sort_by" => &["rows", "key"],
         "distinct" | "pairs" => &["rows"],
         "take" | "drop" => &["rows", "count"],
