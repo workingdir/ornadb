@@ -1410,3 +1410,48 @@ fn parsed_decimal_primary_key_reversed_noncanonical_predicates_use_generic_evalu
 
     assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
 }
+#[test]
+fn parsed_decimal_primary_key_first_and_bounded_window_use_canonical_order() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: -2.5000, label: "negative-low" });
+            Reading.insert({ value: 0.000, label: "zero" });
+            Reading.insert({ value: 1.20, label: "positive-low" });
+            assert (Reading | take(1) | one()).label == "negative-low";
+            assert (Reading | window(2) | count()) == 2;
+        "#,
+    ));
+
+    assert!(
+        matches!(&outcome, StageOutcome::Passed),
+        "canonical Decimal-key first failed: {outcome:?}"
+    );
+}
+
+#[test]
+fn parsed_decimal_primary_key_scale_alias_is_rejected_without_publication() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: -1.20, label: "canonical" });
+            Reading.insert({ value: -1.2000, label: "scale-alias" });
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-DUPLICATE"
+        ),
+        "scale-alias key insertion did not fail as a duplicate: {outcome:?}"
+    );
+    let canonical_key =
+        Value::decimal((-120).into(), (-2).into()).expect("canonical Decimal primary key");
+    assert_eq!(
+        runtime.committed_row("Reading", &canonical_key),
+        None,
+        "duplicate Decimal-key activation published a row"
+    );
+}
