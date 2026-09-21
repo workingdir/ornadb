@@ -4518,6 +4518,70 @@ fn std_collection_filter_enforces_limits() {
 }
 
 #[test]
+fn std_collection_filter_preserves_input_order_and_skips_empty_callbacks() {
+    assert_eq!(
+        evaluate("std.collection.filter([3, 1, 2, 4], value => value % 2 == 0)"),
+        Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())])).unwrap()
+    );
+    assert_eq!(
+        evaluate("std.collection.filter([], value => 1 / 0 == 0)"),
+        Value::new(Raw::Array(vec![])).unwrap()
+    );
+}
+
+#[test]
+fn std_collection_filter_requires_bool_and_propagates_callback_failures() {
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.filter([1], value => value)",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-TYPE"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.filter([1, 0, 2], value => 10 / value > 0)",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
+    );
+}
+
+#[test]
+fn std_collection_filter_debits_one_step_per_scanned_value_without_duplicate_traversal_charging() {
+    let expression = "std.collection.filter([1, 2], value => true)";
+    assert_eq!(
+        code(evaluate_expression(
+            expression,
+            &Environment::new(),
+            Limits {
+                // The second callback's body cannot finish when the
+                // callback-local debit is charged immediately before it.
+                max_steps: 8,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert_eq!(
+        evaluate_expression(
+            expression,
+            &Environment::new(),
+            Limits {
+                // Exactly one traversal debit and one callback body step per
+                // input value fit at this boundary.
+                max_steps: 9,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+        Value::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())])).unwrap()
+    );
+}
+
+#[test]
 fn std_collection_map_preserves_order_for_direct_pipeline_named_and_function_calls() {
     let expected = Value::new(Raw::Array(vec![
         Raw::Int(30.into()),
