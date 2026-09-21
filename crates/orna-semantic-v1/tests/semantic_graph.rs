@@ -5993,3 +5993,58 @@ fn coalesce_types_optional_values_with_precedence_and_grouping() {
     )]);
     assert!(has(&incompatible, DIAG_TYPE));
 }
+#[test]
+fn uuid7_intrinsic_infers_std_uuid_type() {
+    let result = analyze(&[ModuleInput::new(
+        "uuid7.orna",
+        "pub fn generated() = uuid7();",
+    )]);
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "uuid7")
+        .expect("uuid7 module");
+    assert!(matches!(
+        &module.exports["generated"].ty,
+        Type::Function { parameters, result, .. }
+            if parameters.is_empty() && result.as_ref() == &Type::Named("std.UUID".into())
+    ));
+}
+
+#[test]
+fn uuid7_intrinsic_rejects_wrong_arity_and_argument_type() {
+    for source in [
+        "pub fn invalid() = uuid7(1);",
+        "pub fn invalid() = uuid7(1, 2);",
+        "pub fn invalid() = uuid7(\"not-a-uuid\");",
+    ] {
+        let result = analyze(&[ModuleInput::new("uuid7-invalid.orna", source)]);
+        assert!(
+            has(&result, DIAG_TYPE),
+            "{source}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn user_defined_uuid7_shadows_the_root_intrinsic() {
+    let result = analyze(&[ModuleInput::new(
+        "uuid7-shadow.orna",
+        "fn uuid7(value: Int): Str = \"shadowed\"; pub fn generated() = uuid7(1);",
+    )]);
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "uuid7-shadow")
+        .expect("uuid7 shadow module");
+    assert!(matches!(
+        &module.exports["generated"].ty,
+        Type::Function { parameters, result, .. }
+            if parameters.is_empty() && result.as_ref() == &Type::Text
+    ));
+}
