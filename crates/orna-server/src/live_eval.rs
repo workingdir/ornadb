@@ -12,7 +12,7 @@ use std::{
     collections::BTreeMap,
     pin::Pin,
     rc::Rc,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{Arc, Mutex, atomic::AtomicBool},
 };
 
 use futures::Future;
@@ -25,11 +25,11 @@ use orna_foundation_v1::{
     DiagnosticSeverity, OvbRaw, SafeText, Value,
 };
 use orna_live_v1::{
-    ActionAuthority, ActionAuthorityRegistry, ActionBinding, Error, LiveApplication,
-    LiveApplicationWorkLease, LiveEvalResponse, LiveEvalTransaction, Result, RuntimeActivationContext,
+    ActionAuthority, ActionAuthorityRegistry, ActionBinding, ActionFuture, ActionHandler, Error,
+    LiveApplication, LiveApplicationWorkLease, LiveEvalResponse, LiveEvalTransaction, Result,
+    RuntimeActivationContext,
 };
-#[cfg(test)]
-use orna_live_v1::{ActionFuture, ActionHandler};
+use orna_conformance_v1::BoundedEvaluator;
 use orna_project_v1::ProjectLoader;
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Limits as ProtocolLimits, Message, PresentNode, PresentationContext,
@@ -116,11 +116,88 @@ impl OperationAdmissionSource for RepositoryAdmissionSource {
 /// Terminal Eval rejections bound to a live session lease: fingerprint and
 /// envelope keyed by session and request.
 type RejectedTerminals = BTreeMap<SessionId, BTreeMap<[u8; 16], ([u8; 32], Envelope)>>;
+/// Server-owned source descriptor registry. The delegate remains the
+/// application callback owner; this records the descriptor emitted by
+/// `std.ui.action` before a typed Event reaches that authority.
+struct SourceActionAuthority {
+    delegate: Arc<dyn ActionAuthority>,
+    descriptors: Mutex<ActionAuthorityRegistry>,
+}
+
+struct DelegatingActionHandler {
+    delegate: Arc<dyn ActionAuthority>,
+}
+
+impl ActionHandler for DelegatingActionHandler {
+    fn accepts(&self, _: &CanonicalValue) -> bool {
+        true
+    }
+
+    fn activate<'a>(
+        &'a self,
+        binding: ActionBinding,
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        value: &'a CanonicalValue,
+        context: &'a RuntimeActivationContext,
+        work: &'a mut LiveApplicationWorkLease,
+    ) -> ActionFuture<'a> {
+        self.delegate
+            .activate(binding, request, fingerprint, value, context, work)
+    }
+}
+
+impl SourceActionAuthority {
+    fn new(delegate: Arc<dyn ActionAuthority>) -> Self {
+        Self {
+            delegate,
+            descriptors: Mutex::new(ActionAuthorityRegistry::new()),
+        }
+    }
+
+    fn register_descriptor(
+        &self,
+        binding: ActionBinding,
+        descriptor: orna_live_v1::ActionDescriptor,
+    ) -> Result<()> {
+        let mut registry = self
+            .descriptors
+            .lock()
+            .expect("source action registry mutex poisoned");
+        if registry.descriptor(binding) == Some(&descriptor) {
+            return Ok(());
+        }
+        registry
+            .register_descriptor(
+                binding,
+                descriptor,
+                DelegatingActionHandler {
+                    delegate: Arc::clone(&self.delegate),
+                },
+            )
+            .map_err(|_| Error::Denied)
+    }
+}
+impl ActionAuthority for SourceActionAuthority {
+    fn activate<'a>(
+        &'a self,
+        binding: ActionBinding,
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        value: &'a CanonicalValue,
+        context: &'a RuntimeActivationContext,
+        work: &'a mut LiveApplicationWorkLease,
+    ) -> ActionFuture<'a> {
+        self.delegate
+            .activate(binding, request, fingerprint, value, context, work)
+    }
+}
+
 
 pub(crate) struct PureEvalApplication {
     database_id: [u8; 16],
     admissions: Box<dyn OperationAdmissionSource>,
-    action_authority: Arc<dyn ActionAuthority>,
+    action_authority: Arc<SourceActionAuthority>,
     expiries: SessionExpiries,
     sessions: BTreeMap<SessionId, SessionState>,
     /// Terminal Eval rejections that occurred before an evaluator overlay
@@ -217,7 +294,7 @@ impl PureEvalApplication {
                 project,
                 project_capture: capture,
             }),
-            action_authority,
+            action_authority: Arc::new(SourceActionAuthority::new(action_authority)),
             expiries,
             sessions: BTreeMap::new(),
             rejected_terminals: BTreeMap::new(),
@@ -447,6 +524,11 @@ impl LiveApplication for PureEvalApplication {
         let Some(context) = context else {
             return Box::pin(async { Err(Error::UnsupportedOperation) });
         };
+        let source = self
+            .sessions
+            .get(&SessionId::new(session))
+            .and_then(|state| state.watches.get(&watch))
+            .cloned();
         let authority = Arc::clone(&self.action_authority);
         let binding = ActionBinding {
             session,
@@ -454,6 +536,16 @@ impl LiveApplication for PureEvalApplication {
             page_revision: *revision,
             action: *action,
         };
+        if let Some(source) = source
+            && let Some((action_id, input_type, provenance)) =
+                BoundedEvaluator::source_action_descriptor(&source)
+            && let Err(error) = authority.register_descriptor(
+                binding,
+                orna_live_v1::ActionDescriptor::new(action_id, input_type, provenance),
+            )
+        {
+            return Box::pin(async move { Err(error) });
+        }
         Box::pin(async move {
             work.check_active()?;
             let response = authority
@@ -901,7 +993,9 @@ mod tests {
                 capture_admissions: Rc::clone(&capture_admissions),
                 repl_admissions: Rc::clone(&repl_admissions),
             }),
-            action_authority: Arc::new(ActionAuthorityRegistry::new()),
+            action_authority: Arc::new(SourceActionAuthority::new(Arc::new(
+                ActionAuthorityRegistry::new(),
+            ))),
             expiries: Rc::clone(&expiries),
             sessions: BTreeMap::new(),
             rejected_terminals: BTreeMap::new(),
@@ -1618,7 +1712,7 @@ mod tests {
         registry
             .register(binding, CountingActionHandler(Arc::clone(&calls)))
             .unwrap();
-        application.action_authority = Arc::new(registry);
+        application.action_authority = Arc::new(SourceActionAuthority::new(Arc::new(registry)));
 
         for (session, watch, revision, value, request) in [
             ([4; 16], [2; 16], 7, CanonicalValue::unit(), [11; 16]),
@@ -1702,4 +1796,56 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn source_action_registers_descriptor_before_typed_event() {
+        let (mut application, expiries, database_id, _, _, _) = application();
+        let session = [71; 16];
+        expiries.borrow_mut().insert(SessionId::new(session), 100);
+        let source = r#"std.ui.action("save", as: Text, debug_kind: "button")"#;
+        let watch_response = application
+            .watch(
+                session,
+                [72; 16],
+                &Message::Watch {
+                    source: source.into(),
+                    database: database(database_id),
+                    presentation: presentation(),
+                    refresh_floor: None,
+                },
+            )
+            .unwrap();
+        let watch = watch_response.watch.expect("watch handle");
+        let (root, context) = action_context();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let binding = ActionBinding::new(session, watch, 0, [3; 16]);
+        let mut registry = ActionAuthorityRegistry::new();
+        registry
+            .register(binding, CountingActionHandler(Arc::clone(&calls)))
+            .unwrap();
+        application.action_authority =
+            Arc::new(SourceActionAuthority::new(Arc::new(registry)));
+
+        let result = dispatch_action(
+            &mut application,
+            &context,
+            session,
+            watch,
+            0,
+            CanonicalValue::unit(),
+            [74; 16],
+        )
+        .unwrap();
+        let descriptor = application
+            .action_authority
+            .descriptors
+            .lock()
+            .expect("descriptor registry");
+        let descriptor = descriptor.descriptor(binding).expect("registered descriptor");
+        assert_eq!(descriptor.action_id, "save");
+        assert_eq!(descriptor.input_type, "std.text");
+        assert_ne!(descriptor.provenance, [0; 32]);
+        assert_ne!(binding.action, [0; 16]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
 }
