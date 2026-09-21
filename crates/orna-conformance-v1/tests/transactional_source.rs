@@ -916,6 +916,221 @@ fn ordinary_function_quantifiers_share_collection_limit_and_roll_back() {
         }
     }
 }
+fn decimal_quantifier_source(fixture_id: &str, definitions: &str, parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: fixture_id.into(),
+        source_id: format!("{fixture_id}.orna"),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Reading(id: Int) {{ value: Decimal, label: Str, }} {definitions} fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
+fn decimal_key_quantifier_source(
+    fixture_id: &str,
+    definitions: &str,
+    parent_body: &str,
+) -> SourceUnit {
+    SourceUnit {
+        fixture_id: fixture_id.into(),
+        source_id: format!("{fixture_id}.orna"),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Reading(value: Decimal) {{ label: Str, }} {definitions} fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
+#[test]
+fn ordinary_function_quantifiers_compare_decimal_body_fields_without_scale() {
+    let unit = decimal_quantifier_source(
+        "txn-decimal-quantifier-body",
+        r#"
+            fn every_match() = every(Reading, reading =>
+                reading.value == 18.25 && reading.label != ""
+            );
+            fn exists_match() = exists(Reading, reading => reading.value == 18.2500);
+        "#,
+        r#"
+            assert every_match() == true;
+            assert exists_match() == false;
+            Reading.insert({ id: 2, value: 2.0, label: "other" });
+            Reading.insert({ id: 1, value: 18.2500, label: "match" });
+            assert every_match() == false;
+            assert exists_match() == true;
+        "#,
+    );
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+
+    let outcome = runtime.execute_source(&unit);
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    for id in [1, 2] {
+        assert!(
+            runtime
+                .committed_row("Reading", &Value::int(id.into()))
+                .is_some(),
+            "Decimal body candidate row {id} was not published"
+        );
+    }
+}
+
+#[test]
+fn ordinary_function_decimal_quantifiers_short_circuit_after_scale_insensitive_match() {
+    let unit = decimal_quantifier_source(
+        "txn-decimal-quantifier-short-circuit",
+        r#"
+            fn all_first() = every(Reading, reading =>
+                if reading.value == 18.25 { false } else { 1 / 0 == 0 }
+            );
+            fn any_first() = exists(Reading, reading =>
+                if reading.value == 18.2500 { true } else { 1 / 0 == 0 }
+            );
+        "#,
+        r#"
+            Reading.insert({ id: 2, value: 2.0, label: "later" });
+            Reading.insert({ id: 1, value: 18.2500, label: "decisive" });
+            assert all_first() == false;
+            assert any_first() == true;
+        "#,
+    );
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+
+    let outcome = runtime.execute_source(&unit);
+
+    assert!(
+        matches!(&outcome, StageOutcome::Passed),
+        "a later callback failure must be skipped after the scale-alias decisive row: {outcome:?}"
+    );
+    for id in [1, 2] {
+        assert!(
+            runtime
+                .committed_row("Reading", &Value::int(id.into()))
+                .is_some(),
+            "short-circuit candidate row {id} was not published"
+        );
+    }
+}
+
+#[test]
+fn ordinary_function_decimal_quantifier_false_results_roll_back_candidate_rows() {
+    let mut every_runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let every_unit = decimal_quantifier_source(
+        "txn-decimal-quantifier-every-rollback",
+        "fn every_match() = every(Reading, reading => reading.value == 18.25);",
+        r#"
+            Reading.insert({ id: 2, value: 2.0, label: "other" });
+            Reading.insert({ id: 1, value: 18.2500, label: "match" });
+            assert every_match() == true;
+        "#,
+    );
+    let every_outcome = every_runtime.execute_source(&every_unit);
+    assert!(
+        matches!(&every_outcome, StageOutcome::Failed(diagnostic)
+            if diagnostic.code() == "ORNA-EVAL-ASSERT"),
+        "false every result did not fail its assertion: {every_outcome:?}"
+    );
+    for id in [1, 2] {
+        assert_eq!(
+            every_runtime.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "false every result published candidate row {id}"
+        );
+    }
+
+    let mut exists_runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let exists_unit = decimal_quantifier_source(
+        "txn-decimal-quantifier-exists-rollback",
+        "fn exists_miss() = exists(Reading, reading => reading.value == 99.990);",
+        r#"
+            Reading.insert({ id: 1, value: 18.2500, label: "present" });
+            assert exists_miss() == true;
+        "#,
+    );
+    let exists_outcome = exists_runtime.execute_source(&exists_unit);
+    assert!(
+        matches!(&exists_outcome, StageOutcome::Failed(diagnostic)
+            if diagnostic.code() == "ORNA-EVAL-ASSERT"),
+        "false exists result did not fail its assertion: {exists_outcome:?}"
+    );
+    assert_eq!(
+        exists_runtime.committed_row("Reading", &Value::int(1.into())),
+        None,
+        "false exists result published its candidate row"
+    );
+}
+
+#[test]
+fn ordinary_function_decimal_quantifiers_share_collection_limit_and_roll_back() {
+    let limits = Limits {
+        max_collection_items: 1,
+        ..Limits::default()
+    };
+    for (operator, fixture_id) in [
+        ("every", "txn-decimal-quantifier-every-limit"),
+        ("exists", "txn-decimal-quantifier-exists-limit"),
+    ] {
+        let definitions =
+            format!(r#"fn bounded() = {operator}(Reading, reading => reading.value == 18.25);"#);
+        let unit = decimal_quantifier_source(
+            fixture_id,
+            &definitions,
+            r#"
+                Reading.insert({ id: 2, value: 2.0, label: "other" });
+                Reading.insert({ id: 1, value: 18.2500, label: "match" });
+                bounded();
+            "#,
+        );
+        let mut runtime = TransactionalEvaluator::new("parent", limits);
+
+        let outcome = runtime.execute_source(&unit);
+
+        assert!(
+            matches!(&outcome, StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-LIMIT"),
+            "{operator} Decimal quantifier collection limit did not surface: {outcome:?}"
+        );
+        for id in [1, 2] {
+            assert_eq!(
+                runtime.committed_row("Reading", &Value::int(id.into())),
+                None,
+                "bounded {operator} Decimal quantifier published candidate row {id}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ordinary_function_quantifiers_compare_decimal_primary_keys_without_scale() {
+    let unit = decimal_key_quantifier_source(
+        "txn-decimal-key-quantifier",
+        r#"
+            fn every_match() = every(Reading, reading => reading.value == 18.25);
+            fn exists_match() = exists(Reading, reading => reading.value == 18.2500);
+            fn every_miss() = every(Reading, reading => reading.value == 99.990);
+            fn exists_miss() = exists(Reading, reading => reading.value == 99.990);
+        "#,
+        r#"
+            Reading.insert({ value: 18.2500, label: "match" });
+            assert every_match() == true;
+            assert exists_match() == true;
+            assert every_miss() == false;
+            assert exists_miss() == false;
+        "#,
+    );
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+
+    let outcome = runtime.execute_source(&unit);
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    let key = Value::decimal((182500).into(), (-4).into()).expect("canonical Decimal key");
+    assert!(
+        runtime.committed_row("Reading", &key).is_some(),
+        "Decimal-key candidate row was not published"
+    );
+}
+
 fn decimal_filtered_first_source(parent_body: &str) -> SourceUnit {
     SourceUnit {
         fixture_id: "txn-decimal-filtered-first".into(),
