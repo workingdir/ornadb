@@ -517,6 +517,62 @@ fn semantic_project_adapter_admits_typed_sys_start_with_explicit_witness() {
     );
     assert!(start_int.effects.may_fail);
 }
+#[test]
+fn semantic_project_adapter_admits_erased_sys_start_with_value_handle_and_invoke_effect() {
+    let source =
+        "pub fn start_erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
+         sys.start(function, arguments);";
+    let project = typed_invoke_project(source);
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.typecheck_project(&project), StageOutcome::Passed);
+
+    // The adapter proves source admission; inspect the native graph to retain
+    // the erased handle type and invoke effect without claiming runtime
+    // invocation identity or generation.
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("main.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+    let start_erased = &analysis.modules.values().next().unwrap().exports["start_erased"];
+    assert!(matches!(
+        &start_erased.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Applied {
+                base: "sys.InvocationHandle".into(),
+                arguments: vec![Type::Named("sys.Value".into())],
+            }
+    ));
+    assert_eq!(
+        start_erased.effects.effects,
+        std::collections::BTreeSet::from(["invoke".into()])
+    );
+    assert!(start_erased.effects.may_fail);
+}
+
+#[test]
+fn semantic_project_adapter_rejects_typed_sys_start_without_explicit_witness() {
+    let project = typed_invoke_project(
+        "pub fn start_missing(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
+         sys.start<Int>(function, arguments);",
+    );
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    let StageOutcome::Failed(diagnostic) = adapter.typecheck_project(&project) else {
+        panic!("typed sys.start without an explicit witness must fail at typecheck");
+    };
+    assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S021-TYPE");
+    assert_eq!(
+        adapter.diagnostic_message(&diagnostic),
+        "typed sys.start requires an explicit as: T witness"
+    );
+}
+
 
 #[test]
 fn semantic_project_adapter_rejects_typed_sys_start_mismatched_witness() {
