@@ -13640,6 +13640,15 @@ fn historical_namespace_parts(ty: &Type) -> Option<(&Type, &str)> {
 }
 
 
+fn historical_root_available(
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+    root: &str,
+) -> bool {
+    modules
+        .keys()
+        .any(|namespace| namespace.0.first().is_some_and(|part| part == root))
+}
+
 fn infer_historical_member(
     base: &Type,
     name: &str,
@@ -13654,11 +13663,7 @@ fn infer_historical_member(
         && let [snapshot] = arguments.as_slice()
     {
         let namespace = name.to_owned();
-        if scope
-            .historical_modules
-            .contains_key(&Namespace(vec![namespace.clone()]))
-            || name == "sys"
-        {
+        if historical_root_available(&scope.historical_modules, &namespace) || name == "sys" {
             return Some(Inferred {
                 ty: historical_namespace_type(snapshot, &namespace),
                 effects: EffectSummary::default(),
