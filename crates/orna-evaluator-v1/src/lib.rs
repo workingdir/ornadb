@@ -3980,6 +3980,7 @@ impl Context<'_, '_> {
                 self.flat_map(values, transform, depth)
             }
             ("sort_by", [Value::List(values), key]) => self.sort_by(values, key, depth),
+            ("rank", [Value::List(values), key]) => self.rank(values, key, depth),
             ("filter", [Value::List(values), predicate]) => self.filter(values, predicate, depth),
             ("partition", [Value::List(values), predicate]) => {
                 self.partition(values, predicate, depth)
@@ -4022,7 +4023,7 @@ impl Context<'_, '_> {
             | ("drop", [_, _])
             | ("map", [_, _])
             | ("flat_map", [_, _])
-            | ("sort_by", [_, _])
+            | ("sort_by" | "rank", [_, _])
             | ("filter", [_, _])
             | ("partition", [_, _])
             | ("split_when", [_, _])
@@ -4101,6 +4102,65 @@ impl Context<'_, '_> {
         Ok(Value::List(
             keyed.into_iter().map(|(_, value)| value).collect(),
         ))
+    }
+    fn rank(
+        &mut self,
+        values: &[Value],
+        key: &Value,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let mut keyed = Vec::with_capacity(values.len());
+        for value in values {
+            // Callback evaluation is observable and must consume one bounded
+            // step even when the callback body is only an identity lookup.
+            self.step()?;
+            let sort_key = self.invoke_predicate(key, value.clone(), depth + 1)?;
+            lawful_sort_key(&sort_key)?;
+            keyed.push((sort_key, value.clone()));
+            self.items(keyed.len())?;
+        }
+
+        // Stable insertion sort preserves source order for equal keys while
+        // keeping each comparison fallible and explicitly budgeted.
+        for index in 1..keyed.len() {
+            let mut current = index;
+            while current > 0 {
+                self.step()?;
+                if compare_sort_keys(&keyed[current - 1].0, &keyed[current].0)?
+                    != std::cmp::Ordering::Greater
+                {
+                    break;
+                }
+                keyed.swap(current - 1, current);
+                current -= 1;
+            }
+        }
+
+        let mut ranked = Vec::with_capacity(keyed.len());
+        let mut competition_rank = 1usize;
+        let mut previous_key = None;
+        for (index, (sort_key, value)) in keyed.into_iter().enumerate() {
+            if index > 0 {
+                self.step()?;
+                if compare_sort_keys(
+                    previous_key
+                        .as_ref()
+                        .ok_or_else(|| error("ORNA-EVAL-VALUE"))?,
+                    &sort_key,
+                )? != std::cmp::Ordering::Equal
+                {
+                    competition_rank = index
+                        .checked_add(1)
+                        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                }
+            }
+            let rank = self.integer(BigInt::from(competition_rank))?;
+            previous_key = Some(sort_key);
+            ranked.push(Value::Tuple(vec![value, Value::Int(rank)]));
+            self.items(ranked.len())?;
+        }
+        Ok(Value::List(ranked))
     }
     fn distinct(&self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
@@ -5366,6 +5426,7 @@ fn named_arguments(
         "drop" => &["values", "count"],
         "map" | "flat_map" => &["values", "transform"],
         "sort_by" => &["rows", "key"],
+        "rank" => &["values", "key"],
         "filter" | "partition" | "split_when" => &["values", "predicate"],
         "group_by" => &["values", "key"],
         "zip" | "zip_exact" => &["left", "right"],
@@ -5443,6 +5504,7 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
             | "map"
             | "flat_map"
             | "sort_by"
+            | "rank"
             | "filter"
             | "take"
             | "drop"
