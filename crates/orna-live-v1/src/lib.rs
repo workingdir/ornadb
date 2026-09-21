@@ -884,6 +884,28 @@ pub trait LiveApplication {
         })
     }
 
+    /// Dispatches an admitted page action under the same host-owned runtime
+    /// transaction seam as Eval. Existing applications inherit a pure result;
+    /// action-capable adapters may return staged table mutations.
+    fn dispatch_event_with_work<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        watch: Option<[u8; 16]>,
+        fingerprint: [u8; 32],
+        _context: Option<&'a RuntimeActivationContext>,
+        work: &'a mut LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse>> + 'a>> {
+        Box::pin(async move {
+            let response = self
+                .dispatch_with_work(session, request, message, watch, fingerprint, work)
+                .await?;
+            Ok(LiveEvalResponse::pure(response))
+        })
+    }
+
+
     /// Dispatches an admitted application operation under its ownership
     /// lease. Existing synchronous implementations inherit this compatibility
     /// path; cooperative adapters may override it and await
@@ -1027,6 +1049,18 @@ impl LiveApplicationTicket {
                         self.session,
                         self.request,
                         &self.message,
+                        self.eval_context.as_ref(),
+                        &mut self.work,
+                    )
+                    .await
+            } else if matches!(self.message, Message::Event { .. }) {
+                application
+                    .dispatch_event_with_work(
+                        self.session,
+                        self.request,
+                        &self.message,
+                        self.watch,
+                        self.fingerprint,
                         self.eval_context.as_ref(),
                         &mut self.work,
                     )
@@ -2159,7 +2193,10 @@ impl LiveHost {
             return Err(error);
         }
         let eval_context = if self.runtime.is_some()
-            && matches!(envelope.message, Message::Eval { .. })
+            && matches!(
+                envelope.message,
+                Message::Eval { .. } | Message::Event { .. }
+            )
         {
             Some(
                 self.runtime
@@ -2268,7 +2305,7 @@ impl LiveHost {
                 response,
                 transaction,
             } => {
-                if !matches!(message, Message::Eval { .. }) {
+                if !matches!(message, Message::Eval { .. } | Message::Event { .. }) {
                     return Err(Error::ApplicationRejected);
                 }
                 let validated =
