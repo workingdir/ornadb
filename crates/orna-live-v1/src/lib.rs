@@ -767,6 +767,107 @@ impl LiveEvalResponse {
         }
     }
 }
+/// The asynchronous callback boundary for one authenticated page action.
+pub type ActionFuture<'a> = Pin<Box<dyn Future<Output = Result<LiveEvalResponse>> + 'a>>;
+
+/// Identity of the watch and page revision that issued an opaque action handle.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ActionBinding {
+    pub session: [u8; 16],
+    pub watch: [u8; 16],
+    pub page_revision: u64,
+    pub action: [u8; 16],
+}
+
+/// Application callback for a registered action.
+pub trait ActionHandler: Send + Sync {
+    /// Rejects incompatible typed input before activation effects occur.
+    fn accepts(&self, value: &CanonicalValue) -> bool;
+
+    fn activate<'a>(
+        &'a self,
+        binding: ActionBinding,
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        value: &'a CanonicalValue,
+        context: &'a RuntimeActivationContext,
+        work: &'a mut LiveApplicationWorkLease,
+    ) -> ActionFuture<'a>;
+}
+
+/// Host-owned authority for resolving and activating opaque page actions.
+pub trait ActionAuthority: Send + Sync {
+    fn activate<'a>(
+        &'a self,
+        binding: ActionBinding,
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        value: &'a CanonicalValue,
+        context: &'a RuntimeActivationContext,
+        work: &'a mut LiveApplicationWorkLease,
+    ) -> ActionFuture<'a>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActionRegistrationError {
+    ZeroHandle,
+    DuplicateBinding,
+}
+
+/// In-memory action authority suitable for a session-owned server registry.
+pub struct ActionAuthorityRegistry {
+    handlers: BTreeMap<ActionBinding, Arc<dyn ActionHandler>>,
+}
+
+impl ActionAuthorityRegistry {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            handlers: BTreeMap::new(),
+        }
+    }
+
+    pub fn register<H: ActionHandler + 'static>(
+        &mut self,
+        binding: ActionBinding,
+        handler: H,
+    ) -> std::result::Result<(), ActionRegistrationError> {
+        if binding.action == [0; 16] {
+            return Err(ActionRegistrationError::ZeroHandle);
+        }
+        if self.handlers.contains_key(&binding) {
+            return Err(ActionRegistrationError::DuplicateBinding);
+        }
+        self.handlers.insert(binding, Arc::new(handler));
+        Ok(())
+    }
+}
+
+impl Default for ActionAuthorityRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ActionAuthority for ActionAuthorityRegistry {
+    fn activate<'a>(
+        &'a self,
+        binding: ActionBinding,
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        value: &'a CanonicalValue,
+        context: &'a RuntimeActivationContext,
+        work: &'a mut LiveApplicationWorkLease,
+    ) -> ActionFuture<'a> {
+        let Some(handler) = self.handlers.get(&binding) else {
+            return Box::pin(async { Err(Error::Denied) });
+        };
+        if !handler.accepts(value) {
+            return Box::pin(async { Err(Error::Denied) });
+        }
+        handler.activate(binding, request, fingerprint, value, context, work)
+    }
+}
 
 /// Narrow seam for application-owned source execution. The adapter owns wire
 /// admission and response identity; implementations must return a canonical
