@@ -233,6 +233,43 @@ fn parquet_with_logical(
     writer.close().unwrap();
     with_page_checksums(bytes)
 }
+fn dictionary_parquet(profile: &CompactOvbProfile, values: &[Vec<u8>]) -> Vec<u8> {
+    let message = format!(
+        "message schema {{ REQUIRED BYTE_ARRAY f_{}; }}",
+        Uuid::from_bytes(KEY).simple()
+    );
+    let schema = Arc::new(parse_message_type(&message).unwrap());
+    let properties = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::ZSTD(Default::default()))
+            .set_dictionary_enabled(true)
+            .set_encoding(Encoding::PLAIN)
+            .set_writer_version(WriterVersion::PARQUET_2_0)
+            .set_key_value_metadata(Some(metadata(
+                profile,
+                descriptor(Kind::Str, "ovb", vec![OvbRaw::Int(1.into())]),
+            )))
+            .build(),
+    );
+    let mut bytes = Vec::new();
+    let mut writer = SerializedFileWriter::new(&mut bytes, schema, properties).unwrap();
+    let mut row_group = writer.next_row_group().unwrap();
+    let mut column = row_group.next_column().unwrap().unwrap();
+    let encoded = values
+        .iter()
+        .cloned()
+        .map(ByteArray::from)
+        .collect::<Vec<_>>();
+    column
+        .typed::<ByteArrayType>()
+        .write_batch(&encoded, None, None)
+        .unwrap();
+    column.close().unwrap();
+    row_group.close().unwrap();
+    writer.close().unwrap();
+    with_page_checksums(bytes)
+}
+
 
 fn canonical(raw: OvbRaw) -> Vec<u8> {
     CanonicalValue::new(raw).unwrap().encode().unwrap()
@@ -555,6 +592,88 @@ fn footer_start(bytes: &[u8]) -> usize {
     let length = u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap());
     bytes.len() - 8 - length as usize
 }
+fn corrupt_dictionary_page_offset(bytes: Vec<u8>, offset_delta: i64) -> Vec<u8> {
+    let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+    let metadata = reader.metadata().clone();
+    let mut groups = metadata.row_groups().to_vec();
+    let mut group_builder = groups[0].clone().into_builder();
+    let mut columns = group_builder.take_columns();
+    let column = &mut columns[0];
+    let dictionary_offset = column.dictionary_page_offset().unwrap();
+    *column = column
+        .clone()
+        .into_builder()
+        .set_dictionary_page_offset(Some(dictionary_offset + offset_delta))
+        .build()
+        .unwrap();
+    groups[0] = group_builder.set_column_metadata(columns).build().unwrap();
+    let rewritten =
+        parquet::file::metadata::ParquetMetaData::new(metadata.file_metadata().clone(), groups);
+    let mut footer = Vec::new();
+    parquet::file::metadata::ParquetMetaDataWriter::new(&mut footer, &rewritten)
+        .finish()
+        .unwrap();
+    let mut output = bytes[..footer_start(&bytes)].to_vec();
+    output.extend(footer);
+    output
+}
+
+#[test]
+fn rejects_malformed_rle_dictionary_ovb_dictionary_and_page_boundaries() {
+    let profile = profile(Kind::Str);
+    let values = vec![
+        canonical(OvbRaw::Text("alpha".into())),
+        canonical(OvbRaw::Text("alpha".into())),
+        canonical(OvbRaw::Text("beta".into())),
+        canonical(OvbRaw::Text("beta".into())),
+    ];
+    let bytes = dictionary_parquet(&profile, &values);
+    let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+    let column = &reader.metadata().row_groups()[0].columns()[0];
+    assert!(
+        column.dictionary_page_offset().is_some(),
+        "fixture must contain a dictionary page"
+    );
+    assert!(
+        column
+            .encodings()
+            .any(|encoding| encoding == Encoding::RLE_DICTIONARY),
+        "fixture must contain an RLE_DICTIONARY BYTE_ARRAY data page"
+    );
+
+    let malformed_metadata = corrupt_dictionary_page_offset(bytes.clone(), 1);
+    let result = CompactParquetKeySource::decode_verified_bytes(
+        &profile,
+        TABLE,
+        &malformed_metadata,
+        values.len() as u64,
+    );
+    assert!(
+        matches!(
+            result.as_ref(),
+            Err(CompactParquetError::InvalidParquet)
+        )
+    );
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "invalid compact Parquet data"
+    );
+
+    let dictionary_start = column.dictionary_page_offset().unwrap() as usize;
+    let dictionary_end = dictionary_start + column.compressed_size() as usize;
+    let mut malformed_page = bytes.clone();
+    malformed_page.remove(dictionary_end - 1);
+    assert!(matches!(
+        CompactParquetKeySource::decode_verified_bytes(
+            &profile,
+            TABLE,
+            &malformed_page,
+            values.len() as u64,
+        ),
+        Err(CompactParquetError::InvalidParquet)
+    ));
+}
+
 
 fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
     let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
