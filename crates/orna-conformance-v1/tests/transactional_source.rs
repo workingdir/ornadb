@@ -1798,6 +1798,99 @@ fn parsed_decimal_rekey_invalid_key_rolls_back_candidate_rows() {
     );
 }
 #[test]
+fn parsed_decimal_primary_key_delete_selects_scale_insensitive_candidate_and_is_visible() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 1.00, label: "remove" });
+            Reading.insert({ value: 2.0, label: "keep" });
+            Reading.delete(1.0);
+            assert (Reading | filter(reading => reading.value == 1.000) | count()) == 0;
+            assert (Reading | filter(reading => reading.label == "keep") | count()) == 1;
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    let deleted_key = Value::decimal(1.into(), 0.into()).expect("canonical deleted Decimal key");
+    let retained_key = Value::decimal(2.into(), 0.into()).expect("canonical retained Decimal key");
+    assert_eq!(runtime.committed_row("Reading", &deleted_key), None);
+    assert!(runtime.committed_row("Reading", &retained_key).is_some());
+}
+
+#[test]
+fn parsed_decimal_primary_key_delete_rolls_back_when_a_later_failure_occurs() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    assert!(matches!(
+        runtime.execute_source(&decimal_key_relation_source(
+            r#"Reading.insert({ value: 1.00, label: "remove" }); Reading.insert({ value: 2.0, label: "keep" });"#,
+        )),
+        StageOutcome::Passed
+    ));
+
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.delete(1.0);
+            assert (Reading | filter(reading => reading.value == 1.00) | count()) == 0;
+            assert false;
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+        ),
+        "later source failure did not roll back Decimal delete: {outcome:?}"
+    );
+    let deleted_key = Value::decimal(1.into(), 0.into()).expect("canonical restored Decimal key");
+    let retained_key = Value::decimal(2.into(), 0.into()).expect("canonical retained Decimal key");
+    assert!(runtime.committed_row("Reading", &deleted_key).is_some());
+    assert!(runtime.committed_row("Reading", &retained_key).is_some());
+}
+
+#[test]
+fn parsed_decimal_primary_key_delete_absent_key_fails_and_rolls_back_candidates() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 1.00, label: "candidate" });
+            Reading.delete(9.990);
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-MISSING"
+        ),
+        "absent Decimal delete did not fail with missing-row diagnostic: {outcome:?}"
+    );
+    let candidate_key = Value::decimal(1.into(), 0.into()).expect("canonical candidate Decimal key");
+    assert_eq!(runtime.committed_row("Reading", &candidate_key), None);
+}
+
+#[test]
+fn parsed_decimal_primary_key_delete_invalid_key_fails_and_rolls_back_candidates() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 1.00, label: "candidate" });
+            Reading.delete("not-a-decimal");
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-S021-TYPE"
+        ),
+        "invalid Decimal delete key did not fail during source admission: {outcome:?}"
+    );
+    let candidate_key = Value::decimal(1.into(), 0.into()).expect("canonical candidate Decimal key");
+    assert_eq!(runtime.committed_row("Reading", &candidate_key), None);
+}
+#[test]
 fn parsed_decimal_primary_key_update_selects_scale_insensitive_source_and_mutates_non_key_field() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = runtime.execute_source(&decimal_key_relation_source(
