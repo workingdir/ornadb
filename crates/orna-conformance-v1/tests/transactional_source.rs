@@ -1338,3 +1338,75 @@ fn parsed_decimal_reversed_filtered_first_respects_shared_step_budget() {
         );
     }
 }
+fn decimal_key_relation_source(parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "txn-decimal-key-relation".into(),
+        source_id: "txn-decimal-key-relation.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Reading(value: Decimal) {{ label: Str, }} fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
+#[test]
+fn parsed_decimal_primary_key_reversed_filtered_count_is_scale_insensitive() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 18.2500, label: "match" });
+            Reading.insert({ value: 2.0, label: "other" });
+            assert (Reading | filter(reading => 18.250 == reading.value) | count()) == 1;
+            assert (Reading | filter(reading => 99.990 == reading.value) | count()) == 0;
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+}
+
+#[test]
+fn parsed_decimal_primary_key_reversed_filtered_one_is_scale_insensitive() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 2.0, label: "other" });
+            Reading.insert({ value: 18.2500, label: "match" });
+            assert (Reading | filter(reading => 18.25 == reading.value) | one()).label == "match";
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+}
+
+#[test]
+fn parsed_decimal_primary_key_reversed_filtered_one_reports_no_match() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 18.2500, label: "present" });
+            (Reading | filter(reading => 99.990 == reading.value) | one());
+        "#,
+    ));
+
+    assert!(matches!(
+        &outcome,
+        StageOutcome::Failed(diagnostic)
+            if diagnostic.code() == "ORNA-EVAL-RELATION-ONE-ZERO"
+    ));
+}
+
+
+#[test]
+fn parsed_decimal_primary_key_reversed_noncanonical_predicates_use_generic_evaluation() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_relation_source(
+        r#"
+            Reading.insert({ value: 18.25, label: "match" });
+            Reading.insert({ value: 2.0, label: "other" });
+            assert (Reading | filter(reading => 18.25 == reading.value + 0.0) | count()) == 1;
+            assert (Reading | filter(reading => 18.25 != reading.value) | count()) == 1;
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+}
