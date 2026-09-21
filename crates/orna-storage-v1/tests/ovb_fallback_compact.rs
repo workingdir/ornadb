@@ -6,7 +6,7 @@ use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::Uuid;
 use orna_storage_v1::{CompactKeyError, CompactOvbProfile, CompactParquetKeySource};
 use parquet::{
-    basic::{Compression, Encoding},
+    basic::{Compression, Encoding, Type},
     data_type::{ByteArray, ByteArrayType},
     file::{
         metadata::KeyValue,
@@ -178,7 +178,7 @@ fn parquet(profile: &CompactOvbProfile, physical_ids: &[[u8; 16]], values: &[Vec
     let properties = Arc::new(
         WriterProperties::builder()
             .set_compression(Compression::ZSTD(Default::default()))
-            .set_dictionary_enabled(false)
+            .set_dictionary_enabled(true)
             .set_encoding(Encoding::PLAIN)
             .set_writer_version(WriterVersion::PARQUET_2_0)
             .set_key_value_metadata(Some(metadata(profile, descriptors)))
@@ -215,7 +215,7 @@ fn expected_row(text: &str, id: [u8; 16], date: &str, seconds: i64, nanoseconds:
 }
 
 #[test]
-fn ovb_fallback_decodes_all_four_logical_kinds_in_declared_order_and_exact_index() {
+fn ovb_fallback_dictionary_decodes_all_four_logical_kinds_in_declared_order_and_exact_index() {
     let profile = profile();
     let expected = vec![
         expected_row("alpha", UUID, "2024-01-01", -1, 999_999_999),
@@ -258,6 +258,25 @@ fn ovb_fallback_decodes_all_four_logical_kinds_in_declared_order_and_exact_index
             ],
         ],
     );
+    let reader = SerializedFileReader::new(Bytes::copy_from_slice(&bytes)).unwrap();
+    let columns = reader.metadata().row_group(0).columns();
+    assert_eq!(columns.len(), 4);
+    let schema_columns = reader.metadata().file_metadata().schema_descr().columns();
+    assert!(columns
+        .iter()
+        .enumerate()
+        .all(|(index, _)| schema_columns[index].physical_type() == Type::BYTE_ARRAY));
+    assert!(columns
+        .iter()
+        .all(|column| matches!(column.compression(), Compression::ZSTD(_))));
+    assert!(columns
+        .iter()
+        .all(|column| column.dictionary_page_offset().is_some()));
+    assert!(columns.iter().all(|column| {
+        column
+            .encodings()
+            .any(|encoding| encoding == Encoding::RLE_DICTIONARY)
+    }));
 
     let decoded = CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 5).unwrap();
     assert_eq!(decoded, expected);
