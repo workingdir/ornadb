@@ -3037,3 +3037,120 @@ fn harness_maps_sys_resolve_type_error_and_serializes_diagnostic_evidence() {
                 && evidence["diagnostic"]["code"] == "ORNA-S021-TYPE"
         }));
 }
+#[test]
+fn harness_maps_database_cwd_and_serializes_unsupported_member_diagnostic() {
+    let valid = invoke_report(
+        typed_invoke_fixture(
+            "sys-database-cwd-valid",
+            "sys-database-cwd-valid.orna",
+            &[
+                ("parse", "pass"),
+                ("resolve", "pass"),
+                ("typecheck", "pass"),
+                ("evaluate", "not-run"),
+            ],
+            None,
+            None,
+            None,
+        ),
+        "pub fn cwd() = sys.database.cwd;",
+        "ORNA-SYS-022",
+    );
+    let valid_fixture = &valid.fixtures[0];
+    assert!(valid_fixture.passed, "{:?}", valid_fixture.stages);
+    let valid_typecheck = valid_fixture
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Typecheck))
+        .expect("database cwd typecheck stage");
+    assert_eq!(valid_typecheck.class, EvidenceClass::Semantic);
+    assert_eq!(valid_typecheck.status, EvidenceStatus::Passed);
+    assert_eq!(
+        valid_typecheck.requirements,
+        vec!["ORNA-SYS-022".to_string()]
+    );
+    assert!(matches!(
+        &valid_typecheck.requirement_mapping,
+        RequirementMapping::Mapped { requirements }
+            if requirements == &vec!["ORNA-SYS-022".to_string()]
+    ));
+    assert!(valid.semantic_evidence.iter().any(|evidence| {
+        evidence.subject == "sys-database-cwd-valid"
+            && evidence.stage == Some(Stage::Typecheck)
+            && evidence.class == EvidenceClass::Semantic
+            && evidence.status == EvidenceStatus::Passed
+            && matches!(
+                &evidence.requirement_mapping,
+                RequirementMapping::Mapped { requirements }
+                    if requirements == &vec!["ORNA-SYS-022".to_string()]
+            )
+    }));
+
+    let invalid = invoke_report(
+        typed_invoke_fixture(
+            "sys-database-legacy-member",
+            "sys-database-legacy-member.orna",
+            &[
+                ("parse", "pass"),
+                ("resolve", "pass"),
+                ("typecheck", "fail"),
+                ("evaluate", "not-run"),
+            ],
+            Some("typecheck"),
+            Some("ORNA-S022-UNSUPPORTED"),
+            None,
+        ),
+        "pub fn legacy() = sys.database.legacy_member;",
+        "ORNA-SYS-022",
+    );
+    let invalid_fixture = &invalid.fixtures[0];
+    assert!(invalid_fixture.passed, "{:?}", invalid_fixture.stages);
+    let invalid_typecheck = invalid_fixture
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Typecheck))
+        .expect("unsupported database member typecheck stage");
+    assert_eq!(invalid_typecheck.class, EvidenceClass::Semantic);
+    assert_eq!(invalid_typecheck.status, EvidenceStatus::Failed);
+    assert_eq!(
+        invalid_typecheck.requirements,
+        vec!["ORNA-SYS-022".to_string()]
+    );
+    assert_eq!(
+        invalid_typecheck
+            .diagnostic
+            .as_ref()
+            .expect("unsupported database member diagnostic")["code"],
+        "ORNA-S022-UNSUPPORTED"
+    );
+
+    let serialized = serde_json::to_value(&invalid).expect("database member report serializes");
+    let serialized_typecheck = serialized["fixtures"][0]["stages"]
+        .as_array()
+        .expect("serialized database member stage array")
+        .iter()
+        .find(|stage| stage["stage"] == "typecheck")
+        .expect("serialized unsupported database member typecheck stage");
+    assert_eq!(serialized_typecheck["class"], "semantic");
+    assert_eq!(serialized_typecheck["status"], "failed");
+    assert_eq!(
+        serialized_typecheck["requirement_mapping"]["requirements"],
+        serde_json::json!(["ORNA-SYS-022"])
+    );
+    assert_eq!(
+        serialized_typecheck["diagnostic"]["code"],
+        "ORNA-S022-UNSUPPORTED"
+    );
+    assert!(serialized["semantic_evidence"]
+        .as_array()
+        .expect("serialized database semantic evidence")
+        .iter()
+        .any(|evidence| {
+            evidence["subject"] == "sys-database-legacy-member"
+                && evidence["stage"] == "typecheck"
+                && evidence["status"] == "failed"
+                && evidence["requirement_mapping"]["requirements"]
+                    == serde_json::json!(["ORNA-SYS-022"])
+                && evidence["diagnostic"]["code"] == "ORNA-S022-UNSUPPORTED"
+        }));
+}

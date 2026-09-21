@@ -422,6 +422,31 @@ fn snapshot_project(source: &str) -> ProjectUnit {
         },
     }
 }
+fn database_project(source: &str) -> ProjectUnit {
+    ProjectUnit {
+        fixture_id: "database-project".into(),
+        project_id: "logical/database".into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: "database-module".into(),
+            source_id: "logical/database/main.orna".into(),
+            parse_as: "module_unit".into(),
+            source: source.into(),
+        }],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+    }
+}
 fn resolve_project(source: &str) -> ProjectUnit {
     ProjectUnit {
         fixture_id: "resolve-project".into(),
@@ -539,6 +564,50 @@ fn semantic_project_adapter_rejects_non_string_sys_snapshot_argument_at_typechec
     assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S021-TYPE");
 }
 
+#[test]
+fn semantic_project_adapter_admits_sys_database_cwd_as_snapshot_ref_read() {
+    let source = "pub fn cwd() = sys.snapshot(sys.database.cwd);";
+    let project = database_project(source);
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.typecheck_project(&project), StageOutcome::Passed);
+
+    // The project stages exercise the production adapter route.  Inspect the
+    // native graph separately to prove the admitted source retains the
+    // descriptor's typed SnapshotRef result and database-read effect.
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("main.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+    let cwd = &analysis.modules.values().next().unwrap().exports["cwd"];
+    assert!(matches!(
+        &cwd.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Named("sys.SnapshotRef".into())
+    ));
+    assert!(
+        cwd.effects.effects.contains("database read"),
+        "{:?}",
+        cwd.effects
+    );
+}
+
+#[test]
+fn semantic_project_adapter_rejects_unsupported_sys_database_member_at_typecheck() {
+    let source = "pub fn invalid() = sys.database.legacy_member;";
+    let project = database_project(source);
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    let StageOutcome::Failed(diagnostic) = adapter.typecheck_project(&project) else {
+        panic!("unsupported sys.database member must fail at typecheck");
+    };
+    assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S022-UNSUPPORTED");
+}
 
 #[test]
 fn semantic_project_adapter_admits_sys_runtime_info_with_read_effect() {
