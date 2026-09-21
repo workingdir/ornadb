@@ -10065,7 +10065,7 @@ async fn load_stream_observation_tx(
     id: StreamObservationId,
     capture: &CwdCapture,
 ) -> Result<Option<StreamObservation>, RuntimeError> {
-    let mut rows = connection.query("SELECT observation.run_id, observation.producer, observation.consumer_name, observation.status, observation.items_seen, observation.items_committed, observation.items_failed, observation.diagnostic_code, observation.diagnostic_class, checkpoint.consumer_principal, checkpoint.consumer_root, checkpoint.consumer_function, checkpoint.consumer_binding, checkpoint.source_format, checkpoint.source, checkpoint.partition_format, checkpoint.partition, checkpoint.position_format, run.runtime_id, run.runtime_generation, run.status, observation.consumer_identity, observation.source_identity, observation.partition, observation.last_item_ms, observation.observed_ms, observation.last_failure_identity FROM sys_stream_observation AS observation JOIN stream_checkpoint AS checkpoint ON checkpoint.key_id = observation.checkpoint_key_id JOIN sys_run_observation AS run ON run.run_id = observation.run_id WHERE observation.stream_id = ?1", params![id.0.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut rows = connection.query("SELECT observation.run_id, observation.producer, observation.consumer_name, observation.status, observation.items_seen, observation.items_committed, observation.items_failed, observation.diagnostic_code, observation.diagnostic_class, checkpoint.consumer_principal, checkpoint.consumer_root, checkpoint.consumer_function, checkpoint.consumer_binding, checkpoint.source_format, checkpoint.source, checkpoint.partition_format, checkpoint.partition, checkpoint.position_format, run.runtime_id, run.runtime_generation, run.status, observation.consumer_identity, observation.source_identity, observation.partition, observation.last_item_ms, observation.observed_ms, observation.last_failure_identity, observation.checkpoint_key_id FROM sys_stream_observation AS observation JOIN stream_checkpoint AS checkpoint ON checkpoint.key_id = observation.checkpoint_key_id JOIN sys_run_observation AS run ON run.run_id = observation.run_id WHERE observation.stream_id = ?1", params![id.0.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
     let Some(row) = rows
         .next()
         .await
@@ -10116,6 +10116,14 @@ async fn load_stream_observation_tx(
         .partition
         .as_ref()
         .map(|value| value.as_str().to_owned());
+    let observation_consumer = decode_consumer_identity(&row_text(&row, 21)?)?;
+    let observation_source = row_text(&row, 22)?;
+    if observation_consumer != checkpoint.consumer
+        || observation_source != checkpoint.source.as_str()
+        || row_text(&row, 27)? != stream_key_id(&checkpoint)
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
     if partition != checkpoint_partition {
         return Err(RuntimeError::RecoveryInvalid);
     }
@@ -10168,8 +10176,8 @@ async fn load_stream_observation_tx(
         run: parent_run_id,
         producer: row_text(&row, 1)?,
         consumer: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
-        consumer_identity: decode_consumer_identity(&row_text(&row, 21)?)?,
-        source_identity: row_text(&row, 22)?,
+        consumer_identity: observation_consumer,
+        source_identity: observation_source,
         partition: partition.clone(),
         partition_evidence: StreamPartitionEvidence {
             observation: partition,
@@ -27404,6 +27412,49 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            state.stream_observation(stream.id).await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_observation_loader_rejects_checkpoint_identity_mismatch() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let request = request(230, 231);
+        state.reserve_request(request, digest(232)).await.unwrap();
+        let key = stream_delivery("identity-mismatch", "stream").checkpoint_key();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: key.consumer.clone(),
+                function: "pkg.identity-mismatch".into(),
+                source_identity: None,
+                invocation_id: id(233),
+            })
+            .await
+            .unwrap();
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: None,
+                checkpoint: key.clone(),
+            })
+            .await
+            .unwrap();
+        let mut mismatched = key.consumer.clone();
+        mismatched.principal = Component::new("other-principal").unwrap();
+        state
+            .connection
+            .execute(
+                "UPDATE sys_stream_observation SET consumer_identity = ?1 WHERE stream_id = ?2",
+                params![mismatched.canonical(), stream.id.0.to_vec()],
+            )
+            .await
+            .unwrap();
+
         assert_eq!(
             state.stream_observation(stream.id).await,
             Err(RuntimeError::RecoveryInvalid)
