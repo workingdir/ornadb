@@ -4221,14 +4221,16 @@ impl Context<'_, '_> {
         }
         Ok(Value::Int(BigInt::from(values.len())))
     }
-    fn sum(&self, values: &[Value]) -> Result<Value, EvaluationError> {
+    fn sum(&mut self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
         if values.iter().all(|value| matches!(value, Value::Float(_))) && !values.is_empty() {
+            self.step()?;
             let mut total = match values.first() {
                 Some(Value::Float(value)) => f64::from_bits(*value),
                 _ => unreachable!("non-empty all-float list has a first Float"),
             };
             for value in &values[1..] {
+                self.step()?;
                 let Value::Float(value) = value else {
                     unreachable!("all-float list was checked above")
                 };
@@ -4245,11 +4247,13 @@ impl Context<'_, '_> {
             .all(|value| matches!(value, Value::Decimal(_)))
             && !values.is_empty()
         {
+            self.step()?;
             let Value::Decimal(first) = &values[0] else {
                 unreachable!("non-empty all-Decimal list has a first Decimal")
             };
             let mut total = first.clone();
             for value in &values[1..] {
+                self.step()?;
                 let Value::Decimal(value) = value else {
                     unreachable!("all-Decimal list was checked above")
                 };
@@ -4258,6 +4262,7 @@ impl Context<'_, '_> {
             return Ok(Value::Decimal(total));
         }
         if !values.is_empty() && values.iter().all(|value| matches!(value, Value::Money { .. })) {
+            self.step()?;
             let Value::Money {
                 amount: first_amount,
                 currency,
@@ -4267,6 +4272,7 @@ impl Context<'_, '_> {
             };
             let mut total = first_amount.clone();
             for value in &values[1..] {
+                self.step()?;
                 let Value::Money {
                     amount,
                     currency: other_currency,
@@ -4286,6 +4292,7 @@ impl Context<'_, '_> {
         }
         let mut total = BigInt::ZERO;
         for value in values {
+            self.step()?;
             let Value::Int(value) = value else {
                 // Mixed numeric kinds, Money and affine quantities remain
                 // outside this evaluator slice until their runtime contracts
