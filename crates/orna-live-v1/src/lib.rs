@@ -29,14 +29,15 @@ use orna_foundation_v1::{
     CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value,
 };
 use orna_protocol_v1::{
+
     Envelope, Limits as ProtocolLimits, Message, RequestState, ResultBody, ResultStatus,
     TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime_v1::{
     Component, ConsumerIdentity, FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
     RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
-    RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState, TableMutation,
-    TerminalOutcome, WriterLease,
+    RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState, StagedTableActivation,
+    TableMutation, TerminalOutcome, WriterLease,
 };
 use orna_security_v1::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
@@ -770,13 +771,64 @@ impl LiveEvalResponse {
 /// The asynchronous callback boundary for one authenticated page action.
 pub type ActionFuture<'a> = Pin<Box<dyn Future<Output = Result<LiveEvalResponse>> + 'a>>;
 
+/// The source/provenance metadata admitted with one page action descriptor.
+///
+/// The opaque action handle is allocated by the serving owner and supplied in
+/// [`ActionBinding`]; this descriptor never manufactures a wire handle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActionDescriptor {
+    pub action_id: String,
+    pub input_type: String,
+    pub provenance: [u8; 32],
+}
+
+impl ActionDescriptor {
+    #[must_use]
+    pub fn new(
+        action_id: impl Into<String>,
+        input_type: impl Into<String>,
+        provenance: [u8; 32],
+    ) -> Self {
+        Self {
+            action_id: action_id.into(),
+            input_type: input_type.into(),
+            provenance,
+        }
+    }
+
+    fn validate(&self) -> std::result::Result<(), ActionRegistrationError> {
+        if self.action_id.is_empty() || self.input_type.is_empty() || self.provenance == [0; 32] {
+            return Err(ActionRegistrationError::InvalidDescriptor);
+        }
+        Ok(())
+    }
+}
+
 /// Identity of the watch and page revision that issued an opaque action handle.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ActionBinding {
     pub session: [u8; 16],
     pub watch: [u8; 16],
     pub page_revision: u64,
+    /// Allocated by the serving owner; never derived from source text.
     pub action: [u8; 16],
+}
+
+impl ActionBinding {
+    #[must_use]
+    pub const fn new(
+        session: [u8; 16],
+        watch: [u8; 16],
+        page_revision: u64,
+        action: [u8; 16],
+    ) -> Self {
+        Self {
+            session,
+            watch,
+            page_revision,
+            action,
+        }
+    }
 }
 
 /// Application callback for a registered action.
@@ -812,11 +864,13 @@ pub trait ActionAuthority: Send + Sync {
 pub enum ActionRegistrationError {
     ZeroHandle,
     DuplicateBinding,
+    InvalidDescriptor,
 }
 
 /// In-memory action authority suitable for a session-owned server registry.
 pub struct ActionAuthorityRegistry {
     handlers: BTreeMap<ActionBinding, Arc<dyn ActionHandler>>,
+    descriptors: BTreeMap<ActionBinding, ActionDescriptor>,
 }
 
 impl ActionAuthorityRegistry {
@@ -824,6 +878,7 @@ impl ActionAuthorityRegistry {
     pub fn new() -> Self {
         Self {
             handlers: BTreeMap::new(),
+            descriptors: BTreeMap::new(),
         }
     }
 
@@ -840,6 +895,31 @@ impl ActionAuthorityRegistry {
         }
         self.handlers.insert(binding, Arc::new(handler));
         Ok(())
+    }
+
+    /// Registers an explicitly allocated opaque handle with the descriptor
+    /// and provenance that produced it.
+    pub fn register_descriptor<H: ActionHandler + 'static>(
+        &mut self,
+        binding: ActionBinding,
+        descriptor: ActionDescriptor,
+        handler: H,
+    ) -> std::result::Result<(), ActionRegistrationError> {
+        descriptor.validate()?;
+        self.register(binding, handler)?;
+        self.descriptors.insert(binding, descriptor);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn descriptor(&self, binding: ActionBinding) -> Option<&ActionDescriptor> {
+        self.descriptors.get(&binding)
+    }
+
+    /// Retires a descriptor and its callback. Future activations fail closed.
+    pub fn retire(&mut self, binding: ActionBinding) -> bool {
+        self.descriptors.remove(&binding);
+        self.handlers.remove(&binding).is_some()
     }
 }
 
@@ -862,12 +942,17 @@ impl ActionAuthority for ActionAuthorityRegistry {
         let Some(handler) = self.handlers.get(&binding) else {
             return Box::pin(async { Err(Error::Denied) });
         };
-        if !handler.accepts(value) {
+        if let Some(descriptor) = self.descriptors.get(&binding) {
+            if descriptor.validate().is_err() || !handler.accepts(value) {
+                return Box::pin(async { Err(Error::Denied) });
+            }
+        } else if !handler.accepts(value) {
             return Box::pin(async { Err(Error::Denied) });
         }
         handler.activate(binding, request, fingerprint, value, context, work)
     }
 }
+
 
 /// Narrow seam for application-owned source execution. The adapter owns wire
 /// admission and response identity; implementations must return a canonical
@@ -3729,16 +3814,20 @@ impl LiveHost {
             outcome: FrameOutcome::Accepted,
             response: Some(response),
         })?;
+        let staged = StagedTableActivation::from_source(
+            context.clone(),
+            transaction.mutations,
+            transaction.next_digest,
+            transaction.faults,
+        )
+        .map_err(|error| map_runtime(&error))?;
         let committed = runtime
-            .commit_table_request_activation(
+            .commit_staged_table_request_activation(
                 lease,
                 identity,
                 fingerprint,
-                context,
-                &transaction.mutations,
-                transaction.next_digest,
+                &staged,
                 terminal,
-                transaction.faults.as_ref(),
             )
             .await
             .map_err(|error| map_runtime(&error))?;
@@ -9542,5 +9631,51 @@ mod tests {
         );
         assert!(!transport.pending_upgrades.contains_key(&[12; 16]));
         assert_eq!(transport.take_retired_attachments(), vec![[13; 16]]);
+    }
+    struct DescriptorActionHandler;
+
+    impl ActionHandler for DescriptorActionHandler {
+        fn accepts(&self, _: &CanonicalValue) -> bool {
+            true
+        }
+
+        fn activate<'a>(
+            &'a self,
+            _: ActionBinding,
+            _: [u8; 16],
+            _: [u8; 32],
+            _: &'a CanonicalValue,
+            _: &'a RuntimeActivationContext,
+            _: &'a mut LiveApplicationWorkLease,
+        ) -> ActionFuture<'a> {
+            Box::pin(async { Err(Error::UnsupportedOperation) })
+        }
+    }
+
+    #[test]
+    fn descriptor_registration_retains_explicit_handle_and_retires_closed() {
+        let binding = ActionBinding::new([1; 16], [2; 16], 9, [3; 16]);
+        let descriptor = ActionDescriptor::new("save", "std.text", [4; 32]);
+        let mut registry = ActionAuthorityRegistry::new();
+        assert_eq!(
+            registry.register_descriptor(
+                binding,
+                descriptor.clone(),
+                DescriptorActionHandler,
+            ),
+            Ok(())
+        );
+        assert_eq!(registry.descriptor(binding), Some(&descriptor));
+        assert!(registry.retire(binding));
+        assert_eq!(registry.descriptor(binding), None);
+        assert!(!registry.retire(binding));
+        assert_eq!(
+            registry.register_descriptor(
+                binding,
+                ActionDescriptor::new("", "std.text", [4; 32]),
+                DescriptorActionHandler,
+            ),
+            Err(ActionRegistrationError::InvalidDescriptor)
+        );
     }
 }
