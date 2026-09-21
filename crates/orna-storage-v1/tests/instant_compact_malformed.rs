@@ -142,6 +142,36 @@ fn instant_parquet(
     writer.close().unwrap();
     with_page_checksums(bytes)
 }
+fn instant_dictionary_parquet(profile: &CompactOvbProfile, values: &[i64]) -> Vec<u8> {
+    let message = format!(
+        "message schema {{ REQUIRED INT64 f_{} (TIMESTAMP(NANOS,true)); }}",
+        Uuid::from_bytes(KEY).simple()
+    );
+    let schema = Arc::new(parse_message_type(&message).unwrap());
+    let properties = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::ZSTD(Default::default()))
+            .set_dictionary_enabled(true)
+            .set_key_value_metadata(Some(metadata(
+                profile,
+                descriptor("instant_ns", Vec::new()),
+            )))
+            .build(),
+    );
+    let mut bytes = Vec::new();
+    let mut writer = SerializedFileWriter::new(&mut bytes, schema, properties).unwrap();
+    let mut row_group = writer.next_row_group().unwrap();
+    let mut column = row_group.next_column().unwrap().unwrap();
+    column
+        .typed::<Int64Type>()
+        .write_batch(values, None, None)
+        .unwrap();
+    column.close().unwrap();
+    row_group.close().unwrap();
+    writer.close().unwrap();
+    with_page_checksums(bytes)
+}
+
 
 struct PageHeader {
     encoded_len: usize,
@@ -337,6 +367,68 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
     data
 }
 
+#[derive(Clone, Copy)]
+enum MetadataCorruption {
+    DictionaryOffset(i64),
+    DataOffset(i64),
+    CompressedSize(i64),
+    ColumnValues(i64),
+    RowGroupRows(i64),
+}
+
+fn corrupt_metadata(bytes: Vec<u8>, corruption: MetadataCorruption) -> Vec<u8> {
+    let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+    let metadata = reader.metadata().clone();
+    let mut groups = metadata.row_groups().to_vec();
+    let mut group_builder = groups[0].clone().into_builder();
+    let mut columns = group_builder.take_columns();
+    let column = &mut columns[0];
+    let mut column_builder = column.clone().into_builder();
+    match corruption {
+        MetadataCorruption::DictionaryOffset(offset) => {
+            *column = column_builder.set_dictionary_page_offset(Some(offset)).build().unwrap();
+        }
+        MetadataCorruption::DataOffset(offset) => {
+            *column = column_builder.set_data_page_offset(offset).build().unwrap();
+        }
+        MetadataCorruption::CompressedSize(size) => {
+            *column = column_builder.set_total_compressed_size(size).build().unwrap();
+        }
+        MetadataCorruption::ColumnValues(values) => {
+            *column = column_builder.set_num_values(values).build().unwrap();
+        }
+        MetadataCorruption::RowGroupRows(rows) => {
+            *column = column_builder.build().unwrap();
+            groups[0] = group_builder
+                .set_num_rows(rows)
+                .set_column_metadata(columns)
+                .build()
+                .unwrap();
+            let rewritten = parquet::file::metadata::ParquetMetaData::new(
+                metadata.file_metadata().clone(),
+                groups,
+            );
+            let mut footer = Vec::new();
+            parquet::file::metadata::ParquetMetaDataWriter::new(&mut footer, &rewritten)
+                .finish()
+                .unwrap();
+            let mut output = bytes[..footer_start(&bytes)].to_vec();
+            output.extend(footer);
+            return output;
+        }
+    }
+    groups[0] = group_builder.set_column_metadata(columns).build().unwrap();
+    let rewritten =
+        parquet::file::metadata::ParquetMetaData::new(metadata.file_metadata().clone(), groups);
+    let mut footer = Vec::new();
+    parquet::file::metadata::ParquetMetaDataWriter::new(&mut footer, &rewritten)
+        .finish()
+        .unwrap();
+    let mut output = bytes[..footer_start(&bytes)].to_vec();
+    output.extend(footer);
+    output
+}
+
 fn checksummed_chunk(bytes: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(bytes.len() + 8);
     let mut cursor = 0;
@@ -509,5 +601,98 @@ fn rejects_instant_row_count_mismatch_before_logical_key_use() {
             expected: 2,
             observed: 1
         })
+    ));
+}
+
+#[test]
+fn rejects_corrupt_instant_dictionary_page_body_before_key_use() {
+    let profile = profile();
+    let bytes = instant_dictionary_parquet(&profile, &[1, 1, 2, 1]);
+    let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+    let column = &reader.metadata().row_groups()[0].columns()[0];
+    assert!(
+        column.encodings().any(|encoding| encoding == Encoding::RLE_DICTIONARY),
+        "fixture must contain a dictionary-encoded data page"
+    );
+    let dictionary_start = column.dictionary_page_offset().unwrap() as usize;
+    let data_start = column.data_page_offset() as usize;
+    let dictionary_header = page_header(&bytes[dictionary_start..]);
+    let dictionary_body = dictionary_start + dictionary_header.encoded_len;
+    assert!(dictionary_body < data_start, "fixture must contain a dictionary page");
+    let mut corrupted = bytes;
+    corrupted[dictionary_body] ^= 0x80;
+    assert!(matches!(
+        CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &corrupted, 4),
+        Err(CompactParquetError::InvalidParquet)
+    ));
+}
+
+#[test]
+fn rejects_dictionary_page_and_physical_metadata_boundaries() {
+    let profile = profile();
+    let bytes = instant_dictionary_parquet(&profile, &[1, 1, 2, 1]);
+    let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+    let column = &reader.metadata().row_groups()[0].columns()[0];
+    let dictionary_offset = column.dictionary_page_offset().unwrap();
+    let data_offset = column.data_page_offset();
+    let cases = [
+        (
+            "dictionary offset into data page",
+            MetadataCorruption::DictionaryOffset(data_offset),
+        ),
+        (
+            "data offset into dictionary page",
+            MetadataCorruption::DataOffset(dictionary_offset + 1),
+        ),
+        (
+            "compressed boundary before page body",
+            MetadataCorruption::CompressedSize(1),
+        ),
+    ];
+    for (name, corruption) in cases {
+        let malformed = corrupt_metadata(bytes.clone(), corruption);
+        assert!(
+            matches!(
+                CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &malformed, 4),
+                Err(CompactParquetError::InvalidParquet)
+            ),
+            "{name}: malformed physical metadata must fail closed"
+        );
+    }
+}
+
+#[test]
+fn rejects_dictionary_column_and_row_group_boundary_mismatches() {
+    let profile = profile();
+    let bytes = instant_dictionary_parquet(&profile, &[1, 1, 2, 1]);
+    for (name, corruption) in [
+        ("column value count", MetadataCorruption::ColumnValues(3)),
+        ("row-group row count", MetadataCorruption::RowGroupRows(5)),
+    ] {
+        let malformed = corrupt_metadata(bytes.clone(), corruption);
+        let result = CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &malformed, 4);
+        match name {
+            "column value count" => assert!(matches!(
+                result,
+                Err(CompactParquetError::InvalidParquet)
+            )),
+            "row-group row count" => assert!(matches!(
+                result,
+                Err(CompactParquetError::RowCountMismatch {
+                    expected: 4,
+                    observed: 5
+                })
+            )),
+            _ => unreachable!("unknown metadata boundary fixture"),
+        }
+    }
+}
+#[test]
+fn rejects_dictionary_encoded_keys_outside_declared_order() {
+    let profile = profile();
+    let bytes = instant_dictionary_parquet(&profile, &[2, 1]);
+    assert!(matches!(
+        CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 2),
+        Err(CompactParquetError::InvalidParquet)
     ));
 }
