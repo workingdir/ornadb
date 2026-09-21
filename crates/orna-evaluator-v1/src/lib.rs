@@ -28,11 +28,16 @@ use unicode_normalization::UnicodeNormalization;
 mod admitted_repl;
 mod cancellation;
 mod relation;
+mod timezone;
 mod repl;
 
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use cancellation::CancellationToken;
 use relation::{RelationLastState, RelationPlan, RelationStage, RelationWindowState};
+pub use timezone::{
+    Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError,
+    TIMEZONE_DATASET_VERSION, ZonedLocalDateTime, resolve_time_zone,
+};
 pub use repl::{ReplSession, parse_admitted_repl};
 
 /// The verified standard-source bundle used by the bounded local and remote
