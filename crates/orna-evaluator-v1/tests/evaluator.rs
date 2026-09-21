@@ -2459,6 +2459,161 @@ fn std_collection_structural_operations_charge_step_budget_without_changing_fini
 }
 
 #[test]
+fn std_collection_take_drop_and_zip_charge_steps_for_copied_results() {
+    let environment = Environment::from([
+        (
+            "rows".into(),
+            Value::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Int(2.into()),
+                Raw::Int(3.into()),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "left".into(),
+            Value::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Int(2.into()),
+                Raw::Int(3.into()),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "right".into(),
+            Value::new(Raw::Array(vec![
+                Raw::Text("a".into()),
+                Raw::Text("b".into()),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "equal_right".into(),
+            Value::new(Raw::Array(vec![
+                Raw::Text("a".into()),
+                Raw::Text("b".into()),
+                Raw::Text("c".into()),
+            ]))
+            .unwrap(),
+        ),
+    ]);
+
+    assert_eq!(
+        evaluate_expression(
+            "std.collection.take(rows, 1)",
+            &environment,
+            Limits {
+                max_steps: 4,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+        Value::new(Raw::Array(vec![Raw::Int(1.into())])).unwrap()
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.take(rows, 1)",
+            &environment,
+            Limits {
+                max_steps: 3,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert_eq!(
+        evaluate_expression(
+            "std.collection.drop(rows, 2)",
+            &environment,
+            Limits {
+                max_steps: 4,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+        Value::new(Raw::Array(vec![Raw::Int(3.into())])).unwrap()
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.drop(rows, 2)",
+            &environment,
+            Limits {
+                max_steps: 3,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+
+    let short_zip = Value::new(Raw::Array(vec![
+        Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())]),
+        Raw::Array(vec![Raw::Int(2.into()), Raw::Text("b".into())]),
+    ]))
+    .unwrap();
+    assert_eq!(
+        evaluate_expression(
+            "std.collection.zip(left, right)",
+            &environment,
+            Limits {
+                max_steps: 5,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+        short_zip
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.zip(left, right)",
+            &environment,
+            Limits {
+                max_steps: 3,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+
+    let exact_zip = Value::new(Raw::Array(vec![
+        Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())]),
+        Raw::Array(vec![Raw::Int(2.into()), Raw::Text("b".into())]),
+        Raw::Array(vec![Raw::Int(3.into()), Raw::Text("c".into())]),
+    ]))
+    .unwrap();
+    assert_eq!(
+        evaluate_expression(
+            "std.collection.zip_exact(left, equal_right)",
+            &environment,
+            Limits {
+                max_steps: 6,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+        exact_zip
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.zip_exact(left, equal_right)",
+            &environment,
+            Limits {
+                max_steps: 3,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.zip_exact(left, right)",
+            &environment,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-VALUE"
+    );
+}
+
+#[test]
 fn std_collection_first_returns_only_the_head_of_a_finite_list() {
     for (expression, expected) in [
         ("first([0, 1, 2])", Value::int(0.into())),
