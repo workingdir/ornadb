@@ -16107,6 +16107,28 @@ mod tests {
         }
     }
 
+    struct FailAfterTableHandler {
+        calls: usize,
+    }
+
+    impl StreamHandler for FailAfterTableHandler {
+        fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult {
+            self.calls += 1;
+            assert_eq!(item.payload, vec![42]);
+            StreamHandlerResult::FailAfterTable(
+                StreamTableMutationBatch {
+                    mutations: vec![table_mutation(42, 42, Some(42))],
+                    next_digest: digest(42),
+                },
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+            )
+        }
+    }
+
+
     struct CancellingTableHandler {
         calls: usize,
     }
@@ -17030,6 +17052,53 @@ mod tests {
                 .is_none(),
             "re-admitted cancellation must release its delivery lease"
         );
+    }
+
+    #[tokio::test]
+    async fn stream_runner_rolls_back_fail_after_table_without_checkpoint_progress() {
+        // ORNA-CP-002 / ORNA-CP-005 / ORNA-SYS-062: a handler that has
+        // staged table work before returning an ordinary error must not
+        // publish rows, a later checkpoint watermark, or a CWD capture.
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(45)).await.unwrap();
+        let delivery = stream_delivery("fail-after-table", "fail-after-table-next");
+        let key = delivery.checkpoint_key();
+        let checkpoint_before = state.stream_checkpoint(&key).await.unwrap();
+        let capture_before = state.capture().await.unwrap();
+        let identity = FailureIdentity(delivery.clone());
+        let mut source = TestSource {
+            key: key.clone(),
+            item: Some(StreamItem {
+                delivery,
+                payload: vec![42],
+            }),
+            polls: 0,
+        };
+        let mut handler = FailAfterTableHandler { calls: 0 };
+
+        let failure = match state
+            .run_stream_once(writer, &key, &mut source, &mut handler)
+            .await
+            .unwrap()
+        {
+            StreamStep::Failed { failure } => failure,
+            other => panic!("fail-after-table delivery must fail: {other:?}"),
+        };
+        assert_eq!(handler.calls, 1);
+        assert_eq!(failure.identity, identity);
+        assert_eq!(failure.attempts, 1);
+        assert_eq!(state.capture().await.unwrap(), capture_before);
+        assert_eq!(
+            state.stream_checkpoint(&key).await.unwrap(),
+            checkpoint_before
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            state.committed_table_row("books", &[42]).await.unwrap(),
+            None
+        );
+        assert_eq!(state.stream_failure_row_count_for_evidence().await.unwrap(), 1);
     }
 
     #[tokio::test]
