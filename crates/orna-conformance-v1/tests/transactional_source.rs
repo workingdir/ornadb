@@ -45,6 +45,28 @@ fn source_with_table_assertion(assertion: &str, parent_body: &str) -> SourceUnit
         ),
     }
 }
+fn decimal_body_table_assertion_source(assertion: &str, parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "txn-decimal-table-assertion".into(),
+        source_id: "txn-decimal-table-assertion.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Reading(id: Int) {{ value: Decimal, label: Str, assert {assertion}; }} fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
+fn decimal_key_table_assertion_source(assertion: &str, parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "txn-decimal-key-table-assertion".into(),
+        source_id: "txn-decimal-key-table-assertion.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Reading(value: Decimal) {{ label: Str, assert {assertion}; }} fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
 
 fn source_with_module_assertion(assertion: &str, parent_body: &str) -> SourceUnit {
     SourceUnit {
@@ -711,6 +733,107 @@ fn table_all_unique_assertion_permits_atomic_publication() {
             .committed_row("Note", &Value::int(8.into()))
             .is_some()
     );
+}
+
+#[test]
+fn table_all_unique_decimal_body_rejects_scale_alias_and_rolls_back_candidates() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_body_table_assertion_source(
+        "all_unique(reading => reading.value)",
+        r#"
+            Reading.insert({ id: 1, value: 18.25, label: "canonical" });
+            Reading.insert({ id: 2, value: 18.2500, label: "scale-alias" });
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+        ),
+        "scale-alias Decimal body did not fail all_unique: {outcome:?}"
+    );
+    for id in [1, 2] {
+        assert_eq!(
+            runtime.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "failed Decimal body assertion published candidate row {id}"
+        );
+    }
+}
+
+#[test]
+fn table_all_unique_decimal_body_permits_distinct_values() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_body_table_assertion_source(
+        "all_unique(reading => reading.value)",
+        r#"
+            Reading.insert({ id: 1, value: 18.25, label: "first" });
+            Reading.insert({ id: 2, value: 18.26, label: "second" });
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    for id in [1, 2] {
+        assert!(
+            runtime
+                .committed_row("Reading", &Value::int(id.into()))
+                .is_some(),
+            "distinct Decimal body row {id} was not published"
+        );
+    }
+}
+
+#[test]
+fn table_all_unique_decimal_primary_key_rejects_scale_alias_before_assertion_and_rolls_back_candidates() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_table_assertion_source(
+        "all_unique(reading => reading.value)",
+        r#"
+            Reading.insert({ value: 18.25, label: "canonical" });
+            Reading.insert({ value: 18.2500, label: "scale-alias" });
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-DUPLICATE"
+        ),
+        "scale-alias Decimal primary key did not fail at key identity admission: {outcome:?}"
+    );
+    let canonical_key =
+        Value::decimal(1825.into(), (-2).into()).expect("canonical first Decimal key");
+    assert_eq!(
+        runtime.committed_row("Reading", &canonical_key),
+        None,
+        "failed Decimal primary-key admission published candidate row"
+    );
+}
+
+#[test]
+fn table_all_unique_decimal_primary_key_permits_distinct_values() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_key_table_assertion_source(
+        "all_unique(reading => reading.value)",
+        r#"
+            Reading.insert({ value: 18.25, label: "first" });
+            Reading.insert({ value: 18.26, label: "second" });
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    for key in [
+        Value::decimal(1825.into(), (-2).into()).expect("canonical first Decimal key"),
+        Value::decimal(1826.into(), (-2).into()).expect("canonical second Decimal key"),
+    ] {
+        assert!(
+            runtime.committed_row("Reading", &key).is_some(),
+            "distinct Decimal primary-key row was not published"
+        );
+    }
 }
 
 #[test]
