@@ -850,6 +850,10 @@ fn erased_sys_start_report_maps_orna_sys_081_to_semantic_pass_evidence() {
     assert_eq!(serialized_typecheck["class"], "semantic");
     assert_eq!(serialized_typecheck["status"], "passed");
     assert_eq!(
+        serialized_typecheck["requirement_mapping"]["status"],
+        "mapped"
+    );
+    assert_eq!(
         serialized_typecheck["requirement_mapping"]["requirements"],
         serde_json::json!(["ORNA-SYS-081"])
     );
@@ -930,6 +934,10 @@ fn erased_sys_start_report_serializes_missing_witness_diagnostic() {
         .expect("serialized erased start missing-witness typecheck stage");
     assert_eq!(serialized_typecheck["class"], "semantic");
     assert_eq!(serialized_typecheck["status"], "failed");
+    assert_eq!(
+        serialized_typecheck["requirement_mapping"]["status"],
+        "mapped"
+    );
     assert_eq!(
         serialized_typecheck["requirement_mapping"]["requirements"],
         serde_json::json!(["ORNA-SYS-081"])
