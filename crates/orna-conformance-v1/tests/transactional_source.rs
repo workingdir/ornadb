@@ -1807,6 +1807,27 @@ fn parsed_decimal_reversed_filtered_first_respects_shared_step_budget() {
         );
     }
 }
+fn decimal_composite_key_source(parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "txn-decimal-composite-key".into(),
+        source_id: "txn-decimal-composite-key.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Reading(amount: Decimal, label: Str) {{ quantity: Int, }} fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
+fn decimal_composite_key(coefficient: i64, exponent: i64, label: &str) -> Value {
+    let decimal =
+        Value::decimal(coefficient.into(), exponent.into()).expect("canonical Decimal key");
+    Value::new(orna_foundation_v1::OvbRaw::Array(vec![
+        decimal.raw().clone(),
+        orna_foundation_v1::OvbRaw::Text(label.into()),
+    ]))
+    .expect("canonical composite Decimal+Str key")
+}
+
 fn decimal_key_relation_source(parent_body: &str) -> SourceUnit {
     SourceUnit {
         fixture_id: "txn-decimal-key-relation".into(),
@@ -2409,5 +2430,82 @@ fn parsed_decimal_primary_key_upsert_reads_candidate_rows_and_rolls_back_on_fail
         rolled_back.committed_row("Reading", &key),
         None,
         "failed Decimal upsert activation published its candidate row"
+    );
+}
+
+#[test]
+fn parsed_composite_decimal_primary_key_order_and_window_are_canonical() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_composite_key_source(
+        r#"
+            Reading.insert({ amount: 2.00, label: "zulu", quantity: 2 });
+            Reading.insert({ amount: 1.0, label: "zulu", quantity: 1 });
+            Reading.insert({ amount: 1.0000, label: "alpha", quantity: 10 });
+            assert (Reading | count()) == 3;
+            assert (Reading | filter(row => row.amount == 1.000 && row.label == "alpha") | count()) == 1;
+            assert (Reading | take(1) | one()).label == "alpha";
+            assert (Reading | drop(1) | take(1) | one()).label == "zulu";
+            assert (Reading | window(2) | count()) == 2;
+        "#,
+    ));
+
+    assert!(
+        matches!(&outcome, StageOutcome::Passed),
+        "composite Decimal+Str order/window source failed: {outcome:?}"
+    );
+}
+
+#[test]
+fn parsed_composite_decimal_primary_key_duplicate_alias_rolls_back_complete_activation() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_composite_key_source(
+        r#"
+            Reading.insert({ amount: 2.0, label: "other", quantity: 2 });
+            Reading.insert({ amount: 18.25, label: "same", quantity: 1 });
+            Reading.insert({ amount: 18.2500, label: "same", quantity: 2 });
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-DUPLICATE"
+        ),
+        "Decimal scale-alias composite key did not fail as a duplicate: {outcome:?}"
+    );
+    for key in [
+        decimal_composite_key(2, 0, "other"),
+        decimal_composite_key(1825, -2, "same"),
+    ] {
+        assert_eq!(
+            runtime.committed_row("Reading", &key),
+            None,
+            "duplicate composite-key activation published a candidate row"
+        );
+    }
+}
+
+#[test]
+fn parsed_composite_decimal_primary_key_invalid_amount_rolls_back_candidates() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_composite_key_source(
+        r#"
+            Reading.insert({ amount: 2.0, label: "valid", quantity: 2 });
+            Reading.insert({ amount: "not-a-decimal", label: "invalid", quantity: 1 });
+        "#,
+    ));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-S021-TYPE"
+        ),
+        "invalid Decimal component did not fail during source admission: {outcome:?}"
+    );
+    assert_eq!(
+        runtime.committed_row("Reading", &decimal_composite_key(2, 0, "valid")),
+        None,
+        "invalid composite key published a valid candidate row"
     );
 }
