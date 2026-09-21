@@ -430,6 +430,61 @@ fn semantic_project_adapter_rejects_typed_sys_invoke_mismatched_witness() {
         "sys.invoke explicit type argument must match the as: witness"
     );
 }
+#[test]
+fn semantic_project_adapter_admits_typed_sys_start_with_explicit_witness() {
+    let source = "pub fn start_int(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
+         sys.start<Int>(function, arguments, as: Int);";
+    let project = typed_invoke_project(source);
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.typecheck_project(&project), StageOutcome::Passed);
+
+    // Keep the source-stage adapter assertion paired with the native graph
+    // result so this witness proves the real return type and effect contract,
+    // rather than only reporting a phase outcome.
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("main.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+    let start_int = &analysis.modules.values().next().unwrap().exports["start_int"];
+    assert!(matches!(
+        &start_int.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Applied {
+                base: "sys.InvocationHandle".into(),
+                arguments: vec![Type::Int],
+            }
+    ));
+    assert_eq!(
+        start_int.effects.effects,
+        std::collections::BTreeSet::from(["invoke".into()])
+    );
+    assert!(start_int.effects.may_fail);
+}
+
+#[test]
+fn semantic_project_adapter_rejects_typed_sys_start_mismatched_witness() {
+    let project = typed_invoke_project(
+        "pub fn start_wrong(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
+         sys.start<Str>(function, arguments, as: Int);",
+    );
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    let StageOutcome::Failed(diagnostic) = adapter.typecheck_project(&project) else {
+        panic!("mismatched typed sys.start witness must fail at typecheck");
+    };
+    assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S021-TYPE");
+    assert_eq!(
+        adapter.diagnostic_message(&diagnostic),
+        "sys.start explicit type argument must match the as: witness"
+    );
+}
+
 
 #[test]
 fn semantic_project_adapter_admits_inferred_and_explicit_typed_sys_await_and_cancel() {
