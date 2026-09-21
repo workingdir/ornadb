@@ -16,7 +16,7 @@ use num_bigint::{BigInt, Sign};
 use orna_evaluator_v1::{
     EffectHandler, Environment, EvaluationError, Functions, Limits as EvaluatorLimits,
     NominalDefinition, NominalDefinitions, NominalField, PureFunction as RetainedFunction,
-    RelationPage, StepBudget, evaluate_expression_with_functions,
+    RelationPage, StepBudget, evaluate_expression, evaluate_expression_with_functions,
     evaluate_with_functions_and_budget, evaluate_with_functions_and_nominals,
     invoke_named_with_effects_and_budget, invoke_named_with_nominals,
 };
@@ -680,6 +680,31 @@ impl BoundedEvaluator {
             functions: BTreeMap::new(),
             nominal_definitions: NominalDefinitions::new(),
         }
+    }
+    /// Produces the server-consumable descriptor from the actual `std.ui.action`
+    /// source expression.  The source string remains the provenance input; an
+    /// opaque server handle is deliberately allocated by the serving boundary.
+    pub fn source_action_descriptor(source: &str) -> Option<(String, String, [u8; 32])> {
+        let value = evaluate_expression(source, &Environment::new(), EvaluatorLimits::default()).ok()?;
+        let OvbRaw::Map(fields) = value.raw() else {
+            return None;
+        };
+        let field = |name: &str| {
+            fields.iter().find_map(|(key, value)| {
+                (key == &OvbRaw::Text(name.into())).then_some(value)
+            })
+        };
+        let OvbRaw::Text(action_id) = field("action_id")? else {
+            return None;
+        };
+        let OvbRaw::Text(input_type) = field("input_type")? else {
+            return None;
+        };
+        if action_id.is_empty() || input_type.is_empty() {
+            return None;
+        }
+        let provenance: [u8; 32] = Sha256::digest(source.as_bytes()).into();
+        Some((action_id.clone(), input_type.clone(), provenance))
     }
 
     /// Creates an independent ephemeral session from the admitted pure namespace.
@@ -11826,5 +11851,16 @@ mod list_stream_tests {
                 .is_none(),
             "a failed handler must leave the first literal list item uncommitted"
         );
+    }
+
+    #[test]
+    fn source_ui_action_descriptor_preserves_explicit_provenance_and_input_type() {
+        let descriptor = super::BoundedEvaluator::source_action_descriptor(
+            r#"std.ui.action("save", as: Text, debug_kind: "button")"#,
+        )
+        .expect("source action descriptor");
+        assert_eq!(descriptor.0, "save");
+        assert_eq!(descriptor.1, "std.text");
+        assert_ne!(descriptor.2, [0; 32]);
     }
 }
