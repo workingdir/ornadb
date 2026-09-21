@@ -3956,6 +3956,59 @@ fn durable_transactional_event_commits_through_the_application_ticket() {
 }
 
 #[test]
+fn durable_transactional_event_commits_through_synchronous_dispatch() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    let mut application = TransactionalApplication {
+        calls: 0,
+        faults: Arc::new(NoFault),
+        mutations: vec![
+            TableMutation::new([7; 16], "event_books_sync", vec![1], Some(vec![2])).unwrap(),
+        ],
+    };
+    block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(subscribe()),
+        &mut application,
+    ))
+    .unwrap();
+    let request = event([1; 16], [24; 16], [11; 16]);
+    let outcome = block_on(host.dispatch_frame(
+        [5; 16],
+        3,
+        Frame::Binary(request),
+        &mut application,
+    ))
+    .unwrap();
+    assert!(matches!(
+        outcome.response.as_ref().map(|response| &response.message),
+        Some(Message::Result {
+            status: ResultStatus::Success,
+            ..
+        })
+    ));
+    assert_eq!(application.calls, 1);
+    assert_eq!(
+        block_on(open_durable_state(&repository).committed_table_row("event_books_sync", &[1])),
+        Ok(Some(vec![2]))
+    );
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn durable_runtime_replays_a_terminal_request_after_host_reconstruction() {
     let (root, repository) = durable_repository();
     let mut first_host = durable_host(open_durable_state(&repository));
