@@ -7432,26 +7432,29 @@ fn relation_filter_count(
     if predicate_op != "==" {
         return None;
     }
-    let (field_expr, field, expected) =
+    let (field_expr, field, expected, reversed) =
         match (predicate_lhs.as_ref(), predicate_rhs.as_ref()) {
             (
                 Expr::Field { base, name, .. },
                 expected,
             ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-                (predicate_lhs.as_ref(), name, expected)
+                (predicate_lhs.as_ref(), name, expected, false)
             }
             (
                 expected,
                 Expr::Field { base, name, .. },
             ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-                (predicate_rhs.as_ref(), name, expected)
+                (predicate_rhs.as_ref(), name, expected, true)
             }
             _ => return None,
         };
-    if !table_fields
+    if !(table_fields
         .get(table)
         .is_some_and(|fields| fields.contains(field))
-        || !float_fields.contains_decimal(table, field)
+        || table_keys
+            .get(table)
+            .is_some_and(|key| key.fields.iter().any(|name| name == field)))
+        || (reversed && !float_fields.contains_decimal(table, field))
     {
         return None;
     }
@@ -7578,26 +7581,29 @@ fn relation_filtered_one(
     if predicate_op != "==" {
         return None;
     }
-    let (field_expr, field, expected) =
+    let (field_expr, field, expected, reversed) =
         match (predicate_lhs.as_ref(), predicate_rhs.as_ref()) {
             (
                 Expr::Field { base, name, .. },
                 expected,
             ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-                (predicate_lhs.as_ref(), name, expected)
+                (predicate_lhs.as_ref(), name, expected, false)
             }
             (
                 expected,
                 Expr::Field { base, name, .. },
             ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-                (predicate_rhs.as_ref(), name, expected)
+                (predicate_rhs.as_ref(), name, expected, true)
             }
             _ => return None,
         };
-    if !table_fields
+    if !(table_fields
         .get(table)
         .is_some_and(|fields| fields.contains(field))
-        || !float_fields.contains_decimal(table, field)
+        || table_keys
+            .get(table)
+            .is_some_and(|key| key.fields.iter().any(|name| name == field)))
+        || (reversed && !float_fields.contains_decimal(table, field))
     {
         return None;
     }
