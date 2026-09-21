@@ -3,7 +3,8 @@ use futures::{
     io::{AsyncRead, AsyncWrite, Cursor},
 };
 use orna_foundation_v1::{
-    CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value,
+    CanonicalSnapshot, CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity,
+    OvbRaw, SafeText, Value,
 };
 use orna_live_v1::{
     CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpConnection,
@@ -649,6 +650,48 @@ impl LiveApplication for TransactionalApplication {
             work.complete();
             work.check_active()?;
             Ok(response)
+        })
+    }
+
+    fn dispatch_event_with_work<'a>(
+        &'a mut self,
+        _: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        _: Option<[u8; 16]>,
+        _: [u8; 32],
+        _: Option<&'a orna_runtime_v1::RuntimeActivationContext>,
+        _: &'a mut orna_live_v1::LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
+        let Message::Event { fingerprint, .. } = message else {
+            return Box::pin(async { Err(Error::ApplicationRejected) });
+        };
+        self.calls += 1;
+        let response = unit_result(request, *fingerprint);
+        let transaction = LiveEvalTransaction::new(
+            self.mutations.clone(),
+            [3; 32],
+            Arc::clone(&self.faults),
+        );
+        Box::pin(async move { Ok(LiveEvalResponse::transaction(response, transaction)) })
+    }
+
+    fn subscribe(
+        &mut self,
+        _: [u8; 16],
+        request: [u8; 16],
+        _: &Message,
+    ) -> Result<Envelope, Error> {
+        Ok(Envelope {
+            request: Some(request),
+            watch: Some([11; 16]),
+            message: Message::Snapshot {
+                revision: 0,
+                present: orna_protocol_v1::PresentNode::from_value(CanonicalValue::unit())
+                    .unwrap(),
+                snapshot: CanonicalSnapshot::cwd([2; 16], [3; 16], 0.into()).unwrap(),
+            },
+            extensions: BTreeMap::new(),
         })
     }
 
@@ -3832,6 +3875,7 @@ fn durable_transactional_eval_commits_or_rolls_back_and_replays_terminally() {
             TableMutation::new([9; 16], "books", vec![9], Some(vec![9])).unwrap(),
         ],
     };
+
     let failed_replay = block_on(host.dispatch_frame(
         [5; 16],
         5,
@@ -3847,6 +3891,66 @@ fn durable_transactional_eval_commits_or_rolls_back_and_replays_terminally() {
         }
     ));
     assert_eq!(replay_application.calls, 0);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_transactional_event_commits_through_the_application_ticket() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    let mut application = TransactionalApplication {
+        calls: 0,
+        faults: Arc::new(NoFault),
+        mutations: vec![
+            TableMutation::new([6; 16], "event_books", vec![1], Some(vec![2])).unwrap(),
+        ],
+    };
+    block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(subscribe()),
+        &mut application,
+    ))
+    .unwrap();
+    let request = event([1; 16], [23; 16], [11; 16]);
+    let preparation = block_on(host.prepare_application_frame(
+        [5; 16],
+        3,
+        Frame::Binary(request.clone()),
+    ))
+    .unwrap();
+    let ticket = match preparation {
+        orna_live_v1::ApplicationPreparation::Work(ticket) => ticket,
+        orna_live_v1::ApplicationPreparation::Completed(_) => {
+            panic!("event should reach the application worker")
+        }
+    };
+    let completion = block_on(ticket.execute(&mut application));
+    let outcome = block_on(host.complete_application(completion)).unwrap();
+    assert!(matches!(
+        outcome.response.as_ref().map(|response| &response.message),
+        Some(Message::Result {
+            status: ResultStatus::Success,
+            ..
+        })
+    ));
+    assert_eq!(application.calls, 1);
+    assert_eq!(
+        block_on(open_durable_state(&repository).committed_table_row("event_books", &[1])),
+        Ok(Some(vec![2]))
+    );
     drop(host);
     remove_test_repository(&root);
 }
