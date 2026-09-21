@@ -2473,3 +2473,263 @@ fn harness_report_retains_imported_generic_sys_meta_evidence() {
             && evidence["diagnostic"]["code"] == "ORNA-S021-TYPE"
     }));
 }
+
+#[test]
+fn harness_maps_runtime_info_semantics_and_serializes_runtime_rejection() {
+    let root = tempfile::tempdir().expect("temporary runtime-info corpus");
+    let valid_path = "examples/valid/sys-runtime-info.orna";
+    let invalid_path = "examples/invalid/legacy-sys-runtime.orna";
+    for (path, source) in [
+        (
+            valid_path,
+            "pub fn info() = sys.rt.info();",
+        ),
+        (
+            invalid_path,
+            "fn active_streams() {\n    sys.runtime.streams\n}",
+        ),
+    ] {
+        let path = root.path().join(path);
+        std::fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture directory");
+        std::fs::write(path, source).expect("fixture source");
+    }
+
+    let valid_id = "valid/sys-runtime-info.orna";
+    let invalid_id = "invalid/legacy-sys-runtime.orna";
+    let fixture = |id: &str,
+                   path: &str,
+                   kind: &str,
+                   expect: [(&str, &str); 3],
+                   failing_phase: Option<&str>,
+                   diagnostic: Option<&str>,
+                   message_contains: Option<&str>| Fixture {
+        id: id.into(),
+        kind: kind.into(),
+        path: path.into(),
+        parse_as: "module_unit".into(),
+        expect: expect
+            .into_iter()
+            .map(|(stage, outcome)| (stage.into(), outcome.into()))
+            .collect(),
+        failing_phase: failing_phase.map(str::to_owned),
+        diagnostic: diagnostic.map(str::to_owned),
+        message_contains: message_contains.map(str::to_owned),
+        expected_diagnostic: diagnostic.map(|_| "tests/expected-diagnostics/runtime-info.json".into()),
+        environment: None,
+    };
+    let corpus = Corpus {
+        root: root.path().to_path_buf(),
+        manifest: Manifest {
+            version: "1.0.0".into(),
+            counts: ManifestCounts {
+                valid: 1,
+                invalid: 1,
+                project: 0,
+                total: 2,
+            },
+            fixtures: vec![
+                fixture(
+                    valid_id,
+                    valid_path,
+                    "valid",
+                    [("parse", "pass"), ("resolve", "pass"), ("typecheck", "pass")],
+                    None,
+                    None,
+                    None,
+                ),
+                fixture(
+                    invalid_id,
+                    invalid_path,
+                    "invalid",
+                    [("parse", "pass"), ("resolve", "fail"), ("typecheck", "not-run")],
+                    Some("resolve"),
+                    Some("ORNA100-E-SYS-RUNTIME"),
+                    Some("`sys.runtime` was renamed to `sys.rt`"),
+                ),
+            ],
+        },
+        invalid_metadata: InvalidMetadata {
+            version: "1.0.0".into(),
+            count: 1,
+            fixtures: vec![InvalidFixture {
+                path: invalid_path.into(),
+                failing_phase: "resolve".into(),
+                diagnostic: "ORNA100-E-SYS-RUNTIME".into(),
+                message_contains: "`sys.runtime` was renamed to `sys.rt`".into(),
+            }],
+        },
+        diagnostics: std::collections::BTreeMap::from([(
+            invalid_path.into(),
+            ExpectedDiagnostic {
+                version: "1.0.0".into(),
+                fixture: invalid_path.into(),
+                failing_phase: "resolve".into(),
+                primary_diagnostic: "ORNA100-E-SYS-RUNTIME".into(),
+                message_contains: "`sys.runtime` was renamed to `sys.rt`".into(),
+                status: "expected-not-executed".into(),
+            },
+        )]),
+        vectors: std::collections::BTreeMap::new(),
+        scenarios: serde_json::json!({"scenarios": []}),
+        requirements: vec![
+            Requirement {
+                id: "ORNA-SYS-005".into(),
+                chapter: "system".into(),
+                source: "source/15-system.md".into(),
+                text: "The unrecognised member `sys.runtime` MUST produce ORNA100-E-SYS-RUNTIME."
+                    .into(),
+            },
+            Requirement {
+                id: "ORNA-SYS-006".into(),
+                chapter: "system".into(),
+                source: "source/15-system.md".into(),
+                text: "A conforming runtime MUST expose the compatibility fields of sys.RuntimeInfo."
+                    .into(),
+            },
+        ],
+        requirement_evidence: RequirementEvidence {
+            meaning: "focused system semantic Harness witness".into(),
+            requirements: vec![
+                RequirementEvidenceEntry {
+                    requirement: "ORNA-SYS-005".into(),
+                    tests: vec![serde_json::json!({
+                        "kind": "invalid system runtime spelling Harness witness",
+                        "status": "planned",
+                        "subject": "ORNA-SYS-005",
+                        "fixture": invalid_id,
+                        "stage": "resolve",
+                    })],
+                },
+                RequirementEvidenceEntry {
+                    requirement: "ORNA-SYS-006".into(),
+                    tests: vec![serde_json::json!({
+                        "kind": "sys.rt.info semantic pass Harness witness",
+                        "status": "planned",
+                        "subject": "ORNA-SYS-006",
+                        "fixture": valid_id,
+                        "stage": "typecheck",
+                    })],
+                },
+            ],
+        },
+        project_expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+        publication_digests: std::collections::BTreeMap::new(),
+    };
+
+    let report = Harness::new(corpus).run(&mut SemanticAdapter::default());
+    let valid = report
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.fixture == valid_id)
+        .expect("valid runtime-info fixture");
+    assert!(valid.passed, "{:?}", valid.stages);
+    let valid_typecheck = valid
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Typecheck))
+        .expect("runtime-info typecheck stage");
+    assert_eq!(valid_typecheck.class, EvidenceClass::Semantic);
+    assert_eq!(valid_typecheck.status, EvidenceStatus::Passed);
+    assert!(valid_typecheck.expectation_satisfied);
+    assert_eq!(
+        valid_typecheck.requirements,
+        vec!["ORNA-SYS-006".to_string()]
+    );
+    assert!(matches!(
+        &valid_typecheck.requirement_mapping,
+        RequirementMapping::Mapped { requirements }
+            if requirements == &vec!["ORNA-SYS-006".to_string()]
+    ));
+
+    let invalid = report
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.fixture == invalid_id)
+        .expect("invalid runtime spelling fixture");
+    assert!(invalid.passed, "{:?}", invalid.stages);
+    let invalid_resolve = invalid
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Resolve))
+        .expect("runtime spelling resolve stage");
+    assert_eq!(invalid_resolve.class, EvidenceClass::Semantic);
+    assert_eq!(invalid_resolve.status, EvidenceStatus::Failed);
+    assert!(invalid_resolve.expectation_satisfied);
+    assert_eq!(
+        invalid_resolve.requirements,
+        vec!["ORNA-SYS-005".to_string()]
+    );
+    assert_eq!(
+        invalid_resolve
+            .diagnostic
+            .as_ref()
+            .expect("runtime spelling diagnostic")["code"],
+        "ORNA100-E-SYS-RUNTIME"
+    );
+
+    // The semantic adapter deliberately skips execution here: this witness
+    // does not populate or assert any runtime coordinates.
+    assert!(report
+        .runtime_evidence
+        .iter()
+        .all(|evidence| evidence.stage != Some(Stage::Evaluate)));
+    assert!(report
+        .skipped_evidence
+        .iter()
+        .any(|evidence| evidence.stage == Some(Stage::Evaluate)));
+    assert!(report
+        .semantic_evidence
+        .iter()
+        .any(|evidence| evidence.subject == valid_id
+            && evidence.stage == Some(Stage::Typecheck)
+            && evidence.status == EvidenceStatus::Passed));
+    let serialized = serde_json::to_value(&report).expect("runtime-info report serializes");
+    assert!(serialized["runtime_evidence"]
+        .as_array()
+        .expect("serialized runtime evidence")
+        .iter()
+        .all(|evidence| evidence["stage"] != "evaluate"));
+    let serialized_invalid = serialized["fixtures"]
+        .as_array()
+        .expect("serialized fixture array")
+        .iter()
+        .find(|fixture| fixture["fixture"] == invalid_id)
+        .expect("serialized invalid runtime fixture");
+    let serialized_resolve = serialized_invalid["stages"]
+        .as_array()
+        .expect("serialized invalid stages")
+        .iter()
+        .find(|stage| stage["stage"] == "resolve")
+        .expect("serialized runtime spelling resolve stage");
+    assert_eq!(serialized_resolve["class"], "semantic");
+    assert_eq!(serialized_resolve["status"], "failed");
+    assert_eq!(
+        serialized_resolve["requirement_mapping"]["requirements"],
+        serde_json::json!(["ORNA-SYS-005"])
+    );
+    assert_eq!(
+        serialized_resolve["diagnostic"]["code"],
+        "ORNA100-E-SYS-RUNTIME"
+    );
+    assert!(serialized["semantic_evidence"]
+        .as_array()
+        .expect("serialized semantic evidence")
+        .iter()
+        .any(|evidence| {
+            evidence["subject"] == valid_id
+                && evidence["stage"] == "typecheck"
+                && evidence["status"] == "passed"
+                && evidence["requirement_mapping"]["requirements"]
+                    == serde_json::json!(["ORNA-SYS-006"])
+        }));
+}
