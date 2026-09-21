@@ -3007,6 +3007,7 @@ impl Context<'_, '_> {
                 let mut found = None;
                 self.for_each_relation_value(plan, depth, |context, value| {
                     if let Some(predicate) = predicate {
+                        context.step()?;
                         match context.invoke_predicate(predicate, value.clone(), depth + 1)? {
                             Value::Bool(true) => {}
                             Value::Bool(false) => return Ok(true),
@@ -3085,6 +3086,7 @@ impl Context<'_, '_> {
                 let mut found = None;
                 self.for_each_sorted_relation(plan, depth, |context, value| {
                     if let Some(predicate) = predicate {
+                        context.step()?;
                         match context.invoke_predicate(predicate, value.clone(), depth + 1)? {
                             Value::Bool(true) => {}
                             Value::Bool(false) => return Ok(true),
@@ -4868,6 +4870,7 @@ impl Context<'_, '_> {
 
         let mut matching = None;
         for value in values {
+            self.step()?;
             match self.invoke_predicate(predicate, value.clone(), depth + 1)? {
                 Value::Bool(true) => {
                     if matching.is_some() {
