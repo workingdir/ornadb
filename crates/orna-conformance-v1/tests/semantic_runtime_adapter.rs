@@ -1,7 +1,7 @@
 use orna_conformance_v1::{
     BoundedEvaluator, ConformanceAdapter, Corpus, EvidenceClass, EvidenceStatus, Harness,
     ProjectEnvironment, ProjectExpectations, ProjectUnit, RuntimeAdapter, RuntimeEvaluator,
-    Scenario, SemanticAdapter, SourceUnit, StageOutcome,
+    Scenario, SemanticAdapter, SourceUnit, StageOutcome, TransactionalEvaluator,
 };
 use orna_evaluator_v1::Limits;
 use orna_foundation_v1::{Diagnostic, OvbRaw, Value};
@@ -156,6 +156,54 @@ fn semantic_adapter_executes_the_v1_analyzer_with_logical_fixture_names() {
     assert!(report.scenarios.iter().all(|scenario| {
         scenario.detail.contains("runtime-v1") && !scenario.detail.contains("/home/")
     }));
+}
+
+#[test]
+fn admitted_source_relation_pages_traverse_decimal_keys() {
+    fn source(body: &str) -> SourceUnit {
+        SourceUnit {
+            fixture_id: "decimal-cursor-source".into(),
+            source_id: "decimal-cursor-source.orna".into(),
+            parse_as: "module_unit".into(),
+            source: format!(
+                r#"
+                    pub table Reading(value: Decimal) {{ label: Str, }}
+                    fn main() {{ {body} }}
+                "#
+            ),
+        }
+    }
+
+    let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
+    let inserted = evaluator.execute_source(&source(
+        r#"
+            Reading.insert({ value: 2.0, label: "two" });
+            Reading.insert({ value: 0.1, label: "one-tenth" });
+            Reading.insert({ value: 1.0, label: "one" });
+            Reading.insert({ value: 0.01, label: "one-hundredth" });
+        "#
+    ));
+    assert!(
+        matches!(inserted, StageOutcome::Passed),
+        "source insertion failed: {inserted:?}"
+    );
+
+    // Relation evaluation is admitted source execution. Decimal-key pages
+    // must resume at the canonical numeric successor without replaying or
+    // skipping a row.
+    let paged = evaluator.execute_source(&source(
+        r#"
+            assert (Reading | count) == 4;
+            assert (Reading | take(1) | count) == 1;
+            assert (Reading | take(3) | count) == 3;
+            assert (Reading | drop(3) | count) == 1;
+            assert (Reading | drop(4) | count) == 0;
+        "#
+    ));
+    assert!(
+        matches!(paged, StageOutcome::Passed),
+        "Decimal page assertions failed: {paged:?}"
+    );
 }
 
 #[test]
