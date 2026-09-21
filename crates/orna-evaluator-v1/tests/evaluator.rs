@@ -3519,6 +3519,97 @@ fn std_collection_min_and_max_fail_closed_for_unsupported_kinds_shapes_and_limit
 }
 
 #[test]
+fn std_collection_min_and_max_debit_steps_for_each_scanned_value() {
+    let currency = [0x47; 16];
+    let cases = vec![
+        (
+            "Int",
+            Value::new(Raw::Array(vec![
+                Raw::Int(5.into()),
+                Raw::Int(1.into()),
+                Raw::Int(9.into()),
+            ]))
+            .unwrap(),
+            Value::option(Some(Value::int(1.into()))).unwrap(),
+            Value::option(Some(Value::int(9.into()))).unwrap(),
+        ),
+        (
+            "Decimal",
+            Value::new(Raw::Array(vec![
+                Value::decimal(120.into(), (-2).into())
+                    .unwrap()
+                    .raw()
+                    .clone(),
+                Value::decimal(2003.into(), (-3).into())
+                    .unwrap()
+                    .raw()
+                    .clone(),
+                Value::decimal(50.into(), (-2).into()).unwrap().raw().clone(),
+            ]))
+            .unwrap(),
+            Value::option(Some(Value::decimal(50.into(), (-2).into()).unwrap())).unwrap(),
+            Value::option(Some(Value::decimal(2003.into(), (-3).into()).unwrap())).unwrap(),
+        ),
+        (
+            "Float",
+            float_rows(&[3.0f64.to_bits(), (-1.0f64).to_bits(), 2.0f64.to_bits()]),
+            Value::option(Some(Value::float_bits((-1.0f64).to_bits()))).unwrap(),
+            Value::option(Some(Value::float_bits(3.0f64.to_bits()))).unwrap(),
+        ),
+        (
+            "Date",
+            evaluate("[2024-02-29, 2024-01-01, 2024-12-31]"),
+            Value::option(Some(evaluate("2024-01-01"))).unwrap(),
+            Value::option(Some(evaluate("2024-12-31"))).unwrap(),
+        ),
+        (
+            "Instant",
+            evaluate(
+                "[2024-02-29T05:30:00+05:30, 2024-02-29T00:00:00Z, 2024-02-28T23:59:59.999999999Z]",
+            ),
+            Value::option(Some(evaluate("2024-02-28T23:59:59.999999999Z"))).unwrap(),
+            Value::option(Some(evaluate("2024-02-29T05:30:00+05:30"))).unwrap(),
+        ),
+        (
+            "Money",
+            money_rows(vec![
+                money_raw(12.into(), (-1).into(), currency),
+                money_raw(2003.into(), (-3).into(), currency),
+                money_raw((-5).into(), (-1).into(), currency),
+            ]),
+            Value::option(Some(money_value((-5).into(), (-1).into(), currency))).unwrap(),
+            Value::option(Some(money_value(2003.into(), (-3).into(), currency))).unwrap(),
+        ),
+    ];
+
+    for (kind, rows, expected_min, expected_max) in cases {
+        let environment = Environment::from([("rows".into(), rows)]);
+        for (name, expected) in [("min", expected_min), ("max", expected_max)] {
+            let expression = format!("{name}(rows)");
+            assert_eq!(
+                evaluate_expression(&expression, &environment, Limits::default()).unwrap(),
+                expected,
+                "{kind} {expression}"
+            );
+            assert_eq!(
+                code(evaluate_expression(
+                    &expression,
+                    &environment,
+                    Limits {
+                        // The call and its rows binding consume the setup
+                        // steps; scanning the first value must debit more.
+                        max_steps: 2,
+                        ..Limits::default()
+                    }
+                )),
+                "ORNA-EVAL-LIMIT",
+                "{kind} {expression}"
+            );
+        }
+    }
+}
+
+#[test]
 fn std_collection_one_accepts_predicate_free_direct_pipeline_named_and_function_calls() {
     let expected = Value::int(7.into());
     for expression in [
