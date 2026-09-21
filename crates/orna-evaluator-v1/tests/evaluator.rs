@@ -2754,6 +2754,86 @@ fn std_collection_sum_accumulates_exactly_in_order_and_returns_integer_zero() {
         Value::int(0.into())
     );
 }
+#[test]
+fn std_collection_sum_debits_one_step_per_scanned_typed_value() {
+    let currency = [0x47; 16];
+    let cases = vec![
+        (
+            "Int",
+            Value::new(Raw::Array(vec![
+                Raw::Int(3.into()),
+                Raw::Int(1.into()),
+            ]))
+            .unwrap(),
+            Value::int(4.into()),
+        ),
+        (
+            "Decimal",
+            Value::new(Raw::Array(vec![
+                Value::decimal(120.into(), (-2).into())
+                    .unwrap()
+                    .raw()
+                    .clone(),
+                Value::decimal(2003.into(), (-3).into())
+                    .unwrap()
+                    .raw()
+                    .clone(),
+            ]))
+            .unwrap(),
+            Value::decimal(3203.into(), (-3).into()).unwrap(),
+        ),
+        (
+            "Money",
+            money_rows(vec![
+                money_raw(1.into(), (-1).into(), currency),
+                money_raw(2.into(), (-1).into(), currency),
+            ]),
+            money_value(3.into(), (-1).into(), currency),
+        ),
+        (
+            "Float",
+            float_rows(&[1.5f64.to_bits(), 2.25f64.to_bits()]),
+            Value::float_bits(3.75f64.to_bits()),
+        ),
+    ];
+
+    for (kind, rows, expected) in cases {
+        let environment = Environment::from([("rows".into(), rows)]);
+        assert_eq!(
+            evaluate_expression("sum(rows)", &environment, Limits::default()).unwrap(),
+            expected,
+            "{kind} sum should preserve its exact typed result",
+        );
+        assert_eq!(
+            code(evaluate_expression(
+                "sum(rows)",
+                &environment,
+                Limits {
+                    // Call setup and the rows binding consume two steps;
+                    // scanning both values consumes the remaining two.
+                    max_steps: 3,
+                    ..Limits::default()
+                },
+            )),
+            "ORNA-EVAL-LIMIT",
+            "{kind} sum must charge every scanned value",
+        );
+        assert_eq!(
+            evaluate_expression(
+                "sum(rows)",
+                &environment,
+                Limits {
+                    // Exactly enough for setup plus one debit per scanned value.
+                    max_steps: 4,
+                    ..Limits::default()
+                },
+            )
+            .unwrap(),
+            expected,
+            "{kind} sum must not double-charge scanned values",
+        );
+    }
+}
 
 #[test]
 fn std_collection_money_addition_and_sum_preserve_exact_decimal_amounts() {
