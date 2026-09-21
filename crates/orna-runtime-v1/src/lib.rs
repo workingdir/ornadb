@@ -1457,6 +1457,54 @@ pub struct RuntimeActivationContext {
     activation_time: SystemTime,
 }
 
+/// Reusable source-derived work for one captured table activation.
+///
+/// The live layer may carry this owned plan across asynchronous callback
+/// execution, but only [`RuntimeState::commit_staged_table_request_activation`]
+/// publishes it. The captured context, mutations and digest therefore remain
+/// one atomic runtime unit.
+pub struct StagedTableActivation {
+    context: RuntimeActivationContext,
+    mutations: Vec<TableMutation>,
+    next_digest: [u8; 32],
+    faults: Arc<dyn FaultInjector>,
+}
+
+impl StagedTableActivation {
+    pub fn from_source(
+        context: RuntimeActivationContext,
+        mutations: Vec<TableMutation>,
+        next_digest: [u8; 32],
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<Self, RuntimeError> {
+        if mutations.is_empty() {
+            return Err(RuntimeError::EmptyMutationBatch);
+        }
+        Ok(Self {
+            context,
+            mutations,
+            next_digest,
+            faults,
+        })
+    }
+
+    pub fn context(&self) -> &RuntimeActivationContext {
+        &self.context
+    }
+
+    pub fn mutations(&self) -> &[TableMutation] {
+        &self.mutations
+    }
+
+    pub fn next_digest(&self) -> [u8; 32] {
+        self.next_digest
+    }
+
+    pub fn faults(&self) -> &dyn FaultInjector {
+        self.faults.as_ref()
+    }
+}
+
 /// A checked capability to continue one already-admitted table request.
 ///
 /// This does not reserve, start, execute, or finalize a request. It only
@@ -3658,6 +3706,29 @@ impl RuntimeState {
                 unreachable!("unvalidated request activation cannot reject a candidate")
             }
         }
+    }
+
+    /// Commits reusable source-derived work through the existing durable
+    /// request boundary. No alternate transaction path is introduced.
+    pub async fn commit_staged_table_request_activation(
+        &self,
+        lease: WriterLease,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        staged: &StagedTableActivation,
+        outcome: TerminalOutcome,
+    ) -> Result<RequestActivationCommit, RuntimeError> {
+        self.commit_table_request_activation(
+            lease,
+            identity,
+            fingerprint,
+            staged.context(),
+            staged.mutations(),
+            staged.next_digest(),
+            outcome,
+            staged.faults(),
+        )
+        .await
     }
 
     /// Atomically finalizes one table-backed request only after its validator
@@ -28227,5 +28298,32 @@ mod tests {
             reopened.stream_observation(stream.id).await,
             Err(RuntimeError::RecoveryInvalid)
         );
+    }
+    #[tokio::test]
+    async fn staged_table_activation_keeps_one_context_and_source_work_unit() {
+        let (_temp, repository) = repository();
+        let state = open_state(&repository).await;
+        let context = state.begin_activation().await.unwrap();
+        let mutations = vec![table_mutation(7, 1, Some(9))];
+        let staged = StagedTableActivation::from_source(
+            context.clone(),
+            mutations.clone(),
+            digest(8),
+            Arc::new(NoFault),
+        )
+        .unwrap();
+
+        assert_eq!(staged.context(), &context);
+        assert_eq!(staged.mutations(), mutations.as_slice());
+        assert_eq!(staged.next_digest(), digest(8));
+        assert!(matches!(
+            StagedTableActivation::from_source(
+                context,
+                Vec::new(),
+                digest(8),
+                Arc::new(NoFault),
+            ),
+            Err(RuntimeError::EmptyMutationBatch)
+        ));
     }
 }
