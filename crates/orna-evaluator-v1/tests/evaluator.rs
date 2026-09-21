@@ -4004,6 +4004,71 @@ fn std_collection_every_and_exists_short_circuit_in_order_and_require_bool_callb
         "ORNA-EVAL-LIMIT"
     );
 }
+#[test]
+fn std_collection_every_and_exists_empty_identity_and_first_match_short_circuit() {
+    assert_eq!(
+        evaluate("every([], value => value > 0)"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        evaluate("exists([], value => value > 0)"),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+
+    assert_eq!(
+        evaluate("every([1, 2], value => if value == 1 { false } else { 1 / 0 == 0 })"),
+        Value::new(Raw::Bool(false)).unwrap()
+    );
+    assert_eq!(
+        evaluate("exists([1, 2], value => if value == 1 { true } else { 1 / 0 == 0 })"),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+}
+
+#[test]
+fn std_collection_every_and_exists_debit_each_scanned_predicate_value() {
+    for (operation, limited_expression, expression, expected) in [
+        (
+            "every",
+            "every([1, 2], value => if value == 1 { true } else { 1 / 0 == 0 })",
+            "every([1, 2], value => true)",
+            Value::new(Raw::Bool(true)).unwrap(),
+        ),
+        (
+            "exists",
+            "exists([1, 2], value => if value == 1 { false } else { 1 / 0 == 0 })",
+            "exists([1, 2], value => false)",
+            Value::new(Raw::Bool(false)).unwrap(),
+        ),
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                limited_expression,
+                &Environment::new(),
+                Limits {
+                    max_steps: 7,
+                    ..Limits::default()
+                },
+            )),
+            "ORNA-EVAL-LIMIT",
+            "{operation} must exhaust before invoking the second callback",
+        );
+        assert_eq!(
+            evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits {
+                    max_steps: 10,
+                    ..Limits::default()
+                },
+            )
+            .unwrap(),
+            expected,
+            "{operation} must charge one step per scanned predicate value",
+        );
+    }
+}
+
 
 #[test]
 fn root_every_and_exists_remain_shadowable_by_admitted_functions_and_locals() {
