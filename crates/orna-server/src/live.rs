@@ -88,7 +88,7 @@ struct ApplicationWorkerRecipe {
     identity: RuntimeIdentity,
     initial_digest: [u8; 32],
     runtime_owner: [u8; 16],
-    action_authority: std::sync::Arc<dyn crate::live_eval::ActionAuthority>,
+    action_authority: std::sync::Arc<dyn orna_live_v1::ActionAuthority>,
     #[cfg(test)]
     eval_started: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     #[cfg(test)]
@@ -378,7 +378,7 @@ impl LiveOnceHost {
         Self::bind_with_action_authority(
             repository,
             port,
-            std::sync::Arc::new(crate::live_eval::ActionAuthorityRegistry::new()),
+            std::sync::Arc::new(orna_live_v1::ActionAuthorityRegistry::new()),
         )
     }
 
@@ -387,7 +387,7 @@ impl LiveOnceHost {
     pub fn bind_with_action_authority(
         repository: &Repository,
         port: u16,
-        action_authority: std::sync::Arc<dyn crate::live_eval::ActionAuthority>,
+        action_authority: std::sync::Arc<dyn orna_live_v1::ActionAuthority>,
     ) -> Result<Self, LiveHostError> {
         let metadata = inspect_metadata(repository)
             .map_err(|_| LiveHostError::Repository)?
@@ -4647,7 +4647,7 @@ mod tests {
                 identity,
                 initial_digest,
                 runtime_owner: [44; 16],
-                action_authority: std::sync::Arc::new(crate::live_eval::ActionAuthorityRegistry::new()),
+                action_authority: std::sync::Arc::new(orna_live_v1::ActionAuthorityRegistry::new()),
                 #[cfg(test)]
                 eval_started: None,
                 #[cfg(test)]
