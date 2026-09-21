@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 futures = "0.3.31"
+getrandom = "0.3.4"
 orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-protocol-v1 = { path = "../orna-protocol-v1" }
@@ -34,7 +35,6 @@ serde_json = "1.0"
 sha2 = "0.10"
 
 [dev-dependencies]
-getrandom = "0.3.4"
 orna-live-v1 = { path = "../orna-live-v1" }
 orna-security-v1 = { path = "../orna-security-v1" }
 orna-serving-v1 = { path = "../orna-serving-v1" }

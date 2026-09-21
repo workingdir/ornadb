@@ -4921,6 +4921,15 @@ impl TableEffectHandler<'_, '_> {
         arguments: &[Value],
         mut budget: Option<&mut StepBudget>,
     ) -> Result<Option<Value>, EvaluationError> {
+        if matches!(callee, Expr::Name { text, .. } if text == "uuid7") {
+            if !arguments.is_empty() {
+                return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+            }
+            let Some(activation_time) = self.activation_time else {
+                return Err(transaction_error("ORNA-EVAL-TABLE-VALUE"));
+            };
+            return canonical_uuid7(activation_time).map(Some);
+        }
         if matches!(callee, Expr::Name { text, .. } if text == "now") {
             if !arguments.is_empty() {
                 return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
@@ -7767,6 +7776,33 @@ fn debit_host_step(budget: &mut StepBudget) -> Result<(), EvaluationError> {
 
 fn canonical_bool(value: bool) -> Result<Value, EvaluationError> {
     Value::new(OvbRaw::Bool(value)).map_err(|_| transaction_error("ORNA-EVAL-MODULE-ASSERT"))
+}
+
+/// Generates an RFC 9562 UUIDv7 from the activation's captured Unix time.
+///
+/// The OVB representation is the canonical tag-37/network-order byte form.
+/// Both the activation timestamp and all random bits are required; this
+/// boundary never substitutes a host clock or deterministic random value.
+fn canonical_uuid7(value: SystemTime) -> Result<Value, EvaluationError> {
+    let duration = value
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| transaction_error("ORNA-EVAL-TABLE-VALUE"))?;
+    let milliseconds = duration.as_millis();
+    let timestamp = u64::try_from(milliseconds)
+        .ok()
+        .filter(|timestamp| *timestamp <= 0x0000_FFFF_FFFF_FFFF)
+        .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-VALUE"))?;
+
+    let mut bytes = [0_u8; 16];
+    bytes[..6].copy_from_slice(&timestamp.to_be_bytes()[2..]);
+    let mut random = [0_u8; 10];
+    getrandom::fill(&mut random)
+        .map_err(|_| transaction_error("ORNA-EVAL-TABLE-VALUE"))?;
+    bytes[6] = 0x70 | (random[0] & 0x0F);
+    bytes[7] = random[1];
+    bytes[8] = 0x80 | (random[2] & 0x3F);
+    bytes[9..].copy_from_slice(&random[3..]);
+    Ok(Value::uuid(bytes))
 }
 
 fn canonical_instant(value: SystemTime) -> Result<Value, EvaluationError> {

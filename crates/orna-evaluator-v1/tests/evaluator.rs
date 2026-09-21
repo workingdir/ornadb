@@ -9049,3 +9049,108 @@ fn root_sum_and_min_remain_shadowable_by_admitted_functions() {
         Value::int(101.into())
     );
 }
+struct Uuid7Effects {
+    calls: usize,
+    arguments: Vec<Value>,
+    value: Value,
+}
+
+impl EffectHandler for Uuid7Effects {
+    fn handle(
+        &mut self,
+        callee: &Expr,
+        arguments: &[Value],
+    ) -> Result<Option<Value>, EvaluationError> {
+        if matches!(callee, Expr::Name { text, .. } if text == "uuid7") {
+            self.calls += 1;
+            self.arguments = arguments.to_vec();
+            return Ok(Some(self.value.clone()));
+        }
+        Ok(None)
+    }
+}
+
+#[test]
+fn uuid7_is_root_effect_intrinsic_and_tag37_round_trips() {
+    let bytes = [
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0x7c, 0xde, 0x8f, 0x01, 0x23, 0x45, 0x67, 0x89,
+        0xab, 0xcd,
+    ];
+    let expected = Value::uuid(bytes);
+    let functions = functions_from_source("fn main() = uuid7();");
+    let mut effects = Uuid7Effects {
+        calls: 0,
+        arguments: Vec::new(),
+        value: expected.clone(),
+    };
+
+    let result = invoke_named_with_effects(
+        "main",
+        &functions,
+        &Environment::new(),
+        Limits::default(),
+        &mut effects,
+    )
+    .expect("uuid7 effect dispatch");
+
+    assert_eq!(result, expected);
+    assert_eq!(effects.calls, 1);
+    assert!(effects.arguments.is_empty());
+    let encoded = result.encode().expect("canonical UUID encoding");
+    assert_eq!(Value::decode(&encoded).expect("canonical UUID decode"), result);
+    assert_eq!(result.raw(), &Raw::Tag(37, Box::new(Raw::Bytes(bytes.to_vec()))));
+}
+
+#[test]
+fn uuid7_direct_evaluation_fails_closed_without_an_effect_handler() {
+    assert_eq!(
+        code(invoke_named(
+            "main",
+            &functions_from_source("fn main() = uuid7();"),
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-NAME"
+    );
+}
+
+#[test]
+fn uuid7_rejects_arguments_and_preserves_function_shadowing() {
+    let expected = Value::uuid([0x42; 16]);
+    let functions = functions_from_source("fn main() = uuid7(1);");
+    let mut effects = Uuid7Effects {
+        calls: 0,
+        arguments: Vec::new(),
+        value: expected.clone(),
+    };
+    assert_eq!(
+        code(invoke_named_with_effects(
+            "main",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut effects,
+        )),
+        "ORNA-EVAL-ARGUMENT"
+    );
+    assert_eq!(effects.calls, 0);
+
+    let functions = functions_from_source("fn uuid7() = 7; fn main() = uuid7();");
+    let mut effects = Uuid7Effects {
+        calls: 0,
+        arguments: Vec::new(),
+        value: expected,
+    };
+    assert_eq!(
+        invoke_named_with_effects(
+            "main",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut effects,
+        )
+        .expect("shadowed function call"),
+        Value::int(7.into())
+    );
+    assert_eq!(effects.calls, 0);
+}

@@ -1116,6 +1116,7 @@ enum Value {
     Float(u64),
     String(String),
     Date(String),
+    Uuid([u8; 16]),
     Instant {
         unix_seconds: i64,
         nanosecond: u32,
@@ -1399,6 +1400,7 @@ impl Value {
             Self::Float(bits) => Raw::Float(bits),
             Self::String(value) => Raw::Text(value),
             Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
+            Self::Uuid(value) => object_id_raw(value),
             Self::Instant {
                 unix_seconds,
                 nanosecond,
@@ -1527,6 +1529,16 @@ impl Value {
                     return Err(error("ORNA-EVAL-VALUE"));
                 }
                 context.string(value.clone()).map(Self::Date)
+            }
+            Raw::Tag(37, boxed) => {
+                let Raw::Bytes(bytes) = boxed.as_ref() else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                };
+                let bytes = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                Ok(Self::Uuid(bytes))
             }
             Raw::Tag(60002, boxed) => Self::instant_from_raw(boxed, context),
             Raw::Tag(60005, boxed) => Self::duration_from_raw(boxed, context),
@@ -3604,6 +3616,34 @@ impl Context<'_, '_> {
         // `now` retains precedence and therefore shadows this intrinsic.
         if matches!(callee, Expr::Name { text, .. } if text == "now")
             && !scope.0.contains_key("now")
+            && self.resolve_function_name(callee, scope).is_none()
+            && self.effects.is_some()
+        {
+            if input.is_some() || !arguments.is_empty() {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+            let remaining = self.limits.max_steps.saturating_sub(self.steps);
+            let mut budget = StepBudget::new(remaining);
+            let result = self
+                .effects
+                .as_deref_mut()
+                .expect("checked effect handler")
+                .handle_with_budget(callee, &[], &mut budget);
+            let debited = remaining - budget.remaining();
+            self.steps = self
+                .steps
+                .checked_add(debited)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            if let Some(value) = result? {
+                return Value::from_canonical(&value, self, depth + 1);
+            }
+        }
+        // `uuid7()` is an activation-scoped intrinsic. Like `now()`, it is
+        // available only through the effect boundary: the evaluator never
+        // supplies a clock or random fallback. Lexical and admitted function
+        // bindings retain precedence over the root intrinsic.
+        if matches!(callee, Expr::Name { text, .. } if text == "uuid7")
+            && !scope.0.contains_key("uuid7")
             && self.resolve_function_name(callee, scope).is_none()
             && self.effects.is_some()
         {
@@ -6606,6 +6646,7 @@ mod tests {
         );
         assert_eq!(effects.calls, 0);
     }
+
 
     #[test]
     fn recovery_pipelines_handle_ordinary_failures_and_skip_successes() {
