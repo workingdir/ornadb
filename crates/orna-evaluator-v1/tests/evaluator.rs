@@ -25,6 +25,26 @@ fn code(result: Result<Value, EvaluationError>) -> String {
 fn float_rows(bits: &[u64]) -> Value {
     Value::new(Raw::Array(bits.iter().copied().map(Raw::Float).collect())).unwrap()
 }
+fn money_raw(coefficient: BigInt, exponent10: BigInt, currency: [u8; 16]) -> Raw {
+    Raw::Tag(
+        60007,
+        Box::new(Raw::Array(vec![
+            Raw::Tag(
+                60000,
+                Box::new(Raw::Array(vec![Raw::Int(coefficient), Raw::Int(exponent10)])),
+            ),
+            Raw::Tag(37, Box::new(Raw::Bytes(currency.to_vec()))),
+        ])),
+    )
+}
+
+fn money_value(coefficient: BigInt, exponent10: BigInt, currency: [u8; 16]) -> Value {
+    Value::new(money_raw(coefficient, exponent10, currency)).unwrap()
+}
+
+fn money_rows(values: Vec<Raw>) -> Value {
+    Value::new(Raw::Array(values)).unwrap()
+}
 
 fn invoke(source: &str, arguments: &Environment, limits: Limits) -> Result<Value, EvaluationError> {
     let parsed = orna_syntax_v1::parse_module(source);
@@ -2386,6 +2406,196 @@ fn std_collection_sum_accumulates_exactly_in_order_and_returns_integer_zero() {
 }
 
 #[test]
+fn std_collection_money_addition_and_sum_preserve_exact_decimal_amounts() {
+    let currency = [0x47; 16];
+    let left = money_value(1.into(), (-1).into(), currency);
+    let right = money_value(2.into(), (-1).into(), currency);
+    let rows = money_rows(vec![left.raw().clone(), right.raw().clone()]);
+    let environment = Environment::from([
+        ("left".into(), left),
+        ("right".into(), right),
+        ("rows".into(), rows),
+    ]);
+    let expected = money_value(3.into(), (-1).into(), currency);
+
+    assert_eq!(
+        evaluate_expression("left + right", &environment, Limits::default()).unwrap(),
+        expected
+    );
+    assert_eq!(
+        evaluate_expression("left - right", &environment, Limits::default()).unwrap(),
+        money_value((-1).into(), (-1).into(), currency)
+    );
+    assert_eq!(
+        evaluate_expression("sum(rows)", &environment, Limits::default()).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn std_collection_money_aggregates_preserve_currency_and_exact_extrema() {
+    let currency = [0x47; 16];
+    let values = vec![
+        money_raw(12.into(), (-1).into(), currency),
+        money_raw(2003.into(), (-3).into(), currency),
+        money_raw((-5).into(), (-1).into(), currency),
+    ];
+    let environment = Environment::from([("rows".into(), money_rows(values))]);
+    let expected_sum = money_value(2703.into(), (-3).into(), currency);
+    let expected_min =
+        Value::option(Some(money_value((-5).into(), (-1).into(), currency))).unwrap();
+    let expected_max =
+        Value::option(Some(money_value(2003.into(), (-3).into(), currency))).unwrap();
+
+    assert_eq!(
+        evaluate_expression("sum(rows)", &environment, Limits::default()).unwrap(),
+        expected_sum
+    );
+    assert_eq!(
+        evaluate_expression("min(rows)", &environment, Limits::default()).unwrap(),
+        expected_min
+    );
+    assert_eq!(
+        evaluate_expression("max(rows)", &environment, Limits::default()).unwrap(),
+        expected_max
+    );
+}
+
+#[test]
+fn canonical_money_round_trip_requires_nested_decimal_and_currency_witness() {
+    let currency = [0x47; 16];
+    let raw = money_raw(1234.into(), (-2).into(), currency);
+    let environment = Environment::from([("money".into(), Value::new(raw.clone()).unwrap())]);
+
+    let result =
+        evaluate_expression("money", &environment, Limits::default()).expect("Money should decode");
+    assert_eq!(result.raw(), &raw);
+    assert!(matches!(
+        result.raw(),
+        Raw::Tag(60007, body)
+            if matches!(
+                body.as_ref(),
+                Raw::Array(parts)
+                    if matches!(
+                        parts.as_slice(),
+                        [Raw::Tag(60000, _), Raw::Tag(37, currency)]
+                            if matches!(currency.as_ref(), Raw::Bytes(bytes) if bytes.len() == 16)
+                    )
+            )
+    ));
+}
+
+#[test]
+fn money_aggregates_fail_closed_for_cross_currency_float_mixing_and_limits() {
+    let currency = [0x47; 16];
+    let other_currency = [0x55; 16];
+    let one = money_raw(1.into(), 0.into(), currency);
+    let two = money_raw(2.into(), 0.into(), currency);
+    let foreign = money_raw(3.into(), 0.into(), other_currency);
+    let environment = Environment::from([
+        ("cross_currency".into(), money_rows(vec![one.clone(), foreign])),
+        (
+            "float_mixed".into(),
+            money_rows(vec![two, Raw::Float(1.5f64.to_bits())]),
+        ),
+    ]);
+
+    for expression in [
+        "sum(cross_currency)",
+        "min(cross_currency)",
+        "max(cross_currency)",
+        "sum(float_mixed)",
+        "min(float_mixed)",
+        "max(float_mixed)",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &environment,
+                Limits::default()
+            )),
+            "ORNA-EVAL-UNSUPPORTED",
+            "{expression}"
+        );
+    }
+
+    let limited = Environment::from([(
+        "rows".into(),
+        money_rows(vec![
+            money_raw(1.into(), 0.into(), currency),
+            money_raw(2.into(), 0.into(), currency),
+            money_raw(3.into(), 0.into(), currency),
+        ]),
+    )]);
+    assert_eq!(
+        code(evaluate_expression(
+            "sum(rows)",
+            &limited,
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+
+    let oversized = BigInt::parse_bytes(b"1234", 10).unwrap();
+    let environment =
+        Environment::from([("money".into(), money_value(oversized, 0.into(), currency))]);
+    assert_eq!(
+        code(evaluate_expression(
+            "money",
+            &environment,
+            Limits {
+                max_integer_digits: 3,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn malformed_or_noncanonical_money_is_rejected_before_evaluation() {
+    let currency = Raw::Tag(37, Box::new(Raw::Bytes(vec![0x47; 16])));
+    let malformed = [
+        Raw::Tag(
+            60007,
+            Box::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                currency.clone(),
+            ])),
+        ),
+        Raw::Tag(
+            60007,
+            Box::new(Raw::Array(vec![
+                Raw::Tag(
+                    60000,
+                    Box::new(Raw::Array(vec![Raw::Int(10.into()), Raw::Int((-1).into())])),
+                ),
+                currency.clone(),
+            ])),
+        ),
+        Raw::Tag(
+            60007,
+            Box::new(Raw::Array(vec![
+                Raw::Tag(
+                    60000,
+                    Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(0.into())])),
+                ),
+                Raw::Tag(37, Box::new(Raw::Bytes(vec![0x47; 15]))),
+            ])),
+        ),
+    ];
+    for raw in malformed {
+        assert!(
+            Value::new(raw).is_err(),
+            "malformed or noncanonical Money must fail at the canonical boundary"
+        );
+    }
+}
+
+#[test]
 fn std_collection_decimal_sum_preserves_exact_canonical_arithmetic() {
     let large_coefficient = BigInt::parse_bytes(b"12345678901234567891", 10).unwrap();
     for (expression, expected) in [
@@ -2453,28 +2663,16 @@ fn std_collection_sum_rejects_unsupported_numeric_kinds_and_shapes() {
         60006,
         Box::new(Raw::Array(vec![Raw::Int(1.into()), currency.clone()])),
     );
-    let money = Raw::Tag(
-        60007,
-        Box::new(Raw::Array(vec![
-            Raw::Tag(
-                60000,
-                Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(0.into())])),
-            ),
-            currency,
-        ])),
+    let environment =
+        Environment::from([("values".into(), Value::new(Raw::Array(vec![affine])).unwrap())]);
+    assert_eq!(
+        code(evaluate_expression(
+            "sum(values)",
+            &environment,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-UNSUPPORTED"
     );
-    for raw in [affine, money] {
-        let environment =
-            Environment::from([("values".into(), Value::new(Raw::Array(vec![raw])).unwrap())]);
-        assert_eq!(
-            code(evaluate_expression(
-                "sum(values)",
-                &environment,
-                Limits::default(),
-            )),
-            "ORNA-EVAL-UNSUPPORTED"
-        );
-    }
 }
 
 #[test]
@@ -2926,29 +3124,17 @@ fn std_collection_min_and_max_fail_closed_for_unsupported_kinds_shapes_and_limit
         60006,
         Box::new(Raw::Array(vec![Raw::Int(1.into()), currency.clone()])),
     );
-    let money = Raw::Tag(
-        60007,
-        Box::new(Raw::Array(vec![
-            Raw::Tag(
-                60000,
-                Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(0.into())])),
-            ),
-            currency,
-        ])),
-    );
-    for raw in [affine, money] {
-        let environment =
-            Environment::from([("rows".into(), Value::new(Raw::Array(vec![raw])).unwrap())]);
-        for operation in ["min", "max"] {
-            assert_eq!(
-                code(evaluate_expression(
-                    &format!("{operation}(rows)"),
-                    &environment,
-                    Limits::default(),
-                )),
-                "ORNA-EVAL-UNSUPPORTED"
-            );
-        }
+    let environment =
+        Environment::from([("rows".into(), Value::new(Raw::Array(vec![affine])).unwrap())]);
+    for operation in ["min", "max"] {
+        assert_eq!(
+            code(evaluate_expression(
+                &format!("{operation}(rows)"),
+                &environment,
+                Limits::default(),
+            )),
+            "ORNA-EVAL-UNSUPPORTED"
+        );
     }
 
     for (expression, limits) in [
