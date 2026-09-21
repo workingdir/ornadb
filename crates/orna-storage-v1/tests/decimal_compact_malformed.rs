@@ -216,6 +216,70 @@ fn decimal_parquet(
     writer.close().unwrap();
     with_page_checksums(bytes)
 }
+fn decimal_dictionary_parquet(profile: &CompactOvbProfile, values: &[i32]) -> Vec<u8> {
+    let message = format!(
+        "message schema {{ REQUIRED INT32 f_{} (DECIMAL(9,2)); }}",
+        Uuid::from_bytes(KEY).simple()
+    );
+    let schema = Arc::new(parse_message_type(&message).unwrap());
+    let properties = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::ZSTD(Default::default()))
+            .set_dictionary_enabled(true)
+            .set_writer_version(WriterVersion::PARQUET_2_0)
+            .set_key_value_metadata(Some(metadata(
+                profile,
+                descriptor(
+                    "decimal",
+                    vec![
+                        OvbRaw::Int(9.into()),
+                        OvbRaw::Int(2.into()),
+                        OvbRaw::Int(4.into()),
+                    ],
+                ),
+            )))
+            .build(),
+    );
+    let mut bytes = Vec::new();
+    let mut writer = SerializedFileWriter::new(&mut bytes, schema, properties).unwrap();
+    let mut row_group = writer.next_row_group().unwrap();
+    let mut column = row_group.next_column().unwrap().unwrap();
+    column
+        .typed::<Int32Type>()
+        .write_batch(values, None, None)
+        .unwrap();
+    column.close().unwrap();
+    row_group.close().unwrap();
+    writer.close().unwrap();
+    with_page_checksums(bytes)
+}
+
+fn corrupt_dictionary_page_offset(bytes: Vec<u8>, offset_delta: i64) -> Vec<u8> {
+    let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+    let metadata = reader.metadata().clone();
+    let mut groups = metadata.row_groups().to_vec();
+    let mut group_builder = groups[0].clone().into_builder();
+    let mut columns = group_builder.take_columns();
+    let column = &mut columns[0];
+    let dictionary_offset = column.dictionary_page_offset().unwrap();
+    *column = column
+        .clone()
+        .into_builder()
+        .set_dictionary_page_offset(Some(dictionary_offset + offset_delta))
+        .build()
+        .unwrap();
+    groups[0] = group_builder.set_column_metadata(columns).build().unwrap();
+    let rewritten =
+        parquet::file::metadata::ParquetMetaData::new(metadata.file_metadata().clone(), groups);
+    let mut footer = Vec::new();
+    parquet::file::metadata::ParquetMetaDataWriter::new(&mut footer, &rewritten)
+        .finish()
+        .unwrap();
+    let mut output = bytes[..footer_start(&bytes)].to_vec();
+    output.extend(footer);
+    output
+}
+
 
 fn ovb_parquet(
     profile: &CompactOvbProfile,
@@ -726,6 +790,28 @@ fn rejects_truncated_and_malformed_decimal_pages() {
         "malformed Decimal page must fail closed"
     );
 }
+#[test]
+fn rejects_decimal_dictionary_page_boundary_metadata_corruption() {
+    let profile = profile();
+    let values = [120, 120, -340, -340];
+    let bytes = decimal_dictionary_parquet(&profile, &values);
+    let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+    let column = &reader.metadata().row_groups()[0].columns()[0];
+    assert!(column.dictionary_page_offset().is_some());
+    assert!(column.encodings().any(|encoding| encoding == Encoding::RLE_DICTIONARY));
+
+    let malformed = corrupt_dictionary_page_offset(bytes, 1);
+    assert!(matches!(
+        CompactParquetKeySource::decode_verified_bytes(
+            &profile,
+            TABLE,
+            &malformed,
+            values.len() as u64,
+        ),
+        Err(CompactParquetError::InvalidParquet)
+    ));
+}
+
 
 #[test]
 fn rejects_decimal_row_count_mismatch_before_key_use() {

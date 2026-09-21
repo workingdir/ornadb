@@ -26,6 +26,10 @@ const KEY_B: [u8; 16] = [
     0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e,
     0x2f,
 ];
+const KEY_C: [u8; 16] = [
+    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e,
+    0x3f,
+];
 
 fn uuid_raw(value: [u8; 16]) -> OvbRaw {
     OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(value.to_vec())))
@@ -133,6 +137,14 @@ struct Column {
 }
 
 fn parquet(profile: &CompactOvbProfile, columns: Vec<Column>) -> Vec<u8> {
+    parquet_with_dictionary(profile, columns, false)
+}
+
+fn parquet_with_dictionary(
+    profile: &CompactOvbProfile,
+    columns: Vec<Column>,
+    dictionary_enabled: bool,
+) -> Vec<u8> {
     let mut message = String::from("message schema {");
     for column in &columns {
         let name = format!("f_{}", Uuid::from_bytes(column.id).simple());
@@ -149,7 +161,9 @@ fn parquet(profile: &CompactOvbProfile, columns: Vec<Column>) -> Vec<u8> {
                 " REQUIRED FIXED_LEN_BYTE_ARRAY({width}) {name} (DECIMAL({}, {}));",
                 column.precision, column.scale
             )),
-            PhysicalValues::ByteArray(_) => message.push_str(&format!(" REQUIRED BYTE_ARRAY {name};")),
+            PhysicalValues::ByteArray(_) => {
+                message.push_str(&format!(" REQUIRED BYTE_ARRAY {name};"))
+            }
         }
     }
     message.push('}');
@@ -161,7 +175,7 @@ fn parquet(profile: &CompactOvbProfile, columns: Vec<Column>) -> Vec<u8> {
     let properties = Arc::new(
         WriterProperties::builder()
             .set_compression(Compression::ZSTD(Default::default()))
-            .set_dictionary_enabled(false)
+            .set_dictionary_enabled(dictionary_enabled)
             .set_encoding(Encoding::PLAIN)
             .set_writer_version(WriterVersion::PARQUET_2_0)
             .set_key_value_metadata(Some(metadata(profile, descriptors)))
@@ -351,6 +365,99 @@ fn decimal_composite_uses_declared_order_and_exact_decimal_sorting() {
         vec![
             expected_tuple(&[decimal_raw(101, -2), decimal_raw(9, 0)]),
             expected_tuple(&[decimal_raw(11, -1), decimal_raw(1, 0)]),
+        ]
+    );
+}
+
+#[test]
+fn dictionary_decimal_mixed_physical_forms_decode_canonical_values_in_key_order() {
+    let profile = profile(&[KEY_A, KEY_B, KEY_C]);
+    let values_a = vec![101, 101, 110, 110, 111, 111];
+    let values_b = vec![9000, 9000, 1000, 1000, 2000, 2000];
+    let values_c = vec![
+        signed_be(123450, 9),
+        signed_be(123450, 9),
+        signed_be(123451, 9),
+        signed_be(123451, 9),
+        signed_be(123450, 9),
+        signed_be(123450, 9),
+    ];
+    let bytes = parquet_with_dictionary(
+        &profile,
+        vec![
+            Column {
+                id: KEY_C,
+                precision: 20,
+                scale: 1,
+                encoding: "decimal",
+                parameters: standard_parameters(20, 1, 9),
+                values: PhysicalValues::Fixed {
+                    width: 9,
+                    values: values_c,
+                },
+            },
+            Column {
+                id: KEY_A,
+                precision: 9,
+                scale: 2,
+                encoding: "decimal",
+                parameters: standard_parameters(9, 2, 4),
+                values: PhysicalValues::Int32(values_a),
+            },
+            Column {
+                id: KEY_B,
+                precision: 18,
+                scale: 3,
+                encoding: "decimal",
+                parameters: standard_parameters(18, 3, 8),
+                values: PhysicalValues::Int64(values_b),
+            },
+        ],
+        true,
+    );
+    let reader = SerializedFileReader::new(Bytes::copy_from_slice(&bytes)).unwrap();
+    let columns = reader.metadata().row_group(0).columns();
+    assert!(columns
+        .iter()
+        .all(|column| matches!(column.compression(), Compression::ZSTD(_))));
+    assert!(columns.iter().all(|column| {
+        column
+            .encodings()
+            .any(|encoding| encoding == Encoding::RLE_DICTIONARY)
+    }));
+    assert_eq!(
+        CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 6).unwrap(),
+        vec![
+            expected_tuple(&[
+                decimal_raw(101, -2),
+                decimal_raw(9, 0),
+                decimal_raw(12345, 0),
+            ]),
+            expected_tuple(&[
+                decimal_raw(101, -2),
+                decimal_raw(9, 0),
+                decimal_raw(12345, 0),
+            ]),
+            expected_tuple(&[
+                decimal_raw(11, -1),
+                decimal_raw(1, 0),
+                decimal_raw(123451, -1),
+            ]),
+            expected_tuple(&[
+                decimal_raw(11, -1),
+                decimal_raw(1, 0),
+                decimal_raw(123451, -1),
+            ]),
+            expected_tuple(&[
+                decimal_raw(111, -2),
+                decimal_raw(2, 0),
+                decimal_raw(12345, 0),
+            ]),
+            expected_tuple(&[
+                decimal_raw(111, -2),
+                decimal_raw(2, 0),
+                decimal_raw(12345, 0),
+            ]),
         ]
     );
 }
