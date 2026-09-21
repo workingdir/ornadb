@@ -11,9 +11,11 @@
 //! Inputs are in-memory modules with logical paths: no files, temp directories,
 //! environment changes, fixture catalogues, or runtime evaluation are needed.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use orna_semantic_v1::{
-    Analysis, DIAG_ANNOTATION, DIAG_DUPLICATE, DIAG_TYPE, DIAG_UNRESOLVED, ModuleInput, Namespace,
-    Type, analyze,
+    Analysis, Catalogue, DIAG_ANNOTATION, DIAG_DUPLICATE, DIAG_TYPE, DIAG_UNRESOLVED,
+    EffectSummary, ModuleHeader, ModuleInput, Namespace, Symbol, SymbolKind, Type, analyze,
 };
 use orna_syntax_v1::parse_module_with_file;
 
@@ -2093,4 +2095,41 @@ fn nested_impl_static_properties_are_checked() {
     ] {
         expect_diagnostics(&analyze_main(source), &[DIAG_TYPE]);
     }
+}
+
+#[test]
+fn historical_snapshot_projects_nested_authority_module_roots() {
+    let exports = BTreeMap::from([(
+        "read".into(),
+        Symbol {
+            kind: SymbolKind::Function,
+            ty: Type::Function {
+                parameters: Vec::new(),
+                parameter_names: Some(Vec::new()),
+                default_parameters: BTreeSet::new(),
+                result: Box::new(Type::Int),
+            },
+            public: true,
+            effects: EffectSummary::default(),
+            generic_parameters: Vec::new(),
+            table_schema: None,
+        },
+    )]);
+    let historical = ModuleHeader {
+        namespace: Namespace(vec!["legacy".into(), "pkg".into()]),
+        symbols: exports.clone(),
+        exports,
+        generic_functions: BTreeMap::new(),
+        prelude_exports: BTreeSet::new(),
+        implicit: false,
+    };
+    let catalogue = Catalogue::empty().with_historical_modules([historical]);
+    let result = orna_semantic_v1::analyze_with_catalogue(
+        &[ModuleInput::new(
+            "main.orna",
+            "pub fn read(): Int = sys.database.as_of(CWD).legacy.pkg.read();",
+        )],
+        &catalogue,
+    );
+    expect_accepted(&result);
 }
