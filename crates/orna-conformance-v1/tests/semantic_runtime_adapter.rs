@@ -372,6 +372,80 @@ fn semantic_adapter_rejects_invalid_imported_generic_sys_meta_argument() {
     };
     assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S021-TYPE");
 }
+fn runtime_info_project(source: &str) -> ProjectUnit {
+    ProjectUnit {
+        fixture_id: "runtime-info-project".into(),
+        project_id: "logical/runtime-info".into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: "runtime-info-module".into(),
+            source_id: "logical/runtime-info/main.orna".into(),
+            parse_as: "module_unit".into(),
+            source: source.into(),
+        }],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+    }
+}
+
+#[test]
+fn semantic_project_adapter_admits_sys_runtime_info_with_read_effect() {
+    let source = "pub fn runtime_info() = sys.rt.info();";
+    let project = runtime_info_project(source);
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.typecheck_project(&project), StageOutcome::Passed);
+
+    // The adapter proves source/project phase admission. Inspect the native
+    // semantic graph separately so this witness also proves the declared
+    // result type and effect, without relying on harness serialization.
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("main.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+    let runtime_info = &analysis.modules.values().next().unwrap().exports["runtime_info"];
+    assert!(matches!(
+        &runtime_info.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Named("sys.RuntimeInfo".into())
+    ));
+    assert_eq!(
+        runtime_info.effects.effects,
+        std::collections::BTreeSet::from(["database read".into()])
+    );
+    assert!(runtime_info.effects.may_fail);
+}
+
+#[test]
+fn semantic_project_adapter_rejects_removed_sys_runtime_with_native_diagnostic() {
+    let source = "pub fn runtime_info() = sys.runtime;";
+    let project = runtime_info_project(source);
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    let StageOutcome::Failed(diagnostic) = adapter.resolve_project(&project) else {
+        panic!("removed sys.runtime must fail during source resolution");
+    };
+    assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA100-E-SYS-RUNTIME");
+    assert_eq!(
+        adapter.diagnostic_message(&diagnostic),
+        "`sys.runtime` was renamed to `sys.rt`"
+    );
+}
+
 fn typed_invoke_project(source: &str) -> ProjectUnit {
     ProjectUnit {
         fixture_id: "typed-invoke-project".into(),
