@@ -140,13 +140,22 @@ pub fn apply_migration_plan_to_compact(
     mutation_ids: &[[u8; 16]],
     candidate_digest: [u8; 32],
 ) -> Result<CompactWriterInput, CompactBaseProjectionError> {
-    if plan.operations().len() != mutation_ids.len() || candidate_generation == 0 {
+    let expected_mutation_ids = plan
+        .operations()
+        .len()
+        .checked_mul(2)
+        .ok_or(CompactBaseProjectionError::EvolutionInputMismatch)?;
+    if mutation_ids.len() != expected_mutation_ids || candidate_generation == 0 {
         return Err(CompactBaseProjectionError::EvolutionInputMismatch);
     }
-    let mut mutations = Vec::with_capacity(plan.operations().len());
+    let mut mutations = Vec::with_capacity(expected_mutation_ids);
+    let mut mutation_id_set = BTreeSet::new();
     let mut targets = BTreeSet::new();
-    for (sequence, (operation, mutation_id)) in
-        plan.operations().iter().zip(mutation_ids).enumerate()
+    for (index, (operation, ids)) in plan
+        .operations()
+        .iter()
+        .zip(mutation_ids.chunks_exact(2))
+        .enumerate()
     {
         let MigrationOperation::RekeyRow {
             table,
@@ -156,7 +165,13 @@ pub fn apply_migration_plan_to_compact(
         else {
             return Err(CompactBaseProjectionError::UnsupportedEvolutionOperation);
         };
-        if table.bytes() != profile.table_id() || *mutation_id == [0; 16] {
+        let [deletion_id, replacement_id] = [ids[0], ids[1]];
+        if table.bytes() != profile.table_id()
+            || deletion_id == [0; 16]
+            || replacement_id == [0; 16]
+            || !mutation_id_set.insert(deletion_id)
+            || !mutation_id_set.insert(replacement_id)
+        {
             return Err(CompactBaseProjectionError::WrongTable);
         }
         let old_bytes = old_key
@@ -177,16 +192,31 @@ pub fn apply_migration_plan_to_compact(
         let Some(value) = row.value.as_ref() else {
             return Err(CompactBaseProjectionError::MissingBaseValue);
         };
-        if base.rows.contains_key(&new_identity) || !targets.insert(new_identity.clone()) {
+        if old_identity == new_identity
+            || base.rows.contains_key(&new_identity)
+            || !targets.insert(new_identity.clone())
+        {
             return Err(CompactBaseProjectionError::DuplicateEvolutionKey);
         }
         let value = value
             .encode()
             .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+        let sequence = u64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_mul(2))
+            .and_then(|sequence| sequence.checked_add(1))
+            .ok_or(CompactBaseProjectionError::EvolutionInputMismatch)?;
         mutations.push(CompactWriterMutation {
-            sequence: u64::try_from(sequence + 1)
-                .map_err(|_| CompactBaseProjectionError::EvolutionInputMismatch)?,
-            mutation_id: *mutation_id,
+            sequence,
+            mutation_id: deletion_id,
+            key: old_identity,
+            state: CompactWriterMutationState::Deletion,
+        });
+        mutations.push(CompactWriterMutation {
+            sequence: sequence
+                .checked_add(1)
+                .ok_or(CompactBaseProjectionError::EvolutionInputMismatch)?,
+            mutation_id: replacement_id,
             key: new_identity,
             state: CompactWriterMutationState::Replacement { value },
         });
@@ -1967,15 +1997,20 @@ mod tests {
             &base,
             &plan,
             2,
-            &[[0x55; 16]],
+            &[[0x55; 16], [0x56; 16]],
             [0x66; 32],
         )
         .unwrap();
         assert_eq!(input.candidate_generation, 2);
-        assert_eq!(input.mutations.len(), 1);
-        assert_eq!(input.mutations[0].key.encoded(), scalar_key(8));
+        assert_eq!(input.mutations.len(), 2);
+        assert_eq!(input.mutations[0].key.encoded(), scalar_key(7));
         assert!(matches!(
             input.mutations[0].state,
+            CompactWriterMutationState::Deletion
+        ));
+        assert_eq!(input.mutations[1].key.encoded(), scalar_key(8));
+        assert!(matches!(
+            input.mutations[1].state,
             CompactWriterMutationState::Replacement { .. }
         ));
         let mut evolved_schema = schema.clone();
@@ -2002,7 +2037,7 @@ mod tests {
                 &base,
                 &schema_plan,
                 2,
-                &[[0x55; 16]],
+                &[[0x57; 16], [0x58; 16]],
                 [0x66; 32],
             ),
             Err(CompactBaseProjectionError::UnsupportedEvolutionOperation)
