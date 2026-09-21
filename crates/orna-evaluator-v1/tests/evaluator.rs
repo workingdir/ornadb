@@ -4460,6 +4460,120 @@ fn std_collection_partition_accepts_lawful_predicates_and_enforces_limits() {
         "ORNA-EVAL-LIMIT"
     );
 }
+#[test]
+fn std_collection_partition_preserves_order_empty_and_invokes_predicate_once_per_value() {
+    assert_eq!(
+        evaluate("std.collection.partition([3, 1, 2, 4], value => value % 2 == 0)"),
+        Value::new(Raw::Array(vec![
+            Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
+            Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())]),
+        ]))
+        .unwrap()
+    );
+    assert_eq!(
+        evaluate("std.collection.partition([], value => 1 / 0 == 0)"),
+        Value::new(Raw::Array(vec![Raw::Array(vec![]), Raw::Array(vec![])]))
+            .unwrap()
+    );
+
+    let functions = functions_from_source(
+        "fn seen(value: Int) = Note.insert(value) == 1 && value % 2 == 0; \
+         fn run(values: [Int]) = std.collection.partition(values, seen);",
+    );
+    let arguments = Environment::from([(
+        "values".into(),
+        Value::new(Raw::Array(vec![
+            Raw::Int(3.into()),
+            Raw::Int(1.into()),
+            Raw::Int(2.into()),
+            Raw::Int(4.into()),
+        ]))
+        .unwrap(),
+    )]);
+    let mut effects = NoteEffects::default();
+    assert_eq!(
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &arguments,
+            Limits::default(),
+            &mut effects,
+        )
+        .unwrap(),
+        Value::new(Raw::Array(vec![
+            Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
+            Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())]),
+        ]))
+        .unwrap()
+    );
+    assert_eq!(
+        effects.calls,
+        vec![
+            vec![Value::int(3.into())],
+            vec![Value::int(1.into())],
+            vec![Value::int(2.into())],
+            vec![Value::int(4.into())],
+        ]
+    );
+}
+
+#[test]
+fn std_collection_partition_requires_bool_and_propagates_callback_failures() {
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.partition([1], value => value)",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-TYPE"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.partition([1, 0, 2], value => 10 / value > 0)",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
+    );
+}
+
+#[test]
+fn std_collection_partition_debits_one_step_per_scanned_value_without_duplicate_traversal_charging() {
+    let expression = "std.collection.partition([1, 2], value => true)";
+    assert_eq!(
+        code(evaluate_expression(
+            expression,
+            &Environment::new(),
+            Limits {
+                // The second callback-local debit is reached before its
+                // callback body can complete at this boundary.
+                max_steps: 8,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT",
+        "partition must debit each scanned predicate value before invoking it",
+    );
+    assert_eq!(
+        evaluate_expression(
+            expression,
+            &Environment::new(),
+            Limits {
+                // Exactly one callback-local debit and callback body step per
+                // input value fit at this boundary.
+                max_steps: 9,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+        Value::new(Raw::Array(vec![
+            Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
+            Raw::Array(vec![]),
+        ]))
+        .unwrap(),
+        "partition should succeed when one debit is charged per input value",
+    );
+}
 
 #[test]
 fn std_collection_filter_accepts_direct_pipeline_and_named_calls() {
