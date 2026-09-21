@@ -5363,6 +5363,109 @@ fn std_collection_group_by_accepts_functions_and_enforces_limits() {
         "ORNA-EVAL-LIMIT"
     );
 }
+#[test]
+fn std_collection_group_by_sorts_keys_and_preserves_input_row_order() {
+    assert_eq!(
+        evaluate("std.collection.group_by([12, 1, 7, 4, 2, 5], value => value % 3)"),
+        Value::new(Raw::Array(vec![
+            Raw::Array(vec![
+                Raw::Int(0.into()),
+                Raw::Array(vec![Raw::Int(12.into())]),
+            ]),
+            Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Array(vec![
+                    Raw::Int(1.into()),
+                    Raw::Int(7.into()),
+                    Raw::Int(4.into()),
+                ]),
+            ]),
+            Raw::Array(vec![
+                Raw::Int(2.into()),
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(5.into())]),
+            ]),
+        ]))
+        .unwrap()
+    );
+}
+
+#[test]
+fn std_collection_group_by_empty_input_does_not_invoke_key_callback() {
+    assert_eq!(
+        evaluate("std.collection.group_by([], value => 1 / 0)"),
+        Value::new(Raw::Array(vec![])).unwrap()
+    );
+}
+
+#[test]
+fn std_collection_group_by_requires_lawful_keys_and_propagates_callback_failures() {
+    for expression in [
+        "std.collection.group_by([1], value => [value])",
+        "std.collection.group_by([1, 2], value => if value == 1 { 1 } else { \"two\" })",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            "ORNA-EVAL-TYPE",
+            "{expression} must reject keys without a lawful total comparison",
+        );
+    }
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.group_by([1, 0, 2], value => 10 / value)",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
+    );
+}
+
+#[test]
+fn std_collection_group_by_debits_one_step_per_scanned_value_without_duplicate_traversal_charging() {
+    let expression = "std.collection.group_by([1, 2], value => value)";
+    assert_eq!(
+        code(evaluate_expression(
+            expression,
+            &Environment::new(),
+            Limits {
+                // The second callback-local debit is reached before its
+                // callback body can complete at this boundary.
+                max_steps: 8,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT",
+        "group_by must debit each scanned key callback before invoking it",
+    );
+    assert_eq!(
+        evaluate_expression(
+            expression,
+            &Environment::new(),
+            Limits {
+                // Exactly one callback-local debit and callback body step per
+                // input value fit at this boundary.
+                max_steps: 9,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+        Value::new(Raw::Array(vec![
+            Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Array(vec![Raw::Int(1.into())]),
+            ]),
+            Raw::Array(vec![
+                Raw::Int(2.into()),
+                Raw::Array(vec![Raw::Int(2.into())]),
+            ]),
+        ]))
+        .unwrap(),
+        "group_by should succeed when one debit is charged per input value",
+    );
+}
 
 #[test]
 fn recursive_calls_terminate_or_hit_shared_limits() {

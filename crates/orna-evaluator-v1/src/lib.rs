@@ -5052,6 +5052,7 @@ impl Context<'_, '_> {
             // Classify once, in input order. The returned key must have an
             // explicit total comparison; canonical encoding alone is not a
             // substitute for the library's lawful-key requirement.
+            self.step()?;
             let group_key = self.invoke_predicate(key, value.clone(), depth + 1)?;
             lawful_group_key(&group_key)?;
             let mut matched = false;
