@@ -239,9 +239,14 @@ fn decode_verified_bytes_for_role(
                     .map(instant_value)
                     .collect(),
                 KeyColumnKind::Uuid => read_uuid_column(&*row_group, column.index, rows)?,
-                KeyColumnKind::OvbInt | KeyColumnKind::OvbBool => {
+                KeyColumnKind::OvbInt | KeyColumnKind::OvbBool | KeyColumnKind::OvbDecimal => {
                     read_ovb_column(&*row_group, column.index, rows, column.kind)?
                 }
+                KeyColumnKind::Decimal {
+                    scale,
+                    precision,
+                    storage_width: _,
+                } => read_decimal_column(&*row_group, column.index, rows, precision, scale)?,
                 KeyColumnKind::Bool => read_bool_column(&*row_group, column.index, rows)?
                     .into_iter()
                     .map(OvbRaw::Bool)
@@ -386,10 +391,86 @@ fn key_components(raw: &OvbRaw) -> Result<Vec<OvbRaw>, CompactParquetError> {
         | OvbRaw::Bool(_)
         | OvbRaw::Text(_)
         | OvbRaw::Tag(37, _)
+        | OvbRaw::Tag(60000, _)
         | OvbRaw::Tag(60001, _)
         | OvbRaw::Tag(60002, _) => Ok(vec![raw.clone()]),
         _ => Err(CompactParquetError::InvalidMetadata),
     }
+}
+
+fn decimal_parts(raw: &OvbRaw) -> Result<(bool, String, i64), CompactParquetError> {
+    let OvbRaw::Tag(60000, value) = raw else {
+        return Err(CompactParquetError::InvalidMetadata);
+    };
+    let OvbRaw::Array(fields) = value.as_ref() else {
+        return Err(CompactParquetError::InvalidMetadata);
+    };
+    let [OvbRaw::Int(coefficient), OvbRaw::Int(exponent)] = fields.as_slice() else {
+        return Err(CompactParquetError::InvalidMetadata);
+    };
+    let coefficient = coefficient.to_string();
+    let negative = coefficient.starts_with('-');
+    let digits = if negative {
+        coefficient[1..].to_owned()
+    } else {
+        coefficient.clone()
+    };
+    let exponent = exponent
+        .to_string()
+        .parse::<i64>()
+        .map_err(|_| CompactParquetError::InvalidMetadata)?;
+    if digits == "0" {
+        return Ok((false, digits, 0));
+    }
+    Ok((negative, digits, exponent))
+}
+
+fn compare_decimal_values(left: &OvbRaw, right: &OvbRaw) -> Result<Ordering, CompactParquetError> {
+    let (left_negative, left_digits, left_exponent) = decimal_parts(left)?;
+    let (right_negative, right_digits, right_exponent) = decimal_parts(right)?;
+    if left_digits == "0" || right_digits == "0" {
+        return Ok(match (left_digits == "0", right_digits == "0") {
+            (true, true) => Ordering::Equal,
+            (true, false) => {
+                if right_negative {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            (false, true) => {
+                if left_negative {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            _ => unreachable!(),
+        });
+    }
+    let sign_order = left_negative.cmp(&right_negative);
+    if sign_order != Ordering::Equal {
+        return Ok(sign_order.reverse());
+    }
+    let left_position = left_exponent + left_digits.len() as i64;
+    let right_position = right_exponent + right_digits.len() as i64;
+    let mut ordering = left_position.cmp(&right_position);
+    if ordering == Ordering::Equal {
+        let width = left_digits.len().max(right_digits.len());
+        for offset in 0..width {
+            let left_digit = left_digits.as_bytes().get(offset).copied().unwrap_or(b'0');
+            let right_digit = right_digits.as_bytes().get(offset).copied().unwrap_or(b'0');
+            ordering = left_digit.cmp(&right_digit);
+            if ordering != Ordering::Equal {
+                break;
+            }
+        }
+    }
+    Ok(if left_negative {
+        ordering.reverse()
+    } else {
+        ordering
+    })
 }
 
 fn compare_key_components(
@@ -410,6 +491,9 @@ fn compare_key_components(
                     return Err(CompactParquetError::InvalidMetadata);
                 };
                 left.cmp(right)
+            }
+            (OvbRaw::Tag(60000, _), OvbRaw::Tag(60000, _)) => {
+                compare_decimal_values(left, right)?
             }
             (OvbRaw::Tag(60001, left), OvbRaw::Tag(60001, right)) => {
                 let (OvbRaw::Text(left), OvbRaw::Text(right)) = (left.as_ref(), right.as_ref())
@@ -476,14 +560,26 @@ enum KeyColumnKind {
     OvbInt,
     Bool,
     OvbBool,
+    Decimal {
+        precision: u8,
+        scale: u8,
+        storage_width: u8,
+    },
+    OvbDecimal,
     Str,
     Date,
 }
 
 fn matches_profile_key_kind(expected: KeyColumnKind, actual: KeyColumnKind) -> bool {
-    expected == actual
-        || (expected == KeyColumnKind::Int && actual == KeyColumnKind::OvbInt)
-        || (expected == KeyColumnKind::Bool && actual == KeyColumnKind::OvbBool)
+    match (expected, actual) {
+        (KeyColumnKind::Decimal { .. }, KeyColumnKind::Decimal { .. })
+        | (KeyColumnKind::Decimal { .. }, KeyColumnKind::OvbDecimal) => true,
+        (expected, actual) => {
+            expected == actual
+                || (expected == KeyColumnKind::Int && actual == KeyColumnKind::OvbInt)
+                || (expected == KeyColumnKind::Bool && actual == KeyColumnKind::OvbBool)
+        }
+    }
 }
 fn ensure_supported_profile(
     profile: &CompactOvbProfile,
@@ -502,6 +598,10 @@ fn ensure_supported_profile(
             ),
             KeyColumnKind::Uuid => OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(vec![0; 16]))),
             KeyColumnKind::Bool | KeyColumnKind::OvbBool => OvbRaw::Bool(false),
+            KeyColumnKind::Decimal { .. } | KeyColumnKind::OvbDecimal => OvbRaw::Tag(
+                60000,
+                Box::new(OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Int(0.into())])),
+            ),
             KeyColumnKind::Str => OvbRaw::Text(String::new()),
             KeyColumnKind::Date => OvbRaw::Tag(60001, Box::new(OvbRaw::Text("1970-01-01".into()))),
         })
@@ -663,6 +763,55 @@ fn valid_uuid_parameters(raw: &OvbRaw) -> bool {
     }
 }
 
+fn decimal_parameters(raw: &OvbRaw) -> Result<(u8, u8, u8), CompactParquetError> {
+    let OvbRaw::Array(parameters) = raw else {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    };
+    let [OvbRaw::Int(precision), OvbRaw::Int(scale), OvbRaw::Int(storage_width)] =
+        parameters.as_slice()
+    else {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    };
+    let precision = precision
+        .to_string()
+        .parse::<u8>()
+        .map_err(|_| CompactParquetError::UnsupportedKeyMapping)?;
+    let scale = scale
+        .to_string()
+        .parse::<u8>()
+        .map_err(|_| CompactParquetError::UnsupportedKeyMapping)?;
+    let storage_width = storage_width
+        .to_string()
+        .parse::<u8>()
+        .map_err(|_| CompactParquetError::UnsupportedKeyMapping)?;
+    if !(1..=38).contains(&precision) || scale > precision {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    }
+    Ok((precision, scale, storage_width))
+}
+
+fn decimal_storage_width(precision: u8) -> Option<u8> {
+    if !(1..=38).contains(&precision) {
+        return None;
+    }
+    if precision <= 9 {
+        return Some(4);
+    }
+    if precision <= 18 {
+        return Some(8);
+    }
+    let maximum = 10_i128.pow(u32::from(precision)) - 1;
+    (1_u8..=16).find(|width| {
+        let bits = u32::from(*width) * 8 - 1;
+        let limit = if bits >= 127 {
+            i128::MAX
+        } else {
+            (1_i128 << bits) - 1
+        };
+        maximum <= limit
+    })
+}
+
 fn descriptor_field_id(
     descriptor: &OvbRaw,
     column: &parquet::schema::types::ColumnDescriptor,
@@ -708,7 +857,50 @@ fn descriptor_field_id(
         let OvbRaw::Array(logical_type) = &fields[2] else {
             return Err(CompactParquetError::UnsupportedKeyMapping);
         };
-        let kind = if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]
+        let kind = if logical_type
+            == &[OvbRaw::Int(0.into()), OvbRaw::Text("Decimal".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "decimal")
+        {
+            let (precision, scale, storage_width) = decimal_parameters(&fields[4])?;
+            let expected_width = decimal_storage_width(precision)
+                .ok_or(CompactParquetError::UnsupportedKeyMapping)?;
+            let decimal_annotation = matches!(
+                column.logical_type_ref(),
+                Some(LogicalType::Decimal(decimal))
+                    if decimal.precision == i32::from(precision)
+                        && decimal.scale == i32::from(scale)
+            );
+            let physical_ok = match precision {
+                1..=9 => column.physical_type() == Type::INT32 && storage_width == 4,
+                10..=18 => column.physical_type() == Type::INT64 && storage_width == 8,
+                19..=38 => {
+                    column.physical_type() == Type::FIXED_LEN_BYTE_ARRAY
+                        && column.type_length() == i32::from(storage_width)
+                }
+                _ => false,
+            };
+            if !decimal_annotation
+                || !physical_ok
+                || storage_width != expected_width
+                || column.converted_type() != ConvertedType::DECIMAL
+            {
+                return Err(CompactParquetError::UnsupportedKeyMapping);
+            }
+            KeyColumnKind::Decimal {
+                precision,
+                scale,
+                storage_width,
+            }
+        } else if logical_type
+            == &[OvbRaw::Int(0.into()), OvbRaw::Text("Decimal".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
+            && matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
+            && column.physical_type() == Type::BYTE_ARRAY
+            && column.logical_type_ref().is_none()
+            && column.converted_type() == ConvertedType::NONE
+        {
+            KeyColumnKind::OvbDecimal
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]
             && matches!(&fields[3], OvbRaw::Text(value) if value == "int64")
             && column.physical_type() == Type::INT64
         {
@@ -761,9 +953,10 @@ fn descriptor_field_id(
             return Err(CompactParquetError::UnsupportedKeyMapping);
         };
         let valid_parameters = match kind {
-            KeyColumnKind::OvbInt | KeyColumnKind::OvbBool => {
+            KeyColumnKind::OvbInt | KeyColumnKind::OvbBool | KeyColumnKind::OvbDecimal => {
                 matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
             }
+            KeyColumnKind::Decimal { .. } => true,
             KeyColumnKind::Uuid => valid_uuid_parameters(&fields[4]),
             _ => matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty()),
         };
@@ -771,13 +964,19 @@ fn descriptor_field_id(
             || (!(kind == KeyColumnKind::Str
                 || kind == KeyColumnKind::Date
                 || kind == KeyColumnKind::Uuid
-                || kind == KeyColumnKind::Instant)
+                || kind == KeyColumnKind::Instant
+                || matches!(kind, KeyColumnKind::Decimal { .. }))
                 && column.logical_type_ref().is_some())
-            || (matches!(kind, KeyColumnKind::OvbInt | KeyColumnKind::OvbBool)
-                && column.converted_type() != ConvertedType::NONE)
+            || (matches!(
+                kind,
+                KeyColumnKind::OvbInt | KeyColumnKind::OvbBool | KeyColumnKind::OvbDecimal
+            ) && column.converted_type() != ConvertedType::NONE)
             || (kind == KeyColumnKind::Uuid && column.converted_type() != ConvertedType::NONE)
-            || (matches!(kind, KeyColumnKind::OvbInt | KeyColumnKind::OvbBool)
-                && column.max_def_level() != 0)
+            || (matches!(
+                kind,
+                KeyColumnKind::OvbInt | KeyColumnKind::OvbBool | KeyColumnKind::OvbDecimal
+            ) && column.max_def_level() != 0)
+            || (matches!(kind, KeyColumnKind::Decimal { .. }) && column.max_def_level() != 0)
             || column.max_rep_level() != 0
         {
             return Err(CompactParquetError::UnsupportedKeyMapping);
@@ -931,6 +1130,15 @@ fn profile_key_kinds(
                 if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Bool".to_owned())] =>
             {
                 KeyColumnKind::Bool
+            }
+            OvbRaw::Array(logical_type)
+                if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Decimal".to_owned())] =>
+            {
+                KeyColumnKind::Decimal {
+                    precision: 38,
+                    scale: 0,
+                    storage_width: 16,
+                }
             }
             OvbRaw::Array(logical_type)
                 if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Str".to_owned())] =>
@@ -1147,6 +1355,132 @@ fn read_int32_column(
 /// Reads the immutable profile's descriptor-gated scalar `ovb` fallback.
 /// Each physical cell is the complete canonical OVB-1 value, never a scalar
 /// surrogate. The descriptor's logical type determines the accepted value.
+fn decimal_value(
+    unscaled: i128,
+    precision: u8,
+    scale: u8,
+) -> Result<OvbRaw, CompactParquetError> {
+    if unscaled.to_string().trim_start_matches('-').len() > usize::from(precision) {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    }
+    if unscaled == 0 {
+        return Ok(OvbRaw::Tag(
+            60000,
+            Box::new(OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Int(0.into())])),
+        ));
+    }
+    let mut coefficient = unscaled;
+    let mut exponent = -i32::from(scale);
+    while coefficient % 10 == 0 {
+        coefficient /= 10;
+        exponent += 1;
+    }
+    Ok(OvbRaw::Tag(
+        60000,
+        Box::new(OvbRaw::Array(vec![
+            OvbRaw::Int(coefficient.into()),
+            OvbRaw::Int(exponent.into()),
+        ])),
+    ))
+}
+
+fn fixed_decimal_value(bytes: &[u8]) -> Result<i128, CompactParquetError> {
+    if bytes.is_empty() || bytes.len() > 16 {
+        return Err(CompactParquetError::InvalidMetadata);
+    }
+    let mut unsigned = 0_u128;
+    for byte in bytes {
+        unsigned = (unsigned << 8) | u128::from(*byte);
+    }
+    let bits = bytes.len() * 8;
+    let value = if bytes[0] & 0x80 != 0 {
+        if bits == 128 {
+            unsigned as i128
+        } else {
+            (unsigned as i128) - (1_i128 << bits)
+        }
+    } else {
+        unsigned as i128
+    };
+    Ok(value)
+}
+
+fn read_decimal_column(
+    row_group: &dyn parquet::file::reader::RowGroupReader,
+    index: usize,
+    expected_rows: usize,
+    precision: u8,
+    scale: u8,
+) -> Result<Vec<OvbRaw>, CompactParquetError> {
+    let physical_type = row_group.metadata().schema_descr().column(index).physical_type();
+    match physical_type {
+        Type::INT32 => read_int32_column(row_group, index, expected_rows)?
+            .into_iter()
+            .map(|value| decimal_value(i128::from(value), precision, scale))
+            .collect(),
+        Type::INT64 => read_int64_column(row_group, index, expected_rows)?
+            .into_iter()
+            .map(|value| decimal_value(i128::from(value), precision, scale))
+            .collect(),
+        Type::FIXED_LEN_BYTE_ARRAY => {
+            let reader = row_group
+                .get_column_reader(index)
+                .map_err(|_| CompactParquetError::InvalidParquet)?;
+            let ColumnReader::FixedLenByteArrayColumnReader(mut reader) = reader else {
+                return Err(CompactParquetError::UnsupportedKeyMapping);
+            };
+            let descriptor = row_group.metadata().schema_descr().column(index);
+            if descriptor.max_rep_level() != 0 {
+                return Err(CompactParquetError::UnsupportedKeyMapping);
+            }
+            let mut values = Vec::with_capacity(expected_rows);
+            let mut definition_levels = Vec::new();
+            let mut records = 0usize;
+            while records < expected_rows {
+                let remaining = expected_rows - records;
+                let definition_levels_ref =
+                    (descriptor.max_def_level() != 0).then_some(&mut definition_levels);
+                let (read_records, values_read, levels_read) = reader
+                    .read_records(remaining, definition_levels_ref, None, &mut values)
+                    .map_err(|_| CompactParquetError::InvalidParquet)?;
+                if read_records == 0 {
+                    break;
+                }
+                if levels_read != read_records || values_read != read_records {
+                    return Err(CompactParquetError::NullKey);
+                }
+                if descriptor.max_def_level() != 0
+                    && definition_levels
+                        .iter()
+                        .any(|level| *level != descriptor.max_def_level())
+                {
+                    return Err(CompactParquetError::NullKey);
+                }
+                records = records
+                    .checked_add(read_records)
+                    .ok_or(CompactParquetError::InvalidParquet)?;
+            }
+            if records != expected_rows || values.len() != expected_rows {
+                return Err(CompactParquetError::RowCountMismatch {
+                    expected: expected_rows as u64,
+                    observed: records as u64,
+                });
+            }
+            values
+                .into_iter()
+                .map(|value| {
+                    decimal_value(
+                        fixed_decimal_value(value.as_bytes())?,
+                        precision,
+                        scale,
+                    )
+                })
+                .collect()
+        }
+        _ => Err(CompactParquetError::UnsupportedKeyMapping),
+    }
+}
+
 fn read_ovb_column(
     row_group: &dyn parquet::file::reader::RowGroupReader,
     index: usize,
@@ -1209,7 +1543,9 @@ fn read_ovb_column(
                 .map_err(|_| CompactParquetError::InvalidMetadata)?;
             let supported = matches!(
                 (expected_kind, value.raw()),
-                (KeyColumnKind::OvbInt, OvbRaw::Int(_)) | (KeyColumnKind::OvbBool, OvbRaw::Bool(_))
+                (KeyColumnKind::OvbInt, OvbRaw::Int(_))
+                    | (KeyColumnKind::OvbBool, OvbRaw::Bool(_))
+                    | (KeyColumnKind::OvbDecimal, OvbRaw::Tag(60000, _))
             );
             if !supported {
                 return Err(CompactParquetError::UnsupportedKeyMapping);
