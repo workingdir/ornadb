@@ -5989,18 +5989,11 @@ fn applicable_module_assertions(
     Ok(applicable)
 }
 
-/// Materializes the narrow relation forms admitted by the durable transaction
-/// seam. `Table | map(row => row.integer_field) | min/max/sum` and
-/// `Table | map(row => row.float_field) | sum` become an
-/// internal candidate-relation fold, `Table | filter(predicate) | one()`
-/// becomes a keyed lookup, `Table | filter(row => row.field == value) | count`
-/// becomes an internal lazy candidate-relation count, and the terminal
-/// `Table | count` / `Table | count()` form becomes `Table.count()`. All read
-/// the active candidate relation; other relation operators stay unsupported
-/// rather than being materialized by this seam. Aggregate lowering is
-/// deliberately shape-limited: the effect handler admits Int and Decimal
-/// `min`/`max`/`sum` and Float `sum`, while Money, affine, and other
-/// unsupported values fail closed.
+/// Rewrites the narrow relation forms admitted by the durable transaction
+/// seam.  Quantifiers remain lazy plans (`filter` + `take(1)` + `count`),
+/// while aggregate, filtered-cardinality and lookup forms use their existing
+/// candidate-relation effects.  Other relation operators stay unsupported
+/// rather than being materialized by this seam.
 /// Internal forms use a ReplBinding AST marker which ordinary source cannot
 /// spell, rather than an undocumented table member.
 fn lower_relation_bindings(
@@ -6037,14 +6030,25 @@ fn lower_relation_expression_with_resolution(
     namespace: Option<&str>,
     shadowed: &BTreeSet<String>,
 ) {
-    if let Some(lowered) = relation_aggregate(
+    if let Some(lowered) = relation_quantifier(
         expression,
         table_keys,
         float_fields,
+        table_fields,
         functions,
         namespace,
         shadowed,
     )
+    .or_else(|| {
+        relation_aggregate(
+            expression,
+            table_keys,
+            float_fields,
+            functions,
+            namespace,
+            shadowed,
+        )
+    })
     .or_else(|| relation_window_count(expression, table_keys, functions, namespace, shadowed))
     .or_else(|| relation_lookup(expression, table_keys, functions, namespace, shadowed))
     .or_else(|| relation_filtered_one(expression, table_keys, functions, namespace, shadowed))
@@ -6463,6 +6467,208 @@ fn root_relation_intrinsic_is_unshadowed(
         && namespace
             .map(|namespace| !functions.contains_key(&format!("{namespace}.{name}")))
             .unwrap_or(true)
+}
+
+/// Lowers ordinary `every`/`exists` calls to a lazy relation plan.  The
+/// negated/positive filter followed by `take(1)` preserves canonical scan
+/// order, decisive short-circuiting and predicate failures without general
+/// relation materialization.
+fn relation_quantifier(
+    expression: &Expr,
+    table_keys: &TableKeys,
+    float_fields: &TableFloatFields,
+    table_fields: &TableFields,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
+) -> Option<Expr> {
+    let (operation, table, predicate) = match expression {
+        Expr::Call {
+            callee, arguments, ..
+        } => {
+            let Expr::Name { text: operation, .. } = callee.as_ref() else {
+                return None;
+            };
+            if !matches!(operation.as_str(), "every" | "exists")
+                || !root_relation_intrinsic_is_unshadowed(
+                    operation,
+                    functions,
+                    namespace,
+                    shadowed,
+                )
+            {
+                return None;
+            }
+            let mut positional = 0usize;
+            let mut table = None;
+            let mut predicate = None;
+            for argument in arguments {
+                let slot = match argument.name.as_deref() {
+                    Some("rows") => &mut table,
+                    Some("predicate") => &mut predicate,
+                    Some(_) => return None,
+                    None => {
+                        let slot = match positional {
+                            0 => &mut table,
+                            1 => &mut predicate,
+                            _ => return None,
+                        };
+                        positional += 1;
+                        slot
+                    }
+                };
+                if slot.replace(&argument.value).is_some() {
+                    return None;
+                }
+            }
+            (operation.as_str(), table?, predicate?)
+        }
+        Expr::Binary { lhs, op, rhs, .. } if op == "|" => {
+            let Expr::Call { callee, arguments, .. } = rhs.as_ref() else {
+                return None;
+            };
+            let Expr::Name { text: operation, .. } = callee.as_ref() else {
+                return None;
+            };
+            if !matches!(operation.as_str(), "every" | "exists")
+                || !root_relation_intrinsic_is_unshadowed(
+                    operation,
+                    functions,
+                    namespace,
+                    shadowed,
+                )
+            {
+                return None;
+            }
+            let [argument] = arguments.as_slice() else {
+                return None;
+            };
+            if argument
+                .name
+                .as_deref()
+                .is_some_and(|name| name != "predicate")
+            {
+                return None;
+            }
+            (operation.as_str(), lhs.as_ref(), &argument.value)
+        }
+        _ => return None,
+    };
+    if !table_keys.contains_key(table_name)
+        || shadowed.contains(table_name)
+        || !root_relation_intrinsic_is_unshadowed("filter", functions, namespace, shadowed)
+        || !root_relation_intrinsic_is_unshadowed("take", functions, namespace, shadowed)
+        || !root_relation_intrinsic_is_unshadowed("count", functions, namespace, shadowed)
+    {
+        return None;
+    }
+    let Expr::Lambda {
+        parameters,
+        body,
+        span: predicate_span,
+    } = predicate
+    else {
+        return None;
+    };
+    if parameters.len() != 1 {
+        return None;
+    }
+    let mut callback_shadowed = shadowed.clone();
+    for parameter in parameters {
+        callback_shadowed.extend(relation_pattern_names(&parameter.pattern));
+    }
+    let mut callback_body = body.as_ref().clone();
+    lower_relation_expression_with_resolution(
+        &mut callback_body,
+        table_keys,
+        float_fields,
+        table_fields,
+        functions,
+        namespace,
+        &callback_shadowed,
+    );
+    let callback_body = if operation == "every" {
+        Expr::Unary {
+            op: "!".into(),
+            rhs: Box::new(callback_body),
+            span: body.span(),
+        }
+    } else {
+        callback_body
+    };
+    let callback = Expr::Lambda {
+        parameters: parameters.clone(),
+        body: Box::new(callback_body),
+        span: predicate_span.clone(),
+    };
+    let span = expression.span();
+    let filter = Expr::Call {
+        callee: Box::new(Expr::Name {
+            text: "filter".into(),
+            span: span.clone(),
+        }),
+        arguments: vec![orna_syntax_v1::Argument {
+            name: None,
+            value: callback,
+            span: predicate_span.clone(),
+        }],
+        span: span.clone(),
+    };
+    let filtered = Expr::Binary {
+        lhs: Box::new(relation_source_expression(table_name, table_span.clone())),
+        op: "|".into(),
+        rhs: Box::new(filter),
+        span: span.clone(),
+    };
+    let take = Expr::Call {
+        callee: Box::new(Expr::Name {
+            text: "take".into(),
+            span: span.clone(),
+        }),
+        arguments: vec![orna_syntax_v1::Argument {
+            name: None,
+            value: Expr::Literal {
+                text: "1".into(),
+                kind: orna_syntax_v1::LiteralKind::Integer,
+                span: span.clone(),
+            },
+            span: span.clone(),
+        }],
+        span: span.clone(),
+    };
+    let limited = Expr::Binary {
+        lhs: Box::new(filtered),
+        op: "|".into(),
+        rhs: Box::new(take),
+        span: span.clone(),
+    };
+    let counted = Expr::Binary {
+        lhs: Box::new(limited),
+        op: "|".into(),
+        rhs: Box::new(Expr::Call {
+            callee: Box::new(Expr::Name {
+                text: "count".into(),
+                span: span.clone(),
+            }),
+            arguments: Vec::new(),
+            span: span.clone(),
+        }),
+        span: span.clone(),
+    };
+    Some(Expr::Binary {
+        lhs: Box::new(counted),
+        op: if operation == "every" {
+            "==".into()
+        } else {
+            ">".into()
+        },
+        rhs: Box::new(Expr::Literal {
+            text: "0".into(),
+            kind: orna_syntax_v1::LiteralKind::Integer,
+            span: span.clone(),
+        }),
+        span,
+    })
 }
 
 fn relation_aggregate(
