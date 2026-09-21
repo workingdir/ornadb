@@ -464,6 +464,95 @@ impl CompilerDiagnostic {
         self
     }
 }
+impl CompilerDiagnostic {
+    /// Renders this diagnostic with the retained source text in Rust-style form.
+    ///
+    /// The raw message, code, path, and byte span exposed by the other accessors
+    /// remain unchanged.  This presentation-only view derives its line, column,
+    /// source snippet, and caret from the supplied source text.
+    pub fn render_human(&self, source_text: &str) -> String {
+        render_human_diagnostic(self, source_text)
+    }
+
+    fn render_human_without_source(&self) -> String {
+        let mut rendered = format!(
+            "{}[{}]: {}",
+            self.severity().as_str(),
+            self.code.as_str(),
+            self.message
+        );
+        rendered.push_str(&format!(
+            "\n --> {}: byte {}..{}",
+            self.location.logical_path(),
+            self.location.span().start(),
+            self.location.span().end()
+        ));
+        append_human_extras(&mut rendered, self);
+        rendered
+    }
+}
+
+fn render_human_diagnostic(diagnostic: &CompilerDiagnostic, source_text: &str) -> String {
+    let start = diagnostic.location.span().start();
+    let end = diagnostic.location.span().end();
+    let Some((line_number, column_number, line_start, line_end)) =
+        source_line_for_offset(source_text, start)
+    else {
+        return diagnostic.render_human_without_source();
+    };
+
+    let line = &source_text[line_start..line_end];
+    let mut safe_end = end.min(line_end).max(start);
+    while safe_end > start && !source_text.is_char_boundary(safe_end) {
+        safe_end -= 1;
+    }
+    let prefix = &source_text[line_start..start];
+    let selected = &source_text[start..safe_end];
+    let caret_width = selected.chars().count().max(1);
+    let caret_indent = prefix.chars().count();
+    let mut rendered = format!(
+        "{}[{}]: {}\n --> {}:{}:{}\n  |\n{:>3} | {}\n  | {}{}",
+        diagnostic.severity().as_str(),
+        diagnostic.code.as_str(),
+        diagnostic.message,
+        diagnostic.location.logical_path(),
+        line_number,
+        column_number,
+        line_number,
+        line,
+        " ".repeat(caret_indent),
+        "^".repeat(caret_width),
+    );
+    rendered.push(' ');
+    rendered.push_str(diagnostic.primary_label());
+    append_human_extras(&mut rendered, diagnostic);
+    rendered
+}
+
+fn source_line_for_offset(source_text: &str, offset: usize) -> Option<(usize, usize, usize, usize)> {
+    if offset > source_text.len() || !source_text.is_char_boundary(offset) {
+        return None;
+    }
+    let line_start = source_text[..offset].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = source_text[offset..]
+        .find('\n')
+        .map_or(source_text.len(), |index| offset + index);
+    let line_number = source_text[..line_start].bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let column_number = source_text[line_start..offset].chars().count() + 1;
+    Some((line_number, column_number, line_start, line_end))
+}
+
+fn append_human_extras(rendered: &mut String, diagnostic: &CompilerDiagnostic) {
+    if let Some(help) = diagnostic.help() {
+        rendered.push_str("\n  = help: ");
+        rendered.push_str(help);
+    }
+    for note in diagnostic.notes() {
+        rendered.push_str("\n  = note: ");
+        rendered.push_str(note);
+    }
+}
+
 
 /// One lossless source unit parsed by the compiler.
 #[derive(Clone, Debug)]
@@ -516,6 +605,26 @@ impl ParseReport {
     pub fn diagnostics(&self) -> &[CompilerDiagnostic] {
         &self.diagnostics
     }
+    /// Renders all diagnostics with source snippets from the retained source units.
+    ///
+    /// Diagnostics remain available through [`Self::diagnostics`] with their raw
+    /// message, byte span, and machine-readable code unchanged.
+    pub fn render_human(&self) -> String {
+        self.diagnostics
+            .iter()
+            .map(|diagnostic| {
+                self.units
+                    .iter()
+                    .find(|unit| unit.logical_path() == diagnostic.location().logical_path())
+                    .map_or_else(
+                        || diagnostic.render_human_without_source(),
+                        |unit| diagnostic.render_human(unit.source_text()),
+                    )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
 
     /// Returns whether parsing produced any error-level diagnostics.
     pub fn has_errors(&self) -> bool {
