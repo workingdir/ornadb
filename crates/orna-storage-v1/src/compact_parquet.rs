@@ -17,7 +17,7 @@ use orna_repository_v1::{
     RepositoryError, Uuid, validate_compact_page_uncompressed_sizes,
 };
 use parquet::{
-    basic::{Compression, ConvertedType, Encoding, Type},
+    basic::{Compression, ConvertedType, Encoding, LogicalType, TimeUnit, Type},
     column::reader::ColumnReader,
     data_type::AsBytes,
     file::reader::{FileReader, SerializedFileReader},
@@ -234,6 +234,10 @@ fn decode_verified_bytes_for_role(
                     .into_iter()
                     .map(|value| OvbRaw::Int(value.into()))
                     .collect(),
+                KeyColumnKind::Instant => read_int64_column(&*row_group, column.index, rows)?
+                    .into_iter()
+                    .map(instant_value)
+                    .collect(),
                 KeyColumnKind::Uuid => read_uuid_column(&*row_group, column.index, rows)?,
                 KeyColumnKind::OvbInt | KeyColumnKind::OvbBool => {
                     read_ovb_column(&*row_group, column.index, rows, column.kind)?
@@ -382,7 +386,8 @@ fn key_components(raw: &OvbRaw) -> Result<Vec<OvbRaw>, CompactParquetError> {
         | OvbRaw::Bool(_)
         | OvbRaw::Text(_)
         | OvbRaw::Tag(37, _)
-        | OvbRaw::Tag(60001, _) => Ok(vec![raw.clone()]),
+        | OvbRaw::Tag(60001, _)
+        | OvbRaw::Tag(60002, _) => Ok(vec![raw.clone()]),
         _ => Err(CompactParquetError::InvalidMetadata),
     }
 }
@@ -412,6 +417,28 @@ fn compare_key_components(
                     return Err(CompactParquetError::InvalidMetadata);
                 };
                 left.cmp(right)
+            }
+            (OvbRaw::Tag(60002, left), OvbRaw::Tag(60002, right)) => {
+                let (OvbRaw::Array(left), OvbRaw::Array(right)) = (left.as_ref(), right.as_ref())
+                else {
+                    return Err(CompactParquetError::InvalidMetadata);
+                };
+                if left.len() != 2 || right.len() != 2 {
+                    return Err(CompactParquetError::InvalidMetadata);
+                }
+                let (OvbRaw::Int(left_seconds), OvbRaw::Int(left_nanos)) =
+                    (&left[0], &left[1])
+                else {
+                    return Err(CompactParquetError::InvalidMetadata);
+                };
+                let (OvbRaw::Int(right_seconds), OvbRaw::Int(right_nanos)) =
+                    (&right[0], &right[1])
+                else {
+                    return Err(CompactParquetError::InvalidMetadata);
+                };
+                left_seconds
+                    .cmp(right_seconds)
+                    .then_with(|| left_nanos.cmp(right_nanos))
             }
             _ => return Err(CompactParquetError::InvalidMetadata),
         };
@@ -445,6 +472,7 @@ struct KeyColumn {
 enum KeyColumnKind {
     Uuid,
     Int,
+    Instant,
     OvbInt,
     Bool,
     OvbBool,
@@ -457,7 +485,6 @@ fn matches_profile_key_kind(expected: KeyColumnKind, actual: KeyColumnKind) -> b
         || (expected == KeyColumnKind::Int && actual == KeyColumnKind::OvbInt)
         || (expected == KeyColumnKind::Bool && actual == KeyColumnKind::OvbBool)
 }
-
 fn ensure_supported_profile(
     profile: &CompactOvbProfile,
 ) -> Result<Vec<KeyColumnKind>, CompactParquetError> {
@@ -469,6 +496,10 @@ fn ensure_supported_profile(
         .iter()
         .map(|kind| match kind {
             KeyColumnKind::Int | KeyColumnKind::OvbInt => OvbRaw::Int(0.into()),
+            KeyColumnKind::Instant => OvbRaw::Tag(
+                60002,
+                Box::new(OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Int(0.into())])),
+            ),
             KeyColumnKind::Uuid => OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(vec![0; 16]))),
             KeyColumnKind::Bool | KeyColumnKind::OvbBool => OvbRaw::Bool(false),
             KeyColumnKind::Str => OvbRaw::Text(String::new()),
@@ -682,6 +713,16 @@ fn descriptor_field_id(
             && column.physical_type() == Type::INT64
         {
             KeyColumnKind::Int
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Instant".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "instant_ns")
+            && column.physical_type() == Type::INT64
+            && matches!(
+                column.logical_type_ref(),
+                Some(LogicalType::Timestamp(timestamp))
+                    if timestamp.is_adjusted_to_u_t_c && timestamp.unit == TimeUnit::NANOS
+            )
+        {
+            KeyColumnKind::Instant
         } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Uuid".to_owned())]
             && matches!(&fields[3], OvbRaw::Text(value) if value == "uuid")
             && column.physical_type() == Type::FIXED_LEN_BYTE_ARRAY
@@ -729,7 +770,8 @@ fn descriptor_field_id(
         if !valid_parameters
             || (!(kind == KeyColumnKind::Str
                 || kind == KeyColumnKind::Date
-                || kind == KeyColumnKind::Uuid)
+                || kind == KeyColumnKind::Uuid
+                || kind == KeyColumnKind::Instant)
                 && column.logical_type_ref().is_some())
             || (matches!(kind, KeyColumnKind::OvbInt | KeyColumnKind::OvbBool)
                 && column.converted_type() != ConvertedType::NONE)
@@ -874,6 +916,11 @@ fn profile_key_kinds(
                 if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())] =>
             {
                 KeyColumnKind::Int
+            }
+            OvbRaw::Array(logical_type)
+                if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Instant".to_owned())] =>
+            {
+                KeyColumnKind::Instant
             }
             OvbRaw::Array(logical_type)
                 if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Uuid".to_owned())] =>
@@ -1171,6 +1218,18 @@ fn read_ovb_column(
         })
         .collect()
 }
+fn instant_value(nanoseconds: i64) -> OvbRaw {
+    let seconds = nanoseconds.div_euclid(1_000_000_000);
+    let nanosecond = nanoseconds.rem_euclid(1_000_000_000);
+    OvbRaw::Tag(
+        60002,
+        Box::new(OvbRaw::Array(vec![
+            OvbRaw::Int(seconds.into()),
+            OvbRaw::Int(nanosecond.into()),
+        ])),
+    )
+}
+
 
 fn date_value(days: i32) -> Result<OvbRaw, CompactParquetError> {
     let z = i64::from(days) + 719_468;
@@ -1210,6 +1269,7 @@ fn read_bool_column(
         return Err(CompactParquetError::UnsupportedKeyMapping);
     };
     let descriptor = row_group.metadata().schema_descr().column(index);
+
     if descriptor.max_rep_level() != 0 {
         return Err(CompactParquetError::UnsupportedKeyMapping);
     }
