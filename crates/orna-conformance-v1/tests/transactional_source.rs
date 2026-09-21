@@ -1351,6 +1351,46 @@ fn decimal_distinct_source(parent_body: &str) -> SourceUnit {
         ),
     }
 }
+fn flat_map_source(parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "txn-flat-map".into(),
+        source_id: "txn-flat-map.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Note(id: Int) {{ value: Int, }} fn expanded() = Note | map(note => note.value) | flat_map(value => [value, value + 10]); fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
+#[test]
+fn parsed_relation_map_flat_map_preserves_order_and_count_before_rollback() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&flat_map_source(
+        r#"
+            Note.insert({ id: 2, value: 20 });
+            Note.insert({ id: 1, value: 10 });
+            assert expanded() | count() == 4;
+            assert (expanded() | take(1) | one()) == 10;
+            assert (expanded() | drop(1) | take(1) | one()) == 20;
+            assert (expanded() | drop(2) | take(1) | one()) == 20;
+            assert (expanded() | drop(3) | take(1) | one()) == 30;
+            assert false;
+        "#,
+    ));
+
+    assert!(matches!(
+        &outcome,
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+    ));
+    for id in [1, 2] {
+        assert_eq!(
+            runtime.committed_row("Note", &Value::int(id.into())),
+            None,
+            "failed flat_map source published candidate row {id}"
+        );
+    }
+}
+
 
 #[test]
 fn parsed_decimal_relation_distinct_is_scale_insensitive_and_keeps_canonical_first_order() {
