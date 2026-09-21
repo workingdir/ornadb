@@ -32,11 +32,11 @@ mod init;
 mod transport;
 
 pub use compact::{
-    COMPACT_MANIFEST_SHARD_LIMIT, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactManifest,
-    CompactManifestEntry, CompactManifestWitness, CompactPublicationPending,
-    CompactPublicationPlan, CompactPublicationReconciliation, CompactPublicationRecovery,
-    CompactRuntimeReceipt, CompactSegment, CompactSegmentRole,
-    validate_compact_page_uncompressed_sizes,
+    COMPACT_MANIFEST_SHARD_LIMIT, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactCommittedRow,
+    CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry,
+    CompactManifestWitness, CompactPublicationPending, CompactPublicationPlan,
+    CompactPublicationReconciliation, CompactPublicationRecovery, CompactRuntimeReceipt,
+    CompactSegment, CompactSegmentRole, validate_compact_page_uncompressed_sizes,
 };
 pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
