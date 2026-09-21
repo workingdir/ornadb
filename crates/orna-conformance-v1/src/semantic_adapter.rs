@@ -6452,6 +6452,7 @@ fn relation_stage_name<'a>(
         text.as_str(),
         "filter"
             | "map"
+            | "flat_map"
             | "sort_by"
             | "distinct"
             | "take"
