@@ -397,6 +397,77 @@ fn runtime_info_project(source: &str) -> ProjectUnit {
         },
     }
 }
+fn snapshot_project(source: &str) -> ProjectUnit {
+    ProjectUnit {
+        fixture_id: "snapshot-project".into(),
+        project_id: "logical/snapshot".into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: "snapshot-module".into(),
+            source_id: "logical/snapshot/main.orna".into(),
+            parse_as: "module_unit".into(),
+            source: source.into(),
+        }],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+    }
+}
+
+#[test]
+fn semantic_project_adapter_admits_sys_snapshot_string_as_pinned_read() {
+    let source = r#"pub fn before_change() = sys.snapshot("HEAD~3");"#;
+    let project = snapshot_project(source);
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.typecheck_project(&project), StageOutcome::Passed);
+
+    // The project stages above exercise the production adapter boundary.  The
+    // native semantic graph proves the typed result and read metadata retained
+    // for the admitted source without loading or executing historical state.
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("main.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+    let before_change = &analysis.modules.values().next().unwrap().exports["before_change"];
+    assert!(matches!(
+        &before_change.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Named("sys.SnapshotRef".into())
+    ));
+    assert_eq!(
+        before_change.effects.effects,
+        std::collections::BTreeSet::from(["database read".into()])
+    );
+    assert!(before_change.effects.may_fail);
+}
+
+#[test]
+fn semantic_project_adapter_rejects_non_string_sys_snapshot_argument_at_typecheck() {
+    let source = "pub fn invalid() = sys.snapshot(3);";
+    let project = snapshot_project(source);
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    let StageOutcome::Failed(diagnostic) = adapter.typecheck_project(&project) else {
+        panic!("non-string sys.snapshot argument must fail typecheck");
+    };
+    assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S021-TYPE");
+}
+
 
 #[test]
 fn semantic_project_adapter_admits_sys_runtime_info_with_read_effect() {
