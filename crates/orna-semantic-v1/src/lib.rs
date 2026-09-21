@@ -8478,6 +8478,7 @@ fn root_collection_intrinsic_is_unshadowed(
             | "flat_map"
             | "sort_by"
             | "filter"
+            | "distinct"
             | "take"
             | "drop"
             | "window"
@@ -9568,6 +9569,7 @@ fn infer_relation_collection_call(
                     | "map"
                     | "flat_map"
                     | "sort_by"
+                    | "distinct"
                     | "take"
                     | "drop"
                     | "count"
@@ -9734,7 +9736,7 @@ fn infer_relation_terminal_call(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
     let expected = match operation {
-        "count" | "first" | "sum" | "min" | "max" => 1..=1,
+        "count" | "first" | "sum" | "min" | "max" | "distinct" => 1..=1,
         "one" => 1..=2,
         "take" | "drop" => 2..=2,
         "window" => 2..=3,
@@ -9909,6 +9911,18 @@ fn infer_relation_terminal_call(
             // including when the relation overload is selected directly.
             effects.may_fail = true;
             element.as_ref().clone()
+        }
+        "distinct" => {
+            if is_default_float_equality_type(element.as_ref()) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "distinct requires a lawful equality key; default Float equality is unavailable",
+                ));
+                valid = false;
+                Type::Error
+            } else {
+                Type::Relation(element.clone())
+            }
         }
         "take" | "drop" => Type::Relation(element.clone()),
         "window" => Type::Relation(Box::new(Type::List(Box::new(element.as_ref().clone())))),
@@ -10670,6 +10684,17 @@ fn infer_success_pipeline(
                 && root_collection_intrinsic_is_unshadowed("filter", scope, local) =>
         {
             (Type::Relation(Box::new(element.clone())), Some(Type::Bool))
+        }
+        ("distinct", false, []) if root_collection_intrinsic_is_unshadowed("distinct", scope, local) => {
+            if is_default_float_equality_type(&element) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "distinct requires a lawful equality key; default Float equality is unavailable",
+                ));
+                (Type::Error, None)
+            } else {
+                (Type::Relation(Box::new(element.clone())), None)
+            }
         }
         ("one", false, []) if root_collection_intrinsic_is_unshadowed("one", scope, local) => {
             (element.clone(), None)
