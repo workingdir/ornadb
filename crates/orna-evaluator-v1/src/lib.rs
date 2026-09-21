@@ -4900,7 +4900,7 @@ impl Context<'_, '_> {
         }
         Ok(Value::Bool(false))
     }
-    fn take(&self, values: &[Value], count: &BigInt) -> Result<Value, EvaluationError> {
+    fn take(&mut self, values: &[Value], count: &BigInt) -> Result<Value, EvaluationError> {
         if count.is_negative() {
             return Err(error("ORNA-EVAL-VALUE"));
         }
@@ -4910,9 +4910,14 @@ impl Context<'_, '_> {
             count.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?
         };
         self.items(end)?;
-        Ok(Value::List(values[..end].to_vec()))
+        let mut result = Vec::with_capacity(end);
+        for value in &values[..end] {
+            self.step()?;
+            result.push(value.clone());
+        }
+        Ok(Value::List(result))
     }
-    fn drop(&self, values: &[Value], count: &BigInt) -> Result<Value, EvaluationError> {
+    fn drop(&mut self, values: &[Value], count: &BigInt) -> Result<Value, EvaluationError> {
         if count.is_negative() {
             return Err(error("ORNA-EVAL-VALUE"));
         }
@@ -4921,8 +4926,14 @@ impl Context<'_, '_> {
         } else {
             count.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?
         };
-        self.items(values.len() - start)?;
-        Ok(Value::List(values[start..].to_vec()))
+        let result_len = values.len() - start;
+        self.items(result_len)?;
+        let mut result = Vec::with_capacity(result_len);
+        for value in &values[start..] {
+            self.step()?;
+            result.push(value.clone());
+        }
+        Ok(Value::List(result))
     }
     fn filter(
         &mut self,
@@ -5113,7 +5124,7 @@ impl Context<'_, '_> {
         Ok(value.to_usize().unwrap_or(usize::MAX))
     }
     fn zipped(
-        &self,
+        &mut self,
         left: &[Value],
         right: &[Value],
         exact: bool,
@@ -5126,6 +5137,7 @@ impl Context<'_, '_> {
         let mut pairs = Vec::new();
         for (left, right) in left.iter().zip(right) {
             self.items(2)?;
+            self.step()?;
             pairs.push(Value::Tuple(vec![left.clone(), right.clone()]));
             self.items(pairs.len())?;
         }
