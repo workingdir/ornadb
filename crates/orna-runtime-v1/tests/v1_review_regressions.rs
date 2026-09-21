@@ -20,9 +20,11 @@ use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
     CatalogueFunctionDeclaration, CatalogueObjectKind, CatalogueParameterDeclaration,
-    CatalogueTypeDeclaration, CatalogueTypeForm, CatalogueTypeSpec, NoFault, RuntimeIdentity,
+    CatalogueTypeDeclaration, CatalogueTypeForm, CatalogueTypeSpec, NoFault, PublicationMutationState,
+    PublicationRowEncoding, PublicationTableIdentity, PublicationValueEncoding, RuntimeIdentity,
     RuntimeState, TableMutation, WriterLease,
 };
+use sha2::{Digest, Sha256};
 use tempfile::{Builder, TempDir};
 
 fn declaration(
@@ -354,5 +356,188 @@ async fn unadmitted_data_only_generation_allows_first_catalogue_admission() {
             .await
             .expect("read first admitted function")
             .is_some()
+    );
+}
+
+#[tokio::test]
+async fn compact_freeze_publishes_authoritative_ordered_mutations_and_recovers() {
+    let (directory, state) = {
+        let (directory, repository) = repository();
+        let state = RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [1; 16],
+                repository_id: [2; 16],
+            },
+            [3; 32],
+        )
+        .await
+        .expect("open fresh runtime");
+        (directory, state)
+    };
+    let lease = state
+        .acquire_lease([15; 16])
+        .await
+        .expect("acquire writer lease");
+    let context = state.begin_activation().await.expect("begin mutation activation");
+    let mutations = [
+        TableMutation::new([51; 16], "freeze-books", vec![1], Some(vec![10]))
+            .expect("insert mutation"),
+        TableMutation::new([52; 16], "freeze-books", vec![1], Some(vec![11]))
+            .expect("replacement mutation"),
+        TableMutation::new([53; 16], "freeze-books", vec![1], None)
+            .expect("deletion mutation"),
+        TableMutation::new([54; 16], "freeze-books", vec![2], Some(vec![20]))
+            .expect("second replacement mutation"),
+    ];
+    state
+        .commit_table_activation(lease, &context, &mutations, [61; 32], &NoFault)
+        .await
+        .expect("commit ordered mutations");
+    let checkpoint = state
+        .latest_checkpoint()
+        .await
+        .expect("read committed checkpoint")
+        .expect("checkpoint exists");
+    let identity = PublicationTableIdentity {
+        table: "freeze-books".into(),
+        table_id: [71; 16],
+        schema_fingerprint: [72; 32],
+        candidate_generation: checkpoint.generation,
+    };
+    let freeze = state
+        .freeze_compact([73; 16], &checkpoint, &[identity.clone()])
+        .await
+        .expect("freeze compact candidate");
+    assert_eq!(freeze.checkpoint, checkpoint);
+    assert_eq!(freeze.mutations.len(), 4);
+    assert_eq!(
+        freeze
+            .mutations
+            .iter()
+            .map(|mutation| mutation.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4],
+        "freeze preserves durable mutation order"
+    );
+    for mutation in &freeze.mutations {
+        assert_eq!(mutation.table_id, identity.table_id);
+        assert_eq!(mutation.schema_fingerprint, identity.schema_fingerprint);
+        assert_eq!(mutation.row_encoding_identity, PublicationRowEncoding::CompactOvb1);
+        assert_eq!(mutation.value_encoding_identity, PublicationValueEncoding::Ovb1);
+        assert_eq!(mutation.candidate_generation, checkpoint.generation);
+        let key_digest: [u8; 32] = Sha256::digest(&mutation.logical_key).into();
+        assert_eq!(mutation.equivalence_witness.key_digest, key_digest);
+        assert_eq!(
+            mutation.equivalence_witness.candidate_digest,
+            freeze.candidate_digest
+        );
+    }
+    assert!(matches!(
+        freeze.mutations[0].state,
+        PublicationMutationState::Replacement { ref value } if value == &vec![10]
+    ));
+    assert!(matches!(
+        freeze.mutations[1].state,
+        PublicationMutationState::Replacement { ref value } if value == &vec![11]
+    ));
+    assert!(matches!(freeze.mutations[2].state, PublicationMutationState::Deletion));
+    assert!(matches!(
+        freeze.mutations[3].state,
+        PublicationMutationState::Replacement { ref value } if value == &vec![20]
+    ));
+
+    let mut candidate = Sha256::new();
+    candidate.update(b"ORNA-COMPACT-CANDIDATE-1\0");
+    candidate.update(checkpoint.generation.to_be_bytes());
+    for mutation in &freeze.mutations {
+        candidate.update(mutation.sequence.to_be_bytes());
+        candidate.update((mutation.logical_key.len() as u64).to_be_bytes());
+        candidate.update(&mutation.logical_key);
+        match &mutation.state {
+            PublicationMutationState::Replacement { value } => {
+                candidate.update([1]);
+                candidate.update((value.len() as u64).to_be_bytes());
+                candidate.update(value);
+            }
+            PublicationMutationState::Deletion => {
+                candidate.update([2]);
+                candidate.update(0_u64.to_be_bytes());
+            }
+        }
+    }
+    let expected_candidate_digest: [u8; 32] = candidate.finalize().into();
+    assert_eq!(freeze.candidate_digest, expected_candidate_digest);
+
+    let recovered = state
+        .publication_freeze_compact([73; 16], &[identity])
+        .await
+        .expect("recover typed freeze from durable journal");
+    assert_eq!(recovered, freeze);
+    let legacy_recovered = state
+        .publication_freeze([73; 16])
+        .await
+        .expect("recover legacy freeze journal");
+    assert_eq!(legacy_recovered.checkpoint, checkpoint);
+    assert!(legacy_recovered.mutations.is_empty());
+
+    let stale_identity = PublicationTableIdentity {
+        table: "freeze-books".into(),
+        table_id: [71; 16],
+        schema_fingerprint: [72; 32],
+        candidate_generation: checkpoint.generation + 1,
+    };
+    assert_eq!(
+        state
+            .freeze_compact([74; 16], &checkpoint, &[stale_identity])
+            .await,
+        Err(orna_runtime_v1::RuntimeError::RecoveryInvalid)
+    );
+    let stale = orna_runtime_v1::Checkpoint {
+        generation: checkpoint.generation + 1,
+        digest: [99; 32],
+        mutation_sequence: checkpoint.mutation_sequence,
+    };
+    assert_eq!(
+        state
+            .freeze_compact(
+                [74; 16],
+                &stale,
+                &[PublicationTableIdentity {
+                    table: "freeze-books".into(),
+                    table_id: [71; 16],
+                    schema_fingerprint: [72; 32],
+                    candidate_generation: stale.generation,
+                }],
+            )
+            .await,
+        Err(orna_runtime_v1::RuntimeError::RecoveryInvalid)
+    );
+    drop(state);
+    let repository = Repository::discover(directory.path()).expect("reopen repository");
+    let reopened = RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [1; 16],
+            repository_id: [2; 16],
+        },
+        [3; 32],
+    )
+    .await
+    .expect("reopen runtime after freeze");
+    assert_eq!(
+        reopened
+            .publication_freeze_compact(
+                [73; 16],
+                &[PublicationTableIdentity {
+                    table: "freeze-books".into(),
+                    table_id: [71; 16],
+                    schema_fingerprint: [72; 32],
+                    candidate_generation: checkpoint.generation,
+                }],
+            )
+            .await
+            .expect("recover freeze after reopen"),
+        freeze
     );
 }
