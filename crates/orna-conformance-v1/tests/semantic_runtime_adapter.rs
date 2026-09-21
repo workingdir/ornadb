@@ -431,6 +431,42 @@ fn semantic_project_adapter_rejects_typed_sys_invoke_mismatched_witness() {
     );
 }
 
+#[test]
+fn semantic_project_adapter_admits_inferred_and_explicit_typed_sys_await_and_cancel() {
+    let project = typed_invoke_project(
+        r#"
+            pub fn inferred_await(job: sys.InvocationHandle<Int>) =
+                sys.await(job, timeout: 1.s);
+            pub fn explicit_await(job: sys.InvocationHandle<Int>) =
+                sys.await<Int>(invocation: job, timeout: null);
+            pub fn inferred_cancel(job: sys.InvocationHandle<Int>) =
+                sys.cancel(job);
+            pub fn explicit_cancel(job: sys.InvocationHandle<Int>) =
+                sys.cancel<Int>(job, reason: "stop");
+        "#,
+    );
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.typecheck_project(&project), StageOutcome::Passed);
+}
+
+#[test]
+fn semantic_project_adapter_rejects_mismatched_explicit_sys_await_type() {
+    let project = typed_invoke_project(
+        "pub fn mismatched(job: sys.InvocationHandle<Int>) = sys.await<Str>(job);",
+    );
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    let StageOutcome::Failed(diagnostic) = adapter.typecheck_project(&project) else {
+        panic!("mismatched explicit sys.await type must fail at typecheck");
+    };
+    assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S021-TYPE");
+}
+
 
 #[tokio::test]
 async fn project_stream_ignores_unrelated_false_module_assertion() {
