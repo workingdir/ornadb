@@ -58,6 +58,10 @@ pub use invoke::{
     run_installed_invoke_at, run_invoke_with_kernel,
 };
 pub use live::{LiveHostError, LiveOnceHost};
+pub use live_eval::{
+    ActionAuthority, ActionAuthorityRegistry, ActionBinding, ActionHandler,
+    ActionRegistrationError,
+};
 pub use local_auth::{LocalAuthenticationError, authenticate_local_stream};
 pub use raw_call::{
     LocalRawCallError, LocalRawCallOutcome, run_local_raw_call, run_local_raw_call_with_argument,

@@ -21,18 +21,19 @@ use orna_evaluator_v1::{
     reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::{
-    CanonicalSnapshot, CwdCapture, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, OvbRaw,
-    SafeText, Value,
+    CanonicalSnapshot, CanonicalValue, CwdCapture, Diagnostic as FoundationDiagnostic,
+    DiagnosticSeverity, OvbRaw, SafeText, Value,
 };
-use orna_live_v1::{Error, LiveApplication, Result};
+use orna_live_v1::{
+    Error, LiveApplication, LiveApplicationWorkLease, LiveEvalResponse, LiveEvalTransaction, Result,
+    RuntimeActivationContext,
+};
 use orna_project_v1::ProjectLoader;
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Limits as ProtocolLimits, Message, PresentNode, PresentationContext,
     ResultStatus,
 };
-use orna_repository_v1::Repository;
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
-use orna_security_v1::SessionId;
 
 /// The HTTP authority and the application share this expiry index. Keeping
 /// the index outside either owner lets deletion and the actor's expiry tick
@@ -109,19 +110,123 @@ impl OperationAdmissionSource for RepositoryAdmissionSource {
     }
 }
 
+/// The asynchronous callback boundary for one authenticated page action.
+///
+/// The live protocol owns request identity, CWD admission, cancellation and
+/// the terminal commit. The action authority owns the opaque handle and typed
+/// input, returning the already-staged response/transaction for that action.
+pub type ActionFuture<'a> = Pin<Box<dyn Future<Output = Result<LiveEvalResponse>> + 'a>>;
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ActionBinding {
+    pub session: [u8; 16],
+    pub watch: [u8; 16],
+    pub page_revision: u64,
+    pub action: [u8; 16],
+}
+
+pub trait ActionHandler: Send + Sync {
+    /// Checks the callback's declared input shape before any activation work.
+    /// A rejected value never reaches `activate`, preserving typed action
+    /// admission at the opaque-handle boundary.
+    fn accepts(&self, value: &CanonicalValue) -> bool;
+
+    fn activate<'a>(
+        &'a self,
+        binding: ActionBinding,
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        value: &'a CanonicalValue,
+        context: &'a RuntimeActivationContext,
+        work: &'a mut LiveApplicationWorkLease,
+    ) -> ActionFuture<'a>;
+}
+
+pub trait ActionAuthority: Send + Sync {
+    fn activate<'a>(
+        &'a self,
+        binding: ActionBinding,
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        value: &'a CanonicalValue,
+        context: &'a RuntimeActivationContext,
+        work: &'a mut LiveApplicationWorkLease,
+    ) -> ActionFuture<'a>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActionRegistrationError {
+    ZeroHandle,
+    DuplicateBinding,
+}
+
+pub struct ActionAuthorityRegistry {
+    handlers: BTreeMap<ActionBinding, Arc<dyn ActionHandler>>,
+}
+
+impl ActionAuthorityRegistry {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            handlers: BTreeMap::new(),
+        }
+    }
+
+    pub fn register<H: ActionHandler + 'static>(
+        &mut self,
+        binding: ActionBinding,
+        handler: H,
+    ) -> std::result::Result<(), ActionRegistrationError> {
+        if binding.action == [0; 16] {
+            return Err(ActionRegistrationError::ZeroHandle);
+        }
+        if self.handlers.contains_key(&binding) {
+            return Err(ActionRegistrationError::DuplicateBinding);
+        }
+        self.handlers.insert(binding, Arc::new(handler));
+        Ok(())
+    }
+}
+
+impl Default for ActionAuthorityRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ActionAuthority for ActionAuthorityRegistry {
+    fn activate<'a>(
+        &'a self,
+        binding: ActionBinding,
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        value: &'a CanonicalValue,
+        context: &'a RuntimeActivationContext,
+        work: &'a mut LiveApplicationWorkLease,
+    ) -> ActionFuture<'a> {
+        let Some(handler) = self.handlers.get(&binding) else {
+            return Box::pin(async { Err(Error::Denied) });
+        };
+        if !handler.accepts(value) {
+            return Box::pin(async { Err(Error::Denied) });
+        }
+        handler.activate(binding, request, fingerprint, value, context, work)
+    }
+}
+
 /// Terminal Eval rejections bound to a live session lease: fingerprint and
 /// envelope keyed by session and request.
 type RejectedTerminals = BTreeMap<SessionId, BTreeMap<[u8; 16], ([u8; 32], Envelope)>>;
 
-/// The server's pure Eval/Watch implementation.
 pub(crate) struct PureEvalApplication {
     database_id: [u8; 16],
     admissions: Box<dyn OperationAdmissionSource>,
+    action_authority: Arc<dyn ActionAuthority>,
     expiries: SessionExpiries,
     sessions: BTreeMap<SessionId, SessionState>,
     /// Terminal Eval rejections that occurred before an evaluator overlay
     /// could be admitted. They are still bound to a live session lease, so an
-    /// exact retry cannot re-admit against later repository state.
+    /// exact retry cannot re-admit or re-execute against later repository state.
     rejected_terminals: RejectedTerminals,
     #[cfg(test)]
     eval_started: Option<Arc<AtomicBool>>,
@@ -165,9 +270,32 @@ impl PureEvalApplication {
     /// Builds a worker-owned application from an immutable project snapshot.
     /// The repository is retained only for the durable CWD capture used when
     /// admitting each request; source loading never re-reads it.
-    // The worker recipe requires snapshots, but repository-backed callers pass no project or capture.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_repository_with_project(
+        repository: &Repository,
+        database_id: [u8; 16],
+        identity: RuntimeIdentity,
+        initial_digest: [u8; 32],
+        runtime_owner: [u8; 16],
+        expiries: SessionExpiries,
+        project: Option<orna_project_v1::LoadedProject>,
+        capture: Option<CwdCapture>,
+    ) -> std::result::Result<Self, ()> {
+        Self::from_repository_with_project_and_authority(
+            repository,
+            database_id,
+            identity,
+            initial_digest,
+            runtime_owner,
+            expiries,
+            project,
+            capture,
+            Arc::new(ActionAuthorityRegistry::new()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_repository_with_project_and_authority(
         repository: &Repository,
         database_id: [u8; 16],
         identity: RuntimeIdentity,
@@ -176,6 +304,7 @@ impl PureEvalApplication {
         expiries: SessionExpiries,
         project: Option<orna_project_v1::LoadedProject>,
         capture: Option<CwdCapture>,
+        action_authority: Arc<dyn ActionAuthority>,
     ) -> std::result::Result<Self, ()> {
         if identity.database_id != database_id {
             return Err(());
@@ -189,6 +318,7 @@ impl PureEvalApplication {
                 project,
                 project_capture: capture,
             }),
+            action_authority,
             expiries,
             sessions: BTreeMap::new(),
             rejected_terminals: BTreeMap::new(),
@@ -388,6 +518,63 @@ impl LiveApplication for PureEvalApplication {
         futures::executor::block_on(
             self.eval_with_cancellation(session, request, message, None, None),
         )
+    }
+
+    fn dispatch_event_with_work<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        watch: Option<[u8; 16]>,
+        fingerprint: [u8; 32],
+        context: Option<&'a RuntimeActivationContext>,
+        work: &'a mut LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse>> + 'a>> {
+        let Message::Event {
+            revision,
+            action,
+            value,
+            fingerprint: message_fingerprint,
+        } = message
+        else {
+            return Box::pin(async { Err(Error::InvalidMessage) });
+        };
+        if *message_fingerprint != fingerprint {
+            return Box::pin(async { Err(Error::RequestMismatch) });
+        }
+        let Some(watch) = watch else {
+            return Box::pin(async { Err(Error::Denied) });
+        };
+        let Some(context) = context else {
+            return Box::pin(async { Err(Error::UnsupportedOperation) });
+        };
+        let authority = Arc::clone(&self.action_authority);
+        let binding = ActionBinding {
+            session,
+            watch,
+            page_revision: *revision,
+            action: *action,
+        };
+        Box::pin(async move {
+            work.check_active()?;
+            let response = authority
+                .activate(
+                    binding,
+                    request,
+                    fingerprint,
+                    value,
+                    context,
+                    work,
+                )
+                .await;
+            work.complete();
+            let response = response?;
+            work.check_active()?;
+            if !matches!(response, LiveEvalResponse::Transaction { .. }) {
+                return Err(Error::ApplicationRejected);
+            }
+            Ok(response)
+        })
     }
 
     fn dispatch_with_work<'a>(
@@ -729,8 +916,17 @@ fn decode_envelope(raw: OvbRaw) -> Result<Envelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::Cell, sync::atomic::Ordering, thread};
-
+    use std::{
+        cell::Cell,
+        fs,
+        path::PathBuf,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        thread,
+    };
+    use orna_runtime_v1::{NoFault, TableMutation};
     struct TestAdmissionSource {
         capture: Rc<RefCell<CwdCapture>>,
         capture_admissions: Rc<Cell<usize>>,
@@ -806,6 +1002,7 @@ mod tests {
                 capture_admissions: Rc::clone(&capture_admissions),
                 repl_admissions: Rc::clone(&repl_admissions),
             }),
+            action_authority: Arc::new(ActionAuthorityRegistry::new()),
             expiries: Rc::clone(&expiries),
             sessions: BTreeMap::new(),
             rejected_terminals: BTreeMap::new(),
@@ -822,6 +1019,52 @@ mod tests {
             capture_admissions,
             repl_admissions,
         )
+    }
+    fn action_context() -> (PathBuf, RuntimeActivationContext) {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/orna-server-action-tests");
+        fs::create_dir_all(&base).unwrap();
+        let root = loop {
+            let candidate = base.join(format!(
+                "{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("action fixture directory: {error}"),
+            }
+        };
+        let initialized = orna_repository_v1::initialize_repository(&root).unwrap();
+        let repository = initialized.into_repository();
+        let database_id = *orna_repository_v1::inspect_metadata(&repository)
+            .unwrap()
+            .unwrap()
+            .database_id()
+            .as_bytes();
+        let mut repository_id = database_id;
+        for (index, byte) in repository_id.iter_mut().enumerate() {
+            *byte ^= 0x5a_u8.wrapping_add(index as u8);
+        }
+        if repository_id == [0; 16] {
+            repository_id[0] = 1;
+        }
+        let mut initial_digest = [0; 32];
+        initial_digest[..16].copy_from_slice(&database_id);
+        initial_digest[16..].copy_from_slice(&repository_id);
+        let state = futures::executor::block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id,
+                repository_id,
+            },
+            initial_digest,
+        ))
+        .unwrap();
+        let context = futures::executor::block_on(state.begin_activation()).unwrap();
+        (root, context)
     }
 
     fn eval_message(database_id: [u8; 16], source: &str, fingerprint: [u8; 32]) -> Message {
@@ -1360,5 +1603,178 @@ mod tests {
         application.remove(session_id);
         assert!(!application.sessions.contains_key(&session_id));
         assert!(!expiries.borrow().contains_key(&session_id));
+    }
+    struct CountingActionHandler(Arc<AtomicUsize>);
+
+    impl ActionHandler for CountingActionHandler {
+        fn accepts(&self, value: &CanonicalValue) -> bool {
+            *value == CanonicalValue::unit()
+        }
+
+        fn activate<'a>(
+            &'a self,
+            _binding: ActionBinding,
+            request: [u8; 16],
+            fingerprint: [u8; 32],
+            _value: &'a CanonicalValue,
+            _context: &'a RuntimeActivationContext,
+            _work: &'a mut LiveApplicationWorkLease,
+        ) -> ActionFuture<'a> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(LiveEvalResponse::transaction(
+                    Envelope {
+                        request: Some(request),
+                        watch: None,
+                        message: Message::Result {
+                            status: ResultStatus::Success,
+                            value: Some(CanonicalValue::unit()),
+                            fingerprint,
+                            diagnostic: None,
+                        },
+                        extensions: BTreeMap::new(),
+                    },
+                    LiveEvalTransaction::new(
+                        vec![
+                            TableMutation::new(
+                                [9; 16],
+                                "action-test",
+                                vec![1],
+                                Some(vec![2]),
+                            )
+                            .expect("valid test mutation"),
+                        ],
+                        [10; 32],
+                        Arc::new(NoFault),
+                    ),
+                ))
+            })
+        }
+    }
+
+    #[test]
+    fn action_registry_fences_every_binding_identity_before_callback() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let binding = ActionBinding {
+            session: [1; 16],
+            watch: [2; 16],
+            page_revision: 7,
+            action: [3; 16],
+        };
+        let mut registry = ActionAuthorityRegistry::new();
+        registry
+            .register(binding, CountingActionHandler(Arc::clone(&calls)))
+            .unwrap();
+        let handler = registry.handlers.get(&binding).expect("registered action");
+        assert!(
+            !handler.accepts(&CanonicalValue::uuid([9; 16])),
+            "incompatible typed input must be rejected before callback"
+        );
+
+        for wrong in [
+            ActionBinding {
+                session: [4; 16],
+                ..binding
+            },
+            ActionBinding {
+                watch: [5; 16],
+                ..binding
+            },
+            ActionBinding {
+                page_revision: 8,
+                ..binding
+            },
+            ActionBinding {
+                action: [6; 16],
+                ..binding
+            },
+        ] {
+            assert!(
+                registry.handlers.get(&wrong).is_none(),
+                "mismatched session/watch/revision/action must not resolve"
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+    fn dispatch_action(
+        application: &mut PureEvalApplication,
+        context: &RuntimeActivationContext,
+        session: [u8; 16],
+        watch: [u8; 16],
+        revision: u64,
+        value: CanonicalValue,
+        request: [u8; 16],
+    ) -> Result<LiveEvalResponse> {
+        let fingerprint = [8; 32];
+        let message = Message::Event {
+            revision,
+            action: [3; 16],
+            value,
+            fingerprint,
+        };
+        let supervisor = orna_live_v1::LiveApplicationWorkSupervisor::new();
+        let mut work = supervisor.admit(session, request).unwrap();
+        futures::executor::block_on(application.dispatch_event_with_work(
+            session,
+            request,
+            &message,
+            Some(watch),
+            fingerprint,
+            Some(context),
+            &mut work,
+        ))
+    }
+
+    #[test]
+    fn dispatch_event_fences_scope_and_typed_input_before_callback() {
+        let (mut application, _, _, _, _, _) = application();
+        let (root, context) = action_context();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let binding = ActionBinding {
+            session: [1; 16],
+            watch: [2; 16],
+            page_revision: 7,
+            action: [3; 16],
+        };
+        let mut registry = ActionAuthorityRegistry::new();
+        registry
+            .register(binding, CountingActionHandler(Arc::clone(&calls)))
+            .unwrap();
+        application.action_authority = Arc::new(registry);
+
+        for (session, watch, revision, value, request) in [
+            ([4; 16], [2; 16], 7, CanonicalValue::unit(), [11; 16]),
+            ([1; 16], [5; 16], 7, CanonicalValue::unit(), [12; 16]),
+            ([1; 16], [2; 16], 8, CanonicalValue::unit(), [13; 16]),
+            ([1; 16], [2; 16], 7, CanonicalValue::uuid([9; 16]), [14; 16]),
+        ] {
+            assert!(matches!(
+                dispatch_action(
+                    &mut application,
+                    &context,
+                    session,
+                    watch,
+                    revision,
+                    value,
+                    request,
+                ),
+                Err(Error::Denied)
+            ));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+
+        let result = dispatch_action(
+            &mut application,
+            &context,
+            [1; 16],
+            [2; 16],
+            7,
+            CanonicalValue::unit(),
+            [15; 16],
+        )
+        .unwrap();
+        assert!(matches!(result, LiveEvalResponse::Transaction { .. }));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        fs::remove_dir_all(root).unwrap();
     }
 }

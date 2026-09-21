@@ -88,6 +88,7 @@ struct ApplicationWorkerRecipe {
     identity: RuntimeIdentity,
     initial_digest: [u8; 32],
     runtime_owner: [u8; 16],
+    action_authority: std::sync::Arc<dyn crate::live_eval::ActionAuthority>,
     #[cfg(test)]
     eval_started: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     #[cfg(test)]
@@ -270,7 +271,7 @@ fn application_worker_loop(
     let eval_started = recipe.eval_started.clone();
     #[cfg(test)]
     let panic_on_eval = recipe.panic_on_eval;
-    let mut application = match PureEvalApplication::from_repository_with_project(
+    let mut application = match PureEvalApplication::from_repository_with_project_and_authority(
         &recipe.repository,
         recipe.database_id,
         recipe.identity,
@@ -279,6 +280,7 @@ fn application_worker_loop(
         Rc::clone(&expiries),
         Some(recipe.project),
         Some(recipe.capture),
+        recipe.action_authority,
     ) {
         Ok(application) => application,
         Err(()) => {
@@ -373,6 +375,20 @@ impl Drop for ApplicationJob {
 impl LiveOnceHost {
     /// Binds a one-shot host to the default loopback listener.
     pub fn bind(repository: &Repository, port: u16) -> Result<Self, LiveHostError> {
+        Self::bind_with_action_authority(
+            repository,
+            port,
+            std::sync::Arc::new(crate::live_eval::ActionAuthorityRegistry::new()),
+        )
+    }
+
+    /// Binds a loopback host with the caller's authoritative page-action
+    /// registry. Opaque action handles are resolved only by this authority.
+    pub fn bind_with_action_authority(
+        repository: &Repository,
+        port: u16,
+        action_authority: std::sync::Arc<dyn crate::live_eval::ActionAuthority>,
+    ) -> Result<Self, LiveHostError> {
         let metadata = inspect_metadata(repository)
             .map_err(|_| LiveHostError::Repository)?
             .ok_or(LiveHostError::Repository)?;
@@ -403,13 +419,16 @@ impl LiveOnceHost {
             return Err(LiveHostError::Runtime);
         }
         let application = Rc::new(RefCell::new(Some(
-            PureEvalApplication::from_repository(
+            PureEvalApplication::from_repository_with_project_and_authority(
                 repository,
                 database_id,
                 identity,
                 initial_digest,
                 runtime_owner,
                 Rc::clone(&expiries),
+                Some(project.clone()),
+                Some(capture.clone()),
+                std::sync::Arc::clone(&action_authority),
             )
             .map_err(|_| LiveHostError::Repository)?,
         )));
@@ -421,6 +440,7 @@ impl LiveOnceHost {
             identity,
             initial_digest,
             runtime_owner,
+            action_authority,
             #[cfg(test)]
             eval_started: None,
             #[cfg(test)]
@@ -4627,6 +4647,7 @@ mod tests {
                 identity,
                 initial_digest,
                 runtime_owner: [44; 16],
+                action_authority: std::sync::Arc::new(crate::live_eval::ActionAuthorityRegistry::new()),
                 #[cfg(test)]
                 eval_started: None,
                 #[cfg(test)]

@@ -2779,7 +2779,7 @@ impl LiveHost {
                         }
                         Message::Event { .. } => {
                             let response = self
-                                .application_call(
+                                .application_event_call(
                                     application,
                                     session,
                                     request,
@@ -2977,6 +2977,64 @@ impl LiveHost {
         work.complete();
         let result = result?;
         match result {
+            LiveEvalResponse::Pure(response) => Ok(response),
+            LiveEvalResponse::Transaction {
+                response,
+                transaction,
+            } => {
+                let validated =
+                    validate_result_response(request, fingerprint, response, self.limits.protocol)?;
+                let response = validated.response.ok_or(Error::ApplicationRejected)?;
+                self.commit_eval_transaction(
+                    session,
+                    request,
+                    fingerprint,
+                    context
+                        .as_ref()
+                        .ok_or(Error::UnsupportedOperation)?,
+                    response,
+                    transaction,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn application_event_call(
+        &mut self,
+        application: &mut impl LiveApplication,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &Message,
+        watch: Option<[u8; 16]>,
+        fingerprint: [u8; 32],
+    ) -> Result<Envelope> {
+        let context = if self.runtime.is_some() {
+            Some(
+                self.runtime
+                    .as_ref()
+                    .ok_or(Error::RuntimeUnavailable)?
+                    .begin_activation()
+                    .await
+                    .map_err(|error| map_runtime(&error))?,
+            )
+        } else {
+            None
+        };
+        let mut work = self.application_work.admit(session, request)?;
+        let result = application
+            .dispatch_event_with_work(
+                session,
+                request,
+                message,
+                watch,
+                fingerprint,
+                context.as_ref(),
+                &mut work,
+            )
+            .await;
+        work.complete();
+        match result? {
             LiveEvalResponse::Pure(response) => Ok(response),
             LiveEvalResponse::Transaction {
                 response,
