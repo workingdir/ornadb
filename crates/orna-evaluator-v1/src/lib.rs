@@ -1109,6 +1109,10 @@ enum Value {
     Bool(bool),
     Int(BigInt),
     Decimal(DecimalValue),
+    Money {
+        amount: DecimalValue,
+        currency: [u8; 16],
+    },
     Float(u64),
     String(String),
     Date(String),
@@ -1301,6 +1305,19 @@ impl Value {
                     Raw::Int(value.exponent10),
                 ])),
             ),
+            Self::Money { amount, currency } => Raw::Tag(
+                60007,
+                Box::new(Raw::Array(vec![
+                    Raw::Tag(
+                        60000,
+                        Box::new(Raw::Array(vec![
+                            Raw::Int(amount.coefficient),
+                            Raw::Int(amount.exponent10),
+                        ])),
+                    ),
+                    object_id_raw(currency),
+                ])),
+            ),
             Self::Float(bits) => Raw::Float(bits),
             Self::String(value) => Raw::Text(value),
             Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
@@ -1461,6 +1478,7 @@ impl Value {
                 Ok(Self::Record(record))
             }
             Raw::Tag(60000, boxed) => Self::decimal_from_raw(boxed, context),
+            Raw::Tag(60007, boxed) => Self::money_from_raw(boxed, context),
             Raw::Tag(60008, boxed) => Self::enum_from_raw(boxed, context, depth),
             Raw::Tag(60009, boxed) => Self::nominal_record_from_raw(boxed, context, depth),
             Raw::Tag(60013, boxed) => Self::option_from_raw(boxed, context, depth),
@@ -1482,6 +1500,29 @@ impl Value {
         context.integer(coefficient.clone())?;
         context.integer(exponent.clone())?;
         DecimalValue::new(coefficient.clone(), exponent.clone()).map(Self::Decimal)
+    }
+    fn money_from_raw(raw: &Raw, context: &mut Context) -> Result<Self, EvaluationError> {
+        let Raw::Array(parts) = raw else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        let [Raw::Tag(60000, decimal_raw), currency_raw] = parts.as_slice() else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        let Self::Decimal(amount) = Self::decimal_from_raw(decimal_raw, context)? else {
+            unreachable!("decimal decoder returns Decimal");
+        };
+        let canonical_decimal = Raw::Tag(
+            60000,
+            Box::new(Raw::Array(vec![
+                Raw::Int(amount.coefficient.clone()),
+                Raw::Int(amount.exponent10.clone()),
+            ])),
+        );
+        if canonical_decimal != Raw::Tag(60000, decimal_raw.clone()) {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        let currency = object_id_key(currency_raw).ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+        Ok(Self::Money { amount, currency })
     }
     fn instant_from_raw(raw: &Raw, context: &mut Context) -> Result<Self, EvaluationError> {
         let Raw::Array(parts) = raw else {
@@ -2399,12 +2440,23 @@ impl Context<'_, '_> {
     fn unary(&self, op: &str, value: Value) -> Result<Value, EvaluationError> {
         match (op, value) {
             ("!", Value::Bool(value)) => Ok(Value::Bool(!value)),
-            ("+", value @ (Value::Int(_) | Value::Decimal(_) | Value::Float(_))) => Ok(value),
+            (
+                "+",
+                value @ (Value::Int(_) | Value::Decimal(_) | Value::Money { .. } | Value::Float(_)),
+            ) => Ok(value),
             ("-", Value::Int(value)) => self.integer(-value).map(Value::Int),
-            ("-", Value::Decimal(value)) => {
-                DecimalValue::new(-value.coefficient, value.exponent10).map(Value::Decimal)
-            }
-            ("-", Value::Float(bits)) => Ok(Value::Float((-f64::from_bits(bits)).to_bits())),
+            ("-", Value::Decimal(value)) => self
+                .checked_decimal(DecimalValue::new(-value.coefficient, value.exponent10)?)
+                .map(Value::Decimal),
+            (
+                "-",
+                Value::Money {
+                    amount,
+                    currency,
+                },
+            ) => self
+                .checked_decimal(DecimalValue::new(-amount.coefficient, amount.exponent10)?)
+                .map(|amount| Value::Money { amount, currency }),
             _ => Err(error("ORNA-EVAL-TYPE")),
         }
     }
@@ -2526,6 +2578,16 @@ impl Context<'_, '_> {
         match (left, right) {
             (Value::Int(a), Value::Int(b)) => self.int_binary(op, a, b),
             (Value::Decimal(a), Value::Decimal(b)) => self.decimal_binary(op, a, b),
+            (
+                Value::Money { amount: a, currency: ac },
+                Value::Money { amount: b, currency: bc },
+            ) => self.money_binary(op, a, ac, b, bc),
+            (Value::Money { amount, currency }, Value::Decimal(scalar)) => {
+                self.money_scalar_binary(op, amount, currency, scalar, false)
+            }
+            (Value::Decimal(scalar), Value::Money { amount, currency }) => {
+                self.money_scalar_binary(op, amount, currency, scalar, true)
+            }
             (Value::Float(a), Value::Float(b)) => self.float_binary(op, a, b),
             (Value::String(a), Value::String(b)) => compare(op, a.cmp(&b)),
             (Value::Date(a), Value::Date(b)) => compare(op, a.cmp(&b)),
@@ -2683,6 +2745,58 @@ impl Context<'_, '_> {
             "<" | "<=" | ">" | ">=" => compare(op, a.cmp(&b)),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
+    }
+    fn checked_decimal(&self, value: DecimalValue) -> Result<DecimalValue, EvaluationError> {
+        self.integer(value.coefficient.clone())?;
+        self.integer(value.exponent10.clone())?;
+        Ok(value)
+    }
+    fn money_binary(
+        &self,
+        op: &str,
+        left: DecimalValue,
+        left_currency: [u8; 16],
+        right: DecimalValue,
+        right_currency: [u8; 16],
+    ) -> Result<Value, EvaluationError> {
+        if left_currency != right_currency {
+            return Err(error("ORNA-EVAL-TYPE"));
+        }
+        match op {
+            "+" => self
+                .checked_decimal(left.add(&right)?)
+                .map(|amount| Value::Money {
+                    amount,
+                    currency: left_currency,
+                }),
+            "-" => self
+                .checked_decimal(left.add(&DecimalValue::new(-right.coefficient, right.exponent10)?)?)
+                .map(|amount| Value::Money {
+                    amount,
+                    currency: left_currency,
+                }),
+            "<" | "<=" | ">" | ">=" => compare(
+                op,
+                compare_values(&Value::Decimal(left), &Value::Decimal(right))?,
+            ),
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
+    }
+    fn money_scalar_binary(
+        &self,
+        op: &str,
+        amount: DecimalValue,
+        currency: [u8; 16],
+        scalar: DecimalValue,
+        scalar_left: bool,
+    ) -> Result<Value, EvaluationError> {
+        let result = match (op, scalar_left) {
+            ("*", _) => amount.multiply(&scalar),
+            ("/", false) => amount.divide(&scalar),
+            _ => return Err(error("ORNA-EVAL-TYPE")),
+        }?;
+        self.checked_decimal(result)
+            .map(|amount| Value::Money { amount, currency })
     }
     fn decimal_binary(
         &self,
@@ -3964,6 +4078,33 @@ impl Context<'_, '_> {
             }
             return Ok(Value::Decimal(total));
         }
+        if !values.is_empty() && values.iter().all(|value| matches!(value, Value::Money { .. })) {
+            let Value::Money {
+                amount: first_amount,
+                currency,
+            } = &values[0]
+            else {
+                unreachable!("non-empty all-Money list has a first Money");
+            };
+            let mut total = first_amount.clone();
+            for value in &values[1..] {
+                let Value::Money {
+                    amount,
+                    currency: other_currency,
+                } = value
+                else {
+                    unreachable!("all-Money list was checked above");
+                };
+                if currency != other_currency {
+                    return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                }
+                total = self.checked_decimal(total.add(amount)?)?;
+            }
+            return Ok(Value::Money {
+                amount: total,
+                currency: *currency,
+            });
+        }
         let mut total = BigInt::ZERO;
         for value in values {
             let Value::Int(value) = value else {
@@ -4012,6 +4153,42 @@ impl Context<'_, '_> {
                 if replace {
                     // Strict comparison retains the first equal Decimal,
                     // including values that differ only by representational scale.
+                    candidate = Some(value.clone());
+                }
+            }
+            return Ok(candidate.map_or(Value::Null, |value| {
+                Value::Option(Some(Box::new(value)))
+            }));
+        }
+        if !values.is_empty() && values.iter().all(|value| matches!(value, Value::Money { .. })) {
+            let currency = match &values[0] {
+                Value::Money { currency, .. } => *currency,
+                _ => unreachable!("non-empty all-Money list has a first Money"),
+            };
+            let mut candidate = None;
+            for value in values {
+                let Value::Money {
+                    currency: value_currency,
+                    ..
+                } = value
+                else {
+                    unreachable!("all-Money list was checked above");
+                };
+                if *value_currency != currency {
+                    return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                }
+                let replace = match candidate.as_ref() {
+                    None => true,
+                    Some(current) => {
+                        let ordering = compare_values(value, current)?;
+                        if name == "min" {
+                            ordering.is_lt()
+                        } else {
+                            ordering.is_gt()
+                        }
+                    }
+                };
+                if replace {
                     candidate = Some(value.clone());
                 }
             }
@@ -5015,6 +5192,24 @@ fn compare_values(left: &Value, right: &Value) -> Result<std::cmp::Ordering, Eva
             } else {
                 (&a.coefficient * factor).cmp(&b.coefficient)
             })
+        }
+        (
+            Value::Money {
+                amount: left_amount,
+                currency: left_currency,
+            },
+            Value::Money {
+                amount: right_amount,
+                currency: right_currency,
+            },
+        ) => {
+            if left_currency != right_currency {
+                return Err(error("ORNA-EVAL-TYPE"));
+            }
+            compare_values(
+                &Value::Decimal(left_amount.clone()),
+                &Value::Decimal(right_amount.clone()),
+            )
         }
         (Value::Float(a), Value::Float(b)) => f64::from_bits(*a)
             .partial_cmp(&f64::from_bits(*b))
