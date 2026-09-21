@@ -2959,6 +2959,10 @@ impl Context<'_, '_> {
                     plan = plan.with_stage(RelationStage::Distinct);
                     Ok(Value::Relation(plan))
                 }
+                "pairs" => {
+                    plan = plan.with_stage(RelationStage::Pairs);
+                    Ok(Value::Relation(plan))
+                }
                 "take" | "drop" => {
                     let Value::Int(count) = &ordered[1] else {
                         return Err(error("ORNA-EVAL-TYPE"));
@@ -3191,6 +3195,7 @@ impl Context<'_, '_> {
         let mut after = None;
         let mut counters = vec![0usize; plan.stages.len()];
         let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
+        let mut pair_previous = vec![None; plan.stages.len()];
         let mut seen = 0usize;
         loop {
             // Relation work has its own cancellation checkpoints. A plan
@@ -3211,6 +3216,7 @@ impl Context<'_, '_> {
                     &plan.stages,
                     &mut counters,
                     &mut distinct_seen,
+                    &mut pair_previous,
                     0,
                     depth + 1,
                 )? {
@@ -3244,6 +3250,7 @@ impl Context<'_, '_> {
         stages: &[RelationStage],
         counters: &mut [usize],
         distinct_seen: &mut [Vec<orna_foundation_v1::CanonicalValue>],
+        pair_previous: &mut [Option<Value>],
         stage_offset: usize,
         depth: usize,
     ) -> Result<RelationRow, EvaluationError> {
@@ -3274,6 +3281,13 @@ impl Context<'_, '_> {
                     }
                     seen.push(key);
                     self.items(seen.len())?;
+                }
+                RelationStage::Pairs => {
+                    let Some(previous) = pair_previous[index].replace(value.clone()) else {
+                        return Ok(RelationRow::Skip);
+                    };
+                    self.items(2)?;
+                    value = Value::Tuple(vec![previous, value]);
                 }
                 RelationStage::Drop(count) => {
                     if counters[local_index] < *count {
@@ -3334,12 +3348,14 @@ impl Context<'_, '_> {
         };
         let suffix = &plan.stages[sort_index + 1..];
         let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
+        let mut pair_previous = vec![None; plan.stages.len()];
         self.for_each_buffered_relation(
             sorted,
             suffix,
             sort_index + 1,
             depth,
             &mut distinct_seen,
+            &mut pair_previous,
             visit,
         )
     }
@@ -3351,6 +3367,7 @@ impl Context<'_, '_> {
         stage_offset: usize,
         depth: usize,
         distinct_seen: &mut [Vec<orna_foundation_v1::CanonicalValue>],
+        pair_previous: &mut [Option<Value>],
         visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
     ) -> Result<(), EvaluationError> {
         let Some(sort_index) = stages
@@ -3363,6 +3380,7 @@ impl Context<'_, '_> {
                 stage_offset,
                 depth,
                 distinct_seen,
+                pair_previous,
                 visit,
             );
         };
@@ -3374,6 +3392,7 @@ impl Context<'_, '_> {
             stage_offset,
             depth,
             distinct_seen,
+            pair_previous,
             |context, value| {
                 upstream.push(value);
                 context.items(upstream.len())?;
@@ -3393,6 +3412,7 @@ impl Context<'_, '_> {
             stage_offset + sort_index + 1,
             depth,
             distinct_seen,
+            pair_previous,
             visit,
         )
     }
@@ -3404,6 +3424,7 @@ impl Context<'_, '_> {
         stage_offset: usize,
         depth: usize,
         distinct_seen: &mut [Vec<orna_foundation_v1::CanonicalValue>],
+        pair_previous: &mut [Option<Value>],
         mut visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
     ) -> Result<(), EvaluationError> {
         if stages
@@ -3423,6 +3444,7 @@ impl Context<'_, '_> {
                 stages,
                 &mut counters,
                 distinct_seen,
+                pair_previous,
                 stage_offset,
                 depth + 1,
             )? {
@@ -5635,6 +5657,7 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
             | "rank"
             | "filter"
             | "distinct"
+            | "pairs"
             | "take"
             | "drop"
             | "window"
@@ -5696,7 +5719,7 @@ fn relation_named_arguments(
         "filter" => &["rows", "predicate"],
         "map" => &["rows", "transform"],
         "sort_by" => &["rows", "key"],
-        "distinct" => &["rows"],
+        "distinct" | "pairs" => &["rows"],
         "take" | "drop" => &["rows", "count"],
         "window" => match values.len() {
             2 => &["rows", "size"],
