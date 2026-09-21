@@ -239,7 +239,13 @@ fn decode_verified_bytes_for_role(
                     .map(instant_value)
                     .collect(),
                 KeyColumnKind::Uuid => read_uuid_column(&*row_group, column.index, rows)?,
-                KeyColumnKind::OvbInt | KeyColumnKind::OvbBool | KeyColumnKind::OvbDecimal => {
+                KeyColumnKind::OvbInt
+                | KeyColumnKind::OvbBool
+                | KeyColumnKind::OvbDecimal
+                | KeyColumnKind::OvbStr
+                | KeyColumnKind::OvbUuid
+                | KeyColumnKind::OvbDate
+                | KeyColumnKind::OvbInstant => {
                     read_ovb_column(&*row_group, column.index, rows, column.kind)?
                 }
                 KeyColumnKind::Decimal {
@@ -558,6 +564,10 @@ enum KeyColumnKind {
     Int,
     Instant,
     OvbInt,
+    OvbStr,
+    OvbUuid,
+    OvbDate,
+    OvbInstant,
     Bool,
     OvbBool,
     Decimal {
@@ -573,7 +583,11 @@ enum KeyColumnKind {
 fn matches_profile_key_kind(expected: KeyColumnKind, actual: KeyColumnKind) -> bool {
     match (expected, actual) {
         (KeyColumnKind::Decimal { .. }, KeyColumnKind::Decimal { .. })
-        | (KeyColumnKind::Decimal { .. }, KeyColumnKind::OvbDecimal) => true,
+        | (KeyColumnKind::Decimal { .. }, KeyColumnKind::OvbDecimal)
+        | (KeyColumnKind::Str, KeyColumnKind::OvbStr)
+        | (KeyColumnKind::Uuid, KeyColumnKind::OvbUuid)
+        | (KeyColumnKind::Date, KeyColumnKind::OvbDate)
+        | (KeyColumnKind::Instant, KeyColumnKind::OvbInstant) => true,
         (expected, actual) => {
             expected == actual
                 || (expected == KeyColumnKind::Int && actual == KeyColumnKind::OvbInt)
@@ -602,8 +616,17 @@ fn ensure_supported_profile(
                 60000,
                 Box::new(OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Int(0.into())])),
             ),
-            KeyColumnKind::Str => OvbRaw::Text(String::new()),
-            KeyColumnKind::Date => OvbRaw::Tag(60001, Box::new(OvbRaw::Text("1970-01-01".into()))),
+            KeyColumnKind::Str | KeyColumnKind::OvbStr => OvbRaw::Text(String::new()),
+            KeyColumnKind::OvbUuid => {
+                OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(vec![0; 16])))
+            }
+            KeyColumnKind::Date | KeyColumnKind::OvbDate => {
+                OvbRaw::Tag(60001, Box::new(OvbRaw::Text("1970-01-01".into())))
+            }
+            KeyColumnKind::OvbInstant => OvbRaw::Tag(
+                60002,
+                Box::new(OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Int(0.into())])),
+            ),
         })
         .collect::<Vec<_>>();
     let raw = match components.as_slice() {
@@ -949,11 +972,49 @@ fn descriptor_field_id(
             && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Date)
         {
             KeyColumnKind::Date
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Str".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
+            && matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
+            && column.physical_type() == Type::BYTE_ARRAY
+            && column.logical_type_ref().is_none()
+            && column.converted_type() == ConvertedType::NONE
+        {
+            KeyColumnKind::OvbStr
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Uuid".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
+            && matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
+            && column.physical_type() == Type::BYTE_ARRAY
+            && column.logical_type_ref().is_none()
+            && column.converted_type() == ConvertedType::NONE
+        {
+            KeyColumnKind::OvbUuid
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Date".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
+            && matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
+            && column.physical_type() == Type::BYTE_ARRAY
+            && column.logical_type_ref().is_none()
+            && column.converted_type() == ConvertedType::NONE
+        {
+            KeyColumnKind::OvbDate
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Instant".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
+            && matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
+            && column.physical_type() == Type::BYTE_ARRAY
+            && column.logical_type_ref().is_none()
+            && column.converted_type() == ConvertedType::NONE
+        {
+            KeyColumnKind::OvbInstant
         } else {
             return Err(CompactParquetError::UnsupportedKeyMapping);
         };
         let valid_parameters = match kind {
-            KeyColumnKind::OvbInt | KeyColumnKind::OvbBool | KeyColumnKind::OvbDecimal => {
+            KeyColumnKind::OvbInt
+            | KeyColumnKind::OvbBool
+            | KeyColumnKind::OvbDecimal
+            | KeyColumnKind::OvbStr
+            | KeyColumnKind::OvbUuid
+            | KeyColumnKind::OvbDate
+            | KeyColumnKind::OvbInstant => {
                 matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
             }
             KeyColumnKind::Decimal { .. } => true,
@@ -969,12 +1030,24 @@ fn descriptor_field_id(
                 && column.logical_type_ref().is_some())
             || (matches!(
                 kind,
-                KeyColumnKind::OvbInt | KeyColumnKind::OvbBool | KeyColumnKind::OvbDecimal
+                KeyColumnKind::OvbInt
+                    | KeyColumnKind::OvbBool
+                    | KeyColumnKind::OvbDecimal
+                    | KeyColumnKind::OvbStr
+                    | KeyColumnKind::OvbUuid
+                    | KeyColumnKind::OvbDate
+                    | KeyColumnKind::OvbInstant
             ) && column.converted_type() != ConvertedType::NONE)
             || (kind == KeyColumnKind::Uuid && column.converted_type() != ConvertedType::NONE)
             || (matches!(
                 kind,
-                KeyColumnKind::OvbInt | KeyColumnKind::OvbBool | KeyColumnKind::OvbDecimal
+                KeyColumnKind::OvbInt
+                    | KeyColumnKind::OvbBool
+                    | KeyColumnKind::OvbDecimal
+                    | KeyColumnKind::OvbStr
+                    | KeyColumnKind::OvbUuid
+                    | KeyColumnKind::OvbDate
+                    | KeyColumnKind::OvbInstant
             ) && column.max_def_level() != 0)
             || (matches!(kind, KeyColumnKind::Decimal { .. }) && column.max_def_level() != 0)
             || column.max_rep_level() != 0
@@ -1008,13 +1081,60 @@ fn descriptor_field_id(
             && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Date)
         {
             KeyColumnKind::Date
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Str".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
+            && column.physical_type() == Type::BYTE_ARRAY
+            && column.logical_type_ref().is_none()
+            && column.converted_type() == ConvertedType::NONE
+        {
+            KeyColumnKind::OvbStr
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Uuid".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
+            && column.physical_type() == Type::BYTE_ARRAY
+            && column.logical_type_ref().is_none()
+            && column.converted_type() == ConvertedType::NONE
+        {
+            KeyColumnKind::OvbUuid
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Date".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
+            && column.physical_type() == Type::BYTE_ARRAY
+            && column.logical_type_ref().is_none()
+            && column.converted_type() == ConvertedType::NONE
+        {
+            KeyColumnKind::OvbDate
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Instant".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
+            && column.physical_type() == Type::BYTE_ARRAY
+            && column.logical_type_ref().is_none()
+            && column.converted_type() == ConvertedType::NONE
+        {
+            KeyColumnKind::OvbInstant
         } else {
             return Err(CompactParquetError::UnsupportedKeyMapping);
         };
-        if !matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty())
-            || (!(kind == KeyColumnKind::Str || kind == KeyColumnKind::Date)
-                && column.logical_type_ref().is_some())
-            || column.max_rep_level() != 0
+        let valid_parameters = match kind {
+            KeyColumnKind::OvbInt
+            | KeyColumnKind::OvbBool
+            | KeyColumnKind::OvbDecimal
+            | KeyColumnKind::OvbStr
+            | KeyColumnKind::OvbUuid
+            | KeyColumnKind::OvbDate
+            | KeyColumnKind::OvbInstant => {
+                matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
+            }
+            _ => matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty()),
+        };
+        if !valid_parameters
+            || (matches!(
+                kind,
+                KeyColumnKind::OvbInt
+                    | KeyColumnKind::OvbBool
+                    | KeyColumnKind::OvbDecimal
+                    | KeyColumnKind::OvbStr
+                    | KeyColumnKind::OvbUuid
+                    | KeyColumnKind::OvbDate
+                    | KeyColumnKind::OvbInstant
+            ) && column.logical_type_ref().is_some())
         {
             return Err(CompactParquetError::UnsupportedKeyMapping);
         }
@@ -1541,18 +1661,39 @@ fn read_ovb_column(
         .map(|value| {
             let value = CanonicalValue::decode(value.data())
                 .map_err(|_| CompactParquetError::InvalidMetadata)?;
-            let supported = matches!(
-                (expected_kind, value.raw()),
-                (KeyColumnKind::OvbInt, OvbRaw::Int(_))
-                    | (KeyColumnKind::OvbBool, OvbRaw::Bool(_))
-                    | (KeyColumnKind::OvbDecimal, OvbRaw::Tag(60000, _))
-            );
-            if !supported {
+            if !valid_ovb_fallback(&value.raw(), expected_kind) {
                 return Err(CompactParquetError::UnsupportedKeyMapping);
             }
             Ok(value.raw().clone())
         })
         .collect()
+}
+fn valid_ovb_fallback(value: &OvbRaw, expected_kind: KeyColumnKind) -> bool {
+    match (expected_kind, value) {
+        (KeyColumnKind::OvbInt, OvbRaw::Int(_))
+        | (KeyColumnKind::OvbBool, OvbRaw::Bool(_))
+        | (KeyColumnKind::OvbStr, OvbRaw::Text(_)) => true,
+        (KeyColumnKind::OvbUuid, OvbRaw::Tag(37, payload)) => {
+            matches!(payload.as_ref(), OvbRaw::Bytes(bytes) if bytes.len() == 16)
+        }
+        (KeyColumnKind::OvbDate, OvbRaw::Tag(60001, payload)) => {
+            matches!(payload.as_ref(), OvbRaw::Text(value) if valid_canonical_date_text(value))
+        }
+        (KeyColumnKind::OvbInstant, OvbRaw::Tag(60002, payload)) => {
+            let OvbRaw::Array(parts) = payload.as_ref() else {
+                return false;
+            };
+            let [OvbRaw::Int(_seconds), OvbRaw::Int(nanosecond)] = parts.as_slice() else {
+                return false;
+            };
+            nanosecond
+                .to_string()
+                .parse::<u32>()
+                .is_ok_and(|nanosecond| nanosecond < 1_000_000_000)
+        }
+        (KeyColumnKind::OvbDecimal, OvbRaw::Tag(60000, _)) => true,
+        _ => false,
+    }
 }
 fn instant_value(nanoseconds: i64) -> OvbRaw {
     let seconds = nanoseconds.div_euclid(1_000_000_000);
@@ -1591,6 +1732,35 @@ fn date_value(days: i32) -> Result<OvbRaw, CompactParquetError> {
         60001,
         Box::new(OvbRaw::Text(format!("{year:04}-{month:02}-{day:02}"))),
     ))
+}
+fn valid_canonical_date_text(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let number = |part: &[u8]| {
+        part.iter()
+            .try_fold(0_u32, |value, byte| (*byte).is_ascii_digit().then_some(value * 10 + u32::from(*byte - b'0')))
+    };
+    let (Some(year), Some(month), Some(day)) = (
+        number(&bytes[0..4]),
+        number(&bytes[5..7]),
+        number(&bytes[8..10]),
+    ) else {
+        return false;
+    };
+    if !(1..=9_999).contains(&year) || !(1..=12).contains(&month) {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let maximum = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=maximum).contains(&day)
 }
 
 fn read_bool_column(
