@@ -1341,6 +1341,70 @@ fn decimal_filtered_relation_source(parent_body: &str) -> SourceUnit {
         ),
     }
 }
+fn decimal_distinct_source(parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "txn-decimal-distinct".into(),
+        source_id: "txn-decimal-distinct.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Reading(id: Int) {{ value: Decimal, }} fn unique_values(): [Decimal] = [18.2500, 2.0, 18.25, 3.000] | distinct(); fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
+
+#[test]
+fn parsed_decimal_relation_distinct_source_is_rejected_before_execution() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_distinct_source(
+        r#"
+            Reading.insert({ id: 1, value: 18.2500 });
+            Reading.insert({ id: 2, value: 2.0 });
+            Reading.insert({ id: 3, value: 18.25 });
+            Reading.insert({ id: 4, value: 3.000 });
+            assert unique_values() | count() == 3;
+        "#,
+    ));
+
+    assert!(matches!(
+        &outcome,
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-S012-UNRESOLVED"
+    ));
+    for id in 1..=4 {
+        assert_eq!(
+            runtime.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "unresolved distinct source published candidate row {id}"
+        );
+    }
+}
+
+#[test]
+fn parsed_decimal_relation_distinct_source_failure_is_preempted_by_unresolved_distinct() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_distinct_source(
+        r#"
+            Reading.insert({ id: 1, value: 18.2500 });
+            Reading.insert({ id: 2, value: 2.0 });
+            Reading.insert({ id: 3, value: 18.25 });
+            Reading.insert({ id: 4, value: 3.000 });
+            assert unique_values() | count() == 3;
+            assert false;
+        "#,
+    ));
+
+    assert!(matches!(
+        &outcome,
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-S012-UNRESOLVED"
+    ));
+    for id in 1..=4 {
+        assert_eq!(
+            runtime.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "unresolved distinct source published candidate row {id}"
+        );
+    }
+}
 
 #[test]
 fn parsed_decimal_reversed_filtered_count_is_scale_insensitive_and_canonical() {
