@@ -2264,6 +2264,125 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
 }
 
 #[test]
+fn std_collection_structural_operations_charge_step_budget_without_changing_finite_outputs() {
+    let environment = Environment::from([
+        (
+            "rows".into(),
+            Value::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Int(2.into()),
+                Raw::Int(3.into()),
+                Raw::Int(4.into()),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "nested".into(),
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
+                Raw::Array(vec![]),
+                Raw::Array(vec![Raw::Int(3.into())]),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "left".into(),
+            Value::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())])).unwrap(),
+        ),
+        (
+            "right".into(),
+            Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())])).unwrap(),
+        ),
+    ]);
+    let cases = [
+        (
+            "std.collection.chunk(rows, 2)",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
+                Raw::Array(vec![Raw::Int(3.into()), Raw::Int(4.into())]),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.flatten(nested)",
+            Value::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Int(2.into()),
+                Raw::Int(3.into()),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.pairs(rows)",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
+                Raw::Array(vec![Raw::Int(3.into()), Raw::Int(4.into())]),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.window(rows, 2, 2)",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
+                Raw::Array(vec![Raw::Int(3.into()), Raw::Int(4.into())]),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.distinct(rows)",
+            Value::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Int(2.into()),
+                Raw::Int(3.into()),
+                Raw::Int(4.into()),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.unique(rows)",
+            Value::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Int(2.into()),
+                Raw::Int(3.into()),
+                Raw::Int(4.into()),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.union(left, right)",
+            Value::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Int(2.into()),
+                Raw::Int(2.into()),
+                Raw::Int(3.into()),
+            ]))
+            .unwrap(),
+        ),
+        ("std.collection.count(rows)", Value::int(4.into())),
+    ];
+    for (expression, expected) in cases {
+        assert_eq!(
+            evaluate_expression(expression, &environment, Limits::default()).unwrap(),
+            expected,
+            "{expression}"
+        );
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &environment,
+                Limits {
+                    max_steps: 2,
+                    ..Limits::default()
+                },
+            )),
+            "ORNA-EVAL-LIMIT",
+            "{expression}"
+        );
+    }
+}
+
+#[test]
 fn std_collection_first_returns_only_the_head_of_a_finite_list() {
     for (expression, expected) in [
         ("first([0, 1, 2])", Value::int(0.into())),

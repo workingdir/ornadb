@@ -3938,9 +3938,13 @@ impl Context<'_, '_> {
             ("chunk", [Value::List(values), Value::Int(size)]) => {
                 self.items(values.len())?;
                 let size = self.positive_collection_size(size)?;
+                for _ in values {
+                    self.step()?;
+                }
                 let mut chunks = Vec::new();
                 for chunk in values.chunks(size) {
                     self.items(chunk.len())?;
+                    self.step()?;
                     chunks.push(Value::List(chunk.to_vec()));
                     self.items(chunks.len())?;
                 }
@@ -3950,11 +3954,13 @@ impl Context<'_, '_> {
                 self.items(values.len())?;
                 let mut flattened = Vec::new();
                 for value in values {
+                    self.step()?;
                     let Value::List(inner) = value else {
                         return Err(error("ORNA-EVAL-TYPE"));
                     };
                     self.items(inner.len())?;
                     for value in inner {
+                        self.step()?;
                         flattened.push(value.clone());
                         self.items(flattened.len())?;
                     }
@@ -3995,8 +4001,12 @@ impl Context<'_, '_> {
             }
             ("pairs", [Value::List(values)]) => {
                 self.items(values.len())?;
+                for _ in values {
+                    self.step()?;
+                }
                 let mut pairs = Vec::new();
                 for pair in values.windows(2) {
+                    self.step()?;
                     self.items(pair.len())?;
                     pairs.push(Value::Tuple(pair.to_vec()));
                     self.items(pairs.len())?;
@@ -4162,11 +4172,12 @@ impl Context<'_, '_> {
         }
         Ok(Value::List(ranked))
     }
-    fn distinct(&self, values: &[Value]) -> Result<Value, EvaluationError> {
+    fn distinct(&mut self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
         let mut keys = Vec::new();
         let mut unique = Vec::new();
         for value in values {
+            self.step()?;
             // Equality for this fallback is equality of the canonical value,
             // not incidental host representation. Values that cannot cross the
             // canonical boundary (including callables) have no lawful key.
@@ -4180,12 +4191,13 @@ impl Context<'_, '_> {
                 continue;
             }
             keys.push(key);
+            self.step()?;
             unique.push(value.clone());
             self.items(unique.len())?;
         }
         Ok(Value::List(unique))
     }
-    fn union(&self, left: &[Value], right: &[Value]) -> Result<Value, EvaluationError> {
+    fn union(&mut self, left: &[Value], right: &[Value]) -> Result<Value, EvaluationError> {
         self.items(left.len())?;
         self.items(right.len())?;
         let length = left
@@ -4194,12 +4206,17 @@ impl Context<'_, '_> {
             .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
         self.items(length)?;
         let mut values = Vec::with_capacity(length);
-        values.extend(left.iter().cloned());
-        values.extend(right.iter().cloned());
+        for value in left.iter().chain(right) {
+            self.step()?;
+            values.push(value.clone());
+        }
         Ok(Value::List(values))
     }
-    fn count(&self, values: &[Value]) -> Result<Value, EvaluationError> {
+    fn count(&mut self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
+        for _ in values {
+            self.step()?;
+        }
         Ok(Value::Int(BigInt::from(values.len())))
     }
     fn sum(&self, values: &[Value]) -> Result<Value, EvaluationError> {
@@ -5113,7 +5130,7 @@ impl Context<'_, '_> {
         Ok(Value::List(pairs))
     }
     fn windows(
-        &self,
+        &mut self,
         values: &[Value],
         size: &BigInt,
         step: &BigInt,
@@ -5124,12 +5141,16 @@ impl Context<'_, '_> {
         if size > values.len() {
             return Ok(Value::List(Vec::new()));
         }
+        for _ in values {
+            self.step()?;
+        }
         let last_start = values.len() - size;
         let mut start = 0;
         let mut windows = Vec::new();
         while start <= last_start {
             let window = &values[start..start + size];
             self.items(window.len())?;
+            self.step()?;
             windows.push(Value::List(window.to_vec()));
             self.items(windows.len())?;
             let Some(next) = start.checked_add(step) else {
