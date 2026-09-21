@@ -7249,25 +7249,34 @@ fn relation_filter_first(
     let Expr::Binary {
         lhs: predicate_lhs,
         op: predicate_op,
-        rhs: expected,
+        rhs: predicate_rhs,
         ..
     } = body.as_ref()
     else {
         return None;
     };
-    let Expr::Field {
-        base,
-        name: field,
-        ..
-    } = predicate_lhs.as_ref()
-    else {
+    if predicate_op != "==" {
         return None;
-    };
-    if predicate_op != "=="
-        || !matches!(base.as_ref(), Expr::Name { text, .. } if text == binding)
-        || !table_fields
-            .get(table)
-            .is_some_and(|fields| fields.contains(field))
+    }
+    let (field_expr, field, expected) =
+        match (predicate_lhs.as_ref(), predicate_rhs.as_ref()) {
+            (
+                Expr::Field { base, name, .. },
+                expected,
+            ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
+                (predicate_lhs.as_ref(), name, expected)
+            }
+            (
+                expected,
+                Expr::Field { base, name, .. },
+            ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
+                (predicate_rhs.as_ref(), name, expected)
+            }
+            _ => return None,
+        };
+    if !table_fields
+        .get(table)
+        .is_some_and(|fields| fields.contains(field))
         || !float_fields.contains_decimal(table, field)
     {
         return None;
@@ -7280,7 +7289,7 @@ fn relation_filter_first(
     let field = Expr::Literal {
         text: format!("{field:?}"),
         kind: orna_syntax_v1::LiteralKind::String,
-        span: predicate_lhs.span(),
+        span: field_expr.span(),
     };
     Some(Expr::Call {
         callee: Box::new(Expr::Field {
@@ -7305,7 +7314,7 @@ fn relation_filter_first(
             orna_syntax_v1::Argument {
                 name: None,
                 span: expected.span(),
-                value: expected.as_ref().clone(),
+                value: expected.clone(),
             },
         ],
         span: expression.span(),
