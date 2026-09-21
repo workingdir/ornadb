@@ -18,6 +18,21 @@ fn source(body: &str) -> SourceUnit {
         ),
     }
 }
+fn decimal_source(body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "relation-decimal-aggregate".into(),
+        source_id: "relation-decimal-aggregate.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            r#"
+                pub table Reading(id: Int) {{ value: Decimal, }}
+                fn total(): Decimal = Reading | map(reading => reading.value) | sum;
+                fn parent() {{ {body} }}
+            "#
+        ),
+    }
+}
+
 
 fn table_assertion_source(assertion: &str, body: &str) -> SourceUnit {
     SourceUnit {
@@ -502,6 +517,117 @@ fn generous_assertion_budget_preserves_successful_publication() {
                 .committed_row("Reading", &Value::int(id.into()))
                 .is_some(),
             "row {id} was not published under generous limits"
+        );
+    }
+}
+
+#[test]
+fn relation_decimal_sum_normalizes_scales_through_source_execution() {
+    let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = evaluator.execute_source(&decimal_source(
+        r#"
+            Reading.insert({ id: 2, value: 2.003 });
+            Reading.insert({ id: 1, value: 1.20 });
+            assert total() == 3.203;
+        "#,
+    ));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    for id in [1, 2] {
+        assert!(
+            evaluator
+                .committed_row("Reading", &Value::int(id.into()))
+                .is_some(),
+            "Decimal row {id} was not published"
+        );
+    }
+}
+
+#[test]
+fn relation_decimal_sum_returns_decimal_additive_zero_for_empty_input() {
+    let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = evaluator.execute_source(&decimal_source(
+        r#"
+            assert total() == 0.000;
+        "#,
+    ));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+}
+
+#[test]
+fn relation_decimal_sum_observes_candidate_read_your_writes() {
+    let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = evaluator.execute_source(&decimal_source(
+        r#"
+            Reading.insert({ id: 2, value: 2.003 });
+            assert total() == 2.003;
+            Reading.insert({ id: 1, value: 1.20 });
+            assert total() == 3.203;
+        "#,
+    ));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    for id in [1, 2] {
+        assert!(
+            evaluator
+                .committed_row("Reading", &Value::int(id.into()))
+                .is_some(),
+            "candidate Decimal row {id} was not published"
+        );
+    }
+}
+
+#[test]
+fn relation_decimal_sum_rolls_back_candidate_rows_after_assertion_failure() {
+    let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = evaluator.execute_source(&decimal_source(
+        r#"
+            Reading.insert({ id: 2, value: 2.003 });
+            Reading.insert({ id: 1, value: 1.20 });
+            assert total() == 3.203;
+            assert false;
+        "#,
+    ));
+
+    assert!(matches!(
+        &outcome,
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+    ));
+    for id in [1, 2] {
+        assert_eq!(
+            evaluator.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "Decimal row {id} escaped assertion rollback"
+        );
+    }
+}
+
+#[test]
+fn relation_decimal_sum_rejects_too_many_candidate_rows_at_the_limit() {
+    let limits = Limits {
+        max_collection_items: 2,
+        ..Default::default()
+    };
+    let mut evaluator = TransactionalEvaluator::new("parent", limits);
+    let outcome = evaluator.execute_source(&decimal_source(
+        r#"
+            Reading.insert({ id: 1, value: 1.0 });
+            Reading.insert({ id: 2, value: 2.0 });
+            Reading.insert({ id: 3, value: 3.0 });
+            Reading | map(reading => reading.value) | sum;
+        "#,
+    ));
+
+    assert!(matches!(
+        &outcome,
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+    ));
+    for id in [1, 2, 3] {
+        assert_eq!(
+            evaluator.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "Decimal row {id} escaped aggregate-limit rollback"
         );
     }
 }
