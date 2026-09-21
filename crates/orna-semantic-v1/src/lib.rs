@@ -11521,7 +11521,9 @@ fn infer_table_operation(
         _ => None,
     });
     for (index, argument) in arguments.iter().enumerate() {
-        let insertion = matches!(name.as_str(), "insert" | "upsert");
+        let insertion = name == "insert";
+        let upsert = name == "upsert";
+        let insertion_like = insertion || upsert;
         let update = name == "update" && index == 1;
         let key_argument =
             matches!(name.as_str(), "update" | "delete") && index == 0 || name == "rekey";
@@ -11539,14 +11541,14 @@ fn infer_table_operation(
                 diagnostics,
             );
             inferred
-        } else if insertion || update {
+        } else if insertion_like || update {
             row.map(|fields| {
                 let inferred =
                     infer_table_row_input(&argument.value, fields, scope, local, diagnostics);
                 if let Some(schema) = admission
                     && let Type::Record(supplied) = &inferred.ty
                 {
-                    if !supplied.is_empty() && insertion {
+                    if insertion {
                         for field in &schema.required {
                             if !supplied.contains_key(field) {
                                 diagnostics.push(diag(
@@ -11559,6 +11561,25 @@ fn infer_table_operation(
                                 ));
                             }
                         }
+                    } else if upsert {
+                        // Upsert is a patch when its key identifies an
+                        // existing row.  The runtime validates completeness
+                        // if the key is absent, so semantic admission only
+                        // requires key fields needed to select that row.
+                        for field in &schema.required {
+                            if schema.keys.iter().any(|(key, _)| key == field)
+                                && !supplied.contains_key(field)
+                            {
+                                diagnostics.push(diag(
+                                    DIAG_TYPE,
+                                    if authoritative_contact {
+                                        format!("missing required field `{field}`")
+                                    } else {
+                                        "table upsert omits a required primary key field".into()
+                                    },
+                                ));
+                            }
+                        }
                     }
                     if !supplied.is_empty() {
                         for field in &schema.computed {
@@ -11566,7 +11587,7 @@ fn infer_table_operation(
                                 diagnostics.push(diag(
                                     DIAG_TYPE,
                                     if authoritative_contact {
-                                        if insertion {
+                                        if insertion_like {
                                             format!(
                                                 "computed field `{field}` cannot be supplied during insert"
                                             )
@@ -11575,7 +11596,7 @@ fn infer_table_operation(
                                                 "computed field `{field}` cannot be updated directly"
                                             )
                                         }
-                                    } else if insertion {
+                                    } else if insertion_like {
                                         "table insertion cannot supply a computed field".into()
                                     } else {
                                         "table update cannot change a computed field".into()

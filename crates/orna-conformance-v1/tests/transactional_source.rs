@@ -2027,3 +2027,133 @@ fn parsed_decimal_primary_key_filtered_lookup_and_first_use_scale_insensitive_ca
 
     assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
 }
+fn decimal_upsert_source(fixture_id: &str, parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: fixture_id.into(),
+        source_id: format!("{fixture_id}.orna"),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Reading(value: Decimal) {{ label: Str, note: Str, }} fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
+#[test]
+fn parsed_decimal_primary_key_upsert_selects_existing_row_across_scales() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_upsert_source(
+        "txn-decimal-upsert-existing-scale",
+        r#"
+            Reading.insert({ value: 1.2000, label: "before", note: "original" });
+            Reading.upsert({ value: 1.20, label: "after", note: "patched" });
+            assert (Reading | filter(reading => reading.value == 1.20000) | count()) == 1;
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    let key = Value::decimal(12.into(), (-1).into()).expect("canonical Decimal primary key");
+    let row = runtime
+        .committed_row("Reading", &key)
+        .expect("scale-insensitive Decimal upsert row");
+    assert!(matches!(
+        row.raw(),
+        orna_foundation_v1::OvbRaw::Map(fields)
+            if fields.iter().any(|(field, value)| field
+                == &orna_foundation_v1::OvbRaw::Text("label".into())
+                && value == &orna_foundation_v1::OvbRaw::Text("after".into()))
+    ));
+}
+
+#[test]
+fn parsed_decimal_primary_key_upsert_preserves_omitted_non_key_fields() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_upsert_source(
+        "txn-decimal-upsert-preserve-omitted",
+        r#"
+            Reading.insert({ value: 1.2000, label: "before", note: "preserve me" });
+            Reading.upsert({ value: 1.2, label: "after" });
+            assert (Reading | filter(reading => reading.note == "preserve me") | count()) == 1;
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    let key = Value::decimal(12.into(), (-1).into()).expect("canonical Decimal primary key");
+    let row = runtime
+        .committed_row("Reading", &key)
+        .expect("patched Decimal primary-key row");
+    assert!(matches!(
+        row.raw(),
+        orna_foundation_v1::OvbRaw::Map(fields)
+            if fields.iter().any(|(field, value)| field
+                == &orna_foundation_v1::OvbRaw::Text("label".into())
+                && value == &orna_foundation_v1::OvbRaw::Text("after".into()))
+                && fields.iter().any(|(field, value)| field
+                    == &orna_foundation_v1::OvbRaw::Text("note".into())
+                    && value == &orna_foundation_v1::OvbRaw::Text("preserve me".into()))
+    ));
+}
+
+#[test]
+fn parsed_decimal_primary_key_upsert_inserts_an_absent_key() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_upsert_source(
+        "txn-decimal-upsert-absent-key",
+        r#"
+            Reading.upsert({ value: 2.5000, label: "inserted", note: "new row" });
+            assert (Reading | filter(reading => reading.value == 2.50) | count()) == 1;
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    let key = Value::decimal(25.into(), (-1).into()).expect("canonical inserted Decimal key");
+    let row = runtime
+        .committed_row("Reading", &key)
+        .expect("absent Decimal key was inserted");
+    assert!(matches!(
+        row.raw(),
+        orna_foundation_v1::OvbRaw::Map(fields)
+            if fields.iter().any(|(field, value)| field
+                == &orna_foundation_v1::OvbRaw::Text("label".into())
+                && value == &orna_foundation_v1::OvbRaw::Text("inserted".into()))
+    ));
+}
+
+#[test]
+fn parsed_decimal_primary_key_upsert_reads_candidate_rows_and_rolls_back_on_failure() {
+    let mut committed = TransactionalEvaluator::new("parent", Limits::default());
+    let committed_outcome = committed.execute_source(&decimal_upsert_source(
+        "txn-decimal-upsert-ryw-commit",
+        r#"
+            Reading.upsert({ value: 3.7500, label: "candidate", note: "visible" });
+            assert (Reading | filter(reading => reading.value == 3.75) | count()) == 1;
+        "#,
+    ));
+    assert!(
+        matches!(&committed_outcome, StageOutcome::Passed),
+        "{committed_outcome:?}"
+    );
+    let key = Value::decimal(375.into(), (-2).into()).expect("canonical candidate Decimal key");
+    assert!(
+        committed.committed_row("Reading", &key).is_some(),
+        "candidate Decimal upsert row was not published"
+    );
+
+    let mut rolled_back = TransactionalEvaluator::new("parent", Limits::default());
+    let failed = rolled_back.execute_source(&decimal_upsert_source(
+        "txn-decimal-upsert-ryw-rollback",
+        r#"
+            Reading.upsert({ value: 3.7500, label: "candidate", note: "visible" });
+            assert (Reading | filter(reading => reading.value == 3.75) | count()) == 1;
+            assert false;
+        "#,
+    ));
+    assert!(matches!(
+        &failed,
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+    ));
+    assert_eq!(
+        rolled_back.committed_row("Reading", &key),
+        None,
+        "failed Decimal upsert activation published its candidate row"
+    );
+}

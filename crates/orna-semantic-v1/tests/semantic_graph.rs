@@ -420,7 +420,11 @@ fn declared_table_admission_retains_required_default_and_computed_metadata_acros
                 (r#"{ id: "a", name: "Alice", country: "US" }"#, None),
                 (
                     r#"{ country: "GB" }"#,
-                    Some("table insertion omits a required field"),
+                    if operation == "upsert" {
+                        None
+                    } else {
+                        Some("table insertion omits a required field")
+                    },
                 ),
                 (
                     r#"{ name: "Alice", label: "override" }"#,
@@ -578,6 +582,72 @@ fn table_insert_and_upsert_validate_provided_fields() {
         )]);
         assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
     }
+}
+
+#[test]
+fn decimal_primary_key_upsert_admits_partial_rows_but_insert_requires_completeness() {
+    let declaration = r#"table Reading(value: Decimal) {
+        label: Str,
+        note: Str,
+    }"#;
+
+    let partial_upsert = analyze(&[ModuleInput::new(
+        "decimal-upsert.orna",
+        format!(
+            "{declaration} fn patch() = Reading.upsert({{ value: 1.25, label: \"after\" }});"
+        ),
+    )]);
+    assert!(
+        partial_upsert.is_ok(),
+        "existing-row partial upsert should be admitted: {:?}",
+        partial_upsert.diagnostics
+    );
+
+    let incomplete_insert = analyze(&[ModuleInput::new(
+        "decimal-insert.orna",
+        format!(
+            "{declaration} fn create() = Reading.insert({{ value: 1.25, label: \"new\" }});"
+        ),
+    )]);
+    assert!(
+        incomplete_insert
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message() == "table insertion omits a required field"),
+        "absent-row insert must retain completeness admission: {:?}",
+        incomplete_insert.diagnostics
+    );
+
+    let missing_key = analyze(&[ModuleInput::new(
+        "decimal-missing-key.orna",
+        format!(
+            "{declaration} fn patch() = Reading.upsert({{ label: \"after\", note: \"kept\" }});"
+        ),
+    )]);
+    assert!(
+        missing_key.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message() == "table upsert omits a required primary key field"
+        }),
+        "upsert must still require its Decimal primary key: {:?}",
+        missing_key.diagnostics
+    );
+
+    let invalid_supplied_field = analyze(&[ModuleInput::new(
+        "decimal-invalid-field.orna",
+        format!(
+            "{declaration} fn patch() = Reading.upsert({{ value: 1.25, label: 42 }});"
+        ),
+    )]);
+    assert!(
+        invalid_supplied_field
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic
+                .message()
+                .starts_with("table write field has an incompatible type")),
+        "supplied fields must retain static type validation: {:?}",
+        invalid_supplied_field.diagnostics
+    );
 }
 
 #[test]
