@@ -172,6 +172,14 @@ fn relation_integer(value: i64) -> Expr {
     }
 }
 
+fn relation_pair(left: i64, right: i64) -> Value {
+    Value::new(Raw::Array(vec![
+        Raw::Int(left.into()),
+        Raw::Int(right.into()),
+    ]))
+    .unwrap()
+}
+
 fn relation_function(body: Expr) -> Functions {
     Functions::from([(
         "run".into(),
@@ -7640,4 +7648,163 @@ fn distinct_relation_preserves_sorted_buffered_order() {
         Value::option(Some(Value::int(2.into()))).expect("option is canonical")
     );
     assert_eq!(effects.cursors, vec![None, Some(vec![1]), Some(vec![2])]);
+}
+
+fn relation_named_stage(input: Expr, name: &str, argument_name: &str) -> Expr {
+    let span = relation_span();
+    Expr::Call {
+        callee: Box::new(Expr::Name {
+            text: name.into(),
+            span: span.clone(),
+        }),
+        arguments: vec![orna_syntax_v1::Argument {
+            name: Some(argument_name.into()),
+            value: input,
+            span: span.clone(),
+        }],
+        span,
+    }
+}
+
+#[test]
+fn pairs_relation_preserves_sorted_buffered_order_and_overlap() {
+    let source = relation_source_expression("Note");
+    let sorted = relation_stage(source, "sort_by", vec![parsed_expression("value => value")]);
+    let pairs = relation_stage(sorted, "pairs", Vec::new());
+    let second_pair = relation_stage(pairs, "drop", vec![relation_integer(1)]);
+    let body = relation_terminal(second_pair, "first");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(3.into()),
+        Value::int(1.into()),
+        Value::int(2.into()),
+    ]);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::option(Some(relation_pair(2, 3)))
+        .expect("option is canonical")
+    );
+}
+
+#[test]
+fn pairs_relation_accepts_a_named_rows_relation_argument() {
+    let source = relation_source_expression("Note");
+    let pairs = relation_named_stage(source, "pairs", "rows");
+    let body = relation_terminal(pairs, "count");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(1.into()),
+        Value::int(2.into()),
+        Value::int(3.into()),
+    ]);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::int(2.into())
+    );
+}
+
+#[test]
+fn pairs_relation_preserves_upstream_order_and_adjacent_overlapping_tuples() {
+    let source = relation_source_expression("Note");
+    let pairs = relation_stage(source, "pairs", Vec::new());
+    let second_pair = relation_stage(pairs, "drop", vec![relation_integer(1)]);
+    let body = relation_terminal(second_pair, "first");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(1.into()),
+        Value::int(2.into()),
+        Value::int(3.into()),
+    ]);
+
+    let result = invoke_relation(body, &mut effects, Limits::default())
+        .expect("pairs relation should evaluate");
+
+    assert_eq!(
+        result,
+        Value::option(Some(relation_pair(2, 3)))
+        .expect("option is canonical")
+    );
+}
+
+#[test]
+fn pairs_relation_empty_and_one_row_inputs_produce_no_pairs() {
+    for rows in [Vec::new(), vec![Value::int(7.into())]] {
+        let source = relation_source_expression("Note");
+        let pairs = relation_stage(source, "pairs", Vec::new());
+        let body = relation_terminal(pairs, "count");
+        let mut effects = DistinctRelationEffects::new(rows);
+
+        assert_eq!(
+            invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+            Value::int(0.into())
+        );
+    }
+}
+
+#[test]
+fn pairs_relation_first_short_circuits_after_bounded_lookahead() {
+    let source = relation_source_expression("Note");
+    let pairs = relation_stage(source, "pairs", Vec::new());
+    let body = relation_terminal(pairs, "first");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(1.into()),
+        Value::int(2.into()),
+        Value::int(3.into()),
+        Value::int(4.into()),
+    ]);
+
+    let result = invoke_relation(body, &mut effects, Limits::default())
+        .expect("first pair should evaluate");
+
+    assert_eq!(
+        result,
+        Value::option(Some(relation_pair(1, 2)))
+        .expect("option is canonical")
+    );
+    assert_eq!(
+        effects.cursors.len(),
+        2,
+        "first pair needs only one adjacent lookahead"
+    );
+}
+
+#[test]
+fn pairs_relation_take_bounds_consumption_and_take_zero_skips_source() {
+    let source = relation_source_expression("Note");
+    let pairs = relation_stage(source, "pairs", Vec::new());
+    let taken = relation_stage(pairs, "take", vec![relation_integer(1)]);
+    let body = relation_terminal(taken, "count");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(1.into()),
+        Value::int(2.into()),
+        Value::int(3.into()),
+        Value::int(4.into()),
+    ]);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::int(1.into())
+    );
+    assert_eq!(
+        effects.cursors.len(),
+        2,
+        "take(1) must not scan beyond the first pair"
+    );
+
+    let source = relation_source_expression("Note");
+    let pairs = relation_stage(source, "pairs", Vec::new());
+    let taken = relation_stage(pairs, "take", vec![relation_integer(0)]);
+    let body = relation_terminal(taken, "count");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(1.into()),
+        Value::int(2.into()),
+    ]);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::int(0.into())
+    );
+    assert!(
+        effects.cursors.is_empty(),
+        "take(0) must short-circuit before relation scanning"
+    );
 }
