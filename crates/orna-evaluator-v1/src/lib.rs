@@ -2990,7 +2990,7 @@ impl Context<'_, '_> {
                     });
                     Ok(Value::Relation(plan))
                 }
-                "count" | "first" | "last" | "one" => {
+                "count" | "first" | "last" | "one" | "every" | "exists" | "sum" | "min" | "max" => {
                     self.observe_relation(&plan, name, &ordered[1..], depth)
                 }
                 _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
