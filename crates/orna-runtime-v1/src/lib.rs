@@ -49,6 +49,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+mod activation;
+pub use activation::{ActivationError, ActivationWork, run_table_activation};
 mod catalogue;
 pub use catalogue::{
     CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
@@ -14377,6 +14379,84 @@ mod tests {
                 (vec![3], vec![11]),
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn reusable_table_activation_runner_admits_reads_commits_and_rolls_back_evaluator_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+
+        let observed = run_table_activation(
+            &state,
+            lease,
+            &["books"],
+            &NoFault,
+            |snapshot| {
+                let rows = snapshot.table_rows().clone();
+                let activation_time = snapshot.context().activation_time();
+                async move {
+                    assert!(rows["books"].is_empty());
+                    assert!(activation_time <= SystemTime::now());
+                    Ok::<_, &'static str>(ActivationWork::new(
+                        vec![table_mutation(20, 1, Some(9))],
+                        digest(21),
+                        rows.len(),
+                    ))
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(observed, 1);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+
+        let snapshot = state.begin_table_activation(&["books"]).await.unwrap();
+        let captured_rows = snapshot.table_rows().clone();
+        let later_context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                lease,
+                &later_context,
+                &[table_mutation(22, 2, Some(10))],
+                digest(23),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot.table_rows(), &captured_rows);
+        assert_eq!(snapshot.table_rows()["books"], vec![(vec![1], vec![9])]);
+
+        let before_failure_capture = state.capture().await.unwrap();
+        let before_failure_rows = state.committed_table_rows("books").await.unwrap();
+        let expected_failure_rows = before_failure_rows.clone();
+        let failure = run_table_activation(
+            &state,
+            lease,
+            &["books"],
+            &NoFault,
+            |snapshot| {
+                let rows = snapshot.table_rows().clone();
+                let expected_failure_rows = expected_failure_rows.clone();
+                async move {
+                    assert_eq!(rows["books"], expected_failure_rows);
+                    Err::<ActivationWork<()>, _>("evaluator rejected")
+                }
+            },
+        )
+        .await;
+        assert!(matches!(
+            failure,
+            Err(ActivationError::Evaluator("evaluator rejected"))
+        ));
+        assert_eq!(
+            state.committed_table_rows("books").await.unwrap(),
+            before_failure_rows
+        );
+        assert_eq!(state.capture().await.unwrap(), before_failure_capture);
     }
 
     #[tokio::test]
