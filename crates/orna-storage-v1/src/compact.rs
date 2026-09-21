@@ -14,6 +14,7 @@ use std::{
 };
 
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
+use orna_evolution_v1::{MigrationOperation, MigrationPlan};
 use orna_repository_v1::{
     CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry, CompactSegmentRole,
 };
@@ -128,6 +129,81 @@ impl CompactBaseState {
     }
 }
 
+/// Applies an already-authorized evolution plan to the verified compact base.
+/// Schema operations without a physical projection are rejected; rekeys retain
+/// the complete canonical row value and emit typed writer mutations.
+pub fn apply_migration_plan_to_compact(
+    profile: &CompactOvbProfile,
+    base: &CompactBaseState,
+    plan: &MigrationPlan,
+    candidate_generation: u64,
+    mutation_ids: &[[u8; 16]],
+    candidate_digest: [u8; 32],
+) -> Result<CompactWriterInput, CompactBaseProjectionError> {
+    if plan.operations().len() != mutation_ids.len() || candidate_generation == 0 {
+        return Err(CompactBaseProjectionError::EvolutionInputMismatch);
+    }
+    let mut mutations = Vec::with_capacity(plan.operations().len());
+    let mut targets = BTreeSet::new();
+    for (sequence, (operation, mutation_id)) in
+        plan.operations().iter().zip(mutation_ids).enumerate()
+    {
+        let MigrationOperation::RekeyRow {
+            table,
+            old_key,
+            new_key,
+        } = operation
+        else {
+            return Err(CompactBaseProjectionError::UnsupportedEvolutionOperation);
+        };
+        if table.bytes() != profile.table_id() || *mutation_id == [0; 16] {
+            return Err(CompactBaseProjectionError::WrongTable);
+        }
+        let old_bytes = old_key
+            .encode()
+            .map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
+        let old_identity = profile
+            .decode_key(&old_bytes)
+            .map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
+        let new_bytes = new_key
+            .encode()
+            .map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
+        let new_identity = profile
+            .decode_key(&new_bytes)
+            .map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
+        let Some(row) = base.rows.get(&old_identity) else {
+            return Err(CompactBaseProjectionError::MissingBaseKey);
+        };
+        let Some(value) = row.value.as_ref() else {
+            return Err(CompactBaseProjectionError::MissingBaseValue);
+        };
+        if base.rows.contains_key(&new_identity) || !targets.insert(new_identity.clone()) {
+            return Err(CompactBaseProjectionError::DuplicateEvolutionKey);
+        }
+        let value = value
+            .encode()
+            .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+        mutations.push(CompactWriterMutation {
+            sequence: u64::try_from(sequence + 1)
+                .map_err(|_| CompactBaseProjectionError::EvolutionInputMismatch)?,
+            mutation_id: *mutation_id,
+            key: new_identity,
+            state: CompactWriterMutationState::Replacement { value },
+        });
+    }
+    let input = CompactWriterInput {
+        table_id: profile.table_id(),
+        schema_fingerprint: profile.schema_fingerprint(),
+        candidate_generation,
+        row_encoding_identity: PublicationRowEncoding::CompactOvb1,
+        value_encoding_identity: PublicationValueEncoding::Ovb1,
+        mutations,
+        candidate_digest,
+    };
+    base.consume_writer_input(&input)?;
+    Ok(input)
+}
+
 /// Fail-closed errors while projecting and folding committed compact rows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompactBaseProjectionError {
@@ -137,6 +213,13 @@ pub enum CompactBaseProjectionError {
     WrongProfile,
     DuplicateKeyGeneration,
     StaleGeneration,
+    EvolutionInputMismatch,
+    UnsupportedEvolutionOperation,
+    InvalidEvolutionKey,
+    InvalidEvolutionValue,
+    MissingBaseKey,
+    MissingBaseValue,
+    DuplicateEvolutionKey,
 }
 
 impl fmt::Display for CompactBaseProjectionError {
@@ -150,6 +233,15 @@ impl fmt::Display for CompactBaseProjectionError {
                 "compact committed base repeats a key at one generation"
             }
             Self::StaleGeneration => "compact writer generation is not newer than the base",
+            Self::EvolutionInputMismatch => "evolution input does not match mutation IDs",
+            Self::UnsupportedEvolutionOperation => {
+                "schema operation lacks a physical compact projection"
+            }
+            Self::InvalidEvolutionKey => "evolution key is invalid for the compact profile",
+            Self::InvalidEvolutionValue => "evolution row value is not canonical",
+            Self::MissingBaseKey => "evolution rekey source is absent from the compact base",
+            Self::MissingBaseValue => "evolution rekey source has no row value",
+            Self::DuplicateEvolutionKey => "evolution rekey target collides with the compact base",
         })
     }
 }
@@ -1818,6 +1910,102 @@ mod tests {
                 ..input
             }),
             Err(CompactBaseProjectionError::WrongTable)
+        );
+    }
+    #[test]
+    fn evolution_rekey_consumes_verified_base_and_emits_writer_input() {
+        let profile = scalar_profile();
+        let table = orna_evolution_v1::ObjectId::new(TABLE);
+        let field = orna_evolution_v1::Field {
+            id: orna_evolution_v1::ObjectId::new(KEY_A),
+            name: "id".into(),
+            ty: orna_evolution_v1::FieldType::Int,
+            role: orna_evolution_v1::FieldRole::Key,
+            optional: false,
+            introduction_fallback: None,
+        };
+        let schema = orna_evolution_v1::Schema {
+            version: orna_evolution_v1::EvolutionVersion::V1_0,
+            tables: vec![orna_evolution_v1::Table {
+                id: table,
+                name: "accounts".into(),
+                explicit_key: true,
+                fields: vec![field],
+            }],
+        };
+        let plan = orna_evolution_v1::plan(
+            &schema,
+            &schema,
+            &orna_evolution_v1::PlanningRequest {
+                fence: orna_evolution_v1::VersionFence::V1,
+                rekeys: vec![orna_evolution_v1::RekeyIntent {
+                    table,
+                    old_key: CanonicalValue::new(OvbRaw::Int(7.into())).unwrap(),
+                    new_key: CanonicalValue::new(OvbRaw::Int(8.into())).unwrap(),
+                }],
+            },
+        )
+        .unwrap();
+        let old = profile.decode_key(&scalar_key(7)).unwrap();
+        let mut rows = BTreeMap::new();
+        rows.insert(
+            old,
+            CompactBaseRow {
+                key: CanonicalValue::decode(&scalar_key(7)).unwrap(),
+                value: Some(CanonicalValue::new(OvbRaw::Int(70.into())).unwrap()),
+                generation: 1,
+                role: CompactSegmentRole::Data,
+            },
+        );
+        let base = CompactBaseState {
+            table_id: TABLE,
+            schema_fingerprint: profile.schema_fingerprint(),
+            rows,
+        };
+        let input = apply_migration_plan_to_compact(
+            &profile,
+            &base,
+            &plan,
+            2,
+            &[[0x55; 16]],
+            [0x66; 32],
+        )
+        .unwrap();
+        assert_eq!(input.candidate_generation, 2);
+        assert_eq!(input.mutations.len(), 1);
+        assert_eq!(input.mutations[0].key.encoded(), scalar_key(8));
+        assert!(matches!(
+            input.mutations[0].state,
+            CompactWriterMutationState::Replacement { .. }
+        ));
+        let mut evolved_schema = schema.clone();
+        evolved_schema.tables[0].fields.push(orna_evolution_v1::Field {
+            id: orna_evolution_v1::ObjectId::new(KEY_B),
+            name: "label".into(),
+            ty: orna_evolution_v1::FieldType::Str,
+            role: orna_evolution_v1::FieldRole::Stored,
+            optional: true,
+            introduction_fallback: None,
+        });
+        let schema_plan = orna_evolution_v1::plan(
+            &schema,
+            &evolved_schema,
+            &orna_evolution_v1::PlanningRequest {
+                fence: orna_evolution_v1::VersionFence::V1,
+                rekeys: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            apply_migration_plan_to_compact(
+                &profile,
+                &base,
+                &schema_plan,
+                2,
+                &[[0x55; 16]],
+                [0x66; 32],
+            ),
+            Err(CompactBaseProjectionError::UnsupportedEvolutionOperation)
         );
     }
 }

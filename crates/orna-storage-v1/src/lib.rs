@@ -9,8 +9,9 @@ mod compact;
 mod compact_parquet;
 
 pub use compact::{
-    fold_compact_committed_base, lower_publication_freeze, CompactBaseProjectionError,
-    CompactBaseRow, CompactBaseState, CompactExactKeyIndex, CompactExactKeySource,
+    apply_migration_plan_to_compact, fold_compact_committed_base, lower_publication_freeze,
+    CompactBaseProjectionError, CompactBaseRow, CompactBaseState, CompactExactKeyIndex,
+    CompactExactKeySource,
     CompactKeyError, CompactKeyIdentity, CompactLogicalKeyError, CompactLogicalReader,
     CompactLoweringError, CompactOvbProfile, CompactWriterInput, CompactWriterMutation,
     CompactWriterMutationState, COMPACT_STORAGE_PROFILE, OVB_PROFILE,
