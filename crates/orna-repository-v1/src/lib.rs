@@ -1760,6 +1760,7 @@ impl Repository {
         &self,
         journal: &PublicationJournal,
     ) -> Result<(), RepositoryError> {
+        self.require_no_pending_checkout_recovery_locked()?;
         let encoded = journal.encode()?;
         self.runtime.ensure_exists()?;
         let path = self.runtime.root().join("publication-journal.bin");
@@ -1830,6 +1831,7 @@ impl Repository {
     }
 
     pub(crate) fn clear_publication_journal_locked(&self) -> Result<(), RepositoryError> {
+        self.require_no_pending_checkout_recovery_locked()?;
         let path = self.runtime.root().join("publication-journal.bin");
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
@@ -1865,6 +1867,7 @@ impl Repository {
         &self,
         journal: &CheckoutRecoveryJournal,
     ) -> Result<(), RepositoryError> {
+        self.require_no_pending_publication_recovery_locked()?;
         let encoded = journal.encode()?;
         self.runtime.ensure_exists()?;
         let path = self.runtime.root().join("checkout-journal.bin");
@@ -1922,6 +1925,7 @@ impl Repository {
     }
 
     fn clear_checkout_recovery_journal_locked(&self) -> Result<(), RepositoryError> {
+        self.require_no_pending_publication_recovery_locked()?;
         let path = self.runtime.root().join("checkout-journal.bin");
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {

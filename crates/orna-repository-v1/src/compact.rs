@@ -2043,6 +2043,10 @@ impl Repository {
         &self,
         plan: &CompactPublicationPlan,
     ) -> Result<(), RepositoryError> {
+        {
+            let _lock = self.acquire_coordination_lock()?;
+            self.require_no_pending_checkout_recovery_locked()?;
+        }
         if self.read_publication_journal()?.is_some()
             || self.head()?.as_ref() != Some(plan.journal.old_head())
             || self.index_generation()? != plan.expected_index
@@ -2101,6 +2105,10 @@ impl Repository {
     pub fn recover_compact_publication_boundary(
         &self,
     ) -> Result<Option<CompactPublicationRecovery>, RepositoryError> {
+        {
+            let _lock = self.acquire_coordination_lock()?;
+            self.require_no_pending_checkout_recovery_locked()?;
+        }
         let Some(existing) = self.read_publication_journal()? else {
             return Ok(None);
         };
@@ -2139,6 +2147,10 @@ impl Repository {
         &self,
         receipt: &CompactRuntimeReceipt,
     ) -> Result<IndexGeneration, RepositoryError> {
+        {
+            let _lock = self.acquire_coordination_lock()?;
+            self.require_no_pending_checkout_recovery_locked()?;
+        }
         let key = self.compact_runtime_receipt_verification_key()?;
         let journal = self
             .read_publication_journal()?
@@ -2209,6 +2221,7 @@ impl Repository {
         journal: &PublicationJournal,
     ) -> Result<CompactRuntimeCompletionFence, RepositoryError> {
         let coordination_lock = self.acquire_coordination_lock()?;
+        self.require_no_pending_checkout_recovery_locked()?;
         if self.read_publication_journal_locked()?.as_ref() != Some(journal) {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
@@ -2323,6 +2336,7 @@ impl Repository {
         journal: &mut PublicationJournal,
         _fence: CompactRuntimeCompletionFence,
     ) -> Result<(), RepositoryError> {
+        self.require_no_pending_checkout_recovery_locked()?;
         if self.read_publication_journal_locked()?.as_ref() != Some(journal) {
             return Err(RepositoryError::InvalidPublicationJournal);
         }

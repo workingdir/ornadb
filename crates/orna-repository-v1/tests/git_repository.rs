@@ -5290,6 +5290,117 @@ fn publication_refuses_to_replace_a_retained_journal() {
 }
 
 #[test]
+fn cross_protocol_recovery_journals_are_mutually_exclusive() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+    fs::write(root.path().join("ordinary.txt"), "staged local\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+
+    let runtime = RuntimeGeneration::new(877);
+    let plan = repo.plan_checkout("experiment", runtime).unwrap();
+    let token = plan.force_token();
+    let discard = repo
+        .validate_checkout_discard_set(
+            &plan,
+            true,
+            Some(&token),
+            plan.git().discardable_paths(),
+        )
+        .unwrap();
+    repo.persist_validated_checkout_discard(&discard).unwrap();
+    let checkout_path = repo.runtime_paths().root().join("checkout-journal.bin");
+    let checkout_bytes = fs::read(&checkout_path).unwrap();
+    repo.recover_pre_execution_checkout().unwrap();
+    assert!(!checkout_path.exists());
+
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"candidate row\n".to_vec()),
+            )],
+            "orna: cross-protocol publication",
+        )
+        .unwrap();
+    let mut publication = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [87; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed,
+            None,
+            Some(b"candidate row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+    repo.write_publication_journal(&publication).unwrap();
+    let publication_path = repo.runtime_paths().root().join("publication-journal.bin");
+    let publication_bytes = fs::read(&publication_path).unwrap();
+    fs::write(&checkout_path, &checkout_bytes).unwrap();
+
+    let before = git_state(&repo, root.path());
+    let index_file_before = fs::read(root.path().join(".git/index")).unwrap();
+    assert!(matches!(
+        repo.publish_candidate(&index_before, &candidate, &mut publication),
+        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
+    ));
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
+    ));
+    assert!(matches!(
+        repo.recover_compact_publication_boundary(),
+        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
+    ));
+    let receipt = CompactRuntimeReceipt::new(
+        [87; 16],
+        [88; 32],
+        head.clone(),
+        [89; 32],
+        [0; 64],
+    )
+    .unwrap();
+    assert!(matches!(
+        repo.finish_compact_with_receipt(&receipt),
+        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
+    ));
+    assert!(matches!(
+        repo.clear_publication_journal(),
+        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
+    ));
+    assert!(matches!(
+        repo.persist_validated_checkout_discard(&discard),
+        Err(orna_repository_v1::RepositoryError::PublicationPending)
+    ));
+    assert!(matches!(
+        repo.execute_validated_force_checkout(&discard),
+        Err(orna_repository_v1::RepositoryError::PublicationPending)
+    ));
+    assert!(matches!(
+        repo.recover_pre_execution_checkout(),
+        Err(orna_repository_v1::RepositoryError::PublicationPending)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert_eq!(
+        fs::read(root.path().join(".git/index")).unwrap(),
+        index_file_before
+    );
+    assert_eq!(fs::read(&publication_path).unwrap(), publication_bytes);
+    assert_eq!(fs::read(&checkout_path).unwrap(), checkout_bytes);
+}
+
+#[test]
 fn publication_pauses_for_an_existing_git_index_lock_before_ref_change() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
