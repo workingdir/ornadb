@@ -14,8 +14,9 @@ pub(super) enum RelationStage {
     Filter(Value),
     Map(Value),
     SortBy(Value),
-    Take(usize),
+    Distinct,
     Drop(usize),
+    Take(usize),
 }
 
 impl RelationPlan {

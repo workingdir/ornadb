@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
-    EffectHandler, Environment, EvaluationError, Limits, NominalDefinition, NominalDefinitions,
-    NominalField, PureFunction, StepBudget, evaluate_expression, evaluate_function,
-    evaluate_parsed, evaluate_parsed_with_nominals, evaluate_repl,
+    EffectHandler, Environment, EvaluationError, Functions, Limits, NominalDefinition,
+    NominalDefinitions, NominalField, PureFunction, RelationPage, StepBudget, evaluate_expression,
+    evaluate_function, evaluate_parsed, evaluate_parsed_with_nominals, evaluate_repl,
     evaluate_with_functions_and_nominals, invoke_named, invoke_named_with_effects,
-    invoke_named_with_nominals,
+    invoke_named_with_effects_and_budget, invoke_named_with_nominals,
 };
 use orna_syntax_v1::{
     AssignmentOperator, AssignmentTarget, Expr, NameSegment, Pattern, RecordField, Statement,
@@ -102,6 +102,141 @@ fn parsed_expression(source: &str) -> Expr {
     let parsed = orna_syntax_v1::parse_expression(source);
     assert!(parsed.is_ok(), "{source}: {:?}", parsed.diagnostics);
     parsed.value
+}
+
+fn relation_span() -> SyntaxSpan {
+    SyntaxSpan::new(0, 0)
+}
+
+fn relation_argument(value: Expr, span: &SyntaxSpan) -> orna_syntax_v1::Argument {
+    orna_syntax_v1::Argument {
+        name: None,
+        value,
+        span: span.clone(),
+    }
+}
+
+fn relation_source_expression(source: &str) -> Expr {
+    let span = relation_span();
+    Expr::Call {
+        callee: Box::new(Expr::Field {
+            base: Box::new(Expr::ReplBinding {
+                text: "$__orna_relation".into(),
+                span: span.clone(),
+            }),
+            name: "source".into(),
+            span: span.clone(),
+        }),
+        arguments: vec![relation_argument(
+            Expr::Literal {
+                text: format!("{source:?}"),
+                kind: orna_syntax_v1::LiteralKind::String,
+                span: span.clone(),
+            },
+            &span,
+        )],
+        span,
+    }
+}
+
+fn relation_stage(input: Expr, name: &str, arguments: Vec<Expr>) -> Expr {
+    let span = relation_span();
+    Expr::Binary {
+        lhs: Box::new(input),
+        op: "|".into(),
+        rhs: Box::new(Expr::Call {
+            callee: Box::new(Expr::Name {
+                text: name.into(),
+                span: span.clone(),
+            }),
+            arguments: arguments
+                .into_iter()
+                .map(|value| relation_argument(value, &span))
+                .collect(),
+            span: span.clone(),
+        }),
+        span,
+    }
+}
+
+fn relation_terminal(input: Expr, name: &str) -> Expr {
+    relation_stage(input, name, Vec::new())
+}
+
+fn relation_integer(value: i64) -> Expr {
+    let span = relation_span();
+    Expr::Literal {
+        text: value.to_string(),
+        kind: orna_syntax_v1::LiteralKind::Integer,
+        span,
+    }
+}
+
+fn relation_function(body: Expr) -> Functions {
+    Functions::from([(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body,
+            environment: Environment::new(),
+        },
+    )])
+}
+
+struct DistinctRelationEffects {
+    rows: Vec<Value>,
+    cursors: Vec<Option<Vec<u8>>>,
+}
+
+impl DistinctRelationEffects {
+    fn new(rows: Vec<Value>) -> Self {
+        Self {
+            rows,
+            cursors: Vec::new(),
+        }
+    }
+}
+
+impl EffectHandler for DistinctRelationEffects {
+    fn handle(
+        &mut self,
+        _: &Expr,
+        _: &[Value],
+    ) -> Result<Option<Value>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn scan_relation_page(
+        &mut self,
+        _: &str,
+        after: Option<&[u8]>,
+        _: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        budget.debit(1)?;
+        self.cursors.push(after.map(ToOwned::to_owned));
+        let index = after.map_or(0, |cursor| usize::from(cursor[0]));
+        if index >= self.rows.len() {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        let next = (index + 1 < self.rows.len()).then(|| vec![(index + 1) as u8]);
+        Ok(Some(RelationPage {
+            rows: vec![self.rows[index].clone()],
+            next,
+        }))
+    }
+}
+
+fn invoke_relation(
+    body: Expr,
+    effects: &mut DistinctRelationEffects,
+    limits: Limits,
+) -> Result<Value, EvaluationError> {
+    let functions = relation_function(body);
+    invoke_named_with_effects("run", &functions, &Environment::new(), limits, effects)
 }
 
 fn nominal_field(name: &str, public: bool, default: Option<&str>) -> NominalField {
@@ -7366,4 +7501,143 @@ fn std_stats_reject_mixed_or_unsupported_inputs_and_resource_overflow() {
         )),
         "ORNA-EVAL-LIMIT"
     );
+}
+
+#[test]
+fn distinct_relation_preserves_first_occurrence_order_and_stays_lazy() {
+    let source = relation_source_expression("Note");
+    let distinct = relation_stage(source, "distinct", Vec::new());
+    let dropped = relation_stage(distinct, "drop", vec![relation_integer(1)]);
+    let body = relation_terminal(dropped, "first");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(2.into()),
+        Value::int(1.into()),
+        Value::int(2.into()),
+    ]);
+
+    let result = invoke_relation(body, &mut effects, Limits::default())
+        .expect("distinct relation should evaluate");
+
+    assert_eq!(
+        result,
+        Value::option(Some(Value::int(1.into()))).expect("option is canonical")
+    );
+    assert_eq!(effects.cursors, vec![None, Some(vec![1])]);
+}
+
+#[test]
+fn distinct_relation_eliminates_duplicates_and_handles_empty_input() {
+    let source = relation_source_expression("Note");
+    let distinct = relation_stage(source, "distinct", Vec::new());
+    let body = relation_terminal(distinct, "count");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(2.into()),
+        Value::int(1.into()),
+        Value::int(2.into()),
+        Value::int(1.into()),
+    ]);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::int(2.into())
+    );
+
+    let source = relation_source_expression("Empty");
+    let distinct = relation_stage(source, "distinct", Vec::new());
+    let body = relation_terminal(distinct, "count");
+    let mut empty = DistinctRelationEffects::new(Vec::new());
+    assert_eq!(
+        invoke_relation(body, &mut empty, Limits::default()).unwrap(),
+        Value::int(0.into())
+    );
+    assert_eq!(empty.cursors, vec![None]);
+}
+
+#[test]
+fn distinct_relation_take_zero_short_circuits_source_scanning() {
+    let source = relation_source_expression("Note");
+    let distinct = relation_stage(source, "distinct", Vec::new());
+    let taken = relation_stage(distinct, "take", vec![relation_integer(0)]);
+    let body = relation_terminal(taken, "count");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(1.into()),
+        Value::int(2.into()),
+    ]);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::int(0.into())
+    );
+    assert!(effects.cursors.is_empty());
+}
+
+#[test]
+fn distinct_relation_respects_step_budget_and_item_limit() {
+    let source = relation_source_expression("Note");
+    let distinct = relation_stage(source, "distinct", Vec::new());
+    let body = relation_terminal(distinct, "count");
+    let functions = relation_function(body.clone());
+    let mut effects = DistinctRelationEffects::new(vec![Value::int(1.into())]);
+    let mut budget = StepBudget::new(1);
+    assert_eq!(
+        code(invoke_named_with_effects_and_budget(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut effects,
+            &mut budget,
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(1.into()),
+        Value::int(2.into()),
+    ]);
+    assert_eq!(
+        code(invoke_relation(
+            body,
+            &mut effects,
+            Limits {
+                max_collection_items: 1,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn distinct_relation_rejects_float_equality() {
+    let source = relation_source_expression("FloatRows");
+    let distinct = relation_stage(source, "distinct", Vec::new());
+    let body = relation_terminal(distinct, "first");
+    let mut effects =
+        DistinctRelationEffects::new(vec![Value::float_bits(1.0f64.to_bits())]);
+
+    assert_eq!(
+        code(invoke_relation(body, &mut effects, Limits::default())),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
+}
+
+#[test]
+fn distinct_relation_preserves_sorted_buffered_order() {
+    let source = relation_source_expression("Note");
+    let sorted = relation_stage(source, "sort_by", vec![parsed_expression("value => value")]);
+    let distinct = relation_stage(sorted, "distinct", Vec::new());
+    let dropped = relation_stage(distinct, "drop", vec![relation_integer(1)]);
+    let body = relation_terminal(dropped, "first");
+    let mut effects = DistinctRelationEffects::new(vec![
+        Value::int(2.into()),
+        Value::int(1.into()),
+        Value::int(2.into()),
+    ]);
+
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::option(Some(Value::int(2.into()))).expect("option is canonical")
+    );
+    assert_eq!(effects.cursors, vec![None, Some(vec![1]), Some(vec![2])]);
 }
