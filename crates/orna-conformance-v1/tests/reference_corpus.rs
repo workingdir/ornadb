@@ -1238,3 +1238,191 @@ fn report_reconciliation_excludes_failed_runtime_claims() {
         EvidenceStatus::Failed
     );
 }
+#[test]
+fn harness_report_retains_imported_generic_sys_meta_evidence() {
+    let root = tempfile::tempdir().expect("temporary conformance corpus");
+    let manifest_root = root.path().join("tests");
+    std::fs::create_dir_all(&manifest_root).expect("manifest directory");
+    std::fs::write(
+        manifest_root.join("project-manifest.json"),
+        serde_json::json!({
+            "project": "imported-generic",
+            "entry": "consumer.orna",
+            "modules": ["library.orna", "consumer.orna"],
+            "expected": "semantic-only",
+            "implementation_execution": "not executed"
+        })
+        .to_string(),
+    )
+    .expect("project manifest");
+
+    let accepted_path = root.path().join("accepted-imported-generic");
+    let rejected_path = root.path().join("rejected-imported-generic");
+    for project_path in [&accepted_path, &rejected_path] {
+        std::fs::create_dir_all(project_path).expect("project directory");
+        std::fs::write(
+            project_path.join("library.orna"),
+            "pub fn lookup<T>(value: T) = sys.meta<T>(value);",
+        )
+        .expect("generic library module");
+    }
+    std::fs::write(
+        accepted_path.join("consumer.orna"),
+        "use library; pub fn read(value: Int) = library.lookup<Int>(value);",
+    )
+    .expect("accepted consumer module");
+    std::fs::write(
+        rejected_path.join("consumer.orna"),
+        "use library; pub fn too_many(value: Int) = library.lookup<Int, Str>(value);",
+    )
+    .expect("rejected consumer module");
+
+    let fixture = |id: &str, path: &str, failing: bool| Fixture {
+        id: id.into(),
+        kind: "project".into(),
+        path: path.into(),
+        parse_as: "module_unit".into(),
+        expect: std::collections::BTreeMap::from([
+            ("parse".into(), "pass".into()),
+            ("resolve".into(), "pass".into()),
+            (
+                "typecheck".into(),
+                if failing { "fail".into() } else { "pass".into() },
+            ),
+        ]),
+        failing_phase: failing.then(|| "typecheck".into()),
+        diagnostic: failing.then(|| "ORNA-S021-TYPE".into()),
+        message_contains: None,
+        expected_diagnostic: None,
+        environment: None,
+    };
+    let accepted_id = "valid/imported-generic-sys-meta.orna";
+    let rejected_id = "invalid/imported-generic-sys-meta-type-arguments.orna";
+    let requirement_test = |fixture: &str| {
+        serde_json::json!({
+            "kind": "imported generic sys.meta<T> report witness",
+            "status": "planned",
+            "subject": "ORNA-GENERIC-001",
+            "fixture": fixture,
+            "stage": "typecheck",
+        })
+    };
+    let corpus = Corpus {
+        root: root.path().to_path_buf(),
+        manifest: Manifest {
+            version: "1.0.0".into(),
+            counts: ManifestCounts {
+                valid: 1,
+                invalid: 1,
+                project: 2,
+                total: 2,
+            },
+            fixtures: vec![
+                fixture(accepted_id, "accepted-imported-generic", false),
+                fixture(rejected_id, "rejected-imported-generic", true),
+            ],
+        },
+        invalid_metadata: InvalidMetadata {
+            version: "1.0.0".into(),
+            count: 0,
+            fixtures: Vec::new(),
+        },
+        diagnostics: std::collections::BTreeMap::new(),
+        vectors: std::collections::BTreeMap::new(),
+        scenarios: serde_json::json!({"scenarios": []}),
+        requirements: vec![Requirement {
+            id: "ORNA-GENERIC-001".into(),
+            chapter: "expressions".into(),
+            source: "source/06-expressions.md".into(),
+            text: "Generic parameters are explicit in public source when a generic abstraction is intended; local type arguments may be inferred.".into(),
+        }],
+        requirement_evidence: RequirementEvidence {
+            meaning: "focused report-stage witness".into(),
+            requirements: vec![RequirementEvidenceEntry {
+                requirement: "ORNA-GENERIC-001".into(),
+                tests: vec![requirement_test(accepted_id), requirement_test(rejected_id)],
+            }],
+        },
+        project_expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+        publication_digests: std::collections::BTreeMap::new(),
+    };
+
+    let report = Harness::new(corpus).run(&mut SemanticAdapter::default());
+    let accepted = report
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.fixture == accepted_id)
+        .expect("accepted imported generic fixture");
+    assert!(accepted.passed, "{:?}", accepted.stages);
+    let accepted_stage = accepted
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Typecheck))
+        .expect("accepted typecheck evidence");
+    assert_eq!(accepted_stage.class, EvidenceClass::Semantic);
+    assert_eq!(accepted_stage.status, EvidenceStatus::Passed);
+    assert!(accepted_stage.expectation_satisfied);
+    assert_eq!(
+        accepted_stage.requirements,
+        vec!["ORNA-GENERIC-001".to_string()]
+    );
+    assert!(matches!(
+        accepted_stage.requirement_mapping,
+        RequirementMapping::Mapped { .. }
+    ));
+
+    let rejected = report
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.fixture == rejected_id)
+        .expect("rejected imported generic fixture");
+    assert!(rejected.passed, "{:?}", rejected.stages);
+    let rejected_stage = rejected
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Typecheck))
+        .expect("rejected typecheck evidence");
+    assert_eq!(rejected_stage.class, EvidenceClass::Semantic);
+    assert_eq!(rejected_stage.status, EvidenceStatus::Failed);
+    assert!(rejected_stage.expectation_satisfied);
+    assert_eq!(
+        rejected_stage.requirements,
+        vec!["ORNA-GENERIC-001".to_string()]
+    );
+    assert!(matches!(
+        rejected_stage.requirement_mapping,
+        RequirementMapping::Mapped { .. }
+    ));
+    assert_eq!(
+        rejected_stage
+            .diagnostic
+            .as_ref()
+            .expect("rejected diagnostic is retained")["code"],
+        "ORNA-S021-TYPE"
+    );
+
+    let serialized = serde_json::to_value(&report).expect("report serializes");
+    let semantic = serialized["semantic_evidence"]
+        .as_array()
+        .expect("semantic evidence array");
+    assert!(semantic.iter().any(|evidence| {
+        evidence["subject"] == accepted_id
+            && evidence["status"] == "passed"
+            && evidence["requirement_mapping"]["status"] == "mapped"
+    }));
+    assert!(semantic.iter().any(|evidence| {
+        evidence["subject"] == rejected_id
+            && evidence["status"] == "failed"
+            && evidence["diagnostic"]["code"] == "ORNA-S021-TYPE"
+    }));
+}
