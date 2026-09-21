@@ -15,6 +15,12 @@ pub(super) enum RelationStage {
     Map(Value),
     SortBy(Value),
     Distinct,
+    /// Adjacent overlapping row pairs, preserving upstream order.
+    ///
+    /// Evaluation keeps the previous post-prefix row across source pages and
+    /// stage applications; the stage index is absolute through `stage_offset`
+    /// when buffered suffixes are evaluated.
+    Pairs,
     Drop(usize),
     Take(usize),
 }
