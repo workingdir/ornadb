@@ -1748,6 +1748,8 @@ mod tests {
                 digest: [98; 32],
                 mutation_sequence: freeze.checkpoint.mutation_sequence,
             },
+            candidate_digest: freeze.candidate_digest,
+            mutations: freeze.mutations.clone(),
         };
         let plan = compact_runtime_plan(&repository, &mismatched_freeze);
         repository
@@ -1828,6 +1830,8 @@ mod tests {
                 digest: [99; 32],
                 mutation_sequence: freeze.checkpoint.mutation_sequence,
             },
+            candidate_digest: freeze.candidate_digest,
+            mutations: freeze.mutations.clone(),
         };
 
         assert_eq!(
@@ -1887,6 +1891,8 @@ mod tests {
                 digest: [42; 32],
                 mutation_sequence: 1,
             },
+            candidate_digest: [42; 32],
+            mutations: Vec::new(),
         };
         let mutation = LooseMutation {
             id: MutationId::new("publication-conflict").unwrap(),
@@ -1921,6 +1927,8 @@ mod tests {
                 digest: [44; 32],
                 mutation_sequence: 1,
             },
+            candidate_digest: [44; 32],
+            mutations: Vec::new(),
         };
         let batch = FrozenBatch::new(
             MutationId::new("unrelated-batch").unwrap(),
@@ -1958,6 +1966,8 @@ mod tests {
                 digest: [8; 32],
                 mutation_sequence: 1,
             },
+            candidate_digest: [8; 32],
+            mutations: Vec::new(),
         };
         let mutation =
             TableMutation::new([9; 16], "Contact", b"Alice".to_vec(), Some(b"row".to_vec()))
@@ -2000,6 +2010,8 @@ mod tests {
                 digest: [18; 32],
                 mutation_sequence: 2,
             },
+            candidate_digest: [18; 32],
+            mutations: Vec::new(),
         };
         let first = TableMutation::new(
             [19; 16],
@@ -2052,6 +2064,8 @@ mod tests {
                 digest: [26; 32],
                 mutation_sequence: 1,
             },
+            candidate_digest: [26; 32],
+            mutations: Vec::new(),
         };
         let mutation = TableMutation::new(
             [27; 16],
@@ -2080,6 +2094,8 @@ mod tests {
                 digest: [22; 32],
                 mutation_sequence: 2,
             },
+            candidate_digest: [22; 32],
+            mutations: Vec::new(),
         };
         let first = TableMutation::new(
             [23; 16],
@@ -2141,6 +2157,8 @@ mod tests {
                 digest: [82; 32],
                 mutation_sequence: 1,
             },
+            candidate_digest: [82; 32],
+            mutations: Vec::new(),
         };
         assert_eq!(
             RuntimePublicationCoordinator::prepare(
@@ -2191,6 +2209,8 @@ mod tests {
                 digest: [84; 32],
                 mutation_sequence: 1,
             },
+            candidate_digest: [84; 32],
+            mutations: Vec::new(),
         };
         assert_eq!(
             RuntimePublicationCoordinator::prepare(
