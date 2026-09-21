@@ -372,6 +372,65 @@ fn semantic_adapter_rejects_invalid_imported_generic_sys_meta_argument() {
     };
     assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S021-TYPE");
 }
+fn typed_invoke_project(source: &str) -> ProjectUnit {
+    ProjectUnit {
+        fixture_id: "typed-invoke-project".into(),
+        project_id: "logical/typed-invoke".into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: "typed-invoke-module".into(),
+            source_id: "logical/typed-invoke/main.orna".into(),
+            parse_as: "module_unit".into(),
+            source: source.into(),
+        }],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+    }
+}
+
+#[test]
+fn semantic_project_adapter_admits_typed_sys_invoke_with_explicit_witness() {
+    let project = typed_invoke_project(
+        "pub fn invoke_int(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
+         sys.invoke<Int>(function, arguments, as: Int);",
+    );
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.typecheck_project(&project), StageOutcome::Passed);
+}
+
+#[test]
+fn semantic_project_adapter_rejects_typed_sys_invoke_mismatched_witness() {
+    let project = typed_invoke_project(
+        "pub fn invoke_wrong(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
+         sys.invoke<Str>(function, arguments, as: Int);",
+    );
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    let StageOutcome::Failed(diagnostic) = adapter.typecheck_project(&project) else {
+        panic!("mismatched typed sys.invoke witness must fail at typecheck");
+    };
+    assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S021-TYPE");
+    assert_eq!(
+        adapter.diagnostic_message(&diagnostic),
+        "sys.invoke explicit type argument must match the as: witness"
+    );
+}
+
 
 #[tokio::test]
 async fn project_stream_ignores_unrelated_false_module_assertion() {
