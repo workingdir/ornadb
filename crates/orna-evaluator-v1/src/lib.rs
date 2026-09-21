@@ -4702,9 +4702,12 @@ impl Context<'_, '_> {
         }
         Ok(Value::Float(sorted[choose]))
     }
-    fn extreme(&self, name: &str, values: &[Value]) -> Result<Value, EvaluationError> {
+    fn extreme(&mut self, name: &str, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
         if values.iter().all(|value| matches!(value, Value::Float(_))) {
+            for _ in values {
+                self.step()?;
+            }
             let bits = values
                 .iter()
                 .map(|value| match value {
@@ -4724,6 +4727,7 @@ impl Context<'_, '_> {
         if !values.is_empty() && values.iter().all(|value| matches!(value, Value::Decimal(_))) {
             let mut candidate = None;
             for value in values {
+                self.step()?;
                 let replace = match candidate.as_ref() {
                     None => true,
                     Some(current) => {
@@ -4752,6 +4756,7 @@ impl Context<'_, '_> {
             };
             let mut candidate = None;
             for value in values {
+                self.step()?;
                 let Value::Money {
                     currency: value_currency,
                     ..
@@ -4789,6 +4794,7 @@ impl Context<'_, '_> {
         {
             let mut candidate = None;
             for value in values {
+                self.step()?;
                 let replace = match candidate.as_ref() {
                     None => true,
                     Some(current) => {
@@ -4810,6 +4816,7 @@ impl Context<'_, '_> {
         }
         let mut candidate = None;
         for value in values {
+            self.step()?;
             let Value::Int(value) = value else {
                 // Mixed numeric kinds, Decimal, Money and affine aggregation
                 // fail closed rather than receiving incidental host ordering.
