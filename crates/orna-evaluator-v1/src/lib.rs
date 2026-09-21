@@ -3236,6 +3236,7 @@ impl Context<'_, '_> {
         for (index, stage) in stages.iter().enumerate() {
             match stage {
                 RelationStage::Filter(predicate) => {
+                    self.step()?;
                     let result = self.invoke_predicate(predicate, value.clone(), depth + 1)?;
                     let Value::Bool(result) = result else {
                         return Err(error("ORNA-EVAL-TYPE"));
@@ -4966,6 +4967,7 @@ impl Context<'_, '_> {
         let mut filtered = Vec::new();
         for value in values {
             // Invoke once, in input order, and retain only an explicit true.
+            self.step()?;
             match self.invoke_predicate(predicate, value.clone(), depth + 1)? {
                 Value::Bool(true) => {
                     filtered.push(value.clone());
