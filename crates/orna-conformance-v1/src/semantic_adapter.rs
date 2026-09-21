@@ -4955,14 +4955,19 @@ impl TableEffectHandler<'_, '_> {
             let kind = kind.as_str();
             if !self.key_fields.contains_key(table)
                 || !matches!(operation, "min" | "max" | "sum")
-                || !matches!(kind, "integer" | "float")
-                || kind == "float" && operation != "sum"
+                || !matches!(kind, "integer" | "float" | "decimal")
+                || matches!(kind, "float" | "decimal") && operation != "sum"
             {
                 return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
             }
             let mut integer_extreme = None;
             let mut integer_total = BigInt::ZERO;
             let mut float_total = None;
+            let mut decimal_total = Value::decimal(BigInt::ZERO, BigInt::ZERO)
+                .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ARGUMENT"))?;
+            let decimal_addition = parse_expression("left + right").value;
+            let mut decimal_budget = StepBudget::new(self.limits.max_steps);
+            let decimal_functions = Functions::new();
             let mut candidate_rows: usize = 0;
             for (_, row) in self
                 .activation
@@ -5018,6 +5023,27 @@ impl TableEffectHandler<'_, '_> {
                         let value = f64::from_bits(*bits);
                         float_total = Some(float_total.map_or(value, |total: f64| total + value));
                     }
+                    OvbRaw::Tag(60000, _) if kind == "decimal" => {
+                        let mut environment = Environment::new();
+                        environment.insert("left".into(), decimal_total.clone());
+                        environment.insert("right".into(), value);
+                        decimal_total = match budget.as_deref_mut() {
+                            Some(shared_budget) => evaluate_with_functions_and_budget(
+                                &decimal_addition,
+                                &environment,
+                                &decimal_functions,
+                                self.limits,
+                                shared_budget,
+                            ),
+                            None => evaluate_with_functions_and_budget(
+                                &decimal_addition,
+                                &environment,
+                                &decimal_functions,
+                                self.limits,
+                                &mut decimal_budget,
+                            ),
+                        }?;
+                    }
                     _ => return Err(transaction_error("ORNA-EVAL-UNSUPPORTED")),
                 }
             }
@@ -5025,6 +5051,7 @@ impl TableEffectHandler<'_, '_> {
                 "sum" if kind == "float" => Ok(Some(Value::float_bits(
                     float_total.map_or(0.0f64.to_bits(), f64::to_bits),
                 ))),
+                "sum" if kind == "decimal" => Ok(Some(decimal_total)),
                 "sum" => Ok(Some(Value::int(integer_total))),
                 "min" | "max" => match integer_extreme {
                     Some(value) => Value::option(Some(Value::int(value)))
@@ -5355,7 +5382,38 @@ struct AdmittedAssertion {
 type TableAssertions = BTreeMap<String, Vec<AdmittedAssertion>>;
 type ModuleAssertions = Vec<AdmittedAssertion>;
 type TableKeys = BTreeMap<String, TransactionTableKey>;
-type TableFloatFields = BTreeMap<String, BTreeSet<String>>;
+#[derive(Clone, Default)]
+struct TableFloatFields {
+    floats: BTreeMap<String, BTreeSet<String>>,
+    decimals: BTreeMap<String, BTreeSet<String>>,
+}
+impl TableFloatFields {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn clear(&mut self) {
+        self.floats.clear();
+        self.decimals.clear();
+    }
+    fn insert(&mut self, table: String, fields: BTreeSet<String>) {
+        self.floats.insert(table, fields);
+    }
+    fn insert_decimal(&mut self, table: String, fields: BTreeSet<String>) {
+        self.decimals.insert(table, fields);
+    }
+    fn extend(&mut self, other: Self) {
+        self.floats.extend(other.floats);
+        self.decimals.extend(other.decimals);
+    }
+    fn get(&self, table: &str) -> Option<&BTreeSet<String>> {
+        self.floats.get(table)
+    }
+    fn contains_decimal(&self, table: &str, field: &str) -> bool {
+        self.decimals
+            .get(table)
+            .is_some_and(|fields| fields.contains(field))
+    }
+}
 type TableFields = BTreeMap<String, BTreeSet<String>>;
 /// Complete admission result for one transactional entry point: lowered
 /// functions plus every declared table and assertion surface.
@@ -5780,6 +5838,20 @@ fn admitted_transaction_module(
                                 ty: orna_syntax_v1::TypeExpr::Name { path, .. },
                                 ..
                             } if path.len() == 1 && path[0] == "Float" => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                );
+                float_fields.insert_decimal(
+                    name.clone(),
+                    members
+                        .iter()
+                        .filter_map(|member| match member {
+                            orna_syntax_v1::TableMember::Field {
+                                name,
+                                ty: orna_syntax_v1::TypeExpr::Name { path, .. },
+                                ..
+                            } if path.len() == 1 && path[0] == "Decimal" => Some(name.clone()),
                             _ => None,
                         })
                         .collect(),
@@ -6447,6 +6519,8 @@ fn relation_aggregate(
             .is_some_and(|fields| fields.contains(field))
     {
         "float"
+    } else if operation == "sum" && float_fields.contains_decimal(table, field) {
+        "decimal"
     } else {
         "integer"
     };
