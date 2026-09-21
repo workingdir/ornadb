@@ -13,6 +13,9 @@ pub(super) struct RelationPlan {
 pub(super) enum RelationStage {
     Filter(Value),
     Map(Value),
+    /// Lazily expands each upstream value through a transform returning a
+    /// finite `List`, preserving source and inner order.
+    FlatMap(Value),
     SortBy(Value),
     Distinct,
     /// Adjacent overlapping row pairs, preserving upstream order.
