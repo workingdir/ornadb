@@ -28,7 +28,8 @@ use orna_runtime_v1::{
     RuntimeIdentity, RuntimeState, StreamFailurePayload, StreamHandler, StreamHandlerResult,
     StreamItem, StreamObservationRegistration, StreamRunControl, StreamRunOutcome, StreamSource,
     StreamSourcePoll, StreamStep, StreamTableCandidateValidator, StreamTableDeliveryError,
-    StreamValidatedTableDeliveryCommit, StreamValidatedTableMutationBatch,
+    StreamTableMutationBatch, StreamValidatedTableDeliveryCommit,
+    StreamValidatedTableMutationBatch,
     TableActivationCandidateValidator, TableActivationError, TableMutation, TerminalOutcome,
     ValidatedTableActivationCommit, ValidatedTableRequestActivationCommit, WriterLease,
 };
@@ -4004,17 +4005,27 @@ impl StreamHandler for ListTableHandler {
         digest.update(self.digest);
         digest.update(mutation.id());
         self.digest = digest.finalize().into();
+        // Constructing the validator is part of handler execution. If it
+        // fails after the mutation was staged, preserve that staged batch only
+        // in the failure result so the runtime can discard it atomically.
+        let validator = match ListTableCandidateValidator::new(&self.bridge, self.limits) {
+            Ok(validator) => Box::new(validator),
+            Err(_) => {
+                return StreamHandlerResult::FailAfterTable(
+                    StreamTableMutationBatch {
+                        mutations: vec![mutation],
+                        next_digest: self.digest,
+                    },
+                    stream_handler_diagnostic(),
+                )
+            }
+        };
         StreamHandlerResult::CommitValidatedTable(StreamValidatedTableMutationBatch {
             mutations: vec![mutation],
             next_digest: self.digest,
             // Even a table with no declared assertions crosses the durable
             // boundary through an explicit no-op validator.
-            validator: Box::new(
-                match ListTableCandidateValidator::new(&self.bridge, self.limits) {
-                    Ok(validator) => validator,
-                    Err(_) => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
-                },
-            ),
+            validator,
         })
     }
 }
