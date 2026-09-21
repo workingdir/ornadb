@@ -56,6 +56,17 @@ fn source_with_module_assertion(assertion: &str, parent_body: &str) -> SourceUni
         ),
     }
 }
+fn quantifier_source(fixture_id: &str, definitions: &str, parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: fixture_id.into(),
+        source_id: format!("{fixture_id}.orna"),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Note(id: Int) {{ text: Str, }} {definitions} fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
 
 #[test]
 fn parsed_nested_insert_is_rolled_back_when_parent_assertion_escapes() {
@@ -769,4 +780,139 @@ fn table_assertions_precede_module_assertions_and_abort_the_candidate_database()
     ));
     assert_eq!(runtime.committed_row("Book", &Value::int(7.into())), None);
     assert_eq!(runtime.committed_row("Loan", &Value::int(1.into())), None);
+}
+
+#[test]
+fn ordinary_function_quantifiers_use_empty_identities_and_candidate_rows() {
+    let unit = quantifier_source(
+        "txn-quantifier-empty-ryw",
+        r#"
+            fn every_note() = every(Note, note => note.text == "ok");
+            fn exists_note() = exists(Note, note => note.id == 2);
+        "#,
+        r#"
+            assert every_note() == true;
+            assert exists_note() == false;
+            Note.insert({ id: 2, text: "ok" });
+            Note.insert({ id: 1, text: "ok" });
+            assert every_note() == true;
+            assert exists_note() == true;
+        "#,
+    );
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+
+    let outcome = runtime.execute_source(&unit);
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    for id in [1, 2] {
+        assert!(
+            runtime
+                .committed_row("Note", &Value::int(id.into()))
+                .is_some(),
+            "candidate row {id} was not published"
+        );
+    }
+}
+
+#[test]
+fn ordinary_function_quantifiers_short_circuit_in_canonical_key_order() {
+    let unit = quantifier_source(
+        "txn-quantifier-order",
+        r#"
+            fn all_first() = every(Note, note =>
+                if note.id == 1 { false } else { 1 / 0 == 0 }
+            );
+            fn any_first() = exists(Note, note =>
+                if note.id == 1 { true } else { 1 / 0 == 0 }
+            );
+        "#,
+        r#"
+            Note.insert({ id: 2, text: "later" });
+            Note.insert({ id: 1, text: "decisive" });
+            assert all_first() == false;
+            assert any_first() == true;
+        "#,
+    );
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+
+    let outcome = runtime.execute_source(&unit);
+
+    assert!(
+        matches!(outcome, StageOutcome::Passed),
+        "a later callback failure must be skipped after the canonical decisive row: {outcome:?}"
+    );
+    assert!(runtime.committed_row("Note", &Value::int(1.into())).is_some());
+    assert!(runtime.committed_row("Note", &Value::int(2.into())).is_some());
+}
+
+#[test]
+fn ordinary_function_quantifier_callback_failures_propagate_and_roll_back() {
+    for (operator, fixture_id) in [
+        ("every", "txn-quantifier-every-failure"),
+        ("exists", "txn-quantifier-exists-failure"),
+    ] {
+        let definitions =
+            format!(r#"fn failing() = {operator}(Note, note => 1 / 0 == 0);"#);
+        let unit = quantifier_source(
+            fixture_id,
+            &definitions,
+            r#"Note.insert({ id: 1, text: "bad" }); failing();"#,
+        );
+        let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+
+        let outcome = runtime.execute_source(&unit);
+
+        assert!(
+            matches!(
+                outcome,
+                StageOutcome::Failed(ref diagnostic)
+                    if diagnostic.code() == "ORNA-EVAL-DIVIDE-BY-ZERO"
+            ),
+            "{operator} callback failure escaped as {outcome:?}"
+        );
+        assert_eq!(
+            runtime.committed_row("Note", &Value::int(1.into())),
+            None,
+            "{operator} callback failure published a candidate row"
+        );
+    }
+}
+
+#[test]
+fn ordinary_function_quantifiers_share_collection_limit_and_roll_back() {
+    let limits = Limits {
+        max_collection_items: 1,
+        ..Limits::default()
+    };
+
+    for (operator, fixture_id) in [
+        ("every", "txn-quantifier-every-limit"),
+        ("exists", "txn-quantifier-exists-limit"),
+    ] {
+        let definitions =
+            format!(r#"fn bounded() = {operator}(Note, note => note.id > 0);"#);
+        let unit = quantifier_source(
+            fixture_id,
+            &definitions,
+            r#"Note.insert({ id: 2, text: "two" }); Note.insert({ id: 1, text: "one" }); bounded();"#,
+        );
+        let mut runtime = TransactionalEvaluator::new("parent", limits);
+
+        let outcome = runtime.execute_source(&unit);
+
+        assert!(
+            matches!(
+                outcome,
+                StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+            ),
+            "{operator} collection limit did not surface: {outcome:?}"
+        );
+        for id in [1, 2] {
+            assert_eq!(
+                runtime.committed_row("Note", &Value::int(id.into())),
+                None,
+                "{operator} collection limit published candidate row {id}"
+            );
+        }
+    }
 }
