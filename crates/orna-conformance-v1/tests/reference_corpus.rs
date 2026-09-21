@@ -391,6 +391,63 @@ fn typed_await_report(fixture: Fixture, source: &str) -> orna_conformance_v1::Ru
 
     Harness::new(corpus).run(&mut SemanticAdapter::default())
 }
+fn typed_cancel_report(fixture: Fixture, source: &str) -> orna_conformance_v1::RunReport {
+    let root = tempfile::tempdir().expect("typed cancel fixture root");
+    std::fs::write(root.path().join(&fixture.path), source).expect("typed cancel fixture writes");
+
+    let fixture_id = fixture.id.clone();
+    let fixture_path = fixture.path.clone();
+    let mut corpus = Corpus::load_default().expect("reference corpus loads");
+    corpus.root = root.path().to_path_buf();
+    corpus.manifest.fixtures = vec![fixture];
+    corpus
+        .requirement_evidence
+        .requirements
+        .iter_mut()
+        .find(|entry| entry.requirement == "ORNA-SYS-083")
+        .expect("ORNA-SYS-083 requirement exists")
+        .tests
+        .push(serde_json::json!({
+            "kind": "ordinary source fixture",
+            "status": "planned",
+            "subject": "ORNA-SYS-083",
+            "fixture": fixture_id,
+            "path": fixture_path,
+            "stage": "typecheck",
+        }));
+
+    Harness::new(corpus).run(&mut SemanticAdapter::default())
+}
+
+fn typed_cancel_fixture(
+    id: &str,
+    path: &str,
+    expect: &[(&str, &str)],
+    failing_phase: Option<&str>,
+    diagnostic: Option<&str>,
+    message_contains: Option<&str>,
+) -> Fixture {
+    Fixture {
+        id: id.into(),
+        kind: if failing_phase.is_some() {
+            "invalid".into()
+        } else {
+            "valid".into()
+        },
+        path: path.into(),
+        parse_as: "module_unit".into(),
+        expect: expect
+            .iter()
+            .map(|(stage, result)| ((*stage).into(), (*result).into()))
+            .collect(),
+        failing_phase: failing_phase.map(str::to_owned),
+        diagnostic: diagnostic.map(str::to_owned),
+        message_contains: message_contains.map(str::to_owned),
+        expected_diagnostic: None,
+        environment: None,
+    }
+}
+
 
 fn typed_await_fixture(
     id: &str,
@@ -878,6 +935,129 @@ fn typed_sys_await_report_retains_mismatched_witness_diagnostic() {
         "ORNA-S021-TYPE"
     );
 }
+#[test]
+fn typed_sys_cancel_report_maps_orna_sys_083_to_semantic_pass_evidence() {
+    let report = typed_cancel_report(
+        typed_cancel_fixture(
+            "typed-cancel-valid",
+            "typed-cancel-valid.orna",
+            &[("parse", "pass"), ("resolve", "pass"), ("typecheck", "pass"), ("evaluate", "not-run")],
+            None,
+            None,
+            None,
+        ),
+        r#"
+            pub fn inferred_cancel(job: sys.InvocationHandle<Int>) =
+                sys.cancel(job);
+            pub fn explicit_cancel(job: sys.InvocationHandle<Int>) =
+                sys.cancel<Int>(job, reason: "stop");
+        "#,
+    );
+    let fixture = &report.fixtures[0];
+    let typecheck = fixture
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Typecheck))
+        .expect("typed cancel typecheck stage");
+    assert_eq!(typecheck.class, EvidenceClass::Semantic);
+    assert_eq!(typecheck.status, EvidenceStatus::Passed);
+    assert_eq!(
+        typecheck.requirements,
+        vec!["ORNA-SYS-083".to_string()]
+    );
+    assert!(matches!(
+        &typecheck.requirement_mapping,
+        RequirementMapping::Mapped { requirements }
+            if requirements == &vec!["ORNA-SYS-083".to_string()]
+    ));
+    assert!(report.semantic_evidence.iter().any(|evidence| {
+        evidence.subject == "typed-cancel-valid"
+            && evidence.stage == Some(Stage::Typecheck)
+            && evidence.status == EvidenceStatus::Passed
+    }));
+    assert!(fixture.passed, "{:?}", fixture.stages);
+}
+
+#[test]
+fn typed_sys_cancel_report_retains_mismatched_witness_diagnostic() {
+    let report = typed_cancel_report(
+        typed_cancel_fixture(
+            "typed-cancel-mismatch",
+            "typed-cancel-mismatch.orna",
+            &[("parse", "pass"), ("resolve", "pass"), ("typecheck", "fail"), ("evaluate", "not-run")],
+            Some("typecheck"),
+            Some("ORNA-S021-TYPE"),
+            Some("sys.cancel explicit type argument must match the invocation handle result type"),
+        ),
+        r#"
+            pub fn cancel_wrong(job: sys.InvocationHandle<Int>) =
+                sys.cancel<Str>(job);
+        "#,
+    );
+    let typecheck = report.fixtures[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Typecheck))
+        .expect("typed cancel mismatch typecheck stage");
+    assert_eq!(typecheck.class, EvidenceClass::Semantic);
+    assert_eq!(typecheck.status, EvidenceStatus::Failed);
+    assert_eq!(
+        typecheck.requirements,
+        vec!["ORNA-SYS-083".to_string()]
+    );
+    assert!(matches!(
+        &typecheck.requirement_mapping,
+        RequirementMapping::Mapped { requirements }
+            if requirements == &vec!["ORNA-SYS-083".to_string()]
+    ));
+    assert_eq!(
+        typecheck.diagnostic,
+        Some(serde_json::json!({
+            "code": "ORNA-S021-TYPE",
+            "spans": [],
+            "redacted": true,
+        }))
+    );
+    assert!(report.semantic_evidence.iter().any(|evidence| {
+        evidence.subject == "typed-cancel-mismatch"
+            && evidence.stage == Some(Stage::Typecheck)
+            && evidence.status == EvidenceStatus::Failed
+            && evidence.diagnostic.as_ref().is_some_and(|diagnostic| {
+                diagnostic["code"] == "ORNA-S021-TYPE"
+            })
+    }));
+
+    let serialized = serde_json::to_value(&report).expect("typed cancel report serializes");
+    let serialized_typecheck = serialized["fixtures"][0]["stages"]
+        .as_array()
+        .expect("serialized stage array")
+        .iter()
+        .find(|stage| stage["stage"] == "typecheck")
+        .expect("serialized typed cancel mismatch typecheck stage");
+    assert_eq!(serialized_typecheck["class"], "semantic");
+    assert_eq!(serialized_typecheck["status"], "failed");
+    assert_eq!(
+        serialized_typecheck["requirement_mapping"]["status"],
+        "mapped"
+    );
+    assert_eq!(
+        serialized_typecheck["diagnostic"]["code"],
+        "ORNA-S021-TYPE"
+    );
+    assert_eq!(
+        serialized["semantic_evidence"]
+            .as_array()
+            .expect("serialized semantic evidence")
+            .iter()
+            .find(|evidence| {
+                evidence["subject"] == "typed-cancel-mismatch"
+                    && evidence["stage"] == "typecheck"
+            })
+            .expect("serialized typed cancel mismatch evidence")["diagnostic"]["code"],
+        "ORNA-S021-TYPE"
+    );
+}
+
 
 struct FailBeforeResolve {
     later_calls: usize,

@@ -487,13 +487,26 @@ fn semantic_project_adapter_rejects_typed_sys_start_mismatched_witness() {
 
 
 #[test]
-fn semantic_project_adapter_admits_inferred_and_explicit_typed_sys_await_and_cancel() {
+fn semantic_project_adapter_admits_inferred_and_explicit_typed_sys_await() {
     let project = typed_invoke_project(
         r#"
             pub fn inferred_await(job: sys.InvocationHandle<Int>) =
                 sys.await(job, timeout: 1.s);
             pub fn explicit_await(job: sys.InvocationHandle<Int>) =
                 sys.await<Int>(invocation: job, timeout: null);
+        "#,
+    );
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.typecheck_project(&project), StageOutcome::Passed);
+}
+
+#[test]
+fn semantic_project_adapter_admits_inferred_and_explicit_typed_sys_cancel() {
+    let project = typed_invoke_project(
+        r#"
             pub fn inferred_cancel(job: sys.InvocationHandle<Int>) =
                 sys.cancel(job);
             pub fn explicit_cancel(job: sys.InvocationHandle<Int>) =
