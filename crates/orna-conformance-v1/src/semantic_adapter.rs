@@ -5132,6 +5132,54 @@ impl TableEffectHandler<'_, '_> {
                 name,
                 ..
             } if matches!(base.as_ref(), Expr::ReplBinding { text, .. } if text == "$__orna_relation")
+                && name == "filtered_first"
+        ) {
+            let [table, field, expected] = arguments else {
+                return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+            };
+            let (OvbRaw::Text(table), OvbRaw::Text(field)) = (table.raw(), field.raw()) else {
+                return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+            };
+            if !self.key_fields.contains_key(table)
+                || !self
+                    .table_fields
+                    .get(table)
+                    .is_some_and(|fields| fields.contains(field))
+                || !matches!(expected.raw(), OvbRaw::Tag(60000, _))
+            {
+                return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+            }
+            let mut first = None;
+            for (_, row) in self
+                .activation
+                .candidate_relation(table)
+                .map_err(|error| transaction_error(table_error_code(error)))?
+            {
+                debit_effect_step(&mut budget)?;
+                let value = record_field(&row, field)
+                    .ok_or_else(|| transaction_error("ORNA-EVAL-UNSUPPORTED"))?;
+                let matches = match (value.raw(), expected.raw()) {
+                    (OvbRaw::Tag(60000, left), OvbRaw::Tag(60000, right)) => {
+                        decimal_key_cmp(left, right) == Ordering::Equal
+                    }
+                    _ => false,
+                };
+                if matches {
+                    first = Some(row);
+                    break;
+                }
+            }
+            return Value::option(first)
+                .map(Some)
+                .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+        }
+        if matches!(
+            callee,
+            Expr::Field {
+                base,
+                name,
+                ..
+            } if matches!(base.as_ref(), Expr::ReplBinding { text, .. } if text == "$__orna_relation")
                 && name == "filtered_count"
         ) {
             let [table, field, expected] = arguments else {
@@ -6051,6 +6099,17 @@ fn lower_relation_expression_with_resolution(
     })
     .or_else(|| relation_window_count(expression, table_keys, functions, namespace, shadowed))
     .or_else(|| relation_lookup(expression, table_keys, functions, namespace, shadowed))
+    .or_else(|| {
+        relation_filter_first(
+            expression,
+            table_keys,
+            float_fields,
+            table_fields,
+            functions,
+            namespace,
+            shadowed,
+        )
+    })
     .or_else(|| relation_filtered_one(expression, table_keys, functions, namespace, shadowed))
     .or_else(|| relation_filter_count(expression, table_keys, functions, namespace, shadowed))
     .or_else(|| relation_count(expression, table_keys, functions, namespace, shadowed))
@@ -7117,6 +7176,152 @@ fn relation_window_size_and_step(arguments: &[orna_syntax_v1::Argument]) -> Opti
         span: size.span(),
     });
     Some((size, step))
+}
+
+fn relation_filter_first(
+    expression: &Expr,
+    table_keys: &TableKeys,
+    float_fields: &TableFloatFields,
+    table_fields: &TableFields,
+    functions: &Functions,
+    namespace: Option<&str>,
+    shadowed: &BTreeSet<String>,
+) -> Option<Expr> {
+    let Expr::Binary { lhs, op, rhs, .. } = expression else {
+        return None;
+    };
+    if op != "|"
+        || !relation_first_target(rhs)
+        || !root_relation_intrinsic_is_unshadowed("first", functions, namespace, shadowed)
+    {
+        return None;
+    }
+    let Expr::Binary {
+        lhs: table,
+        op: filter_op,
+        rhs: filter,
+        ..
+    } = lhs.as_ref()
+    else {
+        return None;
+    };
+    let Expr::Name {
+        text: table,
+        span: table_span,
+    } = table.as_ref()
+    else {
+        return None;
+    };
+    if filter_op != "|"
+        || shadowed.contains(table)
+        || !table_keys.contains_key(table)
+        || !table_fields.contains_key(table)
+        || !root_relation_intrinsic_is_unshadowed("filter", functions, namespace, shadowed)
+    {
+        return None;
+    }
+    let Expr::Call {
+        callee, arguments, ..
+    } = filter.as_ref()
+    else {
+        return None;
+    };
+    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "filter")
+        || !root_relation_intrinsic_is_unshadowed("filter", functions, namespace, shadowed)
+    {
+        return None;
+    }
+    let [argument] = arguments.as_slice() else {
+        return None;
+    };
+    let Expr::Lambda {
+        parameters, body, ..
+    } = &argument.value
+    else {
+        return None;
+    };
+    let [parameter] = parameters.as_slice() else {
+        return None;
+    };
+    let Pattern::Name(binding, _) = &parameter.pattern else {
+        return None;
+    };
+    let Expr::Binary {
+        lhs: predicate_lhs,
+        op: predicate_op,
+        rhs: expected,
+        ..
+    } = body.as_ref()
+    else {
+        return None;
+    };
+    let Expr::Field {
+        base,
+        name: field,
+        ..
+    } = predicate_lhs.as_ref()
+    else {
+        return None;
+    };
+    if predicate_op != "=="
+        || !matches!(base.as_ref(), Expr::Name { text, .. } if text == binding)
+        || !table_fields
+            .get(table)
+            .is_some_and(|fields| fields.contains(field))
+        || !float_fields.contains_decimal(table, field)
+    {
+        return None;
+    }
+    let table = Expr::Literal {
+        text: format!("{table:?}"),
+        kind: orna_syntax_v1::LiteralKind::String,
+        span: table_span.clone(),
+    };
+    let field = Expr::Literal {
+        text: format!("{field:?}"),
+        kind: orna_syntax_v1::LiteralKind::String,
+        span: predicate_lhs.span(),
+    };
+    Some(Expr::Call {
+        callee: Box::new(Expr::Field {
+            base: Box::new(Expr::ReplBinding {
+                text: "$__orna_relation".into(),
+                span: expression.span(),
+            }),
+            name: "filtered_first".into(),
+            span: expression.span(),
+        }),
+        arguments: vec![
+            orna_syntax_v1::Argument {
+                name: None,
+                span: table.span(),
+                value: table,
+            },
+            orna_syntax_v1::Argument {
+                name: None,
+                span: field.span(),
+                value: field,
+            },
+            orna_syntax_v1::Argument {
+                name: None,
+                span: expected.span(),
+                value: expected.as_ref().clone(),
+            },
+        ],
+        span: expression.span(),
+    })
+}
+
+fn relation_first_target(expression: &Expr) -> bool {
+    matches!(
+        expression,
+        Expr::Name { text, .. } if text == "first"
+    ) || matches!(
+        expression,
+        Expr::Call {
+            callee, arguments, ..
+        } if arguments.is_empty() && matches!(callee.as_ref(), Expr::Name { text, .. } if text == "first")
+    )
 }
 
 fn relation_filter_count(
