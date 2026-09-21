@@ -25,6 +25,7 @@ use parquet::{
         page::Page,
         reader::ColumnReader,
     },
+    data_type::{AsBytes, BoolType, ByteArrayType, Int32Type, Int64Type},
     file::reader::{FileReader, SerializedFileReader},
 };
 use sha2::{Digest, Sha256};
@@ -250,6 +251,73 @@ impl CompactSegmentRole {
         }
     }
 }
+/// One canonical logical row projected from a verified committed segment.
+///
+/// `key` and `value` are decoded and re-encoded OVB values. They are never
+/// treated as arbitrary Parquet or byte-array payloads. A deletion carries its
+/// key and no value; data and replacement segments carry a complete row value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactCommittedRow {
+    key: CanonicalValue,
+    value: Option<CanonicalValue>,
+}
+
+impl CompactCommittedRow {
+    pub fn key(&self) -> &CanonicalValue {
+        &self.key
+    }
+
+    pub fn value(&self) -> Option<&CanonicalValue> {
+        self.value.as_ref()
+    }
+}
+
+/// The verified logical projection of one committed compact segment.
+///
+/// This is the repository-to-storage producer boundary. The projection is
+/// available only after the committed Git object, manifest identity, Parquet
+/// profile, schema descriptor, and every physical value have been verified.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactCommittedSegmentProjection {
+    table_id: Uuid,
+    schema_id: [u8; 32],
+    profile: &'static str,
+    encoder_version: String,
+    generation: u64,
+    role: CompactSegmentRole,
+    rows: Vec<CompactCommittedRow>,
+}
+
+impl CompactCommittedSegmentProjection {
+    pub const fn table_id(&self) -> Uuid {
+        self.table_id
+    }
+
+    pub const fn schema_id(&self) -> [u8; 32] {
+        self.schema_id
+    }
+
+    pub const fn profile(&self) -> &'static str {
+        self.profile
+    }
+
+    pub fn encoder_version(&self) -> &str {
+        &self.encoder_version
+    }
+
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub const fn role(&self) -> CompactSegmentRole {
+        self.role
+    }
+
+    pub fn rows(&self) -> &[CompactCommittedRow] {
+        &self.rows
+    }
+}
+
 /// Observed compact-storage layout at one commit: manifest-holding tables
 /// paired with their validated shard/data paths.
 type CompactInventoryPaths = (BTreeSet<Uuid>, BTreeMap<Uuid, BTreeSet<String>>);
@@ -870,7 +938,23 @@ fn verify_physical_columns(
         physical_columns.insert(
             column_index,
             PhysicalColumnInfo {
+                field_id: expected.field_id,
                 is_key: expected.is_key,
+                max_def_level: expected.max_def_level,
+                max_rep_level: expected.max_rep_level,
+                kind: if let Some(kind) = ovb_kind {
+                    PhysicalValueKind::Ovb(kind)
+                } else if int_mapping {
+                    PhysicalValueKind::Int
+                } else if bool_mapping {
+                    PhysicalValueKind::Bool
+                } else if string_mapping {
+                    PhysicalValueKind::Str
+                } else if date_mapping {
+                    PhysicalValueKind::Date
+                } else {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                },
             },
         );
         let path = path.join(".");
@@ -890,8 +974,22 @@ fn verify_physical_columns(
 
 #[derive(Clone, Copy)]
 struct PhysicalColumnInfo {
+    field_id: Uuid,
     is_key: bool,
+    max_def_level: i16,
+    max_rep_level: i16,
+    kind: PhysicalValueKind,
 }
+
+#[derive(Clone, Copy)]
+enum PhysicalValueKind {
+    Int,
+    Bool,
+    Str,
+    Date,
+    Ovb(OvbFallbackKind),
+}
+
 #[derive(Clone, Copy)]
 enum OvbFallbackKind {
     Int,
@@ -948,6 +1046,345 @@ fn verify_ovb_values(
     Ok(())
 }
 
+
+fn decode_projection_column(
+    row_group: &dyn parquet::file::reader::RowGroupReader,
+    index: usize,
+    kind: PhysicalValueKind,
+    max_def_level: i16,
+    max_rep_level: i16,
+    expected_rows: usize,
+) -> Result<Vec<Option<OvbRaw>>, RepositoryError> {
+    if max_rep_level != 0 {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let reader = row_group
+        .get_column_reader(index)
+        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+
+    macro_rules! read_values {
+        ($column:expr, $value_type:ty, $convert:expr) => {{
+            let mut values: Vec<$value_type> = Vec::new();
+            let mut definitions = Vec::new();
+            let mut records = 0usize;
+            while records < expected_rows {
+                let remaining = expected_rows - records;
+                let definition_levels = (max_def_level != 0).then_some(&mut definitions);
+                let (read_records, values_read, levels_read) = $column
+                    .read_records(remaining, definition_levels, None, &mut values)
+                    .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                if read_records == 0 || levels_read != read_records {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+                if max_def_level == 0 && values_read != read_records {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+                records = records
+                    .checked_add(read_records)
+                    .ok_or(RepositoryError::InvalidCompactManifest)?;
+            }
+            if records != expected_rows
+                || (max_def_level == 0 && values.len() != expected_rows)
+                || (max_def_level != 0 && definitions.len() != expected_rows)
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let mut value_index = 0usize;
+            let definitions = if max_def_level == 0 {
+                vec![0; expected_rows]
+            } else {
+                definitions
+            };
+            let output = definitions
+                .into_iter()
+                .map(|definition| {
+                    if definition == max_def_level {
+                        let value = values
+                            .get(value_index)
+                            .ok_or(RepositoryError::InvalidCompactManifest)?;
+                        value_index = value_index
+                            .checked_add(1)
+                            .ok_or(RepositoryError::InvalidCompactManifest)?;
+                        Ok(Some(($convert)(value)?))
+                    } else if definition < max_def_level {
+                        Ok(None)
+                    } else {
+                        Err(RepositoryError::InvalidCompactManifest)
+                    }
+                })
+                .collect::<Result<Vec<_>, RepositoryError>>()?;
+            if value_index != values.len() {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            Ok(output)
+        }};
+    }
+
+    match kind {
+        PhysicalValueKind::Int => {
+            let ColumnReader::Int64ColumnReader(mut column) = reader else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            read_values!(column, i64, |value: &i64| Ok(OvbRaw::Int((*value).into())))
+        }
+        PhysicalValueKind::Bool => {
+            let ColumnReader::BoolColumnReader(mut column) = reader else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            read_values!(column, bool, |value: &bool| Ok(OvbRaw::Bool(*value)))
+        }
+        PhysicalValueKind::Str => {
+            let ColumnReader::ByteArrayColumnReader(mut column) = reader else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            read_values!(column, parquet::data_type::ByteArray, |value: &parquet::data_type::ByteArray| {
+                String::from_utf8(value.data().to_vec())
+                    .map(OvbRaw::Text)
+                    .map_err(|_| RepositoryError::InvalidCompactManifest)
+            })
+        }
+        PhysicalValueKind::Date => {
+            let ColumnReader::Int32ColumnReader(mut column) = reader else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            read_values!(column, i32, |value: &i32| {
+                compact_date_value(*value)
+            })
+        }
+        PhysicalValueKind::Ovb(fallback) => {
+            let ColumnReader::ByteArrayColumnReader(mut column) = reader else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            read_values!(column, parquet::data_type::ByteArray, |value: &parquet::data_type::ByteArray| {
+                let value = CanonicalValue::decode(value.data())
+                    .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                let supported = match fallback {
+                    OvbFallbackKind::Int => matches!(value.raw(), OvbRaw::Int(_)),
+                    OvbFallbackKind::Bool => matches!(value.raw(), OvbRaw::Bool(_)),
+                };
+                supported
+                    .then(|| value.raw().clone())
+                    .ok_or(RepositoryError::InvalidCompactManifest)
+            })
+        }
+    }
+}
+
+fn compact_date_value(days: i32) -> Result<OvbRaw, RepositoryError> {
+    let z = i64::from(days) + 719_468;
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let month0 = (5 * doy + 2) / 153;
+    let day = doy - (153 * month0 + 2) / 5 + 1;
+    let month = month0 + if month0 < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    if !(1..=9_999).contains(&year) {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    Ok(OvbRaw::Tag(
+        60001,
+        Box::new(OvbRaw::Text(format!("{year:04}-{month:02}-{day:02}"))),
+    ))
+}
+
+fn schema_row_fields(
+    descriptor: &SchemaDescriptor,
+) -> Result<(Vec<Uuid>, Vec<Uuid>), RepositoryError> {
+    let OvbRaw::Map(entries) = descriptor.raw() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let value_for = |number: i64| {
+        entries
+            .iter()
+            .find_map(|(key, value)| matches!(key, OvbRaw::Int(value) if *value == number.into()).then_some(value))
+            .ok_or(RepositoryError::InvalidCompactManifest)
+    };
+    let ids = |value: &OvbRaw| {
+        let OvbRaw::Array(values) = value else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        values
+            .iter()
+            .map(|value| {
+                let OvbRaw::Tag(37, value) = value else {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                };
+                let OvbRaw::Bytes(value) = value.as_ref() else {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                };
+                Uuid::from_slice(value).map_err(|_| RepositoryError::InvalidCompactManifest)
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let key_ids = ids(value_for(2)?)?;
+    let OvbRaw::Array(fields) = value_for(3)? else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let mut stored = BTreeSet::new();
+    let mut declared = BTreeSet::new();
+    for field in fields {
+        let OvbRaw::Array(field) = field else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let [OvbRaw::Tag(37, id), _, _, OvbRaw::Int(role), _] = field.as_slice() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let OvbRaw::Bytes(id) = id.as_ref() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let id = Uuid::from_slice(id).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        if !declared.insert(id) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        if role.to_string() == "1" {
+            stored.insert(id);
+        }
+    }
+    if key_ids.iter().any(|id| !declared.contains(id)) {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let stored = stored
+        .into_iter()
+        .filter(|id| !key_ids.contains(id))
+        .collect();
+    Ok((key_ids, stored))
+}
+
+fn decode_compact_segment_projection(
+    table: Uuid,
+    entry: &CompactManifestEntry,
+    bytes: &[u8],
+) -> Result<CompactCommittedSegmentProjection, RepositoryError> {
+    let reader = SerializedFileReader::new(Bytes::copy_from_slice(bytes))
+        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let schema_bytes = reader
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .into_iter()
+        .flatten()
+        .find(|item| item.key == "orna.schema.ovb")
+        .and_then(|item| item.value.as_deref())
+        .ok_or(RepositoryError::InvalidCompactManifest)
+        .and_then(decode_base64)?;
+    let descriptor = SchemaDescriptor::decode(&schema_bytes)
+        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    if schema_descriptor_fingerprint(&descriptor)? != entry.schema_id()
+        || schema_descriptor_table(&descriptor)? != table
+    {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let (_, physical_columns) = verify_physical_columns(
+        &entry.columns,
+        reader.metadata().file_metadata().schema_descr(),
+        &descriptor,
+        entry.role(),
+    )?;
+    let (key_fields, stored_fields) = schema_row_fields(&descriptor)?;
+    let mut field_values = BTreeMap::<Uuid, Vec<Option<OvbRaw>>>::new();
+    for (column_index, info) in &physical_columns {
+        if field_values.contains_key(&info.field_id) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let mut values = Vec::new();
+        for row_group_index in 0..reader.num_row_groups() {
+            let row_group = reader
+                .get_row_group(row_group_index)
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let rows = usize::try_from(row_group.metadata().num_rows())
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            values.extend(decode_projection_column(
+                &*row_group,
+                *column_index,
+                info.kind,
+                info.max_def_level,
+                info.max_rep_level,
+                rows,
+            )?);
+        }
+        if values.len() != usize::try_from(entry.row_count())
+            .map_err(|_| RepositoryError::InvalidCompactManifest)?
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        field_values.insert(info.field_id, values);
+    }
+    let row_count =
+        usize::try_from(entry.row_count()).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let mut rows = Vec::with_capacity(row_count);
+    for row in 0..row_count {
+        let mut key_components = Vec::with_capacity(key_fields.len());
+        for field in &key_fields {
+            let value = field_values
+                .get(field)
+                .and_then(|values| values.get(row))
+                .and_then(Option::as_ref)
+                .ok_or(RepositoryError::InvalidCompactManifest)?
+                .clone();
+            key_components.push(value);
+        }
+        let key_raw = match key_components.as_slice() {
+            [value] => value.clone(),
+            [] => return Err(RepositoryError::InvalidCompactManifest),
+            values => OvbRaw::Tag(60015, Box::new(OvbRaw::Array(values.to_vec()))),
+        };
+        let key =
+            CanonicalValue::new(key_raw).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        let value = if entry.role() == CompactSegmentRole::Deletion {
+            None
+        } else {
+            let mut fields = Vec::with_capacity(key_fields.len() + stored_fields.len());
+            for field in key_fields.iter().chain(stored_fields.iter()) {
+                let value = field_values
+                    .get(field)
+                    .and_then(|values| values.get(row))
+                    .ok_or(RepositoryError::InvalidCompactManifest)?
+                    .clone()
+                    .unwrap_or(OvbRaw::Null);
+                fields.push(OvbRaw::Array(vec![
+                    OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(field.as_bytes().to_vec()))),
+                    value,
+                ]));
+            }
+            let raw = OvbRaw::Tag(
+                60009,
+                Box::new(OvbRaw::Array(vec![
+                    OvbRaw::Null,
+                    OvbRaw::Array(fields),
+                ])),
+            );
+            Some(CanonicalValue::new(raw).map_err(|_| RepositoryError::InvalidCompactManifest)?)
+        };
+        rows.push(CompactCommittedRow { key, value });
+    }
+    let keys = rows
+        .iter()
+        .map(|row| row.key.encode())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let (min_key, max_key) = canonical_key_extrema(keys.iter().map(Vec::as_slice))?;
+    if min_key != entry.min_key() || max_key != entry.max_key() {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    Ok(CompactCommittedSegmentProjection {
+        table_id: table,
+        schema_id: entry.schema_id(),
+        profile: COMPACT_PROFILE,
+        encoder_version: entry.encoder_version().to_owned(),
+        generation: entry.generation(),
+        role: entry.role(),
+        rows,
+    })
+}
 
 struct ExpectedPhysicalLeaf {
     field_id: Uuid,
@@ -2051,6 +2488,73 @@ impl Repository {
         let bytes = self.git_bytes(["cat-file", "blob", &object])?;
         verify_manifest_segment_bytes(table, entry, &object, &bytes)?;
         Ok(bytes)
+    }
+
+    /// Projects the complete logical base of one committed compact table
+    /// through a schema-bound consumer. Every callback input has already
+    /// passed committed Git object, checksum, manifest, Parquet, descriptor,
+    /// and canonical-row validation; no manifest bound or physical hash is
+    /// used as row data.
+    pub fn read_compact_committed_base<T, F>(
+        &self,
+        expected_head: &GitCommitRef,
+        table: Uuid,
+        expected_schema: [u8; 32],
+        expected_profile: &str,
+        mut project: F,
+    ) -> Result<Vec<T>, RepositoryError>
+    where
+        F: FnMut(
+            &CompactManifestEntry,
+            &CompactCommittedSegmentProjection,
+        ) -> Result<T, RepositoryError>,
+    {
+        if expected_profile != COMPACT_PROFILE
+            || self.head()?.as_ref() != Some(expected_head)
+        {
+            return Err(RepositoryError::StaleHead);
+        }
+        let manifest = self
+            .read_compact_manifest(expected_head, table)?
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        if manifest.table() != table || manifest.schema() != expected_schema {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let mut segments = Vec::with_capacity(manifest.entries().len());
+        for entry in manifest.entries() {
+            if entry.schema_id() != expected_schema {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let bytes = self.read_verified_compact_segment(expected_head, table, entry)?;
+            let projection = decode_compact_segment_projection(table, entry, &bytes)?;
+            if projection.profile() != expected_profile
+                || projection.schema_id() != expected_schema
+                || projection.table_id() != table
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            segments.push((entry, projection));
+        }
+        let mut authoritative = BTreeSet::new();
+        for (entry, projection) in &segments {
+            for row in projection.rows() {
+                let key = row
+                    .key()
+                    .encode()
+                    .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                if !authoritative.insert((key, entry.generation())) {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+        }
+        let mut projected = Vec::with_capacity(segments.len());
+        for (entry, projection) in &segments {
+            projected.push(project(entry, projection)?);
+        }
+        if self.head()?.as_ref() != Some(expected_head) {
+            return Err(RepositoryError::StaleHead);
+        }
+        Ok(projected)
     }
 
     /// Persists a prepared compact journal without advancing the selected ref.
@@ -5062,6 +5566,25 @@ mod tests {
             .unwrap();
         assert_eq!((records, values_read, levels_read), (2, 2, 2));
         assert_eq!(values, [false, true]);
+        let projected = repository
+            .read_compact_committed_base(
+                pending.commit(),
+                BOOL_TABLE,
+                schema,
+                COMPACT_PROFILE,
+                |_entry, projection| Ok(projection.clone()),
+            )
+            .unwrap();
+        assert_eq!(projected.len(), 1);
+        let projection = &projected[0];
+        assert_eq!(projection.table_id(), BOOL_TABLE);
+        assert_eq!(projection.schema_id(), schema);
+        assert_eq!(projection.profile(), COMPACT_PROFILE);
+        assert_eq!(projection.generation(), 1);
+        assert_eq!(projection.rows().len(), 2);
+        assert!(matches!(projection.rows()[0].key().raw(), OvbRaw::Bool(false)));
+        assert!(matches!(projection.rows()[1].key().raw(), OvbRaw::Bool(true)));
+        assert!(projection.rows().iter().all(|row| row.value().is_some()));
         drop(root);
     }
 
