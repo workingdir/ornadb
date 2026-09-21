@@ -3039,6 +3039,7 @@ impl Context<'_, '_> {
                 let want_exists = operation == "exists";
                 let mut result = !want_exists;
                 self.for_each_relation_value(plan, depth, |context, value| {
+                    context.step()?;
                     let value = context.invoke_predicate(predicate, value, depth + 1)?;
                     let Value::Bool(value) = value else {
                         return Err(error("ORNA-EVAL-TYPE"));
@@ -3116,6 +3117,7 @@ impl Context<'_, '_> {
                 let want_exists = operation == "exists";
                 let mut result = !want_exists;
                 self.for_each_sorted_relation(plan, depth, |context, value| {
+                    context.step()?;
                     let value = context.invoke_predicate(predicate, value, depth + 1)?;
                     let Value::Bool(value) = value else {
                         return Err(error("ORNA-EVAL-TYPE"));
@@ -4890,6 +4892,7 @@ impl Context<'_, '_> {
     ) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
         for value in values {
+            self.step()?;
             match self.invoke_predicate(predicate, value.clone(), depth + 1)? {
                 Value::Bool(true) => {}
                 Value::Bool(false) => return Ok(Value::Bool(false)),
@@ -4906,6 +4909,7 @@ impl Context<'_, '_> {
     ) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
         for value in values {
+            self.step()?;
             match self.invoke_predicate(predicate, value.clone(), depth + 1)? {
                 Value::Bool(true) => return Ok(Value::Bool(true)),
                 Value::Bool(false) => {}
