@@ -6057,3 +6057,213 @@ fn rejects_resource_limits_before_work_can_expand() {
         "ORNA-EVAL-LIMIT"
     );
 }
+
+#[test]
+fn std_stats_mean_returns_empty_null_and_preserves_exact_or_explicitly_rounded_results() {
+    let null = Value::new(Raw::Null).unwrap();
+    assert_eq!(evaluate("std.stats.mean([])"), null);
+    assert_eq!(
+        evaluate("std.stats.mean([1.0, 2.0])"),
+        Value::decimal(15.into(), (-1).into()).unwrap()
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.stats.mean([1.0, 2.0, 4.0])",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-VALUE"
+    );
+    assert_eq!(
+        evaluate(
+            "std.stats.mean([1.0, 2.0, 4.0], scale: 2, rounding: \"half_even\")"
+        ),
+        Value::decimal(233.into(), (-2).into()).unwrap()
+    );
+
+    let expected_float = Value::float_bits((1.0f64 / 3.0f64).to_bits());
+    let environment = Environment::from([(
+        "rows".into(),
+        float_rows(&[
+            10_000_000_000_000_000.0f64.to_bits(),
+            (-10_000_000_000_000_000.0f64).to_bits(),
+            1.0f64.to_bits(),
+        ]),
+    )]);
+    assert_eq!(
+        evaluate_expression("std.stats.mean(rows)", &environment, Limits::default()).unwrap(),
+        expected_float
+    );
+    let singleton = Environment::from([(
+        "rows".into(),
+        float_rows(&[(-0.0f64).to_bits()]),
+    )]);
+    assert_eq!(
+        evaluate_expression("std.stats.mean(rows)", &singleton, Limits::default()).unwrap(),
+        Value::float_bits((-0.0f64).to_bits())
+    );
+}
+
+#[test]
+fn std_stats_median_sorts_by_total_order_and_rounds_only_when_requested() {
+    assert_eq!(
+        evaluate("std.stats.median([9, 1, 5])"),
+        Value::int(5.into())
+    );
+    assert_eq!(
+        evaluate("std.stats.median([1.0, 2.0])"),
+        Value::decimal(15.into(), (-1).into()).unwrap()
+    );
+    assert_eq!(
+        evaluate("std.stats.median([1.0, 2.0], scale: 0, rounding: \"half_even\")"),
+        Value::decimal(2.into(), 0.into()).unwrap()
+    );
+    assert_eq!(
+        evaluate("std.stats.median([1.0, 2.0, 4.0, 8.0])"),
+        Value::decimal(3.into(), 0.into()).unwrap()
+    );
+
+    let environment = Environment::from([(
+        "rows".into(),
+        float_rows(&[
+            CANONICAL_NAN_BITS,
+            (-0.0f64).to_bits(),
+            0.0f64.to_bits(),
+            (-1.0f64).to_bits(),
+            1.0f64.to_bits(),
+        ]),
+    )]);
+    assert_eq!(
+        evaluate_expression(
+            "std.stats.median(rows)",
+            &environment,
+            Limits::default()
+        )
+        .unwrap(),
+        Value::float_bits(0.0f64.to_bits())
+    );
+}
+
+#[test]
+fn std_stats_percentile_requires_bounded_probability_and_named_supported_interpolation() {
+    let values = "[10.0, 0.0]";
+    for (expression, expected) in [
+        (
+            format!("std.stats.percentile({values}, 0.0, interpolation: \"linear\")"),
+            Value::decimal(0.into(), 0.into()).unwrap(),
+        ),
+        (
+            format!("std.stats.percentile({values}, 1.0, interpolation: \"linear\")"),
+            Value::decimal(10.into(), 0.into()).unwrap(),
+        ),
+        (
+            format!("std.stats.percentile({values}, 0.25, interpolation: \"linear\")"),
+            Value::decimal(25.into(), (-1).into()).unwrap(),
+        ),
+        (
+            format!("std.stats.percentile({values}, 0.25, interpolation: \"lower\")"),
+            Value::decimal(0.into(), 0.into()).unwrap(),
+        ),
+        (
+            format!("std.stats.percentile({values}, 0.25, interpolation: \"higher\")"),
+            Value::decimal(10.into(), 0.into()).unwrap(),
+        ),
+        (
+            format!("std.stats.percentile({values}, 0.25, interpolation: \"nearest\")"),
+            Value::decimal(0.into(), 0.into()).unwrap(),
+        ),
+        (
+            format!("std.stats.percentile({values}, 0.25, interpolation: \"midpoint\")"),
+            Value::decimal(5.into(), 0.into()).unwrap(),
+        ),
+    ] {
+        assert_eq!(evaluate(&expression), expected, "{expression}");
+    }
+    for expression in [
+        "std.stats.percentile([0.0, 10.0], -0.1, interpolation: \"linear\")",
+        "std.stats.percentile([0.0, 10.0], 1.1, interpolation: \"linear\")",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            "ORNA-EVAL-VALUE",
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        code(evaluate_expression(
+            "std.stats.percentile([0.0, 10.0], 0.5)",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.stats.percentile([0.0, 10.0], 0.5, interpolation: \"cubic\")",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-VALUE"
+    );
+}
+
+#[test]
+fn std_stats_reject_mixed_or_unsupported_inputs_and_resource_overflow() {
+    for (expression, expected) in [
+        ("std.stats.mean([1, 2.0])", "ORNA-EVAL-UNSUPPORTED"),
+        ("std.stats.median([1, true])", "ORNA-EVAL-UNSUPPORTED"),
+        (
+            "std.stats.percentile([1, 2.0], 0.5, interpolation: \"linear\")",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        ("std.stats.mean(1)", "ORNA-EVAL-TYPE"),
+        ("std.stats.median(values: [1, 2])", "ORNA-EVAL-UNSUPPORTED"),
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            expected,
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        code(evaluate_expression(
+            "std.stats.mean([1, 2, 3])",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.stats.percentile([1.0, 2.0, 3.0], 0.5, interpolation: \"linear\")",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.stats.median([1, 2])",
+            &Environment::new(),
+            Limits {
+                max_steps: 1,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}

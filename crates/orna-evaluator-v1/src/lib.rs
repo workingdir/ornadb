@@ -1245,6 +1245,84 @@ impl DecimalValue {
             &self.exponent10 - &other.exponent10 - BigInt::from(scale),
         )
     }
+    fn divide_rounded(&self, other: &Self, scale: usize) -> Result<Self, EvaluationError> {
+        if other.coefficient.is_zero() {
+            return Err(error("ORNA-EVAL-DIVIDE-BY-ZERO"));
+        }
+        if scale > DEFAULT_INTEGER_DIGITS {
+            return Err(error("ORNA-EVAL-LIMIT"));
+        }
+        let gcd = self.coefficient.gcd(&other.coefficient);
+        let mut numerator = &self.coefficient / &gcd;
+        let mut denominator = (&other.coefficient / gcd).abs();
+        if other.coefficient.sign() == Sign::Minus {
+            numerator = -numerator;
+        }
+        let power = &self.exponent10 - &other.exponent10 + BigInt::from(scale);
+        if power.sign() == Sign::Plus || power.is_zero() {
+            let power = power.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            if power > DEFAULT_INTEGER_DIGITS {
+                return Err(error("ORNA-EVAL-LIMIT"));
+            }
+            numerator *= BigInt::from(10u8).pow(power as u32);
+        } else {
+            let power = (-power).to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            if power > DEFAULT_INTEGER_DIGITS {
+                return Err(error("ORNA-EVAL-LIMIT"));
+            }
+            denominator *= BigInt::from(10u8).pow(power as u32);
+        }
+        let (mut quotient, remainder) = numerator.div_rem(&denominator);
+        if !remainder.is_zero() {
+            let twice = remainder.abs() * 2u8;
+            if twice > denominator
+                || (twice == denominator && (&quotient % 2u8).abs() == BigInt::from(1u8))
+            {
+                if numerator.sign() == Sign::Minus {
+                    quotient -= 1;
+                } else {
+                    quotient += 1;
+                }
+            }
+        }
+        Self::new(quotient, -BigInt::from(scale))
+    }
+
+    fn round_to_scale(&self, scale: usize) -> Result<Self, EvaluationError> {
+        if scale > DEFAULT_INTEGER_DIGITS {
+            return Err(error("ORNA-EVAL-LIMIT"));
+        }
+        let shift = &self.exponent10 + BigInt::from(scale);
+        let mut coefficient = self.coefficient.clone();
+        if shift.sign() == Sign::Plus || shift.is_zero() {
+            let shift = shift.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            if shift > DEFAULT_INTEGER_DIGITS {
+                return Err(error("ORNA-EVAL-LIMIT"));
+            }
+            coefficient *= BigInt::from(10u8).pow(shift as u32);
+        } else {
+            let shift = (-shift).to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            if shift > DEFAULT_INTEGER_DIGITS {
+                return Err(error("ORNA-EVAL-LIMIT"));
+            }
+            let divisor = BigInt::from(10u8).pow(shift as u32);
+            let (mut quotient, remainder) = coefficient.div_rem(&divisor);
+            if !remainder.is_zero() {
+                let twice = remainder.abs() * 2u8;
+                if twice > divisor
+                    || (twice == divisor && (&quotient % 2u8).abs() == BigInt::from(1u8))
+                {
+                    if coefficient.sign() == Sign::Minus {
+                        quotient -= 1;
+                    } else {
+                        quotient += 1;
+                    }
+                }
+            }
+            coefficient = quotient;
+        }
+        Self::new(coefficient, -BigInt::from(scale))
+    }
 }
 
 impl Value {
@@ -2457,6 +2535,7 @@ impl Context<'_, '_> {
             ) => self
                 .checked_decimal(DecimalValue::new(-amount.coefficient, amount.exponent10)?)
                 .map(|amount| Value::Money { amount, currency }),
+            ("-", Value::Float(value)) => finite_float(-f64::from_bits(value)),
             _ => Err(error("ORNA-EVAL-TYPE")),
         }
     }
@@ -3452,6 +3531,7 @@ impl Context<'_, '_> {
             && bits_name(callee).is_none()
             && text_name(callee).is_none()
             && collection_name(callee).is_none()
+            && stats_name(callee).is_none()
             && root_collection.is_none()
             || self.resolve_function_name(callee, scope).is_some()
         {
@@ -3602,10 +3682,12 @@ impl Context<'_, '_> {
         let math = math_name(callee);
         let bits = bits_name(callee);
         let text = text_name(callee);
+        let stats = stats_name(callee);
         let collection = collection_name(callee).or(root_collection);
         let name = math
             .or(bits)
             .or(text)
+            .or(stats)
             .or(collection)
             .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
         let implicit = usize::from(input.is_some());
@@ -3613,7 +3695,23 @@ impl Context<'_, '_> {
         let mut values = input.into_iter().collect::<Vec<_>>();
         let mut explicit = Vec::with_capacity(arguments.len());
         for argument in arguments {
-            explicit.push(self.evaluate(&argument.value, scope, depth + 1)?);
+            let shorthand = stats.is_some()
+                && argument
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| matches!(name, "rounding" | "interpolation" | "method"))
+                && matches!(
+                    argument.value,
+                    Expr::Name { ref text, .. } if matches!(text.as_str(), "half_even" | "linear" | "lower" | "higher" | "nearest" | "midpoint")
+                );
+            explicit.push(if shorthand {
+                let Expr::Name { text, .. } = &argument.value else {
+                    unreachable!("stats shorthand was checked above");
+                };
+                Value::String(text.clone())
+            } else {
+                self.evaluate(&argument.value, scope, depth + 1)?
+            });
             if self.transfer.is_some() {
                 return Ok(Value::Null);
             }
@@ -3626,6 +3724,8 @@ impl Context<'_, '_> {
             self.bits(name, values)
         } else if text.is_some() {
             self.text(name, values)
+        } else if stats.is_some() {
+            self.stats(name, values)
         } else {
             self.collection(name, values, depth)
         }
@@ -4116,6 +4216,412 @@ impl Context<'_, '_> {
             total = self.integer(&total + value)?;
         }
         Ok(Value::Int(total))
+    }
+    fn stats_options(&self, values: &[Value]) -> Result<Option<(usize, bool)>, EvaluationError> {
+        if values.is_empty() {
+            return Ok(None);
+        }
+        if values.len() != 2 {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        let Value::Int(scale) = &values[0] else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        if scale.is_negative() {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        let scale = scale.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        if scale > self.limits.max_integer_digits {
+            return Err(error("ORNA-EVAL-LIMIT"));
+        }
+        let Value::String(rounding) = &values[1] else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        if rounding != "half_even" {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        Ok(Some((scale, true)))
+    }
+
+    fn exact_decimal_result(
+        &self,
+        value: DecimalValue,
+        preserve_decimal: bool,
+    ) -> Result<Value, EvaluationError> {
+        let value = self.checked_decimal(value)?;
+        if preserve_decimal || value.exponent10.is_negative() {
+            return Ok(Value::Decimal(value));
+        }
+        let power = value
+            .exponent10
+            .to_usize()
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        let integer = self.integer(
+            value.coefficient * BigInt::from(10u8).pow(power as u32),
+        )?;
+        Ok(Value::Int(integer))
+    }
+
+    fn divide_stats(
+        &self,
+        left: &DecimalValue,
+        right: &DecimalValue,
+        options: Option<(usize, bool)>,
+        preserve_decimal: bool,
+    ) -> Result<Value, EvaluationError> {
+        match left.divide(right) {
+            Ok(value) => {
+                let value = if let Some((scale, _)) = options {
+                    value.round_to_scale(scale)?
+                } else {
+                    value
+                };
+                self.exact_decimal_result(value, preserve_decimal)
+            }
+            Err(failure) if failure.code() == "ORNA-EVAL-VALUE" => {
+                let Some((scale, _)) = options else {
+                    return Err(failure);
+                };
+                self.exact_decimal_result(left.divide_rounded(right, scale)?, preserve_decimal)
+            }
+            Err(failure) => Err(failure),
+        }
+    }
+
+    fn stats(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        let (rows, options) = match name {
+            "mean" | "median" => {
+                let [Value::List(rows), rest @ ..] = values.as_slice() else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                (rows.as_slice(), self.stats_options(rest)?)
+            }
+            "percentile" => {
+                let [Value::List(rows), probability, Value::String(interpolation), rest @ ..] =
+                    values.as_slice()
+                else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                let options = self.stats_options(rest)?;
+                return self.percentile(rows, probability, interpolation, options);
+            }
+            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+        };
+        self.items(rows.len())?;
+        if rows.is_empty() {
+            return Ok(Value::Null);
+        }
+        match name {
+            "mean" => self.mean(rows, options),
+            "median" => self.median(rows, options),
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+
+    fn mean(
+        &self,
+        values: &[Value],
+        options: Option<(usize, bool)>,
+    ) -> Result<Value, EvaluationError> {
+        let count = DecimalValue::new(BigInt::from(values.len()), BigInt::zero())?;
+        match values.first() {
+            Some(Value::Int(_)) if values.iter().all(|value| matches!(value, Value::Int(_))) => {
+                let mut total = BigInt::zero();
+                for value in values {
+                    let Value::Int(value) = value else { unreachable!() };
+                    total = self.integer(total + value)?;
+                }
+                self.divide_stats(
+                    &DecimalValue::new(total, BigInt::zero())?,
+                    &count,
+                    options,
+                    false,
+                )
+            }
+            Some(Value::Decimal(_))
+                if values
+                    .iter()
+                    .all(|value| matches!(value, Value::Decimal(_))) =>
+            {
+                let Value::Decimal(first) = &values[0] else { unreachable!() };
+                let mut total = first.clone();
+                for value in &values[1..] {
+                    let Value::Decimal(value) = value else { unreachable!() };
+                    total = total.add(value)?;
+                }
+                self.divide_stats(&total, &count, options, true)
+            }
+            Some(Value::Float(_))
+                if values.iter().all(|value| matches!(value, Value::Float(_))) =>
+            {
+                let Value::Float(first) = values.first().expect("non-empty Float mean") else {
+                    unreachable!("Float branch requires a Float first value")
+                };
+                let mut total = f64::from_bits(*first);
+                for value in &values[1..] {
+                    let Value::Float(bits) = value else { unreachable!() };
+                    total += f64::from_bits(*bits);
+                }
+                finite_float(total / values.len() as f64)
+            }
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+
+    fn median(
+        &mut self,
+        values: &[Value],
+        options: Option<(usize, bool)>,
+    ) -> Result<Value, EvaluationError> {
+        let Some(first) = values.first() else {
+            return Ok(Value::Null);
+        };
+        let homogeneous = match first {
+            Value::Int(_) => values.iter().all(|value| matches!(value, Value::Int(_))),
+            Value::Decimal(_) => values.iter().all(|value| matches!(value, Value::Decimal(_))),
+            Value::Float(_) => values.iter().all(|value| matches!(value, Value::Float(_))),
+            _ => false,
+        };
+        if !homogeneous {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        let mut sorted = values.to_vec();
+        for index in 1..sorted.len() {
+            let mut current = index;
+            while current > 0 {
+                self.step()?;
+                if compare_sort_keys(&sorted[current - 1], &sorted[current])?
+                    != std::cmp::Ordering::Greater
+                {
+                    break;
+                }
+                sorted.swap(current - 1, current);
+                current -= 1;
+            }
+        }
+        if sorted.len() % 2 == 1 {
+            return Ok(sorted[sorted.len() / 2].clone());
+        }
+        self.average_values(
+            &sorted[sorted.len() / 2 - 1],
+            &sorted[sorted.len() / 2],
+            options,
+        )
+    }
+
+    fn average_values(
+        &self,
+        left: &Value,
+        right: &Value,
+        options: Option<(usize, bool)>,
+    ) -> Result<Value, EvaluationError> {
+        match (left, right) {
+            (Value::Int(left), Value::Int(right)) => {
+                let total = self.integer(left + right)?;
+                self.divide_stats(
+                    &DecimalValue::new(total, BigInt::zero())?,
+                    &DecimalValue::new(2.into(), BigInt::zero())?,
+                    options,
+                    false,
+                )
+            }
+            (Value::Decimal(left), Value::Decimal(right)) => {
+                let total = left.add(right)?;
+                self.divide_stats(
+                    &total,
+                    &DecimalValue::new(2.into(), BigInt::zero())?,
+                    options,
+                    true,
+                )
+            }
+            (Value::Float(left), Value::Float(right)) => {
+                finite_float((f64::from_bits(*left) + f64::from_bits(*right)) / 2.0)
+            }
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+
+    fn percentile(
+        &self,
+        values: &[Value],
+        probability: &Value,
+        interpolation: &str,
+        options: Option<(usize, bool)>,
+    ) -> Result<Value, EvaluationError> {
+        if !matches!(
+            interpolation,
+            "linear" | "lower" | "higher" | "nearest" | "midpoint"
+        ) {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        self.items(values.len())?;
+        let probability = match probability {
+            Value::Int(value) if !value.is_negative() => {
+                DecimalValue::new(value.clone(), BigInt::zero())?
+            }
+            Value::Decimal(value) => value.clone(),
+            Value::Float(value) if f64::from_bits(*value).is_finite() => {
+                if !((0.0..=1.0).contains(&f64::from_bits(*value))) {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                return self.percentile_float(values, f64::from_bits(*value), interpolation);
+            }
+            _ => return Err(error("ORNA-EVAL-VALUE")),
+        };
+        let zero = DecimalValue::new(BigInt::zero(), BigInt::zero())?;
+        let one = DecimalValue::new(BigInt::from(1u8), BigInt::zero())?;
+        if compare_values(&Value::Decimal(probability.clone()), &Value::Decimal(zero))?
+            == std::cmp::Ordering::Less
+            || compare_values(&Value::Decimal(probability.clone()), &Value::Decimal(one))?
+                == std::cmp::Ordering::Greater
+        {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        if values.is_empty() {
+            return Ok(Value::Null);
+        }
+        let Some(first) = values.first() else {
+            return Ok(Value::Null);
+        };
+        let homogeneous = match first {
+            Value::Int(_) => values.iter().all(|value| matches!(value, Value::Int(_))),
+            Value::Decimal(_) => values.iter().all(|value| matches!(value, Value::Decimal(_))),
+            Value::Float(_) => values.iter().all(|value| matches!(value, Value::Float(_))),
+            _ => false,
+        };
+        if !homogeneous {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        let mut sorted = values.to_vec();
+        for index in 1..sorted.len() {
+            let mut current = index;
+            while current > 0
+                && compare_sort_keys(&sorted[current - 1], &sorted[current])?
+                    == std::cmp::Ordering::Greater
+            {
+                sorted.swap(current - 1, current);
+                current -= 1;
+            }
+        }
+        let values = sorted.as_slice();
+        let span = DecimalValue::new(BigInt::from(values.len() - 1), BigInt::zero())?;
+        let position = probability.multiply(&span)?;
+        let (index, fraction) = decimal_floor_fraction(&position)?;
+        let lower = values
+            .get(index)
+            .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+        let upper = values
+            .get(index.saturating_add(1))
+            .unwrap_or(lower);
+        match interpolation {
+            "lower" => Ok(lower.clone()),
+            "higher" => {
+                if fraction.coefficient.is_zero() {
+                    Ok(lower.clone())
+                } else {
+                    Ok(upper.clone())
+                }
+            }
+            "nearest" => {
+                let half = DecimalValue::new(5.into(), (-1).into())?;
+                if compare_values(&Value::Decimal(fraction), &Value::Decimal(half))?
+                    == std::cmp::Ordering::Less
+                {
+                    Ok(lower.clone())
+                } else {
+                    Ok(upper.clone())
+                }
+            }
+            "midpoint" if fraction.coefficient.is_zero() => Ok(lower.clone()),
+            "midpoint" => self.average_values(lower, upper, options),
+            "linear" if fraction.coefficient.is_zero() => Ok(lower.clone()),
+            "linear" => self.interpolate_exact(lower, upper, &fraction, options),
+            _ => Err(error("ORNA-EVAL-VALUE")),
+        }
+    }
+
+    fn interpolate_exact(
+        &self,
+        lower: &Value,
+        upper: &Value,
+        fraction: &DecimalValue,
+        options: Option<(usize, bool)>,
+    ) -> Result<Value, EvaluationError> {
+        match (lower, upper) {
+            (Value::Int(lower), Value::Int(upper)) => {
+                let low = DecimalValue::new(lower.clone(), BigInt::zero())?;
+                let high = DecimalValue::new(upper.clone(), BigInt::zero())?;
+                let delta = high.add(&DecimalValue::new(-lower.clone(), BigInt::zero())?)?;
+                let result = low.add(&delta.multiply(fraction)?)?;
+                let result = if let Some((scale, _)) = options {
+                    result.round_to_scale(scale)?
+                } else {
+                    result
+                };
+                self.exact_decimal_result(result, false)
+            }
+            (Value::Decimal(lower), Value::Decimal(upper)) => {
+                let delta =
+                    upper.add(&DecimalValue::new(-lower.coefficient.clone(), lower.exponent10.clone())?)?;
+                let result = lower.add(&delta.multiply(fraction)?)?;
+                let result = if let Some((scale, _)) = options {
+                    result.round_to_scale(scale)?
+                } else {
+                    result
+                };
+                self.exact_decimal_result(result, true)
+            }
+            (Value::Float(lower), Value::Float(upper)) => finite_float(
+                f64::from_bits(*lower)
+                    + (f64::from_bits(*upper) - f64::from_bits(*lower))
+                        * decimal_to_f64(fraction)?,
+            ),
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+
+    fn percentile_float(
+        &self,
+        values: &[Value],
+        probability: f64,
+        interpolation: &str,
+    ) -> Result<Value, EvaluationError> {
+        if values.is_empty() {
+            return Ok(Value::Null);
+        }
+        if !values.iter().all(|value| matches!(value, Value::Float(_))) {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        let mut sorted = values
+            .iter()
+            .map(|value| match value {
+                Value::Float(bits) => *bits,
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        sorted.sort_by(|left, right| float_total_cmp(*left, *right));
+        let position = probability * (sorted.len() - 1) as f64;
+        let lower = position.floor() as usize;
+        let upper = position.ceil() as usize;
+        let fraction = position - lower as f64;
+        let choose = match interpolation {
+            "lower" => lower,
+            "higher" => upper,
+            "nearest" => {
+                if fraction < 0.5 { lower } else { upper }
+            }
+            _ => lower,
+        };
+        if interpolation == "linear" {
+            return finite_float(
+                f64::from_bits(sorted[lower])
+                    + (f64::from_bits(sorted[upper]) - f64::from_bits(sorted[lower])) * fraction,
+            );
+        }
+        if interpolation == "midpoint" {
+            return finite_float((f64::from_bits(sorted[lower]) + f64::from_bits(sorted[upper])) / 2.0);
+        }
+        Ok(Value::Float(sorted[choose]))
     }
     fn extreme(&self, name: &str, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
@@ -4817,7 +5323,9 @@ fn named_arguments(
     implicit: usize,
     collection: bool,
 ) -> Result<Vec<Value>, EvaluationError> {
-    if arguments.iter().all(|argument| argument.name.is_none()) {
+    if !matches!(function, "mean" | "median" | "percentile")
+        && arguments.iter().all(|argument| argument.name.is_none())
+    {
         return Ok(values);
     }
     let expected: &[&str] = match function {
@@ -4836,6 +5344,16 @@ fn named_arguments(
         "chunk" => &["values", "size"],
         "flatten" | "distinct" | "unique" | "pairs" | "count" => &["values"],
         "sum" => &["rows"],
+        "mean" | "median" => match values.len() {
+            1 => &["rows"],
+            3 => &["rows", "scale", "rounding"],
+            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+        },
+        "percentile" => match values.len() {
+            3 => &["rows", "p", "interpolation"],
+            5 => &["rows", "p", "interpolation", "scale", "rounding"],
+            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+        },
         "first" => &["rows"],
         "one" => match values.len() {
             1 => &["rows"],
@@ -4903,6 +5421,9 @@ fn text_name(expression: &Expr) -> Option<&str> {
 
 fn collection_name(expression: &Expr) -> Option<&str> {
     standard_name(expression, "collection")
+}
+fn stats_name(expression: &Expr) -> Option<&str> {
+    standard_name(expression, "stats")
 }
 
 fn root_collection_name(expression: &Expr) -> Option<&str> {
@@ -5305,6 +5826,41 @@ fn compare_range_endpoints(
         _ => compare_values(left, right),
     }
 }
+fn decimal_floor_fraction(value: &DecimalValue) -> Result<(usize, DecimalValue), EvaluationError> {
+    if value.coefficient.is_negative() {
+        return Err(error("ORNA-EVAL-VALUE"));
+    }
+    if !value.exponent10.is_negative() {
+        let power = value
+            .exponent10
+            .to_usize()
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        if power > DEFAULT_INTEGER_DIGITS {
+            return Err(error("ORNA-EVAL-LIMIT"));
+        }
+        let index = (&value.coefficient * BigInt::from(10u8).pow(power as u32))
+            .to_usize()
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        return Ok((index, DecimalValue::new(BigInt::zero(), BigInt::zero())?));
+    }
+    let power = (-&value.exponent10)
+        .to_usize()
+        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+    if power > DEFAULT_INTEGER_DIGITS {
+        return Err(error("ORNA-EVAL-LIMIT"));
+    }
+    let divisor = BigInt::from(10u8).pow(power as u32);
+    let (index, remainder) = value.coefficient.div_rem(&divisor);
+    Ok((index.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?, DecimalValue::new(remainder, value.exponent10.clone())?))
+}
+
+fn decimal_to_f64(value: &DecimalValue) -> Result<f64, EvaluationError> {
+    let coefficient = value.coefficient.to_f64().ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+    let exponent = value.exponent10.to_i32().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+    let value = coefficient * 10f64.powi(exponent);
+    value.is_finite().then_some(value).ok_or_else(|| error("ORNA-EVAL-VALUE"))
+}
+
 fn lawful_sort_key(value: &Value) -> Result<(), EvaluationError> {
     match value {
         Value::Bool(_)
