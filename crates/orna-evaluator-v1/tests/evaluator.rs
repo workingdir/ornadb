@@ -3892,6 +3892,40 @@ fn std_collection_one_rejects_invalid_inputs_propagates_callback_failures_and_ke
 }
 
 #[test]
+fn std_collection_one_debits_one_step_per_scanned_predicate_value() {
+    let expression = "one([1, 2], value => value == 1)";
+    assert_eq!(
+        code(evaluate_expression(
+            expression,
+            &Environment::new(),
+            Limits {
+                // Setup and the first callback fit; the second callback's
+                // callback-local debit leaves too little budget to finish.
+                max_steps: 12,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT",
+        "one must debit each scanned predicate value before invoking its callback",
+    );
+    assert_eq!(
+        evaluate_expression(
+            expression,
+            &Environment::new(),
+            Limits {
+                // Setup plus two callback-local debits and both callback
+                // bodies fit exactly at this boundary.
+                max_steps: 13,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+        Value::int(1.into()),
+        "one should succeed when exactly one debit is available per scanned value",
+    );
+}
+
+#[test]
 fn std_collection_every_and_exists_accept_all_call_forms_and_function_callbacks() {
     let true_value = Value::new(Raw::Bool(true)).unwrap();
     let false_value = Value::new(Raw::Bool(false)).unwrap();
