@@ -926,6 +926,190 @@ fn decimal_filtered_first_source(parent_body: &str) -> SourceUnit {
         ),
     }
 }
+fn decimal_filtered_relation_source(parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "txn-decimal-filtered-relation".into(),
+        source_id: "txn-decimal-filtered-relation.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Reading(id: Int) {{ value: Decimal, }} fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
+#[test]
+fn parsed_decimal_reversed_filtered_count_is_scale_insensitive_and_canonical() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_filtered_relation_source(
+        r#"
+            Reading.insert({ id: 2, value: 18.2500 });
+            Reading.insert({ id: 1, value: 18.25 });
+            Reading.insert({ id: 3, value: 2.0 });
+            assert (Reading | filter(reading => 18.250 == reading.value) | count()) == 2;
+            assert (Reading | filter(reading => 99.990 == reading.value) | count()) == 0;
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    for id in [1, 2, 3] {
+        assert!(
+            runtime
+                .committed_row("Reading", &Value::int(id.into()))
+                .is_some(),
+            "canonical reverse-scale count did not publish row {id}"
+        );
+    }
+}
+
+#[test]
+fn parsed_decimal_reversed_filtered_count_observes_candidate_writes_and_rolls_back() {
+    let mut committed = TransactionalEvaluator::new("parent", Limits::default());
+    let committed_outcome = committed.execute_source(&decimal_filtered_relation_source(
+        r#"
+            Reading.insert({ id: 2, value: 18.2500 });
+            Reading.insert({ id: 1, value: 2.0 });
+            assert (Reading | filter(reading => 18.25 == reading.value) | count()) == 1;
+        "#,
+    ));
+    assert!(
+        matches!(&committed_outcome, StageOutcome::Passed),
+        "{committed_outcome:?}"
+    );
+    for id in [1, 2] {
+        assert!(
+            committed
+                .committed_row("Reading", &Value::int(id.into()))
+                .is_some(),
+            "candidate reverse-scale count row {id} was not published"
+        );
+    }
+
+    let mut rolled_back = TransactionalEvaluator::new("parent", Limits::default());
+    let failed = rolled_back.execute_source(&decimal_filtered_relation_source(
+        r#"
+            Reading.insert({ id: 2, value: 18.2500 });
+            assert (Reading | filter(reading => 18.25 == reading.value) | count()) == 1;
+            assert false;
+        "#,
+    ));
+    assert!(matches!(
+        &failed,
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+    ));
+    assert_eq!(
+        rolled_back.committed_row("Reading", &Value::int(2.into())),
+        None,
+        "reverse-scale count candidate escaped rollback"
+    );
+}
+
+#[test]
+fn parsed_decimal_reversed_filtered_one_is_scale_insensitive_and_reads_candidate_rows() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_filtered_relation_source(
+        r#"
+            Reading.insert({ id: 2, value: 18.2500 });
+            Reading.insert({ id: 1, value: 2.0 });
+            assert (Reading | filter(reading => 18.25 == reading.value) | one()).id == 2;
+        "#,
+    ));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    for id in [1, 2] {
+        assert!(
+            runtime
+                .committed_row("Reading", &Value::int(id.into()))
+                .is_some(),
+            "candidate reverse-scale one row {id} was not published"
+        );
+    }
+}
+
+#[test]
+fn parsed_decimal_reversed_filtered_one_reports_zero_and_rolls_back() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_filtered_relation_source(
+        r#"
+            Reading.insert({ id: 1, value: 18.2500 });
+            (Reading | filter(reading => 99.990 == reading.value) | one());
+        "#,
+    ));
+
+    assert!(matches!(
+        &outcome,
+        StageOutcome::Failed(diagnostic)
+            if diagnostic.code() == "ORNA-EVAL-RELATION-ONE-ZERO"
+    ));
+    assert_eq!(
+        runtime.committed_row("Reading", &Value::int(1.into())),
+        None,
+        "zero-match reverse-scale one published a candidate row"
+    );
+}
+
+#[test]
+fn parsed_decimal_reversed_filtered_one_reports_multiple_and_rolls_back() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&decimal_filtered_relation_source(
+        r#"
+            Reading.insert({ id: 2, value: 18.2500 });
+            Reading.insert({ id: 1, value: 18.25 });
+            (Reading | filter(reading => 18.250 == reading.value) | one());
+        "#,
+    ));
+
+    assert!(matches!(
+        &outcome,
+        StageOutcome::Failed(diagnostic)
+            if diagnostic.code() == "ORNA-EVAL-RELATION-ONE-MULTIPLE"
+    ));
+    for id in [1, 2] {
+        assert_eq!(
+            runtime.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "multiple-match reverse-scale one published candidate row {id}"
+        );
+    }
+}
+
+#[test]
+fn parsed_decimal_reversed_filtered_count_and_one_respect_shared_step_budget() {
+    for (operation, query) in [
+        (
+            "count",
+            r#"assert (Reading | filter(reading => 18.25 == reading.value) | count()) == 1;"#,
+        ),
+        (
+            "one",
+            r#"(Reading | filter(reading => 18.25 == reading.value) | one());"#,
+        ),
+    ] {
+        let limits = Limits {
+            max_steps: 10,
+            ..Limits::default()
+        };
+        let mut runtime = TransactionalEvaluator::new("parent", limits);
+        let outcome = runtime.execute_source(&decimal_filtered_relation_source(&format!(
+            r#"
+                Reading.insert({{ id: 1, value: 2.0 }});
+                Reading.insert({{ id: 2, value: 18.2500 }});
+                {query}
+            "#
+        )));
+
+        assert!(
+            matches!(&outcome, StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"),
+            "{operation} reverse-scale filter did not surface the step limit: {outcome:?}"
+        );
+        for id in [1, 2] {
+            assert_eq!(
+                runtime.committed_row("Reading", &Value::int(id.into())),
+                None,
+                "bounded reverse-scale {operation} execution published row {id}"
+            );
+        }
+    }
+}
 
 #[test]
 fn parsed_decimal_filtered_first_is_scale_insensitive_and_canonical() {

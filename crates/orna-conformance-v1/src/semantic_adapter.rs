@@ -5198,7 +5198,9 @@ impl TableEffectHandler<'_, '_> {
                 .map_err(|error| transaction_error(table_error_code(error)))?
             {
                 debit_effect_step(&mut budget)?;
-                if record_field(&row, field).as_ref() == Some(expected) {
+                if record_field(&row, field)
+                    .is_some_and(|value| relation_values_equal(&value, expected))
+                {
                     count = count
                         .checked_add(1)
                         .ok_or_else(|| transaction_error("ORNA-EVAL-LIMIT"))?;
@@ -5231,7 +5233,9 @@ impl TableEffectHandler<'_, '_> {
                 .map_err(|error| transaction_error(table_error_code(error)))?
             {
                 debit_effect_step(&mut budget)?;
-                if record_field(&row, field).as_ref() != Some(expected) {
+                if !record_field(&row, field)
+                    .is_some_and(|value| relation_values_equal(&value, expected))
+                {
                     continue;
                 }
                 if found.is_some() {
@@ -6110,9 +6114,28 @@ fn lower_relation_expression_with_resolution(
             shadowed,
         )
     })
-    .or_else(|| relation_filtered_one(expression, table_keys, functions, namespace, shadowed))
-    .or_else(|| relation_filter_count(expression, table_keys, functions, namespace, shadowed))
-    .or_else(|| relation_count(expression, table_keys, functions, namespace, shadowed))
+    .or_else(|| {
+        relation_filtered_one(
+            expression,
+            table_keys,
+            float_fields,
+            table_fields,
+            functions,
+            namespace,
+            shadowed,
+        )
+    })
+    .or_else(|| {
+        relation_filter_count(
+            expression,
+            table_keys,
+            float_fields,
+            table_fields,
+            functions,
+            namespace,
+            shadowed,
+        )
+    })
     .or_else(|| relation_window(expression, table_keys, functions, namespace, shadowed))
     {
         *expression = lowered;
@@ -7336,6 +7359,8 @@ fn relation_first_target(expression: &Expr) -> bool {
 fn relation_filter_count(
     expression: &Expr,
     table_keys: &TableKeys,
+    float_fields: &TableFloatFields,
+    table_fields: &TableFields,
     functions: &Functions,
     namespace: Option<&str>,
     shadowed: &BTreeSet<String>,
@@ -7362,7 +7387,11 @@ fn relation_filter_count(
     else {
         return None;
     };
-    if filter_op != "|" || !table_keys.contains_key(table) {
+    if filter_op != "|"
+        || shadowed.contains(table)
+        || !table_keys.contains_key(table)
+        || !table_fields.contains_key(table)
+    {
         return None;
     }
     let Expr::Call {
@@ -7391,13 +7420,39 @@ fn relation_filter_count(
     let Pattern::Name(binding, _) = &parameter.pattern else {
         return None;
     };
-    let Expr::Binary { lhs, op, rhs, .. } = body.as_ref() else {
+    let Expr::Binary {
+        lhs: predicate_lhs,
+        op: predicate_op,
+        rhs: predicate_rhs,
+        ..
+    } = body.as_ref()
+    else {
         return None;
     };
-    let Expr::Field { base, name, .. } = lhs.as_ref() else {
+    if predicate_op != "==" {
         return None;
-    };
-    if op != "==" || !matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) {
+    }
+    let (field_expr, field, expected) =
+        match (predicate_lhs.as_ref(), predicate_rhs.as_ref()) {
+            (
+                Expr::Field { base, name, .. },
+                expected,
+            ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
+                (predicate_lhs.as_ref(), name, expected)
+            }
+            (
+                expected,
+                Expr::Field { base, name, .. },
+            ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
+                (predicate_rhs.as_ref(), name, expected)
+            }
+            _ => return None,
+        };
+    if !table_fields
+        .get(table)
+        .is_some_and(|fields| fields.contains(field))
+        || !float_fields.contains_decimal(table, field)
+    {
         return None;
     }
     let table = Expr::Literal {
@@ -7406,9 +7461,9 @@ fn relation_filter_count(
         span: table_span.clone(),
     };
     let field = Expr::Literal {
-        text: format!("{name:?}"),
+        text: format!("{field:?}"),
         kind: orna_syntax_v1::LiteralKind::String,
-        span: lhs.span(),
+        span: field_expr.span(),
     };
     Some(Expr::Call {
         callee: Box::new(Expr::Field {
@@ -7432,8 +7487,8 @@ fn relation_filter_count(
             },
             orna_syntax_v1::Argument {
                 name: None,
-                span: rhs.span(),
-                value: rhs.as_ref().clone(),
+                span: expected.span(),
+                value: expected.clone(),
             },
         ],
         span: expression.span(),
@@ -7447,6 +7502,8 @@ fn relation_filter_count(
 fn relation_filtered_one(
     expression: &Expr,
     table_keys: &TableKeys,
+    float_fields: &TableFloatFields,
+    table_fields: &TableFields,
     functions: &Functions,
     namespace: Option<&str>,
     shadowed: &BTreeSet<String>,
@@ -7476,7 +7533,11 @@ fn relation_filtered_one(
     else {
         return None;
     };
-    if filter_op != "|" || !table_keys.contains_key(table) {
+    if filter_op != "|"
+        || shadowed.contains(table)
+        || !table_keys.contains_key(table)
+        || !table_fields.contains_key(table)
+    {
         return None;
     }
     let Expr::Call {
@@ -7505,13 +7566,39 @@ fn relation_filtered_one(
     let Pattern::Name(binding, _) = &parameter.pattern else {
         return None;
     };
-    let Expr::Binary { lhs, op, rhs, .. } = body.as_ref() else {
+    let Expr::Binary {
+        lhs: predicate_lhs,
+        op: predicate_op,
+        rhs: predicate_rhs,
+        ..
+    } = body.as_ref()
+    else {
         return None;
     };
-    let Expr::Field { base, name, .. } = lhs.as_ref() else {
+    if predicate_op != "==" {
         return None;
-    };
-    if op != "==" || !matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) {
+    }
+    let (field_expr, field, expected) =
+        match (predicate_lhs.as_ref(), predicate_rhs.as_ref()) {
+            (
+                Expr::Field { base, name, .. },
+                expected,
+            ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
+                (predicate_lhs.as_ref(), name, expected)
+            }
+            (
+                expected,
+                Expr::Field { base, name, .. },
+            ) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
+                (predicate_rhs.as_ref(), name, expected)
+            }
+            _ => return None,
+        };
+    if !table_fields
+        .get(table)
+        .is_some_and(|fields| fields.contains(field))
+        || !float_fields.contains_decimal(table, field)
+    {
         return None;
     }
     let table = Expr::Literal {
@@ -7520,9 +7607,9 @@ fn relation_filtered_one(
         span: table_span.clone(),
     };
     let field = Expr::Literal {
-        text: format!("{name:?}"),
+        text: format!("{field:?}"),
         kind: orna_syntax_v1::LiteralKind::String,
-        span: lhs.span(),
+        span: field_expr.span(),
     };
     Some(Expr::Call {
         callee: Box::new(Expr::Field {
@@ -7546,13 +7633,14 @@ fn relation_filtered_one(
             },
             orna_syntax_v1::Argument {
                 name: None,
-                span: rhs.span(),
-                value: rhs.as_ref().clone(),
+                span: expected.span(),
+                value: expected.clone(),
             },
         ],
         span: expression.span(),
     })
 }
+
 
 fn relation_one_target(expression: &Expr) -> bool {
     matches!(
@@ -8027,6 +8115,14 @@ fn record_field(row: &Value, field: &str) -> Option<Value> {
         OvbRaw::Text(name) if name == field => Value::new(value.clone()).ok(),
         _ => None,
     })
+}
+fn relation_values_equal(left: &Value, right: &Value) -> bool {
+    match (left.raw(), right.raw()) {
+        (OvbRaw::Tag(60000, left), OvbRaw::Tag(60000, right)) => {
+            decimal_key_cmp(left, right) == Ordering::Equal
+        }
+        _ => left == right,
+    }
 }
 
 fn encoded_key(key: &Value) -> Result<Vec<u8>, EvaluationError> {
