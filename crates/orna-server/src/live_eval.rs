@@ -25,9 +25,11 @@ use orna_foundation_v1::{
     DiagnosticSeverity, OvbRaw, SafeText, Value,
 };
 use orna_live_v1::{
-    Error, LiveApplication, LiveApplicationWorkLease, LiveEvalResponse, LiveEvalTransaction, Result,
-    RuntimeActivationContext,
+    ActionAuthority, ActionAuthorityRegistry, ActionBinding, Error, LiveApplication,
+    LiveApplicationWorkLease, LiveEvalResponse, LiveEvalTransaction, Result, RuntimeActivationContext,
 };
+#[cfg(test)]
+use orna_live_v1::{ActionFuture, ActionHandler};
 use orna_project_v1::ProjectLoader;
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Limits as ProtocolLimits, Message, PresentNode, PresentationContext,
@@ -110,109 +112,6 @@ impl OperationAdmissionSource for RepositoryAdmissionSource {
     }
 }
 
-/// The asynchronous callback boundary for one authenticated page action.
-///
-/// The live protocol owns request identity, CWD admission, cancellation and
-/// the terminal commit. The action authority owns the opaque handle and typed
-/// input, returning the already-staged response/transaction for that action.
-pub type ActionFuture<'a> = Pin<Box<dyn Future<Output = Result<LiveEvalResponse>> + 'a>>;
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct ActionBinding {
-    pub session: [u8; 16],
-    pub watch: [u8; 16],
-    pub page_revision: u64,
-    pub action: [u8; 16],
-}
-
-pub trait ActionHandler: Send + Sync {
-    /// Checks the callback's declared input shape before any activation work.
-    /// A rejected value never reaches `activate`, preserving typed action
-    /// admission at the opaque-handle boundary.
-    fn accepts(&self, value: &CanonicalValue) -> bool;
-
-    fn activate<'a>(
-        &'a self,
-        binding: ActionBinding,
-        request: [u8; 16],
-        fingerprint: [u8; 32],
-        value: &'a CanonicalValue,
-        context: &'a RuntimeActivationContext,
-        work: &'a mut LiveApplicationWorkLease,
-    ) -> ActionFuture<'a>;
-}
-
-pub trait ActionAuthority: Send + Sync {
-    fn activate<'a>(
-        &'a self,
-        binding: ActionBinding,
-        request: [u8; 16],
-        fingerprint: [u8; 32],
-        value: &'a CanonicalValue,
-        context: &'a RuntimeActivationContext,
-        work: &'a mut LiveApplicationWorkLease,
-    ) -> ActionFuture<'a>;
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ActionRegistrationError {
-    ZeroHandle,
-    DuplicateBinding,
-}
-
-pub struct ActionAuthorityRegistry {
-    handlers: BTreeMap<ActionBinding, Arc<dyn ActionHandler>>,
-}
-
-impl ActionAuthorityRegistry {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            handlers: BTreeMap::new(),
-        }
-    }
-
-    pub fn register<H: ActionHandler + 'static>(
-        &mut self,
-        binding: ActionBinding,
-        handler: H,
-    ) -> std::result::Result<(), ActionRegistrationError> {
-        if binding.action == [0; 16] {
-            return Err(ActionRegistrationError::ZeroHandle);
-        }
-        if self.handlers.contains_key(&binding) {
-            return Err(ActionRegistrationError::DuplicateBinding);
-        }
-        self.handlers.insert(binding, Arc::new(handler));
-        Ok(())
-    }
-}
-
-impl Default for ActionAuthorityRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ActionAuthority for ActionAuthorityRegistry {
-    fn activate<'a>(
-        &'a self,
-        binding: ActionBinding,
-        request: [u8; 16],
-        fingerprint: [u8; 32],
-        value: &'a CanonicalValue,
-        context: &'a RuntimeActivationContext,
-        work: &'a mut LiveApplicationWorkLease,
-    ) -> ActionFuture<'a> {
-        let Some(handler) = self.handlers.get(&binding) else {
-            return Box::pin(async { Err(Error::Denied) });
-        };
-        if !handler.accepts(value) {
-            return Box::pin(async { Err(Error::Denied) });
-        }
-        handler.activate(binding, request, fingerprint, value, context, work)
-    }
-}
 
 /// Terminal Eval rejections bound to a live session lease: fingerprint and
 /// envelope keyed by session and request.
@@ -1652,50 +1551,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn action_registry_fences_every_binding_identity_before_callback() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let binding = ActionBinding {
-            session: [1; 16],
-            watch: [2; 16],
-            page_revision: 7,
-            action: [3; 16],
-        };
-        let mut registry = ActionAuthorityRegistry::new();
-        registry
-            .register(binding, CountingActionHandler(Arc::clone(&calls)))
-            .unwrap();
-        let handler = registry.handlers.get(&binding).expect("registered action");
-        assert!(
-            !handler.accepts(&CanonicalValue::uuid([9; 16])),
-            "incompatible typed input must be rejected before callback"
-        );
-
-        for wrong in [
-            ActionBinding {
-                session: [4; 16],
-                ..binding
-            },
-            ActionBinding {
-                watch: [5; 16],
-                ..binding
-            },
-            ActionBinding {
-                page_revision: 8,
-                ..binding
-            },
-            ActionBinding {
-                action: [6; 16],
-                ..binding
-            },
-        ] {
-            assert!(
-                registry.handlers.get(&wrong).is_none(),
-                "mismatched session/watch/revision/action must not resolve"
-            );
-        }
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-    }
     fn dispatch_action(
         application: &mut PureEvalApplication,
         context: &RuntimeActivationContext,
@@ -1705,12 +1560,35 @@ mod tests {
         value: CanonicalValue,
         request: [u8; 16],
     ) -> Result<LiveEvalResponse> {
-        let fingerprint = [8; 32];
+        dispatch_action_with_inputs(
+            application,
+            Some(context),
+            session,
+            Some(watch),
+            revision,
+            value,
+            request,
+            [8; 32],
+            [8; 32],
+        )
+    }
+
+    fn dispatch_action_with_inputs(
+        application: &mut PureEvalApplication,
+        context: Option<&RuntimeActivationContext>,
+        session: [u8; 16],
+        watch: Option<[u8; 16]>,
+        revision: u64,
+        value: CanonicalValue,
+        request: [u8; 16],
+        message_fingerprint: [u8; 32],
+        fingerprint: [u8; 32],
+    ) -> Result<LiveEvalResponse> {
         let message = Message::Event {
             revision,
             action: [3; 16],
             value,
-            fingerprint,
+            fingerprint: message_fingerprint,
         };
         let supervisor = orna_live_v1::LiveApplicationWorkSupervisor::new();
         let mut work = supervisor.admit(session, request).unwrap();
@@ -1718,9 +1596,9 @@ mod tests {
             session,
             request,
             &message,
-            Some(watch),
+            watch,
             fingerprint,
-            Some(context),
+            context,
             &mut work,
         ))
     }
@@ -1762,6 +1640,53 @@ mod tests {
             ));
             assert_eq!(calls.load(Ordering::SeqCst), 0);
         }
+        assert!(matches!(
+            dispatch_action_with_inputs(
+                &mut application,
+                Some(&context),
+                [1; 16],
+                Some([2; 16]),
+                7,
+                CanonicalValue::unit(),
+                [15; 16],
+                [9; 32],
+                [8; 32],
+            ),
+            Err(Error::RequestMismatch)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        assert!(matches!(
+            dispatch_action_with_inputs(
+                &mut application,
+                Some(&context),
+                [1; 16],
+                None,
+                7,
+                CanonicalValue::unit(),
+                [16; 16],
+                [8; 32],
+                [8; 32],
+            ),
+            Err(Error::Denied)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        assert!(matches!(
+            dispatch_action_with_inputs(
+                &mut application,
+                None,
+                [1; 16],
+                Some([2; 16]),
+                7,
+                CanonicalValue::unit(),
+                [17; 16],
+                [8; 32],
+                [8; 32],
+            ),
+            Err(Error::UnsupportedOperation)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
 
         let result = dispatch_action(
             &mut application,
