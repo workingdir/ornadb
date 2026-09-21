@@ -9,9 +9,10 @@ mod compact;
 mod compact_parquet;
 
 pub use compact::{
-    COMPACT_STORAGE_PROFILE, CompactExactKeyIndex, CompactExactKeySource, CompactKeyError,
-    CompactKeyIdentity, CompactLogicalKeyError, CompactLogicalReader, CompactOvbProfile,
-    OVB_PROFILE,
+    lower_publication_freeze, CompactExactKeyIndex, CompactExactKeySource, CompactKeyError,
+    CompactKeyIdentity, CompactLogicalKeyError, CompactLogicalReader, CompactLoweringError,
+    CompactOvbProfile, CompactWriterInput, CompactWriterMutation, CompactWriterMutationState,
+    COMPACT_STORAGE_PROFILE, OVB_PROFILE,
 };
 pub use compact_parquet::{CompactParquetError, CompactParquetKeySource};
 
