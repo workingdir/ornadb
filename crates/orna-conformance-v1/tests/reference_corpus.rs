@@ -3290,3 +3290,159 @@ fn harness_maps_database_writable_and_serializes_unsupported_member_diagnostic()
                 && evidence["diagnostic"]["code"] == "ORNA-S022-UNSUPPORTED"
         }));
 }
+
+#[test]
+fn harness_maps_current_snapshot_and_serializes_unsupported_member_diagnostic() {
+    let valid = invoke_report(
+        typed_invoke_fixture(
+            "sys-current-snapshot-valid",
+            "sys-current-snapshot-valid.orna",
+            &[
+                ("parse", "pass"),
+                ("resolve", "pass"),
+                ("typecheck", "pass"),
+                ("evaluate", "not-run"),
+            ],
+            None,
+            None,
+            None,
+        ),
+        "pub fn current_snapshot() = sys.current.snapshot;",
+        "ORNA-SYS-024",
+    );
+    let valid_fixture = &valid.fixtures[0];
+    assert!(valid_fixture.passed, "{:?}", valid_fixture.stages);
+    let valid_typecheck = valid_fixture
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Typecheck))
+        .expect("current snapshot typecheck stage");
+    assert_eq!(valid_typecheck.class, EvidenceClass::Semantic);
+    assert_eq!(valid_typecheck.status, EvidenceStatus::Passed);
+    assert!(valid_typecheck.expectation_satisfied);
+    assert_eq!(
+        valid_typecheck.requirements,
+        vec!["ORNA-SYS-024".to_string()]
+    );
+    assert!(matches!(
+        &valid_typecheck.requirement_mapping,
+        RequirementMapping::Mapped { requirements }
+            if requirements == &vec!["ORNA-SYS-024".to_string()]
+    ));
+    assert!(valid.semantic_evidence.iter().any(|evidence| {
+        evidence.subject == "sys-current-snapshot-valid"
+            && evidence.stage == Some(Stage::Typecheck)
+            && evidence.class == EvidenceClass::Semantic
+            && evidence.status == EvidenceStatus::Passed
+            && matches!(
+                &evidence.requirement_mapping,
+                RequirementMapping::Mapped { requirements }
+                    if requirements == &vec!["ORNA-SYS-024".to_string()]
+            )
+    }));
+
+    let invalid = invoke_report(
+        typed_invoke_fixture(
+            "sys-current-legacy-member",
+            "sys-current-legacy-member.orna",
+            &[
+                ("parse", "pass"),
+                ("resolve", "pass"),
+                ("typecheck", "fail"),
+                ("evaluate", "not-run"),
+            ],
+            Some("typecheck"),
+            Some("ORNA-S022-UNSUPPORTED"),
+            None,
+        ),
+        "pub fn legacy() = sys.current.legacy_member;",
+        "ORNA-SYS-024",
+    );
+    let invalid_fixture = &invalid.fixtures[0];
+    assert!(invalid_fixture.passed, "{:?}", invalid_fixture.stages);
+    let invalid_typecheck = invalid_fixture
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(Stage::Typecheck))
+        .expect("unsupported current member typecheck stage");
+    assert_eq!(invalid_typecheck.class, EvidenceClass::Semantic);
+    assert_eq!(invalid_typecheck.status, EvidenceStatus::Failed);
+    assert!(invalid_typecheck.expectation_satisfied);
+    assert_eq!(
+        invalid_typecheck.requirements,
+        vec!["ORNA-SYS-024".to_string()]
+    );
+    assert!(matches!(
+        &invalid_typecheck.requirement_mapping,
+        RequirementMapping::Mapped { requirements }
+            if requirements == &vec!["ORNA-SYS-024".to_string()]
+    ));
+    assert_eq!(
+        invalid_typecheck
+            .diagnostic
+            .as_ref()
+            .expect("unsupported current member diagnostic")["code"],
+        "ORNA-S022-UNSUPPORTED"
+    );
+    assert!(invalid.semantic_evidence.iter().any(|evidence| {
+        evidence.subject == "sys-current-legacy-member"
+            && evidence.stage == Some(Stage::Typecheck)
+            && evidence.class == EvidenceClass::Semantic
+            && evidence.status == EvidenceStatus::Failed
+            && matches!(
+                &evidence.requirement_mapping,
+                RequirementMapping::Mapped { requirements }
+                    if requirements == &vec!["ORNA-SYS-024".to_string()]
+            )
+            && evidence
+                .diagnostic
+                .as_ref()
+                .is_some_and(|diagnostic| diagnostic["code"] == "ORNA-S022-UNSUPPORTED")
+    }));
+
+    let serialized_valid =
+        serde_json::to_value(&valid).expect("current snapshot report serializes");
+    let serialized_valid_typecheck = serialized_valid["fixtures"][0]["stages"]
+        .as_array()
+        .expect("serialized current snapshot stage array")
+        .iter()
+        .find(|stage| stage["stage"] == "typecheck")
+        .expect("serialized current snapshot typecheck stage");
+    assert_eq!(serialized_valid_typecheck["class"], "semantic");
+    assert_eq!(serialized_valid_typecheck["status"], "passed");
+    assert_eq!(
+        serialized_valid_typecheck["requirement_mapping"]["requirements"],
+        serde_json::json!(["ORNA-SYS-024"])
+    );
+
+    let serialized_invalid =
+        serde_json::to_value(&invalid).expect("unsupported current member report serializes");
+    let serialized_invalid_typecheck = serialized_invalid["fixtures"][0]["stages"]
+        .as_array()
+        .expect("serialized unsupported current stage array")
+        .iter()
+        .find(|stage| stage["stage"] == "typecheck")
+        .expect("serialized unsupported current typecheck stage");
+    assert_eq!(serialized_invalid_typecheck["class"], "semantic");
+    assert_eq!(serialized_invalid_typecheck["status"], "failed");
+    assert_eq!(
+        serialized_invalid_typecheck["requirement_mapping"]["requirements"],
+        serde_json::json!(["ORNA-SYS-024"])
+    );
+    assert_eq!(
+        serialized_invalid_typecheck["diagnostic"]["code"],
+        "ORNA-S022-UNSUPPORTED"
+    );
+    assert!(serialized_invalid["semantic_evidence"]
+        .as_array()
+        .expect("serialized unsupported current semantic evidence")
+        .iter()
+        .any(|evidence| {
+            evidence["subject"] == "sys-current-legacy-member"
+                && evidence["stage"] == "typecheck"
+                && evidence["status"] == "failed"
+                && evidence["requirement_mapping"]["requirements"]
+                    == serde_json::json!(["ORNA-SYS-024"])
+                && evidence["diagnostic"]["code"] == "ORNA-S022-UNSUPPORTED"
+        }));
+}

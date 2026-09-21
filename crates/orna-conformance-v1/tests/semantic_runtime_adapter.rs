@@ -549,6 +549,51 @@ fn semantic_project_adapter_admits_sys_snapshot_string_as_pinned_read() {
     );
     assert!(before_change.effects.may_fail);
 }
+#[test]
+fn semantic_project_adapter_admits_sys_current_snapshot_as_snapshot_ref_observation() {
+    let source = "pub fn current_snapshot() = sys.current.snapshot;";
+    let project = snapshot_project(source);
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.typecheck_project(&project), StageOutcome::Passed);
+
+    // Project stages prove source admission through the production adapter.
+    // Inspect the native graph separately for the typed SnapshotRef
+    // observation. The current analyzer records no synthetic effect for this
+    // immutable singleton field, so this witness preserves the native empty
+    // effect summary rather than claiming a read effect it does not expose.
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("main.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+    let current_snapshot =
+        &analysis.modules.values().next().unwrap().exports["current_snapshot"];
+    assert!(matches!(
+        &current_snapshot.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Named("sys.SnapshotRef".into())
+    ));
+    assert!(current_snapshot.effects.effects.is_empty());
+    assert!(!current_snapshot.effects.may_fail);
+}
+
+#[test]
+fn semantic_project_adapter_rejects_unsupported_sys_current_member_at_typecheck() {
+    let source = "pub fn legacy() = sys.current.legacy_member;";
+    let project = snapshot_project(source);
+    let mut adapter = SemanticAdapter::default();
+
+    assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
+    assert_eq!(adapter.resolve_project(&project), StageOutcome::Passed);
+    let StageOutcome::Failed(diagnostic) = adapter.typecheck_project(&project) else {
+        panic!("unsupported sys.current member must fail at typecheck");
+    };
+    assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S022-UNSUPPORTED");
+}
+
 
 #[test]
 fn semantic_project_adapter_rejects_non_string_sys_snapshot_argument_at_typecheck() {
