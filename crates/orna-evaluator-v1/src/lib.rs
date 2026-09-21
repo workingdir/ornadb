@@ -32,7 +32,7 @@ mod repl;
 
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use cancellation::CancellationToken;
-use relation::{RelationPlan, RelationStage, RelationWindowState};
+use relation::{RelationLastState, RelationPlan, RelationStage, RelationWindowState};
 pub use repl::{ReplSession, parse_admitted_repl};
 
 /// The verified standard-source bundle used by the bounded local and remote
@@ -2990,7 +2990,7 @@ impl Context<'_, '_> {
                     });
                     Ok(Value::Relation(plan))
                 }
-                "count" | "first" | "one" => {
+                "count" | "first" | "last" | "one" => {
                     self.observe_relation(&plan, name, &ordered[1..], depth)
                 }
                 _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
@@ -3014,6 +3014,14 @@ impl Context<'_, '_> {
         }
 
         match operation {
+            "last" => {
+                let mut state = RelationLastState::new();
+                self.for_each_relation_value(plan, depth, |_, value| {
+                    state.push(value);
+                    Ok(true)
+                })?;
+                Ok(Value::Option(state.finish().map(Box::new)))
+            }
             "first" => {
                 let mut first = None;
                 self.for_each_relation_value(plan, depth, |_, value| {
@@ -3093,6 +3101,14 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         match operation {
+            "last" => {
+                let mut state = RelationLastState::new();
+                self.for_each_sorted_relation(plan, depth, |_, value| {
+                    state.push(value);
+                    Ok(true)
+                })?;
+                Ok(Value::Option(state.finish().map(Box::new)))
+            }
             "first" => {
                 let mut first = None;
                 self.for_each_sorted_relation(plan, depth, |_, value| {
@@ -4151,6 +4167,7 @@ impl Context<'_, '_> {
             ("union", [Value::List(left), Value::List(right)]) => self.union(left, right),
             ("count", [Value::List(values)]) => self.count(values),
             ("first", [Value::List(values)]) => self.first(values),
+            ("last", [Value::List(values)]) => self.last(values),
             ("min" | "max", [Value::List(values)]) => self.extreme(name, values),
             ("sum", [Value::List(values)]) => self.sum(values),
             ("one", [Value::List(values)]) => self.one(values, None, depth),
@@ -4199,8 +4216,8 @@ impl Context<'_, '_> {
             }
             ("chunk", [_, _])
             | (
-                "flatten" | "distinct" | "unique" | "pairs" | "count" | "first" | "min" | "max"
-                | "sum",
+                "flatten" | "distinct" | "unique" | "pairs" | "count" | "first" | "last"
+                | "min" | "max" | "sum",
                 [_],
             )
             | ("one", [_] | [_, _])
@@ -5025,6 +5042,11 @@ impl Context<'_, '_> {
     fn first(&self, values: &[Value]) -> Result<Value, EvaluationError> {
         Ok(values.first().cloned().unwrap_or(Value::Null))
     }
+    fn last(&self, values: &[Value]) -> Result<Value, EvaluationError> {
+        Ok(Value::Option(
+            values.last().cloned().map(Box::new),
+        ))
+    }
     fn one(
         &mut self,
         values: &[Value],
@@ -5635,6 +5657,7 @@ fn named_arguments(
         "normalise" => &["value", "form"],
         "chunk" => &["values", "size"],
         "flatten" | "distinct" | "unique" | "pairs" | "count" => &["values"],
+        "last" => &["rows"],
         "sum" => &["rows"],
         "mean" | "median" => match values.len() {
             1 => &["rows"],
@@ -5725,9 +5748,10 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
     };
     matches!(
         text.as_str(),
-        "first"
+        "count"
+            | "first"
+            | "last"
             | "one"
-            | "count"
             | "min"
             | "max"
             | "sum"
@@ -5814,7 +5838,7 @@ fn relation_named_arguments(
             _ => return Err(error("ORNA-EVAL-ARGUMENT")),
         },
         "every" | "exists" => &["rows", "predicate"],
-        "count" | "first" | "sum" | "min" | "max" => &["rows"],
+        "count" | "first" | "last" | "sum" | "min" | "max" => &["rows"],
         _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
     };
     if values.len() > expected.len() {
