@@ -2223,6 +2223,7 @@ version = "1.0.0"
 dependencies = [
  "base64",
  "bytes",
+ "orna-evolution-v1",
  "orna-foundation-v1",
  "orna-repository-v1",
  "orna-runtime-v1",
