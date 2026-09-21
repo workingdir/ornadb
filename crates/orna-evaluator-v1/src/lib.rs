@@ -2955,6 +2955,10 @@ impl Context<'_, '_> {
                     plan = plan.with_stage(RelationStage::SortBy(ordered[1].clone()));
                     Ok(Value::Relation(plan))
                 }
+                "distinct" => {
+                    plan = plan.with_stage(RelationStage::Distinct);
+                    Ok(Value::Relation(plan))
+                }
                 "take" | "drop" => {
                     let Value::Int(count) = &ordered[1] else {
                         return Err(error("ORNA-EVAL-TYPE"));
@@ -3186,6 +3190,7 @@ impl Context<'_, '_> {
         }
         let mut after = None;
         let mut counters = vec![0usize; plan.stages.len()];
+        let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
         let mut seen = 0usize;
         loop {
             // Relation work has its own cancellation checkpoints. A plan
@@ -3201,7 +3206,14 @@ impl Context<'_, '_> {
                     .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
                 self.items(seen)?;
                 let value = Value::from_canonical(&canonical, self, depth + 1)?;
-                match self.apply_relation_stages(value, &plan.stages, &mut counters, depth + 1)? {
+                match self.apply_relation_stages(
+                    value,
+                    &plan.stages,
+                    &mut counters,
+                    &mut distinct_seen,
+                    0,
+                    depth + 1,
+                )? {
                     RelationRow::Skip => {}
                     RelationRow::End => return Ok(()),
                     RelationRow::Yield(value) => {
@@ -3231,9 +3243,12 @@ impl Context<'_, '_> {
         mut value: Value,
         stages: &[RelationStage],
         counters: &mut [usize],
+        distinct_seen: &mut [Vec<orna_foundation_v1::CanonicalValue>],
+        stage_offset: usize,
         depth: usize,
     ) -> Result<RelationRow, EvaluationError> {
-        for (index, stage) in stages.iter().enumerate() {
+        for (local_index, stage) in stages.iter().enumerate() {
+            let index = stage_offset + local_index;
             match stage {
                 RelationStage::Filter(predicate) => {
                     self.step()?;
@@ -3248,17 +3263,29 @@ impl Context<'_, '_> {
                 RelationStage::Map(transform) => {
                     value = self.invoke_predicate(transform, value, depth + 1)?;
                 }
+                RelationStage::Distinct => {
+                    if value.contains_float() {
+                        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                    }
+                    let key = value.clone().canonical()?;
+                    let seen = &mut distinct_seen[index];
+                    if seen.iter().any(|existing| existing == &key) {
+                        return Ok(RelationRow::Skip);
+                    }
+                    seen.push(key);
+                    self.items(seen.len())?;
+                }
                 RelationStage::Drop(count) => {
-                    if counters[index] < *count {
-                        counters[index] += 1;
+                    if counters[local_index] < *count {
+                        counters[local_index] += 1;
                         return Ok(RelationRow::Skip);
                     }
                 }
                 RelationStage::Take(count) => {
-                    if counters[index] >= *count {
+                    if counters[local_index] >= *count {
                         return Ok(RelationRow::End);
                     }
-                    counters[index] += 1;
+                    counters[local_index] += 1;
                 }
                 RelationStage::SortBy(_) => {
                     return Err(error("ORNA-EVAL-UNSUPPORTED"));
@@ -3306,29 +3333,53 @@ impl Context<'_, '_> {
             unreachable!("sort_by returns a list")
         };
         let suffix = &plan.stages[sort_index + 1..];
-        self.for_each_buffered_relation(sorted, suffix, depth, visit)
+        let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
+        self.for_each_buffered_relation(
+            sorted,
+            suffix,
+            sort_index + 1,
+            depth,
+            &mut distinct_seen,
+            visit,
+        )
     }
 
     fn for_each_buffered_relation(
         &mut self,
         values: Vec<Value>,
         stages: &[RelationStage],
+        stage_offset: usize,
         depth: usize,
+        distinct_seen: &mut [Vec<orna_foundation_v1::CanonicalValue>],
         visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
     ) -> Result<(), EvaluationError> {
         let Some(sort_index) = stages
             .iter()
             .position(|stage| matches!(stage, RelationStage::SortBy(_)))
         else {
-            return self.for_each_buffered_stages(values, stages, depth, visit);
+            return self.for_each_buffered_stages(
+                values,
+                stages,
+                stage_offset,
+                depth,
+                distinct_seen,
+                visit,
+            );
         };
         let prefix = &stages[..sort_index];
         let mut upstream = Vec::new();
-        self.for_each_buffered_stages(values, prefix, depth, |context, value| {
-            upstream.push(value);
-            context.items(upstream.len())?;
-            Ok(true)
-        })?;
+        self.for_each_buffered_stages(
+            values,
+            prefix,
+            stage_offset,
+            depth,
+            distinct_seen,
+            |context, value| {
+                upstream.push(value);
+                context.items(upstream.len())?;
+                Ok(true)
+            },
+        )?;
         let RelationStage::SortBy(key) = &stages[sort_index] else {
             unreachable!("sort stage index")
         };
@@ -3336,14 +3387,23 @@ impl Context<'_, '_> {
         let Value::List(sorted) = sorted else {
             unreachable!("sort_by returns a list")
         };
-        self.for_each_buffered_relation(sorted, &stages[sort_index + 1..], depth, visit)
+        self.for_each_buffered_relation(
+            sorted,
+            &stages[sort_index + 1..],
+            stage_offset + sort_index + 1,
+            depth,
+            distinct_seen,
+            visit,
+        )
     }
 
     fn for_each_buffered_stages(
         &mut self,
         values: Vec<Value>,
         stages: &[RelationStage],
+        stage_offset: usize,
         depth: usize,
+        distinct_seen: &mut [Vec<orna_foundation_v1::CanonicalValue>],
         mut visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
     ) -> Result<(), EvaluationError> {
         if stages
@@ -3358,7 +3418,14 @@ impl Context<'_, '_> {
             // that performs its own evaluator step. Keep this materialized
             // path as cancellation-aware as the paged source path.
             self.step()?;
-            match self.apply_relation_stages(value, stages, &mut counters, depth + 1)? {
+            match self.apply_relation_stages(
+                value,
+                stages,
+                &mut counters,
+                distinct_seen,
+                stage_offset,
+                depth + 1,
+            )? {
                 RelationRow::Skip => {}
                 RelationRow::End => return Ok(()),
                 RelationRow::Yield(value) => {
@@ -5567,6 +5634,7 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
             | "sort_by"
             | "rank"
             | "filter"
+            | "distinct"
             | "take"
             | "drop"
             | "window"
@@ -5628,6 +5696,7 @@ fn relation_named_arguments(
         "filter" => &["rows", "predicate"],
         "map" => &["rows", "transform"],
         "sort_by" => &["rows", "key"],
+        "distinct" => &["rows"],
         "take" | "drop" => &["rows", "count"],
         "window" => match values.len() {
             2 => &["rows", "size"],
