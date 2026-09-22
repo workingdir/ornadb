@@ -704,6 +704,121 @@ impl LiveApplication for TransactionalApplication {
         Err(Error::UnsupportedOperation)
     }
 }
+#[derive(Clone, Copy)]
+enum WatchEventMode {
+    Pure,
+    Rejected,
+    Rollback,
+    Commit,
+}
+
+struct WatchEventApplication {
+    mode: WatchEventMode,
+    subscriptions: usize,
+}
+
+impl WatchEventApplication {
+    fn snapshot(request: [u8; 16], watch: [u8; 16]) -> Envelope {
+        Envelope {
+            request: Some(request),
+            watch: Some(watch),
+            message: Message::Snapshot {
+                revision: 0,
+                present: orna_protocol_v1::PresentNode::from_value(CanonicalValue::unit())
+                    .unwrap(),
+                snapshot: CanonicalSnapshot::cwd([2; 16], [3; 16], 0.into()).unwrap(),
+            },
+            extensions: BTreeMap::new(),
+        }
+    }
+}
+
+impl LiveApplication for WatchEventApplication {
+    fn eval(
+        &mut self,
+        _: [u8; 16],
+        _: [u8; 16],
+        _: &Message,
+    ) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
+    }
+
+    fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
+    }
+
+    fn subscribe(
+        &mut self,
+        _: [u8; 16],
+        request: [u8; 16],
+        _: &Message,
+    ) -> Result<Envelope, Error> {
+        self.subscriptions += 1;
+        Ok(Self::snapshot(request, [10 + self.subscriptions as u8; 16]))
+    }
+
+    fn resync(
+        &mut self,
+        _: [u8; 16],
+        request: [u8; 16],
+        watch: [u8; 16],
+        _: &Message,
+    ) -> Result<Envelope, Error> {
+        Ok(Self::snapshot(request, watch))
+    }
+
+    fn dispatch_event_with_work<'a>(
+        &'a mut self,
+        _: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        _: Option<[u8; 16]>,
+        _: [u8; 32],
+        _: Option<&'a orna_runtime_v1::RuntimeActivationContext>,
+        _: &'a mut orna_live_v1::LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
+        let Message::Event { fingerprint, .. } = message else {
+            return Box::pin(async { Err(Error::ApplicationRejected) });
+        };
+        let response = unit_result(request, *fingerprint);
+        let mode = self.mode;
+        Box::pin(async move {
+            match mode {
+                WatchEventMode::Pure => Ok(LiveEvalResponse::pure(response)),
+                WatchEventMode::Rejected => Err(Error::ApplicationRejected),
+                WatchEventMode::Rollback => Ok(LiveEvalResponse::transaction(
+                    response,
+                    LiveEvalTransaction::new(
+                        vec![TableMutation::new(
+                            [201; 16],
+                            "watch_rollback",
+                            vec![1],
+                            Some(vec![2]),
+                        )
+                        .unwrap()],
+                        [201; 32],
+                        Arc::new(FailAt(FaultPoint::AfterTableWrite)),
+                    ),
+                )),
+                WatchEventMode::Commit => Ok(LiveEvalResponse::transaction(
+                    response,
+                    LiveEvalTransaction::new(
+                        vec![TableMutation::new(
+                            [202; 16],
+                            "watch_commit",
+                            vec![1],
+                            Some(vec![2]),
+                        )
+                        .unwrap()],
+                        [202; 32],
+                        Arc::new(NoFault),
+                    ),
+                )),
+            }
+        })
+    }
+}
+
 
 struct Authority;
 impl LiveSessionAuthority for Authority {
@@ -2089,8 +2204,12 @@ fn websocket_connection_driver_closes_after_a_peer_close() {
     assert_eq!(writer.closes, 1);
 }
 fn subscribe() -> Vec<u8> {
+    subscribe_request([3; 16])
+}
+
+fn subscribe_request(request: [u8; 16]) -> Vec<u8> {
     Envelope {
-        request: Some([3; 16]),
+        request: Some(request),
         watch: None,
         message: Message::Subscribe {
             resource: [4; 16],
@@ -2120,13 +2239,17 @@ fn cancel_request(request: [u8; 16], target: [u8; 16]) -> Vec<u8> {
         },
         extensions: BTreeMap::new(),
     }
-    .encode(Limits::default().protocol)
-    .unwrap()
+.encode(Limits::default().protocol)
+.unwrap()
 }
 fn resync() -> Vec<u8> {
+    resync_request([9; 16], [10; 16])
+}
+
+fn resync_request(request: [u8; 16], watch: [u8; 16]) -> Vec<u8> {
     Envelope {
-        request: Some([9; 16]),
-        watch: Some([10; 16]),
+        request: Some(request),
+        watch: Some(watch),
         message: Message::Resync,
         extensions: BTreeMap::new(),
     }
@@ -4012,6 +4135,195 @@ fn durable_transactional_event_commits_through_synchronous_dispatch() {
     drop(host);
     remove_test_repository(&root);
 }
+#[test]
+fn mutating_event_invalidates_only_its_owning_watch() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = WatchEventApplication {
+        mode: WatchEventMode::Commit,
+        subscriptions: 0,
+    };
+    for (request, attachment_sequence) in [([30; 16], 2), ([31; 16], 3)] {
+        block_on(host.dispatch_frame(
+            [5; 16],
+            attachment_sequence,
+            Frame::Binary(subscribe_request(request)),
+            &mut application,
+        ))
+        .unwrap();
+    }
+
+    let outcome = block_on(host.dispatch_frame(
+        [5; 16],
+        4,
+        Frame::Binary(event([1; 16], [32; 16], [11; 16])),
+        &mut application,
+    ))
+    .unwrap();
+    assert!(matches!(
+        outcome.response.as_ref().map(|response| &response.message),
+        Some(Message::Result {
+            status: ResultStatus::Success,
+            ..
+        })
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [5; 16],
+            5,
+            Frame::Binary(resync_request([33; 16], [11; 16])),
+            &mut application,
+        )),
+        Err(Error::Denied)
+    );
+    let other_watch = block_on(host.dispatch_frame(
+        [5; 16],
+        6,
+        Frame::Binary(resync_request([34; 16], [12; 16])),
+        &mut application,
+    ))
+    .unwrap();
+    assert!(matches!(other_watch.outcome, FrameOutcome::Resync { .. }));
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn pure_rejected_and_rolled_back_events_preserve_their_watch() {
+    for mode in [
+        WatchEventMode::Pure,
+        WatchEventMode::Rejected,
+        WatchEventMode::Rollback,
+    ] {
+        let (root, repository) = durable_repository();
+        let mut host = durable_host(open_durable_state(&repository));
+        let mut issuer = Issuer(1, None);
+        let credential = create(&mut host, &mut issuer);
+        block_on(host.resume(ResumeRequest {
+            id: [1; 16],
+            origin: &origin(),
+            credential: &credential,
+            attachment: [5; 16],
+            now: 1,
+        }))
+        .unwrap();
+        let mut application = WatchEventApplication {
+            mode,
+            subscriptions: 0,
+        };
+        block_on(host.dispatch_frame(
+            [5; 16],
+            2,
+            Frame::Binary(subscribe_request([35; 16])),
+            &mut application,
+        ))
+        .unwrap();
+
+        let event_result = block_on(host.dispatch_frame(
+            [5; 16],
+            3,
+            Frame::Binary(event([1; 16], [36; 16], [11; 16])),
+            &mut application,
+        ));
+        match mode {
+            WatchEventMode::Pure => assert!(event_result.is_ok()),
+            WatchEventMode::Rejected => assert_eq!(event_result, Err(Error::ApplicationRejected)),
+            WatchEventMode::Rollback => assert_eq!(event_result, Err(Error::RuntimeUnavailable)),
+            WatchEventMode::Commit => unreachable!("commit is covered by the invalidation test"),
+        }
+        let resync = block_on(host.dispatch_frame(
+            [5; 16],
+            4,
+            Frame::Binary(resync_request([37; 16], [11; 16])),
+            &mut application,
+        ))
+        .unwrap();
+        assert!(matches!(resync.outcome, FrameOutcome::Resync { .. }));
+        drop(host);
+        remove_test_repository(&root);
+    }
+}
+
+#[test]
+fn cancelled_event_preserves_its_watch() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = WatchEventApplication {
+        mode: WatchEventMode::Commit,
+        subscriptions: 0,
+    };
+    block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(subscribe_request([38; 16])),
+        &mut application,
+    ))
+    .unwrap();
+
+    let mut target = match block_on(host.prepare_application_frame(
+        [5; 16],
+        3,
+        Frame::Binary(event([1; 16], [39; 16], [11; 16])),
+    ))
+    .unwrap()
+    {
+        orna_live_v1::ApplicationPreparation::Work(ticket) => ticket,
+        orna_live_v1::ApplicationPreparation::Completed(_) => {
+            panic!("event should remain pending until cancellation")
+        }
+    };
+    let cancel = host.prepare_application_frame(
+        [5; 16],
+        4,
+        Frame::Binary(cancel_request([40; 16], [39; 16])),
+    );
+    let release_target = async {
+        assert!(target.cancellation().await.is_ok());
+        assert!(target.is_cancelled());
+        let _ = target.reject(Error::Closed);
+    };
+    let (cancelled, ()) = block_on(async { futures::join!(cancel, release_target) });
+    match cancelled.unwrap() {
+        orna_live_v1::ApplicationPreparation::Work(ticket) => {
+            let _ = ticket.reject(Error::Closed);
+        }
+        orna_live_v1::ApplicationPreparation::Completed(_) => {
+            panic!("cancellation should reach the application boundary")
+        }
+    }
+
+    let resync = block_on(host.dispatch_frame(
+        [5; 16],
+        5,
+        Frame::Binary(resync_request([41; 16], [11; 16])),
+        &mut application,
+    ))
+    .unwrap();
+    assert!(matches!(resync.outcome, FrameOutcome::Resync { .. }));
+    drop(host);
+    remove_test_repository(&root);
+}
+
 struct RegistryActionHandler {
     calls: Arc<AtomicUsize>,
 }
