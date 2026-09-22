@@ -5233,12 +5233,14 @@ pub enum WebSocketOutput {
         payload: Vec<u8>,
     },
     Pong(Vec<u8>),
-    /// A WebSocket close, optionally carrying one RFC 6455 close code.
+    /// A WebSocket close, optionally carrying one RFC 6455 close code and
+    /// its already-validated UTF-8 reason bytes.
     ///
     /// Protocol-invalid canonical envelopes use 1002. A peer Close without a
     /// code is acknowledged without inventing one.
     Close {
         code: Option<u16>,
+        reason: Vec<u8>,
     },
 }
 
@@ -5258,9 +5260,10 @@ impl fmt::Debug for WebSocketOutput {
                 .debug_struct("WebSocketOutput::Pong")
                 .field("payload_bytes", &payload.len())
                 .finish(),
-            Self::Close { code } => formatter
+            Self::Close { code, reason } => formatter
                 .debug_struct("WebSocketOutput::Close")
                 .field("code", code)
+                .field("reason_bytes", &reason.len())
                 .finish(),
         }
     }
@@ -5282,19 +5285,21 @@ pub fn encode_websocket_output(
     output: &WebSocketOutput,
     limits: TransportLimits,
 ) -> std::result::Result<Option<Vec<u8>>, WebSocketEncodeError> {
-    let close_code;
+    let close_payload;
     let (opcode, payload) = match output {
         WebSocketOutput::Accepted(_) => return Ok(None),
         WebSocketOutput::Binary { payload, .. } => (2, payload.as_slice()),
         WebSocketOutput::Pong(payload) => (10, payload.as_slice()),
-        WebSocketOutput::Close { code } => {
-            close_code = code.map(u16::to_be_bytes);
-            (
-                8,
-                close_code
-                    .as_ref()
-                    .map_or(&[] as &[u8], |code| code.as_slice()),
-            )
+        WebSocketOutput::Close { code, reason } => {
+            close_payload = code
+                .map(|code| {
+                    let mut payload = Vec::with_capacity(2 + reason.len());
+                    payload.extend_from_slice(&code.to_be_bytes());
+                    payload.extend_from_slice(reason);
+                    payload
+                })
+                .unwrap_or_default();
+            (8, close_payload.as_slice())
         }
     };
     let control = matches!(opcode, 8..=10);
@@ -5680,10 +5685,10 @@ impl LiveTransport {
                 WebSocketOutput::Pong(payload),
             )),
             SocketEvent::Pong => Ok(WebSocketApplicationPreparation::Pending),
-            SocketEvent::Close => {
+            SocketEvent::Close { code, reason } => {
                 self.close_attachment(socket.attachment, now).await?;
                 Ok(WebSocketApplicationPreparation::Output(
-                    WebSocketOutput::Close { code: None },
+                    WebSocketOutput::Close { code, reason },
                 ))
             }
             SocketEvent::Text => self.close_prepared_socket(socket, now, 1003).await,
@@ -5706,7 +5711,10 @@ impl LiveTransport {
         socket.pending.clear();
         let _ = self.close_attachment(socket.attachment, now).await;
         Ok(WebSocketApplicationPreparation::Output(
-            WebSocketOutput::Close { code: Some(code) },
+            WebSocketOutput::Close {
+                code: Some(code),
+                reason: Vec::new(),
+            },
         ))
     }
 
@@ -6937,7 +6945,10 @@ impl LiveTransport {
                 let closing = matches!(next, WebSocketOutput::Close { .. });
                 output.push(next);
                 if socket.closed && !closing {
-                    output.push(WebSocketOutput::Close { code: None });
+                    output.push(WebSocketOutput::Close {
+                        code: None,
+                        reason: Vec::new(),
+                    });
                 }
             }
             input = &[];
@@ -7012,13 +7023,11 @@ impl LiveTransport {
             )),
             SocketEvent::Ping(payload) => Ok(Some(WebSocketOutput::Pong(payload))),
             SocketEvent::Pong => Ok(None),
-            SocketEvent::Close => {
-                let outcome = self
-                    .host
+            SocketEvent::Close { code, reason } => {
+                self.host
                     .dispatch_frame(socket.attachment, now, Frame::Close, application)
-                    .await?
-                    .outcome;
-                Ok(Some(WebSocketOutput::Accepted(outcome)))
+                    .await?;
+                Ok(Some(WebSocketOutput::Close { code, reason }))
             }
         }
     }
@@ -7081,7 +7090,10 @@ impl LiveTransport {
             .host
             .dispatch_frame(socket.attachment, now, Frame::Close, application)
             .await;
-        WebSocketOutput::Close { code: Some(code) }
+        WebSocketOutput::Close {
+            code: Some(code),
+            reason: Vec::new(),
+        }
     }
 
     async fn serve_websocket_bytes<W, C, X, A>(
@@ -7116,7 +7128,10 @@ impl LiveTransport {
                         self.limits,
                         writer,
                         cancellation,
-                        vec![WebSocketOutput::Close { code: None }],
+                        vec![WebSocketOutput::Close {
+                            code: None,
+                            reason: Vec::new(),
+                        }],
                     )
                     .await?;
                     return Ok(true);
@@ -7622,11 +7637,11 @@ impl WebSocketState {
                 }
             }
             8 => {
-                validate_close_payload(&payload)?;
+                let (code, reason) = validate_close_payload(&payload)?;
                 self.closed = true;
                 self.fragment = None;
                 self.pending.clear();
-                Ok(Some(SocketEvent::Close))
+                Ok(Some(SocketEvent::Close { code, reason }))
             }
             9 => Ok(Some(SocketEvent::Ping(payload))),
             10 => Ok(Some(SocketEvent::Pong)),
@@ -7680,13 +7695,13 @@ enum SocketEvent {
     Text,
     Ping(Vec<u8>),
     Pong,
-    Close,
+    Close { code: Option<u16>, reason: Vec<u8> },
 }
 type ParsedFrame = (usize, bool, u8, Vec<u8>);
 
-fn validate_close_payload(payload: &[u8]) -> Result<()> {
+fn validate_close_payload(payload: &[u8]) -> Result<(Option<u16>, Vec<u8>)> {
     if payload.is_empty() {
-        return Ok(());
+        return Ok((None, Vec::new()));
     }
     if payload.len() == 1 {
         return Err(Error::InvalidFrame);
@@ -7696,8 +7711,8 @@ fn validate_close_payload(payload: &[u8]) -> Result<()> {
         return Err(Error::InvalidFrame);
     }
     core::str::from_utf8(&payload[2..])
-        .map(|_| ())
-        .map_err(|_| Error::InvalidFrame)
+        .map_err(|_| Error::InvalidFrame)?;
+    Ok((Some(code), payload[2..].to_vec()))
 }
 
 fn ws_frame(bytes: &[u8], limit: usize) -> Result<Option<ParsedFrame>> {
