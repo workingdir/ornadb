@@ -1448,6 +1448,22 @@ struct SynchronousReservation {
 
 impl SynchronousReservation {
     fn begin(mut self) -> Result<SynchronousExecution, AdmissionError> {
+        #[cfg(test)]
+        if let Some(hook) = self
+            .executions
+            .enter_hook
+            .lock()
+            .unwrap()
+            .clone()
+        {
+            let (state, wake) = &*hook;
+            let mut state = state.lock().unwrap();
+            state.0 = true;
+            wake.notify_all();
+            while !state.1 {
+                state = wake.wait(state).unwrap();
+            }
+        }
         let mut state = self
             .executions
             .state
@@ -1471,14 +1487,20 @@ impl Drop for SynchronousReservation {
         if !self.reserved {
             return;
         }
-        if let Ok(mut state) = self.executions.state.lock()
-            && let Some(pending) = state.pending.checked_sub(1)
-        {
+        let mut state = match self.executions.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                self.executions.state.clear_poison();
+                poisoned.into_inner()
+            }
+        };
+        if let Some(pending) = state.pending.checked_sub(1) {
             state.pending = pending;
             self.executions.completed.notify_all();
         }
     }
 }
+
 
 struct SynchronousExecution {
     executions: Arc<SynchronousExecutions>,
@@ -1674,7 +1696,18 @@ impl RuntimeSupervisor {
         if let Some((boundary, worker_handle, cancellation)) = boundary {
             let runtime = Arc::clone(&self.runtime);
             let synchronous = Arc::clone(&self.synchronous);
-            let reservation = synchronous.reserve()?;
+            let reservation = match synchronous.reserve() {
+                Ok(reservation) => reservation,
+                Err(_) => {
+                    synchronous.state.clear_poison();
+                    let mut runtime = self
+                        .runtime
+                        .lock()
+                        .map_err(|_| AdmissionError::RuntimeUnavailable)?;
+                    runtime.classify_terminal(&worker_handle, TerminalClass::Orphaned)?;
+                    return Ok(handle);
+                }
+            };
             let worker_handle_for_worker = worker_handle.clone();
             let start_gate = Arc::new(WorkerStartGate::default());
             let start_gate_for_worker = Arc::clone(&start_gate);
@@ -1685,7 +1718,15 @@ impl RuntimeSupervisor {
                     }
                     let execution = match reservation.begin() {
                         Ok(execution) => execution,
-                        Err(_) => return,
+                        Err(_) => {
+                            if let Ok(mut runtime) = runtime.lock() {
+                                let _ = runtime.classify_terminal(
+                                    &worker_handle_for_worker,
+                                    TerminalClass::Orphaned,
+                                );
+                            }
+                            return;
+                        }
                     };
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         executor.execute_controlled(&boundary, &cancellation)
@@ -3352,6 +3393,100 @@ mod tests {
             })
         ));
         assert_eq!(fresh_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn supervised_start_reservation_failure_retains_orphaned_identity() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("r"));
+        let synchronous = Arc::clone(&supervisor.synchronous);
+        let poisoner = thread::spawn(move || {
+            let _state = synchronous.state.lock().unwrap();
+            panic!("poison synchronous execution state");
+        });
+        assert!(poisoner.join().is_err());
+
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.mode = InvocationMode::Start;
+        request.transaction = TransactionMode::Separate;
+        request.idempotency_key = Some("reservation-failure".into());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handle = supervisor
+            .start(
+                request,
+                CountingExecutor {
+                    calls: Arc::clone(&calls),
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            supervisor.state(&handle),
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::Orphaned(None)
+            ))
+        ));
+        assert!(matches!(
+            supervisor.await_invocation(&handle, Some(Duration::ZERO)),
+            Ok(super::InvocationResult {
+                status: InvocationStatus::Orphaned,
+                value: None,
+                failure: None,
+                ..
+            })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(supervisor.synchronous.pending(), 0);
+    }
+
+    #[test]
+    fn supervised_start_begin_failure_retains_orphaned_identity() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("r"));
+        let hook = Arc::new((Mutex::new((false, false)), Condvar::new()));
+        supervisor
+            .synchronous
+            .set_enter_hook(Some(Arc::clone(&hook)));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.mode = InvocationMode::Start;
+        request.transaction = TransactionMode::Separate;
+        request.idempotency_key = Some("begin-failure".into());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handle = supervisor
+            .start(
+                request,
+                CountingExecutor {
+                    calls: Arc::clone(&calls),
+                },
+            )
+            .unwrap();
+        {
+            let (state, wake) = &*hook;
+            let mut state = state.lock().unwrap();
+            while !state.0 {
+                state = wake.wait(state).unwrap();
+            }
+        }
+
+        let synchronous = Arc::clone(&supervisor.synchronous);
+        let poisoner = thread::spawn(move || {
+            let _state = synchronous.state.lock().unwrap();
+            panic!("poison synchronous execution state");
+        });
+        assert!(poisoner.join().is_err());
+        {
+            let (state, wake) = &*hook;
+            state.lock().unwrap().1 = true;
+            wake.notify_all();
+        }
+
+        let result = supervisor
+            .await_invocation(&handle, Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(result.status, InvocationStatus::Orphaned);
+        assert_eq!(result.value, None);
+        assert_eq!(result.failure, None);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(supervisor.synchronous.pending(), 0);
+        supervisor.synchronous.set_enter_hook(None);
     }
 
     #[test]
