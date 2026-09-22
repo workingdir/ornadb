@@ -148,6 +148,12 @@ async fn unsupported_target_and_key_format_mismatch_fail_before_mutation() {
             .unwrap()
             .is_empty()
     );
+    let audits = state.admin_invocation_audits().await.unwrap();
+    assert_eq!(audits.len(), 2);
+    assert!(!audits[1].succeeded);
+    assert_eq!(audits[1].function, "sys.admin.reset_checkpoint");
+    assert!(audits[1].terminal_outcome.contains("not replayable"));
+
 
     let mut mismatched_key = key.clone();
     mismatched_key.position_format = Component::new("position-format-v2").unwrap();
@@ -171,13 +177,11 @@ async fn unsupported_target_and_key_format_mismatch_fail_before_mutation() {
     );
     assert_eq!(mismatch_provider.validations.load(Ordering::Relaxed), 0);
     assert_eq!(state.stream_checkpoint(&key).await.unwrap(), before);
-    assert!(
-        state
-            .checkpoint_reset_audits(&key)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    let audits = state.admin_invocation_audits().await.unwrap();
+    assert_eq!(audits.len(), 3);
+    assert!(!audits[2].succeeded);
+    assert_eq!(audits[2].function, "sys.admin.reset_checkpoint");
+    assert!(audits[2].safe_arguments.contains("expected_version=0"));
 }
 
 #[tokio::test]
@@ -274,4 +278,90 @@ async fn stale_version_and_position_map_to_conflict_without_mutation() {
     );
     assert_eq!(state.stream_checkpoint(&key).await.unwrap(), before);
     assert_eq!(state.checkpoint_reset_audits(&key).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn generic_admin_audit_is_redacted_atomic_and_reopenable() {
+    let (_directory, state, writer, key) = fixture().await;
+    assert_eq!(
+        state
+            .pause_stream_with_reason(writer, key.clone(), "operator\0secret".into())
+            .await,
+        Ok(StreamAdministrationOutcome::Paused { changed: false })
+    );
+    state.validate_recovery().await.unwrap();
+    let paused = state.admin_invocation_audits().await.unwrap();
+    assert_eq!(paused.len(), 2);
+    assert_eq!(paused[1].sequence, 2);
+    assert_eq!(paused[1].function, "sys.admin.pause_stream_with_reason");
+    assert!(paused[1].succeeded);
+    assert!(paused[1].redacted);
+    assert_eq!(paused[1].terminal_outcome, "paused_noop");
+    assert!(paused[1].safe_arguments.contains("stream_key_digest="));
+    assert!(paused[1].safe_arguments.contains("reason=<redacted>"));
+    assert!(!paused[1].safe_arguments.contains("operator"));
+    assert_eq!(paused[1].owner, writer);
+    assert_eq!(paused[1].observed_generation, 0);
+
+    assert_eq!(paused[0].function, "sys.admin.pause_stream");
+    assert!(paused[0].succeeded);
+    drop(state);
+    let state = {
+        let repository = _directory.path();
+        let repository = orna_repository_v1::Repository::discover(repository).unwrap();
+        RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [1; 16],
+                repository_id: [2; 16],
+            },
+            [3; 32],
+        )
+        .await
+        .unwrap()
+    };
+    let writer = state.acquire_lease([4; 16]).await.unwrap();
+    assert_eq!(state.admin_invocation_audits().await.unwrap(), paused);
+
+    let reset = position("reset-target");
+    state
+        .reset_checkpoint(
+            writer,
+            CheckpointResetRequest {
+                key: key.clone(),
+                expected: expected_initial(),
+                to: reset.clone(),
+                reason: "operator reset".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let before_stale = state.stream_checkpoint(&key).await.unwrap();
+    assert_eq!(
+        state
+            .reset_checkpoint(
+                writer,
+                CheckpointResetRequest {
+                    key: key.clone(),
+                    expected: expected_initial(),
+                    to: position("stale-target"),
+                    reason: "stale\0secret".into(),
+                },
+            )
+            .await,
+        Err(RuntimeError::StreamCheckpointStale)
+    );
+    assert_eq!(state.stream_checkpoint(&key).await.unwrap(), before_stale);
+    assert_eq!(state.checkpoint_reset_audits(&key).await.unwrap().len(), 1);
+    let audits = state.admin_invocation_audits().await.unwrap();
+    assert_eq!(audits.len(), 4);
+    assert_eq!(audits[2].function, "sys.admin.reset_checkpoint");
+    assert!(audits[2].succeeded);
+    assert_eq!(audits[2].terminal_outcome, "checkpoint_reset");
+    assert_eq!(audits[3].function, "sys.admin.reset_checkpoint");
+    assert!(!audits[3].succeeded);
+    assert!(audits[3].terminal_outcome.starts_with("failure:"));
+    assert!(audits[3].redacted);
+    assert!(!audits[3].safe_arguments.contains("secret"));
+
 }
