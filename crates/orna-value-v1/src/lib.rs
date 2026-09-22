@@ -308,6 +308,23 @@ impl OvbCodec for u64 {
     }
 }
 
+impl OvbCodec for f64 {
+    fn type_label() -> &'static str {
+        "Float"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        Ok(Value::float_bits(self.to_bits()))
+    }
+
+    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+        match value.raw() {
+            Raw::Float(bits) => Ok(f64::from_bits(*bits)),
+            _ => Err(decode_type_mismatch(path)),
+        }
+    }
+}
+
 impl OvbCodec for String {
     fn type_label() -> &'static str {
         "Str"
