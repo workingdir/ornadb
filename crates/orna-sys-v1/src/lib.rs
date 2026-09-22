@@ -1448,13 +1448,18 @@ impl SynchronousExecutions {
     }
 
     fn leave(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            let current = thread::current().id();
-            if let Some(index) = state.active.iter().position(|thread| *thread == current) {
-                state.active.remove(index);
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                self.state.clear_poison();
+                poisoned.into_inner()
             }
-            self.completed.notify_all();
+        };
+        let current = thread::current().id();
+        if let Some(index) = state.active.iter().position(|thread| *thread == current) {
+            state.active.remove(index);
         }
+        self.completed.notify_all();
     }
 
     #[cfg(test)]
@@ -3316,6 +3321,51 @@ mod tests {
         }
         assert_eq!(executions.pending(), 0);
         executions.wait_empty().unwrap();
+    }
+
+    #[test]
+    fn active_worker_terminal_drop_recovers_poisoned_execution_state() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("r"));
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.mode = InvocationMode::Start;
+        request.transaction = TransactionMode::Separate;
+        let handle = supervisor
+            .start(
+                request,
+                BlockingExecutor {
+                    gate: Arc::clone(&gate),
+                    calls: Arc::clone(&calls),
+                    result: InvocationResult::Success(value("Str", "done")),
+                },
+            )
+            .unwrap();
+        while calls.load(Ordering::SeqCst) == 0 {
+            thread::yield_now();
+        }
+
+        let synchronous = Arc::clone(&supervisor.synchronous);
+        let poisoner = thread::spawn(move || {
+            let _state = synchronous.state.lock().unwrap();
+            panic!("poison active execution state");
+        });
+        assert!(poisoner.join().is_err());
+
+        assert_eq!(
+            supervisor.cancel(&handle, Some(diagnostic("cancelled"))),
+            Ok(true)
+        );
+        let (open, wake) = &*gate;
+        *open.lock().unwrap() = true;
+        wake.notify_one();
+
+        let result = supervisor
+            .await_invocation(&handle, Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(result.status, InvocationStatus::Cancelled);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(supervisor.restart(), Ok(RuntimeId::new("r@2")));
     }
 
     #[test]
