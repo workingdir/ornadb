@@ -4,8 +4,8 @@ use orna_semantic_v1::{
     Catalogue, DIAG_AMBIGUOUS, DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT,
     DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, DIAG_IMPORT, DIAG_LEGACY_RESULT,
     DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED,
-    DIAG_UNSUPPORTED, EffectSummary, ModuleHeader, ModuleInput, Namespace, Symbol, SymbolKind,
-    StandardDependencyProfile, Type, analyze,
+    DIAG_UNSUPPORTED, EffectSummary, ModuleHeader, ModuleInput, Namespace, StandardCatalogueError,
+    StandardDependencyProfile, StandardProfileError, Symbol, SymbolKind, Type, analyze,
     analyze_with_catalogue,
 };
 
@@ -110,6 +110,45 @@ fn standard_dependency_revision_is_canonical_and_captures_provenance() {
             .with_prelude_exports(["a"])
             .revision_digest(),
         "prelude exports are part of catalogue admission provenance"
+    );
+}
+
+#[test]
+fn standard_catalogue_retains_verified_dependency_provenance() {
+    let source = "pub fn a() = 1;";
+    let profile = StandardDependencyProfile::from_sources(
+        "orna.std/snapshot-1",
+        [("std/a.orna".to_owned(), source.to_owned())],
+    )
+    .expect("profile");
+    let catalogue = Catalogue::from_standard_sources(
+        &profile,
+        [("std/a.orna".to_owned(), source.to_owned())],
+    )
+    .expect("catalogue");
+
+    assert_eq!(catalogue.standard_dependency_profile(), Some(&profile));
+    assert_eq!(
+        catalogue.standard_dependency_revision(),
+        Some(profile.revision_digest())
+    );
+    assert!(matches!(
+        Catalogue::from_standard_sources(
+            &profile,
+            [("std/a.orna".to_owned(), "pub fn a() = 2;".to_owned())],
+        ),
+        Err(StandardCatalogueError::Profile(
+            StandardProfileError::DigestMismatch
+        ))
+    ));
+
+    let attached = Catalogue::authoritative_core()
+        .with_standard_sources(&profile, [("std/a.orna".to_owned(), source.to_owned())])
+        .expect("attached catalogue");
+    assert_eq!(attached.standard_dependency_profile(), Some(&profile));
+    assert_eq!(
+        attached.standard_dependency_revision(),
+        Some(profile.revision_digest())
     );
 }
 

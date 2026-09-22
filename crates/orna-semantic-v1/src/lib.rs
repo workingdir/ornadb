@@ -446,10 +446,27 @@ pub struct Catalogue {
     /// declarations must never become historical definitions merely because
     /// they happen to have the same name.
     historical_modules: BTreeMap<Namespace, ModuleHeader>,
+    /// The verified source provenance used to admit the source-backed
+    /// standard modules, when this catalogue contains any.
+    standard_dependency_profile: Option<StandardDependencyProfile>,
 }
 impl Catalogue {
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// Returns the pinned standard dependency provenance retained by this
+    /// catalogue, if source-backed standard modules were admitted.
+    pub fn standard_dependency_profile(&self) -> Option<&StandardDependencyProfile> {
+        self.standard_dependency_profile.as_ref()
+    }
+
+    /// Returns the canonical revision of the pinned standard dependency
+    /// provenance retained by this catalogue.
+    pub fn standard_dependency_revision(&self) -> Option<[u8; 32]> {
+        self.standard_dependency_profile
+            .as_ref()
+            .map(StandardDependencyProfile::revision_digest)
     }
 
     /// Adds an authority-backed projection of declarations retained for
@@ -475,6 +492,7 @@ impl Catalogue {
         sources: impl IntoIterator<Item = (String, String)>,
     ) -> Result<Self, StandardCatalogueError> {
         let mut catalogue = Self::empty();
+        catalogue.standard_dependency_profile = Some(profile.clone());
         let mut seen = BTreeSet::new();
         let mut supplied = BTreeSet::new();
         for (logical_path, source) in sources {
@@ -545,9 +563,11 @@ impl Catalogue {
         sources: impl IntoIterator<Item = (String, String)>,
     ) -> Result<Self, StandardCatalogueError> {
         let standard = Self::from_standard_sources(profile, sources)?;
+        let provenance = standard.standard_dependency_profile.clone();
         for (namespace, header) in standard.modules {
             self.modules.insert(namespace, header);
         }
+        self.standard_dependency_profile = provenance;
         Ok(self)
     }
 
@@ -873,6 +893,7 @@ impl Catalogue {
             modules,
             attached_symbols: BTreeMap::new(),
             historical_modules: BTreeMap::new(),
+            standard_dependency_profile: None,
         }
     }
 
