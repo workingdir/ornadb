@@ -23,7 +23,6 @@ members = [
     "crates/orna-serving-v1",
     "crates/orna-security-v1",
     "crates/orna-semantic-v1",
-    "crates/orna-server",
     "crates/orna-sqlite",
     "crates/orna-standard",
     "crates/orna-storage",
