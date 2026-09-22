@@ -14541,12 +14541,10 @@ fn infer_refined_assertion(
     }
 }
 
-/// Elaborates the two owner-local relational predicate constructors used by
-/// the frozen reference corpus. They are not evaluator functions: the table
-/// supplies the unpublished `Relation<Row>` subject, and the lambda receives
-/// one statically shaped row. All other assertion forms retain ordinary
-/// inference and therefore remain unsupported unless the general checker can
-/// prove them.
+/// Elaborates owner-local relational predicate constructors and ordinary
+/// relation predicates. The table supplies the unpublished `Relation<Row>`
+/// subject; a predicate function value therefore receives that subject
+/// implicitly, without a source-level table read.
 fn infer_table_assertion(
     value: &Expr,
     owner_name: &str,
@@ -14577,13 +14575,13 @@ fn infer_table_assertion(
         callee, arguments, ..
     } = value
     else {
-        return infer(value, scope, &BTreeMap::new(), diagnostics);
+        return infer_ordinary_table_predicate(value, owner_name, scope, diagnostics);
     };
     let Expr::Name { text, .. } = callee.as_ref() else {
-        return infer(value, scope, &BTreeMap::new(), diagnostics);
+        return infer_ordinary_table_predicate(value, owner_name, scope, diagnostics);
     };
     if !matches!(text.as_str(), "every" | "all_unique") || arguments.len() != 1 {
-        return infer(value, scope, &BTreeMap::new(), diagnostics);
+        return infer_ordinary_table_predicate(value, owner_name, scope, diagnostics);
     }
     let Expr::Lambda {
         parameters, body, ..
@@ -14610,6 +14608,50 @@ fn infer_table_assertion(
     insert_local_binding(name, row.clone(), &mut local, diagnostics);
     let inferred = infer(body, scope, &local, diagnostics);
     let valid = text == "all_unique" || inferred.ty == Type::Bool;
+    Inferred {
+        ty: if valid { Type::Bool } else { Type::Error },
+        effects: inferred.effects,
+    }
+}
+
+/// A table assertion may name an ordinary pure predicate function. Its
+/// `Relation<Owner>` parameter is elaborated from the table owner rather than
+/// from a table expression, so explicit table reads retain their effects.
+fn infer_ordinary_table_predicate(
+    value: &Expr,
+    owner_name: &str,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let expected_relation = Type::Relation(Box::new(Type::Named(owner_name.to_owned())));
+    let inferred = infer_contextual(
+        value,
+        &Type::Function {
+            parameters: vec![expected_relation.clone()],
+            parameter_names: None,
+            default_parameters: BTreeSet::new(),
+            result: Box::new(Type::Bool),
+        },
+        scope,
+        &BTreeMap::new(),
+        diagnostics,
+    );
+    let valid = matches!(
+        &inferred.ty,
+        Type::Function {
+            parameters,
+            result,
+            ..
+        } if parameters.len() == 1
+            && types_match(&parameters[0], &expected_relation)
+            && types_match(result.as_ref(), &Type::Bool)
+    );
+    if !matches!(&inferred.ty, Type::Function { .. }) {
+        // Preserve ordinary expression inference for existing assertion
+        // diagnostics (notably explicit table reads); only function-valued
+        // assertions need owner-predicate elaboration.
+        return inferred;
+    }
     Inferred {
         ty: if valid { Type::Bool } else { Type::Error },
         effects: inferred.effects,
