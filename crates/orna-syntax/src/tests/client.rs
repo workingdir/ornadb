@@ -154,7 +154,7 @@ fn parses_accepted_client_fixture_losslessly_with_expression_and_state_bodies() 
     assert_eq!(parsed.syntax().text(), source);
     assert_eq!(parsed.schemas().len(), 1);
     assert_eq!(parsed.schemas()[0].name.parts[0].text, "accepted_client");
-    assert_eq!(parsed.client_functions().len(), 2);
+    assert_eq!(parsed.client_functions().len(), 3);
 
     let expression = &parsed.client_functions()[0];
     assert_eq!(expression.name.parts[0].text, "accepted_client");
@@ -191,6 +191,36 @@ fn parses_accepted_client_fixture_losslessly_with_expression_and_state_bodies() 
         block.return_expression.as_ref(),
         Some(ClientExpression::BooleanLiteral { value: true, .. })
     ));
+    let v4_stateful = &parsed.client_functions()[2];
+    assert_eq!(v4_stateful.name.parts[0].text, "accepted_client");
+    assert_eq!(v4_stateful.name.parts[1].text, "v4_stateful");
+    let ClientFunctionBody::StateBlock(v4_block) = &v4_stateful.body else {
+        panic!("expected the V4 fixture to use a state CLIENT body");
+    };
+    assert_eq!(v4_block.states.len(), 3);
+    assert!(v4_block.locals.is_empty());
+    assert!(v4_block.statements.is_empty());
+    let Some(ClientExpression::ParameterRead { parameter }) = &v4_block.return_expression else {
+        panic!("expected the V4 fixture to return its state value");
+    };
+    assert_eq!(parameter.text, "local_value");
+    let [local, session, user] = &v4_block.states[..] else {
+        panic!("expected local, session, and user state slots");
+    };
+    assert_eq!(local.scope, StateScope::Local);
+    assert!(matches!(
+        &local.default,
+        StateDefault::Expression(ClientExpression::StringLiteral { value, .. })
+            if value == "local"
+    ));
+    assert_eq!(session.scope, StateScope::Session);
+    assert!(matches!(
+        &session.default,
+        StateDefault::Expression(ClientExpression::StringLiteral { value, .. })
+            if value == "session"
+    ));
+    assert_eq!(user.scope, StateScope::User);
+    assert!(matches!(user.default, StateDefault::Unset));
 }
 
 #[test]
