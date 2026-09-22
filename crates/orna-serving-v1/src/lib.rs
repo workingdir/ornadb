@@ -348,6 +348,9 @@ impl Serving {
                     candidate.insert(key.clone(), value.clone());
                 }
                 Patch::Remove { key } => {
+                    if !candidate.contains_key(key) {
+                        return Err(Error::PatchMalformed);
+                    }
                     candidate.remove(key);
                 }
             }
@@ -817,6 +820,41 @@ mod tests {
         assert_eq!(replay.len(), 1);
         assert_eq!(replay[0].page.get("b"), None);
         assert_eq!(replay[0].page.get("a"), Some(&"one".to_owned()));
+    }
+
+    #[test]
+    fn removing_an_absent_property_is_rejected_atomically() {
+        let mut state = admitted();
+        state
+            .apply_patch(
+                id(1),
+                0,
+                1,
+                &[Patch::Set {
+                    key: "a".into(),
+                    value: "one".into(),
+                }],
+                pin(1),
+            )
+            .unwrap();
+
+        assert_eq!(
+            state.apply_patch(
+                id(1),
+                1,
+                2,
+                &[Patch::Remove {
+                    key: "missing".into(),
+                }],
+                pin(2),
+            ),
+            Err(Error::PatchMalformed)
+        );
+        let replay = state.resync(id(1), 0).unwrap();
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].revision, 1);
+        assert_eq!(replay[0].page.get("a"), Some(&"one".to_owned()));
+        assert_eq!(replay[0].page.get("missing"), None);
     }
 
     #[test]
