@@ -366,14 +366,18 @@ where
         let Ok(frame) = Envelope::decode(encoded, self.limits) else {
             return Ok(());
         };
-        if frame.watch == Some(self.watch)
-            && matches!(frame.message, Message::Snapshot { .. })
-            && self.expected_resync_request.is_none()
-            && frame.request.is_some()
-        {
-            return Err(LiveSessionError::Protocol(
-                orna_protocol_v1::Error::InvalidMessage,
-            ));
+        if frame.watch == Some(self.watch) && matches!(frame.message, Message::Snapshot { .. }) {
+            if let Some(expected) = self.expected_resync_request {
+                if frame.request != Some(expected) {
+                    return Err(LiveSessionError::Protocol(
+                        orna_protocol_v1::Error::InvalidMessage,
+                    ));
+                }
+            } else if frame.request.is_some() {
+                return Err(LiveSessionError::Protocol(
+                    orna_protocol_v1::Error::InvalidMessage,
+                ));
+            }
         }
         Ok(())
     }
@@ -835,8 +839,48 @@ mod tests {
                 orna_protocol_v1::Error::InvalidMessage
             ))
         ));
+
         assert_eq!(driver.presentation().published().unwrap().revision(), 2);
         assert_eq!(driver.renderer.revisions, vec![0, 1, 2]);
+    }
+    #[test]
+    fn initial_snapshot_requires_subscribe_request_correlation() {
+        let expected_request = [1; 16];
+        let mut io = MemoryIo::default();
+        io.incoming.push_back(snapshot_with_request(
+            0,
+            "wrong-request",
+            Some([2; 16]),
+        ));
+        let mut driver = LiveSessionDriver::new_with_expected_snapshot_request(
+            io,
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+            Some(expected_request),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Err(LiveSessionError::Protocol(
+                orna_protocol_v1::Error::InvalidMessage
+            ))
+        ));
+        assert!(driver.presentation().published().is_none());
+        assert!(driver.io.sent.is_empty());
+
+        driver.io.incoming.push_back(snapshot_with_request(
+            0,
+            "correlated",
+            Some(expected_request),
+        ));
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+        assert_eq!(driver.presentation().published().unwrap().revision(), 0);
     }
 
     #[test]
