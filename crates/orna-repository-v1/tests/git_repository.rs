@@ -5,6 +5,8 @@ use std::{
     process::Command,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use ed25519_dalek::{Signer, SigningKey};
 use fs2::FileExt;
 use orna_foundation_v1::{CanonicalValue, GitHash, OvbRaw, SchemaDescriptor};
@@ -1850,6 +1852,40 @@ fn checkout_preflight_revalidation_accepts_unchanged_state_and_rejects_worktree_
         Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
     ));
 }
+#[cfg(unix)]
+#[test]
+fn checkout_force_revalidation_rejects_executable_bit_drift() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target mode"]);
+    git(root.path(), &["switch", "main"]);
+    git(root.path(), &["config", "core.filemode", "false"]);
+
+    fs::write(root.path().join("ordinary.txt"), "local\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(20))
+        .unwrap();
+    let token = plan.force_token();
+
+    let mut permissions = fs::metadata(root.path().join("ordinary.txt"))
+        .unwrap()
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(root.path().join("ordinary.txt"), permissions).unwrap();
+    let before = git_state(&repo, root.path());
+
+    assert!(matches!(
+        repo.authorize_checkout_force(&plan, true, Some(&token)),
+        Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
 
 #[test]
 fn checkout_preflight_revalidation_rejects_index_head_and_branch_tip_drift() {

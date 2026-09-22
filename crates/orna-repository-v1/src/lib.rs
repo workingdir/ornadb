@@ -2733,6 +2733,19 @@ impl Repository {
         let status = self.git_bytes(["status", "--porcelain=v2", "-z", "--untracked-files=all"])?;
         Ok(WorktreeState(status, self.worktree_content_digest(&[])?))
     }
+    #[cfg(unix)]
+    fn worktree_executable_marker(metadata: &fs::Metadata) -> u8 {
+        use std::os::unix::fs::PermissionsExt;
+
+        u8::from(metadata.permissions().mode() & 0o111 != 0)
+    }
+
+    #[cfg(not(unix))]
+    const fn worktree_executable_marker(_metadata: &fs::Metadata) -> u8 {
+        0
+    }
+
+
 
     fn worktree_content_digest(
         &self,
@@ -2805,6 +2818,7 @@ impl Repository {
                 }
                 Ok(metadata) if metadata.is_file() => {
                     digest.update([2]);
+                    digest.update([Self::worktree_executable_marker(&metadata)]);
                     let contents =
                         fs::read(&target).map_err(|_| RepositoryError::LocalStateUnavailable)?;
                     digest.update((contents.len() as u64).to_be_bytes());
