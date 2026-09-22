@@ -1826,7 +1826,17 @@ fn stabilize_local_function_dependencies(tree: &SyntaxTree, scope: &Scope) {
             let Declaration::Function { signature, body } = &item.declaration else {
                 continue;
             };
-            let dependencies = tables_referenced(body, Some(&scope.table_rows), Some(scope));
+            let parameter_names = signature
+                .parameters
+                .iter()
+                .flat_map(|parameter| pattern_binding_names(&parameter.pattern))
+                .collect::<BTreeSet<_>>();
+            let dependencies = tables_referenced(
+                body,
+                Some(&scope.table_rows),
+                Some(scope),
+                Some(&parameter_names),
+            );
             scope
                 .function_dependencies
                 .borrow_mut()
@@ -5544,7 +5554,13 @@ fn check_function(
             }
         }
     }
-    let dependencies = tables_referenced(body, Some(&scope.table_rows), Some(scope));
+    let parameter_names = local.keys().cloned().collect::<BTreeSet<_>>();
+    let dependencies = tables_referenced(
+        body,
+        Some(&scope.table_rows),
+        Some(scope),
+        Some(&parameter_names),
+    );
     scope
         .function_dependencies
         .borrow_mut()
@@ -14824,7 +14840,7 @@ fn assertion(
     plans: &mut Vec<AssertionPlan>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let dependencies = tables_referenced(value, resolved_tables, scope);
+    let dependencies = tables_referenced(value, resolved_tables, scope, None);
     if inferred.ty != Type::Bool {
         let message = match &owner {
             AssertionOwner::Table(name) => {
@@ -15306,17 +15322,86 @@ fn enum_variant_types(
     enums
 }
 
+fn pattern_binding_names(pattern: &Pattern) -> Vec<String> {
+    fn collect(pattern: &Pattern, names: &mut Vec<String>) {
+        match pattern {
+            Pattern::Name(name, _) => names.push(name.clone()),
+            Pattern::Tuple { elements, .. } | Pattern::List { elements, .. } => {
+                for element in elements {
+                    collect(element, names);
+                }
+            }
+            Pattern::Record { fields, .. } => {
+                for (_, pattern, _) in fields {
+                    if let Some(pattern) = pattern {
+                        collect(pattern, names);
+                    }
+                }
+            }
+            Pattern::Constructor {
+                arguments, fields, ..
+            } => {
+                for argument in arguments {
+                    collect(argument, names);
+                }
+                for field in fields {
+                    if let Some(pattern) = &field.pattern {
+                        collect(pattern, names);
+                    }
+                }
+            }
+            Pattern::Wildcard(_) | Pattern::Literal { .. } => {}
+        }
+    }
+
+    let mut names = Vec::new();
+    collect(pattern, &mut names);
+    names
+}
+
+fn resolved_helper_summary_key(
+    path: &[&str],
+    local_names: &BTreeSet<String>,
+    scope: &Scope,
+) -> Option<String> {
+    let first = *path.first()?;
+    if local_names.contains(first) {
+        return None;
+    }
+    if path.len() == 1 {
+        return scope
+            .names
+            .get(first)
+            .filter(|symbol| symbol.kind == SymbolKind::Function)
+            .map(|_| first.to_owned());
+    }
+    let root = scope.modules.get(first)?;
+    let namespace = Namespace(
+        root.0
+            .iter()
+            .cloned()
+            .chain(path[1..path.len() - 1].iter().map(|part| (*part).to_owned()))
+            .collect(),
+    );
+    let module = scope.available_modules.get(&namespace)?;
+    let function = module.exports.get(*path.last()?)?;
+    (function.kind == SymbolKind::Function).then(|| path.join("."))
+}
+
 fn tables_referenced(
     expr: &Expr,
     resolved_tables: Option<&BTreeMap<String, Type>>,
     scope: Option<&Scope>,
+    initial_local_names: Option<&BTreeSet<String>>,
 ) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
+    let initial_local_names = initial_local_names.cloned().unwrap_or_default();
     fn visit(
         e: &Expr,
         names: &mut BTreeSet<String>,
         resolved_tables: Option<&BTreeMap<String, Type>>,
         scope: Option<&Scope>,
+        local_names: &BTreeSet<String>,
     ) {
         // Dependency extraction follows resolved table identities and also
         // expands summaries for called pure helpers. The latter keeps
@@ -15340,16 +15425,16 @@ fn tables_referenced(
             Expr::InterpolatedString { segments, .. } => {
                 for segment in segments {
                     if let StringSegment::Expression { value, .. } = segment {
-                        visit(value, names, resolved_tables, scope);
+                        visit(value, names, resolved_tables, scope, local_names);
                     }
                 }
             }
             Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
-                visit(rhs, names, resolved_tables, scope)
+                visit(rhs, names, resolved_tables, scope, local_names)
             }
             Expr::Binary { lhs, rhs, .. } => {
-                visit(lhs, names, resolved_tables, scope);
-                visit(rhs, names, resolved_tables, scope);
+                visit(lhs, names, resolved_tables, scope, local_names);
+                visit(rhs, names, resolved_tables, scope, local_names);
             }
             Expr::Call {
                 callee, arguments, ..
@@ -15357,68 +15442,83 @@ fn tables_referenced(
             | Expr::GenericCall {
                 callee, arguments, ..
             } => {
-                visit(callee, names, resolved_tables, scope);
+                visit(callee, names, resolved_tables, scope, local_names);
                 if let Some(scope) = scope
                     && let Some(path) = qualified_path(callee)
+                    && let Some(summary_key) =
+                        resolved_helper_summary_key(&path, local_names, scope)
                 {
-                    let path_key = path.join(".");
-                    let name_key = path.last().copied().unwrap_or_default();
                     let summaries = scope.function_dependencies.borrow();
-                    if let Some(dependencies) = summaries
-                        .get(&path_key)
-                        .or_else(|| summaries.get(name_key))
-                    {
+                    if let Some(dependencies) = summaries.get(&summary_key) {
                         names.extend(dependencies.iter().cloned());
                     }
                 }
                 for argument in arguments {
-                    visit(&argument.value, names, resolved_tables, scope);
+                    visit(&argument.value, names, resolved_tables, scope, local_names);
                 }
             }
-            Expr::Field { base, .. } => visit(base, names, resolved_tables, scope),
+            Expr::Field { base, .. } => visit(base, names, resolved_tables, scope, local_names),
             Expr::Index { base, index, .. } => {
-                visit(base, names, resolved_tables, scope);
-                visit(index, names, resolved_tables, scope);
+                visit(base, names, resolved_tables, scope, local_names);
+                visit(index, names, resolved_tables, scope, local_names);
             }
             Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
                 for element in elements {
-                    visit(element, names, resolved_tables, scope);
+                    visit(element, names, resolved_tables, scope, local_names);
                 }
             }
             Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
                 for field in fields {
-                    visit(&field.value, names, resolved_tables, scope);
+                    visit(&field.value, names, resolved_tables, scope, local_names);
                 }
             }
-            Expr::Lambda { body, .. } => visit(body, names, resolved_tables, scope),
+            Expr::Lambda {
+                parameters, body, ..
+            } => {
+                let mut lambda_locals = local_names.clone();
+                for parameter in parameters {
+                    lambda_locals.extend(pattern_binding_names(&parameter.pattern));
+                }
+                visit(body, names, resolved_tables, scope, &lambda_locals);
+            }
             Expr::Block {
                 statements, tail, ..
             } => {
+                let mut block_locals = local_names.clone();
+                let mut terminated = false;
                 for statement in statements {
                     match statement {
-                        Statement::Let { value, .. }
-                        | Statement::Assert { value, .. }
+                        Statement::Let { pattern, value, .. } => {
+                            visit(value, names, resolved_tables, scope, &block_locals);
+                            block_locals.extend(pattern_binding_names(pattern));
+                        }
+                        Statement::Assert { value, .. }
                         | Statement::Expression { value, .. }
                         | Statement::Control { value, .. }
-                        | Statement::Return {
-                            value: Some(value), ..
+                        | Statement::Assignment { value, .. } => {
+                            visit(value, names, resolved_tables, scope, &block_locals)
                         }
-                        | Statement::Break {
-                            value: Some(value), ..
-                        } => visit(value, names, resolved_tables, scope),
-                        Statement::Assignment { value, .. } => {
-                            visit(value, names, resolved_tables, scope)
+                        Statement::Return { value, .. } => {
+                            if let Some(value) = value {
+                                visit(value, names, resolved_tables, scope, &block_locals);
+                            }
+                            terminated = true;
+                            break;
                         }
-                        Statement::Return { value: None, .. }
-                        | Statement::Break { value: None, .. }
-                        | Statement::Continue { .. } => {}
+                        Statement::Break { value, .. } => {
+                            if let Some(value) = value {
+                                visit(value, names, resolved_tables, scope, &block_locals);
+                            }
+                        }
+                        Statement::Continue { .. } => {}
                     }
                 }
-                if let Some(tail) = tail {
-                    visit(tail, names, resolved_tables, scope);
+                if !terminated && let Some(tail) = tail {
+                    visit(tail, names, resolved_tables, scope, &block_locals);
                 }
             }
             Expr::Control {
+                binding,
                 condition,
                 body,
                 arms,
@@ -15426,25 +15526,37 @@ fn tables_referenced(
                 ..
             } => {
                 if let Some(condition) = condition {
-                    visit(condition, names, resolved_tables, scope);
+                    visit(condition, names, resolved_tables, scope, local_names);
                 }
                 if let Some(body) = body {
-                    visit(body, names, resolved_tables, scope);
+                    let mut body_locals = local_names.clone();
+                    if let Some(binding) = binding {
+                        body_locals.extend(pattern_binding_names(binding));
+                    }
+                    visit(body, names, resolved_tables, scope, &body_locals);
                 }
                 if let Some(alternate) = alternate {
-                    visit(alternate, names, resolved_tables, scope);
+                    visit(alternate, names, resolved_tables, scope, local_names);
                 }
                 for arm in arms {
+                    let mut arm_locals = local_names.clone();
+                    arm_locals.extend(pattern_binding_names(&arm.pattern));
                     if let Some(guard) = &arm.guard {
-                        visit(guard, names, resolved_tables, scope);
+                        visit(guard, names, resolved_tables, scope, &arm_locals);
                     }
-                    visit(&arm.body, names, resolved_tables, scope);
+                    visit(&arm.body, names, resolved_tables, scope, &arm_locals);
                 }
             }
             _ => {}
         }
     }
-    visit(expr, &mut names, resolved_tables, scope);
+    visit(
+        expr,
+        &mut names,
+        resolved_tables,
+        scope,
+        &initial_local_names,
+    );
     names
 }
 fn valid_row_path(path: &str) -> bool {
