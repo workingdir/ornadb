@@ -1,110 +1,12 @@
-# Implementation-scoped accepted API demos. Sources remain in the dogfood
-# fixture directory, not the Orna 1.0.0 canonical conformance corpus
-# (`examples/valid`, `examples/invalid`, and `examples/reference`).
+# The accepted demo catalogue is intentionally empty.
 #
-# `mode = "source-check"` invokes the public offline source checker; it proves
-# parse, resolution, and type checking, not runtime behaviour or conformance.
-# `mode = "offline-test"` invokes the named focused offline proof.
-# `mode = "compose-only"` is listed for discoverability but not run locally.
-
-[[demos]]
-name = "server-functions"
-mode = "source-check"
-source = "crates/orna-server/tests/fixtures/server_function_dogfood.orna"
-description = "SERVER query, stream, and mutation functions."
-
-[[demos]]
-name = "client-function"
-mode = "source-check"
-source = "crates/orna-server/tests/fixtures/client_function_dogfood.orna"
-description = "A minimal Boolean CLIENT function."
-
-
-[[demos]]
-name = "contact-app"
-mode = "source-check"
-source = "crates/orna-server/tests/fixtures/contact_app_dogfood.orna"
-description = "A typed contact directory with a client UI entry."
-
-[[demos]]
-name = "issue-tracker-app"
-mode = "source-check"
-source = "crates/orna-server/tests/fixtures/issue_tracker_app_dogfood.orna"
-description = "A typed issue tracker with a client UI entry."
-
-[[demos]]
-name = "task-board-app"
-mode = "source-check"
-source = "crates/orna-server/tests/fixtures/task_board_app_dogfood.orna"
-description = "A typed task board with USER state and a client UI entry."
-
-[[demos]]
-name = "client-local-assignment"
-mode = "source-check"
-source = "crates/orna-server/tests/fixtures/client_local_assignment_dogfood.orna"
-description = "CLIENT local assignment and RETURN."
-
-[[demos]]
-name = "client-control-flow"
-mode = "offline-test"
-test = "checks_and_evaluates_accepted_client_control_flow_fixture_offline"
-source = "crates/orna-server/tests/fixtures/client_control_flow_dogfood.orna"
-description = "A bounded console-style CLIENT counter with mutable state and control flow."
-
-[[demos]]
-name = "expression-client"
-mode = "offline-test"
-test = "checks_accepted_expression_client_fixture_offline"
-source = "crates/orna-server/tests/fixtures/expression_client_dogfood.orna"
-description = "CLIENT expression evaluation, REF field paths, parameters, and external contracts."
-
-[[demos]]
-name = "client-state"
-mode = "source-check"
-source = "crates/orna-server/tests/fixtures/client_state_dogfood.orna"
-description = "CLIENT LOCAL, SESSION, and USER state declarations."
-
-[[demos]]
-name = "static-ui"
-mode = "source-check"
-source = "crates/orna-server/tests/fixtures/static_ui_dogfood.orna"
-description = "A static UI composed from text, panel, column, and window constructors."
-
-[[demos]]
-name = "studio-static-app"
-mode = "offline-test"
-test = "checks_and_evaluates_accepted_static_studio_shell_offline"
-source = "crates/orna-server/tests/fixtures/studio_static_app_dogfood.orna"
-description = "A static, source-authored-only Studio shell evaluated through accepted V9 std.ui constructors."
-
-[[demos]]
-name = "ui-constructor-showcase"
-mode = "source-check"
-source = "crates/orna-server/tests/fixtures/ui_constructor_showcase_dogfood.orna"
-description = "A source-authored static UI showcase covering all V9 constructors and std.ui.window."
-
-[[demos]]
-name = "scalar-resource"
-mode = "offline-test"
-test = "checks_accepted_scalar_resource_fixture_offline"
-source = "crates/orna-server/tests/fixtures/scalar_resource_dogfood.orna"
-description = "CLIENT scalar resource backed by standard invocation."
-
-[[demos]]
-name = "stream-resource"
-mode = "source-check"
-source = "crates/orna-server/tests/fixtures/stream_resource_dogfood.orna"
-description = "SERVER stream and CLIENT stream resource."
-
-[[demos]]
-name = "action"
-mode = "offline-test"
-test = "checks_accepted_action_fixture_offline"
-source = "crates/orna-server/tests/fixtures/action_dogfood.orna"
-description = "Opaque std.Action values and action calls."
-
-[[demos]]
-name = "client-inspector"
-mode = "source-check"
-source = "crates/orna-server/tests/fixtures/client_inspector_dogfood.orna"
-description = "Source-checked CLIENT Inspector shell with a snapshot and eight projection carriers for std.inspect.render@1."
+# The former entries all referenced crates/orna-server/tests/fixtures/*.orna.
+# Those fixtures are consumed only by the legacy orna-server tests and use the
+# historical SERVER/CLIENT surface. The current workspace excludes orna-server;
+# frozen v1 callers instead consume the canonical reference/Orna-1.0.0 corpus
+# through orna-conformance-v1 and orna-cli-v1. No frozen v1 consumer exists for
+# any former entry, so retaining one would claim a runnable proof that cannot
+# be reached from the current product graph.
+#
+# Add an entry only with a frozen v1 source, a direct v1 consumer, and a focused
+# proof command. Do not repoint legacy fixtures here as a compatibility shim.
