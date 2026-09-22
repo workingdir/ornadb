@@ -2125,10 +2125,71 @@ fn module_assertion_scope_distinguishes_zero_and_one_table_invariants() {
     }));
 
     let zero_table = analyze(&[ModuleInput::new("zero.orna", "assert 1 + 1 == 2;")]);
-    assert!(has(&zero_table, DIAG_ASSERTION_SCOPE));
-    assert!(zero_table.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message() == "module assertions must depend on at least two distinct tables"
-    }));
+    assert_eq!(zero_table.diagnostics.len(), 1, "{:?}", zero_table.diagnostics);
+    assert_eq!(zero_table.diagnostics[0].code(), DIAG_ASSERTION_SCOPE);
+    assert_eq!(
+        zero_table.diagnostics[0].message(),
+        "module assertions must depend on at least two distinct tables"
+    );
+    let zero_plan = zero_table
+        .assertions
+        .values()
+        .next()
+        .and_then(|plans| plans.first())
+        .expect("table-free module assertion plan");
+    assert!(zero_plan.dependencies.is_empty());
+    assert_eq!(zero_plan.effects, EffectSummary::default());
+}
+
+#[test]
+fn module_assertion_invoking_pure_helper_retains_transitive_table_dependencies() {
+    let result = analyze(&[ModuleInput::new(
+        "transitive-helper.orna",
+        r#"
+            pub table User(id: Uuid) { name: Str, }
+            pub table Account(id: Uuid) { user_id: Uuid, }
+
+            pub fn related(): Bool =
+                every(User, user =>
+                    exists(Account, account => account.user_id == user.id)
+                );
+
+            assert related();
+        "#,
+    )]);
+
+    assert!(
+        !has(&result, DIAG_ASSERTION_SCOPE),
+        "transitive table dependencies must avoid the empty-dependency diagnostic: {:?}",
+        result.diagnostics
+    );
+    assert!(
+        has(&result, DIAG_ASSERTION_EFFECT),
+        "the helper's existing database-read/failure summary must remain visible: {:?}",
+        result.diagnostics
+    );
+    let module = result.modules.values().next().expect("semantic module");
+    let helper = module
+        .exports
+        .get("related")
+        .expect("pure helper export");
+    assert_eq!(
+        helper.effects.effects,
+        std::collections::BTreeSet::from(["database read".into()])
+    );
+    assert!(helper.effects.may_fail);
+
+    let plan = result
+        .assertions
+        .values()
+        .next()
+        .and_then(|plans| plans.first())
+        .expect("module assertion plan");
+    assert_eq!(
+        plan.dependencies,
+        std::collections::BTreeSet::from(["Account".into(), "User".into()])
+    );
+    assert_eq!(plan.effects, helper.effects);
 }
 
 #[test]

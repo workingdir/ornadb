@@ -6,6 +6,7 @@
 //! imports, conservative type summaries, effect/failure summaries, and
 //! declaration-assertion plans.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
@@ -1702,6 +1703,7 @@ fn analyze_retaining_context(
         for symbol in symbols.values_mut() {
             canonicalize_symbol(symbol, &scope.nominal_identities);
         }
+        stabilize_local_function_dependencies(tree, &scope);
         let table_rows = tree
             .items
             .iter()
@@ -1796,6 +1798,25 @@ fn stabilize_function_summaries(
             }
         }
         if *modules == before {
+            break;
+        }
+    }
+}
+fn stabilize_local_function_dependencies(tree: &SyntaxTree, scope: &Scope) {
+    let pass_limit = tree.items.len().saturating_add(1);
+    for _ in 0..pass_limit {
+        let before = scope.function_dependencies.borrow().clone();
+        for item in &tree.items {
+            let Declaration::Function { signature, body } = &item.declaration else {
+                continue;
+            };
+            let dependencies = tables_referenced(body, Some(&scope.table_rows), Some(scope));
+            scope
+                .function_dependencies
+                .borrow_mut()
+                .insert(signature.name.clone(), dependencies);
+        }
+        if *scope.function_dependencies.borrow() == before {
             break;
         }
     }
@@ -2488,6 +2509,10 @@ fn primitive(name: &str) -> Option<Type> {
 #[derive(Clone, Default)]
 struct Scope {
     names: BTreeMap<String, Symbol>,
+    /// Per-module summaries used while resolving table provenance through
+    /// pure helper calls. This remains semantic-loader state rather than a
+    /// public Symbol field so existing catalogue/value contracts stay stable.
+    function_dependencies: RefCell<BTreeMap<String, BTreeSet<String>>>,
     ambiguous: BTreeSet<String>,
     /// Source spellings mapped to compiler-local nominal identities. The
     /// values are qualified by defining module and are never a substitute for
@@ -2569,6 +2594,7 @@ fn resolve_imports(
 ) -> Scope {
     let mut scope = Scope {
         names: header.symbols.clone(),
+        function_dependencies: RefCell::new(BTreeMap::new()),
         ambiguous: BTreeSet::new(),
         nominal_identities: BTreeMap::new(),
         modules: BTreeMap::new(),
@@ -3269,6 +3295,7 @@ fn check_item(
                 value,
                 inferred,
                 Some(&scope.table_rows),
+                Some(scope),
                 plans,
                 diagnostics,
             );
@@ -3365,6 +3392,7 @@ fn check_item(
                             value,
                             inferred,
                             None,
+                            Some(scope),
                             plans,
                             diagnostics,
                         );
@@ -3423,6 +3451,7 @@ fn check_item(
                             value,
                             inferred,
                             None,
+                            Some(scope),
                             plans,
                             diagnostics,
                         );
@@ -5399,6 +5428,11 @@ fn check_function(
             }
         }
     }
+    let dependencies = tables_referenced(body, Some(&scope.table_rows), Some(scope));
+    scope
+        .function_dependencies
+        .borrow_mut()
+        .insert(signature.name.clone(), dependencies);
     validate_loop_transfers(body, &function_scope, &local, &mut Vec::new(), diagnostics);
 }
 
@@ -14670,10 +14704,11 @@ fn assertion(
     value: &Expr,
     inferred: Inferred,
     resolved_tables: Option<&BTreeMap<String, Type>>,
+    scope: Option<&Scope>,
     plans: &mut Vec<AssertionPlan>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let dependencies = tables_referenced(value, resolved_tables);
+    let dependencies = tables_referenced(value, resolved_tables, scope);
     if inferred.ty != Type::Bool {
         let message = match &owner {
             AssertionOwner::Table(name) => {
@@ -15158,19 +15193,18 @@ fn enum_variant_types(
 fn tables_referenced(
     expr: &Expr,
     resolved_tables: Option<&BTreeMap<String, Type>>,
+    scope: Option<&Scope>,
 ) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     fn visit(
         e: &Expr,
         names: &mut BTreeSet<String>,
         resolved_tables: Option<&BTreeMap<String, Type>>,
+        scope: Option<&Scope>,
     ) {
-        // Dependency extraction must follow the resolver's table identities,
-        // not the spelling convention that examples usually use for table
-        // names. A lower-case table is still a table, and a qualified table
-        // path must be compared with the same resolved key used for its row
-        // type. Stop descending once the whole expression is a table
-        // reference so `User.id` records `User`, not a fictitious `User.id`.
+        // Dependency extraction follows resolved table identities and also
+        // expands summaries for called pure helpers. The latter keeps
+        // assertion planning tied to the resolver rather than source spelling.
         if let Some(path) = qualified_path(e).map(|path| path.join(".")) {
             if resolved_tables.is_some_and(|tables| tables.contains_key(&path)) {
                 names.insert(path);
@@ -15190,50 +15224,78 @@ fn tables_referenced(
             Expr::InterpolatedString { segments, .. } => {
                 for segment in segments {
                     if let StringSegment::Expression { value, .. } = segment {
-                        visit(value, names, resolved_tables);
+                        visit(value, names, resolved_tables, scope);
                     }
                 }
             }
             Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
-                visit(rhs, names, resolved_tables)
+                visit(rhs, names, resolved_tables, scope)
             }
             Expr::Binary { lhs, rhs, .. } => {
-                visit(lhs, names, resolved_tables);
-                visit(rhs, names, resolved_tables);
+                visit(lhs, names, resolved_tables, scope);
+                visit(rhs, names, resolved_tables, scope);
             }
             Expr::Call {
                 callee, arguments, ..
-            } => {
-                visit(callee, names, resolved_tables);
-                for a in arguments {
-                    visit(&a.value, names, resolved_tables);
-                }
             }
-            Expr::GenericCall {
+            | Expr::GenericCall {
                 callee, arguments, ..
             } => {
-                visit(callee, names, resolved_tables);
-                for a in arguments {
-                    visit(&a.value, names, resolved_tables);
+                visit(callee, names, resolved_tables, scope);
+                if let Some(scope) = scope
+                    && let Some(name) = qualified_path(callee).and_then(|path| path.last().copied())
+                    && let Some(dependencies) =
+                        scope.function_dependencies.borrow().get(name).cloned()
+                {
+                    names.extend(dependencies);
+                }
+                for argument in arguments {
+                    visit(&argument.value, names, resolved_tables, scope);
                 }
             }
-            Expr::Field { base, .. } => visit(base, names, resolved_tables),
+            Expr::Field { base, .. } => visit(base, names, resolved_tables, scope),
             Expr::Index { base, index, .. } => {
-                visit(base, names, resolved_tables);
-                visit(index, names, resolved_tables);
+                visit(base, names, resolved_tables, scope);
+                visit(index, names, resolved_tables, scope);
             }
             Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
-                for x in elements {
-                    visit(x, names, resolved_tables);
+                for element in elements {
+                    visit(element, names, resolved_tables, scope);
                 }
             }
             Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
-                for x in fields {
-                    visit(&x.value, names, resolved_tables);
+                for field in fields {
+                    visit(&field.value, names, resolved_tables, scope);
                 }
             }
-            Expr::Lambda { body, .. } => visit(body, names, resolved_tables),
-            Expr::Block { tail: Some(x), .. } => visit(x, names, resolved_tables),
+            Expr::Lambda { body, .. } => visit(body, names, resolved_tables, scope),
+            Expr::Block {
+                statements, tail, ..
+            } => {
+                for statement in statements {
+                    match statement {
+                        Statement::Let { value, .. }
+                        | Statement::Assert { value, .. }
+                        | Statement::Expression { value, .. }
+                        | Statement::Control { value, .. }
+                        | Statement::Return {
+                            value: Some(value), ..
+                        }
+                        | Statement::Break {
+                            value: Some(value), ..
+                        } => visit(value, names, resolved_tables, scope),
+                        Statement::Assignment { value, .. } => {
+                            visit(value, names, resolved_tables, scope)
+                        }
+                        Statement::Return { value: None, .. }
+                        | Statement::Break { value: None, .. }
+                        | Statement::Continue { .. } => {}
+                    }
+                }
+                if let Some(tail) = tail {
+                    visit(tail, names, resolved_tables, scope);
+                }
+            }
             Expr::Control {
                 condition,
                 body,
@@ -15241,26 +15303,26 @@ fn tables_referenced(
                 alternate,
                 ..
             } => {
-                if let Some(x) = condition {
-                    visit(x, names, resolved_tables)
+                if let Some(condition) = condition {
+                    visit(condition, names, resolved_tables, scope);
                 }
-                if let Some(x) = body {
-                    visit(x, names, resolved_tables)
+                if let Some(body) = body {
+                    visit(body, names, resolved_tables, scope);
                 }
-                if let Some(x) = alternate {
-                    visit(x, names, resolved_tables)
+                if let Some(alternate) = alternate {
+                    visit(alternate, names, resolved_tables, scope);
                 }
                 for arm in arms {
                     if let Some(guard) = &arm.guard {
-                        visit(guard, names, resolved_tables);
+                        visit(guard, names, resolved_tables, scope);
                     }
-                    visit(&arm.body, names, resolved_tables);
+                    visit(&arm.body, names, resolved_tables, scope);
                 }
             }
             _ => {}
         }
     }
-    visit(expr, &mut names, resolved_tables);
+    visit(expr, &mut names, resolved_tables, scope);
     names
 }
 fn valid_row_path(path: &str) -> bool {
