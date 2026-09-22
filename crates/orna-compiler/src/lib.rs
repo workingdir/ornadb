@@ -495,6 +495,13 @@ impl CompilerDiagnostic {
 fn render_human_diagnostic(diagnostic: &CompilerDiagnostic, source_text: &str) -> String {
     let start = diagnostic.location.span().start();
     let end = diagnostic.location.span().end();
+    if start > end
+        || end > source_text.len()
+        || !source_text.is_char_boundary(start)
+        || !source_text.is_char_boundary(end)
+    {
+        return diagnostic.render_human_without_source();
+    }
     let Some((line_number, column_number, line_start, line_end)) =
         source_line_for_offset(source_text, start)
     else {
