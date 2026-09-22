@@ -1733,6 +1733,7 @@ impl RuntimeSupervisor {
                     start_gate.release();
                 }
                 Err(error) => {
+                    self.workers.clear_poison();
                     drop(lifecycle);
                     start_gate.abort();
                     let _ = worker.join();
@@ -3354,6 +3355,52 @@ mod tests {
     }
 
     #[test]
+    fn supervised_start_recovers_workers_mutex_poison_for_later_admission() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("r"));
+        let workers = Arc::clone(&supervisor.workers);
+        let poisoner = thread::spawn(move || {
+            let _workers = workers.lock().unwrap();
+            panic!("poison worker registry");
+        });
+        assert!(poisoner.join().is_err());
+
+        let mut initial_request = request(Some(value("Int", "1")), ArgumentMap::default());
+        initial_request.mode = InvocationMode::Start;
+        initial_request.transaction = TransactionMode::Separate;
+        assert_eq!(
+            supervisor.start(
+                initial_request,
+                Executor {
+                    calls: 0,
+                    result: InvocationResult::Success(value("Str", "must-not-run")),
+                },
+            ),
+            Err(AdmissionError::RuntimeUnavailable)
+        );
+
+        let mut fresh_request = request(Some(value("Int", "2")), ArgumentMap::default());
+        fresh_request.mode = InvocationMode::Start;
+        fresh_request.transaction = TransactionMode::Separate;
+        let fresh_handle = supervisor
+            .start(
+                fresh_request,
+                Executor {
+                    calls: 0,
+                    result: InvocationResult::Success(value("Str", "recovered")),
+                },
+            )
+            .unwrap();
+        let result = supervisor
+            .await_invocation(&fresh_handle, Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(result.status, InvocationStatus::Succeeded);
+        assert_eq!(
+            result.value.as_ref().and_then(RetainedValue::canonical),
+            Some(b"recovered".as_slice())
+        );
+    }
+
+    #[test]
     fn supervised_await_reaps_the_completed_worker() {
         let supervisor = RuntimeSupervisor::new(RuntimeId::new("r"));
         let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
@@ -3422,6 +3469,7 @@ mod tests {
         assert_eq!(result.status, InvocationStatus::Succeeded);
         assert!(supervisor.workers.lock().unwrap().is_empty());
     }
+
 
     #[test]
     fn public_handle_and_await_result_have_the_portable_terminal_shape() {
