@@ -6964,10 +6964,10 @@ fn websocket_upgrade_fragmentation_and_controls_are_checked_and_forwarded() {
     .unwrap();
     assert_eq!(
         close,
-        vec![
-            WebSocketOutput::Accepted(FrameOutcome::Closed),
-            WebSocketOutput::Close { code: None }
-        ]
+        vec![WebSocketOutput::Close {
+            code: None,
+            reason: Vec::new(),
+        }]
     );
     assert_eq!(
         block_on(transport.receive(&mut socket, 2, &masked(true, 2, &message))),
@@ -6979,7 +6979,10 @@ fn websocket_upgrade_fragmentation_and_controls_are_checked_and_forwarded() {
             2,
             &masked(true, 1, b"text"),
         )),
-        Ok(vec![WebSocketOutput::Close { code: Some(1003) }])
+        Ok(vec![WebSocketOutput::Close {
+            code: Some(1003),
+            reason: Vec::new(),
+        }])
     );
 }
 
@@ -7025,7 +7028,10 @@ fn websocket_output_encoder_emits_minimal_unmasked_frames() {
     );
     assert_eq!(
         encode_websocket_output(
-            &WebSocketOutput::Close { code: None },
+            &WebSocketOutput::Close {
+                code: None,
+                reason: Vec::new(),
+            },
             TransportLimits::default()
         )
         .unwrap(),
@@ -7033,7 +7039,10 @@ fn websocket_output_encoder_emits_minimal_unmasked_frames() {
     );
     assert_eq!(
         encode_websocket_output(
-            &WebSocketOutput::Close { code: Some(1002) },
+            &WebSocketOutput::Close {
+                code: Some(1002),
+                reason: Vec::new(),
+            },
             TransportLimits::default()
         )
         .unwrap(),
@@ -7077,6 +7086,129 @@ fn websocket_output_encoder_rejects_oversized_payloads_before_encoding() {
     );
 }
 
+fn attached_transport_for_close() -> (LiveTransport, WebSocketState) {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    assert_eq!(
+        block_on(host.resume(ResumeRequest {
+            id: [1; 16],
+            origin: &origin(),
+            credential: &credential,
+            attachment: [5; 16],
+            now: 1,
+        }))
+        .unwrap(),
+        orna_security_v1::AttachOutcome::Attached
+    );
+    (
+        LiveTransport::new(host, TransportLimits::default()).unwrap(),
+        WebSocketState::new([5; 16]),
+    )
+}
+
+fn close_output(
+    transport: &mut LiveTransport,
+    socket: &mut WebSocketState,
+    frame: &[u8],
+) -> WebSocketOutput {
+    let outputs = block_on(transport.receive(socket, 2, frame)).unwrap();
+    assert_eq!(outputs.len(), 1);
+    outputs.into_iter().next().unwrap()
+}
+
+fn prepared_close_output(
+    transport: &mut LiveTransport,
+    socket: &mut WebSocketState,
+    frame: &[u8],
+) -> WebSocketOutput {
+    match block_on(transport.prepare_websocket_application(socket, 2, frame)).unwrap() {
+        orna_live_v1::WebSocketApplicationPreparation::Output(output) => output,
+        orna_live_v1::WebSocketApplicationPreparation::Pending
+        | orna_live_v1::WebSocketApplicationPreparation::Work(_) => {
+            panic!("expected prepared Close output")
+        }
+    }
+}
+
+fn assert_close_output(output: &WebSocketOutput, code: Option<u16>, reason: &[u8]) {
+    match output {
+        WebSocketOutput::Close {
+            code: actual_code,
+            reason: actual_reason,
+        } => {
+            assert_eq!(*actual_code, code);
+            assert_eq!(actual_reason, reason);
+        }
+        other => panic!("expected Close output, got {other:?}"),
+    }
+}
+
+fn encode_close(output: &WebSocketOutput) -> Vec<u8> {
+    encode_websocket_output(output, TransportLimits::default())
+        .unwrap()
+        .expect("Close output must encode")
+}
+
+#[test]
+fn websocket_peer_close_echoes_valid_code_and_reason_on_receive_and_prepare() {
+    let mut payload = vec![0x03, 0xe8];
+    payload.extend_from_slice(b"normal");
+
+    let (mut transport, mut socket) = attached_transport_for_close();
+    let receive = close_output(&mut transport, &mut socket, &masked(true, 8, &payload));
+    assert_close_output(&receive, Some(1000), b"normal");
+    assert_eq!(
+        encode_close(&receive),
+        [0x88, 8, 0x03, 0xe8, b'n', b'o', b'r', b'm', b'a', b'l']
+    );
+
+    let (mut transport, mut socket) = attached_transport_for_close();
+    let prepared =
+        prepared_close_output(&mut transport, &mut socket, &masked(true, 8, &payload));
+    assert_close_output(&prepared, Some(1000), b"normal");
+    assert_eq!(
+        encode_close(&prepared),
+        [0x88, 8, 0x03, 0xe8, b'n', b'o', b'r', b'm', b'a', b'l']
+    );
+}
+
+#[test]
+fn websocket_peer_close_preserves_empty_reason_on_receive_and_prepare() {
+    let payload = [0x03, 0xe9];
+
+    let (mut transport, mut socket) = attached_transport_for_close();
+    let receive = close_output(&mut transport, &mut socket, &masked(true, 8, &payload));
+    assert_close_output(&receive, Some(1001), b"");
+    assert_eq!(encode_close(&receive), [0x88, 2, 0x03, 0xe9]);
+
+    let (mut transport, mut socket) = attached_transport_for_close();
+    let prepared =
+        prepared_close_output(&mut transport, &mut socket, &masked(true, 8, &payload));
+    assert_close_output(&prepared, Some(1001), b"");
+    assert_eq!(encode_close(&prepared), [0x88, 2, 0x03, 0xe9]);
+}
+
+#[test]
+fn websocket_peer_close_rejects_malformed_and_invalid_payloads_on_both_paths() {
+    for payload in [
+        &[0x03][..],
+        &[0x00, 0x01][..],
+        &[0x03, 0xe8, 0xff][..],
+    ] {
+        let (mut transport, mut socket) = attached_transport_for_close();
+        let receive = close_output(&mut transport, &mut socket, &masked(true, 8, payload));
+        assert_close_output(&receive, Some(1002), b"");
+        assert_eq!(encode_close(&receive), [0x88, 2, 0x03, 0xea]);
+
+        let (mut transport, mut socket) = attached_transport_for_close();
+        let prepared =
+            prepared_close_output(&mut transport, &mut socket, &masked(true, 8, payload));
+        assert_close_output(&prepared, Some(1002), b"");
+        assert_eq!(encode_close(&prepared), [0x88, 2, 0x03, 0xea]);
+    }
+}
+
 #[test]
 fn websocket_close_payloads_require_valid_codes_and_utf8_reasons() {
     for payload in [
@@ -7089,7 +7221,10 @@ fn websocket_close_payloads_require_valid_codes_and_utf8_reasons() {
         let mut socket = WebSocketState::new([5; 16]);
         assert_eq!(
             block_on(transport.receive(&mut socket, 2, &masked(true, 8, &payload))),
-            Ok(vec![WebSocketOutput::Close { code: Some(1002) }])
+            Ok(vec![WebSocketOutput::Close {
+                code: Some(1002),
+                reason: Vec::new(),
+            }])
         );
     }
 }
@@ -7110,7 +7245,10 @@ fn websocket_input_rejects_noncanonical_extended_lengths() {
                 2,
                 &masked_with_length_code(true, 2, &body, length_code, encoded_length),
             )),
-            Ok(vec![WebSocketOutput::Close { code: Some(1002) }])
+            Ok(vec![WebSocketOutput::Close {
+                code: Some(1002),
+                reason: Vec::new(),
+            }])
         );
     }
 
@@ -7122,7 +7260,10 @@ fn websocket_input_rejects_noncanonical_extended_lengths() {
             2,
             &masked_with_length_code(true, 2, &[], 127, 1_u64 << 63),
         )),
-        Ok(vec![WebSocketOutput::Close { code: Some(1002) }])
+        Ok(vec![WebSocketOutput::Close {
+            code: Some(1002),
+            reason: Vec::new(),
+        }])
     );
 }
 
@@ -7182,7 +7323,10 @@ fn websocket_input_rejects_oversized_control_frames_as_invalid() {
 
     assert_eq!(
         block_on(transport.receive(&mut socket, 2, &frame)),
-        Ok(vec![WebSocketOutput::Close { code: Some(1002) }])
+        Ok(vec![WebSocketOutput::Close {
+            code: Some(1002),
+            reason: Vec::new(),
+        }])
     );
 }
 
@@ -7193,7 +7337,13 @@ fn websocket_input_malformed_frame_emits_protocol_close_once() {
     let malformed = masked(true, 0, b"");
 
     let output = block_on(transport.receive(&mut socket, 2, &malformed)).unwrap();
-    assert_eq!(output, vec![WebSocketOutput::Close { code: Some(1002) }]);
+    assert_eq!(
+        output,
+        vec![WebSocketOutput::Close {
+            code: Some(1002),
+            reason: Vec::new(),
+        }]
+    );
     assert_eq!(
         encode_websocket_output(&output[0], TransportLimits::default()).unwrap(),
         Some(vec![0x88, 2, 0x03, 0xea])
@@ -7235,7 +7385,10 @@ fn websocket_input_malformed_application_message_closes_and_retires_attachment()
     let mut socket = WebSocketState::new([5; 16]);
     assert_eq!(
         block_on(transport.receive(&mut socket, 2, &masked(true, 2, &[0xff]))),
-        Ok(vec![WebSocketOutput::Close { code: Some(1002) }])
+        Ok(vec![WebSocketOutput::Close {
+            code: Some(1002),
+            reason: Vec::new(),
+        }])
     );
     assert_eq!(
         block_on(transport.close_attachment([5; 16], 2)),
@@ -7254,7 +7407,10 @@ fn websocket_input_coalesced_malformed_frame_closes_after_prior_output() {
         block_on(transport.receive(&mut socket, 2, &bytes)),
         Ok(vec![
             WebSocketOutput::Pong(vec![b'p']),
-            WebSocketOutput::Close { code: Some(1002) },
+            WebSocketOutput::Close {
+                code: Some(1002),
+                reason: Vec::new(),
+            },
         ])
     );
 }
@@ -7282,7 +7438,13 @@ fn websocket_input_limit_emits_message_too_big_close() {
         masked_with_length_code(true, 2, &body, 127, body.len() as u64)
     };
     let output = block_on(transport.receive(&mut socket, 2, &frame)).unwrap();
-    assert_eq!(output, vec![WebSocketOutput::Close { code: Some(1009) }]);
+    assert_eq!(
+        output,
+        vec![WebSocketOutput::Close {
+            code: Some(1009),
+            reason: Vec::new(),
+        }]
+    );
     assert_eq!(
         encode_websocket_output(&output[0], limits).unwrap(),
         Some(vec![0x88, 2, 0x03, 0xf1])
