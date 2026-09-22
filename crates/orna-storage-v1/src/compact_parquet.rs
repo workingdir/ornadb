@@ -41,6 +41,7 @@ pub enum CompactParquetError {
     MissingKeyColumn([u8; 16]),
     DuplicateFieldColumn([u8; 16]),
     NullKey,
+    MissingFloatField([u8; 16]),
     RowCountMismatch { expected: u64, observed: u64 },
     UnorderedPrimaryKeys,
     ManifestKeyBoundsMismatch,
@@ -62,6 +63,9 @@ impl fmt::Display for CompactParquetError {
             Self::MissingKeyColumn(id) => write!(f, "compact key column is missing: {id:?}"),
             Self::DuplicateFieldColumn(id) => {
                 write!(f, "compact field column is duplicated: {id:?}")
+            }
+            Self::MissingFloatField(id) => {
+                write!(f, "compact Float field column is missing: {id:?}")
             }
             Self::NullKey => f.write_str("compact primary-key column contains a null"),
             Self::RowCountMismatch { expected, observed } => {
@@ -154,6 +158,47 @@ impl CompactParquetKeySource {
             CompactSegmentRole::Data,
         )
     }
+    /// Decodes one stable-identity Float/DOUBLE stored column from a verified
+    /// segment. Independent Parquet readers may use any NaN payload; OVB-1
+    /// canonicalises those payloads while retaining signed zero exactly.
+    pub fn decode_verified_float_values(
+        profile: &CompactOvbProfile,
+        table: Uuid,
+        bytes: &[u8],
+        field_id: [u8; 16],
+        expected_row_count: u64,
+    ) -> Result<Vec<Option<Vec<u8>>>, CompactParquetError> {
+        decode_verified_float_values_for_role(
+            profile,
+            table,
+            bytes,
+            field_id,
+            expected_row_count,
+            CompactSegmentRole::Data,
+        )
+    }
+
+    /// Reads a stored Float column through the repository-backed source. This
+    /// is the production row projection seam; field names are never consulted.
+    pub fn float_values_for_entry(
+        &self,
+        entry: &CompactManifestEntry,
+        field_id: [u8; 16],
+    ) -> Result<Vec<Option<Vec<u8>>>, CompactParquetError> {
+        let bytes = self
+            .segments
+            .get(&entry.segment_id())
+            .ok_or_else(|| CompactParquetError::SegmentUnavailable(entry.segment_id()))?;
+        decode_verified_float_values_for_role(
+            &self.profile,
+            self.table,
+            bytes,
+            field_id,
+            entry.row_count(),
+            entry.role(),
+        )
+    }
+
 
     fn exact_keys_for_entry(
         &self,
@@ -350,6 +395,7 @@ fn validate_physical_column(
 
     let mut pages = row_group
         .get_column_page_reader(index)
+
         .map_err(|_| CompactParquetError::InvalidParquet)?;
     let mut page_values = 0_u64;
     while let Some(page) = pages
@@ -380,6 +426,96 @@ fn validate_physical_column(
         });
     }
     Ok(())
+}
+
+fn decode_verified_float_values_for_role(
+    profile: &CompactOvbProfile,
+    table: Uuid,
+    bytes: &[u8],
+    field_id: [u8; 16],
+    expected_row_count: u64,
+    segment_role: CompactSegmentRole,
+) -> Result<Vec<Option<Vec<u8>>>, CompactParquetError> {
+    if table.as_bytes() != &profile.table_id() {
+        return Err(CompactParquetError::Key(CompactKeyError::WrongTable));
+    }
+    ensure_supported_profile(profile)?;
+    let reader = SerializedFileReader::new(Bytes::copy_from_slice(bytes))
+        .map_err(|_| CompactParquetError::InvalidParquet)?;
+    validate_file_metadata(&reader, profile, table, expected_row_count)?;
+    validate_compact_page_uncompressed_sizes(bytes, reader.metadata().row_groups())
+        .map_err(|_| CompactParquetError::InvalidParquet)?;
+    let column_index = stored_float_column_index(&reader, profile, segment_role, field_id)?;
+    let mut values = Vec::new();
+    for row_group_index in 0..reader.num_row_groups() {
+        let row_group = reader
+            .get_row_group(row_group_index)
+            .map_err(|_| CompactParquetError::InvalidParquet)?;
+        let rows = row_group.metadata().num_rows();
+        if rows <= 0 {
+            return Err(CompactParquetError::InvalidParquet);
+        }
+        let rows = usize::try_from(rows).map_err(|_| CompactParquetError::InvalidParquet)?;
+        for column in 0..row_group.num_columns() {
+            validate_physical_column(
+                &*row_group,
+                column,
+                rows,
+                column == column_index,
+            )?;
+        }
+        values.extend(read_float_column(&*row_group, column_index, rows)?);
+    }
+    let observed = u64::try_from(values.len()).map_err(|_| CompactParquetError::InvalidParquet)?;
+    if observed != expected_row_count {
+        return Err(CompactParquetError::RowCountMismatch {
+            expected: expected_row_count,
+            observed,
+        });
+    }
+    Ok(values)
+}
+
+fn stored_float_column_index(
+    reader: &SerializedFileReader<Bytes>,
+    profile: &CompactOvbProfile,
+    segment_role: CompactSegmentRole,
+    field_id: [u8; 16],
+) -> Result<usize, CompactParquetError> {
+    let metadata = reader.metadata().file_metadata();
+    let columns = metadata
+        .key_value_metadata()
+        .into_iter()
+        .flatten()
+        .find(|item| item.key == "orna.columns.ovb")
+        .and_then(|item| item.value.as_deref())
+        .and_then(|value| BASE64.decode(value).ok())
+        .ok_or(CompactParquetError::InvalidMetadata)?;
+    let descriptors =
+        CanonicalValue::decode(&columns).map_err(|_| CompactParquetError::InvalidMetadata)?;
+    let OvbRaw::Array(descriptors) = descriptors.raw() else {
+        return Err(CompactParquetError::InvalidMetadata);
+    };
+    let schema = metadata.schema_descr();
+    if descriptors.len() != schema.num_columns() {
+        return Err(CompactParquetError::InvalidMetadata);
+    }
+    let expected_fields = required_physical_fields(profile, segment_role)?;
+    let mut by_id = BTreeMap::new();
+    let mut found = None;
+    for (index, (descriptor, column)) in descriptors.iter().zip(schema.columns()).enumerate() {
+        let (id, kind) = descriptor_field_id(descriptor, column, profile, &expected_fields)?;
+        if by_id.insert(id, (index, kind)).is_some() {
+            return Err(CompactParquetError::DuplicateFieldColumn(id));
+        }
+        if id == field_id && matches!(kind, Some(KeyColumnKind::Float)) {
+            found = Some(index);
+        }
+    }
+    if by_id.len() != expected_fields.len() {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    }
+    found.ok_or(CompactParquetError::MissingFloatField(field_id))
 }
 
 fn compare_encoded_keys(left: &[u8], right: &[u8]) -> Result<Ordering, CompactParquetError> {
@@ -1421,6 +1557,88 @@ fn read_int64_column(
         }
         if values_read != read_records {
             return Err(CompactParquetError::NullKey);
+        }
+        records = records
+            .checked_add(read_records)
+            .ok_or(CompactParquetError::InvalidParquet)?;
+    }
+    if records != expected_rows || values.len() != expected_rows {
+        return Err(CompactParquetError::RowCountMismatch {
+            expected: expected_rows as u64,
+            observed: records as u64,
+        });
+    }
+    Ok(values)
+}
+
+fn read_float_column(
+    row_group: &dyn parquet::file::reader::RowGroupReader,
+    index: usize,
+    expected_rows: usize,
+) -> Result<Vec<Option<Vec<u8>>>, CompactParquetError> {
+    let reader = row_group
+        .get_column_reader(index)
+        .map_err(|_| CompactParquetError::InvalidParquet)?;
+    let ColumnReader::DoubleColumnReader(mut reader) = reader else {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    };
+    let descriptor = row_group.metadata().schema_descr().column(index);
+    if descriptor.max_rep_level() != 0 {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    }
+    let max_def_level = descriptor.max_def_level();
+    let mut values = Vec::with_capacity(expected_rows);
+    let mut records = 0usize;
+    while records < expected_rows {
+        let remaining = expected_rows - records;
+        let mut definition_levels = Vec::new();
+        let mut physical_values = Vec::new();
+        let definitions = (max_def_level != 0).then_some(&mut definition_levels);
+        let (read_records, values_read, levels_read) = reader
+            .read_records(remaining, definitions, None, &mut physical_values)
+            .map_err(|_| CompactParquetError::InvalidParquet)?;
+        if read_records == 0 || levels_read != read_records {
+            return Err(CompactParquetError::RowCountMismatch {
+                expected: expected_rows as u64,
+                observed: records as u64,
+            });
+        }
+        if max_def_level == 0 {
+            if values_read != read_records {
+                return Err(CompactParquetError::InvalidParquet);
+            }
+            for value in physical_values {
+                values.push(Some(
+                    CanonicalValue::float_bits(value.to_bits())
+                        .encode()
+                        .map_err(|_| CompactParquetError::InvalidMetadata)?,
+                ));
+            }
+        } else {
+            if definition_levels.len() != read_records || values_read > read_records {
+                return Err(CompactParquetError::InvalidParquet);
+            }
+            let mut value_index = 0;
+            for level in definition_levels {
+                if level == max_def_level {
+                    let value = physical_values
+                        .get(value_index)
+                        .ok_or(CompactParquetError::InvalidParquet)?;
+                    value_index += 1;
+                    values.push(Some(
+                        CanonicalValue::float_bits(value.to_bits())
+                            .encode()
+                            .map_err(|_| CompactParquetError::InvalidMetadata)?,
+                    ));
+                } else if level == 0 {
+                    values.push(None);
+                } else {
+                    return Err(CompactParquetError::InvalidParquet);
+                }
+            }
+            if value_index != values_read {
+                return Err(CompactParquetError::InvalidParquet);
+            }
         }
         records = records
             .checked_add(read_records)
@@ -3943,7 +4161,7 @@ mod tests {
     fn reads_double_float_stored_column_without_inference() {
         let profile = profile_with_stored_float_field();
         let keys = [10_i64, 11_i64, 12_i64];
-        let values = [1.5_f64, f64::NAN, -0.0_f64];
+        let values = [1.5_f64, f64::from_bits(0x7ff0_0000_0000_0001), -0.0_f64];
         let bytes = mixed_parquet(
             &profile,
             &[KEY_A, STORED_A],
@@ -3957,6 +4175,22 @@ mod tests {
         assert_eq!(
             decoded,
             keys.into_iter().map(expected_scalar).collect::<Vec<_>>()
+        );
+        let floats =
+            CompactParquetKeySource::decode_verified_float_values(
+                &profile,
+                TABLE,
+                &bytes,
+                STORED_A,
+                values.len() as u64,
+            )
+            .unwrap();
+        assert_eq!(
+            floats,
+            values
+                .into_iter()
+                .map(|value| Some(CanonicalValue::float_bits(value.to_bits()).encode().unwrap()))
+                .collect::<Vec<_>>()
         );
     }
 
