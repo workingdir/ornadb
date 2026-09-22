@@ -1,5 +1,0 @@
-CREATE SCHEMA client_dogfood;
-
-CREATE CLIENT FUNCTION client_dogfood.enabled()
-RETURNS BOOLEAN
-AS TRUE;
