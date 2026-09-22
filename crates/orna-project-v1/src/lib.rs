@@ -1,8 +1,9 @@
 //! Bounded source-project loading for a Git-backed Orna 1.0 worktree.
 //!
-//! This crate resolves only ordinary source-module imports.  `sys` and `std`
-//! remain catalogue dependencies; row loading, execution, and runtime state
-//! are deliberately outside this boundary.
+//! This crate resolves ordinary source-module imports and discovers bounded,
+//! opaque editable loose-row candidates. `sys` and `std` remain catalogue
+//! dependencies; semantic schema admission, execution, and runtime state
+//! remain outside this boundary.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
