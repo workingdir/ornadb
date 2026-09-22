@@ -1808,6 +1808,9 @@ fn validate_date(s: &str) -> Result<()> {
         return Err(Error::InvalidTag);
     }
     let y = s[..4].parse::<i32>().map_err(|_| Error::InvalidTag)?;
+    if !(1..=9999).contains(&y) {
+        return Err(Error::InvalidTag);
+    }
     let m = s[5..7].parse::<u32>().map_err(|_| Error::InvalidTag)?;
     let d = s[8..].parse::<u32>().map_err(|_| Error::InvalidTag)?;
     let max = match m {
@@ -2404,6 +2407,15 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn date_codec_rejects_year_zero_and_accepts_declared_bounds() {
+        let date = |text: &str| Value::new(tag(60001, Raw::Text(text.to_owned())));
+
+        assert_eq!(date("0000-01-01"), Err(Error::InvalidTag));
+        assert!(date("0001-01-01").is_ok());
+        assert!(date("9999-12-31").is_ok());
     }
 
     #[test]
