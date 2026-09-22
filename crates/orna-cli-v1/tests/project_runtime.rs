@@ -211,7 +211,7 @@ fn sensors_checkpoint_key(database_id: [u8; 16]) -> CheckpointKey {
         )),
         partition_format: checkpoint_component("literal-list"),
         partition: None,
-        position_format: checkpoint_component("ordinal"),
+        position_format: checkpoint_component("orna.list.v1"),
     }
 }
 
