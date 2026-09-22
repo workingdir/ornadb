@@ -1397,6 +1397,210 @@ impl Analysis {
         self.diagnostics.is_empty()
     }
 }
+/// Primitive row-unit input supplied by a project/repository adapter.
+///
+/// The semantic crate deliberately does not depend on `orna-project-v1`.
+/// Callers copy the opaque candidate accessors into this borrowed boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RowUnitInput<'a> {
+    pub logical_path: &'a str,
+    pub table_path: &'a str,
+    pub key_path: &'a [String],
+    pub source: &'a str,
+    pub source_bytes: &'a [u8],
+    pub parse_as: &'a str,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RowUnitAdmission {
+    /// Slash-separated semantic owner (`namespace/table`).
+    pub owner: Option<String>,
+    /// Decoded key components in declared key order.
+    pub key: Vec<String>,
+    /// Statically admitted non-key row fields.
+    pub fields: BTreeMap<String, Type>,
+    /// Existing parser and semantic classifications, with no source values.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl RowUnitAdmission {
+    pub fn is_ok(&self) -> bool {
+        self.diagnostics.is_empty()
+    }
+}
+
+/// Admit one opaque project row candidate against already checked declarations.
+///
+/// This is schema admission only: it parses and type-checks the row expression,
+/// validates the encoded path key, and retains the existing assertion plans.
+/// Evaluation, persistence and assertion execution remain downstream concerns.
+pub fn admit_row_unit(
+    analysis: &Analysis,
+    input: &RowUnitInput<'_>,
+) -> RowUnitAdmission {
+    let mut result = RowUnitAdmission::default();
+    if !analysis.is_ok() {
+        result.diagnostics.extend(analysis.diagnostics.iter().cloned());
+        return result;
+    }
+    if input.parse_as != "row_unit" {
+        result.diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "project row candidate is not tagged as a row_unit",
+        ));
+        return result;
+    }
+    if std::str::from_utf8(input.source_bytes).is_err()
+        || input.source_bytes != input.source.as_bytes()
+    {
+        result.diagnostics.push(diag(
+            DIAG_BAD_PATH,
+            "project row source bytes are not valid UTF-8 source",
+        ));
+        return result;
+    }
+    if !valid_row_path(input.logical_path)
+        || !valid_row_path(input.table_path)
+        || input.key_path.is_empty()
+        || input
+            .key_path
+            .iter()
+            .any(|component| !valid_row_component(component))
+        || !input.key_path.last().is_some_and(|component| component.ends_with(".orna"))
+    {
+        result.diagnostics.push(diag(
+            DIAG_BAD_PATH,
+            "project row candidate has an invalid logical or key path",
+        ));
+        return result;
+    }
+    let expected_logical = format!(
+        "{}/{}",
+        input.table_path.trim_end_matches('/'),
+        input.key_path.join("/")
+    );
+    if input.logical_path != expected_logical {
+        result.diagnostics.push(diag(
+            DIAG_BAD_PATH,
+            "project row logical path is not below its declared table path",
+        ));
+        return result;
+    }
+    let mut owners = analysis.modules.iter().flat_map(|(namespace, module)| {
+        module.symbols.iter().filter_map(|(name, symbol)| {
+            let schema = symbol.table_schema.as_ref()?;
+            let owner = if namespace.0.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", namespace.0.join("/"), name)
+            };
+            (owner == input.table_path).then_some((owner, schema))
+        })
+    });
+    let Some((owner, schema)) = owners.next() else {
+        result.diagnostics.push(diag(
+            DIAG_UNRESOLVED,
+            "project row table path does not resolve to a declared table",
+        ));
+        return result;
+    };
+    if owners.next().is_some() {
+        result.diagnostics.push(diag(
+            DIAG_AMBIGUOUS,
+            "project row table path resolves to more than one declared table",
+        ));
+        return result;
+    }
+    result.owner = Some(owner);
+    let Some(admission) = schema.admission.as_ref() else {
+        result.diagnostics.push(diag(
+            DIAG_TYPE,
+            "declared table has no row admission schema",
+        ));
+        return result;
+    };
+    let Some(decoded_key) = decode_row_key_path(input.key_path) else {
+        result.diagnostics.push(diag(
+            DIAG_BAD_PATH,
+            "project row key path is not canonically encoded",
+        ));
+        return result;
+    };
+    if decoded_key.len() != admission.keys.len()
+        || admission
+            .keys
+            .iter()
+            .zip(&decoded_key)
+            .any(|((_, ty), value)| !row_key_matches_type(value, ty))
+    {
+        result.diagnostics.push(diag(
+            DIAG_TYPE,
+            "project row key path does not match the declared key schema",
+        ));
+        return result;
+    }
+    result.key = decoded_key;
+    let parsed = orna_syntax_v1::parse_row_with_file(input.source, input.logical_path);
+    for _ in parsed.diagnostics {
+        result.diagnostics.push(diag(
+            "ORNA-S000-PARSE",
+            "source was not admitted by the frozen syntax parser",
+        ));
+    }
+    if !result.diagnostics.is_empty() {
+        return result;
+    }
+    let orna_syntax_v1::Expr::Record { fields, .. } = &parsed.value else {
+        result.diagnostics
+            .push(diag(DIAG_TYPE, "project row unit must contain one record"));
+        return result;
+    };
+    let key_names = admission
+        .keys
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    for field in fields {
+        if !seen.insert(field.name.as_str()) {
+            result
+                .diagnostics
+                .push(diag(DIAG_DUPLICATE, "project row repeats a field"));
+        }
+        if key_names.contains(field.name.as_str()) {
+            result.diagnostics.push(diag(
+                DIAG_TYPE,
+                "project row body must not repeat a path key",
+            ));
+        }
+        if admission.computed.contains(&field.name) {
+            result.diagnostics.push(diag(
+                DIAG_TYPE,
+                "project row body cannot supply a computed field",
+            ));
+        }
+    }
+    let mut inferred = Vec::new();
+    let input_type = infer_table_row_input(
+        &parsed.value,
+        &schema.fields,
+        &Scope::default(),
+        &BTreeMap::new(),
+        &mut inferred,
+    );
+    result.diagnostics.extend(inferred);
+    if let Type::Record(fields) = input_type.ty {
+        result.fields = fields;
+    }
+    for required in &admission.required {
+        if !key_names.contains(required.as_str()) && !seen.contains(required.as_str()) {
+            result
+                .diagnostics
+                .push(diag(DIAG_TYPE, "project row omits a required stored field"));
+        }
+    }
+    result
+}
 
 /// Load and check caller-provided modules.  `sys` is a built-in namespace,
 /// while `std` remains absent unless an adapter supplies it separately; source
@@ -15059,6 +15263,186 @@ fn tables_referenced(
     visit(expr, &mut names, resolved_tables);
     names
 }
+fn valid_row_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 1024
+        && path.split('/').all(valid_row_path_component)
+}
+
+fn valid_row_path_component(component: &str) -> bool {
+    !component.is_empty()
+        && component != "."
+        && component != ".."
+        && !component.contains('/')
+        && !component.contains('\\')
+        && is_nfc(component)
+        && component.len() <= 200
+}
+
+fn valid_row_component(component: &str) -> bool {
+    valid_row_path_component(component) && component.is_ascii()
+}
+
+fn decode_row_key_path(components: &[String]) -> Option<Vec<String>> {
+    let last = components.last()?;
+    let stem = last.strip_suffix(".orna")?;
+    if stem.is_empty() {
+        return None;
+    }
+    let mut decoded = Vec::with_capacity(components.len());
+    for (index, component) in components.iter().enumerate() {
+        let encoded = if index + 1 == components.len() {
+            stem
+        } else {
+            component.as_str()
+        };
+        let value = decode_row_component(encoded)?;
+        if index + 1 == components.len() && value.is_empty() {
+            return None;
+        }
+        decoded.push(value);
+    }
+    Some(decoded)
+}
+
+fn decode_row_component(encoded: &str) -> Option<String> {
+    if encoded == "~ff" {
+        return Some(String::new());
+    }
+    if !encoded.is_ascii()
+        || encoded.is_empty()
+        || encoded.len() > 200
+        || encoded.contains("~ff")
+    {
+        return None;
+    }
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'~' {
+            if index + 2 >= bytes.len() {
+                return None;
+            }
+            let value = std::str::from_utf8(&bytes[index + 1..index + 3])
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())?;
+            decoded.push(value);
+            index += 3;
+        } else {
+            if !matches!(
+                bytes[index],
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'
+            ) {
+                return None;
+            }
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    let value = String::from_utf8(decoded).ok()?;
+    (encode_row_component(&value) == encoded).then_some(value)
+}
+
+fn encode_row_component(value: &str) -> String {
+    if value.is_empty() {
+        return "~ff".into();
+    }
+    let bytes = value.as_bytes();
+    let reserved = reserved_row_name(value);
+    let trailing = bytes.iter().rposition(|byte| *byte != b'.').map_or(0, |index| index + 1);
+    let mut encoded = String::new();
+    for (index, byte) in bytes.iter().enumerate() {
+        let force = (reserved && index == 0) || (*byte == b'.' && index >= trailing);
+        if !force
+            && matches!(
+                *byte,
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'
+            )
+        {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push_str(&format!("~{byte:02x}"));
+        }
+    }
+    encoded
+}
+
+fn reserved_row_name(value: &str) -> bool {
+    let trimmed = value.trim_end_matches([' ', '.']);
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == ".git" {
+        return true;
+    }
+    let first = lower.split('.').next().unwrap_or_default();
+    matches!(
+        first,
+        "con" | "prn" | "aux" | "nul" | "clock$" | "conin$" | "conout$"
+    ) || (first.len() == 4
+        && (first.starts_with("com") || first.starts_with("lpt"))
+        && matches!(first.as_bytes()[3], b'1'..=b'9'))
+}
+
+fn row_key_matches_type(value: &str, ty: &Type) -> bool {
+    match ty {
+        Type::Text => true,
+        Type::Int => canonical_integer(value),
+        Type::Decimal => canonical_decimal(value),
+        Type::Bool => matches!(value, "true" | "false"),
+        Type::Date => {
+            value.len() == 10
+                && value.as_bytes()[4] == b'-'
+                && value.as_bytes()[7] == b'-'
+                && value
+                    .bytes()
+                    .enumerate()
+                    .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+        }
+        Type::Instant => value.contains('T') && (value.ends_with('Z') || value.contains('+')),
+        Type::Named(name) => {
+            matches!(name.as_str(), "Uuid" | "UUID" | "std.UUID") && canonical_uuid(value)
+        }
+        _ => false,
+    }
+}
+
+fn canonical_integer(value: &str) -> bool {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    !digits.is_empty()
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && (digits == "0" || !digits.starts_with('0'))
+}
+
+fn canonical_decimal(value: &str) -> bool {
+    let value = value.strip_prefix('-').unwrap_or(value);
+    let (mantissa, exponent) = value.split_once(['e', 'E']).map_or((value, None), |(m, e)| {
+        (m, Some(e))
+    });
+    if let Some(exponent) = exponent {
+        if exponent.is_empty() {
+            return false;
+        }
+        let exponent = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+        if exponent.is_empty() || !exponent.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+    }
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    !whole.is_empty()
+        && whole.bytes().all(|byte| byte.is_ascii_digit())
+        && (whole == "0" || !whole.starts_with('0'))
+        && (fraction.is_empty() || fraction.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn canonical_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            matches!(index, 8 | 13 | 18 | 23)
+                .then_some(byte == b'-')
+                .unwrap_or(byte.is_ascii_hexdigit())
+        })
+}
+
 fn diag(code: &'static str, message: impl Into<String>) -> Diagnostic {
     Diagnostic::new(
         SafeText::new(code).expect("static code"),
