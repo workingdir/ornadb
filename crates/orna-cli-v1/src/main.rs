@@ -530,6 +530,7 @@ enum Command {
     Repl(Option<String>),
     Init(Option<PathBuf>),
     Status { format: StatusFormat },
+    Fetch { remote: String, branch: String },
     Check,
     Explain(String),
     Invoke(String),
@@ -611,6 +612,10 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             None => Command::Status {
                 format: StatusFormat::Human,
             },
+        },
+        Some("fetch") => Command::Fetch {
+            remote: words.next().unwrap_or("origin").to_owned(),
+            branch: words.next().unwrap_or("main").to_owned(),
         },
         Some("explain") => Command::Explain(
             words
@@ -1729,12 +1734,68 @@ fn initialize_repository(target: Option<&std::path::Path>) -> Result<(), Diagnos
     println!("initialized Orna repository");
     Ok(())
 }
+fn run_fetch(endpoint: &Endpoint, remote: &str, branch: &str) -> Result<(), Diagnostic> {
+    let path = local_project_path(endpoint)?;
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree could not be discovered",
+            "run `fetch` inside a Git worktree or provide a local project path",
+        )
+    })?;
+    let requested = orna_repository_v1::RequestedRef::branch(branch.to_owned()).map_err(
+        |error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "fetch branch is invalid",
+                "supply a valid Git branch name",
+                error.to_string(),
+            )
+        },
+    )?;
+    let request = orna_repository_v1::FetchRequest::new(remote.to_owned(), [requested], [])
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "fetch request is invalid",
+                "supply a configured remote and valid branch",
+                error.to_string(),
+            )
+        })?;
+    let report = repository.fetch(&request).map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "Git fetch failed",
+            "check the configured remote and retry `fetch`",
+            error.to_string(),
+        )
+    })?;
+    let fetched = report.ordinary().first().ok_or_else(|| {
+        Diagnostic::target(
+            "E2100",
+            "Git fetch returned no requested ref",
+            "check the configured remote and retry `fetch`",
+        )
+    })?;
+    let state = if fetched.updated() {
+        "updated"
+    } else {
+        "unchanged"
+    };
+    println!(
+        "fetched {} -> {} ({state})",
+        fetched.source(),
+        fetched.destination()
+    );
+    Ok(())
+}
+
 
 fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     match parsed.command.clone() {
         Command::Help => {
             println!(
-                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|status|status --porcelain|status --short|check|explain CODE|invoke TARGET|run [QUALIFIED_FUNCTION]|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
+                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|status|status --porcelain|status --short|fetch [REMOTE] [BRANCH]|check|explain CODE|invoke TARGET|run [QUALIFIED_FUNCTION]|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
             );
             println!("orna-cli-v1 init [DIRECTORY]");
             Ok(())
@@ -1744,6 +1805,7 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             Ok(())
         }
         Command::Init(ref target) => initialize_repository(target.as_deref()),
+        Command::Fetch { ref remote, ref branch } => run_fetch(&parsed.endpoint, remote, branch),
         Command::Status {
             format: StatusFormat::Human,
         } => run_status_human(&parsed.endpoint),
@@ -3106,5 +3168,64 @@ mod tests {
             assert_eq!(diagnostic.code, code);
             assert_eq!(diagnostic.help, help);
         }
+    }
+    #[test]
+    fn fetch_command_consumes_git_transport_without_mutating_head_or_worktree() {
+        let root = tempfile::tempdir().expect("fetch fixture");
+        let remote = root.path().join("remote.git");
+        let local = root.path().join("local");
+        let updater = root.path().join("updater");
+        let git = |directory: &std::path::Path, arguments: &[&str]| -> String {
+            let output = std::process::Command::new("git")
+                .current_dir(directory)
+                .args(arguments)
+                .output()
+                .expect("git starts");
+            assert!(
+                output.status.success(),
+                "git failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("git output is UTF-8")
+                .trim()
+                .to_owned()
+        };
+        std::fs::create_dir_all(&local).expect("local directory");
+        git(root.path(), &["init", "--bare", "remote.git"]);
+        git(&local, &["init", "-b", "main"]);
+        git(&local, &["config", "user.email", "fetch@example.invalid"]);
+        git(&local, &["config", "user.name", "Fetch test"]);
+        std::fs::write(local.join("tracked.txt"), "base\n").expect("base file");
+        git(&local, &["add", "tracked.txt"]);
+        git(&local, &["commit", "-m", "base"]);
+        let initial = git(&local, &["rev-parse", "HEAD"]);
+        let remote_path = remote.to_str().expect("remote path");
+        git(&local, &["remote", "add", "origin", remote_path]);
+        git(&local, &["push", "origin", "HEAD:refs/heads/main"]);
+        git(root.path(), &["clone", remote_path, "updater"]);
+        git(&updater, &["config", "user.email", "fetch@example.invalid"]);
+        git(&updater, &["config", "user.name", "Fetch test"]);
+        std::fs::write(updater.join("tracked.txt"), "advanced\n").expect("advanced file");
+        git(&updater, &["add", "tracked.txt"]);
+        git(&updater, &["commit", "-m", "advance"]);
+        let advanced = git(&updater, &["rev-parse", "HEAD"]);
+        git(&updater, &["push", "origin", "HEAD:refs/heads/main"]);
+
+        let endpoint = Endpoint::Path(local.display().to_string());
+        execute(&Parsed {
+            endpoint,
+            command: Command::Fetch {
+                remote: "origin".into(),
+                branch: "main".into(),
+            },
+        })
+        .expect("fetch command");
+        assert_eq!(git(&local, &["rev-parse", "HEAD"]), initial);
+        assert_eq!(
+            git(&local, &["rev-parse", "refs/remotes/origin/main"]),
+            advanced
+        );
+        assert!(git(&local, &["status", "--porcelain"]).is_empty());
     }
 }
