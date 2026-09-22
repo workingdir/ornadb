@@ -10,8 +10,9 @@
 use orna_foundation_v1::{
     CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText,
 };
-use orna_project_v1::LoadedProject;
-use orna_semantic_v1::{Catalogue, ReplContext, analyze_with_catalogue};
+use orna_semantic_v1::{
+    Catalogue, EffectSummary, ReplContext, Type, analyze_with_catalogue,
+};
 use orna_syntax_v1::{Declaration, ReplInput, parse_module};
 
 use crate::{
@@ -86,6 +87,42 @@ impl ReplError {
         .expect("redacted status record is canonical")
     }
 }
+
+/// Canonically admitted source ready for a transaction-aware evaluator.
+///
+/// This boundary owns no table writes or runtime commit. It carries the
+/// original parsed input together with the semantic result type and effect
+/// summary produced by [`ReplContext::stage`], so a downstream evaluator can
+/// execute the same AST under its activation context without reparsing or
+/// bypassing admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedReplActivation {
+    input: ReplInput,
+    result_type: Option<Type>,
+    effects: EffectSummary,
+}
+
+impl StagedReplActivation {
+    /// The exact AST admitted by the parser and semantic checker.
+    #[must_use]
+    pub fn input(&self) -> &ReplInput {
+        &self.input
+    }
+
+    /// The statically inferred successful result type, when the input yields
+    /// one. Declarations and imports have no result type.
+    #[must_use]
+    pub fn result_type(&self) -> Option<&Type> {
+        self.result_type.as_ref()
+    }
+
+    /// The canonical effect/failure summary for the admitted input.
+    #[must_use]
+    pub fn effects(&self) -> &EffectSummary {
+        &self.effects
+    }
+}
+
 
 /// An isolated, typed session against one admitted project snapshot.
 ///
@@ -182,6 +219,26 @@ impl AdmittedReplSession {
         self.runtime = runtime;
         self.semantic = semantic;
         Ok(value)
+    }
+
+    /// Parses and semantically admits an effectful input without executing or
+    /// publishing it.
+    ///
+    /// The returned AST and effect/type metadata are the handoff consumed by
+    /// a transaction-aware evaluator. Pure inputs remain on [`Self::submit`]
+    /// and are rejected here so this boundary cannot be mistaken for a
+    /// committed activation.
+    pub fn stage_activation(&self, source: &str) -> Result<StagedReplActivation, ReplError> {
+        let input = self.parse(source)?;
+        let admission = self.semantic.stage(&input).map_err(semantic_error)?;
+        if admission.effects.effects.is_empty() {
+            return Err(ReplError::fixed("ORNA-REPL-EFFECT"));
+        }
+        Ok(StagedReplActivation {
+            input,
+            result_type: admission.ty,
+            effects: admission.effects,
+        })
     }
 
     /// Executes one already-admitted input with an explicit cancellation
@@ -360,6 +417,28 @@ mod tests {
             .load_with_standard_profile(&repository, profile)
             .unwrap();
         (directory, project)
+    }
+
+    #[test]
+    fn effectful_source_stages_canonical_activation_without_publishing() {
+        let mut session = AdmittedReplSession::new(Limits::default());
+        let staged = session
+            .stage_activation("std.net.http.get(\"https://example.com\")")
+            .expect("effectful source is semantically admitted");
+
+        assert!(matches!(staged.input(), ReplInput::Expression(_)));
+        assert!(staged.result_type().is_some());
+        assert!(staged.effects().effects.contains("network"));
+        assert!(staged.effects().may_fail);
+
+        assert_eq!(
+            session
+                .submit("std.net.http.get(\"https://example.com\")")
+                .unwrap_err()
+                .code(),
+            "ORNA-REPL-EFFECT"
+        );
+        assert_eq!(session.submit("40 + 2"), Ok(Some(Value::int(42.into()))));
     }
 
     #[test]
