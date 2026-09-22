@@ -334,6 +334,9 @@ impl Serving {
         if base_revision != current || new_revision <= base_revision {
             return Err(Error::RevisionMismatch);
         }
+        if pin.revision != new_revision {
+            return Err(Error::RevisionMismatch);
+        }
         let mut candidate = session.page.clone();
         let mut touched = BTreeMap::<&str, ()>::new();
         for patch in patches {
