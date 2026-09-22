@@ -345,14 +345,14 @@ impl Decimal {
             &self.exponent10 + &other.exponent10,
         )
     }
-    pub fn try_add(&self, other: &Self) -> Result<Self> {
-        let e = if self.exponent10 < other.exponent10 {
+    fn try_add_parts(&self, other_coefficient: &BigInt, other_exponent: &BigInt) -> Result<Self> {
+        let e = if self.exponent10 < *other_exponent {
             self.exponent10.clone()
         } else {
-            other.exponent10.clone()
+            other_exponent.clone()
         };
         let shift_a = &self.exponent10 - &e;
-        let shift_b = &other.exponent10 - &e;
+        let shift_b = other_exponent - &e;
         if shift_a > BigInt::from(Self::MAX_ABS_EXPONENT)
             || shift_b > BigInt::from(Self::MAX_ABS_EXPONENT)
         {
@@ -361,9 +361,18 @@ impl Decimal {
         let shift_a = bounded_exponent(&shift_a)?;
         let shift_b = bounded_exponent(&shift_b)?;
         Self::try_new(
-            &self.coefficient * pow10(shift_a) + &other.coefficient * pow10(shift_b),
+            &self.coefficient * pow10(shift_a) + other_coefficient * pow10(shift_b),
             e,
         )
+    }
+    pub fn try_add(&self, other: &Self) -> Result<Self> {
+        self.try_add_parts(&other.coefficient, &other.exponent10)
+    }
+    /// Exact finite decimal subtraction. Resource limits fail closed without
+    /// rounding or converting through binary floating point.
+    pub fn try_subtract(&self, other: &Self) -> Result<Self> {
+        let negated_coefficient = -&other.coefficient;
+        self.try_add_parts(&negated_coefficient, &other.exponent10)
     }
     /// Exact finite decimal division.  A denominator with primes other than 2
     /// and 5 has no finite base-10 result and is rejected without rounding.
@@ -2532,6 +2541,31 @@ mod tests {
                 .divide_exact(&Decimal::new(8.into(), 0.into()))
                 .unwrap(),
             Decimal::new(125.into(), (-3).into())
+        );
+        assert_eq!(
+            Decimal::new(120.into(), (-2).into())
+                .try_subtract(&Decimal::new(34.into(), (-2).into()))
+                .unwrap(),
+            Decimal::new(86.into(), (-2).into())
+        );
+        assert_eq!(
+            Decimal::new(1.into(), (-1).into())
+                .try_subtract(&Decimal::new(25.into(), (-2).into()))
+                .unwrap(),
+            Decimal::new((-15).into(), (-2).into())
+        );
+        assert_eq!(
+            Decimal::new(1.into(), 0.into())
+                .try_subtract(&Decimal::new(1.into(), 0.into()))
+                .unwrap(),
+            Decimal::new(0.into(), 0.into())
+        );
+        assert_eq!(
+            Decimal::new(1.into(), 0.into()).try_subtract(&Decimal::new(
+                1.into(),
+                (-(Decimal::MAX_ABS_EXPONENT as i64 + 1)).into()
+            )),
+            Err(Error::DecimalLimit)
         );
         assert_eq!(
             Decimal::new(1.into(), 0.into()).divide_exact(&Decimal::new(3.into(), 0.into())),
