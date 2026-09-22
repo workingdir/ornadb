@@ -2028,10 +2028,7 @@ impl LiveHost {
             .filter_map(|(owner, watch)| (*owner == session).then_some(*watch))
             .collect::<Vec<_>>();
         for watch in watches {
-            self.serving
-                .close_watch(session, watch)
-                .map_err(map_serving)?;
-            self.watches.remove(&(session, watch));
+            self.close_watch(session, watch)?;
         }
         Ok(())
     }
@@ -2508,6 +2505,7 @@ impl LiveHost {
                         session,
                         request,
                         fingerprint,
+                        watch,
                         context,
                         response,
                         transaction,
@@ -2621,10 +2619,7 @@ impl LiveHost {
                 self.open_watch(session, watch, &outcome)?;
             }
             if let Some(watch) = close_watch {
-                self.serving
-                    .close_watch(session, watch)
-                    .map_err(map_serving)?;
-                self.watches.remove(&(session, watch));
+                self.close_watch(session, watch)?;
             }
         }
         Ok(outcome)
@@ -2957,10 +2952,7 @@ impl LiveHost {
                                 response,
                                 self.limits.protocol,
                             )?;
-                            self.serving
-                                .close_watch(session, watch)
-                                .map_err(map_serving)?;
-                            self.watches.remove(&(session, watch));
+                            self.close_watch(session, watch)?;
                             self.complete(session, request, &envelope, outcome).await
                         }
                         Message::Event { .. } => {
@@ -3066,10 +3058,7 @@ impl LiveHost {
                                     )
                                     .await?;
                                 if *target_kind == TargetKind::Watch {
-                                    self.serving
-                                        .close_watch(session, *target)
-                                        .map_err(map_serving)?;
-                                    self.watches.remove(&(session, *target));
+                                    self.close_watch(session, *target)?;
                                 }
                                 response
                             } else {
@@ -3175,6 +3164,7 @@ impl LiveHost {
                     session,
                     request,
                     fingerprint,
+                    None,
                     context
                         .as_ref()
                         .ok_or(Error::UnsupportedOperation)?,
@@ -3233,6 +3223,7 @@ impl LiveHost {
                     session,
                     request,
                     fingerprint,
+                    watch,
                     context
                         .as_ref()
                         .ok_or(Error::UnsupportedOperation)?,
@@ -3791,6 +3782,7 @@ impl LiveHost {
         session: [u8; 16],
         request: [u8; 16],
         fingerprint: [u8; 32],
+        watch: Option<[u8; 16]>,
         context: &RuntimeActivationContext,
         response: Envelope,
         transaction: LiveEvalTransaction,
@@ -3804,6 +3796,7 @@ impl LiveHost {
         ) {
             return Err(Error::ApplicationRejected);
         }
+        let mutating = !transaction.mutations.is_empty();
         let lease = self.writer_lease().await?;
         let runtime = self.runtime.as_ref().ok_or(Error::UnsupportedOperation)?;
         let identity = RequestIdentity {
@@ -3839,8 +3832,15 @@ impl LiveHost {
         let response = self.decode(retained.as_bytes())?;
         self.validate_recovered_response(&committed.request, &response)
             .await?;
-        validate_result_response(request, fingerprint, response, self.limits.protocol)
-            .map(|validated| validated.response.ok_or(Error::ApplicationRejected))?
+        let response = validate_result_response(request, fingerprint, response, self.limits.protocol)?
+            .response
+            .ok_or(Error::ApplicationRejected)?;
+        if mutating {
+            if let Some(watch) = watch {
+                self.close_watch(session, watch)?;
+            }
+        }
+        Ok(response)
     }
 
     async fn complete(
@@ -4113,6 +4113,14 @@ impl LiveHost {
             .encode(self.limits.protocol)
             .map_err(|_| Error::RuntimeUnavailable)?;
         TerminalOutcome::new(bytes).map_err(|error| map_runtime(&error))
+    }
+
+    fn close_watch(&mut self, session: [u8; 16], watch: [u8; 16]) -> Result<()> {
+        self.serving
+            .close_watch(session, watch)
+            .map_err(map_serving)?;
+        self.watches.remove(&(session, watch));
+        Ok(())
     }
 
     fn open_watch(
