@@ -9674,7 +9674,7 @@ mod durable_tests {
     use super::{
         DurableTransactionalEvaluator, Functions, RunningTableRequestDisposition, SourceUnit,
         StageOutcome, TransactionKeyType, TransactionTableKey, TransactionalEvaluator,
-        admit_transaction_module, admit_transaction_project, lower_relation_bindings,
+        admitted_transaction_module, admit_transaction_project, lower_relation_bindings,
         replay_request_terminal,
         request_terminal,
     };
