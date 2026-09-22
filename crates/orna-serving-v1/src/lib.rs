@@ -429,6 +429,11 @@ impl Serving {
 
     pub fn reserve_request(&mut self, session_id: Id, request_id: Id) -> Result<()> {
         let session = self.session_mut(session_id)?;
+        // A lost WebSocket starts the finite reconnection lease, but it must
+        // not admit any new client operation while that lease is running.
+        if !session.connected {
+            return Err(Error::SessionClosed);
+        }
         if session.requests.contains_key(&request_id) {
             return Err(Error::RequestTerminal);
         }
@@ -646,6 +651,23 @@ mod tests {
         );
         state.validate_reconnect(id(1), &replacement).unwrap();
         state.reconnect(id(1), &replacement).unwrap();
+    }
+
+    #[test]
+    fn disconnected_sessions_reject_new_request_admission() {
+        let mut state = admitted();
+        state.disconnect(id(1)).unwrap();
+        assert_eq!(
+            state.reserve_request(id(1), id(4)),
+            Err(Error::SessionClosed)
+        );
+
+        state.reconnect(id(1), &credential()).unwrap();
+        state.reserve_request(id(1), id(4)).unwrap();
+        assert_eq!(
+            state.request_state(id(1), id(4)),
+            Ok(RequestState::Reserved)
+        );
     }
 
     #[test]
