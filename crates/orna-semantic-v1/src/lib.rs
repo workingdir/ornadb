@@ -118,6 +118,22 @@ impl StandardDependencyProfile {
         &self.module_digests
     }
 
+    /// Returns the canonical source-bundle revision for this profile.
+    ///
+    /// The revision binds the captured snapshot label, every module path and
+    /// source digest, and the root prelude export set. It is deliberately
+    /// derived from this descriptor rather than from caller iteration order,
+    /// so a catalogue consumer can retain one stable provenance coordinate
+    /// without retaining source bytes. This is a source identity, not a
+    /// semantic declaration revision.
+    pub fn revision_digest(&self) -> [u8; 32] {
+        standard_dependency_revision_digest(
+            &self.snapshot,
+            &self.module_digests,
+            &self.prelude_exports,
+        )
+    }
+
     /// Records the exact public names exported by the pinned root prelude.
     /// The names are metadata only until the matching `std.orna` source is
     /// verified and parsed by `Catalogue::from_standard_sources`.
@@ -182,6 +198,35 @@ impl From<StandardProfileError> for StandardCatalogueError {
 
 fn digest_source(source: &str) -> [u8; 32] {
     Sha256::digest(source.as_bytes()).into()
+}
+
+const STANDARD_DEPENDENCY_REVISION_DOMAIN: &[u8] = b"orna.std.dependency.v1";
+
+fn standard_dependency_revision_digest(
+    snapshot: &str,
+    module_digests: &BTreeMap<String, [u8; 32]>,
+    prelude_exports: &BTreeSet<String>,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(STANDARD_DEPENDENCY_REVISION_DOMAIN);
+    hasher.update([0]);
+    hasher.update(1u32.to_be_bytes());
+    update_canonical_text(&mut hasher, snapshot);
+    hasher.update((module_digests.len() as u64).to_be_bytes());
+    for (logical_path, digest) in module_digests {
+        update_canonical_text(&mut hasher, logical_path);
+        hasher.update(digest);
+    }
+    hasher.update((prelude_exports.len() as u64).to_be_bytes());
+    for export in prelude_exports {
+        update_canonical_text(&mut hasher, export);
+    }
+    hasher.finalize().into()
+}
+
+fn update_canonical_text(hasher: &mut Sha256, value: &str) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
 }
 
 fn is_standard_module_path(path: &str) -> bool {
