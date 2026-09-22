@@ -188,6 +188,28 @@ fn imported_helper_call_keeps_exact_transitive_table_dependencies() {
 }
 
 #[test]
+fn imported_helper_shadowed_by_record_pattern_shorthand_does_not_expand_imported_tables() {
+    let analysis = analyze(&[
+        ModuleInput::new("checks.orna", TABLE_HELPER),
+        ModuleInput::new(
+            "consumer.orna",
+            r#"
+                use checks.{related};
+
+                pub fn dispatch(value: { related: fn(): Bool }): Bool =
+                    case value {
+                        { related }: related(),
+                    };
+
+                assert dispatch({ related: () => true });
+            "#,
+        ),
+    ]);
+
+    assert_shadowed_plan(&analysis, BTreeSet::new());
+}
+
+#[test]
 fn direct_return_stops_dependency_walk_before_later_every_expression() {
     let analysis = analyze(&[ModuleInput::new(
         "consumer.orna",

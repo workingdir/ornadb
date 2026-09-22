@@ -15332,9 +15332,11 @@ fn pattern_binding_names(pattern: &Pattern) -> Vec<String> {
                 }
             }
             Pattern::Record { fields, .. } => {
-                for (_, pattern, _) in fields {
+                for (name, pattern, _) in fields {
                     if let Some(pattern) = pattern {
                         collect(pattern, names);
+                    } else {
+                        names.push(name.clone());
                     }
                 }
             }
@@ -15347,6 +15349,8 @@ fn pattern_binding_names(pattern: &Pattern) -> Vec<String> {
                 for field in fields {
                     if let Some(pattern) = &field.pattern {
                         collect(pattern, names);
+                    } else {
+                        names.push(field.name.clone());
                     }
                 }
             }
