@@ -1143,12 +1143,22 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
             source: module.source.clone(),
         })
         .collect();
+    let loose_rows: Vec<SourceUnit> = project
+        .loose_rows()
+        .iter()
+        .map(|row| SourceUnit {
+            fixture_id: "cli-project".into(),
+            source_id: row.logical_path().into(),
+            parse_as: row.parse_as().into(),
+            source: row.source().into(),
+        })
+        .collect();
     ProjectUnit {
         fixture_id: "cli-project".into(),
         project_id: "cli-project".into(),
         environment_id: None,
         modules,
-        loose_rows: Vec::new(),
+        loose_rows,
         expectations: ProjectExpectations {
             environment: ProjectEnvironment {
                 network: false,
@@ -2415,6 +2425,49 @@ mod tests {
             run_repl_submission(&mut session, "1", &mut BrokenWriter).expect_err("writer failure");
         assert_eq!((error.code, error.exit), ("E2200", Exit::Target));
     }
+    #[test]
+    fn execution_project_preserves_reachable_loose_row_metadata() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        std::fs::create_dir_all(directory.path().join("contacts/Contact"))
+            .expect("row directory");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            "use contacts.main; pub fn run() {}",
+        )
+        .expect("root source");
+        std::fs::write(
+            directory.path().join("contacts/main.orna"),
+            "pub table Contact(id: Str) { name: Str, }",
+        )
+        .expect("table source");
+        let row_source = "{ name: \"Alice Smith\" }\n";
+        std::fs::write(
+            directory.path().join("contacts/Contact/alice-smith.orna"),
+            row_source,
+        )
+        .expect("row source");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+
+        let repository =
+            orna_repository_v1::Repository::discover(directory.path()).expect("repository");
+        let project = orna_project_v1::ProjectLoader::default()
+            .load(&repository)
+            .expect("project loads");
+        let execution = execution_project(&project);
+        assert_eq!(execution.loose_rows.len(), 1);
+        let row = &execution.loose_rows[0];
+        assert_eq!(row.source_id, "contacts/Contact/alice-smith.orna");
+        assert_eq!(row.parse_as, "row_unit");
+        assert_eq!(row.source.as_bytes(), row_source.as_bytes());
+    }
+
     #[test]
     fn check_loads_reachable_project_sources_and_ignores_unreachable_modules() {
         let directory = tempfile::tempdir().expect("temporary project");
