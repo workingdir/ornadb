@@ -15,7 +15,7 @@ OrnaDB ships three layers of editor support for `.orna` files:
 ## Fresh-checkout prerequisites and evidence
 
 Run the static gate from the repository root after the locked Cargo cache has
-been provisioned and the embedded-engine prerequisite is available:
+been provisioned:
 
 ```bash
 cargo fetch --locked
@@ -27,13 +27,14 @@ The two `cargo fetch --locked` commands are the networked dependency bootstrap
 for the root workspace and separate `editors/zed` workspace. The editor gate
 requires Python 3.11 or newer (for TOML validation), `tree-sitter-cli` 0.26.5,
 Node, Cargo, Git, and the checked-in `editors/` tree. Its Cargo checks and
-tests use `--locked --offline`; the source-check parity phase also invokes
-`orna-server`, whose embedded-engine build requires a Linux x86_64 host plus
-either `ORNA_POSTGRES_ENGINE_OUTPUT` naming a complete prebuilt engine output
-directory with an **absolute** path (for example,
-`$PWD/target/postgresql-embedded-native-one/output` after the native lifecycle
-recipe has produced it) or the environment-dependent Docker-backed build.
-Cargo offline mode does not disable that build script's host/network work.
+tests use `--locked --offline`; the gate validates checked-in parser, LSP, and
+editor assets without invoking the legacy server or PostgreSQL engine. It has no
+PostgreSQL-specific environment or Docker engine prerequisite.
+For v1 project checks, use `cargo run --locked --offline -p orna-cli-v1 -- check`.
+When a v1 runtime opens local state, it uses embedded libSQL at the Git-resolved
+per-worktree `state.db` path (`Repository::runtime_paths().state_db()`) through
+`libsql::Builder::new_local`, so no database server is required. Cargo offline
+mode still requires provisioned caches.
 The script generates Tree-sitter output in a temporary directory and does not
 rewrite the checkout.
 
