@@ -1,0 +1,18 @@
+[package]
+name = "orna-application-v1"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Authoritative source admission and activation seam for Orna applications"
+publish = false
+
+[workspace]
+
+[dependencies]
+orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
+orna-foundation-v1 = { path = "../orna-foundation-v1" }
+orna-runtime-v1 = { path = "../orna-runtime-v1" }
+orna-semantic-v1 = { path = "../orna-semantic-v1" }
+orna-syntax-v1 = { path = "../orna-syntax-v1" }
+num-bigint = "0.4.6"
