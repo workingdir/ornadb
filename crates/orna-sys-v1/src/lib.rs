@@ -900,6 +900,7 @@ impl Runtime {
                 mode: request.mode,
                 transaction: request.transaction,
                 context,
+                execution_started: request.mode == InvocationMode::Invoke,
                 terminal: None,
                 started: Instant::now(),
                 ended: None,
@@ -939,7 +940,14 @@ impl Runtime {
             .get(handle.invocation.id())
             .expect("checked");
         let (status, failure) = match &stored.terminal {
-            None => (InvocationStatus::Running, None),
+            None => (
+                if stored.mode == InvocationMode::Start && !stored.execution_started {
+                    InvocationStatus::Queued
+                } else {
+                    InvocationStatus::Running
+                },
+                None,
+            ),
             Some(RetainedInvocationResult::Success(_)) => (InvocationStatus::Succeeded, None),
             Some(RetainedInvocationResult::OrdinaryFailure(failure)) => {
                 (InvocationStatus::Failed, Some(failure.clone()))
@@ -979,6 +987,7 @@ impl Runtime {
     {
         match self.admit(request)? {
             Admission::New { boundary, handle } => {
+                self.mark_running(&handle)?;
                 let cancellation = self.cancellation_token(&handle)?;
                 self.retain_terminal(
                     &handle,
@@ -1072,6 +1081,17 @@ impl Runtime {
             ExecutionResult::Orphaned(diagnostic) => RetainedInvocationResult::Orphaned(diagnostic),
         };
         self.store_terminal(handle, result)
+    }
+    fn mark_running<T>(&mut self, handle: &InvocationHandle<T>) -> Result<(), AdmissionError> {
+        self.check_handle(handle)?;
+        let invocation = self
+            .invocations
+            .get_mut(handle.invocation.id())
+            .expect("checked");
+        if invocation.terminal.is_none() {
+            invocation.execution_started = true;
+        }
+        Ok(())
     }
     pub fn invocation_state<T>(
         &self,
@@ -1283,6 +1303,10 @@ pub struct RuntimeSupervisor {
     workers: Arc<Mutex<BTreeMap<InvocationId, thread::JoinHandle<()>>>>,
     lifecycle: Arc<Lifecycle>,
     synchronous: Arc<SynchronousExecutions>,
+    #[cfg(test)]
+    test_hold_worker_start: Arc<AtomicBool>,
+    #[cfg(test)]
+    test_worker_gate: Arc<Mutex<Option<Arc<WorkerStartGate>>>>,
 }
 
 #[derive(Debug, Default)]
@@ -1532,6 +1556,10 @@ impl RuntimeSupervisor {
             workers: Arc::new(Mutex::new(BTreeMap::new())),
             lifecycle: Arc::new(Lifecycle::default()),
             synchronous: Arc::new(SynchronousExecutions::default()),
+            #[cfg(test)]
+            test_hold_worker_start: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            test_worker_gate: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1624,6 +1652,10 @@ impl RuntimeSupervisor {
         drop(lifecycle);
         match admission {
             Admission::New { boundary, handle } => {
+                self.runtime
+                    .lock()
+                    .map_err(|_| AdmissionError::RuntimeUnavailable)?
+                    .mark_running(&handle)?;
                 let cancellation = {
                     self.runtime
                         .lock()
@@ -1710,6 +1742,12 @@ impl RuntimeSupervisor {
             };
             let worker_handle_for_worker = worker_handle.clone();
             let start_gate = Arc::new(WorkerStartGate::default());
+            #[cfg(test)]
+            let hold_worker_start = self.test_hold_worker_start.load(Ordering::Acquire);
+            #[cfg(test)]
+            if hold_worker_start {
+                *self.test_worker_gate.lock().unwrap() = Some(Arc::clone(&start_gate));
+            }
             let start_gate_for_worker = Arc::clone(&start_gate);
             let worker = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 thread::spawn(move || {
@@ -1728,6 +1766,9 @@ impl RuntimeSupervisor {
                             return;
                         }
                     };
+                    if let Ok(mut runtime) = runtime.lock() {
+                        let _ = runtime.mark_running(&worker_handle_for_worker);
+                    }
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         executor.execute_controlled(&boundary, &cancellation)
                     }))
@@ -1771,6 +1812,11 @@ impl RuntimeSupervisor {
                     workers.insert(handle.invocation.id().clone(), worker);
                     drop(workers);
                     drop(lifecycle);
+                    #[cfg(test)]
+                    if !hold_worker_start {
+                        start_gate.release();
+                    }
+                    #[cfg(not(test))]
                     start_gate.release();
                 }
                 Err(error) => {
@@ -1874,6 +1920,18 @@ impl RuntimeSupervisor {
             .map_err(|_| AdmissionError::RuntimeUnavailable)?
             .invocation_metadata(handle)
     }
+    #[cfg(test)]
+    fn hold_next_worker_start(&self) {
+        self.test_hold_worker_start.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn release_held_worker_start(&self) {
+        self.test_hold_worker_start.store(false, Ordering::Release);
+        if let Some(gate) = self.test_worker_gate.lock().unwrap().take() {
+            gate.release();
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1884,6 +1942,7 @@ struct StoredInvocation {
     mode: InvocationMode,
     transaction: TransactionMode,
     context: InvocationContext,
+    execution_started: bool,
     terminal: Option<RetainedInvocationResult>,
     started: Instant,
     ended: Option<Instant>,
@@ -2434,6 +2493,26 @@ mod tests {
                 open = wake.wait(open).unwrap();
             }
             self.result.clone()
+        }
+    }
+    struct AdmissionLifecycleExecutor {
+        started: Arc<AtomicBool>,
+    }
+    impl InvocationExecutor for AdmissionLifecycleExecutor {
+        fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+            InvocationResult::Success(value("Str", "unexpected"))
+        }
+
+        fn execute_controlled(
+            &mut self,
+            _: &ExecutionBoundary,
+            cancellation: &CancellationToken,
+        ) -> InvocationResult<TypedValue> {
+            self.started.store(true, Ordering::SeqCst);
+            while !cancellation.is_cancelled() {
+                thread::yield_now();
+            }
+            InvocationResult::Cancelled(None)
         }
     }
     struct CancellableExecutor {
@@ -3315,6 +3394,59 @@ mod tests {
             .unwrap();
         assert_eq!(replay.invocation(), handle.invocation());
         assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn supervised_start_metadata_transitions_from_queued_to_running_then_cancelled() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("r"));
+        supervisor.hold_next_worker_start();
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.mode = InvocationMode::Start;
+        request.transaction = TransactionMode::Separate;
+        let started = Arc::new(AtomicBool::new(false));
+        let handle = supervisor
+            .start(
+                request,
+                AdmissionLifecycleExecutor {
+                    started: Arc::clone(&started),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            supervisor.invocation_metadata(&handle).unwrap().status(),
+            InvocationStatus::Queued
+        );
+        supervisor.release_held_worker_start();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !started.load(Ordering::SeqCst) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(started.load(Ordering::SeqCst));
+        assert_eq!(
+            supervisor.invocation_metadata(&handle).unwrap().status(),
+            InvocationStatus::Running
+        );
+        assert_eq!(
+            supervisor.await_invocation(&handle, Some(Duration::ZERO)),
+            Err(AwaitError::Timeout)
+        );
+        assert_eq!(
+            supervisor.invocation_metadata(&handle).unwrap().status(),
+            InvocationStatus::Running
+        );
+        assert_eq!(
+            supervisor.cancel(&handle, Some(diagnostic("cancelled"))),
+            Ok(true)
+        );
+        let result = supervisor
+            .await_invocation(&handle, Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(result.status, InvocationStatus::Cancelled);
+        assert_eq!(
+            supervisor.invocation_metadata(&handle).unwrap().status(),
+            InvocationStatus::Cancelled
+        );
+        assert_eq!(supervisor.cancel(&handle, None), Ok(true));
     }
 
     #[test]
