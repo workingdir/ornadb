@@ -140,6 +140,171 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
                 "Orna uses `let` for local declarations; reassignment updates that binding when permitted.",
             help: "replace `var` with `let`",
         },
+        "ORNA-A091-001" => DiagnosticDocumentation {
+            code: "ORNA-A091-001",
+            title: "refined type uses the legacy `where self` form",
+            explanation:
+                "Refined Orna types state their invariant in a brace-delimited assertion block owned by the type.",
+            help: "replace `where self` with a brace-delimited `assert` block",
+        },
+        "ORNA-A091-002" => DiagnosticDocumentation {
+            code: "ORNA-A091-002",
+            title: "table assertion repeats its owner",
+            explanation:
+                "A table assertion is already evaluated for its owning table, so an explicit owner pipeline is redundant.",
+            help: "remove the leading `self |` or table-name pipeline from the assertion",
+        },
+        "ORNA-A091-003" => DiagnosticDocumentation {
+            code: "ORNA-A091-003",
+            title: "module assertion belongs to one table",
+            explanation:
+                "An assertion that depends on only one table must live with that table so its owner is explicit.",
+            help: "move the assertion into the table body it depends on",
+        },
+        "ORNA-A091-004" => DiagnosticDocumentation {
+            code: "ORNA-A091-004",
+            title: "assertion predicate has the wrong owner",
+            explanation:
+                "The declaration's predicate does not describe the type or table that owns the assertion.",
+            help: "rewrite the predicate for the reported owner type",
+        },
+        "ORNA-A091-005" => DiagnosticDocumentation {
+            code: "ORNA-A091-005",
+            title: "assertion is missing its terminator",
+            explanation: "An assertion clause must end with a semicolon before the next declaration.",
+            help: "terminate the assertion clause with `;`",
+        },
+        "ORNA-A091-006" => DiagnosticDocumentation {
+            code: "ORNA-A091-006",
+            title: "assertion uses a dedicated recovery branch",
+            explanation:
+                "Assertions report failed propositions; they do not provide an assertion-specific `else` branch.",
+            help: "use ordinary failure, recovery, or control flow instead",
+        },
+        "ORNA-A091-007" => DiagnosticDocumentation {
+            code: "ORNA-A091-007",
+            title: "assertion has a forbidden effect",
+            explanation:
+                "Declaration and refined assertions must be deterministic and cannot perform external effects.",
+            help: "remove the identified effect or nondeterministic operation",
+        },
+        "ORNA-A091-008" => DiagnosticDocumentation {
+            code: "ORNA-A091-008",
+            title: "assertion is false",
+            explanation:
+                "The executable or refined assertion does not hold for the value being checked.",
+            help: "inspect the owner and proposition, then provide a safe value",
+        },
+        "ORNA-A091-009" => DiagnosticDocumentation {
+            code: "ORNA-A091-009",
+            title: "table assertion is false",
+            explanation:
+                "A table or cross-table invariant does not hold for the deterministic rows being checked.",
+            help: "inspect the reported witness and repair the affected table data",
+        },
+        "ORNA-A091-010" => DiagnosticDocumentation {
+            code: "ORNA-A091-010",
+            title: "assertion form is unsupported",
+            explanation: "Orna 1.0 supports the sole owner-local `assert` form for declarations and tables.",
+            help: "rewrite the construct using the supported `assert` form",
+        },
+        "ORNA-A091-011" => DiagnosticDocumentation {
+            code: "ORNA-A091-011",
+            title: "assertion is empty",
+            explanation: "An assertion must contain a proposition that can be checked.",
+            help: "provide a proposition after `assert`",
+        },
+        "ORNA-A091-012" => DiagnosticDocumentation {
+            code: "ORNA-A091-012",
+            title: "module assertion has no table dependency",
+            explanation:
+                "A module assertion is only valid when it depends on a table; otherwise it has no executable owner.",
+            help: "place the check in executable or test code",
+        },
+        "ORNA091-E-MATCH" => DiagnosticDocumentation {
+            code: "ORNA091-E-MATCH",
+            title: "value branching uses the legacy `match` form",
+            explanation:
+                "Orna branches on values with `case` and colon-separated arms rather than `match` and arrows.",
+            help: "replace `match` with `case` and use `:` for each arm",
+        },
+        "ORNA091-E-RESULT" => DiagnosticDocumentation {
+            code: "ORNA091-E-RESULT",
+            title: "source uses an explicit `Result` value",
+            explanation:
+                "Orna returns the successful type directly and propagates failures automatically.",
+            help: "return the successful type and use `|?` for recovery",
+        },
+        "ORNA091-E-POSTFIX-QUESTION" => DiagnosticDocumentation {
+            code: "ORNA091-E-POSTFIX-QUESTION",
+            title: "operation uses postfix failure propagation",
+            explanation:
+                "Orna propagates operation failures automatically instead of using a postfix `?` operator.",
+            help: "remove the postfix `?` and use `|?` only for recovery",
+        },
+        "ORNA091-E-CURRENCY" => DiagnosticDocumentation {
+            code: "ORNA091-E-CURRENCY",
+            title: "source uses a special currency declaration",
+            explanation:
+                "Currencies are nominal types with a nested `Currency` implementation, not a separate declaration form.",
+            help: "replace the currency declaration with a nominal type and nested `impl Currency`",
+        },
+        "ORNA091-E-CURRENCY-SYMBOL" => DiagnosticDocumentation {
+            code: "ORNA091-E-CURRENCY-SYMBOL",
+            title: "currency declares a universal symbol",
+            explanation:
+                "Currency symbols and placement depend on locale formatter data rather than a universal static field.",
+            help: "move symbol and placement choices to the locale-aware money formatter",
+        },
+        "ORNA091-E-IMPL-FOR" => DiagnosticDocumentation {
+            code: "ORNA091-E-IMPL-FOR",
+            title: "protocol implementation uses the legacy top-level form",
+            explanation:
+                "Orna protocol implementations are nested inside the type that owns them.",
+            help: "nest `impl P` inside the owning type instead of writing `impl P for T`",
+        },
+        "ORNA091-E-BOUND-COLON" => DiagnosticDocumentation {
+            code: "ORNA091-E-BOUND-COLON",
+            title: "generic bound uses the legacy colon form",
+            explanation:
+                "Generic protocol bounds use the `impl` keyword in Orna type parameters.",
+            help: "replace `<T: P>` with `<T impl P>`",
+        },
+        "ORNA091-E-STATIC-FN" => DiagnosticDocumentation {
+            code: "ORNA091-E-STATIC-FN",
+            title: "protocol declares a static function",
+            explanation:
+                "Protocols expose static properties or ordinary functions rather than static function declarations.",
+            help: "use a static property or an ordinary function",
+        },
+        "ORNA091-E-TRYFROM" => DiagnosticDocumentation {
+            code: "ORNA091-E-TRYFROM",
+            title: "source uses `TryFrom`",
+            explanation:
+                "Orna's `From<S>` conversion may fail without wrapping the successful value in a separate result type.",
+            help: "use `From<S>` for a conversion that may fail",
+        },
+        "ORNA091-E-CONVERSION-CHAIN" => DiagnosticDocumentation {
+            code: "ORNA091-E-CONVERSION-CHAIN",
+            title: "conversion chain is implicit",
+            explanation:
+                "Orna does not search for unspoken multi-step conversions between types.",
+            help: "name each conversion step explicitly",
+        },
+        "ORNA091-E-OPAQUE" => DiagnosticDocumentation {
+            code: "ORNA091-E-OPAQUE",
+            title: "source uses an opaque type declaration",
+            explanation:
+                "Orna uses one nominal or refined `type` form instead of a separate opaque declaration.",
+            help: "replace `opaque Name` with the unified nominal or refined `type` form",
+        },
+        "ORNA091-E-FIELD-CONSTRAINT" => DiagnosticDocumentation {
+            code: "ORNA091-E-FIELD-CONSTRAINT",
+            title: "field declares a legacy constraint",
+            explanation:
+                "Field uniqueness and checks are table assertions owned by the table, not field suffixes.",
+            help: "write an owner-local table assertion using `all_unique` or `every`",
+        },
         _ => return None,
     })
 }
@@ -1742,6 +1907,44 @@ mod tests {
         );
         let error = explain_diagnostic("ORNA-NOT-A-CODE").expect_err("unknown diagnostic");
         assert_eq!((error.code, error.exit), ("E1002", Exit::Usage));
+    }
+
+    #[test]
+    fn explain_documents_frozen_assertion_and_syntax_diagnostics() {
+        assert_eq!(
+            explain_diagnostic("ORNA-A091-001").expect("assertion diagnostic is documented"),
+            "ORNA-A091-001: refined type uses the legacy `where self` form\nRefined Orna types state their invariant in a brace-delimited assertion block owned by the type.\nhelp: replace `where self` with a brace-delimited `assert` block"
+        );
+        for code in [
+            "ORNA-A091-002",
+            "ORNA-A091-003",
+            "ORNA-A091-004",
+            "ORNA-A091-005",
+            "ORNA-A091-006",
+            "ORNA-A091-007",
+            "ORNA-A091-008",
+            "ORNA-A091-009",
+            "ORNA-A091-010",
+            "ORNA-A091-011",
+            "ORNA-A091-012",
+            "ORNA091-E-MATCH",
+            "ORNA091-E-RESULT",
+            "ORNA091-E-POSTFIX-QUESTION",
+            "ORNA091-E-CURRENCY",
+            "ORNA091-E-CURRENCY-SYMBOL",
+            "ORNA091-E-IMPL-FOR",
+            "ORNA091-E-BOUND-COLON",
+            "ORNA091-E-STATIC-FN",
+            "ORNA091-E-TRYFROM",
+            "ORNA091-E-CONVERSION-CHAIN",
+            "ORNA091-E-OPAQUE",
+            "ORNA091-E-FIELD-CONSTRAINT",
+        ] {
+            assert!(
+                explain_diagnostic(code).is_ok(),
+                "frozen diagnostic {code} must have user guidance"
+            );
+        }
     }
 
     #[test]
