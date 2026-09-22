@@ -230,6 +230,7 @@ fn decode_verified_bytes_for_role(
         let mut group_values: Vec<Vec<OvbRaw>> = Vec::with_capacity(key_columns.len());
         for column in &key_columns {
             let column_values = match column.kind {
+                KeyColumnKind::Float => return Err(CompactParquetError::UnsupportedKeyMapping),
                 KeyColumnKind::Int => read_int64_column(&*row_group, column.index, rows)?
                     .into_iter()
                     .map(|value| OvbRaw::Int(value.into()))
@@ -563,6 +564,7 @@ enum KeyColumnKind {
     Uuid,
     Int,
     Instant,
+    Float,
     OvbInt,
     OvbStr,
     OvbUuid,
@@ -606,6 +608,7 @@ fn ensure_supported_profile(
         .iter()
         .map(|kind| match kind {
             KeyColumnKind::Int | KeyColumnKind::OvbInt => OvbRaw::Int(0.into()),
+            KeyColumnKind::Float => OvbRaw::Float(0.0f64.to_bits()),
             KeyColumnKind::Instant => OvbRaw::Tag(
                 60002,
                 Box::new(OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Int(0.into())])),
@@ -1064,6 +1067,17 @@ fn descriptor_field_id(
             && column.physical_type() == Type::INT64
         {
             KeyColumnKind::Int
+        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Float".to_owned())]
+            && matches!(&fields[3], OvbRaw::Text(value) if value == "float64")
+            && matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty())
+            && column.physical_type() == Type::DOUBLE
+            && column.logical_type_ref().is_none()
+            && column.converted_type() == ConvertedType::NONE
+        {
+            // Float is not a legal primary-key type, but it is a standard
+            // physical mapping for stored columns. Retain its descriptor
+            // identity so DOUBLE is never inferred from a sample value.
+            KeyColumnKind::Float
         } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Bool".to_owned())]
             && matches!(&fields[3], OvbRaw::Text(value) if value == "bool")
             && column.physical_type() == Type::BOOLEAN
@@ -1903,7 +1917,9 @@ mod tests {
     };
     use parquet::{
         basic::{Compression, Encoding},
-        data_type::{BoolType, ByteArray, ByteArrayType, Int32Type, Int64Type},
+        data_type::{
+            BoolType, ByteArray, ByteArrayType, DoubleType, Int32Type, Int64Type,
+        },
         file::{
             metadata::KeyValue,
             properties::{WriterProperties, WriterVersion},
@@ -1929,6 +1945,9 @@ mod tests {
 
     fn int_type() -> OvbRaw {
         OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())])
+    }
+    fn float_type() -> OvbRaw {
+        OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Float".into())])
     }
 
     fn bool_type() -> OvbRaw {
@@ -2005,6 +2024,29 @@ mod tests {
                         uuid_raw(STORED_A),
                         OvbRaw::Text(format!("f_{}", Uuid::from_bytes(STORED_A).simple())),
                         int_type(),
+                        OvbRaw::Int(1.into()),
+                        OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                    ]),
+                ]),
+            ),
+            (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+        ]);
+        CompactOvbProfile::new(SchemaDescriptor::new(schema).unwrap()).unwrap()
+    }
+
+    fn profile_with_stored_float_field() -> CompactOvbProfile {
+        let schema = OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (OvbRaw::Int(1.into()), uuid_raw(*TABLE.as_bytes())),
+            (OvbRaw::Int(2.into()), OvbRaw::Array(vec![uuid_raw(KEY_A)])),
+            (
+                OvbRaw::Int(3.into()),
+                OvbRaw::Array(vec![
+                    field_with_type(KEY_A, int_type()),
+                    OvbRaw::Array(vec![
+                        uuid_raw(STORED_A),
+                        OvbRaw::Text(format!("f_{}", Uuid::from_bytes(STORED_A).simple())),
+                        float_type(),
                         OvbRaw::Int(1.into()),
                         OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
                     ]),
@@ -2159,6 +2201,7 @@ mod tests {
 
     enum TestColumn<'a> {
         Int(&'a [i64]),
+        Float(&'a [f64]),
         OvbInt(&'a [Vec<u8>]),
         OvbIntOptionalPresent(&'a [Vec<u8>]),
         Bool(&'a [bool]),
@@ -2226,6 +2269,7 @@ mod tests {
             };
             let physical = match &values[index] {
                 TestColumn::Int(_) => "INT64",
+                TestColumn::Float(_) => "DOUBLE",
                 TestColumn::OvbInt(_)
                 | TestColumn::OvbIntOptionalPresent(_)
                 | TestColumn::OvbBool(_)
@@ -2257,6 +2301,7 @@ mod tests {
                 .zip(values)
                 .map(|(id, value)| match value {
                     TestColumn::Int(_) => descriptor(id, int_type()),
+                    TestColumn::Float(_) => descriptor_with_encoding(id, float_type(), "float64"),
                     TestColumn::OvbInt(_) => ovb_int_descriptor(id),
                     TestColumn::OvbIntOptionalPresent(_) => ovb_int_descriptor(id),
                     TestColumn::OvbBool(_) => {
@@ -2416,6 +2461,12 @@ mod tests {
                 TestColumn::Int(values) => {
                     column
                         .typed::<Int64Type>()
+                        .write_batch(values, None, None)
+                        .unwrap();
+                }
+                TestColumn::Float(values) => {
+                    column
+                        .typed::<DoubleType>()
                         .write_batch(values, None, None)
                         .unwrap();
                 }
@@ -3886,6 +3937,27 @@ mod tests {
             date_value(2_932_897),
             Err(CompactParquetError::InvalidMetadata)
         ));
+    }
+
+    #[test]
+    fn reads_double_float_stored_column_without_inference() {
+        let profile = profile_with_stored_float_field();
+        let keys = [10_i64, 11_i64, 12_i64];
+        let values = [1.5_f64, f64::NAN, -0.0_f64];
+        let bytes = mixed_parquet(
+            &profile,
+            &[KEY_A, STORED_A],
+            &[TestColumn::Int(&keys), TestColumn::Float(&values)],
+            false,
+            None,
+        );
+        let decoded =
+            CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, keys.len() as u64)
+                .unwrap();
+        assert_eq!(
+            decoded,
+            keys.into_iter().map(expected_scalar).collect::<Vec<_>>()
+        );
     }
 
     #[test]
