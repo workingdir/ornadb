@@ -38,6 +38,11 @@ fn plaintext_is_only_allowed_for_explicit_trusted_loopback() {
             .is_ok()
     );
     assert!(
+        config("http://127.0.0.2:8080", TlsPolicy::TrustedLoopbackOnly)
+            .validate()
+            .is_ok()
+    );
+    assert!(
         config("http://example.test", TlsPolicy::TrustedLoopbackOnly)
             .validate()
             .is_err()
