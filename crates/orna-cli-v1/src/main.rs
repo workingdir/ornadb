@@ -10,6 +10,8 @@ use std::fmt;
 use std::io::{self, BufReader, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
@@ -18,7 +20,20 @@ use orna_conformance_v1::{
 use orna_application_v1::ApplicationAuthority;
 use orna_evaluator_v1::{Environment, Limits};
 use orna_foundation_v1::{OvbRaw, Value};
-use orna_runtime_v1::RuntimeIdentity;
+use orna_runtime_v1::{RunObservationStatus, RuntimeIdentity, RuntimeState};
+
+static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
+
+fn cli_request_nonce() -> u128 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    (now << 32)
+        ^ (u128::from(std::process::id()) << 16)
+        ^ u128::from(CLI_REQUEST_NONCE.fetch_add(1, AtomicOrdering::Relaxed))
+}
+
 
 const SENSOR_SOURCE_IDENTITY: &str = "example:sensors:v1";
 #[allow(
@@ -1284,6 +1299,20 @@ fn run_project_invocation_with_arguments(
         ));
     }
     let (identity, initial_digest) = runtime_identity(&repository)?;
+    let (request, fingerprint) = DurableTransactionalEvaluator::project_request_identity(
+        identity,
+        initial_digest,
+        root_entry,
+        arguments,
+        cli_request_nonce(),
+    )
+    .map_err(|_| {
+        Diagnostic::target(
+            "E2200",
+            "project request identity could not be created",
+            "retry the durable project invocation",
+        )
+    })?;
     let project = execution_project(&project);
     let owner_id = invocation_owner_id(identity);
     let outcome = tokio::runtime::Builder::new_current_thread()
@@ -1297,13 +1326,15 @@ fn run_project_invocation_with_arguments(
             )
         })?
         .block_on(
-            DurableTransactionalEvaluator::default().execute_project_with_arguments(
+            DurableTransactionalEvaluator::default().execute_project_request_with_arguments(
                 orna_conformance_v1::RuntimeTarget {
                     repository: &repository,
                     identity,
                     owner_id,
                     initial_digest,
                 },
+                request,
+                fingerprint,
                 &project,
                 root_entry,
                 arguments,
@@ -2446,6 +2477,24 @@ mod tests {
             }),
             Ok(())
         );
+        let repository =
+            orna_repository_v1::Repository::discover(directory.path()).expect("repository");
+        let (identity, initial_digest) = runtime_identity(&repository).expect("runtime identity");
+        let observations = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                RuntimeState::open(&repository, identity, initial_digest)
+                    .await
+                    .expect("reopened runtime")
+                    .run_observations()
+                    .await
+                    .expect("run observations")
+            });
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].status, RunObservationStatus::Completed);
+        assert!(!observations[0].live);
         let error = execute(&Parsed {
             endpoint: endpoint.clone(),
             command: Command::Run(Invocation::Seed),
