@@ -19,6 +19,7 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 
 [dependencies]
+orna-application-v1 = { path = "../orna-application-v1" }
 orna-conformance-v1 = { path = "../orna-conformance-v1" }
 orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
