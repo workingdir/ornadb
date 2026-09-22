@@ -1,718 +1,168 @@
 # OrnaDB maintainer and operator runbook
 
-OrnaDB (Object-Relational Native Applications) is the product. `orna` is the
-CLI and server executable. This runbook covers the current
-checkout; it is not a replacement for the canonical design bundle in a
-separate `spec` checkout.
+This runbook describes the current Orna 1.0 implementation in the v1 crates. It
+is maintained operational guidance, not a replacement for the canonical
+publication under `reference/Orna-1.0.0/`. Historical design records remain in
+`docs/decisions/` and are not operational inputs.
 
 ## Before you start
 
-Work from the repository root. The normal local gate is:
+Work from the repository root. The v1 command is the `orna-cli-v1` Cargo
+binary; run it from a checked-out repository with the locked dependency graph:
 
 ```text
-just
+cargo run --locked -p orna-cli-v1 -- --help
 ```
 
-A bare `just` runs the default `check` recipe: formatting, workspace build,
-Clippy, and tests. PostgreSQL starts only when a PostgreSQL recipe is selected.
+The workspace declares Rust 1.95. Git and Cargo are required for project
+initialisation and source loading. Use `--offline` only after the locked
+registry and Git dependencies are already cached; an offline command that
+cannot resolve its cache is unavailable, not a successful check.
 
-The normal toolchain is Rust 1.95 with `rustfmt` and `clippy`, `just`, Node 22,
-`tree-sitter-cli@0.26.5`, Python 3.11 or newer, and Docker with the Compose
-Commands that compile the embedded PostgreSQL engine require a Linux x86_64
-host; use the Docker-backed engine gate when the host is not Linux x86_64.
-The ABI-header/parity checks require `gcc` with C11 support and the canonical
-`../spec/spec/orna_runtime_abi_v1.h`. Qt runtime recipes additionally require
-CMake 3.21 or newer, CTest, Qt 6 Core and Widgets, and a C++17 compiler. Git,
-GNU `make`, `patch`, and the standard Unix file/archive tools are needed by
-the checked-in source and evidence recipes.
-
-When using a prebuilt engine instead of the build script's Docker or source
-build, `ORNA_POSTGRES_ENGINE_OUTPUT` must be an **absolute** path to a complete
-engine output directory, such as
-`$PWD/target/postgresql-embedded-native-one/output` after the native lifecycle
-recipe has produced it.
-
-This checkout currently has neither `./spec/` nor the sibling `../spec/`
-checkout. The latter owns `../spec/spec/orna_runtime_abi_v1.h`; it is required
-by `just runtime-abi-header-check`, `just runtime-abi-parity`, and the Qt
-runtime CMake project. Do not substitute a generated or local header, and do
-not report those gates as passed while the canonical input is absent.
-
-## Fresh-checkout bootstrap
-
-Use a real Git checkout rather than a source archive: the embedded PostgreSQL
-engine is a pinned submodule and its input checks reject an absent, modified,
-or detached-at-the-wrong-commit source tree. From the parent directory, replace
-`<repository-url>` with the repository URL supplied by your hosting service:
-
-```sh
-git clone --recurse-submodules <repository-url> ornadb
-cd ornadb
-git submodule sync --recursive
-git submodule update --init --recursive --checkout
-git status --short
-git submodule status -- third_party/postgresql
-git -C third_party/postgresql rev-parse HEAD
-git -C third_party/postgresql status --porcelain=v1 --untracked-files=all
-```
-
-The superproject status must be empty, the PostgreSQL submodule status must be
-clean, and its commit must be the checked-in gitlink
-`f5cc81719e6da4cbdb1f797c48b693e91018153a` (the status line has a leading
-space for a matching checkout). The initial clone and submodule update may
-fetch the pinned source; after bootstrap, the gate commands below must not
-silently fetch it.
-
-Install or select the required host tools before running a gate. With rustup,
-the accepted toolchain setup is:
-
-```sh
-rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
-rustup override set 1.95.0
-rustc --version
-cargo --version
-just --version
-python3 --version
-node --version
-tree-sitter --version
-docker --version
-docker compose version
-cmake --version
-gcc --version
-```
-
-Warm the locked Cargo cache while network access is available, then use Cargo
-offline mode where the cache must be complete:
-
-```sh
-cargo fetch --locked
-cargo fetch --locked --manifest-path editors/zed/Cargo.toml
-CARGO_NET_OFFLINE=true just check
-CARGO_NET_OFFLINE=true just editor-tooling-check
-CARGO_NET_OFFLINE=true just demo-check
-CARGO_NET_OFFLINE=true just sqlite-check
-CARGO_NET_OFFLINE=true just sqlite-smoke
-```
-Commands that compile `orna-server` or `orna-postgres` invoke the embedded
-engine build unless `ORNA_POSTGRES_ENGINE_OUTPUT` names a complete prebuilt
-engine output directory using an **absolute** path. Record that prerequisite
-separately; Cargo offline mode alone does not make the engine build network-free.
-`CARGO_NET_OFFLINE=true` makes Cargo registry/git resolution fail closed when
-the cache is incomplete, but it does not disable arbitrary build scripts.
-
-Each gate is **pass** only after its command exits zero and its output is
-retained. A prerequisite that is intentionally not installed is **skipped** or
-**unavailable** only when the evidence record names the gate and missing
-prerequisite; it is never a pass. A command that was invoked and exited
-non-zero is a **failure**, not a skip. The current missing `./spec`/`../spec`
-inputs therefore make the canonical-header-consuming ABI and CMake/CTest Qt
-gates unavailable, rather than evidence of success; path-dependent Rust runtime
-smokes remain separate.
-
-## Repository map
-
-1. `Cargo.toml`, `Cargo.lock`: workspace definition and locked dependencies.
-2. `crates/`: the Rust implementation packages, including the server/CLI,
-   client, compiler, protocol, standard library, LSP, and PostgreSQL kernel.
-3. `crates/orna-storage/`: backend-neutral application revision and typed
-   migration contracts.
-4. `crates/orna-sqlite/`: the local Turso revision-store adapter.
-5. `stdlib/std/`: source-authored standard-library declarations.
-6. `runtimes/qt/`: the separate Qt runtime CMake project.
-7. `editors/`: editor integrations and grammar metadata.
-8. `scripts/`: static editor-tooling and accepted demo runners.
-9. `postgresql/`: the embedded PostgreSQL engine build and lifecycle tooling.
-10. `compose.yaml`: the loopback-only PostgreSQL development service.
-11. `.beads/`: the tracked issue ledger; preserve it when cleaning other
-    repository state.
-12. `docs/`: maintained operator guidance and historical design decisions.
-13. `packaging/linux/`: deterministic Linux artifact builder, verifier, installer,
-    and focused package tests.
-
-The repository intentionally has no hosted/public website, Debian release
-package, or generated root status ledger. It does retain the maintained
-`website/docs/status.md` status source. The Linux artifact recipe is a local
-provenance and install smoke boundary, not a production distribution authority.
-Keep planning and issue state in the issue ledger and maintained documentation
-rather than restoring removed snapshots.
-
-## Local check flow
-
-Warm dependencies once from the network with `cargo fetch --locked` and
-`cargo fetch --locked --manifest-path editors/zed/Cargo.toml`; do not mistake
-those provisioning commands for evidence. After the caches are warm, use
-Cargo's offline forms where applicable:
-
-```text
-just fmt
-CARGO_NET_OFFLINE=true just build
-CARGO_NET_OFFLINE=true just lint
-CARGO_NET_OFFLINE=true just test
-CARGO_NET_OFFLINE=true just rustdoc-check
-CARGO_NET_OFFLINE=true just editor-tooling-check
-CARGO_NET_OFFLINE=true just demo-check
-```
-
-`CARGO_NET_OFFLINE=true` makes Cargo registry and Git resolution fail closed,
-but it does not disable arbitrary build scripts. `build`, `test`,
-`rustdoc-check`, `editor-tooling-check`, and `demo-check` include paths that can
-compile `orna-server`/`orna-postgres`; those paths need a Linux x86_64 host plus
-a complete `ORNA_POSTGRES_ENGINE_OUTPUT` directory at an **absolute** path or
-the environment-dependent embedded-engine build. Keep that prerequisite in the
-evidence instead of calling the whole command network-free.
-
-`just fmt` checks formatting without changing files. `just build` checks all
-workspace targets. `just lint` runs workspace Clippy with warnings denied.
-`just test` runs workspace tests except tests marked `#[ignore]`.
-`just rustdoc-check` builds all workspace API documentation with rustdoc
-warnings denied and `--no-deps`; it is included in `just check` and does not
-claim documentation for external dependencies.
-`just editor-tooling-check` is a static gate and does not launch editor
-runtimes, but its source-check parity child can compile `orna-server` and
-therefore needs the embedded-engine prerequisite described above.
-`just demo-check` runs accepted source-check and offline demos in manifest order
-and explicitly skips Compose-only entries; source-check entries have the same
-embedded-engine prerequisite.
-
-The editor gate requires Python 3.11+, `tree-sitter` CLI 0.26.5, Node, Cargo,
-and the checked-in editor trees. It validates JSON, grammar generation,
-accepted corpus manifests, LSP tests, the Zed extension, and the VS Code
-syntax with `node --check`; it does not launch Neovim, Vim, Zed, VS Code,
-Helix, or Sublime. Emacs is optional: when `emacs` and Eglot are available,
-the script batch-loads `editors/emacs/orna-eglot.el`; otherwise it records the
-Emacs runtime check as unavailable while still requiring the checked-in
-integration file. `../spec/examples` is optional proposal/deferred input; the
-script logs it as absent and skips it when, as in this checkout, the directory
-is missing.
-
-The retained static `just editor-tooling-check` result dated 2026-08-25 is
-the current documented editor-tooling baseline. It is bounded evidence for
-only the checked-in static contracts listed above, not a full editor-parity or
-runtime result. Neovim/Vim host sessions are unavailable and not proven in the
-current environment. No manual Zed host launch was run; VSIX packaging,
-installation, and launch were not run and remain unclaimed.
-
-`just demo-suite` combines `demo-check` with the standalone TTY renderer,
-client artifact-integrity, and local capability-matching demos. `demo-check`
-source-check entries can compile `orna-server`; provide the embedded-engine
-output or record that environment-dependent prerequisite. The suite does not
-run the local PostgreSQL CLI demo or Qt/Studio smoke commands.
-
-## Application revisions and SQLite boundary
-
-`orna-storage` defines the backend-neutral `ApplicationRevisionStore`
-lifecycle and typed migration contracts. It carries compiler-produced
-`PhysicalMigrationArtifact` values as exact canonical bytes and digests for
-durable ledger entries. `orna-sqlite` opens a local Turso database as a
-library-level revision-store adapter. Its persisted state covers source and
-catalogue identities/lineage, source units, semantic revision snapshots, the
-application migration ledger, and generated object tables with reference
-foreign keys for supported object changes. Unsupported value, enum, record,
-binding, scalar, and artifact shapes fail closed.
-
-`LocalPath` also has direct routes for SERVER-only `invoke` and `raw-call`,
-principal-scoped USER state, security administration, and redacted invocation
-inspection. Local invocation evidence stores only bounded structural summaries,
-terminal audit fields, and trace records; arguments, result values, source text,
-and resource payloads are not persisted. The private SQLite socket continues to
-serve protocol raw calls and applies the same local-peer/execute gate.
-
-Migration validation is bounded to typed migration artifacts and deterministic
-PostgreSQL/SQLite artifact checks, plus SQLite schema/data lineage,
-revision-ledger integrity, semantic snapshot, generated object-table/
-foreign-key checks, and bounded runtime evidence. This scope does not prove
-full physical or runtime parity between PostgreSQL and SQLite; do not record
-that claim without fresh, dedicated evidence. CLIENT/Qt execution, protected
-standard transports, and resource transport remain PostgreSQL/runtime-only.
-
-`just sqlite-check` is the dedicated Cargo compile gate for the storage, SQLite,
-and local CLI binary targets. Its local CLI target can compile `orna-server`
-and therefore needs the embedded-engine output or environment-dependent build;
-Cargo offline mode alone is not sufficient. `just sqlite-smoke` runs the
-deterministic revision-store example and the focused SQLite process/socket
-integration target. These recipes provide a dedicated SQLite adoption proof;
-the standalone adapter example remains a library smoke and does not exercise
-the socket by itself.
-
-The SQLite owner configures WAL journaling and `synchronous = FULL` before
-schema setup. The claimed durability boundary covers committed transactions
-across a process or operating-system crash when the filesystem honors flushes;
-Orna does not claim power-loss durability against a filesystem or storage
-device that lies about flush completion. The writable local database has one
-owner process; other commands use the private socket when that owner exists.
-
-The accepted standard-library compatibility record currently covers V1 through
-V9. The implementation contains V10/V11 paths, but they have no accepted 1.0
-compatibility promise until the release evidence and product baseline are
-reconciled.
-
-## PostgreSQL Compose lifecycle
-
-`compose.yaml` defines the development `postgres` service using
-`postgres:18.4-bookworm`. It binds PostgreSQL to `127.0.0.1:55432` and stores
-data in the named `ornadb_postgres_data` volume. Its credentials are development
-fixtures only.
-
-The basic Compose lifecycle recipes (`postgres-up`, `postgres-status`,
-`postgres-health`, and `postgres-stop`) require Docker and the development
-image but do not build the embedded PostgreSQL source. The kernel recipes below
-also compile `orna-server`/`orna-postgres`; on a clean target they require a
-Linux x86_64 host and either `ORNA_POSTGRES_ENGINE_OUTPUT` naming a complete
-prebuilt engine output directory at an **absolute** path or the Docker-backed
-engine build. The pinned submodule is required when the Docker/source engine
-build path is selected; the prebuilt-output branch does not read it.
-
-Use the checked-in recipes:
-
-```text
-just postgres-up
-just postgres-status
-just postgres-health
-just postgres-stop
-```
-
-`postgres-up` starts the service in detached mode. `postgres-status` reports
-container status. `postgres-health` runs `pg_isready` inside the container for
-`ornadb_dev`. `postgres-stop` stops PostgreSQL without deleting the volume.
-If Docker, the plugin, the image, or the port is unavailable, record this
-Compose gate as unavailable before invoking it; a command that was invoked and
-failed is a failure.
-
-For the integration kernel, use these commands from the repository root:
-
-```text
-just kernel-resource-audit-proof
-just kernel-test
-```
-
-Both recipes start PostgreSQL with `--wait`, set the checked-in development
-connection fixtures, run ignored tests serially, and stop the service on exit.
-`kernel-test` uses a unique per-invocation database named with the
-`ornadb_kernel_gate_<BASHPID>_<UTC nanoseconds>` prefix and drops it during
-cleanup. Their Cargo invocations enforce `--locked`, but compiling the server
-or kernel can still run `orna-postgres/build.rs`. With the Docker/source engine
-build, ensure the clean pinned submodule is present; with a prebuilt engine,
-provide `ORNA_POSTGRES_ENGINE_OUTPUT` as a complete output directory at an
-**absolute** path. These environment-gated Compose proofs also require a Linux
-x86_64 host.
-
-Capture the service and gate logs locally when retaining evidence:
-
-```sh
-set -euo pipefail
-mkdir -p ci-evidence
-just kernel-test 2>&1 | tee ci-evidence/kernel-test.log
-docker compose logs --no-color postgres | tee ci-evidence/postgres.log
-```
-
-Do not remove the named volume during a routine stop. Reset it only after
-confirming that data recovery or reset is intentional. A passing test command
-without retained gate/log output is not sufficient release evidence.
-
-## Embedded PostgreSQL source gate
-
-The native embedded-engine summary is a separate Docker-isolated gate from the
-Compose development service. It requires the clean
-`third_party/postgresql` submodule at the pinned gitlink, a running Docker
-daemon, and network access while the pinned builder image is prepared. Check
-the source boundary first, then run the two-lifecycle reproduction:
-
-```text
-make -C postgresql verify-inputs
-make -C postgresql verify-lifecycle \
-  TARGET_ROOT="$PWD/target/postgresql-embedded-native"
-```
-
-`verify-inputs` rejects an absent, modified, dirty, or wrong-commit submodule
-and rejects changed or untracked overlays, patches, and build scripts.
-`verify-lifecycle` builds the pinned Debian builder image and fetches only the
-checksummed sources named by `postgresql/Containerfile`; the image-preparation
-step needs network access. Its `prepare-source` prerequisite runs on the host,
-using the pinned Git archive, overlays, and patches. Compilation and both
-lifecycle probes then run in `docker run --network=none` with the PostgreSQL
-source mounted read-only. Do not enable network access for those proof
-containers.
-
-The reproducibility evidence is written under
-`target/postgresql-embedded-native-one/output/` (and the comparison run under
-`target/postgresql-embedded-native-two/`). The output includes the embedded
-archives, support data, lifecycle report/stdout, symbol inventories, licence,
-and `embedded-engine-manifest.json`; retain the complete `target` subtree when
-reviewing a result. Retain the first run's `output/*`, not an unrecorded local
-summary. A missing submodule, unavailable Docker daemon/image source,
-non-zero build, lifecycle verifier failure, or mismatch between the two runs
-is a failed or unavailable gate as appropriate; it is never evidence of a
-passed embedded build. This checkout has the PostgreSQL source at the checked-in
-gitlink `f5cc81719e6da4cbdb1f797c48b693e91018153a`; no native result is claimed
-without a newly executed command and retained evidence.
-
-## Runtime and ABI boundaries
-
-The product is `OrnaDB`, the CLI is `orna`, and runtime families use the
-`orna-runtime-*` prefix. The checkout contains an offline TTY path and a
-separate Qt runtime project. A runtime named in the canonical spec is not
-necessarily implemented or proved here.
-The TTY and client demos are Cargo-only and their recipes enforce
-`--locked --offline`; they do not need PostgreSQL, Qt, or a display:
-
-```text
-just runtime-tty-demo
-just client-artifact-demo
-just client-capability-demo
-```
-
-The ABI header/parity checks require a GCC-compatible C11 compiler, Linux
-x86_64 for the parity assertions, and the canonical
-`../spec/spec/orna_runtime_abi_v1.h`. The CMake/CTest Qt build additionally
-requires CMake 3.21 or newer, CTest, a C++17 compiler, and Qt 6.2+ Core and
-Widgets development files. The Rust loader and Studio smoke commands only
-require an explicit compatible shared-library path. Build and test headlessly
-with:
-
-```text
-just runtime-qt-build
-just runtime-qt-test
-just runtime-qt-rust-smoke <runtime-shared-library>
-just studio-qt-demo
-just studio-qt-smoke <runtime-shared-library>
-just runtime-abi-header-check
-just runtime-abi-parity
-```
-
-`runtime-qt-test` sets `QT_QPA_PLATFORM=offscreen`; the Rust loader and
-`studio-qt-smoke` also use offscreen mode and require an explicit compatible
-shared-library path (normally produced by `runtime-qt-build`). The build tree
-and Qt visual output remain under `target/runtime-qt/` (including the CTest
-visual PNG), while the TTY demo writes `target/runtime-tty-demo-output.bin`.
-The ABI-header check is GCC C11 syntax-only validation; ABI parity compiles the
-Linux x86_64 C assertions against the canonical header. Because this checkout
-has neither `./spec/` nor `../spec/`, the canonical-header-dependent ABI
-commands are currently unavailable. The CMake/CTest Qt commands also require
-their listed native dependencies; no Qt/ABI pass is claimed. The two Rust
-smoke commands remain path-dependent.
-
-Display-backed gates are separate and require a live `DISPLAY` or
-`WAYLAND_DISPLAY`:
-
-```text
-just runtime-qt-demo
-just studio-qt-display-smoke
-just studio-qt-action-smoke
-just runtime-display-suite
-```
-
-The checked-in recipes fail with a prerequisite message and status 2 when the
-display variables are absent; record that condition as unavailable rather than
-as a passing headless result. None of these commands proves a remote
-deployment, editor host session, or production sandbox.
+Keep the working tree and the runtime state it owns together. Do not copy or
+hand-edit private runtime files to move state between repositories. The v1
+repository layer resolves the per-worktree runtime location.
 
 ## CLI entry points
 
-Start with `orna --help`, then use command-specific help:
+The command syntax is:
 
 ```text
-orna --help
-orna help <topic>
-orna --version
-orna server run
-orna server backend-shell
-orna runtime describe <runtime-shared-library>
-orna source check <file.orna>
-orna source apply <file.orna>
-orna source diff <file.orna>
-orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]
-orna raw-call <canonical-function-id> [<canonical-parameter-id> [<canonical-parameter-id-2>]]
-orna state get <root-function-id> [options]
-orna state set <root-function-id> [options]
-orna inspect <invocation-id> [options]
-orna security grant-execute <canonical-function-id>
-orna security user create|disable <canonical-principal-id>
-orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]
-orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]
-orna security grants list <canonical-principal-id>
-orna security check can-execute <canonical-principal-id> <canonical-function-id>
-orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]
-orna security whoami
+cargo run --locked -p orna-cli-v1 -- [--db PATH] COMMAND [ARGUMENTS]
 ```
 
-`orna server run` with the default managed-local endpoint starts the embedded
-PostgreSQL instance in the foreground, using user-owned state and runtime
-directories selected by XDG environment variables, with safe fallbacks under
-`/tmp`. An explicit `LocalPath` instead starts the local SQLite server and
-exposes the `<database>.orna.sock` Unix socket described below.
+`--db PATH` must precede the command and selects a local project directory. It
+is accepted by project-loading commands; `init` takes its directory as a
+positional argument and rejects `--db`.
 
-The managed PostgreSQL server supports `invoke`, `state`, `inspect`, `raw-call`,
-`backend-shell`, source apply/diff, and security administration through the
-same peer-authenticated instance. Explicit `LocalPath` uses direct SQLite
-routes for source apply/diff, SERVER-only invoke/raw-call, USER state, security
-administration, and redacted invocation inspection. `source check` remains
-offline and does not need PostgreSQL, network access, configuration, or writes.
+| Command | Behaviour |
+| --- | --- |
+| `init [DIRECTORY]` | Initialise a local Git-backed Orna repository. The current directory is the default. |
+| `status` | Show the local Git worktree status. |
+| `status --porcelain` | Emit the machine-readable status form. |
+| `status --short` | Emit the short status form. |
+| `check` | Load reachable source modules from the local Git worktree and perform the v1 checks. |
+| `invoke TARGET` | Execute a reachable zero-argument pure function. |
+| `run` | Run the default project entry point (`main.main`). |
+| `run TARGET` | Run a named project entry point. |
+| `run seed` | Run the reference seed workflow when the loaded project provides it. |
+| `run exercise` | Run the reference exercise workflow when the loaded project provides it. |
+| `run sensors.ingest` | Run the finite sensor-ingestion workflow when the loaded project provides it. |
+| `run library.lend BOOK BORROWER` | Run the bounded lending workflow with the supplied identifiers. |
+| `repl [EXPRESSION]` | Evaluate a pure expression in an ephemeral interactive session, or evaluate one expression and exit. |
+| `explain CODE` | Print guidance for a documented Orna diagnostic code. |
+| `--help`, `help`, `--version`, `-V` | Print command help or the binary version. |
 
-## Endpoint and command-routing boundary
-
-`DatabaseEndpoint::parse` treats a value without `://` as
-`DatabaseEndpoint::LocalPath`; `Display` renders that path directly. Parsing
-and display do not imply that every command is routed.
-
-An explicit `LocalPath` is accepted for `server run`, `source check`, source
-apply/diff, SERVER-only `invoke` and `raw-call`, `state`, `inspect`, and
-security administration. Unsupported commands fail before selecting a backend.
-`orna server run` opens and bootstraps the database before exposing
-`<database>.orna.sock`; the foreground Unix listener enforces mode `0600`.
-Its handshake recognises protocol versions v1 through v5. Versions v1 through
-v3 have typed handling in the bounded SQLite surface; v4 and v5 use the
-protocol fallback when their opaque codec registry is unavailable. The socket
-shares the private Orna raw-call wire protocol, but only the bounded
-server-plan/parameter-echo execution subset can produce a successful result.
-
-LocalPath inspection is deliberately narrower than PostgreSQL inspection:
-successful direct invocations persist a bounded structural summary and trace
-event, while value-bearing projections, source text, and resource payloads are
-not stored. LocalPath security mutations are authorized by the durable local
-peer principal and `SecurityAdmin` privilege; USER state is principal-scoped
-and uses canonical ORV5 values with optimistic revisions.
-
-For an explicit endpoint (`--db` or a positional endpoint), the CLI currently
-accepts `ManagedLocal` and `LocalPath`. The bounded installed `invoke` route
-also accepts only the current managed Orna Unix socket; other explicit
-Unix-socket command routes and remote-TLS endpoints remain rejected until their
-route or transport wiring is available. ManagedLocal routes installed commands
-to the fixed embedded PostgreSQL host; LocalPath routes the supported local
-surface to SQLite without a PostgreSQL fallback.
-
-Run the complete local binary demo with:
+Examples:
 
 ```text
-just local-cli-demo
+cargo run --locked -p orna-cli-v1 -- init ./example-project
+cargo run --locked -p orna-cli-v1 -- --db ./example-project check
+cargo run --locked -p orna-cli-v1 -- --db ./example-project invoke main
+cargo run --locked -p orna-cli-v1 -- --db ./example-project run main.main
+cargo run --locked -p orna-cli-v1 -- repl "1 + 2"
+cargo run --locked -p orna-cli-v1 -- explain ORNA-S010-IMPORT
 ```
 
-The demo builds the binary, starts a temporary user-owned server, waits for
-readiness, invokes `std.invoke.echo`, and removes its temporary state.
+### Initialising a project
 
-## Security, sessions, and recovery
+`init` creates missing repository metadata and an empty root module without
+staging files or creating a commit. Existing root source is preserved and
+repeated initialisation retains the database identity. Partial, malformed, or
+unsupported metadata is reported rather than overwritten. Git's configured
+defaults determine the initial branch. New database creation is currently
+supported on Linux.
 
-Managed local operations authenticate the operating-system peer. The server
-obtains the Unix peer UID, maps it to the session principal, and keeps the
-principal out of request payloads. A caller cannot supply a replacement
-principal. The bounded SQLite socket relies on its `0600` filesystem mode and
-applies the same local-peer and execute checks as the direct LocalPath routes.
-SQLite LocalPath does not expose PostgreSQL CLIENT/Qt execution, standard
-protected transports, or resource dispatch.
+After adding source files, use `status` to inspect the worktree and `check` to
+validate the reachable source. `check` is local and read-only with respect to
+project source; it does not substitute a host catalogue or silently import
+uncaptured modules. A successful check prints `project valid`.
 
-These authentication and transport session paths do not currently expose the
-canonical live `sys.Session`/`sys.SessionRef` projection through
-`sys.rt.sessions` or `sys.RuntimeView.sessions`. The schema is pinned by the
-`sys_api_contract` regression in commit `78301153`; the runtime projection
-remains blocked until authoritative `started`, `last_seen`, client, locale,
-timezone, renderer, and session-reference provenance exists with the required
-epoch/session fencing. Do not infer those fields from peer identity, transport
-metadata, expiry, or subscribe payloads.
+### Pure evaluation and the REPL
 
-Keep secrets out of source, argument files, state value files, shell history,
-CI logs, and evidence artifacts. The Compose password is a repository-visible
-development fixture, not a production credential.
+`invoke TARGET` resolves a reachable zero-argument pure function. `repl` is an
+ephemeral session: bindings, pure function declarations, imports, and `$_`
+(the last successful result) remain available until EOF or `:quit`. A failed
+submission leaves the retained declarations and last successful result
+unchanged. Preview evaluation is bounded and cannot perform external effects.
 
-Treat source apply, runtime evidence, and recovery as transactional operations:
+The REPL can select an admitted snapshot with `:at CWD`, `:at HEAD`, or
+`:at REF`. `HEAD` and named references are read-only committed snapshots; a
+failed selection retains the previous session. Remote endpoints are not a
+fallback for a local project: use a local Git worktree and an explicit `--db
+PATH` when selecting a project.
 
-1. Source apply reads one regular UTF-8 file and fails closed for invalid input.
-2. Managed PostgreSQL source apply records its protected audit event and cannot
-   choose an audit principal from the request. SQLite source apply records its
-   typed migration and snapshot transaction; SQLite runtime commands record
-   only bounded redacted invocation/inspection metadata.
-3. Recovery must reproduce the candidate source and catalogue hashes. A
-   recovery mismatch, session-close failure, or audit invariant failure is an
-   operational failure.
-4. Retained revision ancestry is validated for parent identity, uniqueness,
-   cycles, and exactly one active pair. Do not hand-edit retained revision or
-   audit records to force a transition.
-5. Inspection and state operations retain authentication, ownership, epoch, and
-   privilege checks through the complete operation and rendering path.
+### Diagnostics and exit behaviour
 
-Use `just kernel-test` for the Compose-gated apply, rollback, tamper, retained
-listing, recovery, and user-state integration matrix.
+Diagnostics are written to standard error. `explain CODE` accepts a documented
+code such as `ORNA-S010-IMPORT`; an unknown code is a usage error. Unsupported
+declarations or operations return an explicit diagnostic rather than silently
+executing an unsupported operation. Keep the complete diagnostic code and help
+text when recording an incident; do not replace it with a generic
+success/failure label.
 
-Resource payloads and results are process-local. In the PostgreSQL resource
-transport, `Values` batches and completed result values are owned by the
-producer/transport and emitted as connection-local frames; they are not durable
-resource payload rows. SQLite LocalPath has no resource-dispatch protocol.
+## Embedded libsql state
 
-Where implemented, PostgreSQL persisted resource request history/audit is
-redacted metadata: request, parent/call-site, target/revision/principal
-identities, decision/terminal outcomes, and optional item/byte counts. It
-deliberately does not retain arguments or returned values. This is redacted
-history/audit, not durable `Resources` streaming; do not document it as durable
-payload/result storage.
+The v1 runtime uses the `libsql` crate's local database builder for private
+state; it does not require a separate database service. `orna-runtime-v1`
+opens the `state.db` path supplied by the repository's per-worktree runtime
+paths, creates the database locally, and applies the runtime schema before
+admitting work. The schema enables WAL journaling and foreign-key enforcement.
 
-## Compact-publication recovery boundary
+This state is below the Git boundary. It carries runtime metadata, writer-lease
+and recovery state, pending mutations, checkpoints, failures, catalogue
+snapshots, and other bounded observations that must share a local transaction.
+The runtime owns its schema and validates recovery before returning an opened
+state. Operators must not edit the database directly or delete its files to
+resolve a failed operation; preserve the repository and runtime evidence and
+rerun the affected v1 command after diagnosing the reported error.
 
-The repository boundary has a deliberately narrow, fail-closed compact
-publication recovery path. It verifies a candidate compact manifest before
-reconciliation and retains the local publication journal when completion is
-not proven. In particular, an unsupported required compact profile is rejected
-without moving an externally advanced `HEAD` or clearing the receipt. A
-post-publication cleanup also requires the matching runtime-completion receipt;
-an ordinary commit that advances `HEAD` first leaves reconciliation pending
-rather than forcing cleanup.
+A worktree has one writable runtime owner at a time. Runtime leases and epochs
+fence stale owners and recovery attempts. A command that cannot acquire or
+resume the local state must fail closed; it must not silently bind a request to
+another worktree or to a newer snapshot.
 
-This is repository-boundary evidence for ORNA-PUB-007, ORNA-PUB-008,
-ORNA-PUB-009, ORNA-PUB-016, ORNA-PUB-017, ORNA-COMPACT-010, and
-ORNA-COMPACT-011. It is not a claim that compact storage is generally usable
-for logical table reads. Do not delete the journal, reset the ordinary index,
-or force the reference to resolve a recovery conflict; preserve the observed
-state and investigate the retained journal and manifest instead.
+The local state database is not a publication format. Git repository history,
+loose row files, and compact data are managed by their respective v1 layers;
+callers use the logical table interface and do not branch on physical
+placement. Compact files and manifests must be treated as immutable published
+artifacts and verified before they become authoritative.
 
-Run the focused repository recovery evidence with:
+## Focused maintenance checks
 
-```sh
-CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=6 RUSTFLAGS='-C debuginfo=0' \
-  cargo test --locked -p orna-repository-v1 --test git_repository \
-  compact_recovery_rejects_an_unknown_profile_without_clearing_the_receipt
-CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=6 RUSTFLAGS='-C debuginfo=0' \
-  cargo test --locked -p orna-repository-v1 --test git_repository \
-  compact_runtime_fence_rejects_ref_drift_before_cleanup
-CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=6 RUSTFLAGS='-C debuginfo=0' \
-  cargo test --locked -p orna-repository-v1 --test git_repository \
-  ordinary_commit_preserves_verified_compact_manifest_and_segment_identities
-```
-
-These regressions establish only the stated recovery fences. The required
-logical compact reader/provider, supported encoder-version interoperability,
-cross-reader profile evidence, full publication fault profile, and production
-throughput claim remain unimplemented or unproven. Treat a failure or missing
-prerequisite as unavailable or failed evidence, never as successful recovery.
-
-## Orna 1.0.0 traceability and evidence boundary
-
-The immutable Orna 1.0.0 reference publication identifies version `1.0.0`,
-870 normative requirements, and a 46-entry SHA-256 inventory of normative
-payloads. Its primary Markdown publication digest is
-`d12cf5d86b9337ccbe45f257bcb8c25bc769e0505500bdc68e21a1b67d728d7d`.
-The publication's selected contract and protocol models are reference evidence
-only: the publication explicitly records that no complete Orna compiler/runtime
-was executed, and that independent Parquet and network interoperability were
-not performed.
-
-Generate the logical traceability report against the exact reference bundle:
+Run the smallest check that covers the change. These are package-scoped checks,
+not a claim that the whole product is validated:
 
 ```text
-cargo run --locked --offline -p orna-traceability-v1 -- <reference-bundle>
+cargo test --locked -p orna-cli-v1 --test init
+cargo test --locked -p orna-cli-v1 --test project_runtime
+cargo test --locked -p orna-runtime-v1 --lib
 ```
 
-The generator verifies the bundle's exact payload digests and emits
-`orna.traceability.v1` without source bodies or host paths. In the current
-no-witness report, all 870 requirements, all 46 normative payloads, all 167
-fixtures (86 valid, 80 invalid, and one complete project), and all 144
-behavioural scenarios are `justified-gap`. This is the honest result of the
-reference evidence recording implementation results as not executed and tests
-as planned; it is not a conformance pass. An implementation/test witness may
-promote only the exact digest-matched boundary it names. Skipped, specified, or
-missing runtime evidence cannot be promoted to `Executed`.
+For a command smoke check, use a temporary local project and exercise
+`init`, `check`, `status --porcelain`, and `repl "1 + 2"`. Keep the command
+output and exit status with the evidence. A test or command that could not run
+because a tool, dependency, or reference bundle is missing is unavailable; it
+is not a pass.
 
-The current bounded harness evidence was separately observed with the exact
-reference bundle:
+Before committing documentation, run:
 
 ```text
-ORNA_REFERENCE_DIR=<reference-bundle> cargo test --locked --offline \
-  -p orna-conformance-v1 --test reference_corpus
-ORNA_REFERENCE_DIR=<reference-bundle> cargo test --locked --offline \
-  -p orna-conformance-v1 --test runtime_scenarios
+git diff --check -- docs/maintainer-runbook.md
 ```
 
-The exact-bundle traceability command and the focused `reference_corpus` suite
-passed in this audit; the latter ran 22 tests. The bounded `runtime_scenarios`
-gate was separately observed to pass 15 tests in 290.47 seconds through the
-runtime adapter. That is implementation/runtime-adapter evidence only: remote
-Eval was skipped without an authoritative host witness, and no Orna-engine
-execution witness was produced. The passing checks verify corpus loading,
-evidence redaction, witness fencing, and the rule that skipped or unimplemented
-work is not a pass. They do not establish full Orna 1.0.0 language, runtime,
-serving, storage, security, or interoperability conformance; those claims still
-require their own executed evidence.
+Record the exact command, working directory, revision, exit status, and any
+unrun checks. Do not claim language, runtime, storage, or interoperability
+completion from a CLI smoke alone.
 
-## Linux distribution artifact
+## Issue ledger and historical material
 
-The checked-in `packaging/linux/` command builds the smallest accepted Linux
-x86_64 distribution artifact: a deterministic root-relative USTAR archive
-containing `orna`, the distribution manifest, and the embedded-engine manifest.
-It is a provenance/install smoke artifact, not the Debian 12 release authority
-reserved by ADR 0047 and not a production package publication.
+`.beads/` is the tracked issue ledger. Use the repository's Beads workflow for
+issue state and preserve its history; do not replace it with a generated status
+file. Current operational claims belong in this runbook and in executable v1
+checks. Historical design decisions are context only and must not be used as
+instructions for current commands.
 
-Run the focused packaging tests and a deterministic build from Linux x86_64:
-
-```text
-PYTHONDONTWRITEBYTECODE=1 packaging/linux/package.sh test
-SOURCE_DATE_EPOCH=1700000000 PYTHONDONTWRITEBYTECODE=1 \
-  packaging/linux/package.sh build
-PYTHONDONTWRITEBYTECODE=1 packaging/linux/package.sh verify \
-  target/orna-1.0.0-linux-amd64.tar --source-date-epoch 1700000000
-PYTHONDONTWRITEBYTECODE=1 packaging/linux/package.sh install \
-  target/orna-1.0.0-linux-amd64.tar --root "$PWD/target/package-root"
-```
-
-The default build compiles `orna-server` into a fresh `target/linux-package/`
-tree and pairs that executable with its generated engine manifest. A caller
-supplying `--executable` and `--engine-manifest` must take both files from the
-same build; the installed command still verifies the compiled engine identity
-before serving. The output archive is intentionally not a `.deb`, and no
-clean-host, signing, SBOM, repository, or publication result follows from
-these local commands.
-
-## Issue ledger and status
-
-`.beads/` is the repository's tracked issue ledger. Use the project's Beads
-workflow for issue state; do not delete or replace the ledger with a generated
-status snapshot.
-
-`docs/decisions/` retains historical architecture decisions, including decisions
-about previously considered distribution approaches. Historical references are
-not live build inputs. Current operational claims belong in this runbook and in
-the executable tests.
-
-For a local evidence bundle, retain the outputs from the quality gates:
-
-```text
-ci-evidence/tool-versions.txt
-ci-evidence/check.log
-ci-evidence/editor-tooling.log
-ci-evidence/kernel-test.log
-ci-evidence/postgres.log
-```
-
-For a local evidence bundle, create the directory and preserve exit status
-while capturing each gate:
-
-```bash
-mkdir -p ci-evidence
-set -euo pipefail
-CARGO_NET_OFFLINE=true just check 2>&1 | tee ci-evidence/check.log
-CARGO_NET_OFFLINE=true just editor-tooling-check 2>&1 | tee ci-evidence/editor-tooling.log
-CARGO_NET_OFFLINE=true just demo-check 2>&1 | tee ci-evidence/demo-check.log
-CARGO_NET_OFFLINE=true just sqlite-check 2>&1 | tee ci-evidence/sqlite-check.log
-CARGO_NET_OFFLINE=true just sqlite-smoke 2>&1 | tee ci-evidence/sqlite-smoke.log
-```
-
-The embedded PostgreSQL lifecycle command stores its output under
-`target/postgresql-embedded-native-one/output/`; the comparison run is under
-the sibling `-two` directory. Report a result only when a recorded artifact
-or a newly run command supports it. A missing prerequisite may be recorded as
-skipped/unavailable with the gate and reason (for example, absent `../spec`,
-Docker, a display server, Emacs, or the PostgreSQL submodule); a command that
-ran and failed remains a failure. This runbook does not claim a fresh
-native, Compose, Qt, editor-host, remote, or release result.
-
-## Explicit non-claims
-
-The following remain outside the current implementation claim:
-
-1. Native distribution packages, package-maintainer scripts, and clean-host
-   deployment or recovery.
-2. Neovim, Vim, Zed, and VSIX host-session parity beyond the static editor gate.
-3. Live `REF` field-path evaluation and the same-major PostgreSQL predecessor
-   transition.
-4. Full Studio workflows, richer model/launch/projection semantics, and remote
-   transport proof.
-5. Reflective JSON-RPC/MCP gateways, VM proof, additional toolkit/platform
-   runtimes, and general Rows/object-value semantics.
-
-Do not document proposal-only Studio, gateway, remote, VM, or distribution
-features as shipped behavior.
+When changing this runbook, keep the edit limited to current v1 behaviour. Do
+not reintroduce superseded command names, backend-specific service setup, or
+package paths that are absent from the v1 CLI and runtime path.
