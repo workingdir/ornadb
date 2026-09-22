@@ -53,6 +53,66 @@ fn declared_result_and_ok_names_remain_ordinary_user_declarations() {
     }
 }
 
+#[test]
+fn standard_dependency_revision_is_canonical_and_captures_provenance() {
+    let first = ("std/a.orna".to_owned(), "pub fn a() = 1;".to_owned());
+    let second = ("std/nested/b.orna".to_owned(), "pub fn b() = 2;".to_owned());
+    let ordered = StandardDependencyProfile::from_sources(
+        "orna.std/snapshot-1",
+        [first.clone(), second.clone()],
+    )
+    .expect("ordered profile");
+    let reversed = StandardDependencyProfile::from_sources(
+        "orna.std/snapshot-1",
+        [second.clone(), first.clone()],
+    )
+    .expect("reversed profile");
+
+    assert_eq!(
+        ordered.revision_digest(),
+        reversed.revision_digest(),
+        "caller source order must not change the captured revision"
+    );
+    assert_ne!(
+        ordered.revision_digest(),
+        StandardDependencyProfile::from_sources(
+            "orna.std/snapshot-1",
+            [("std/renamed.orna".to_owned(), first.1.clone()), second.clone()],
+        )
+        .expect("path-sensitive profile")
+        .revision_digest(),
+        "module paths are part of source provenance"
+    );
+    assert_ne!(
+        ordered.revision_digest(),
+        StandardDependencyProfile::from_sources(
+            "orna.std/snapshot-1",
+            [
+                (first.0.clone(), "pub fn a() = 3;".to_owned()),
+                second.clone(),
+            ],
+        )
+        .expect("content-sensitive profile")
+        .revision_digest(),
+        "source bytes are part of source provenance"
+    );
+    assert_ne!(
+        ordered.revision_digest(),
+        StandardDependencyProfile::from_sources("orna.std/snapshot-2", [first, second])
+            .expect("snapshot-sensitive profile")
+            .revision_digest(),
+        "the pinned snapshot coordinate is part of source provenance"
+    );
+    assert_ne!(
+        ordered.revision_digest(),
+        ordered
+            .clone()
+            .with_prelude_exports(["a"])
+            .revision_digest(),
+        "prelude exports are part of catalogue admission provenance"
+    );
+}
+
 fn collection_catalogue() -> Catalogue {
     let source = r#"
         pub fn first(rows: [Int]): Int? = null;
