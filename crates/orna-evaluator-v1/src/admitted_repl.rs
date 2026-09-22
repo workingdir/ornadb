@@ -10,6 +10,7 @@
 use orna_foundation_v1::{
     CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText,
 };
+use orna_project_v1::LoadedProject;
 use orna_semantic_v1::{
     Catalogue, EffectSummary, ReplAdmission, ReplContext, Type, analyze_with_catalogue,
 };
