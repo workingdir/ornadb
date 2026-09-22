@@ -358,6 +358,79 @@ impl OvbCodec for Vec<u8> {
         }
     }
 }
+/// A typed OVB-1 map codec backed by Rust's ordered map.
+///
+/// Map entries are ordered by the complete canonical bytes of their encoded
+/// keys, rather than by Rust's `Ord` implementation. This preserves OVB-1's
+/// deterministic ordering even when those orders differ.
+impl<K, V> OvbCodec for BTreeMap<K, V>
+where
+    K: OvbCodec + Ord,
+    V: OvbCodec,
+{
+    fn type_label() -> &'static str {
+        "Map"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        let mut entries = Vec::with_capacity(self.len());
+        for (key, value) in self {
+            let key_value = key.encode_value()?;
+            let key_bytes = key_value.encode()?;
+            let value = value.encode_value()?;
+            entries.push((key_bytes, key_value.0, value.0));
+        }
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(Error::DuplicateOrUnorderedMapKey);
+        }
+        Value::new(Raw::Map(
+            entries
+                .into_iter()
+                .map(|(_, key, value)| (key, value))
+                .collect(),
+        ))
+    }
+
+    fn decode_value(
+        value: &Value,
+        path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
+        let Raw::Map(entries) = value.raw() else {
+            return Err(decode_type_mismatch(path));
+        };
+
+        let mut decoded = BTreeMap::new();
+        for (index, (key, value)) in entries.iter().enumerate() {
+            path.push(index.to_string());
+
+            path.push("Key".to_owned());
+            let key = Value::new(key.clone())
+                .map_err(|error| DecodeError::new(error, path.clone()))
+                .and_then(|key| K::decode_value(&key, path));
+            path.pop();
+            let key = key?;
+
+            path.push("Value".to_owned());
+            let value = Value::new(value.clone())
+                .map_err(|error| DecodeError::new(error, path.clone()))
+                .and_then(|value| V::decode_value(&value, path));
+            path.pop();
+            let value = value?;
+
+            if decoded.insert(key, value).is_some() {
+                path.push("Key".to_owned());
+                return Err(DecodeError::new(
+                    Error::DuplicateOrUnorderedMapKey,
+                    path.clone(),
+                ));
+            }
+            path.pop();
+        }
+        Ok(decoded)
+    }
+}
+
 
 impl<T: OvbCodec> OvbCodec for Option<T> {
     fn type_label() -> &'static str {
