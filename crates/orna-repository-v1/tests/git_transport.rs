@@ -852,6 +852,23 @@ fn fetch_rejects_a_local_change_to_an_unchanged_destination() {
     assert_eq!(git(&fixture.local, &["rev-parse", INTERNAL_REF]), initial);
 }
 
+#[test]
+fn clone_synchronizes_internal_refs_without_checking_out_or_mutating_worktree() {
+    let fixture = Fixture::new();
+    let destination = fixture.root.path().join("cloned");
+
+    Repository::clone_from(fixture.remote.to_str().unwrap(), &destination).unwrap();
+
+    assert_eq!(
+        git(&destination, &["rev-parse", INTERNAL_REF]),
+        fixture.initial_head()
+    );
+    assert!(git(&destination, &["symbolic-ref", "--quiet", "HEAD"]).starts_with("refs/heads/"));
+    assert!(!destination.join("main.orna").exists());
+    assert!(git_path_bytes(&destination, "index").is_none());
+    assert!(git_path_bytes(&destination, "FETCH_HEAD").is_none());
+}
+
 fn filtered_clone() -> Option<(TempDir, PathBuf, String)> {
     let fixture = tempfile::tempdir().ok()?;
     let origin = fixture.path().join("origin.git");
