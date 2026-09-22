@@ -270,6 +270,7 @@ fn days_in_month(year: i32, month: u8) -> u8 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RelationPlan {
     pub(super) source: String,
+    pub(super) source_union: Option<(Box<RelationPlan>, Box<RelationPlan>)>,
     pub(super) stages: Vec<RelationStage>,
 }
 
@@ -382,6 +383,15 @@ impl RelationPlan {
     pub(super) fn new(source: String) -> Self {
         Self {
             source,
+            source_union: None,
+            stages: Vec::new(),
+        }
+    }
+
+    pub(super) fn union(left: Self, right: Self) -> Self {
+        Self {
+            source: String::new(),
+            source_union: Some((Box::new(left), Box::new(right))),
             stages: Vec::new(),
         }
     }
