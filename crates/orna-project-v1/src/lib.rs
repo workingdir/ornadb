@@ -58,11 +58,56 @@ impl ModuleIdentity {
     }
 }
 
+/// One reachable editable loose-row source unit.
+///
+/// The loader owns only repository identity and bounded source discovery.  The
+/// table path and key path remain opaque strings until semantic admission binds
+/// them to a declared schema and decodes their types.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LooseRowCandidate {
+    logical_path: String,
+    table_path: String,
+    key_path: Vec<String>,
+    source: String,
+}
+
+impl LooseRowCandidate {
+    pub fn logical_path(&self) -> &str {
+        &self.logical_path
+    }
+
+    /// Canonical repository-relative directory owning this row's table.
+    pub fn table_path(&self) -> &str {
+        &self.table_path
+    }
+
+    /// Canonical, encoded path components after the table directory.  The
+    /// final component retains its `.orna` suffix; semantic admission owns
+    /// decoding and key-arity/type checks.
+    pub fn key_path(&self) -> &[String] {
+        &self.key_path
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn source_bytes(&self) -> &[u8] {
+        self.source.as_bytes()
+    }
+
+    /// The downstream semantic/conformance boundary's stable unit tag.
+    pub const fn parse_as(&self) -> &'static str {
+        "row_unit"
+    }
+}
+
 /// The deterministic source inputs suitable for `analyze_with_catalogue`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadedProject {
     modules: Vec<ModuleInput>,
     identities: Vec<ModuleIdentity>,
+    loose_rows: Vec<LooseRowCandidate>,
     standard_profile: Option<StandardDependencyProfile>,
     standard_imports: bool,
     standard_modules: BTreeSet<String>,
@@ -76,6 +121,15 @@ impl LoadedProject {
     pub fn identities(&self) -> &[ModuleIdentity] {
         &self.identities
     }
+    /// Reachable editable row units, in canonical logical-path order.
+    pub fn loose_rows(&self) -> &[LooseRowCandidate] {
+        &self.loose_rows
+    }
+
+    pub fn into_loose_rows(self) -> Vec<LooseRowCandidate> {
+        self.loose_rows
+    }
+
 
     pub fn into_modules(self) -> Vec<ModuleInput> {
         self.modules
@@ -145,6 +199,9 @@ impl ProjectLoader {
             standard_profile,
             |logical_path, total_bytes| read_module(&root, logical_path, total_bytes, self.limits),
             |segments| resolve_import(&root, segments),
+            |tables, total_bytes| {
+                discover_worktree_rows(&root, tables, total_bytes, self.limits)
+            },
         )
     }
 
@@ -183,6 +240,16 @@ impl ProjectLoader {
                 )
             },
             |segments| resolve_committed_import(&source_paths, segments),
+            |tables, total_bytes| {
+                discover_committed_rows(
+                    repository,
+                    commit,
+                    &source_paths,
+                    tables,
+                    total_bytes,
+                    self.limits,
+                )
+            },
         )
     }
 }
@@ -192,6 +259,10 @@ fn load_reachable_project(
     standard_profile: Option<StandardDependencyProfile>,
     mut read_module: impl FnMut(&str, &mut usize) -> Result<String, ProjectLoadError>,
     mut resolve_import: impl FnMut(&[&str]) -> Result<String, ProjectLoadError>,
+    mut discover_rows: impl FnMut(
+        &BTreeSet<String>,
+        &mut usize,
+    ) -> Result<Vec<LooseRowCandidate>, ProjectLoadError>,
 ) -> Result<LoadedProject, ProjectLoadError> {
     let mut pending = VecDeque::from([String::from("main.orna")]);
     let mut loaded = BTreeMap::<String, LoadedModule>::new();
@@ -199,6 +270,7 @@ fn load_reachable_project(
     let mut total_bytes = 0usize;
     let mut standard_imports = false;
     let mut standard_modules = BTreeSet::new();
+    let mut table_paths = BTreeSet::new();
 
     while let Some(logical_path) = pending.pop_front() {
         if loaded.contains_key(&logical_path) {
@@ -248,6 +320,13 @@ fn load_reachable_project(
             imports.insert(resolve_import(&segments)?);
         }
         pending.extend(imports);
+        for item in &parsed.value.items {
+            if let Declaration::Table { name, .. } = &item.declaration {
+                let mut table_path = namespace.clone();
+                table_path.push(name.clone());
+                table_paths.insert(table_path.join("/"));
+            }
+        }
         loaded.insert(logical_path, LoadedModule { source, namespace });
     }
 
@@ -260,9 +339,11 @@ fn load_reachable_project(
         });
         modules.push(ModuleInput::new(logical_path, module.source));
     }
+    let loose_rows = discover_rows(&table_paths, &mut total_bytes)?;
     Ok(LoadedProject {
         modules,
         identities,
+        loose_rows,
         standard_profile,
         standard_imports,
         standard_modules,
@@ -379,7 +460,10 @@ fn validate_repository_paths(root: &Path, limits: ProjectLimits) -> Result<(), P
                 pending.push_back(entry.path());
             } else if !metadata.is_file() {
                 return Err(ProjectLoadError::UnsafePath);
-            } else if name.ends_with(".orna") && !is_committed_metadata_path(root, &entry.path()) {
+            } else if name.ends_with(".orna")
+                && !is_committed_metadata_path(root, &entry.path())
+                && is_module_source_path(root, &entry.path())
+            {
                 let logical_path = logical_path(root, &entry.path())?;
                 let namespace = namespace_for_path(&logical_path)?;
                 if namespace
@@ -470,6 +554,10 @@ fn validate_committed_tree_entry(
     if !logical_path.ends_with(".orna") {
         return Ok(());
     }
+    source_paths.insert(logical_path.to_owned());
+    if !is_module_source_logical(logical_path) {
+        return Ok(());
+    }
     let namespace = namespace_for_path(logical_path)?;
     if namespace
         .first()
@@ -482,7 +570,6 @@ fn validate_committed_tree_entry(
     {
         return Err(ProjectLoadError::DuplicateModuleNamespace);
     }
-    source_paths.insert(logical_path.to_owned());
     Ok(())
 }
 
@@ -491,6 +578,20 @@ fn is_committed_metadata_path(root: &Path, path: &Path) -> bool {
         .ok()
         .and_then(|relative| relative.components().next())
         .is_some_and(|component| component.as_os_str() == ".orna")
+}
+
+fn is_module_source_path(root: &Path, path: &Path) -> bool {
+    logical_path(root, path)
+        .map(|logical_path| is_module_source_logical(&logical_path))
+        .unwrap_or(false)
+}
+
+fn is_module_source_logical(logical_path: &str) -> bool {
+    let mut components = logical_path.split('/');
+    let Some(first) = components.next() else {
+        return false;
+    };
+    components.next().is_none() || logical_path.ends_with("/main.orna") || first == "main.orna"
 }
 
 fn resolve_import(root: &Path, segments: &[&str]) -> Result<String, ProjectLoadError> {
@@ -530,8 +631,123 @@ fn resolve_committed_import(
         (false, false) => Err(ProjectLoadError::ImportUnavailable),
         (true, true) => Err(ProjectLoadError::AmbiguousImport),
         (true, false) => Ok(file),
+
         (false, true) => Ok(directory),
     }
+}
+fn discover_worktree_rows(
+    root: &Path,
+    table_paths: &BTreeSet<String>,
+    total_bytes: &mut usize,
+    limits: ProjectLimits,
+) -> Result<Vec<LooseRowCandidate>, ProjectLoadError> {
+    let mut paths = BTreeSet::new();
+    let mut pending = VecDeque::from([root.to_path_buf()]);
+    while let Some(directory) = pending.pop_front() {
+        let mut entries = fs::read_dir(&directory)
+            .map_err(|_| ProjectLoadError::SourceUnavailable)?
+            .map(|entry| entry.map_err(|_| ProjectLoadError::SourceUnavailable))
+            .collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let metadata =
+                fs::symlink_metadata(&path).map_err(|_| ProjectLoadError::SourceUnavailable)?;
+            if metadata.is_dir() {
+                pending.push_back(path);
+                continue;
+            }
+            if !metadata.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("orna")
+            {
+                continue;
+            }
+            if is_committed_metadata_path(root, &path) {
+                continue;
+            }
+            let logical_path = logical_path(root, &path)?;
+            if table_owner_and_key(&logical_path, table_paths).is_some() {
+                paths.insert(logical_path);
+            }
+        }
+    }
+
+    paths
+        .into_iter()
+        .map(|logical_path| {
+            let (table_path, key_path) =
+                table_owner_and_key(&logical_path, table_paths).ok_or(ProjectLoadError::UnsafePath)?;
+            let source = read_module(root, &logical_path, total_bytes, limits)?;
+            Ok(LooseRowCandidate {
+                logical_path,
+                table_path,
+                key_path,
+                source,
+            })
+        })
+        .collect()
+}
+
+fn discover_committed_rows(
+    repository: &Repository,
+    commit: &GitCommitRef,
+    source_paths: &BTreeSet<String>,
+    table_paths: &BTreeSet<String>,
+    total_bytes: &mut usize,
+    limits: ProjectLimits,
+) -> Result<Vec<LooseRowCandidate>, ProjectLoadError> {
+    source_paths
+        .iter()
+        .filter_map(|logical_path| {
+            table_owner_and_key(logical_path, table_paths)
+                .map(|(table_path, key_path)| (logical_path, table_path, key_path))
+        })
+        .map(|(logical_path, table_path, key_path)| {
+            let maximum = limits.max_source_bytes.saturating_sub(*total_bytes);
+            let bytes = repository
+                .read_committed_file(commit, logical_path, maximum)
+                .map_err(ProjectLoadError::Repository)?;
+            let source =
+                String::from_utf8(bytes).map_err(|_| ProjectLoadError::SourceUnavailable)?;
+            if source.len() > maximum {
+                return Err(ProjectLoadError::SourceTooLarge);
+            }
+            *total_bytes += source.len();
+            Ok(LooseRowCandidate {
+                logical_path: logical_path.clone(),
+                table_path,
+                key_path,
+                source,
+            })
+        })
+        .collect()
+}
+
+fn table_owner_and_key(
+    logical_path: &str,
+    table_paths: &BTreeSet<String>,
+) -> Option<(String, Vec<String>)> {
+    let mut selected: Option<(String, Vec<String>)> = None;
+    for table_path in table_paths {
+        let prefix = format!("{table_path}/");
+        let Some(suffix) = logical_path.strip_prefix(&prefix) else {
+            continue;
+        };
+        if suffix.is_empty() || !suffix.ends_with(".orna") {
+            continue;
+        }
+        let key_path = suffix.split('/').map(str::to_owned).collect::<Vec<_>>();
+        if key_path.iter().any(|component| component.is_empty()) {
+            continue;
+        }
+        let replace = match &selected {
+            None => true,
+            Some((previous, _)) => table_path.len() > previous.len(),
+        };
+        if replace {
+            selected = Some((table_path.clone(), key_path));
+        }
+    }
+    selected
 }
 
 fn checked_candidate(root: &Path, candidate: &Path) -> Result<bool, ProjectLoadError> {
