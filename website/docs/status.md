@@ -129,7 +129,7 @@ chapters 15 (system), 28 (serving), and 30 (live protocol).
 - exact production sandbox and host-effect audit boundary;
 - signed artifact envelope, keyring, rotation, revocation, and replay policy;
 - process isolation requirements for future native or untrusted code;
-- physical storage layout and PostgreSQL wire compatibility.
+- physical storage layout.
 
 ## Sources of truth
 
