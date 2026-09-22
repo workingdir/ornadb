@@ -8997,6 +8997,8 @@ impl RuntimeState {
             _ => return Err(RuntimeError::RecoveryInvalid),
         }
         self.validate_checkpoint_anchors().await?;
+        self.validate_stream_checkpoint_history(&capture, generation)
+            .await?;
         self.validate_stream_controls().await?;
         self.validate_stream_provider_failures().await?;
         self.validate_stream_failure_payloads().await?;
@@ -9335,6 +9337,173 @@ impl RuntimeState {
             if key_id.is_empty() || referenced.as_deref() != Some(key_id.as_str()) {
                 return Err(RuntimeError::RecoveryInvalid);
             }
+        }
+        Ok(())
+    }
+
+    async fn validate_stream_checkpoint_history(
+        &self,
+        current_capture: &CwdCapture,
+        current_generation: u64,
+    ) -> Result<(), RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT history.key_id, history.version, history.committed_position,
+                        history.snapshot, history.generation_digest, history.transition,
+                        checkpoint.key_id, checkpoint.version, checkpoint.committed_position
+                 FROM stream_checkpoint_history AS history
+                 LEFT JOIN stream_checkpoint AS checkpoint
+                   ON checkpoint.key_id = history.key_id
+                 ORDER BY history.key_id, history.version",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut active_key: Option<String> = None;
+        let mut previous_version = 0_u64;
+        let mut latest_position: Option<String> = None;
+        let mut checkpoint_version = 0_u64;
+        let mut checkpoint_position: Option<String> = None;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let key_id: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if key_id.is_empty() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let version = decode_u64(
+                row.get::<i64>(1)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
+            if version == 0 {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let committed: String = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            decode_position(committed.clone())?;
+            let capture = decode_capture(
+                row.get::<Vec<u8>>(3)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                fixed(
+                    row.get::<Vec<u8>>(4)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                )?,
+            )?;
+            if capture.database_id() != current_capture.database_id()
+                || capture.runtime_id() != current_capture.runtime_id()
+                || capture.generation() > current_capture.generation()
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let history_generation = capture
+                .generation()
+                .to_u64_digits()
+                .1
+                .first()
+                .copied()
+                .unwrap_or(0);
+            if history_generation > current_generation {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            if history_generation == current_generation
+                && capture.generation_digest() != current_capture.generation_digest()
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            if history_generation > 0 {
+                let mut checkpoints = self
+                    .connection
+                    .query(
+                        "SELECT digest FROM checkpoint WHERE generation = ?1",
+                        params![i64::try_from(history_generation)
+                            .map_err(|_| RuntimeError::RecoveryInvalid)?],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                let checkpoint = checkpoints
+                    .next()
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    .ok_or(RuntimeError::RecoveryInvalid)?;
+                if fixed(
+                    checkpoint
+                        .get::<Vec<u8>>(0)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                )? != capture.generation_digest()
+                {
+                    return Err(RuntimeError::RecoveryInvalid);
+                }
+            }
+            let transition = row
+                .get::<i64>(5)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if !matches!(transition, 1 | 2) {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let joined_key: Option<String> =
+                row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if joined_key.as_deref() != Some(key_id.as_str()) {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let joined_version = decode_u64(
+                row.get::<i64>(7)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
+            let joined_position: Option<String> =
+                row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if joined_version == 0 || joined_position.is_none() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            if active_key.as_deref() != Some(key_id.as_str()) {
+                if active_key.is_some()
+                    && (previous_version != checkpoint_version
+                        || latest_position != checkpoint_position)
+                {
+                    return Err(RuntimeError::RecoveryInvalid);
+                }
+                active_key = Some(key_id);
+                previous_version = 0;
+                checkpoint_version = joined_version;
+                checkpoint_position = joined_position;
+            } else if joined_version != checkpoint_version
+                || joined_position != checkpoint_position
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            if version != previous_version.saturating_add(1) {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            previous_version = version;
+            latest_position = Some(committed);
+        }
+        if active_key.is_some()
+            && (previous_version != checkpoint_version || latest_position != checkpoint_position)
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let mut missing = self
+            .connection
+            .query(
+                "SELECT checkpoint.key_id
+                 FROM stream_checkpoint AS checkpoint
+                 LEFT JOIN stream_checkpoint_history AS history
+                   ON history.key_id = checkpoint.key_id
+                  AND history.version = checkpoint.version
+                 WHERE checkpoint.version > 0 AND history.key_id IS NULL
+                 LIMIT 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if missing
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::RecoveryInvalid);
         }
         Ok(())
     }
@@ -15096,6 +15265,116 @@ mod tests {
             selected_current[1].checkpoint.committed.as_ref().unwrap().token.as_str(),
             "history-skip-next"
         );
+        assert_eq!(current, capture_after_table);
+        state.validate_recovery().await.unwrap();
+        let key_id = stream_key_id(&key);
+        let committed = selected_current[0]
+            .checkpoint
+            .committed
+            .as_ref()
+            .unwrap()
+            .token
+            .as_str()
+            .to_owned();
+        let snapshot = encode_capture(&selected_current[0].capture).unwrap();
+        let generation_digest = selected_current[0]
+            .capture
+            .generation_digest()
+            .to_vec();
+        state
+            .connection
+            .execute(
+                "DELETE FROM stream_checkpoint_history WHERE key_id = ?1 AND version = 1",
+                params![key_id.clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.validate_recovery().await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        state
+            .connection
+            .execute(
+                "INSERT INTO stream_checkpoint_history
+                 (key_id, version, committed_position, snapshot, generation_digest, transition)
+                 VALUES (?1, 1, ?2, ?3, ?4, 1)",
+                params![
+                    key_id.clone(),
+                    committed.clone(),
+                    snapshot.clone(),
+                    generation_digest.clone()
+                ],
+            )
+            .await
+            .unwrap();
+        state
+            .connection
+            .execute(
+                "UPDATE stream_checkpoint_history SET version = 3
+                 WHERE key_id = ?1 AND version = 1",
+                params![key_id.clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.validate_recovery().await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        state
+            .connection
+            .execute(
+                "UPDATE stream_checkpoint_history SET version = 1
+                 WHERE key_id = ?1 AND version = 3",
+                params![key_id.clone()],
+            )
+            .await
+            .unwrap();
+        state
+            .connection
+            .execute(
+                "UPDATE stream_checkpoint_history SET version = 4
+                 WHERE key_id = ?1 AND version = 2",
+                params![key_id.clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.validate_recovery().await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        state
+            .connection
+            .execute(
+                "UPDATE stream_checkpoint_history SET version = 2
+                 WHERE key_id = ?1 AND version = 4",
+                params![key_id.clone()],
+            )
+            .await
+            .unwrap();
+        state
+            .connection
+            .execute(
+                "UPDATE stream_checkpoint_history SET snapshot = ?2
+                 WHERE key_id = ?1 AND version = 1",
+                params![key_id.clone(), vec![1_u8, 2, 3]],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.validate_recovery().await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        state
+            .connection
+            .execute(
+                "UPDATE stream_checkpoint_history SET snapshot = ?2
+                 WHERE key_id = ?1 AND version = 1",
+                params![key_id, snapshot],
+            )
+            .await
+            .unwrap();
+        state.validate_recovery().await.unwrap();
         assert_eq!(current, capture_after_table);
         drop(state);
 
