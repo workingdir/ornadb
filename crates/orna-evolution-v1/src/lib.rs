@@ -203,6 +203,10 @@ pub enum PlanningError {
         found: EvolutionVersion,
         fence: VersionFence,
     },
+    UnsupportedVersion {
+        side: SchemaSide,
+        found: EvolutionVersion,
+    },
     IncompatibleVersionTransition {
         from: EvolutionVersion,
         to: EvolutionVersion,
@@ -275,6 +279,12 @@ pub fn plan(
         return Err(PlanningError::IncompatibleVersionTransition {
             from: from.version,
             to: to.version,
+        });
+    }
+    if from.version != EvolutionVersion::V1_0 {
+        return Err(PlanningError::UnsupportedVersion {
+            side: SchemaSide::From,
+            found: from.version,
         });
     }
     let old_tables: BTreeMap<_, _> = from.tables.iter().map(|table| (table.id, table)).collect();
@@ -1103,6 +1113,26 @@ mod tests {
             Err(PlanningError::IncompatibleVersionTransition {
                 from: EvolutionVersion::V1_0,
                 to: EvolutionVersion { major: 1, minor: 1 },
+            })
+        ));
+    }
+    #[test]
+    fn widened_fence_rejects_unsupported_same_coordinate() {
+        let mut source = schema(table(true, vec![]));
+        source.version = EvolutionVersion { major: 1, minor: 1 };
+        let request = PlanningRequest {
+            fence: VersionFence {
+                minimum: EvolutionVersion::V1_0,
+                maximum: source.version,
+            },
+            rekeys: vec![],
+        };
+
+        assert!(matches!(
+            plan(&source, &source, &request),
+            Err(PlanningError::UnsupportedVersion {
+                side: SchemaSide::From,
+                found: EvolutionVersion { major: 1, minor: 1 },
             })
         ));
     }
