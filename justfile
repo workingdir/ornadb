@@ -3,16 +3,6 @@ default: check
 # Run the default local fmt/build/lint/non-ignored test/rustdoc gate.
 check: fmt build lint test rustdoc-check
 
-# Check the SQLite adapter, storage contract, and local CLI binary offline.
-sqlite-check:
-    cargo check --locked --offline -p orna-storage -p orna-sqlite
-    cargo check --locked --offline -p orna-server --bin orna
-
-# Run the deterministic SQLite adapter and process-boundary smoke tests offline.
-sqlite-smoke:
-    cargo test --locked --offline -p orna-sqlite --lib
-    cargo run --locked --offline -p orna-sqlite --example revision_store_smoke
-    cargo test --locked --offline -p orna-server --test sqlite_backend -- --nocapture
 
 # Verify formatting without changing source files.
 fmt:
@@ -28,9 +18,6 @@ runtime-tty-demo:
     cargo run --locked --offline -p orna-runtime-tty --example runtime_demo
 
 
-# Build the binary, start a temporary local server, and invoke std.invoke.echo.
-local-cli-demo:
-    bash scripts/local-cli-demo.sh
 
 
 # Exercise CLIENT artifact kind and payload-digest validation.
@@ -143,67 +130,3 @@ editor-tooling-check:
 # Run every runnable accepted source-check/offline demo in manifest order.
 demo-check:
     python3 scripts/run-demos.py
-
-# Start the private PostgreSQL development kernel.
-postgres-up:
-    docker compose up --detach postgres
-
-# Stop PostgreSQL without deleting its persistent volume.
-postgres-stop:
-    docker compose stop postgres
-
-# Show PostgreSQL container status.
-postgres-status:
-    docker compose ps postgres
-
-# Verify that PostgreSQL accepts authenticated connections.
-postgres-health:
-    docker compose exec postgres pg_isready --username=ornadb_dev --dbname=ornadb_dev
-
-# Run only the installed resource transport durability proof.
-kernel-resource-audit-proof:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cleanup() {
-        docker compose stop postgres || true
-    }
-    trap cleanup EXIT
-    docker compose up --detach --wait postgres
-    export ORNA_TEST_POSTGRES_ADMIN_URL='host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password'
-    export ORNA_TEST_POSTGRES_URL='host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password dbname=ornadb_dev'
-    cargo test --locked --package orna-server --features test-hooks --test standard_database installed_resource_socket_delivers_values_and_enforces_windows_and_grants -- --ignored --exact --test-threads=1
-
-# Run every ignored PostgreSQL integration test against an isolated database.
-kernel-test:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    kernel_database="ornadb_kernel_gate_${BASHPID}_$(date -u +%s%N)"
-    cleanup() {
-        local status=$?
-        trap - EXIT INT TERM
-        docker compose exec -T postgres dropdb --if-exists --force --username=ornadb_dev "$kernel_database" || true
-        docker compose stop postgres || true
-        exit "$status"
-    }
-    trap cleanup EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    docker compose up --detach --wait postgres
-    export ORNA_TEST_POSTGRES_ADMIN_URL="host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password"
-    export ORNA_TEST_POSTGRES_URL="host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password dbname=ornadb_dev"
-    server_tests=()
-    for test_path in crates/orna-server/tests/*.rs; do
-        test_name=${test_path##*/}
-        server_tests+=(--test "${test_name%.rs}")
-    done
-    postgres_tests=()
-    for test_path in crates/orna-postgres/tests/*.rs; do
-        test_name=${test_path##*/}
-        postgres_tests+=(--test "${test_name%.rs}")
-    done
-    cargo test --locked --package orna-server --features test-hooks "${server_tests[@]}" -- --ignored --test-threads=1
-    docker compose exec -T postgres dropdb --if-exists --force --username=ornadb_dev "$kernel_database"
-    docker compose exec -T postgres createdb --template=template0 --username=ornadb_dev "$kernel_database"
-    export ORNA_TEST_POSTGRES_URL="host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password dbname=$kernel_database"
-    cargo test --locked --package orna-postgres --features test-hooks --lib -- --ignored --test-threads=1
-    cargo test --locked --package orna-postgres --features test-hooks "${postgres_tests[@]}" -- --ignored --test-threads=1
