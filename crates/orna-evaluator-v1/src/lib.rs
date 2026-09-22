@@ -2989,6 +2989,14 @@ impl Context<'_, '_> {
                 values.push(value);
             }
             let ordered = relation_named_arguments(name, arguments, values, implicit)?;
+            if name == "union" {
+                let (Value::Relation(left), Value::Relation(right)) =
+                    (&ordered[0], &ordered[1])
+                else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                return Ok(Value::Relation(RelationPlan::union(left.clone(), right.clone())));
+            }
             let Value::Relation(mut plan) = ordered[0].clone() else {
                 return Err(error("ORNA-EVAL-TYPE"));
             };
@@ -3077,6 +3085,7 @@ impl Context<'_, '_> {
         let mut state = RelationBucketState::try_new(spec.clone()).map_err(bucket_error)?;
         let prefix = RelationPlan {
             source: plan.source.clone(),
+            source_union: plan.source_union.clone(),
             stages: plan.stages[..bucket_index].to_vec(),
         };
         let suffix = &plan.stages[bucket_index + 1..];
@@ -3089,6 +3098,7 @@ impl Context<'_, '_> {
             };
             let group_plan = RelationPlan {
                 source: plan.source.clone(),
+                source_union: plan.source_union.clone(),
                 stages: plan.stages[..bucket_index + 1 + sort_pos].to_vec(),
             };
             let mut groups = Vec::new();
@@ -3474,7 +3484,6 @@ impl Context<'_, '_> {
         {
             return Ok(());
         }
-        let mut after = None;
         let mut counters = vec![0usize; plan.stages.len()];
         let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
         let mut pair_previous = vec![None; plan.stages.len()];
@@ -3482,6 +3491,60 @@ impl Context<'_, '_> {
             .map(|_| None)
             .collect::<Vec<Option<RelationWindowState>>>();
         let mut seen = 0usize;
+        self.for_each_relation_source_value(plan, depth, &mut |context, value| {
+            context.step()?;
+            seen = seen
+                .checked_add(1)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            context.items(seen)?;
+            let rows = context.apply_relation_stages(
+                value,
+                &plan.stages,
+                &mut counters,
+                &mut distinct_seen,
+                &mut pair_previous,
+                &mut window_states,
+                0,
+                depth + 1,
+            )?;
+            for row in rows {
+                match row {
+                    RelationRow::Skip => {}
+                    RelationRow::End => return Ok(false),
+                    RelationRow::Yield(value) => {
+                        if !visit(context, value)? {
+                            return Ok(false);
+                        }
+                    }
+                }
+            }
+            Ok(true)
+        })
+    }
+
+    fn for_each_relation_source_value(
+        &mut self,
+        plan: &RelationPlan,
+        depth: usize,
+        visit: &mut dyn FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
+    ) -> Result<(), EvaluationError> {
+        if let Some((left, right)) = &plan.source_union {
+            let mut keep_going = true;
+            self.for_each_relation_value(left, depth, |context, value| {
+                keep_going = visit(context, value)?;
+                Ok(keep_going)
+            })?;
+            if !keep_going {
+                return Ok(());
+            }
+            self.for_each_relation_value(right, depth, |context, value| {
+                keep_going = visit(context, value)?;
+                Ok(keep_going)
+            })?;
+            return Ok(());
+        }
+
+        let mut after = None;
         loop {
             // Relation work has its own cancellation checkpoints. A plan
             // must remain interruptible even when its callbacks are absent,
@@ -3491,31 +3554,9 @@ impl Context<'_, '_> {
             let page_len = page.rows.len();
             for canonical in page.rows {
                 self.step()?;
-                seen = seen
-                    .checked_add(1)
-                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-                self.items(seen)?;
                 let value = Value::from_canonical(&canonical, self, depth + 1)?;
-                let rows = self.apply_relation_stages(
-                    value,
-                    &plan.stages,
-                    &mut counters,
-                    &mut distinct_seen,
-                    &mut pair_previous,
-                    &mut window_states,
-                    0,
-                    depth + 1,
-                )?;
-                for row in rows {
-                    match row {
-                        RelationRow::Skip => {}
-                        RelationRow::End => return Ok(()),
-                        RelationRow::Yield(value) => {
-                            if !visit(self, value)? {
-                                return Ok(());
-                            }
-                        }
-                    }
+                if !visit(self, value)? {
+                    return Ok(());
                 }
             }
             let Some(next) = page.next else {
@@ -3676,6 +3717,7 @@ impl Context<'_, '_> {
         };
         let prefix = RelationPlan {
             source: plan.source.clone(),
+            source_union: plan.source_union.clone(),
             stages: plan.stages[..sort_index].to_vec(),
         };
         let RelationStage::SortBy(key) = &plan.stages[sort_index] else {
@@ -6117,6 +6159,7 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
             | "rank"
             | "filter"
             | "distinct"
+            | "union"
             | "pairs"
             | "take"
             | "drop"
@@ -6185,6 +6228,7 @@ fn relation_named_arguments(
             _ => return Err(error("ORNA-EVAL-ARGUMENT")),
         },
         "distinct" | "pairs" => &["rows"],
+        "union" => &["left", "right"],
         "take" | "drop" => &["rows", "count"],
         "window" => match values.len() {
             2 => &["rows", "size"],

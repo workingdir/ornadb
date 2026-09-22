@@ -326,6 +326,72 @@ impl EffectHandler for DistinctRelationEffects {
         }))
     }
 }
+struct UnionRelationEffects {
+    rows: BTreeMap<String, Vec<Value>>,
+    cursors: Vec<(String, Option<Vec<u8>>)>,
+}
+
+impl UnionRelationEffects {
+    fn new(left: Vec<Value>, right: Vec<Value>) -> Self {
+        Self {
+            rows: BTreeMap::from([("Left".into(), left), ("Right".into(), right)]),
+            cursors: Vec::new(),
+        }
+    }
+}
+
+impl EffectHandler for UnionRelationEffects {
+    fn handle(
+        &mut self,
+        _: &Expr,
+        _: &[Value],
+    ) -> Result<Option<Value>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn scan_relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+        _: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        budget.debit(1)?;
+        self.cursors
+            .push((source.into(), after.map(ToOwned::to_owned)));
+        let rows = self
+            .rows
+            .get(source)
+            .unwrap_or_else(|| panic!("unexpected relation source {source}"));
+        let index = after.map_or(0, |cursor| usize::from(cursor[0]));
+        if index >= rows.len() {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        let next = (index + 1 < rows.len()).then(|| vec![(index + 1) as u8]);
+        Ok(Some(RelationPage {
+            rows: vec![rows[index].clone()],
+            next,
+        }))
+    }
+}
+
+fn relation_union(left: Expr, right: Expr) -> Expr {
+    let span = relation_span();
+    Expr::Call {
+        callee: Box::new(Expr::Name {
+            text: "union".into(),
+            span: span.clone(),
+        }),
+        arguments: vec![
+            relation_argument(left, &span),
+            relation_argument(right, &span),
+        ],
+        span,
+    }
+}
 
 fn invoke_relation<E: EffectHandler>(
     body: Expr,
@@ -7667,6 +7733,122 @@ fn std_stats_percentile_requires_bounded_probability_and_named_supported_interpo
             Limits::default(),
         )),
         "ORNA-EVAL-VALUE"
+    );
+}
+#[test]
+fn union_relations_preserve_declared_order_duplicates_and_bounded_terminals() {
+    let union = relation_union(
+        relation_source_expression("Left"),
+        relation_source_expression("Right"),
+    );
+    let left = vec![
+        Value::int(1.into()),
+        Value::int(2.into()),
+        Value::int(2.into()),
+    ];
+    let right = vec![Value::int(2.into()), Value::int(3.into())];
+
+    let mut effects = UnionRelationEffects::new(left.clone(), right.clone());
+    assert_eq!(
+        invoke_relation(
+            relation_terminal(union.clone(), "count"),
+            &mut effects,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(5.into()),
+        "union count must retain duplicates from both relations"
+    );
+    assert_eq!(
+        effects.cursors,
+        vec![
+            ("Left".into(), None),
+            ("Left".into(), Some(vec![1])),
+            ("Left".into(), Some(vec![2])),
+            ("Right".into(), None),
+            ("Right".into(), Some(vec![1])),
+        ],
+        "union must scan all left pages before any right page"
+    );
+
+    let mut effects = UnionRelationEffects::new(left.clone(), right.clone());
+    assert_eq!(
+        invoke_relation(
+            relation_terminal(union.clone(), "first"),
+            &mut effects,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::option(Some(Value::int(1.into()))).expect("option is canonical")
+    );
+    assert_eq!(effects.cursors, vec![("Left".into(), None)]);
+
+    let mut effects = UnionRelationEffects::new(left.clone(), right.clone());
+    assert_eq!(
+        invoke_relation(
+            relation_terminal(union.clone(), "last"),
+            &mut effects,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::option(Some(Value::int(3.into()))).expect("option is canonical")
+    );
+    assert_eq!(effects.cursors.len(), 5);
+
+    let dropped_left_duplicate =
+        relation_stage(union.clone(), "drop", vec![relation_integer(2)]);
+    let mut effects = UnionRelationEffects::new(left.clone(), right.clone());
+    assert_eq!(
+        invoke_relation(
+            relation_terminal(dropped_left_duplicate, "first"),
+            &mut effects,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::option(Some(Value::int(2.into()))).expect("option is canonical")
+    );
+    assert_eq!(
+        effects.cursors,
+        vec![
+            ("Left".into(), None),
+            ("Left".into(), Some(vec![1])),
+            ("Left".into(), Some(vec![2])),
+        ],
+        "drop must preserve the left duplicate and avoid the right relation"
+    );
+
+    let taken = relation_stage(union, "take", vec![relation_integer(2)]);
+    let mut effects = UnionRelationEffects::new(left, right);
+    assert_eq!(
+        invoke_relation(
+            relation_terminal(taken, "count"),
+            &mut effects,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(2.into())
+    );
+    assert_eq!(
+        effects.cursors,
+        vec![
+            ("Left".into(), None),
+            ("Left".into(), Some(vec![1])),
+        ],
+        "take must stop before scanning the right relation"
+    );
+}
+
+#[test]
+fn materialized_list_union_remains_left_to_right_with_duplicates() {
+    assert_eq!(
+        evaluate("std.collection.union([1, 2], [2, 3])"),
+        Value::new(Raw::Array(vec![
+            Raw::Int(1.into()),
+            Raw::Int(2.into()),
+            Raw::Int(2.into()),
+            Raw::Int(3.into()),
+        ]))
+        .unwrap()
     );
 }
 
