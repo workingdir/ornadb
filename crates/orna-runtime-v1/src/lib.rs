@@ -8946,6 +8946,7 @@ impl RuntimeState {
         self.validate_stream_failure_payloads().await?;
         validate_recoverable_stream_attempts(&self.connection).await?;
         self.validate_session_deletions().await?;
+        self.validate_request_admissions(generation).await?;
         let mut request_rows = self
             .connection
             .query(
@@ -8965,6 +8966,55 @@ impl RuntimeState {
             let status = decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let evidence = decode_request_execution_evidence(&row, 5)?;
             validate_request_execution_evidence(&status, evidence)?;
+        }
+        Ok(())
+    }
+
+    async fn validate_request_admissions(&self, current_generation: u64) -> Result<(), RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT session_id, request_id, fingerprint, capability_digest,
+                        owner_id, owner_epoch, generation
+                 FROM request_admission",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let identity = RequestIdentity {
+                session_id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+                request_id: fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+            };
+            let fingerprint = fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            let _capability_digest: [u8; 32] =
+                fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            let owner_id = fixed(row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            let owner_epoch: i64 = row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let generation: i64 = row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            validate_id(identity.session_id).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            validate_id(identity.request_id).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            validate_id(owner_id).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if owner_epoch <= 0
+                || u64::try_from(generation)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?
+                    > current_generation
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let Some(status) = request_status_tx(&self.connection, identity).await? else {
+                return Err(RuntimeError::RecoveryInvalid);
+            };
+            if status.state != RequestState::Reserved
+                || status.fingerprint != fingerprint
+                || status.terminal_outcome.is_some()
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
         }
         Ok(())
     }
@@ -24237,6 +24287,39 @@ mod tests {
         assert_eq!(
             state.request_status_for_identity(identity).await.unwrap(),
             Some(first)
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_admission_without_reserved_ledger_state() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        state.acquire_lease(id(42)).await.unwrap();
+        let identity = request(43, 44);
+        let fingerprint = digest(45);
+        state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        state
+            .connection
+            .execute(
+                "UPDATE request_ledger
+                 SET state = ?1, terminal_outcome = ?2
+                 WHERE session_id = ?3 AND request_id = ?4",
+                params![
+                    RequestState::Completed.code(),
+                    vec![46_u8],
+                    identity.session_id.to_vec(),
+                    identity.request_id.to_vec(),
+                ],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.validate_recovery().await,
+            Err(RuntimeError::RecoveryInvalid)
         );
     }
 
