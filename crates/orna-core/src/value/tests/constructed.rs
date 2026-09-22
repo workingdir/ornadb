@@ -1634,27 +1634,6 @@ fn map_canonical_order_holds_for_every_admitted_flat_key_family() {
         ]
     );
 
-    let float_keys = canonical_map_entries(
-        &active,
-        TypeDescriptor::named(MAP_FLOAT),
-        map_keys(vec![
-            RuntimeValue::Float(RuntimeFloat::new(1.5).unwrap()),
-            RuntimeValue::Float(RuntimeFloat::new(-2.5).unwrap()),
-            RuntimeValue::Float(RuntimeFloat::new(0.0).unwrap()),
-        ]),
-    )
-    .into_iter()
-    .map(|(key, _)| key)
-    .collect::<Vec<_>>();
-    assert_eq!(
-        float_keys,
-        vec![
-            RuntimeValue::Float(RuntimeFloat::new(-2.5).unwrap()),
-            RuntimeValue::Float(RuntimeFloat::new(0.0).unwrap()),
-            RuntimeValue::Float(RuntimeFloat::new(1.5).unwrap()),
-        ]
-    );
-
     let text_keys = canonical_map_entries(
         &active,
         TypeDescriptor::named(MAP_TEXT),
@@ -1914,7 +1893,6 @@ fn map_input_permutations_produce_equal_canonical_maps() {
 fn map_duplicate_keys_report_exact_original_indices() {
     let active = active_map_revision();
     let integer_descriptor = TypeDescriptor::named(MAP_INTEGER);
-    let float_descriptor = TypeDescriptor::named(MAP_FLOAT);
 
     let error = RuntimeValue::map(
         &active,
@@ -1979,27 +1957,69 @@ fn map_duplicate_keys_report_exact_original_indices() {
         }
     );
 
-    let negative_zero_error = RuntimeValue::map(
+}
+
+#[test]
+fn named_float_map_keys_fail_at_descriptor_preflight_for_all_attempted_values() {
+    let active = active_map_revision();
+    let float_descriptor = TypeDescriptor::named(MAP_FLOAT);
+    let attempted_keys = [
+        RuntimeValue::Float(RuntimeFloat::new(1.5).unwrap()),
+        RuntimeValue::Float(RuntimeFloat::new(-0.0).unwrap()),
+        // Deliberately bypass the finite-only constructor: descriptor preflight
+        // must reject the named Float key before inspecting this attempted key.
+        RuntimeValue::Float(unsafe { std::mem::transmute(f64::NAN) }),
+    ];
+
+    for attempted_key in attempted_keys {
+        let map_descriptor =
+            TypeDescriptor::map(float_descriptor.clone(), TypeDescriptor::named(MAP_BOOLEAN))
+                .unwrap();
+        let error = RuntimeValue::map(
+            &active,
+            map_descriptor,
+            vec![(attempted_key, RuntimeValue::Boolean(true))],
+        )
+        .unwrap_err();
+        let CollectionValueError::UnsupportedDescriptor { path, descriptor } = error else {
+            panic!("named Float map key must fail at descriptor preflight");
+        };
+        assert_eq!(
+            path.segments(),
+            &[CollectionValuePathSegment::MapKeyChild]
+        );
+        assert_eq!(descriptor, float_descriptor);
+    }
+}
+
+#[test]
+fn float_map_values_remain_accepted_under_an_integer_key_descriptor() {
+    let active = active_map_revision();
+    let descriptor =
+        TypeDescriptor::map(TypeDescriptor::named(MAP_INTEGER), TypeDescriptor::named(MAP_FLOAT))
+            .unwrap();
+    let value = RuntimeValue::map(
         &active,
-        TypeDescriptor::map(float_descriptor, TypeDescriptor::named(MAP_BOOLEAN)).unwrap(),
-        map_keys(vec![
-            RuntimeValue::Float(RuntimeFloat::new(-0.0).unwrap()),
-            RuntimeValue::Float(RuntimeFloat::new(0.0).unwrap()),
-        ]),
+        descriptor,
+        vec![(
+            RuntimeValue::Integer(7),
+            RuntimeValue::Float(RuntimeFloat::new(3.5).unwrap()),
+        )],
     )
-    .unwrap_err();
+    .unwrap();
+    let RuntimeValue::Constructed(value) = value else {
+        panic!("accepted integer-key map must construct a value");
+    };
+    let ConstructedValueKind::Map(entries) = value.kind() else {
+        panic!("accepted integer-key map must retain map entries");
+    };
     assert_eq!(
-        negative_zero_error,
-        CollectionValueError::DuplicateMapKey {
-            first: 0,
-            duplicate: 1,
-        }
+        entries,
+        &[(
+            RuntimeValue::Integer(7),
+            RuntimeValue::Float(RuntimeFloat::new(3.5).unwrap()),
+        )]
     );
-    assert_eq!(
-        negative_zero_error.to_string(),
-        "map contains a duplicate key"
-    );
-    assert!(std::error::Error::source(&negative_zero_error).is_none());
 }
 
 #[test]
