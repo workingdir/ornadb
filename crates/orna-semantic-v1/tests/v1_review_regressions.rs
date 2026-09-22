@@ -15,7 +15,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orna_semantic_v1::{
     Analysis, Catalogue, DIAG_ANNOTATION, DIAG_DUPLICATE, DIAG_TYPE, DIAG_UNRESOLVED,
-    EffectSummary, ModuleHeader, ModuleInput, Namespace, Symbol, SymbolKind, Type, analyze,
+    DIAG_UNSUPPORTED, EffectSummary, ModuleHeader, ModuleInput, Namespace, Symbol, SymbolKind,
+    Type, analyze,
 };
 use orna_syntax_v1::parse_module_with_file;
 
@@ -164,6 +165,40 @@ fn direct_return_ends_body_before_later_statement() {
         .next()
         .and_then(|module| module.symbols.get("integer"))
         .expect("inferred direct-return function");
+    assert!(matches!(
+        &symbol.ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Int
+    ));
+}
+
+#[test]
+fn nested_return_in_fallthrough_control_flow_is_supported() {
+    let result = analyze_main(
+        r#"
+            pub fn nested(): Int {
+                if true {
+                    return 1;
+                    99
+                }
+                return 2;
+            }
+        "#,
+    );
+    expect_accepted(&result);
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_UNSUPPORTED),
+        "nested return emitted an unsupported diagnostic: {:?}",
+        result.diagnostics
+    );
+    let symbol = result
+        .modules
+        .values()
+        .next()
+        .and_then(|module| module.symbols.get("nested"))
+        .expect("inferred nested-return function");
     assert!(matches!(
         &symbol.ty,
         Type::Function { result, .. } if result.as_ref() == &Type::Int
