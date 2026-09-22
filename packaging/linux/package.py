@@ -317,10 +317,13 @@ def source_engine_path(
     candidates: list[Path] = []
     if explicit:
         candidates.append(input_path(explicit, "embedded engine manifest"))
-    elif os.environ.get("ORNA_POSTGRES_ENGINE_OUTPUT"):
+    elif os.environ.get("ORNA_EMBEDDED_ENGINE_OUTPUT"):
         candidates.append(
             input_path(
-                str(Path(os.environ["ORNA_POSTGRES_ENGINE_OUTPUT"]) / "embedded-engine-manifest.json"),
+                str(
+                    Path(os.environ["ORNA_EMBEDDED_ENGINE_OUTPUT"])
+                    / "embedded-engine-manifest.json"
+                ),
                 "embedded engine manifest",
             )
         )
@@ -387,15 +390,15 @@ def build_executable(repository: Path, source_date_epoch: int) -> Path:
         "--manifest-path",
         str(repository / "Cargo.toml"),
         "--package",
-        "orna-server",
+        "orna-cli-v1",
         "--bin",
-        "orna",
+        "orna-cli-v1",
     ]
     try:
         subprocess.run(command, cwd=repository, env=environment, check=True)
     except (OSError, subprocess.CalledProcessError) as error:
         fail(f"the reproducible Orna build failed: {error}")
-    executable = target / "release" / "orna"
+    executable = target / "release" / "orna-cli-v1"
     if not executable.is_file() or executable.is_symlink():
         fail(f"the reproducible build did not produce {executable}")
     return executable
