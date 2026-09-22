@@ -12,7 +12,7 @@ use std::{
 
 use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
-use num_traits::{Signed, Zero};
+use num_traits::{Signed, ToPrimitive, Zero};
 use sha2::{Digest as _, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
@@ -122,6 +122,259 @@ impl Value {
     pub fn protected() -> Self {
         Self(Raw::Tag(0, Box::new(Raw::Null)))
     } // unencodable marker
+}
+
+/// A type-directed failure from a canonical value decoder.
+///
+/// The underlying [`Error`] identifies the malformed OVB condition while
+/// `path` identifies the expected type position, from the outer value inward.
+/// No decoded payload is retained or formatted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DecodeError {
+    error: Error,
+    path: Vec<String>,
+}
+
+impl DecodeError {
+    fn new(error: Error, path: Vec<String>) -> Self {
+        Self { error, path }
+    }
+
+    /// Returns the underlying canonical-value failure.
+    pub fn error(&self) -> &Error {
+        &self.error
+    }
+
+    /// Returns the expected type path from the root to the failing value.
+    pub fn path(&self) -> &[String] {
+        &self.path
+    }
+
+    /// Returns the expected type path in a stable human-readable form.
+    pub fn type_path(&self) -> String {
+        self.path.join(".")
+    }
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.path.is_empty() {
+            write!(f, "OVB-1 decode: {}", self.error)
+        } else {
+            write!(f, "OVB-1 decode at {}: {}", self.type_path(), self.error)
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+/// Public type-directed OVB-1 codec contract.
+///
+/// Implementations must use the existing [`Value`] representation; the
+/// blanket `Option<T>` implementation below supplies canonical tag 60013
+/// handling without introducing another value model.
+pub trait OvbCodec: Sized {
+    /// Stable type label used in [`DecodeError`] paths.
+    fn type_label() -> &'static str;
+
+    /// Converts the typed value to a validated canonical value.
+    fn encode_value(&self) -> Result<Value>;
+
+    /// Converts a validated canonical value to the typed value.
+    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError>;
+}
+
+/// Encodes a typed value as canonical OVB-1 bytes.
+pub fn encode_typed<T: OvbCodec>(value: &T) -> Result<Vec<u8>> {
+    value.encode_value()?.encode()
+}
+
+/// Decodes canonical OVB-1 bytes as the requested type.
+pub fn decode_typed<T: OvbCodec>(bytes: &[u8]) -> std::result::Result<T, DecodeError> {
+    let value = Value::decode(bytes).map_err(|error| {
+        DecodeError::new(error, vec![T::type_label().to_owned()])
+    })?;
+    let mut path = vec![T::type_label().to_owned()];
+    T::decode_value(&value, &mut path)
+}
+
+/// Short aliases for callers that use the generic codec operations directly.
+pub fn encode<T: OvbCodec>(value: &T) -> Result<Vec<u8>> {
+    encode_typed(value)
+}
+
+/// Short alias for the generic typed decoder.
+pub fn decode<T: OvbCodec>(bytes: &[u8]) -> std::result::Result<T, DecodeError> {
+    decode_typed(bytes)
+}
+
+fn decode_type_mismatch(path: &[String]) -> DecodeError {
+    DecodeError::new(Error::InvalidValue, path.to_vec())
+}
+
+impl OvbCodec for Value {
+    fn type_label() -> &'static str {
+        "Value"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        Ok(self.clone())
+    }
+
+    fn decode_value(value: &Value, _path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+        Ok(value.clone())
+    }
+}
+
+impl OvbCodec for Raw {
+    fn type_label() -> &'static str {
+        "Raw"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        Value::new(self.clone())
+    }
+
+    fn decode_value(value: &Value, _path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+        Ok(value.raw().clone())
+    }
+}
+
+impl OvbCodec for bool {
+    fn type_label() -> &'static str {
+        "Bool"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        Value::new(Raw::Bool(*self))
+    }
+
+    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+        match value.raw() {
+            Raw::Bool(value) => Ok(*value),
+            _ => Err(decode_type_mismatch(path)),
+        }
+    }
+}
+
+impl OvbCodec for BigInt {
+    fn type_label() -> &'static str {
+        "Int"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        Ok(Value::int(self.clone()))
+    }
+
+    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+        match value.raw() {
+            Raw::Int(value) => Ok(value.clone()),
+            _ => Err(decode_type_mismatch(path)),
+        }
+    }
+}
+
+impl OvbCodec for i64 {
+    fn type_label() -> &'static str {
+        "Int"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        Ok(Value::int(BigInt::from(*self)))
+    }
+
+    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+        match value.raw() {
+            Raw::Int(value) => value.to_i64().ok_or_else(|| decode_type_mismatch(path)),
+            _ => Err(decode_type_mismatch(path)),
+        }
+    }
+}
+
+impl OvbCodec for u64 {
+    fn type_label() -> &'static str {
+        "UInt"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        Ok(Value::int(BigInt::from(*self)))
+    }
+
+    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+        match value.raw() {
+            Raw::Int(value) => value.to_u64().ok_or_else(|| decode_type_mismatch(path)),
+            _ => Err(decode_type_mismatch(path)),
+        }
+    }
+}
+
+impl OvbCodec for String {
+    fn type_label() -> &'static str {
+        "Str"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        Value::new(Raw::Text(self.clone()))
+    }
+
+    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+        match value.raw() {
+            Raw::Text(value) => Ok(value.clone()),
+            _ => Err(decode_type_mismatch(path)),
+        }
+    }
+}
+
+impl OvbCodec for Vec<u8> {
+    fn type_label() -> &'static str {
+        "Blob"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        Value::new(Raw::Bytes(self.clone()))
+    }
+
+    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+        match value.raw() {
+            Raw::Bytes(value) => Ok(value.clone()),
+            _ => Err(decode_type_mismatch(path)),
+        }
+    }
+}
+
+impl<T: OvbCodec> OvbCodec for Option<T> {
+    fn type_label() -> &'static str {
+        "Option"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        match self {
+            None => Value::option(None),
+            Some(value) => Value::option(Some(value.encode_value()?)),
+        }
+    }
+
+    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+        let Raw::Tag(60013, payload) = value.raw() else {
+            return Err(decode_type_mismatch(path));
+        };
+        let Raw::Array(payload) = payload.as_ref() else {
+            return Err(decode_type_mismatch(path));
+        };
+        match payload.as_slice() {
+            [Raw::Int(flag)] if flag.is_zero() => Ok(None),
+            [Raw::Int(flag), payload] if *flag == BigInt::from(1) => {
+                path.push(T::type_label().to_owned());
+                let result = T::decode_value(
+                    &Value::new(payload.clone()).map_err(|error| DecodeError::new(error, path.clone()))?,
+                    path,
+                );
+                path.pop();
+                result.map(Some)
+            }
+            _ => Err(decode_type_mismatch(path)),
+        }
+    }
 }
 
 /// A typed view of the portable OVB Error value (tag 60016).
