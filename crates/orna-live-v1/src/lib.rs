@@ -7444,7 +7444,7 @@ fn session_response(
 ) -> WireResponse {
     let path = format!("/orna/live/{}", uuid(metadata.session));
     let body = format!(
-        "{{\"session\":\"{}\",\"database\":\"{}\",\"runtime\":\"{}\",\"resume_token\":\"{}\",\"websocket_path\":\"{}\",\"lease_ms\":{},\"limits\":{{\"max_message_bytes\":{},\"max_depth\":64,\"max_nodes\":100000,\"max_collection_items\":100000,\"max_outgoing_bytes\":{},\"request_retention_ms\":{}}}}}",
+        "{{\"session\":\"{}\",\"database\":\"{}\",\"runtime\":\"{}\",\"resume_token\":\"{}\",\"websocket_path\":\"{}\",\"lease_ms\":{},\"limits\":{{\"max_message_bytes\":{},\"max_depth\":{},\"max_nodes\":{},\"max_collection_items\":{},\"max_outgoing_bytes\":{},\"request_retention_ms\":{}}}}}",
         uuid(metadata.session),
         uuid(metadata.database),
         uuid(metadata.runtime),
@@ -7452,6 +7452,9 @@ fn session_response(
         path,
         limits.lease_ms,
         protocol.max_message_bytes,
+        protocol.max_depth,
+        protocol.max_nodes,
+        protocol.max_collection_items,
         limits.max_outgoing_bytes,
         limits.request_retention_ms
     );
@@ -8332,7 +8335,12 @@ mod tests {
 
     #[test]
     fn session_metadata_advertises_decoder_message_limit_when_frame_limit_is_larger() {
-        let protocol = ProtocolLimits::default();
+        let protocol = ProtocolLimits {
+            max_depth: 96,
+            max_nodes: 150_000,
+            max_collection_items: 200_000,
+            ..ProtocolLimits::default()
+        };
         let frame_limit = protocol.max_message_bytes + 1;
         let origin = Origin::parse("https://app.example").unwrap();
         let host = LiveHost::new(
@@ -8371,6 +8379,15 @@ mod tests {
             "\"max_message_bytes\":{}",
             protocol.max_message_bytes
         )));
+        assert!(body.contains(&format!("\"max_depth\":{}", protocol.max_depth)));
+        assert!(body.contains(&format!("\"max_nodes\":{}", protocol.max_nodes)));
+        assert!(body.contains(&format!(
+            "\"max_collection_items\":{}",
+            protocol.max_collection_items
+        )));
+        assert!(!body.contains("\"max_depth\":64"));
+        assert!(!body.contains("\"max_nodes\":100000"));
+        assert!(!body.contains("\"max_collection_items\":100000"));
         assert!(!body.contains(&format!("\"max_message_bytes\":{frame_limit}")));
     }
 
