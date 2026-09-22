@@ -522,14 +522,17 @@ impl Repository {
             updated,
         })
     }
-    /// Creates a partial clone with no checkout; callers must explicitly
-    /// fetch required ordinary and `refs/orna/*` refs before selecting CWD.
+    /// Creates a partial clone with no checkout, retaining ordinary Git refs
+    /// and synchronizing every advertised `refs/orna/*` ref into the new
+    /// repository. Missing internal refs are tolerated so a repository moved
+    /// with plain Git remains readable; when present, they are available to
+    /// the repository/project checkout boundary before CWD selection.
     pub fn clone_from(
         remote: impl AsRef<str>,
         destination: impl AsRef<Path>,
     ) -> Result<Self, FetchError> {
         let status = Command::new("git")
-            .args(["clone", "--filter=blob:none", "--no-checkout", "--no-tags"])
+            .args(["clone", "--filter=blob:none", "--no-checkout"])
             .arg(remote.as_ref())
             .arg(destination.as_ref())
             .status()
@@ -537,7 +540,39 @@ impl Repository {
         if !status.success() {
             return Err(FetchError::RemoteUnavailable);
         }
-        Repository::discover(destination).map_err(FetchError::Repository)
+        let repository = Repository::discover(destination).map_err(FetchError::Repository)?;
+        let mut advertised = repository.observer_command();
+        advertised
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(["ls-remote", "--refs", "origin", "refs/orna/*"]);
+        let output = advertised
+            .output()
+            .map_err(|_| FetchError::RemoteUnavailable)?;
+        if !output.status.success() {
+            return Err(FetchError::RemoteUnavailable);
+        }
+        if !output.stdout.is_empty() {
+            let mut fetch = repository.observer_command();
+            fetch
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .args([
+                    "fetch",
+                    "--no-tags",
+                    "--no-recurse-submodules",
+                    "--no-write-fetch-head",
+                    "--refmap=",
+                    "origin",
+                    "+refs/orna/*:refs/orna/*",
+                ]);
+            if !fetch
+                .status()
+                .map_err(|_| FetchError::RemoteUnavailable)?
+                .success()
+            {
+                return Err(FetchError::RemoteUnavailable);
+            }
+        }
+        Ok(repository)
     }
 
     /// Pulls the requested branch and continuity refs without changing CWD;
