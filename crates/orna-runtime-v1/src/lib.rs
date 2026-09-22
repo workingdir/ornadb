@@ -61,6 +61,8 @@ pub use catalogue::{
 
 const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
+-- FULL synchronous covers process and OS crashes; power-loss durability is not claimed.
+PRAGMA synchronous = FULL;
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS runtime_meta (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -13740,6 +13742,16 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn open_configures_full_synchronous_durability() {
+        let (_temp, repository) = repository();
+        let state = open_state(&repository).await;
+        let mut rows = state.connection.query("PRAGMA synchronous", ()).await.unwrap();
+        let row = rows.next().await.unwrap().expect("synchronous pragma row");
+        let synchronous: i64 = row.get(0).unwrap();
+        assert_eq!(synchronous, 2, "RuntimeState must use SQLite FULL synchronous mode");
     }
 
     async fn begin_continuable_request(
