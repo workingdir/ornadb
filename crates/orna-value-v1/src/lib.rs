@@ -1747,7 +1747,7 @@ fn validate_fields(v: &Raw) -> Result<()> {
             return Err(Error::InvalidTag);
         }
         match &p[0] {
-            Raw::Text(name) if name.nfc().collect::<String>() == *name => {}
+            Raw::Text(name) if name.nfc().eq(name.chars()) => {}
             Raw::Tag(37, _) => {
                 uuid_array(&p[0])?;
             }
