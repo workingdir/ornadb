@@ -15,6 +15,7 @@ use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
     ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
 };
+use orna_application_v1::ApplicationAuthority;
 use orna_evaluator_v1::{Environment, Limits};
 use orna_foundation_v1::{OvbRaw, Value};
 use orna_runtime_v1::RuntimeIdentity;
@@ -1237,6 +1238,42 @@ fn run_project_stream_invocation_with_project(
 
 fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
+    if project.modules().len() == 1 {
+        let identity = &project.identities()[0];
+        let module = &project.modules()[0];
+        let (module_name, function) = target.rsplit_once('.').unwrap_or(("", target));
+        let namespace = if module_name.is_empty() {
+            Vec::new()
+        } else {
+            module_name.split('.').map(str::to_owned).collect::<Vec<_>>()
+        };
+        if identity.namespace() == namespace {
+            let authority =
+                ApplicationAuthority::new(semantic_catalogue(), Limits::default());
+            let admitted = authority
+                .admit_module(identity.logical_path(), module.source.clone(), function)
+                .map_err(|error| {
+                    Diagnostic::target_with_detail(
+                        "E2101",
+                        "project semantic analysis failed",
+                        "fix the first reported source contract error, then run check again",
+                        error.to_string(),
+                    )
+                })?;
+            authority
+                .evaluate(&admitted, &Environment::new())
+                .map_err(|error| {
+                    Diagnostic::target_with_detail(
+                        "E2200",
+                        "pure project invocation failed",
+                        "fix the admitted function or retry the invocation",
+                        error.to_string(),
+                    )
+                })?;
+            println!("invocation completed");
+            return Ok(());
+        }
+    }
     let catalogue = semantic_catalogue();
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
