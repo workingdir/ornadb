@@ -2833,3 +2833,35 @@ fn falls_back_to_raw_location_when_retained_source_cannot_cover_span() {
     assert!(!rendered.contains("1 |"));
     assert_eq!(report.diagnostics().len(), 1);
 }
+
+#[test]
+fn falls_back_to_raw_location_when_span_end_exceeds_retained_source() {
+    let source = "CREATE SCHEMA crm.;";
+    let bundle = SourceBundle::new([SourceUnit::new("syntax.orna", source)]).unwrap();
+    let mut report = parse_bundle(&bundle);
+    let raw = report.diagnostics().to_vec();
+    report.units[0].replace_source_text_for_test("123456789012345678");
+
+    let rendered = report.render_human();
+
+    assert!(rendered.contains("error[ORNA0001]:"));
+    assert!(rendered.contains(" --> syntax.orna: byte 18..19"));
+    assert!(!rendered.contains("1 |"));
+    assert_eq!(report.diagnostics(), raw.as_slice());
+}
+
+#[test]
+fn falls_back_to_raw_location_when_span_end_is_not_a_utf8_boundary() {
+    let source = "CREATE SCHEMA crm.;";
+    let bundle = SourceBundle::new([SourceUnit::new("syntax.orna", source)]).unwrap();
+    let mut report = parse_bundle(&bundle);
+    let raw = report.diagnostics().to_vec();
+    report.units[0].replace_source_text_for_test("123456789012345678é");
+
+    let rendered = report.render_human();
+
+    assert!(rendered.contains("error[ORNA0001]:"));
+    assert!(rendered.contains(" --> syntax.orna: byte 18..19"));
+    assert!(!rendered.contains("1 |"));
+    assert_eq!(report.diagnostics(), raw.as_slice());
+}
