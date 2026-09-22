@@ -1026,15 +1026,237 @@ impl Producer<'_> {
     ) -> Result<Raw> {
         Ok(match pattern {
             Pattern::Name(name, _) => {
-                let ty_node = self.type_node(key, ty, scope)?;
+                let ty_node = self.pattern_type_node(key, ty, scope)?;
                 node("bind", vec![index(locals.bind(name, ty.clone())), ty_node])
             }
             Pattern::Wildcard(_) => node("wildcard", Vec::new()),
             Pattern::Literal { text, kind, .. } => {
                 node("literal_pattern", vec![self.literal(key, text, *kind)?])
             }
-            _ => return Err(self.error(key, SemanticPayloadErrorKind::UnsupportedPattern)),
+            Pattern::Tuple { elements, .. } => {
+                let Type::Tuple(expected) = ty else {
+                    return Err(self.error(key, SemanticPayloadErrorKind::UnsupportedPattern));
+                };
+                if elements.len() != expected.len() {
+                    return Err(self.error(key, SemanticPayloadErrorKind::UnsupportedPattern));
+                }
+                let values = elements
+                    .iter()
+                    .zip(expected)
+                    .map(|(pattern, ty)| self.pattern(key, pattern, ty, scope, locals))
+                    .collect::<Result<Vec<_>>>()?;
+                node("tuple_pattern", vec![array(values)])
+            }
+            Pattern::List { elements, .. } => {
+                let Type::List(inner) = ty else {
+                    return Err(self.error(key, SemanticPayloadErrorKind::UnsupportedPattern));
+                };
+                let values = elements
+                    .iter()
+                    .map(|pattern| self.pattern(key, pattern, inner, scope, locals))
+                    .collect::<Result<Vec<_>>>()?;
+                node("list_pattern", vec![array(values)])
+            }
+            Pattern::Record { fields, .. } => {
+                let expected = self.record_pattern_fields(key, ty, scope)?;
+                let mut encoded = Vec::with_capacity(fields.len());
+                for (name, nested, span) in fields {
+                    let field_ty = expected
+                        .get(name)
+                        .ok_or_else(|| self.error(key, SemanticPayloadErrorKind::UnsupportedPattern))?;
+                    let nested = nested.clone().unwrap_or_else(|| {
+                        Pattern::Name(name.clone(), span.clone())
+                    });
+                    encoded.push(array(vec![
+                        text(name),
+                        self.pattern(key, &nested, field_ty, scope, locals)?,
+                    ]));
+                }
+                node("record_pattern", vec![array(encoded)])
+            }
+            Pattern::Constructor {
+                path,
+                arguments,
+                fields,
+                ..
+            } => {
+                let path_text = path
+                    .iter()
+                    .map(|segment| segment.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                let target = self.constructor_target(key, path, ty, scope)?;
+                let (argument_types, field_types) =
+                    self.constructor_pattern_shape(key, path, ty, scope)?;
+                if arguments.len() != argument_types.len() {
+                    return Err(self.error(key, SemanticPayloadErrorKind::UnsupportedPattern));
+                }
+                let arguments = arguments
+                    .iter()
+                    .zip(argument_types)
+                    .map(|(pattern, ty)| self.pattern(key, pattern, &ty, scope, locals))
+                    .collect::<Result<Vec<_>>>()?;
+                let mut encoded_fields = Vec::with_capacity(fields.len());
+                for field in fields {
+                    let field_ty = field_types
+                        .get(&field.name)
+                        .ok_or_else(|| self.error(key, SemanticPayloadErrorKind::UnsupportedPattern))?;
+                    let nested = field.pattern.clone().unwrap_or_else(|| {
+                        Pattern::Name(field.name.clone(), field.span.clone())
+                    });
+                    encoded_fields.push(array(vec![
+                        text(&field.name),
+                        self.pattern(key, &nested, field_ty, scope, locals)?,
+                    ]));
+                }
+                node(
+                    "constructor_pattern",
+                    vec![
+                        target,
+                        text(&path_text),
+                        array(arguments),
+                        array(encoded_fields),
+                    ],
+                )
+            }
         })
+    }
+    fn pattern_type_node(&mut self, key: &Key, ty: &Type, scope: &Scope) -> Result<Raw> {
+        match ty {
+            Type::List(inner) => Ok(node(
+                "list_type",
+                vec![self.pattern_type_node(key, inner, scope)?],
+            )),
+            Type::Tuple(elements) => Ok(node(
+                "tuple_type",
+                vec![array(
+                    elements
+                        .iter()
+                        .map(|element| self.pattern_type_node(key, element, scope))
+                        .collect::<Result<Vec<_>>>()?,
+                )],
+            )),
+            Type::Record(fields) => Ok(node(
+                "record_type",
+                vec![array(
+                    fields
+                        .iter()
+                        .map(|(name, ty)| {
+                            Ok(array(vec![
+                                text(name),
+                                self.pattern_type_node(key, ty, scope)?,
+                            ]))
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                )],
+            )),
+            Type::Optional(inner) => Ok(node(
+                "optional_type",
+                vec![self.pattern_type_node(key, inner, scope)?],
+            )),
+            _ => self.type_node(key, ty, scope),
+        }
+    }
+
+    fn unsupported_pattern(&self, key: &Key) -> SemanticPayloadError {
+        self.error(key, SemanticPayloadErrorKind::UnsupportedPattern)
+    }
+
+    fn record_pattern_fields(
+        &self,
+        key: &Key,
+        ty: &Type,
+        scope: &Scope,
+    ) -> Result<BTreeMap<String, Type>> {
+        match ty {
+            Type::Record(fields) => Ok(fields.clone()),
+            Type::Named(name) => scope
+                .nominal_rows
+                .get(name)
+                .and_then(|shape| match shape {
+                    Type::Record(fields) => Some(fields.clone()),
+                    _ => None,
+                })
+                .ok_or_else(|| self.unsupported_pattern(key)),
+            _ => Err(self.unsupported_pattern(key)),
+        }
+    }
+
+
+    fn constructor_pattern_shape(
+        &self,
+        key: &Key,
+        path: &[orna_syntax_v1::NameSegment],
+        ty: &Type,
+        scope: &Scope,
+    ) -> Result<(Vec<Type>, BTreeMap<String, Type>)> {
+        if path.len() == 1 && path[0].text == "Some" {
+            let Type::Optional(inner) = ty else {
+                return Err(self.unsupported_pattern(key));
+            };
+            return Ok((vec![inner.as_ref().clone()], BTreeMap::new()));
+        }
+
+        let Type::Named(enum_or_nominal) = ty else {
+            return Err(self.unsupported_pattern(key));
+        };
+        if path.len() == 1 {
+            if let Some(Type::Record(fields)) = scope.nominal_rows.get(enum_or_nominal) {
+                return Ok((Vec::new(), fields.clone()));
+            }
+        }
+        if path.len() >= 2 {
+            let owner = path[..path.len() - 1]
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            let variant = path.last().expect("path length checked").text.as_str();
+            let variants = scope
+                .enum_variants
+                .get(enum_or_nominal)
+                .or_else(|| {
+                    scope.enum_variants.iter().find_map(|(name, variants)| {
+                        (name == &owner || name.ends_with(&format!(".{owner}")))
+                            .then_some(variants)
+                    })
+                });
+            if let Some(fields) = variants.and_then(|variants| variants.get(variant)) {
+                return Ok((Vec::new(), fields.clone()));
+            }
+        }
+
+        Err(SemanticPayloadError {
+            declaration: None,
+            origin: None,
+            kind: SemanticPayloadErrorKind::UnsupportedPattern,
+        })
+    }
+
+    fn constructor_target(
+        &mut self,
+        key: &Key,
+        path: &[orna_syntax_v1::NameSegment],
+        ty: &Type,
+        scope: &Scope,
+    ) -> Result<Raw> {
+        if path.len() == 1 && path[0].text == "Some" && matches!(ty, Type::Optional(_)) {
+            return Ok(Raw::Null);
+        }
+        let target_path = if path.len() >= 2 {
+            path[..path.len() - 1]
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>()
+                .join(".")
+        } else {
+            path.iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>()
+                .join(".")
+        };
+        let target = self.target(key, &target_path, scope)?;
+        Ok(Raw::Bytes(self.declaration(&target)?))
     }
 
     fn statement(
@@ -1149,6 +1371,7 @@ impl Producer<'_> {
             LiteralKind::Integer => {
                 Raw::Int(spelling.replace('_', "").parse().map_err(|_| invalid())?)
             }
+
             LiteralKind::Float => {
                 let number = spelling
                     .strip_suffix('f')
@@ -1362,6 +1585,122 @@ mod tests {
                 target: "Entry".into()
             }
         );
+    }
+
+    #[test]
+    fn structured_patterns_are_admitted_and_encoded_recursively() {
+        fn span() -> orna_syntax_v1::SyntaxSpan {
+            orna_syntax_v1::SyntaxSpan::new(0, 0)
+        }
+        fn name(text: &str) -> orna_syntax_v1::NameSegment {
+            orna_syntax_v1::NameSegment {
+                text: text.to_owned(),
+                span: span(),
+            }
+        }
+        fn has_tag(raw: &Raw, tag: &str) -> bool {
+            match raw {
+                Raw::Array(values) => {
+                    values.iter().any(|value| {
+                        matches!(value, Raw::Text(text) if text == tag) || has_tag(value, tag)
+                    })
+                }
+                _ => false,
+            }
+        }
+
+        let inputs = vec![ModuleInput::new(
+            "payload.orna",
+            "pub type Point { pub x: Int, pub y: Int, }",
+        )];
+        let (analysis, contexts) = analyze_retaining_context(&inputs, &Catalogue::empty(), true);
+        assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+        let mut producer = Producer {
+            analysis: &analysis,
+            contexts: &contexts,
+            inputs: &inputs,
+            active: BTreeSet::new(),
+            completed: BTreeMap::new(),
+        };
+        let key = (Namespace(vec!["payload".into()]), "Point".into());
+        let scope = &contexts[0].2;
+
+        let mut locals = Locals::default();
+        let tuple = producer
+            .pattern(
+                &key,
+                &Pattern::Tuple {
+                    elements: vec![
+                        Pattern::Wildcard(span()),
+                        Pattern::Name("second".into(), span()),
+                    ],
+                    span: span(),
+                },
+                &Type::Tuple(vec![Type::Int, Type::Int]),
+                scope,
+                &mut locals,
+            )
+            .unwrap();
+        assert!(has_tag(&tuple, "tuple_pattern"));
+
+        let mut locals = Locals::default();
+        let list = producer
+            .pattern(
+                &key,
+                &Pattern::List {
+                    elements: vec![
+                        Pattern::Name("head".into(), span()),
+                        Pattern::Name("tail".into(), span()),
+                    ],
+                    span: span(),
+                },
+                &Type::List(Box::new(Type::Int)),
+                scope,
+                &mut locals,
+            )
+            .unwrap();
+        assert!(has_tag(&list, "list_pattern"));
+
+        let mut locals = Locals::default();
+        let record = producer
+            .pattern(
+                &key,
+                &Pattern::Record {
+                    fields: vec![(
+                        "x".into(),
+                        None,
+                        span(),
+                    )],
+                    span: span(),
+                },
+                &Type::Record(BTreeMap::from([("x".into(), Type::Int)])),
+                scope,
+                &mut locals,
+            )
+            .unwrap();
+        assert!(has_tag(&record, "record_pattern"));
+
+        let mut locals = Locals::default();
+        let nominal = producer
+            .pattern(
+                &key,
+                &Pattern::Constructor {
+                    path: vec![name("Point")],
+                    arguments: Vec::new(),
+                    fields: vec![orna_syntax_v1::PatternField {
+                        name: "x".into(),
+                        pattern: Some(Pattern::Wildcard(span())),
+                        span: span(),
+                    }],
+                    span: span(),
+                },
+                &Type::Named("payload.Point".into()),
+                scope,
+                &mut locals,
+            )
+            .unwrap();
+        assert!(has_tag(&nominal, "constructor_pattern"));
+        assert!(has_tag(&tuple, "wildcard"));
     }
 
     #[test]
