@@ -1777,8 +1777,30 @@ impl RuntimeSupervisor {
                             return;
                         }
                     };
-                    if let Ok(mut runtime) = runtime.lock() {
-                        let _ = runtime.mark_running(&worker_handle_for_worker);
+                    // Cancellation while queued fences callback entry. Once
+                    // running is published, cooperative executors observe
+                    // later cancellation through the shared token.
+                    let cancelled_before_running = {
+                        let Ok(mut runtime) = runtime.lock() else {
+                            drop(execution);
+                            return;
+                        };
+                        if cancellation.is_cancelled() {
+                            true
+                        } else {
+                            let _ = runtime.mark_running(&worker_handle_for_worker);
+                            false
+                        }
+                    };
+                    if cancelled_before_running {
+                        if let Ok(mut runtime) = runtime.lock() {
+                            let _ = runtime.retain_terminal(
+                                &worker_handle_for_worker,
+                                InvocationResult::Cancelled(None),
+                            );
+                        }
+                        drop(execution);
+                        return;
                     }
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         executor.execute_controlled(&boundary, &cancellation)
@@ -2527,6 +2549,7 @@ mod tests {
         }
     }
     struct CancellableExecutor {
+        started: Arc<AtomicBool>,
         observed: Arc<AtomicBool>,
     }
     impl InvocationExecutor for CancellableExecutor {
@@ -2539,6 +2562,7 @@ mod tests {
             _: &ExecutionBoundary,
             cancellation: &CancellationToken,
         ) -> InvocationResult<TypedValue> {
+            self.started.store(true, Ordering::SeqCst);
             while !cancellation.is_cancelled() {
                 thread::yield_now();
             }
@@ -3448,6 +3472,11 @@ mod tests {
                 },
             )
             .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while calls.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         assert_eq!(
             supervisor.await_invocation(&handle, Some(Duration::ZERO)),
@@ -3536,6 +3565,43 @@ mod tests {
             supervisor.invocation_metadata(&handle).unwrap().status(),
             InvocationStatus::Cancelled
         );
+        assert_eq!(supervisor.cancel(&handle, None), Ok(true));
+    }
+    #[test]
+    fn supervised_start_cancelled_while_queued_never_enters_callback() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("r"));
+        supervisor.hold_next_worker_start();
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.mode = InvocationMode::Start;
+        request.transaction = TransactionMode::Separate;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handle = supervisor
+            .start(
+                request,
+                CountingExecutor {
+                    calls: Arc::clone(&calls),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            supervisor.invocation_metadata(&handle).unwrap().status(),
+            InvocationStatus::Queued
+        );
+        let reason = diagnostic("queued-cancelled");
+        assert_eq!(
+            supervisor.cancel(&handle, Some(reason.clone())),
+            Ok(true)
+        );
+        supervisor.release_held_worker_start();
+
+        let result = supervisor
+            .await_invocation(&handle, Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(result.status, InvocationStatus::Cancelled);
+        assert_eq!(result.value, None);
+        assert_eq!(result.failure, Some(reason));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(supervisor.cancel(&handle, None), Ok(true));
     }
 
@@ -3937,15 +4003,22 @@ mod tests {
         let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
         request.mode = InvocationMode::Start;
         request.transaction = TransactionMode::Separate;
+        let started = Arc::new(AtomicBool::new(false));
         let observed = Arc::new(AtomicBool::new(false));
         let handle = supervisor
             .start(
                 request,
                 CancellableExecutor {
+                    started: Arc::clone(&started),
                     observed: Arc::clone(&observed),
                 },
             )
             .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !started.load(Ordering::SeqCst) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(started.load(Ordering::SeqCst));
 
         assert_eq!(supervisor.cancel(&handle, None), Ok(true));
         let result = supervisor
@@ -4116,15 +4189,22 @@ mod tests {
         let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
         request.mode = InvocationMode::Start;
         request.transaction = TransactionMode::Separate;
+        let started = Arc::new(AtomicBool::new(false));
         let observed = Arc::new(AtomicBool::new(false));
         let handle = supervisor
             .start(
                 request,
                 CancellableExecutor {
+                    started: Arc::clone(&started),
                     observed: Arc::clone(&observed),
                 },
             )
             .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !started.load(Ordering::SeqCst) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(started.load(Ordering::SeqCst));
 
         let new_id = supervisor.restart().unwrap();
 
