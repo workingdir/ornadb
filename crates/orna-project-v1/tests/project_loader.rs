@@ -134,6 +134,37 @@ fn records_reachable_standard_module_names_without_changing_ordinary_loading() {
 }
 
 #[test]
+fn maps_standard_root_import_to_directory_main_module() {
+    let (_directory, repository) = repository(&[(
+        "main.orna",
+        "use std as _; pub fn run(): Int = answer();",
+    )]);
+    let source = "pub fn answer(): Int = 42;";
+    let profile = StandardDependencyProfile::from_sources(
+        "std-snapshot-1",
+        [("std/main.orna".into(), source.into())],
+    )
+    .unwrap();
+
+    let project = ProjectLoader::default()
+        .load_with_standard_profile(&repository, Some(profile))
+        .unwrap();
+
+    assert_eq!(
+        project
+            .standard_modules()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["std/main.orna"]
+    );
+    assert!(project
+        .standard_catalogue([("std/main.orna".into(), source.into())])
+        .unwrap()
+        .is_some());
+}
+
+#[test]
 fn carries_only_an_explicit_standard_dependency_profile() {
     let (_directory, repository) = repository(&[("main.orna", "pub fn run() {}")]);
     let profile = StandardDependencyProfile::from_sources(

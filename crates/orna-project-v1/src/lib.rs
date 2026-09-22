@@ -235,6 +235,9 @@ fn load_reachable_project(
                 standard_imports |= segments[0] == "std";
                 if segments[0] == "std" {
                     let mut logical_path = segments.join("/");
+                    if segments.len() == 1 {
+                        logical_path.push_str("/main");
+                    }
                     if !logical_path.ends_with(".orna") {
                         logical_path.push_str(".orna");
                     }
