@@ -358,6 +358,33 @@ impl OvbCodec for Vec<u8> {
         }
     }
 }
+impl OvbCodec for [u8; 16] {
+    fn type_label() -> &'static str {
+        "Uuid"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        Ok(Value::uuid(*self))
+    }
+
+    fn decode_value(
+        value: &Value,
+        path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
+        match value.raw() {
+            Raw::Tag(37, payload) => match payload.as_ref() {
+                Raw::Bytes(bytes) if bytes.len() == 16 => {
+                    let mut uuid = [0_u8; 16];
+                    uuid.copy_from_slice(bytes);
+                    Ok(uuid)
+                }
+                _ => Err(decode_type_mismatch(path)),
+            },
+            _ => Err(decode_type_mismatch(path)),
+        }
+    }
+}
+
 /// A typed OVB-1 map codec backed by Rust's ordered map.
 ///
 /// Map entries are ordered by the complete canonical bytes of their encoded
