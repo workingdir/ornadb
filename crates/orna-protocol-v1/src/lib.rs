@@ -285,6 +285,7 @@ impl Envelope {
         }
         let mut reader = Reader::new(bytes, limits);
         let root = reader.node(0)?;
+        reject_duplicate_map_keys(&root)?;
         if reader.at != bytes.len() {
             return Err(Error::TrailingBytes);
         }
@@ -1508,6 +1509,34 @@ fn map(node: &Node) -> Option<&Vec<(Node, Node)>> {
         None
     }
 }
+fn reject_duplicate_map_keys(node: &Node) -> Result<()> {
+    match node {
+        Node::Map(fields) => {
+            for (index, (key, _)) in fields.iter().enumerate() {
+                if fields[..index].iter().any(|(previous, _)| previous == key) {
+                    return Err(Error::NonCanonical);
+                }
+                reject_duplicate_map_keys(key)?;
+            }
+            for (_, value) in fields {
+                reject_duplicate_map_keys(value)?;
+            }
+        }
+        Node::Array(values) => {
+            for value in values {
+                reject_duplicate_map_keys(value)?;
+            }
+        }
+        Node::Tag(_, value) => reject_duplicate_map_keys(value)?,
+        Node::Null
+        | Node::Bool(_)
+        | Node::Int(_)
+        | Node::Float(_)
+        | Node::Bytes(_)
+        | Node::Text(_) => {}
+    }
+    Ok(())
+}
 fn array(node: &Node) -> Option<&Vec<Node>> {
     if let Node::Array(value) = node {
         Some(value)
@@ -2026,6 +2055,16 @@ mod tests {
                 extensions: BTreeMap::new(),
             },
         ]
+    }
+    #[test]
+    fn duplicate_structural_map_keys_are_rejected_before_admission() {
+        let nested = Node::Map(vec![
+            (uint(0), Node::Map(vec![(uint(1), uint(2)), (uint(1), uint(3))])),
+        ]);
+        assert_eq!(
+            reject_duplicate_map_keys(&nested),
+            Err(Error::NonCanonical)
+        );
     }
     fn wire(code: u64, request: Option<[u8; 16]>, watch: Option<[u8; 16]>, body: Node) -> Vec<u8> {
         encode_node(&Node::Map(vec![
