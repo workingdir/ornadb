@@ -631,15 +631,24 @@ impl Repository {
             .position(|refspec| refspec.starts_with("refs/orna/") && refspec.contains("allocator"));
         if let Some(index) = allocator {
             let allocator_ref = ordered.remove(index);
-            self.push_refspecs(request.remote(), std::slice::from_ref(&allocator_ref))?;
+            self.push_refspecs(request.remote(), std::slice::from_ref(&allocator_ref), false)?;
         }
-        self.push_refspecs(request.remote(), &ordered)
+        self.push_refspecs(request.remote(), &ordered, true)
     }
 
-    fn push_refspecs(&self, remote: &str, refspecs: &[String]) -> Result<(), FetchError> {
+    fn push_refspecs(
+        &self,
+        remote: &str,
+        refspecs: &[String],
+        atomic: bool,
+    ) -> Result<(), FetchError> {
         let mut command = self.observer_command();
+        command.args(["push", "--porcelain", "--no-follow-tags"]);
+        if atomic {
+            command.arg("--atomic");
+        }
         command
-            .args(["push", "--porcelain", "--no-follow-tags", remote])
+            .arg(remote)
             .args(refspecs)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -649,7 +658,7 @@ impl Repository {
             .success()
             .then_some(())
             .ok_or(FetchError::PushFailed)
-    }
+}
 }
 
 impl From<RefPlan> for FetchedRef {

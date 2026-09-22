@@ -9,11 +9,12 @@ use std::os::unix::fs::PermissionsExt;
 
 use orna_repository_v1::{
     FetchError, FetchRequest, GitObjectKind, GitObjectState, NativeObjectId, OrnaInternalRef,
-    RemoteContinuity, Repository, RequestedRef, RequiredInternalRef,
+    PushRequest, RemoteContinuity, Repository, RequestedRef, RequiredInternalRef,
 };
 use tempfile::TempDir;
 
 const INTERNAL_REF: &str = "refs/orna/ids/0123456789abcdef";
+const ALLOCATOR_REF: &str = "refs/orna/allocator";
 const OTHER_INTERNAL_REF: &str = "refs/orna/checkpoints/0123456789abcdef";
 const STALE_INTERNAL_REF: &str = "refs/orna/runs/0123456789abcdef";
 const FETCH_CHILD_LOCAL: &str = "ORNA_FETCH_ROUTING_LOCAL";
@@ -280,6 +281,83 @@ fn request(
     continuity: impl IntoIterator<Item = RequiredInternalRef>,
 ) -> FetchRequest {
     FetchRequest::new("origin", ordinary, continuity).unwrap()
+}
+
+#[test]
+fn push_keeps_second_phase_atomic_after_allocator_first() {
+    let fixture = Fixture::new();
+    let initial = fixture.initial_head();
+    git(
+        &fixture.source,
+        &["update-ref", ALLOCATOR_REF, &initial],
+    );
+    let allocator_refspec = format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}");
+    git(&fixture.source, &["push", "origin", &allocator_refspec]);
+    fs::write(
+        fixture.source.join("main.orna"),
+        "module main;\n\n// next\n",
+    )
+    .unwrap();
+    git(&fixture.source, &["add", "main.orna"]);
+    git(&fixture.source, &["commit", "-m", "next"]);
+    let next = git(&fixture.source, &["rev-parse", "HEAD"]);
+    git(
+        &fixture.source,
+        &["update-ref", ALLOCATOR_REF, &next],
+    );
+    git(
+        &fixture.source,
+        &["update-ref", INTERNAL_REF, &next],
+    );
+    git(
+        &fixture.source,
+        &["update-ref", OTHER_INTERNAL_REF, &next],
+    );
+
+    let hook = fixture.remote.join("hooks/update");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"{OTHER_INTERNAL_REF}\" ]; then exit 1; fi\nexit 0\n"
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&hook).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&hook, permissions).unwrap();
+
+    let repository = Repository::discover(&fixture.source).unwrap();
+    let request = PushRequest::new(
+        "origin",
+        "main",
+        [
+            OrnaInternalRef::new(ALLOCATOR_REF).unwrap(),
+            OrnaInternalRef::new(INTERNAL_REF).unwrap(),
+            OrnaInternalRef::new(OTHER_INTERNAL_REF).unwrap(),
+        ],
+    )
+    .unwrap();
+    let error = repository
+        .push(&request)
+        .expect_err("a rejected second-phase ref must fail the push");
+
+    assert!(matches!(error, FetchError::PushFailed));
+    assert_eq!(
+        git(&fixture.remote, &["rev-parse", ALLOCATOR_REF]),
+        next
+    );
+    assert_eq!(
+        git(&fixture.remote, &["rev-parse", INTERNAL_REF]),
+        initial
+    );
+    assert_eq!(
+        git(&fixture.remote, &["rev-parse", "refs/heads/main"]),
+        initial
+    );
+    assert!(!git_status(
+        &fixture.remote,
+        &["show-ref", "--verify", "--quiet", "--", OTHER_INTERNAL_REF]
+    ));
 }
 
 #[test]
