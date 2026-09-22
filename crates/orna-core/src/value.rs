@@ -836,6 +836,27 @@ fn preflight_collection_descriptor(
                     descriptor: key.clone(),
                 });
             }
+            if matches!(key.kind(), TypeDescriptorKind::Named(_))
+                && matches!(
+                    classify_collection_named_descriptor(active, key, path),
+                    Ok(RecordValueFieldDescriptorClass::StandardPrimitive(type_id))
+                        if active
+                            .catalogue_hash_context()
+                            .standard()
+                            .and_then(|standard| {
+                                standard.catalogue().value_type_by_id(type_id)
+                            })
+                            .is_some_and(|definition| {
+                                definition.representation_contract()
+                                    == "orna.kernel.value.float@1"
+                            })
+                )
+            {
+                return Err(CollectionValueError::UnsupportedDescriptor {
+                    path: collection_value_path(path),
+                    descriptor: key.clone(),
+                });
+            }
             if !matches!(
                 key.kind(),
                 TypeDescriptorKind::Named(_) | TypeDescriptorKind::Reference(_)
