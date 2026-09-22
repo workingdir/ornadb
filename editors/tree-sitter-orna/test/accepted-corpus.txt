@@ -1,4 +1,4 @@
-accepted client fixture stays in the editor grammar contract
+accepted CLIENT V4 state scalar fixture
 accepted CLIENT action call
 accepted CLIENT Inspector fixture
 alter type rename field

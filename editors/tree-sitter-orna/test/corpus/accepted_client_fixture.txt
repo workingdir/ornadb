@@ -1,5 +1,5 @@
 ====================
-accepted client fixture stays in the editor grammar contract
+accepted CLIENT V4 state scalar fixture
 ====================
 
 CREATE SCHEMA accepted_client;
@@ -14,6 +14,16 @@ IS
     STATE ready BOOLEAN SCOPE LOCAL DEFAULT TRUE;
 BEGIN
     RETURN TRUE;
+END;
+
+CREATE CLIENT FUNCTION accepted_client.v4_stateful()
+RETURNS TEXT
+IS
+    STATE local_value TEXT SCOPE LOCAL DEFAULT 'local';
+    STATE session_value TEXT SCOPE SESSION DEFAULT 'session';
+    STATE user_value TEXT SCOPE USER;
+BEGIN
+    RETURN local_value;
 END;
 
 ---
@@ -90,6 +100,70 @@ END;
             (client_primary_expression
               (boolean_literal
                 (kw_true))))
+          (semicolon))
+        (kw_end)))
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_text))))
+    body: (client_procedural_body
+      (client_state_body
+        (kw_is)
+        (client_state_declaration
+          (kw_state)
+          name: (identifier)
+          type: (type_spec
+            (scalar_type
+              (kw_text)))
+          (kw_scope)
+          (kw_local)
+          (kw_default)
+          default: (client_expression
+            (client_primary_expression
+              (string_literal)))
+          (semicolon))
+        (client_state_declaration
+          (kw_state)
+          name: (identifier)
+          type: (type_spec
+            (scalar_type
+              (kw_text)))
+          (kw_scope)
+          (kw_session)
+          (kw_default)
+          default: (client_expression
+            (client_primary_expression
+              (string_literal)))
+          (semicolon))
+        (client_state_declaration
+          (kw_state)
+          name: (identifier)
+          type: (type_spec
+            (scalar_type
+              (kw_text)))
+          (kw_scope)
+          (kw_user)
+          (semicolon))
+        (kw_begin)
+        (client_state_return_statement
+          (kw_return)
+          expression: (client_expression
+            (client_primary_expression
+              (client_parameter_read
+                (identifier))))
           (semicolon))
         (kw_end)))
     (semicolon)))
