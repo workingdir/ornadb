@@ -29,8 +29,8 @@ client-artifact-demo:
 client-capability-demo:
     cargo run --locked --offline -p orna-client --example client_capability_demo
 
-# Run the accepted offline demo registry and standalone local demos.
-demo-suite: demo-check runtime-tty-demo client-artifact-demo client-capability-demo
+# Run standalone local demos.
+demo-suite: runtime-tty-demo client-artifact-demo client-capability-demo
 
 # Build the first production Qt runtime against the canonical ABI header.
 runtime-qt-build:
@@ -126,7 +126,3 @@ test:
 # This static gate requires its CLI prerequisites: Python 3.11+, tree-sitter CLI, node, and cargo.
 editor-tooling-check:
     python3 scripts/check-editor-tooling.py
-
-# Run every runnable accepted source-check/offline demo in manifest order.
-demo-check:
-    python3 scripts/run-demos.py
