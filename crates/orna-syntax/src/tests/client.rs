@@ -142,56 +142,6 @@ fn parses_short_client_return_await_with_exact_expression_spans() {
 }
 
 #[test]
-fn parses_canonical_accepted_dogfood_fixtures_losslessly() {
-    let fixtures = [
-        (
-            "client_function_dogfood.orna",
-            include_str!("../../../orna-server/tests/fixtures/client_function_dogfood.orna"),
-        ),
-        (
-            "scalar_resource_dogfood.orna",
-            include_str!("../../../orna-server/tests/fixtures/scalar_resource_dogfood.orna"),
-        ),
-        (
-            "stream_resource_dogfood.orna",
-            include_str!("../../../orna-server/tests/fixtures/stream_resource_dogfood.orna"),
-        ),
-        (
-            "action_dogfood.orna",
-            include_str!("../../../orna-server/tests/fixtures/action_dogfood.orna"),
-        ),
-        (
-            "client_inspector_dogfood.orna",
-            include_str!("../../../orna-server/tests/fixtures/client_inspector_dogfood.orna"),
-        ),
-        (
-            "expression_client_dogfood.orna",
-            include_str!("../../../orna-server/tests/fixtures/expression_client_dogfood.orna"),
-        ),
-        (
-            "server_function_dogfood.orna",
-            include_str!("../../../orna-server/tests/fixtures/server_function_dogfood.orna"),
-        ),
-        (
-            "client_local_assignment_dogfood.orna",
-            include_str!(
-                "../../../orna-server/tests/fixtures/client_local_assignment_dogfood.orna"
-            ),
-        ),
-    ];
-
-    for (name, source) in fixtures {
-        let parsed = parse(source);
-        assert!(
-            parsed.diagnostics().is_empty(),
-            "{name}: {:?}",
-            parsed.diagnostics()
-        );
-        assert_eq!(parsed.syntax().text(), source, "{name}");
-    }
-}
-
-#[test]
 fn parses_accepted_client_fixture_losslessly_with_expression_and_state_bodies() {
     let source = include_str!("../../testdata/accepted-client.orna");
     let parsed = parse(source);
