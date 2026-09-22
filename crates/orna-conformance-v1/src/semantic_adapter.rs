@@ -9674,7 +9674,8 @@ mod durable_tests {
     use super::{
         DurableTransactionalEvaluator, Functions, RunningTableRequestDisposition, SourceUnit,
         StageOutcome, TransactionKeyType, TransactionTableKey, TransactionalEvaluator,
-        admitted_transaction_module, lower_relation_bindings, replay_request_terminal,
+        admit_transaction_module, admit_transaction_project, lower_relation_bindings,
+        replay_request_terminal,
         request_terminal,
     };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
@@ -9929,6 +9930,79 @@ mod durable_tests {
                         == &orna_foundation_v1::OvbRaw::Text("changed".into()))
         ));
     }
+    #[tokio::test]
+    async fn application_eval_resolves_admits_stages_and_commits_digest() {
+        let temp = TempDir::new().expect("temporary repository");
+        git(temp.path(), &["init"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "user.name", "test"]);
+        let repository = Repository::discover(temp.path()).expect("repository");
+        let unit = SourceUnit {
+            fixture_id: "application-eval-proof".into(),
+            source_id: "application-eval-proof.orna".into(),
+            parse_as: "module_unit".into(),
+            source: r#"pub table Note(id: Int) { text: Str, } fn resolved_text() = "resolved"; fn main() { Note.insert({ id: 9, text: resolved_text() }); }"#.into(),
+        };
+        let initial_digest = [11; 32];
+        let admitted = super::admit_transaction_source(&unit, Limits::default(), "main")
+            .expect("source is parser, resolver, and typecheck admitted");
+        let mut preview = TransactionalEvaluator::new("main", Limits::default());
+        let mutations = preview
+            .execute_admitted(&admitted)
+            .expect("admitted source stages one mutation");
+        assert_eq!(mutations.len(), 1);
+        let expected_digest = super::durable_activation_digest(initial_digest, &mutations);
+
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+        assert!(matches!(
+            evaluator
+                .execute_source(
+                    &repository,
+                    RuntimeIdentity {
+                        database_id: [13; 16],
+                        repository_id: [14; 16],
+                    },
+                    [12; 16],
+                    initial_digest,
+                    &unit,
+                )
+                .await,
+            Ok(StageOutcome::Passed)
+        ));
+
+        let state = RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [13; 16],
+                repository_id: [14; 16],
+            },
+            expected_digest,
+        )
+        .await
+        .expect("reopen committed runtime");
+        assert_eq!(
+            state.capture().await.expect("capture committed activation").generation_digest(),
+            expected_digest
+        );
+        let key = Value::int(9.into()).encode().expect("encoded key");
+        let row = state
+            .committed_table_row("Note", &key)
+            .await
+            .expect("durable row read")
+            .map(|bytes| Value::decode(&bytes).expect("canonical row"))
+            .expect("committed application row");
+        assert!(matches!(
+            row.raw(),
+            OvbRaw::Map(fields)
+                if fields.iter().any(|(key, value)| key
+                    == &OvbRaw::Text("text".into())
+                    && value == &OvbRaw::Text("resolved".into()))
+        ));
+    }
+
 
     #[tokio::test]
     async fn ordinary_activation_reuses_one_captured_now_for_repeated_writes() {
