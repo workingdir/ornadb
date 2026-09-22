@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
     EffectHandler, Environment, EvaluationError, Functions, Limits, NominalDefinition,
-    NominalDefinitions, NominalField, PureFunction, RelationPage, StepBudget, evaluate_expression,
+    NominalDefinitions, NominalField, NominalVariant, PureFunction, RelationPage, StepBudget,
+    evaluate_expression,
     evaluate_function, evaluate_parsed, evaluate_parsed_with_nominals, evaluate_repl,
     evaluate_with_functions_and_nominals, invoke_named, invoke_named_with_effects,
     invoke_named_with_effects_and_budget, invoke_named_with_nominals,
@@ -7472,6 +7473,50 @@ fn matches_enum_labels_payload_fields_and_interpolates_bound_strings() {
         evaluate_expression(
             "case value { Availability.ready: \"ready\", Availability.waiting { reason }: reason }",
             &environment,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::new(Raw::Text("ready".into())).unwrap()
+    );
+}
+
+#[test]
+fn matches_qualified_enum_patterns_from_retained_definitions_without_scope_sentinels() {
+    let waiting = enum_value(
+        1,
+        3,
+        Some(record_payload(vec![(
+            "reason",
+            Raw::Text("maintenance".into()),
+        )])),
+    );
+    let definitions = NominalDefinitions::from([(
+        "Availability".into(),
+        NominalDefinition::new([1; 16], None, Vec::new()).with_enum_variants(vec![
+            NominalVariant::new([2; 16], "ready"),
+            NominalVariant::new([3; 16], "waiting"),
+        ]),
+    )]);
+    let mut environment = Environment::from([("value".into(), waiting)]);
+    let source =
+        "case value { Availability.ready: \"ready\", Availability.waiting { reason }: \"waiting: {reason}\" }";
+    assert_eq!(
+        evaluate_parsed_with_nominals(
+            &parsed_expression(source),
+            &environment,
+            &definitions,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::new(Raw::Text("waiting: maintenance".into())).unwrap()
+    );
+
+    environment.insert("value".into(), enum_value(1, 2, None));
+    assert_eq!(
+        evaluate_parsed_with_nominals(
+            &parsed_expression(source),
+            &environment,
+            &definitions,
             Limits::default(),
         )
         .unwrap(),
