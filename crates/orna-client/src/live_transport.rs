@@ -70,10 +70,13 @@ impl LiveClientConfig {
 }
 
 fn is_loopback(url: &Url) -> bool {
-    matches!(
-        url.host_str(),
-        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
-    )
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 #[derive(Debug)]
