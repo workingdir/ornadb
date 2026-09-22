@@ -7,8 +7,6 @@ license = "Apache-2.0"
 description = "Authoritative source admission and activation seam for Orna applications"
 publish = false
 
-[workspace]
-
 [dependencies]
 orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
