@@ -204,6 +204,7 @@ pub fn apply_migration_plan_to_compact(
         {
             return Err(CompactBaseProjectionError::DuplicateEvolutionKey);
         }
+        let value = rewrite_rekey_row_value(profile, &old_identity, &new_identity, value)?;
         let value = value
             .encode()
             .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
@@ -238,6 +239,87 @@ pub fn apply_migration_plan_to_compact(
     };
     base.consume_writer_input(&input)?;
     Ok(input)
+}
+
+fn rewrite_rekey_row_value(
+    profile: &CompactOvbProfile,
+    old_key: &CompactKeyIdentity,
+    new_key: &CompactKeyIdentity,
+    value: &CanonicalValue,
+) -> Result<CanonicalValue, CompactBaseProjectionError> {
+    let old_components =
+        decode_key_components(profile, old_key).map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
+    let new_components =
+        decode_key_components(profile, new_key).map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
+    let OvbRaw::Tag(60009, payload) = value.raw() else {
+        return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+    };
+    let Some(row) = array(payload) else {
+        return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+    };
+    let [row_type, OvbRaw::Array(fields)] = row else {
+        return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+    };
+    let mut seen_keys = BTreeSet::new();
+    let mut rewritten_fields = Vec::with_capacity(fields.len());
+    for field in fields {
+        let OvbRaw::Array(parts) = field else {
+            return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+        };
+        let [field_id, field_value] = parts.as_slice() else {
+            return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+        };
+        let field_id_bytes =
+            uuid(field_id).map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+        let mut field_value = field_value.clone();
+        if let Some(index) = profile
+            .key_fields
+            .iter()
+            .position(|key_field| key_field.id == field_id_bytes)
+        {
+            if !seen_keys.insert(field_id_bytes) || field_value != old_components[index] {
+                return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+            }
+            field_value = new_components[index].clone();
+        }
+        rewritten_fields.push(OvbRaw::Array(vec![
+            field_id.clone(),
+            field_value,
+        ]));
+    }
+    if seen_keys.len() != profile.key_fields.len() {
+        return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+    }
+    CanonicalValue::new(OvbRaw::Tag(
+        60009,
+        Box::new(OvbRaw::Array(vec![
+            row_type.clone(),
+            OvbRaw::Array(rewritten_fields),
+        ])),
+    ))
+    .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)
+}
+
+fn decode_key_components(
+    profile: &CompactOvbProfile,
+    key: &CompactKeyIdentity,
+) -> Result<Vec<OvbRaw>, CompactKeyError> {
+    profile.decode_key(key.encoded())?;
+    let value = CanonicalValue::decode(key.encoded()).map_err(|_| CompactKeyError::InvalidOvb)?;
+    match profile.key_fields.len() {
+        0 => Ok(Vec::new()),
+        1 => Ok(vec![value.raw().clone()]),
+        _ => {
+            let OvbRaw::Tag(60015, payload) = value.raw() else {
+                return Err(CompactKeyError::KeyArity);
+            };
+            let components = array(payload).ok_or(CompactKeyError::KeyArity)?;
+            if components.len() != profile.key_fields.len() {
+                return Err(CompactKeyError::KeyArity);
+            }
+            Ok(components.to_vec())
+        }
+    }
 }
 
 /// Fail-closed errors while projecting and folding committed compact rows.
@@ -1464,6 +1546,20 @@ mod tests {
             .encode()
             .unwrap()
     }
+    fn row_value(id: i64) -> CanonicalValue {
+        CanonicalValue::new(OvbRaw::Tag(
+            60009,
+            Box::new(OvbRaw::Array(vec![
+                OvbRaw::Null,
+                OvbRaw::Array(vec![OvbRaw::Array(vec![
+                    uuid_raw(KEY_A),
+                    OvbRaw::Int(id.into()),
+                ])]),
+            ])),
+        ))
+        .unwrap()
+    }
+
 
     fn enum_profile() -> CompactOvbProfile {
         let enum_type = OvbRaw::Array(vec![OvbRaw::Int(5.into()), uuid_raw(ENUM_TYPE)]);
@@ -2025,7 +2121,7 @@ mod tests {
             old,
             CompactBaseRow {
                 key: CanonicalValue::decode(&scalar_key(7)).unwrap(),
-                value: Some(CanonicalValue::new(OvbRaw::Int(70.into())).unwrap()),
+                value: Some(row_value(7)),
                 generation: 1,
                 role: CompactSegmentRole::Data,
             },
@@ -2056,6 +2152,11 @@ mod tests {
             input.mutations[1].state,
             CompactWriterMutationState::Replacement { .. }
         ));
+        let CompactWriterMutationState::Replacement { value } = &input.mutations[1].state else {
+            panic!("rekey must emit a replacement");
+        };
+        assert_eq!(CanonicalValue::decode(value).unwrap(), row_value(8));
+
         let mut evolved_schema = schema.clone();
         evolved_schema.tables[0].fields.push(orna_evolution_v1::Field {
             id: orna_evolution_v1::ObjectId::new(KEY_B),
