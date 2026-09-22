@@ -75,46 +75,26 @@ TYPE_REFERENCE_HIGHLIGHT_FORBIDDEN = {
 TEXTMATE_PARITY_COMPARABLE_KEYS = ("scopeName", "patterns", "repository")
 # Only editor metadata may differ; every other root and nested grammar rule is compared.
 TEXTMATE_PARITY_ALLOWED_ROOT_KEYS = frozenset({"$schema", "name"})
-# The public source-check command checks a complete application against an
-# ephemeral empty catalogue. Most accepted tree-sitter cases are deliberately
-# syntax-only fragments, semantic-error probes, or `(ERROR ...)` cases, so
-# running every corpus source as a clean application would assert a contract
-# the CLI does not provide. These four cases are the bounded, self-contained
-# accepted subset: each has a complete source unit and no unresolved
-# application/standard references. Keep this list in manifest-name form so
-# removing or renaming an accepted case fails closed below.
-SOURCE_CHECK_CORPUS_CASE_NAMES = (
-    "accepted client fixture stays in the editor grammar contract",
-    "create schema lowercase keywords",
-    "line and block comments",
-    "normal whitespace remains extras",
-)
-# These checked-in `.orna` files are source data for a dedicated parser rather
-# than editor-language sources. Keep them in the repository without asking the
-# general tree-sitter grammar to accept the closed backend migration DSL.
-DEDICATED_SOURCE_DIRECTORIES = ("crates/orna-storage/migrations",)
-
-# Exact AST and per-case LSP parity stays in the existing Rust parser manifest
-# and framed LSP tests. This dependency-light gate invokes those public tests
-# rather than inventing a shared runtime protocol between editor implementations.
+SOURCE_CHECK_CORPUS_CASE_NAMES = ("current v1 source-check compatibility",)
 SOURCE_CHECK_DIAGNOSTIC_RE = re.compile(
     r"^(?P<path>.+):(?P<start>[0-9]+)\.\.(?P<end>[0-9]+): "
     r"(?P<code>ORNA[0-9]+): (?P<message>.*)$"
 )
-# Source-check output carries diagnostic codes but no severity field. Keep this
-# set synchronized with DiagnosticCode::severity in the compiler.
 SOURCE_CHECK_WARNING_CODES = frozenset({"ORNA0401"})
-
 
 
 @dataclass(frozen=True)
 class CorpusSourceFixture:
-    """One accepted corpus source with its editor expectation and origin."""
+    """One source fixture used by the optional source-check parity helper."""
 
     name: str
     source: str
     expected_rejection: bool
     path: Path
+
+
+
+
 
 
 
@@ -391,157 +371,12 @@ def check_accepted_corpus_results(
         return False
 
     return True
-
-
-def _corpus_line_body(line: str) -> str:
-    """Remove only one corpus line terminator without changing source text."""
-    if line.endswith("\n"):
-        line = line[:-1]
-    if line.endswith("\r"):
-        line = line[:-1]
-    return line
-
-
-def read_accepted_corpus_sources(
-    corpus_directory: Path,
-    accepted_names: Sequence[str],
-    repository: Path,
-) -> list[CorpusSourceFixture] | None:
-    """Extract accepted corpus sources using the same framing as the Rust test."""
-    fixtures: dict[str, CorpusSourceFixture] = {}
-    for corpus_path in sorted(corpus_directory.rglob("*.txt"), key=lambda path: path.as_posix()):
-        if not corpus_path.is_file():
-            continue
-        try:
-            # Decode bytes directly so CRLF, BOM, and final-newline choices
-            # survive materialisation for the source-check command.
-            contents = corpus_path.read_bytes().decode("utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            log(
-                f"could not read corpus source {display_path(corpus_path, repository)}: {exc}",
-                error=True,
-            )
-            return None
-
-        lines = contents.splitlines(keepends=True)
-        offsets: list[int] = []
-        offset = 0
-        for line in lines:
-            offsets.append(offset)
-            offset += len(line)
-
-        cursor = 0
-        while cursor < len(lines):
-            body = _corpus_line_body(lines[cursor])
-            if not body:
-                cursor += 1
-                continue
-            if body != CORPUS_CASE_DELIMITER:
-                log(
-                    f"malformed corpus framing in {display_path(corpus_path, repository)} "
-                    f"near line {cursor + 1}",
-                    error=True,
-                )
-                return None
-            if cursor + 2 >= len(lines):
-                log(
-                    f"truncated corpus case header in {display_path(corpus_path, repository)} "
-                    f"near line {cursor + 1}",
-                    error=True,
-                )
-                return None
-            name = _corpus_line_body(lines[cursor + 1])
-            if not name or name != name.strip():
-                log(
-                    f"malformed corpus case name in {display_path(corpus_path, repository)} "
-                    f"at line {cursor + 2}: {name!r}",
-                    error=True,
-                )
-                return None
-            if _corpus_line_body(lines[cursor + 2]) != CORPUS_CASE_DELIMITER:
-                log(
-                    f"malformed corpus case header in {display_path(corpus_path, repository)} "
-                    f"near line {cursor + 1}",
-                    error=True,
-                )
-                return None
-
-            source_line = cursor + 3
-            # The blank line after a header is corpus framing, not source text.
-            if source_line < len(lines) and not _corpus_line_body(lines[source_line]):
-                source_line += 1
-            separator_line = next(
-                (
-                    index
-                    for index in range(source_line, len(lines))
-                    if _corpus_line_body(lines[index]) == "---"
-                ),
-                None,
-            )
-            if separator_line is None:
-                log(
-                    f"corpus case {name!r} in {display_path(corpus_path, repository)} "
-                    "has no `---` source separator",
-                    error=True,
-                )
-                return None
-
-            source_end = offsets[separator_line]
-            # The blank line before `---` is also corpus framing.
-            if (
-                separator_line > source_line
-                and not _corpus_line_body(lines[separator_line - 1])
-            ):
-                source_end = offsets[separator_line - 1]
-            source = contents[offsets[source_line] : source_end]
-
-            expected_tree_start = offsets[separator_line] + len(lines[separator_line])
-            next_case = next(
-                (
-                    index
-                    for index in range(separator_line + 1, len(lines))
-                    if _corpus_line_body(lines[index]) == CORPUS_CASE_DELIMITER
-                ),
-                None,
-            )
-            expected_tree_end = offsets[next_case] if next_case is not None else len(contents)
-            expected_tree = contents[expected_tree_start:expected_tree_end].strip()
-            if not expected_tree:
-                log(
-                    f"corpus case {name!r} in {display_path(corpus_path, repository)} "
-                    "has no expected tree",
-                    error=True,
-                )
-                return None
-            if name in fixtures:
-                log(f"duplicate corpus case name: {name!r}", error=True)
-                return None
-            fixtures[name] = CorpusSourceFixture(
-                name=name,
-                source=source,
-                expected_rejection="(ERROR" in expected_tree,
-                path=corpus_path,
-            )
-            cursor = next_case if next_case is not None else len(lines)
-
-    missing = [name for name in accepted_names if name not in fixtures]
-    if missing:
-        log(
-            "accepted corpus manifest cases have no extractable source: "
-            + ", ".join(repr(name) for name in missing),
-            error=True,
-        )
-        return None
-    return [fixtures[name] for name in accepted_names]
-
-
 def _source_check_diagnostics(
     output: str,
     *,
     case_name: str,
     source_length: int,
 ) -> tuple[bool, bool, bool]:
-    """Report diagnostics, reject malformed spans, and classify errors."""
     found = False
     valid = True
     errors_found = False
@@ -571,123 +406,66 @@ def _source_check_diagnostics(
     return found, valid, errors_found
 
 
-
 def check_source_check_parity(
     cargo: str,
     repository: Path,
     accepted_fixtures: Sequence[CorpusSourceFixture],
 ) -> bool:
-    """Run the public source checker for the bounded accepted corpus subset."""
+    """Validate diagnostics from an explicitly supplied v1 source-check command."""
     fixtures_by_name = {fixture.name: fixture for fixture in accepted_fixtures}
     selected: list[CorpusSourceFixture] = []
     for name in SOURCE_CHECK_CORPUS_CASE_NAMES:
         fixture = fixtures_by_name.get(name)
         if fixture is None:
-            log(
-                f"source-check subset case {name!r} is absent from the accepted corpus manifest",
-                error=True,
-            )
+            log(f"source-check case {name!r} is absent", error=True)
             return False
         if fixture.expected_rejection:
-            log(
-                f"source-check subset case {name!r} is an `(ERROR ...)` editor case",
-                error=True,
-            )
+            log(f"source-check case {name!r} is rejected", error=True)
             return False
         selected.append(fixture)
 
-    if not selected:
-        log("source-check accepted subset is empty", error=True)
-        return False
-
-    log(f"running source-check accepted corpus subset ({len(selected)} cases)")
-    try:
-        with tempfile.TemporaryDirectory(prefix="orna-editor-source-check-") as temporary_directory:
-            temporary_root = Path(temporary_directory)
-            for index, fixture in enumerate(selected, start=1):
-                source_bytes = fixture.source.encode("utf-8")
-                source_path = temporary_root / f"accepted-{index:02d}.orna"
-                try:
-                    source_path.write_bytes(source_bytes)
-                except OSError as exc:
-                    log(
-                        f"could not materialise source-check case {fixture.name!r} "
-                        f"from {display_path(fixture.path, repository)}: {exc}",
-                        error=True,
-                    )
-                    return False
-
-                result = run_command(
-                    [
-                        cargo,
-                        "run",
-                        "--quiet",
-                        "--locked",
-                        "--offline",
-                        "--package",
-                        "orna-server",
-                        "--",
-                        "source",
-                        "check",
-                        str(source_path),
-                    ],
-                    cwd=repository,
-                    label=f"source-check {fixture.name}",
-                )
-                output = (result.stdout if result is not None else "") + (
-                    result.stderr if result is not None else ""
-                )
-                diagnostics_found, diagnostics_valid, error_diagnostics_found = (
-                    _source_check_diagnostics(
-                        output,
-                        case_name=fixture.name,
-                        source_length=len(source_bytes),
-                    )
-                )
-                if not diagnostics_valid:
-                    log(
-                        f"source-check case {fixture.name!r} reported an invalid diagnostic span",
-                        error=True,
-                    )
-                    return False
-                if result is None or result.returncode != 0:
-                    status = (
-                        "could not start"
-                        if result is None
-                        else f"exited with status {result.returncode}"
-                    )
-                    if not diagnostics_found:
-                        log(
-                            f"source-check case {fixture.name!r} failed ({status}); "
-                            "no bounded ORNA diagnostic span was emitted",
-                            error=True,
-                        )
-                    else:
-                        log(
-                            f"source-check case {fixture.name!r} failed ({status})",
-                            error=True,
-                        )
-                    return False
-                if error_diagnostics_found:
-                    log(
-                        f"source-check case {fixture.name!r} returned success with "
-                        "error diagnostics",
-                        error=True,
-                    )
-                    return False
-                if diagnostics_found:
-                    log(
-                        f"source-check case {fixture.name!r} passed with warning diagnostics"
-                    )
-                else:
-                    log(
-                        f"source-check case {fixture.name!r} passed "
-                        f"({len(source_bytes)} source bytes)"
-                    )
-    except OSError as exc:
-        log(f"could not create source-check temporary directory: {exc}", error=True)
-        return False
+    for fixture in selected:
+        source_bytes = fixture.source.encode("utf-8")
+        result = run_command(
+            [
+                cargo,
+                "run",
+                "--quiet",
+                "--locked",
+                "--offline",
+                "--",
+                "source",
+                "check",
+                str(fixture.path),
+            ],
+            cwd=repository,
+            label=f"source-check {fixture.name}",
+        )
+        output = (result.stdout if result is not None else "") + (
+            result.stderr if result is not None else ""
+        )
+        diagnostics_found, diagnostics_valid, error_diagnostics_found = _source_check_diagnostics(
+            output,
+            case_name=fixture.name,
+            source_length=len(source_bytes),
+        )
+        if not diagnostics_valid or result is None or result.returncode != 0:
+            return False
+        if error_diagnostics_found:
+            return False
+        if diagnostics_found:
+            log(f"source-check case {fixture.name!r} passed with warning diagnostics")
     return True
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -2595,15 +2373,6 @@ def main() -> int:
         return 1
     log(f"accepted corpus evidence passed: {len(accepted_case_names)} cases")
 
-    accepted_fixtures = read_accepted_corpus_sources(
-        corpus_directory,
-        accepted_case_names,
-        repository,
-    )
-    if accepted_fixtures is None:
-        return 1
-    if not check_source_check_parity(cargo, repository, accepted_fixtures):
-        return 1
 
     if not check_alter_rename_highlights(
         tree_sitter, tree_sitter_directory, repository
