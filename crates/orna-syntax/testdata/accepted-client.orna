@@ -11,3 +11,12 @@ IS
 BEGIN
     RETURN TRUE;
 END;
+CREATE CLIENT FUNCTION accepted_client.v4_stateful()
+RETURNS TEXT
+IS
+    STATE local_value TEXT SCOPE LOCAL DEFAULT 'local';
+    STATE session_value TEXT SCOPE SESSION DEFAULT 'session';
+    STATE user_value TEXT SCOPE USER;
+BEGIN
+    RETURN local_value;
+END;
