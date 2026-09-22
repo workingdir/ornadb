@@ -377,6 +377,102 @@ impl<T: OvbCodec> OvbCodec for Option<T> {
     }
 }
 
+fn tuple_components<'a>(value: &'a Value, path: &[String]) -> std::result::Result<&'a [Raw], DecodeError> {
+    let Raw::Tag(60015, payload) = value.raw() else {
+        return Err(decode_type_mismatch(path));
+    };
+    let Raw::Array(components) = payload.as_ref() else {
+        return Err(decode_type_mismatch(path));
+    };
+    Ok(components)
+}
+
+fn decode_tuple_element<T: OvbCodec>(
+    raw: &Raw,
+    index: usize,
+    path: &mut Vec<String>,
+) -> std::result::Result<T, DecodeError> {
+    path.push(index.to_string());
+    path.push(T::type_label().to_owned());
+    let result = Value::new(raw.clone())
+        .map_err(|error| DecodeError::new(error, path.clone()))
+        .and_then(|value| T::decode_value(&value, path));
+    path.pop();
+    path.pop();
+    result
+}
+
+impl OvbCodec for () {
+    fn type_label() -> &'static str {
+        "Unit"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        Ok(Value::unit())
+    }
+
+    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+        let Raw::Tag(60014, payload) = value.raw() else {
+            return Err(decode_type_mismatch(path));
+        };
+        let Raw::Array(components) = payload.as_ref() else {
+            return Err(decode_type_mismatch(path));
+        };
+        if components.is_empty() {
+            Ok(())
+        } else {
+            Err(decode_type_mismatch(path))
+        }
+    }
+}
+
+macro_rules! impl_tuple_codec {
+    ($(($arity:literal; $($index:tt: $type:ident),+)),+ $(,)?) => {
+        $(
+            impl<$($type: OvbCodec),+> OvbCodec for ($($type,)+) {
+                fn type_label() -> &'static str {
+                    "Tuple"
+                }
+
+                fn encode_value(&self) -> Result<Value> {
+                    let components = vec![
+                        $(self.$index.encode_value()?.0,)+
+                    ];
+                    Value::new(tag(60015, Raw::Array(components)))
+                }
+
+                fn decode_value(
+                    value: &Value,
+                    path: &mut Vec<String>,
+                ) -> std::result::Result<Self, DecodeError> {
+                    let components = tuple_components(value, path)?;
+                    if components.len() != $arity {
+                        return Err(decode_type_mismatch(path));
+                    }
+                    Ok((
+                        $(decode_tuple_element::<$type>(&components[$index], $index, path)?,)+
+                    ))
+                }
+            }
+        )+
+    };
+}
+
+impl_tuple_codec!(
+    (1; 0: A),
+    (2; 0: A, 1: B),
+    (3; 0: A, 1: B, 2: C),
+    (4; 0: A, 1: B, 2: C, 3: D),
+    (5; 0: A, 1: B, 2: C, 3: D, 4: E),
+    (6; 0: A, 1: B, 2: C, 3: D, 4: E, 5: F),
+    (7; 0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G),
+    (8; 0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H),
+    (9; 0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I),
+    (10; 0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J),
+    (11; 0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K),
+    (12; 0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L),
+);
+
 /// A typed view of the portable OVB Error value (tag 60016).
 ///
 /// This wrapper carries no execution or language-level error semantics.  It
