@@ -361,6 +361,132 @@ fn push_keeps_second_phase_atomic_after_allocator_first() {
 }
 
 #[test]
+fn push_does_not_treat_allocator_shadow_as_allocator() {
+    let fixture = Fixture::new();
+    let initial = fixture.initial_head();
+    fs::write(
+        fixture.source.join("main.orna"),
+        "module main;\n\n// next\n",
+    )
+    .unwrap();
+    git(&fixture.source, &["add", "main.orna"]);
+    git(&fixture.source, &["commit", "-m", "next"]);
+    let next = git(&fixture.source, &["rev-parse", "HEAD"]);
+    let allocator_shadow = "refs/orna/allocator-shadow";
+    git(
+        &fixture.source,
+        &["update-ref", allocator_shadow, &next],
+    );
+    git(
+        &fixture.source,
+        &["update-ref", INTERNAL_REF, &next],
+    );
+    git(
+        &fixture.source,
+        &["update-ref", OTHER_INTERNAL_REF, &next],
+    );
+
+    let hook = fixture.remote.join("hooks/update");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"{OTHER_INTERNAL_REF}\" ]; then exit 1; fi\nexit 0\n"
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&hook).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&hook, permissions).unwrap();
+
+    let repository = Repository::discover(&fixture.source).unwrap();
+    let request = PushRequest::new(
+        "origin",
+        "main",
+        [
+            OrnaInternalRef::new(allocator_shadow).unwrap(),
+            OrnaInternalRef::new(INTERNAL_REF).unwrap(),
+            OrnaInternalRef::new(OTHER_INTERNAL_REF).unwrap(),
+        ],
+    )
+    .unwrap();
+    assert!(matches!(
+        repository.push(&request),
+        Err(FetchError::PushFailed)
+    ));
+    assert!(!git_status(
+        &fixture.remote,
+        &["show-ref", "--verify", "--quiet", "--", allocator_shadow]
+    ));
+    assert_eq!(
+        git(&fixture.remote, &["rev-parse", "refs/heads/main"]),
+        initial
+    );
+    assert_eq!(
+        git(&fixture.remote, &["rev-parse", INTERNAL_REF]),
+        initial
+    );
+}
+
+#[test]
+fn push_rejects_unsupported_atomic_before_allocator_advance() {
+    let fixture = Fixture::new();
+    let initial = fixture.initial_head();
+    git(
+        &fixture.source,
+        &["update-ref", ALLOCATOR_REF, &initial],
+    );
+    let allocator_refspec = format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}");
+    git(&fixture.source, &["push", "origin", &allocator_refspec]);
+    fs::write(
+        fixture.source.join("main.orna"),
+        "module main;\n\n// next\n",
+    )
+    .unwrap();
+    git(&fixture.source, &["add", "main.orna"]);
+    git(&fixture.source, &["commit", "-m", "next"]);
+    let next = git(&fixture.source, &["rev-parse", "HEAD"]);
+    git(
+        &fixture.source,
+        &["update-ref", ALLOCATOR_REF, &next],
+    );
+    git(
+        &fixture.source,
+        &["update-ref", INTERNAL_REF, &next],
+    );
+    git(
+        &fixture.remote,
+        &["config", "receive.advertiseAtomic", "false"],
+    );
+
+    let repository = Repository::discover(&fixture.source).unwrap();
+    let request = PushRequest::new(
+        "origin",
+        "main",
+        [
+            OrnaInternalRef::new(ALLOCATOR_REF).unwrap(),
+            OrnaInternalRef::new(INTERNAL_REF).unwrap(),
+        ],
+    )
+    .unwrap();
+    assert!(matches!(
+        repository.push(&request),
+        Err(FetchError::PushFailed)
+    ));
+    assert_eq!(
+        git(&fixture.remote, &["rev-parse", ALLOCATOR_REF]),
+        initial
+    );
+    assert_eq!(
+        git(&fixture.remote, &["rev-parse", INTERNAL_REF]),
+        initial
+    );
+    assert_eq!(
+        git(&fixture.remote, &["rev-parse", "refs/heads/main"]),
+        initial
+    );
+}
+
+#[test]
 fn fetch_preconditions_ignore_inherited_git_routing_child() {
     let Ok(local) = std::env::var(FETCH_CHILD_LOCAL) else {
         return;

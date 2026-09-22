@@ -614,7 +614,7 @@ impl Repository {
         let branch_ref = format!("refs/heads/{}", request.branch());
         let mut internal = request.internal.clone();
         internal.sort_by_key(|reference| {
-            if reference.ends_with("/allocator") {
+            if reference == ALLOCATOR_REF {
                 0
             } else {
                 1
@@ -626,14 +626,38 @@ impl Repository {
             .collect::<Vec<_>>();
         ordered.push(format!("{branch_ref}:{branch_ref}"));
         let _lock = self.acquire_coordination_lock()?;
+        self.preflight_atomic(request.remote(), &branch_ref)?;
         let allocator = ordered
             .iter()
-            .position(|refspec| refspec.starts_with("refs/orna/") && refspec.contains("allocator"));
+            .position(|refspec| refspec == &format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}"));
         if let Some(index) = allocator {
             let allocator_ref = ordered.remove(index);
             self.push_refspecs(request.remote(), std::slice::from_ref(&allocator_ref), false)?;
         }
         self.push_refspecs(request.remote(), &ordered, true)
+    }
+
+    fn preflight_atomic(&self, remote: &str, branch_ref: &str) -> Result<(), FetchError> {
+        let branch_refspec = format!("{branch_ref}:{branch_ref}");
+        let mut command = self.observer_command();
+        command.args([
+            "push",
+            "--atomic",
+            "--dry-run",
+            "--porcelain",
+            "--no-follow-tags",
+            remote,
+            &branch_refspec,
+        ]);
+        command
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+            .status()
+            .map_err(|_| FetchError::RemoteUnavailable)?
+            .success()
+            .then_some(())
+            .ok_or(FetchError::PushFailed)
     }
 
     fn push_refspecs(
@@ -658,8 +682,10 @@ impl Repository {
             .success()
             .then_some(())
             .ok_or(FetchError::PushFailed)
+    }
 }
-}
+
+const ALLOCATOR_REF: &str = "refs/orna/allocator";
 
 impl From<RefPlan> for FetchedRef {
     fn from(plan: RefPlan) -> Self {
