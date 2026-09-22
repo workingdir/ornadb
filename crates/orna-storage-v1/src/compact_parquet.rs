@@ -1288,7 +1288,7 @@ fn descriptor_field_id(
         {
             return Err(CompactParquetError::UnsupportedKeyMapping);
         }
-        None
+        Some(kind)
     };
     Ok((id, kind))
 }
