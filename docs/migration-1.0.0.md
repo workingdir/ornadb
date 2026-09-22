@@ -37,11 +37,10 @@ predecessor and forward-edge sets. In particular:
 - Do not edit `_orna_kernel` tables, retained revision rows, generated SQL, or
   migration ledger entries by hand. Recovery validates their identities and
   digests, and hand edits are unsupported.
-- Do not split one application into PostgreSQL-specific and SQLite-specific
-  `.orna` files. Orna source is backend-neutral. Keep one source model and let
-  the selected adapter accept or reject its currently implemented physical
-  subset; an unsupported shape must fail closed, not acquire different
-  backend-specific semantics.
+- Do not split one application into backend-specific `.orna` files. Orna source
+  is backend-neutral. Keep one source model and let the selected adapter accept
+  or reject its currently implemented physical subset; an unsupported shape
+  must fail closed, not acquire different semantics.
 - Do not treat a retained evidence artifact, a local binary, or a build directory as
   a production distribution authority. The old
   [first-release decision](decisions/0047-first-one-zero-release.md) records a
@@ -125,46 +124,28 @@ The `.orna` source and its typed application model are the portable contract.
 The current adapters do not expose equivalent *implementation capacity* for
 every runtime surface yet:
 
-- The managed local route uses a private embedded PostgreSQL kernel. It does
-  not provide public PostgreSQL TCP/pgwire/SQL or PostgreSQL driver
-  compatibility. See the [embedded PostgreSQL decision](decisions/0019-embedded-postgresql-engine.md).
 - A filesystem endpoint uses the direct SQLite adapter. Its current physical
   implementation is bounded: supported object creation and field additions
   use the typed storage model, while unsupported value/enum/record/binding
   shapes, unsupported scalar fields, and other unimplemented physical
   operations fail closed. SQLite does not reinterpret the source as a second
-  language or silently fall back to PostgreSQL.
-- The same source should remain the input on both backends. A SQLite rejection
+  language or silently add backend-specific semantics.
+- The source remains portable across supported adapters. A SQLite rejection
   identifies an adapter capability boundary that must be implemented before
   that deployment can use the source shape; it is not permission to fork the
   source or write backend-specific SQL.
 - Direct SQLite invocation currently accepts SERVER functions only. It does
-  not provide the managed route's CLIENT/Qt/resource transports, `--trace`, or
-  a Qt runtime. USER state, security administration, bounded raw calls, and
-  redacted inspection have direct local routes.
+  not provide CLIENT/Qt/resource transports, `--trace`, or a Qt runtime. USER
+  state, security administration, bounded raw calls, and redacted inspection
+  have direct local routes.
 
 The internal migration language is deliberately closed and typed rather than
 SQL. The checked-in application migration source is
 `crates/orna-storage/migrations/0046_application_migrations.orna`; users should
 not edit it or its generated adapter artifacts.
+SQLite has its own internal schema bootstrap and migration boundary. This is an
+adapter implementation detail and does not alter the source language.
 
-## Engine and internal schema migrations (managed-product route)
-
-The PostgreSQL bootstrap currently applies a contiguous internal migration
-registry through version 47. Version 46 establishes the application-migration
-ledger; version 47 adds its baseline data step. These are engine/storage
-migrations, not application `.orna` source migrations and not a user-facing
-cross-backend SQL format.
-
-The baseline has a deliberate limitation: physical changes made before the
-ledger existed did not retain replayable artifacts. The baseline binds the
-known source/catalogue ancestry to empty historical artifacts so lineage can be
-validated; it does **not** reconstruct those old physical operations. Do not
-infer a reversible history from the presence of the baseline row.
-
-SQLite has its own internal schema bootstrap and migration boundary. That is an
-adapter implementation detail. It does not alter the source language or create
-a supported PostgreSQL-to-SQLite physical/runtime parity guarantee.
 
 ## Standard-library compatibility (managed-product evidence)
 
@@ -267,12 +248,9 @@ baseline has no accepted predecessor or forward upgrade edge.
 The [maintainer runbook](maintainer-runbook.md) defines the required
 prerequisites and evidence vocabulary. In particular:
 
-- `cargo fetch --locked` is networked dependency provisioning. `CARGO_NET_OFFLINE=true`
-  only makes Cargo dependency resolution fail closed; it does not make an
-  embedded-engine build host- or network-free.
-- The embedded PostgreSQL submodule must be the pinned clean gitlink documented
-  by the runbook. Native engine, Compose/PostgreSQL, Qt/ABI, and clean-host
-  package gates require their own commands and retained output.
+- `cargo fetch --locked` is networked dependency provisioning.
+  `CARGO_NET_OFFLINE=true` only makes Cargo dependency resolution fail closed;
+  it does not make a native build host- or network-free.
 - The immutable 1.0.0 reference bundle supplies the current normative contract
   and authored conformance cases. Local implementation, ABI, and native-host
   gates may still be unavailable or unexecuted; under the bundle's conformance
@@ -288,7 +266,6 @@ prerequisites and evidence vocabulary. In particular:
 | Surface | Current boundary | 1.0 migration claim |
 | --- | --- | --- |
 | `.orna` source | Backend-neutral typed source model | One portable source; no public backend-specific SQL |
-| Managed local endpoint | Private embedded PostgreSQL route | No public PostgreSQL/pgwire/driver compatibility |
 | Filesystem endpoint | Bounded direct SQLite route | No full physical/runtime parity claim |
 | Explicit Unix/remote endpoint | Bounded current-socket `invoke` only for Unix; remote transport unavailable | No migration or general remote-session support |
 | Application source revisions | Typed ledger, hashes, atomic apply | Supported only on a ready compatible engine |
