@@ -669,8 +669,8 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
         Some(_) => {
             return Err(Diagnostic::usage(
                 "E1002",
-                "command is not supported by this bounded slice",
-                "use `repl`, `init`, `run`, `--help`, or `--version`",
+                "unknown Orna command",
+                "use `--help` to list supported commands",
             ));
         }
     };
@@ -1920,8 +1920,16 @@ mod tests {
                 .code,
             "E1001"
         );
-        let error = parse_cli(&["serve".into()]).expect_err("unsupported");
-        assert_eq!((error.code, error.exit), ("E1002", Exit::Usage));
+        let error = parse_cli(&["serve".into()]).expect_err("unknown command");
+        assert_eq!(
+            (error.code, error.exit, error.title, error.help),
+            (
+                "E1002",
+                Exit::Usage,
+                "unknown Orna command",
+                "use `--help` to list supported commands",
+            )
+        );
     }
 
     #[test]
