@@ -426,6 +426,114 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
 }
 
 #[tokio::test]
+async fn durable_function_value_table_assertion_commits_and_rolls_back_candidate_rows() {
+    let valid_source = durable_source(
+        "ASSERT-FUNCTION-VALUE-VALID",
+        r#"
+            pub table Note(id: Int) {
+                value: Int,
+                assert valid_notes;
+            }
+            fn valid_notes(rows: Relation<Note>): Bool =
+                rows | filter(note => note.value > 0) | count == 2;
+            fn parent() {
+                Note.insert({ id: 1, value: 10 });
+                Note.insert({ id: 2, value: 20 });
+            }
+        "#,
+    );
+    let (_temp, repository) = durable_repository();
+    let identity = RuntimeIdentity {
+        database_id: [91; 16],
+        repository_id: [92; 16],
+    };
+    let evaluator = DurableTransactionalEvaluator::new("parent", Limits::default());
+    let valid_outcome = evaluator
+        .execute_source(
+            &repository,
+            identity,
+            [93; 16],
+            [94; 32],
+            &valid_source,
+        )
+        .await
+        .expect("durable pure function assertion commit");
+    assert!(
+        matches!(valid_outcome, StageOutcome::Passed),
+        "two positive Note rows must satisfy valid_notes: {valid_outcome:?}"
+    );
+    let valid_state = RuntimeState::open(&repository, identity, [94; 32])
+        .await
+        .expect("reopen after pure function assertion commit");
+    let valid_rows = valid_state
+        .committed_table_rows("Note")
+        .await
+        .expect("committed Note rows");
+    assert_eq!(valid_rows.len(), 2);
+    assert!(valid_rows
+        .iter()
+        .any(|(key, _)| key == &Value::int(1.into()).encode().unwrap()));
+    assert!(valid_rows
+        .iter()
+        .any(|(key, _)| key == &Value::int(2.into()).encode().unwrap()));
+    valid_state
+        .recover_abandoned([93; 16], [95; 16])
+        .await
+        .expect("recover retained durable lease before rollback attempt");
+    drop(valid_state);
+
+    let invalid_source = durable_source(
+        "ASSERT-FUNCTION-VALUE-INVALID",
+        r#"
+            pub table Note(id: Int) {
+                value: Int,
+                assert valid_notes;
+            }
+            fn valid_notes(rows: Relation<Note>): Bool =
+                rows | filter(note => note.value > 0) | count == 2;
+            fn parent() {
+                Note.insert({ id: 3, value: 30 });
+                Note.insert({ id: 4, value: -40 });
+            }
+        "#,
+    );
+    let invalid_outcome = evaluator
+        .execute_source(
+            &repository,
+            identity,
+            [95; 16],
+            [94; 32],
+            &invalid_source,
+        )
+        .await
+        .expect("durable pure function assertion rollback");
+    assert!(
+        matches!(
+            &invalid_outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+        ),
+        "invalid candidate must retain the table assertion diagnostic: {invalid_outcome:?}"
+    );
+    let invalid_state = RuntimeState::open(&repository, identity, [94; 32])
+        .await
+        .expect("reopen after pure function assertion rollback");
+    let rows_after_rollback = invalid_state
+        .committed_table_rows("Note")
+        .await
+        .expect("rolled-back Note rows");
+    assert_eq!(
+        rows_after_rollback.len(),
+        2,
+        "the assertion failure must preserve only the prior committed rows"
+    );
+    assert!(rows_after_rollback
+        .iter()
+        .all(|(key, _)| key == &Value::int(1.into()).encode().unwrap()
+            || key == &Value::int(2.into()).encode().unwrap()));
+}
+
+#[tokio::test]
 async fn assert_checkpoint_091_exposes_durable_runtime_adapter_evidence() {
     let contract = scenario("ASSERT-CHECKPOINT-091");
     assert_eq!(
