@@ -4081,6 +4081,159 @@ struct ListTableHandler {
     digest: [u8; 32],
 }
 
+struct CandidateRelationEffectHandler<'a> {
+    rows: &'a orna_runtime_v1::RuntimeTableRows,
+}
+
+impl EffectHandler for CandidateRelationEffectHandler<'_> {
+    fn handle(
+        &mut self,
+        _callee: &Expr,
+        _arguments: &[Value],
+    ) -> Result<Option<Value>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn scan_relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+        max_rows: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        let Some(candidates) = self.rows.get(source) else {
+            return Ok(None);
+        };
+        if max_rows == 0 {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        let start = relation_cursor_start(after)?;
+        if start > candidates.len() {
+            return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
+        }
+        let end = start.saturating_add(max_rows).min(candidates.len());
+        let mut rows = Vec::with_capacity(end - start);
+        for (_, encoded) in &candidates[start..end] {
+            budget.debit(1)?;
+            rows.push(
+                Value::decode(encoded)
+                    .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ASSERT"))?,
+            );
+        }
+        Ok(Some(RelationPage {
+            rows,
+            next: (end < candidates.len()).then(|| (end as u64).to_be_bytes().to_vec()),
+        }))
+    }
+}
+
+fn relation_cursor_start(after: Option<&[u8]>) -> Result<usize, EvaluationError> {
+    let Some(after) = after else {
+        return Ok(0);
+    };
+    let cursor: [u8; 8] = after
+        .try_into()
+        .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ASSERT"))?;
+    usize::try_from(u64::from_be_bytes(cursor))
+        .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ASSERT"))
+}
+
+fn table_assertion_function<'a>(
+    assertion: &'a Expr,
+    functions: &Functions,
+) -> Option<&'a str> {
+    match assertion {
+        Expr::Name { text, .. } if functions.contains_key(text) => Some(text),
+        _ => None,
+    }
+}
+
+fn evaluate_function_assertion(
+    table: &str,
+    assertion: &Expr,
+    functions: &Functions,
+    limits: EvaluatorLimits,
+    budget: &mut StepBudget,
+    effects: &mut dyn EffectHandler,
+) -> Result<Value, EvaluationError> {
+    let span = assertion.span();
+    let body = Expr::Call {
+        callee: Box::new(assertion.clone()),
+        arguments: vec![orna_syntax_v1::Argument {
+            name: None,
+            value: relation_source_expression(table, span.clone()),
+            span: span.clone(),
+        }],
+        span,
+    };
+    let wrapper_name = "__orna_table_assertion";
+    let mut admitted = functions.clone();
+    admitted.insert(
+        wrapper_name.into(),
+        RetainedFunction {
+            parameters: Vec::new(),
+            body,
+            environment: Environment::new(),
+        },
+    );
+    let result = invoke_named_with_effects_and_budget(
+        wrapper_name,
+        &admitted,
+        &Environment::new(),
+        limits,
+        effects,
+        budget,
+    );
+    result
+}
+
+struct ActivationRelationEffectHandler<'a, 'runtime> {
+    activation: &'a TransactionActivation<'runtime>,
+}
+
+impl EffectHandler for ActivationRelationEffectHandler<'_, '_> {
+    fn handle(
+        &mut self,
+        _callee: &Expr,
+        _arguments: &[Value],
+    ) -> Result<Option<Value>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn scan_relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+        max_rows: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        if max_rows == 0 {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        let start = relation_cursor_start(after)?;
+        let candidates = self
+            .activation
+            .candidate_relation(&source.to_owned())
+            .map_err(|error| transaction_error(table_error_code(error)))?;
+        let mut rows = Vec::new();
+        let mut next = None;
+        for (index, (_, row)) in candidates.enumerate().skip(start) {
+            if rows.len() == max_rows {
+                next = Some((index as u64).to_be_bytes().to_vec());
+                break;
+            }
+            budget.debit(1)?;
+            rows.push(row);
+        }
+        Ok(Some(RelationPage { rows, next }))
+    }
+}
 struct TransactionalTableCandidateValidator {
     table_assertions: TableAssertions,
     module_assertions: ModuleAssertions,
@@ -4127,6 +4280,22 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
         let mut budget = StepBudget::new(self.limits.max_steps);
         for (table, assertions) in &self.table_assertions {
             for assertion in assertions {
+                if table_assertion_function(&assertion.expression, &self.functions).is_some() {
+                    let mut effects = CandidateRelationEffectHandler { rows };
+                    let value = evaluate_function_assertion(
+                        table,
+                        &assertion.expression,
+                        &self.functions,
+                        self.limits,
+                        &mut budget,
+                        &mut effects,
+                    )
+                    .map_err(|_| table_assertion_diagnostic())?;
+                    if !matches!(value.raw(), OvbRaw::Bool(true)) {
+                        return Err(table_assertion_diagnostic());
+                    }
+                    continue;
+                }
                 let (kind, binding, predicate) = table_assertion_predicate(&assertion.expression)
                     .map_err(|_| table_assertion_diagnostic())?;
                 let mut projections = BTreeSet::new();
@@ -4217,6 +4386,22 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
     fn validate(&mut self, rows: &orna_runtime_v1::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
         let mut budget = StepBudget::new(self.limits.max_steps);
         for assertion in &self.assertions {
+            if table_assertion_function(&assertion.expression, &self.functions).is_some() {
+                let mut effects = CandidateRelationEffectHandler { rows };
+                let value = evaluate_function_assertion(
+                    &self.table,
+                    &assertion.expression,
+                    &self.functions,
+                    self.limits,
+                    &mut budget,
+                    &mut effects,
+                )
+                .map_err(|_| table_assertion_diagnostic())?;
+                if !matches!(value.raw(), OvbRaw::Bool(true)) {
+                    return Err(table_assertion_diagnostic());
+                }
+                continue;
+            }
             let (kind, binding, predicate) = table_assertion_predicate(&assertion.expression)
                 .map_err(|_| table_assertion_diagnostic())?;
             let mut projections = BTreeSet::new();
@@ -7898,6 +8083,21 @@ fn validate_table_assertions(
 ) -> Result<(), EvaluationError> {
     for (table, assertions) in assertions {
         for assertion in assertions {
+            if table_assertion_function(&assertion.expression, functions).is_some() {
+                let mut effects = ActivationRelationEffectHandler { activation };
+                let value = evaluate_function_assertion(
+                    table,
+                    &assertion.expression,
+                    functions,
+                    limits,
+                    budget,
+                    &mut effects,
+                )?;
+                if !matches!(value.raw(), OvbRaw::Bool(true)) {
+                    return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
+                }
+                continue;
+            }
             let (kind, binding, predicate) = table_assertion_predicate(&assertion.expression)?;
             let mut projections = BTreeSet::new();
             let mut candidate_rows = 0usize;
