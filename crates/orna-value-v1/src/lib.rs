@@ -314,6 +314,73 @@ impl Decimal {
     pub fn exponent10(&self) -> &BigInt {
         &self.exponent10
     }
+    /// Renders this already-normalized Decimal in the canonical Orna text
+    /// spelling. The representation stays exact and never passes through a
+    /// binary floating-point value.
+    pub fn canonical_text(&self) -> String {
+        format!("{}e{}.decimal", self.coefficient, self.exponent10)
+    }
+
+    /// Parses only the canonical Orna Decimal text spelling.
+    ///
+    /// The parser intentionally rejects alternate spellings (including
+    /// trailing coefficient zeroes, leading zeroes and a `+` exponent) so a
+    /// textual value cannot acquire a second identity from the same exact
+    /// decimal.
+    pub fn from_canonical_text(text: &str) -> Result<Self> {
+        let body = text.strip_suffix(".decimal").ok_or(Error::InvalidValue)?;
+        let (coefficient_text, exponent_text) =
+            body.split_once('e').ok_or(Error::InvalidValue)?;
+        if coefficient_text.is_empty() || exponent_text.is_empty() {
+            return Err(Error::InvalidValue);
+        }
+
+        let (negative, digits) = coefficient_text
+            .strip_prefix('-')
+            .map_or((false, coefficient_text), |digits| (true, digits));
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(Error::InvalidValue);
+        }
+        if (digits.len() > 1 && digits.starts_with('0')) || (negative && digits == "0") {
+            return Err(Error::NonCanonical);
+        }
+        let mut coefficient =
+            BigInt::parse_bytes(digits.as_bytes(), 10).ok_or(Error::InvalidValue)?;
+        if negative {
+            coefficient = -coefficient;
+        }
+
+        let (negative_exponent, exponent_digits) = exponent_text
+            .strip_prefix('-')
+            .map_or((false, exponent_text), |digits| (true, digits));
+        if exponent_digits.is_empty()
+            || !exponent_digits
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+        {
+            return Err(Error::InvalidValue);
+        }
+        if exponent_digits.len() > 1 && exponent_digits.starts_with('0') {
+            return Err(Error::NonCanonical);
+        }
+        if exponent_digits.len() > 7 {
+            return Err(Error::DecimalLimit);
+        }
+        let mut exponent =
+            BigInt::parse_bytes(exponent_digits.as_bytes(), 10).ok_or(Error::InvalidValue)?;
+        if negative_exponent {
+            if exponent.is_zero() {
+                return Err(Error::NonCanonical);
+            }
+            exponent = -exponent;
+        }
+
+        let decimal = Self::try_new(coefficient, exponent)?;
+        if decimal.canonical_text() != text {
+            return Err(Error::NonCanonical);
+        }
+        Ok(decimal)
+    }
     fn raw(&self) -> Raw {
         tag(
             60000,
