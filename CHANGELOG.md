@@ -26,13 +26,8 @@ for the required release authority and the
 ### Product boundary
 
 - OrnaDB is a backend-neutral `.orna` source language and typed application
-  model. A source file does not select a PostgreSQL or SQLite dialect, and the
-  public product does not ask users to write backend-specific SQL.
-- The managed local implementation uses a private embedded PostgreSQL kernel.
-  It is not a public PostgreSQL server: there is no promise of pgwire, TCP SQL,
-  PostgreSQL driver compatibility, external PostgreSQL extensions, or a host
-  PostgreSQL process. The [embedded-engine decision](docs/decisions/0019-embedded-postgresql-engine.md)
-  records this boundary.
+  model. A source file does not select a backend dialect, and the public product
+  does not ask users to write backend-specific SQL.
 - A filesystem database path selects the direct SQLite adapter. That adapter is
   a bounded implementation/runtime route for the same source model; it does
   not define a second source language. Physical operations the adapter cannot
@@ -98,11 +93,6 @@ release gate has passed.
   users must not edit generated SQL or internal `_orna_kernel` tables. The
   application migration ledger retains expected and candidate source/catalogue
   revision pairs, canonical bytes, and digests.
-- The PostgreSQL migration registry currently contains internal migrations
-  through version 47, including the application-migration ledger and its
-  baseline data step. The baseline preserves historical source/catalogue
-  lineage with empty physical artifacts; it does not reconstruct unrecorded
-  pre-ledger physical operations.
 - Revision recovery validates lineage, active pointers, ledger order, canonical
   digests, and post-apply reproduction. Historical source and standard
   snapshots are immutable inputs to this verification; hand-editing retained
@@ -135,14 +125,13 @@ from the implementation inventory:
   installed `invoke` route, reflective JSON-RPC/MCP gateways, a production
   CLIENT VM/sandbox, arbitrary toolkit or browser runtimes, and richer Studio
   workflows.
-- PostgreSQL/SQLite physical or runtime parity beyond the bounded adapter
-  capabilities described above. Unsupported SQLite physical shapes fail
-  closed; the source language remains backend-neutral.
-- Native embedded-engine, Compose/PostgreSQL, Qt/ABI, editor-host, and
-  clean-host distribution checks unless a named command has been run with
-  retained evidence. `CARGO_NET_OFFLINE=true` only makes Cargo dependency
-  resolution fail closed; it does not make an embedded-engine build host- or
-  network-free.
+- SQLite physical/runtime parity beyond the bounded adapter capabilities
+  described above. Unsupported SQLite physical shapes fail closed; the source
+  language remains backend-neutral.
+- Native Qt/ABI, editor-host, and clean-host distribution checks unless a named
+  command has been run with retained evidence. `CARGO_NET_OFFLINE=true` only
+  makes Cargo dependency resolution fail closed; it does not make a native
+  build host- or network-free.
 - A production package, repository publication, signing, SBOM/package
   inventory, support period, SLA, backup/DR policy, or recovery guarantee.
   CI retention artifacts and local build outputs are not production
