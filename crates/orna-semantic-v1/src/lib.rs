@@ -1657,10 +1657,10 @@ fn collect_header(
         ) {
             ty = Type::Named(nominal_identity(namespace, &name));
         }
-        // The published `sys` table diagnostic belongs to typechecking. Do
-        // not admit this invalid declaration into the header, however: it
-        // must not shadow the portable root while its declaration check runs.
-        if matches!(&item.declaration, Declaration::Table { name, .. } if name == "sys") {
+        // `sys` is the implementation-provided namespace and must not enter
+        // a source module's header under any declaration kind.  Table `sys`
+        // retains its dedicated type diagnostic in `check_item`.
+        if name == "sys" {
             continue;
         }
         let public = matches!(item.visibility, Visibility::Public { .. });
@@ -3006,6 +3006,16 @@ fn check_item(
     plans: &mut Vec<AssertionPlan>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
+    if let Some((name, _, _)) = declared_symbol(item)
+        && name == "sys"
+        && !matches!(&item.declaration, Declaration::Table { .. })
+    {
+        diagnostics.push(diag(
+            DIAG_RESERVED,
+            "`sys` is an implementation-provided namespace and cannot be shadowed",
+        ));
+        return None;
+    }
     match &item.declaration {
         Declaration::Let {
             pattern,
