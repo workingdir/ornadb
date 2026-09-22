@@ -14,9 +14,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use orna_semantic_v1::{
-    Analysis, Catalogue, DIAG_ANNOTATION, DIAG_DUPLICATE, DIAG_TYPE, DIAG_UNRESOLVED,
-    DIAG_UNSUPPORTED, EffectSummary, ModuleHeader, ModuleInput, Namespace, Symbol, SymbolKind,
-    Type, analyze,
+    Analysis, AssertionOwner, Catalogue, DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT,
+    DIAG_DUPLICATE, DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED, EffectSummary, ModuleHeader,
+    ModuleInput, Namespace, Symbol, SymbolKind, Type, analyze,
 };
 use orna_syntax_v1::parse_module_with_file;
 
@@ -1716,6 +1716,89 @@ fn generic_calls_retain_callee_effect_and_failure_summaries() {
         .get("maybe")
         .expect("generic fallible function");
     assert!(maybe.effects.may_fail);
+}
+
+#[test]
+fn table_assertion_admits_pure_relation_function_value_and_retains_plan() {
+    let result = analyze_main(
+        r#"
+            pub table Note(id: Int) {
+                value: Int,
+                assert valid_notes;
+                assert every(note => note.value > 0);
+                assert all_unique(note => note.id);
+            }
+            pub fn valid_notes(rows: Relation<Note>): Bool =
+                rows | filter(note => note.value > 0) | count == 2;
+        "#,
+    );
+    expect_accepted(&result);
+
+    let module = result
+        .modules
+        .values()
+        .next()
+        .expect("pure relation assertion module");
+    assert!(matches!(
+        &module.symbols["valid_notes"].ty,
+        Type::Function { parameters, result, .. }
+            if parameters == &vec![Type::Relation(Box::new(Type::Named("Note".into())))]
+                && result.as_ref() == &Type::Bool
+    ));
+    assert!(module.symbols["valid_notes"].effects.effects.is_empty());
+    assert!(!module.symbols["valid_notes"].effects.may_fail);
+
+    let plans = result
+        .assertions
+        .values()
+        .next()
+        .expect("table assertion plan");
+    assert_eq!(plans.len(), 3);
+    assert!(plans
+        .iter()
+        .all(|plan| plan.owner == AssertionOwner::Table("Note".into())));
+    assert!(plans
+        .iter()
+        .all(|plan| plan.effects == EffectSummary::default()));
+}
+
+#[test]
+fn table_assertion_rejects_database_read_write_and_may_fail_function_values() {
+    for source in [
+        r#"
+            pub table Note(id: Int) { value: Int, assert reads; }
+            pub fn reads(rows: Relation<Note>): Bool = Note.count() > 0;
+        "#,
+        r#"
+            pub table Note(id: Int) { value: Int, assert writes; }
+            pub fn writes(rows: Relation<Note>): Bool {
+                Note.insert({ id: 1, value: 0 });
+                true
+            }
+        "#,
+        r#"
+            pub table Note(id: Int) { value: Int, assert maybe; }
+            pub fn maybe(rows: Relation<Note>): Bool = one([true]);
+        "#,
+    ] {
+        let result = analyze_main(source);
+        expect_diagnostics(&result, &[DIAG_ASSERTION_EFFECT]);
+    }
+}
+
+#[test]
+fn table_assertion_rejects_explicit_relation_read_for_pure_predicate() {
+    let result = analyze_main(
+        r#"
+            pub table Note(id: Int) {
+                value: Int,
+                assert valid_notes(Note);
+            }
+            pub fn valid_notes(rows: Relation<Note>): Bool =
+                rows | filter(note => note.value > 0) | count == 2;
+        "#,
+    );
+    expect_diagnostics(&result, &[DIAG_ASSERTION, DIAG_ASSERTION_EFFECT]);
 }
 
 #[test]
