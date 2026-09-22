@@ -11,7 +11,7 @@ use orna_foundation_v1::{
     CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText,
 };
 use orna_semantic_v1::{
-    Catalogue, EffectSummary, ReplContext, Type, analyze_with_catalogue,
+    Catalogue, EffectSummary, ReplAdmission, ReplContext, Type, analyze_with_catalogue,
 };
 use orna_syntax_v1::{Declaration, ReplInput, parse_module};
 
@@ -92,14 +92,14 @@ impl ReplError {
 ///
 /// This boundary owns no table writes or runtime commit. It carries the
 /// original parsed input together with the semantic result type and effect
-/// summary produced by [`ReplContext::stage`], so a downstream evaluator can
-/// execute the same AST under its activation context without reparsing or
-/// bypassing admission.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// summary produced by [`ReplContext::stage`], plus the opaque semantic
+/// successor that may be committed after a downstream activation succeeds.
+#[derive(Clone, Debug)]
 pub struct StagedReplActivation {
     input: ReplInput,
     result_type: Option<Type>,
     effects: EffectSummary,
+    admission: ReplAdmission,
 }
 
 impl StagedReplActivation {
@@ -120,6 +120,23 @@ impl StagedReplActivation {
     #[must_use]
     pub fn effects(&self) -> &EffectSummary {
         &self.effects
+    }
+
+    /// Publishes only the semantic successor after the downstream evaluator
+    /// has completed its activation successfully.
+    ///
+    /// Runtime/table state is deliberately not touched here. A stale or
+    /// foreign session rejects the handoff before semantic state changes.
+    pub fn commit_semantic(
+        self,
+        session: &mut AdmittedReplSession,
+    ) -> Result<(), ReplError> {
+        let mut semantic = session.semantic.clone();
+        semantic
+            .commit(self.admission)
+            .map_err(|_| ReplError::fixed("ORNA-REPL-COMMIT"))?;
+        session.semantic = semantic;
+        Ok(())
     }
 }
 
@@ -234,10 +251,13 @@ impl AdmittedReplSession {
         if admission.effects.effects.is_empty() {
             return Err(ReplError::fixed("ORNA-REPL-EFFECT"));
         }
+        let result_type = admission.ty.clone();
+        let effects = admission.effects.clone();
         Ok(StagedReplActivation {
             input,
-            result_type: admission.ty,
-            effects: admission.effects,
+            result_type,
+            effects,
+            admission,
         })
     }
 
