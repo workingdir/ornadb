@@ -18,6 +18,8 @@ const OTHER_INTERNAL_REF: &str = "refs/orna/checkpoints/0123456789abcdef";
 const STALE_INTERNAL_REF: &str = "refs/orna/runs/0123456789abcdef";
 const FETCH_CHILD_LOCAL: &str = "ORNA_FETCH_ROUTING_LOCAL";
 const FETCH_CHILD_OTHER: &str = "ORNA_FETCH_ROUTING_OTHER";
+const CLONE_CHILD_REMOTE: &str = "ORNA_CLONE_ROUTING_REMOTE";
+const CLONE_CHILD_DESTINATION: &str = "ORNA_CLONE_ROUTING_DESTINATION";
 
 fn git(directory: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
@@ -290,6 +292,55 @@ fn fetch_preconditions_ignore_inherited_git_routing_child() {
         .fetch(&request([RequestedRef::branch("main").unwrap()], []))
         .unwrap();
     assert!(report.ordinary()[0].updated());
+}
+
+#[test]
+fn clone_preconditions_ignore_inherited_git_routing_child() {
+    let Ok(remote) = std::env::var(CLONE_CHILD_REMOTE) else {
+        return;
+    };
+    let Ok(destination) = std::env::var(CLONE_CHILD_DESTINATION) else {
+        return;
+    };
+    Repository::clone_from(remote, destination).unwrap();
+}
+
+#[test]
+fn clone_preconditions_ignore_inherited_git_routing() {
+    let fixture = Fixture::new();
+    let other = fixture.root.path().join("other");
+    git(
+        fixture.root.path(),
+        &[
+            "clone",
+            fixture.remote.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    let destination = fixture.root.path().join("routing-safe-clone");
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "clone_preconditions_ignore_inherited_git_routing_child",
+            "--nocapture",
+        ])
+        .env(CLONE_CHILD_REMOTE, fixture.remote.to_str().unwrap())
+        .env(CLONE_CHILD_DESTINATION, destination.to_str().unwrap())
+        .env("GIT_DIR", other.join(".git").to_str().unwrap())
+        .env("GIT_WORK_TREE", other.to_str().unwrap())
+        .env("GIT_INDEX_FILE", other.join(".git/index").to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        git(&destination, &["rev-parse", INTERNAL_REF]),
+        fixture.initial_head()
+    );
+    assert!(!destination.join("main.orna").exists());
 }
 
 #[test]
