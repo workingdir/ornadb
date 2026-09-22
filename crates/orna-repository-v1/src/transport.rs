@@ -419,9 +419,15 @@ impl Repository {
             .iter()
             .map(|required| required.reference().as_str().to_owned())
             .collect::<Vec<_>>();
-        let mut sources = ordinary_sources.clone();
-        sources.extend(continuity_sources.iter().cloned());
-        let advertised = advertise(self, request.remote(), &sources, object_id_length)?;
+        let mut requested_sources = ordinary_sources.clone();
+        requested_sources.extend(continuity_sources);
+        // REMOTE-003 applies to ordinary fetch as well as an explicitly
+        // witnessed fetch: every advertised refs/orna/* ref must travel with
+        // the requested branch/tag.  Exact witnesses still gate continuity
+        // claims below; an unrequested internal ref is only synchronized.
+        let mut advertised =
+            advertise_fetch(self, request.remote(), &requested_sources, object_id_length)?;
+        let sources = advertised.keys().cloned().collect::<Vec<_>>();
 
         let mut ordinary_plans = Vec::with_capacity(request.ordinary.len());
         for requested in &request.ordinary {
@@ -443,28 +449,37 @@ impl Repository {
 
         let continuity = continuity_state(&request.continuity, &advertised, object_id_length)?;
         let mut internal_plans = Vec::new();
-        for required in &request.continuity {
-            let source = required.reference().as_str().to_owned();
-            // Synchronize every witness whose exact object is present even
-            // when another required witness is missing or stale.  The
-            // aggregate continuity result remains fail-closed, while
-            // available refs still obey ORNA-REMOTE-003 and can be carried
-            // forward for a later continuity-completing fetch.
-            if advertised
-                .get(&source)
-                .is_some_and(|actual| actual.eq_ignore_ascii_case(required.expected().as_str()))
+        let required = request
+            .continuity
+            .iter()
+            .map(|witness| {
+                (
+                    witness.reference().as_str(),
+                    witness.expected().as_str(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (source, object_id) in advertised
+            .iter()
+            .filter(|(source, _)| source.starts_with("refs/orna/"))
+        {
+            // An explicitly witnessed ref is installable only when its
+            // advertised object matches the expected continuity evidence.
+            // Unwitnessed refs are synchronized for REMOTE-003, but cannot
+            // establish a continuity claim because `continuity_state` only
+            // evaluates caller-supplied witnesses.
+            if required
+                .get(source.as_str())
+                .is_some_and(|expected| !object_id.eq_ignore_ascii_case(expected))
             {
-                let object_id = advertised
-                    .get(&source)
-                    .ok_or(FetchError::RequestedRefMissing)?
-                    .clone();
-                internal_plans.push(self.plan_ref(
-                    source.clone(),
-                    source,
-                    object_id,
-                    RefKind::Internal,
-                )?);
+                continue;
             }
+            internal_plans.push(self.plan_ref(
+                source.clone(),
+                source.clone(),
+                object_id.clone(),
+                RefKind::Internal,
+            )?);
         }
         // Keep the internal transaction's order stable regardless of the
         // caller's witness order. Allocator/checkpoint refs are one
@@ -778,6 +793,54 @@ fn advertise(
     }
     Ok(advertised)
 }
+fn advertise_fetch(
+    repository: &Repository,
+    remote: &str,
+    sources: &[String],
+    object_id_length: usize,
+) -> Result<BTreeMap<String, String>, FetchError> {
+    let mut command = repository.observer_command();
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["ls-remote", "--refs", remote])
+        .args(sources)
+        .arg("refs/orna/*");
+    let output = command
+        .output()
+        .map_err(|_| FetchError::RemoteUnavailable)?;
+    if !output.status.success() {
+        return Err(FetchError::RemoteUnavailable);
+    }
+    let text =
+        std::str::from_utf8(&output.stdout).map_err(|_| FetchError::MalformedAdvertisement)?;
+    if text.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let records = text
+        .strip_suffix('\n')
+        .ok_or(FetchError::MalformedAdvertisement)?;
+    let expected = sources.iter().cloned().collect::<BTreeSet<_>>();
+    let mut advertised = BTreeMap::new();
+    for record in records.split('\n') {
+        let (object_id, reference) = record
+            .split_once('\t')
+            .ok_or(FetchError::MalformedAdvertisement)?;
+        if (!expected.contains(reference)
+            && !reference.starts_with("refs/orna/")
+            || !valid_fetch_full_ref(reference)
+            || object_id.len() != object_id_length
+            || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            || advertised
+                .insert(reference.to_owned(), object_id.to_ascii_lowercase())
+                .is_some()
+        {
+            return Err(FetchError::MalformedAdvertisement);
+        }
+    }
+    Ok(advertised)
+}
+
+
 
 fn continuity_state(
     required: &[RequiredInternalRef],
