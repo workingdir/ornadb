@@ -13,4 +13,6 @@ orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-runtime-v1 = { path = "../orna-runtime-v1" }
 orna-semantic-v1 = { path = "../orna-semantic-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
+orna-live-v1 = { path = "../orna-live-v1" }
+orna-protocol-v1 = { path = "../orna-protocol-v1" }
 num-bigint = "0.4.6"
