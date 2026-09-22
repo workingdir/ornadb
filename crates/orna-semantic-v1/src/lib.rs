@@ -7042,16 +7042,25 @@ fn infer(
                         }
                     }
                     Statement::Continue { .. } => {}
-                    Statement::Return { .. } => diagnostics.push(diag(
-                        DIAG_UNSUPPORTED,
-                        "control statement is outside this semantic slice",
-                    )),
+                    Statement::Return { value, .. } => {
+                        let returned = value
+                            .as_ref()
+                            .map(|value| infer(value, scope, &locals, diagnostics))
+                            .unwrap_or(Inferred {
+                                ty: Type::Null,
+                                effects: EffectSummary::default(),
+                            });
+                        effects.join(&returned.effects);
+                        final_control = Some(Inferred {
+                            ty: Type::Bottom,
+                            effects: returned.effects,
+                        });
+                        break;
+                    }
                 }
             }
-            let tail = tail
-                .as_ref()
-                .map(|x| infer(x, scope, &locals, diagnostics))
-                .or(final_control)
+            let tail = final_control
+                .or_else(|| tail.as_ref().map(|x| infer(x, scope, &locals, diagnostics)))
                 .unwrap_or(Inferred {
                     ty: Type::Null,
                     effects: EffectSummary::default(),
