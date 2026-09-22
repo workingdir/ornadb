@@ -1746,6 +1746,13 @@ fn validate_fields(v: &Raw) -> Result<()> {
         if p.len() != 2 {
             return Err(Error::InvalidTag);
         }
+        match &p[0] {
+            Raw::Text(name) if name.nfc().collect::<String>() == *name => {}
+            Raw::Tag(37, _) => {
+                uuid_array(&p[0])?;
+            }
+            _ => return Err(Error::InvalidTag),
+        }
         let k = encode_raw(&p[0])?;
         if prior.as_ref().is_some_and(|x: &Vec<u8>| k <= *x) {
             return Err(Error::DuplicateOrUnorderedMapKey);
@@ -1753,6 +1760,40 @@ fn validate_fields(v: &Raw) -> Result<()> {
         prior = Some(k);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod field_key_tests {
+    use super::*;
+
+    #[test]
+    fn records_reject_noncanonical_field_key_kinds_and_accept_text_or_uuid() {
+        let record = |key: Raw| {
+            tag(
+                60009,
+                Raw::Array(vec![
+                    Raw::Null,
+                    Raw::Array(vec![Raw::Array(vec![key, Raw::Int(1.into())])]),
+                ]),
+            )
+        };
+
+        for key in [
+            Raw::Int(1.into()),
+            Raw::Bool(false),
+            Raw::Bytes(vec![1]),
+            Raw::Text("e\u{301}".into()),
+        ] {
+            let raw = record(key);
+            assert_eq!(Value::new(raw.clone()), Err(Error::InvalidTag));
+            let mut bytes = Vec::new();
+            write_raw(&raw, &mut bytes).unwrap();
+            assert_eq!(Value::decode(&bytes), Err(Error::InvalidTag));
+        }
+
+        assert!(Value::new(record(Raw::Text("name".into()))).is_ok());
+        assert!(Value::new(record(uuid_raw([7; 16]))).is_ok());
+    }
 }
 fn validate_date(s: &str) -> Result<()> {
     let b = s.as_bytes();
