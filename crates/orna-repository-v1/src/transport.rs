@@ -531,7 +531,9 @@ impl Repository {
         remote: impl AsRef<str>,
         destination: impl AsRef<Path>,
     ) -> Result<Self, FetchError> {
-        let status = Command::new("git")
+        let mut clone = Command::new("git");
+        scrub_git_routing_environment(&mut clone);
+        let status = clone
             .args(["clone", "--filter=blob:none", "--no-checkout"])
             .arg(remote.as_ref())
             .arg(destination.as_ref())
