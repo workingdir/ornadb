@@ -299,6 +299,19 @@ CREATE TABLE IF NOT EXISTS stream_checkpoint_reset_audit (
     reason TEXT NOT NULL CHECK (length(reason) <= 16777216),
     redacted INTEGER NOT NULL CHECK (redacted IN (0, 1))
 );
+CREATE TABLE IF NOT EXISTS admin_invocation_audit (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    invocation_id BLOB NOT NULL UNIQUE CHECK (length(invocation_id) = 16),
+    function_name TEXT NOT NULL CHECK (length(function_name) > 0),
+    safe_arguments TEXT NOT NULL CHECK (length(safe_arguments) <= 16777216),
+    owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
+    owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
+    observed_generation INTEGER NOT NULL CHECK (observed_generation >= 0),
+    terminal_outcome TEXT NOT NULL CHECK (length(terminal_outcome) > 0 AND length(terminal_outcome) <= 16777216),
+    succeeded INTEGER NOT NULL CHECK (succeeded IN (0, 1)),
+    redacted INTEGER NOT NULL CHECK (redacted IN (0, 1))
+);
+
 CREATE TABLE IF NOT EXISTS sys_run_observation (
     run_id BLOB PRIMARY KEY CHECK (length(run_id) = 16),
     session_id BLOB NOT NULL CHECK (length(session_id) = 16),
@@ -2232,6 +2245,154 @@ pub struct CheckpointResetRequest {
     pub to: Position,
     pub reason: String,
 }
+/// Durable redaction-safe record for one administrative invocation.
+///
+/// Successful state-changing calls are committed with their transition in one
+/// local transaction. Failed calls are retained after the transition rolls
+/// back, so an audit never claims that a requested state change occurred.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminInvocationAudit {
+    pub sequence: u64,
+    pub invocation_id: [u8; 16],
+    pub function: String,
+    pub safe_arguments: String,
+    pub owner: WriterLease,
+    pub observed_generation: u64,
+    pub terminal_outcome: String,
+    pub succeeded: bool,
+    pub redacted: bool,
+}
+
+enum AdminInvocationOperation {
+    Pause {
+        key: CheckpointKey,
+        reason: Option<String>,
+    },
+    Reset {
+        key: CheckpointKey,
+        expected: CheckpointPrecondition,
+        to: Position,
+        reason: String,
+    },
+    Resume {
+        key: CheckpointKey,
+    },
+}
+
+struct AdminInvocationDescriptor {
+    invocation_id: [u8; 16],
+    function: &'static str,
+    safe_arguments: String,
+    redacted: bool,
+}
+
+enum AdminOperationResult {
+    Stream(StreamAdministrationOutcome),
+    Checkpoint(StreamCheckpoint),
+}
+
+fn admin_stream_result(
+    result: AdminOperationResult,
+) -> Result<StreamAdministrationOutcome, RuntimeError> {
+    match result {
+        AdminOperationResult::Stream(result) => Ok(result),
+        AdminOperationResult::Checkpoint(_) => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
+fn admin_checkpoint_result(
+    result: AdminOperationResult,
+) -> Result<StreamCheckpoint, RuntimeError> {
+    match result {
+        AdminOperationResult::Checkpoint(result) => Ok(result),
+        AdminOperationResult::Stream(_) => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
+fn admin_invocation_descriptor(
+    operation: &AdminInvocationOperation,
+) -> AdminInvocationDescriptor {
+    let (function, arguments, redacted) = match operation {
+        AdminInvocationOperation::Pause { key, reason } => {
+            let has_reason = reason.is_some();
+            let redacted = reason
+                .as_deref()
+                .map(admin_argument_redacted)
+                .unwrap_or(false);
+            let reason_digest = reason
+                .as_deref()
+                .map(|value| admin_digest(value.as_bytes()))
+                .unwrap_or_else(|| "none".into());
+            let reason_marker = if has_reason {
+                if redacted { "<redacted>" } else { "<safe>" }
+            } else {
+                "<none>"
+            };
+            (
+                if has_reason {
+                    "sys.admin.pause_stream_with_reason"
+                } else {
+                    "sys.admin.pause_stream"
+                },
+                format!(
+                    "stream_key_digest={};reason_digest={reason_digest};reason={reason_marker}",
+                    admin_digest(stream_key_id(key).as_bytes())
+                ),
+                redacted,
+            )
+        }
+        AdminInvocationOperation::Reset {
+            key,
+            expected,
+            to,
+            reason,
+        } => {
+            let reason_redacted = admin_argument_redacted(reason);
+            let reason_marker = if reason_redacted { "<redacted>" } else { "<safe>" };
+            let reason_digest = admin_digest(reason.as_bytes());
+            let expected_position = expected
+                .committed
+                .as_ref()
+                .map(|position| admin_digest(position.token.as_str().as_bytes()))
+                .unwrap_or_else(|| "none".into());
+            (
+                "sys.admin.reset_checkpoint",
+                format!(
+                    "stream_key_digest={};expected_version={};expected_position_digest={expected_position};target_digest={};reason_digest={reason_digest};reason={reason_marker}",
+                    admin_digest(stream_key_id(key).as_bytes()),
+                    expected.version,
+                    admin_digest(to.token.as_str().as_bytes()),
+                ),
+                reason_redacted,
+            )
+        }
+        AdminInvocationOperation::Resume { key } => (
+            "sys.admin.resume_stream",
+            format!(
+                "stream_key_digest={}",
+                admin_digest(stream_key_id(key).as_bytes())
+            ),
+            false,
+        ),
+    };
+    AdminInvocationDescriptor {
+        invocation_id: Uuid::new_v4().into_bytes(),
+        function,
+        safe_arguments: arguments,
+        redacted,
+    }
+}
+
+fn admin_argument_redacted(value: &str) -> bool {
+    value.len() > 16_777_216 || SafeText::new(value.to_owned()).is_err()
+}
+
+fn admin_digest(value: &[u8]) -> String {
+    Sha256::digest(value)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 /// Host-supplied capability for one provider-backed checkpoint reset.
 ///
@@ -3166,36 +3327,25 @@ impl RuntimeState {
     }
 
     /// Applies a pause only if the writer-fenced transaction still observes
-    /// the supplied CWD capture. Hosts resolving a snapshot-pinned system row
-    /// use this boundary so a capture cannot change between reference checks
-    /// and the durable transition.
+    /// the supplied CWD capture.
     pub async fn pause_stream_at_capture(
         &self,
         lease: WriterLease,
         key: CheckpointKey,
         expected_capture: Option<&CwdCapture>,
     ) -> Result<StreamAdministrationOutcome, RuntimeError> {
-        match apply_stream_intent(self, lease, expected_capture, CommitIntent::Pause { key })
-            .await?
-        {
-            CommitResult::StreamStatusChanged { state, changed }
-                if state.status == StreamStatus::Paused =>
-            {
-                Ok(StreamAdministrationOutcome::Paused { changed })
-            }
-            CommitResult::PausePending { changed, .. } => {
-                Ok(StreamAdministrationOutcome::PausePending { changed })
-            }
-            CommitResult::Rejected(RejectReason::StreamBusy) => {
-                Ok(StreamAdministrationOutcome::Busy)
-            }
-            _ => Err(RuntimeError::RecoveryInvalid),
-        }
+        self.apply_admin_invocation(
+            lease,
+            expected_capture,
+            AdminInvocationOperation::Pause { key, reason: None },
+        )
+        .await
+        .and_then(admin_stream_result)
     }
 
-    /// Applies a writer-fenced pause while retaining its supplied safe reason
-    /// in the same local transaction that admits the pause. A no-op pause
-    /// never overwrites the reason already attached to the existing pause.
+    /// Applies a writer-fenced pause while retaining its supplied reason in
+    /// the same local transaction that admits the pause. A no-op pause never
+    /// overwrites the reason already attached to the existing pause.
     pub async fn pause_stream_with_reason(
         &self,
         lease: WriterLease,
@@ -3215,33 +3365,16 @@ impl RuntimeState {
         reason: String,
         expected_capture: Option<&CwdCapture>,
     ) -> Result<StreamAdministrationOutcome, RuntimeError> {
-        if reason.len() > 16_777_216 {
-            return Err(RuntimeError::InvalidIdentity);
-        }
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        self.require_owner(&transaction, lease).await?;
-        if let Some(expected_capture) = expected_capture {
-            let current_capture = capture_tx(&transaction).await?;
-            if &current_capture != expected_capture {
-                return Err(RuntimeError::StaleCapture {
-                    current: Box::new(current_capture),
-                });
-            }
-        }
-        let result = apply_stream_intent_tx(&transaction, CommitIntent::Pause { key }).await?;
-        if stream_pause_changed(&result) {
-            store_stream_pause_reason(&transaction, stream_pause_key(&result)?, &reason).await?;
-        }
-        sync_stream_observation_tx(&transaction, &result).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        stream_administration_outcome(result)
+        self.apply_admin_invocation(
+            lease,
+            expected_capture,
+            AdminInvocationOperation::Pause {
+                key,
+                reason: Some(reason),
+            },
+        )
+        .await
+        .and_then(admin_stream_result)
     }
 
     /// Reads the most recently admitted pause reason retained for a stream.
@@ -3257,9 +3390,8 @@ impl RuntimeState {
     /// Performs the public runtime boundary for
     /// `sys.admin.reset_checkpoint`.
     ///
-    /// The checkpoint, failure cleanup, and redaction-safe audit are admitted
-    /// in one writer-fenced transaction. The expected version and opaque
-    /// position are compared before any progress movement.
+    /// The checkpoint, failure cleanup, specialized reset audit, and generic
+    /// invocation audit are admitted in one writer-fenced transaction.
     pub async fn reset_checkpoint(
         &self,
         lease: WriterLease,
@@ -3270,7 +3402,8 @@ impl RuntimeState {
 
     /// Provider-gated form of [`Self::reset_checkpoint`]. The host supplies
     /// the provider capability for this exact stream; a key mismatch or an
-    /// unsupported opaque target is rejected before transaction admission.
+    /// unsupported opaque target is rejected before transition admission but
+    /// still retains a failed invocation audit.
     pub async fn reset_checkpoint_with_provider<P: CheckpointResetProvider>(
         &self,
         lease: WriterLease,
@@ -3289,12 +3422,22 @@ impl RuntimeState {
         expected_capture: Option<&CwdCapture>,
         provider: &P,
     ) -> Result<StreamCheckpoint, RuntimeError> {
+        let operation = AdminInvocationOperation::Reset {
+            key: request.key.clone(),
+            expected: request.expected.clone(),
+            to: request.to.clone(),
+            reason: request.reason.clone(),
+        };
         if provider.checkpoint_key() != request.key || !provider.supports_reset_target(&request.to)
         {
-            return Err(RuntimeError::CheckpointNotReplayable);
+            let error = RuntimeError::CheckpointNotReplayable;
+            self.record_failed_admin_invocation(&operation, lease, &error)
+                .await?;
+            return Err(error);
         }
-        self.reset_checkpoint_at_capture(lease, request, expected_capture)
+        self.apply_admin_invocation(lease, expected_capture, operation)
             .await
+            .and_then(admin_checkpoint_result)
     }
 
     /// Capture-fenced form of [`Self::reset_checkpoint`]. Hosts use this when
@@ -3305,72 +3448,24 @@ impl RuntimeState {
         request: CheckpointResetRequest,
         expected_capture: Option<&CwdCapture>,
     ) -> Result<StreamCheckpoint, RuntimeError> {
-        let CheckpointResetRequest {
-            key,
-            expected,
-            to,
-            reason,
-        } = request;
-        let audit_reason = redact_reset_reason(reason)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        self.require_owner(&transaction, lease).await?;
-        if let Some(expected_capture) = expected_capture {
-            let current_capture = capture_tx(&transaction).await?;
-            if &current_capture != expected_capture {
-                return Err(RuntimeError::StaleCapture {
-                    current: Box::new(current_capture),
-                });
-            }
-        }
-        let result = apply_stream_intent_tx(
-            &transaction,
-            CommitIntent::Reset {
-                key: key.clone(),
-                expected: expected.clone(),
-                to,
-            },
-        )
-        .await?;
-        let checkpoint = match result {
-            CommitResult::CheckpointReset { checkpoint } => checkpoint,
-            CommitResult::Rejected(RejectReason::StreamNotPaused) => {
-                return Err(RuntimeError::RecoveryInvalid);
-            }
-            CommitResult::Rejected(RejectReason::StreamBusy) => {
-                return Err(RuntimeError::RecoveryInvalid);
-            }
-            CommitResult::Rejected(RejectReason::BlockingFailure) => {
-                return Err(RuntimeError::RecoveryInvalid);
-            }
-            CommitResult::Rejected(RejectReason::StaleCheckpoint) => {
-                return Err(RuntimeError::StreamCheckpointStale);
-            }
-            _ => return Err(RuntimeError::RecoveryInvalid),
+        let operation = AdminInvocationOperation::Reset {
+            key: request.key,
+            expected: request.expected,
+            to: request.to,
+            reason: request.reason,
         };
-        store_stream_checkpoint_reset_audit(
-            &transaction,
-            &key,
-            &expected,
-            &checkpoint,
-            &audit_reason,
-        )
-        .await?;
-        sync_stream_observation_tx(
-            &transaction,
-            &CommitResult::CheckpointReset {
-                checkpoint: checkpoint.clone(),
-            },
-        )
-        .await?;
-        transaction
-            .commit()
+        self.apply_admin_invocation(lease, expected_capture, operation)
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        Ok(checkpoint)
+            .and_then(admin_checkpoint_result)
+    }
+
+    /// Reads redaction-safe generic administrative invocation audits in
+    /// admission order. Specialized checkpoint-reset audits remain available
+    /// through [`Self::checkpoint_reset_audits`].
+    pub async fn admin_invocation_audits(
+        &self,
+    ) -> Result<Vec<AdminInvocationAudit>, RuntimeError> {
+        load_admin_invocation_audits(&self.connection).await
     }
 
     /// Reads reset audits in admission order. This is intentionally a
@@ -3401,22 +3496,109 @@ impl RuntimeState {
         key: CheckpointKey,
         expected_capture: Option<&CwdCapture>,
     ) -> Result<StreamAdministrationOutcome, RuntimeError> {
-        match apply_stream_intent(self, lease, expected_capture, CommitIntent::Resume { key })
-            .await?
-        {
-            CommitResult::StreamStatusChanged { state, changed }
-                if state.status == StreamStatus::Running =>
-            {
-                Ok(StreamAdministrationOutcome::Running { changed })
+        self.apply_admin_invocation(
+            lease,
+            expected_capture,
+            AdminInvocationOperation::Resume { key },
+        )
+        .await
+        .and_then(admin_stream_result)
+    }
+    async fn apply_admin_invocation(
+        &self,
+        lease: WriterLease,
+        expected_capture: Option<&CwdCapture>,
+        operation: AdminInvocationOperation,
+    ) -> Result<AdminOperationResult, RuntimeError> {
+        let descriptor = admin_invocation_descriptor(&operation);
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let attempt = async {
+            self.require_owner(&transaction, lease).await?;
+            let current_capture = capture_tx(&transaction).await?;
+            if let Some(expected_capture) = expected_capture {
+                if &current_capture != expected_capture {
+                    return Err(RuntimeError::StaleCapture {
+                        current: Box::new(current_capture),
+                    });
+                }
             }
-            CommitResult::Rejected(RejectReason::StreamBusy) => {
-                Ok(StreamAdministrationOutcome::Busy)
-            }
-            CommitResult::Rejected(RejectReason::BlockingFailure) => {
-                Ok(StreamAdministrationOutcome::BlockingFailure)
-            }
-            _ => Err(RuntimeError::RecoveryInvalid),
+            let observed_generation = u64::try_from(bigint_to_i64(current_capture.generation())?)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let result = apply_admin_operation_tx(&transaction, &operation).await?;
+            store_admin_invocation_audit(
+                &transaction,
+                &descriptor,
+                lease,
+                observed_generation,
+                admin_operation_outcome(&result),
+                admin_operation_succeeded(&result),
+            )
+            .await?;
+            Ok::<_, RuntimeError>(result)
         }
+        .await;
+        match attempt {
+            Ok(result) => {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                Ok(result)
+            }
+            Err(error) => {
+                drop(transaction);
+                self.record_failed_admin_descriptor(&descriptor, lease, &error)
+                    .await?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn record_failed_admin_invocation(
+        &self,
+        operation: &AdminInvocationOperation,
+        lease: WriterLease,
+        error: &RuntimeError,
+    ) -> Result<(), RuntimeError> {
+        let descriptor = admin_invocation_descriptor(operation);
+        self.record_failed_admin_descriptor(&descriptor, lease, error)
+            .await
+    }
+
+    async fn record_failed_admin_descriptor(
+        &self,
+        descriptor: &AdminInvocationDescriptor,
+        lease: WriterLease,
+        error: &RuntimeError,
+    ) -> Result<(), RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let observed_generation = capture_tx(&transaction)
+            .await
+            .ok()
+            .and_then(|capture| bigint_to_i64(capture.generation()).ok())
+            .and_then(|generation| u64::try_from(generation).ok())
+            .unwrap_or(0);
+        store_admin_invocation_audit(
+            &transaction,
+            descriptor,
+            lease,
+            observed_generation,
+            format!("failure:{error}"),
+            false,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
     }
 
     /// Captures the fixed CWD and activation time for one root activation.
@@ -11271,6 +11453,205 @@ async fn store_stream_pause_reason(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     Ok(())
+}
+
+async fn apply_admin_operation_tx(
+    connection: &Connection,
+    operation: &AdminInvocationOperation,
+) -> Result<AdminOperationResult, RuntimeError> {
+    match operation {
+        AdminInvocationOperation::Pause { key, reason } => {
+            if reason.as_ref().is_some_and(|reason| reason.len() > 16_777_216) {
+                return Err(RuntimeError::InvalidIdentity);
+            }
+            let result = apply_stream_intent_tx(connection, CommitIntent::Pause { key: key.clone() })
+                .await?;
+            if stream_pause_changed(&result) {
+                if let Some(reason) = reason {
+                    store_stream_pause_reason(connection, stream_pause_key(&result)?, reason).await?;
+                }
+            }
+            sync_stream_observation_tx(connection, &result).await?;
+            Ok(AdminOperationResult::Stream(
+                stream_administration_outcome(result)?,
+            ))
+        }
+        AdminInvocationOperation::Reset {
+            key,
+            expected,
+            to,
+            reason,
+        } => {
+            let audit_reason = redact_reset_reason(reason.clone())?;
+            let result = apply_stream_intent_tx(
+                connection,
+                CommitIntent::Reset {
+                    key: key.clone(),
+                    expected: expected.clone(),
+                    to: to.clone(),
+                },
+            )
+            .await?;
+            let checkpoint = match result {
+                CommitResult::CheckpointReset { checkpoint } => checkpoint,
+                CommitResult::Rejected(RejectReason::StreamNotPaused)
+                | CommitResult::Rejected(RejectReason::StreamBusy)
+                | CommitResult::Rejected(RejectReason::BlockingFailure) => {
+                    return Err(RuntimeError::RecoveryInvalid);
+                }
+                CommitResult::Rejected(RejectReason::StaleCheckpoint) => {
+                    return Err(RuntimeError::StreamCheckpointStale);
+                }
+                _ => return Err(RuntimeError::RecoveryInvalid),
+            };
+            store_stream_checkpoint_reset_audit(
+                connection,
+                key,
+                expected,
+                &checkpoint,
+                &audit_reason,
+            )
+            .await?;
+            sync_stream_observation_tx(
+                connection,
+                &CommitResult::CheckpointReset {
+                    checkpoint: checkpoint.clone(),
+                },
+            )
+            .await?;
+            Ok(AdminOperationResult::Checkpoint(checkpoint))
+        }
+        AdminInvocationOperation::Resume { key } => {
+            let result =
+                apply_stream_intent_tx(connection, CommitIntent::Resume { key: key.clone() })
+                    .await?;
+            sync_stream_observation_tx(connection, &result).await?;
+            Ok(AdminOperationResult::Stream(
+                stream_administration_outcome(result)?,
+            ))
+        }
+    }
+}
+
+fn admin_operation_outcome(result: &AdminOperationResult) -> String {
+    match result {
+        AdminOperationResult::Checkpoint(_) => "checkpoint_reset".into(),
+        AdminOperationResult::Stream(StreamAdministrationOutcome::Paused { changed: true }) => {
+            "paused".into()
+        }
+        AdminOperationResult::Stream(StreamAdministrationOutcome::Paused { changed: false }) => {
+            "paused_noop".into()
+        }
+        AdminOperationResult::Stream(StreamAdministrationOutcome::PausePending { changed: true }) => {
+            "pause_pending".into()
+        }
+        AdminOperationResult::Stream(StreamAdministrationOutcome::PausePending { changed: false }) => {
+            "pause_pending_noop".into()
+        }
+        AdminOperationResult::Stream(StreamAdministrationOutcome::Running { changed: true }) => {
+            "resumed".into()
+        }
+        AdminOperationResult::Stream(StreamAdministrationOutcome::Running { changed: false }) => {
+            "resumed_noop".into()
+        }
+        AdminOperationResult::Stream(StreamAdministrationOutcome::Busy) => "busy".into(),
+        AdminOperationResult::Stream(StreamAdministrationOutcome::BlockingFailure) => {
+            "blocking_failure".into()
+        }
+    }
+}
+fn admin_operation_succeeded(result: &AdminOperationResult) -> bool {
+    !matches!(
+        result,
+        AdminOperationResult::Stream(
+            StreamAdministrationOutcome::Busy | StreamAdministrationOutcome::BlockingFailure
+        )
+    )
+}
+
+async fn store_admin_invocation_audit(
+    connection: &Connection,
+    descriptor: &AdminInvocationDescriptor,
+    owner: WriterLease,
+    observed_generation: u64,
+    terminal_outcome: String,
+    succeeded: bool,
+) -> Result<(), RuntimeError> {
+    connection
+        .execute(
+            "INSERT INTO admin_invocation_audit
+             (invocation_id, function_name, safe_arguments, owner_id, owner_epoch,
+              observed_generation, terminal_outcome, succeeded, redacted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                descriptor.invocation_id.to_vec(),
+                descriptor.function,
+                descriptor.safe_arguments.clone(),
+                owner.owner_id.to_vec(),
+                i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                i64::try_from(observed_generation).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                terminal_outcome,
+                if succeeded { 1_i64 } else { 0_i64 },
+                if descriptor.redacted { 1_i64 } else { 0_i64 },
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
+}
+
+async fn load_admin_invocation_audits(
+    connection: &Connection,
+) -> Result<Vec<AdminInvocationAudit>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT sequence, invocation_id, function_name, safe_arguments,
+                    owner_id, owner_epoch, observed_generation,
+                    terminal_outcome, succeeded, redacted
+             FROM admin_invocation_audit ORDER BY sequence",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut audits = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let sequence = decode_u64(row.get::<i64>(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let invocation_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        validate_id(invocation_id)?;
+        let function: String = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        validate_observation_text(&function)?;
+        let safe_arguments: String = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        validate_observation_text(&safe_arguments)?;
+        let owner = WriterLease {
+            owner_id: fixed(row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+            epoch: decode_u64(row.get::<i64>(5).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        };
+        validate_writer_lease(owner)?;
+        let observed_generation =
+            decode_u64(row.get::<i64>(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        validate_observation_text(&terminal_outcome)?;
+        audits.push(AdminInvocationAudit {
+            sequence,
+            invocation_id,
+            function,
+            safe_arguments,
+            owner,
+            observed_generation,
+            terminal_outcome,
+            succeeded: decode_bool(
+                row.get::<i64>(8).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
+            redacted: decode_bool(
+                row.get::<i64>(9).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
+        });
+    }
+    Ok(audits)
 }
 
 fn redact_reset_reason(reason: String) -> Result<(String, bool), RuntimeError> {
