@@ -2691,6 +2691,175 @@ impl DurableTransactionalEvaluator {
         self.execute_admitted_project_with_arguments(target, root_entry, admitted, arguments)
             .await
     }
+    /// Derives a fresh CLI request identity and its canonical argument
+    /// fingerprint. A caller supplies a per-invocation nonce; retries of one
+    /// protocol request must retain the returned pair rather than derive a new
+    /// one.
+    pub fn project_request_identity(
+        identity: RuntimeIdentity,
+        initial_digest: [u8; 32],
+        root_entry: &str,
+        arguments: &Environment,
+        nonce: u128,
+    ) -> Result<(RequestIdentity, [u8; 32]), RuntimeError> {
+        fn update_text(digest: &mut Sha256, value: &str) {
+            digest.update(
+                u64::try_from(value.len())
+                    .expect("project request text length fits u64")
+                    .to_be_bytes(),
+            );
+            digest.update(value.as_bytes());
+        }
+
+        fn update_material(
+            digest: &mut Sha256,
+            identity: RuntimeIdentity,
+            initial_digest: [u8; 32],
+            root_entry: &str,
+            arguments: &Environment,
+            nonce: u128,
+        ) -> Result<(), RuntimeError> {
+            digest.update(identity.database_id);
+            digest.update(identity.repository_id);
+            digest.update(initial_digest);
+            digest.update(nonce.to_be_bytes());
+            update_text(digest, root_entry);
+            for (name, value) in arguments {
+                update_text(digest, name);
+                let encoded = value
+                    .encode()
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?;
+                digest.update(
+                    u64::try_from(encoded.len())
+                        .expect("project request value length fits u64")
+                        .to_be_bytes(),
+                );
+                digest.update(encoded);
+            }
+            Ok(())
+        }
+
+        let mut request_digest = Sha256::new();
+        request_digest.update(b"orna-cli/project-request/v1\0");
+        update_material(
+            &mut request_digest,
+            identity,
+            initial_digest,
+            root_entry,
+            arguments,
+            nonce,
+        )?;
+        let request_bytes: [u8; 32] = request_digest.finalize().into();
+        let mut request_id = [0; 16];
+        request_id.copy_from_slice(&request_bytes[..16]);
+        if request_id == [0; 16] {
+            request_id[0] = 1;
+        }
+
+        let mut fingerprint = Sha256::new();
+        fingerprint.update(b"orna-cli/project-fingerprint/v1\0");
+        update_material(
+            &mut fingerprint,
+            identity,
+            initial_digest,
+            root_entry,
+            arguments,
+            nonce,
+        )?;
+        Ok((
+            RequestIdentity {
+                session_id: identity.database_id,
+                request_id,
+            },
+            fingerprint.finalize().into(),
+        ))
+    }
+
+    /// Executes a project activation through the durable request boundary.
+    ///
+    /// Unlike the request-free compatibility route, this entry point records
+    /// the run observation before admission and retains the terminal result
+    /// with table mutations in one owner-fenced commit.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_project_request_with_arguments(
+        &self,
+        target: RuntimeTarget<'_>,
+        request: RequestIdentity,
+        fingerprint: [u8; 32],
+        project: &ProjectUnit,
+        root_entry: &str,
+        arguments: &Environment,
+    ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+        let state =
+            RuntimeState::open(target.repository, target.identity, target.initial_digest).await?;
+        if let Some(status) = state.request_status(request, fingerprint).await? {
+            return replay_or_fence_request(status);
+        }
+        let lease = state.acquire_lease(target.owner_id).await?;
+        let start = state
+            .begin_observed_request(
+                RunObservationRegistration {
+                    request,
+                    consumer_identity: request_consumer_identity(),
+                    function: root_entry.into(),
+                    source_identity: Some(project.project_id.clone()),
+                    invocation_id: request.request_id,
+                },
+                fingerprint,
+                lease,
+            )
+            .await?;
+        if !start.admitted {
+            return replay_or_fence_request(start.request);
+        }
+        if !root_entry.contains('.') {
+            return terminalize_observed_outcome(
+                &state,
+                request,
+                fingerprint,
+                lease,
+                StageOutcome::Skipped {
+                    reason: "project transaction roots must be namespace-qualified".into(),
+                },
+            )
+            .await;
+        }
+        let admitted = match admit_transaction_project(project, self.limits, root_entry) {
+            Ok(value) => value,
+            Err(outcome) => {
+                return terminalize_observed_outcome(
+                    &state,
+                    request,
+                    fingerprint,
+                    lease,
+                    *outcome,
+                )
+                .await;
+            }
+        };
+        if admit_project_list_stream(project, &admitted, root_entry, target.identity).is_ok() {
+            return terminalize_observed_outcome(
+                &state,
+                request,
+                fingerprint,
+                lease,
+                StageOutcome::Skipped {
+                    reason: PROJECT_STREAM_ROOT_ADMISSION_REASON.into(),
+                },
+            )
+            .await;
+        }
+        self.execute_admitted_project_request(
+            &state,
+            lease,
+            request,
+            fingerprint,
+            root_entry,
+            admitted,
+            arguments,
+        )
+        .await
+    }
 
     /// Runs the deliberately narrow finite-list stream shape from independently
     /// admitted project modules. The root and its zero-argument list producer
@@ -3460,6 +3629,127 @@ impl DurableTransactionalEvaluator {
         }
         Ok(StageOutcome::Passed)
     }
+    async fn execute_admitted_project_request(
+        &self,
+        state: &RuntimeState,
+        lease: WriterLease,
+        request: RequestIdentity,
+        fingerprint: [u8; 32],
+        entry: &str,
+        admitted: AdmittedTransaction,
+        arguments: &Environment,
+    ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+        let tables = admitted
+            .key_fields
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let snapshot = match state.begin_table_activation(&tables).await {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                return fail_observed_request_runtime(state, request, fingerprint, lease).await;
+            }
+        };
+        let context = snapshot.context();
+        self.record_activation_time(context.activation_time());
+        let mut evaluator = TransactionalEvaluator::new(entry, self.limits)
+            .with_activation_time(context.activation_time());
+        for (table, rows) in snapshot.table_rows() {
+            for (key, row) in rows {
+                let row = match Value::decode(row) {
+                    Ok(row) => row,
+                    Err(_) => {
+                        return fail_observed_request_runtime(
+                            state,
+                            request,
+                            fingerprint,
+                            lease,
+                        )
+                        .await;
+                    }
+                };
+                if evaluator
+                    .seed_committed_from_admission(
+                        table.clone(),
+                        key.clone(),
+                        row,
+                        &admitted.key_fields,
+                    )
+                    .is_err()
+                {
+                    return fail_observed_request_runtime(state, request, fingerprint, lease).await;
+                }
+            }
+        }
+        let mutations = match evaluator.execute_admitted_with_arguments(&admitted, arguments) {
+            Ok(mutations) => mutations,
+            Err(diagnostic) => {
+                return terminalize_observed_outcome(
+                    state,
+                    request,
+                    fingerprint,
+                    lease,
+                    StageOutcome::Failed(*diagnostic),
+                )
+                .await;
+            }
+        };
+        if mutations.is_empty() {
+            return terminalize_observed_outcome(
+                state,
+                request,
+                fingerprint,
+                lease,
+                StageOutcome::Passed,
+            )
+            .await;
+        }
+        let next_digest =
+            durable_activation_digest(context.capture().generation_digest(), &mutations);
+        let mut validator = TransactionalTableCandidateValidator::new(
+            &admitted.functions,
+            &admitted.key_fields,
+            &admitted.float_fields,
+            &admitted.table_fields,
+            &admitted.table_assertions,
+            &admitted.module_assertions,
+            self.limits,
+        );
+        let outcome = StageOutcome::Passed;
+        let terminal = request_terminal(&outcome)?;
+        match state
+            .commit_validated_table_request_activation(ValidatedTableRequestActivationCommit {
+                writer: lease,
+                identity: request,
+                fingerprint,
+                context,
+                mutations: &mutations,
+                next_digest,
+                outcome: terminal,
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await
+        {
+            Ok(_) => Ok(outcome),
+            Err(TableActivationError::Runtime(error)) => Err(error),
+            Err(TableActivationError::ValidationFailed(_)) => {
+                fail_observed_request_outcome(
+                    state,
+                    request,
+                    fingerprint,
+                    lease,
+                    StageOutcome::Failed(
+                        transaction_error("ORNA-EVAL-TABLE-ASSERT")
+                            .diagnostic()
+                            .clone(),
+                    ),
+                )
+                .await
+            }
+        }
+    }
+
 
     /// Publishes the caller-selected frozen runtime prefix through the loose
     /// Git projection. Publication is explicit: source execution only stages
