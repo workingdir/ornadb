@@ -9,6 +9,11 @@ use std::fmt;
 use subtle::ConstantTimeEq;
 
 pub const CREDENTIAL_BYTES: usize = 32;
+/// Maximum session lease permitted by the live protocol profile.
+///
+/// Hosts may advertise shorter leases, but an admitted session must never
+/// retain owner state beyond this bounded interval.
+pub const MAX_SESSION_LEASE: u64 = 300_000;
 
 /// A stable, non-secret name for one externally managed secret.
 ///
@@ -372,6 +377,7 @@ impl SessionBoundary {
     ) -> Result<OpaqueCredential, BoundaryError> {
         if !self.policy.permits(&origin)
             || expires_at <= now
+            || expires_at.saturating_sub(now) > MAX_SESSION_LEASE
             || self.sessions.contains_key(&session)
         {
             return Err(BoundaryError::Denied);
@@ -752,6 +758,29 @@ mod tests {
         assert_eq!(
             boundary.attach(session, &app, &credential, attachment(3), 8),
             Ok(AttachOutcome::Reconnected)
+        );
+    }
+
+    #[test]
+    fn session_lease_is_bounded_at_the_protocol_maximum() {
+        let mut boundary = boundary();
+        let mut issuer = Issuer(1);
+        let app = origin("https://app.example");
+
+        assert!(
+            boundary
+                .create(id(1), app.clone(), MAX_SESSION_LEASE, 0, &mut issuer)
+                .is_ok()
+        );
+        assert_eq!(
+            boundary.create(
+                id(2),
+                app,
+                MAX_SESSION_LEASE.saturating_add(1),
+                0,
+                &mut issuer,
+            ),
+            Err(BoundaryError::Denied)
         );
     }
 
