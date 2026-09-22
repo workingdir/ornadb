@@ -114,6 +114,8 @@ pub struct LiveSession {
     resume_token: String,
     cookie: String,
     limits: Limits,
+    max_outgoing_bytes: usize,
+    request_retention_ms: u64,
 }
 
 impl LiveSession {
@@ -129,7 +131,14 @@ impl LiveSession {
     pub const fn limits(&self) -> Limits {
         self.limits
     }
+    pub const fn max_outgoing_bytes(&self) -> usize {
+        self.max_outgoing_bytes
+    }
+    pub const fn request_retention_ms(&self) -> u64 {
+        self.request_retention_ms
+    }
 }
+
 
 pub struct LiveClient {
     config: LiveClientConfig,
@@ -441,7 +450,9 @@ fn parse_session(
         websocket_path,
         resume_token,
         cookie,
-        limits: response_limits,
+        limits: response_limits.protocol_limits,
+        max_outgoing_bytes: response_limits.max_outgoing_bytes,
+        request_retention_ms: response_limits.request_retention_ms,
     })
 }
 
@@ -483,6 +494,13 @@ fn parse_session_with_set_cookies(
     )?;
     parse_session(value, &cookie, limits, secure_transport)
 }
+
+struct ParsedResponseLimits {
+    protocol_limits: Limits,
+    max_outgoing_bytes: usize,
+    request_retention_ms: u64,
+}
+
 
 fn validate_resume_token(token: &str) -> Result<(), LiveTransportError> {
     if token.len() != 43
@@ -537,7 +555,7 @@ fn parse_response_limits(
     value: Option<&serde_json::Value>,
     configured: Limits,
     lease_ms: u64,
-) -> Result<Limits, LiveTransportError> {
+) -> Result<ParsedResponseLimits, LiveTransportError> {
     let object = value
         .and_then(serde_json::Value::as_object)
         .ok_or(LiveTransportError::Response("limits"))?;
@@ -579,7 +597,7 @@ fn parse_response_limits(
         "max_collection_items",
         configured.max_collection_items,
     )?;
-    let _max_outgoing_bytes = positive_bounded_usize(
+    let max_outgoing_bytes = positive_bounded_usize(
         object.get("max_outgoing_bytes"),
         "max_outgoing_bytes",
         configured.max_message_bytes,
@@ -594,11 +612,15 @@ fn parse_response_limits(
             "request retention is shorter than lease",
         ));
     }
-    Ok(Limits {
-        max_message_bytes,
-        max_depth,
-        max_nodes,
-        max_collection_items,
+    Ok(ParsedResponseLimits {
+        protocol_limits: Limits {
+            max_message_bytes,
+            max_depth,
+            max_nodes,
+            max_collection_items,
+        },
+        max_outgoing_bytes,
+        request_retention_ms,
     })
 }
 
@@ -1244,6 +1266,10 @@ mod tests {
         let mut unknown = valid_response();
         unknown["unexpected"] = serde_json::Value::Bool(true);
         assert!(parse_session(unknown, &valid_cookie(), Limits::default(), true).is_err());
+        let mut unknown_limit = valid_response();
+        unknown_limit["limits"]["unexpected"] = serde_json::Value::Bool(true);
+        assert!(parse_session(unknown_limit, &valid_cookie(), Limits::default(), true).is_err());
+
 
         let mut wrong_path = valid_response();
         wrong_path["websocket_path"] = "/orna/live/00000000-0000-0000-0000-000000000009".into();
@@ -1260,6 +1286,21 @@ mod tests {
         let distinct =
             parse_session(valid_response(), &valid_cookie(), Limits::default(), true).unwrap();
         assert_ne!(distinct.cookie, format!("orna_session={}", valid_token()));
+    }
+
+    #[test]
+    fn session_parser_preserves_negotiated_session_bounds() {
+        let max_outgoing_bytes = 12_345_678;
+        let request_retention_ms = 60_000;
+        let mut response = valid_response();
+        response["limits"]["max_outgoing_bytes"] = max_outgoing_bytes.into();
+        response["limits"]["request_retention_ms"] = request_retention_ms.into();
+
+        let session = parse_session(response, &valid_cookie(), Limits::default(), true).unwrap();
+
+        assert_eq!(session.limits(), Limits::default());
+        assert_eq!(session.max_outgoing_bytes(), max_outgoing_bytes);
+        assert_eq!(session.request_retention_ms(), request_retention_ms);
     }
 
     #[test]
