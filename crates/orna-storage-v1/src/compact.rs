@@ -125,6 +125,12 @@ impl CompactBaseState {
         if input.candidate_generation <= maximum_generation {
             return Err(CompactBaseProjectionError::StaleGeneration);
         }
+        let mut keys = BTreeSet::new();
+        for mutation in &input.mutations {
+            if !keys.insert(mutation.key.clone()) {
+                return Err(CompactBaseProjectionError::DuplicateKeyGeneration);
+            }
+        }
         Ok(())
     }
 }
@@ -1940,6 +1946,43 @@ mod tests {
                 ..input
             }),
             Err(CompactBaseProjectionError::WrongTable)
+        );
+    }
+
+    #[test]
+    fn committed_base_rejects_duplicate_writer_keys_at_generation() {
+        let profile = scalar_profile();
+        let key = profile.decode_key(&scalar_key(7)).unwrap();
+        let state = CompactBaseState {
+            table_id: TABLE,
+            schema_fingerprint: profile.schema_fingerprint(),
+            rows: BTreeMap::new(),
+        };
+        let input = CompactWriterInput {
+            table_id: TABLE,
+            schema_fingerprint: profile.schema_fingerprint(),
+            candidate_generation: 1,
+            row_encoding_identity: PublicationRowEncoding::CompactOvb1,
+            value_encoding_identity: PublicationValueEncoding::Ovb1,
+            mutations: vec![
+                CompactWriterMutation {
+                    sequence: 1,
+                    mutation_id: [1; 16],
+                    key: key.clone(),
+                    state: CompactWriterMutationState::Deletion,
+                },
+                CompactWriterMutation {
+                    sequence: 2,
+                    mutation_id: [2; 16],
+                    key,
+                    state: CompactWriterMutationState::Deletion,
+                },
+            ],
+            candidate_digest: [0x42; 32],
+        };
+        assert_eq!(
+            state.consume_writer_input(&input),
+            Err(CompactBaseProjectionError::DuplicateKeyGeneration)
         );
     }
     #[test]
