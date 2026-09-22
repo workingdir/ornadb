@@ -418,14 +418,12 @@ impl PublicationJournal {
             }
             None => bytes.push(0),
         }
-        if self.wire_version >= 3 {
-            match &self.compact_manifest {
-                Some(witness) => {
-                    bytes.push(1);
-                    witness.encode(&mut bytes)?;
-                }
-                None => bytes.push(0),
+        match &self.compact_manifest {
+            Some(witness) => {
+                bytes.push(1);
+                witness.encode(&mut bytes)?;
             }
+            None => bytes.push(0),
         }
         bytes.push(self.stage.code());
         put_u32(&mut bytes, self.entries.len())?;
@@ -438,10 +436,8 @@ impl PublicationJournal {
             put_string(&mut bytes, path)?;
             put_optional_bytes(&mut bytes, entry.expected.as_deref())?;
             put_optional_bytes(&mut bytes, entry.next.as_deref())?;
-            if self.wire_version >= 5 {
-                bytes.push(entry.materialization.phase.code());
-                put_optional_string(&mut bytes, entry.materialization.quarantine.as_deref())?;
-            }
+            bytes.push(entry.materialization.phase.code());
+            put_optional_string(&mut bytes, entry.materialization.quarantine.as_deref())?;
         }
         if bytes.len() > MAX_JOURNAL_BYTES {
             return Err(RepositoryError::InvalidPublicationJournal);
@@ -465,7 +461,7 @@ impl PublicationJournal {
         }
         let mut cursor = JOURNAL_MAGIC.len();
         let version = take_byte(bytes, &mut cursor)?;
-        if version != 2 && version != 3 && version != 4 && version != 5 {
+        if version != 5 {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         let old_head =
@@ -480,23 +476,14 @@ impl PublicationJournal {
             1 => Some(take_fixed_array::<16>(bytes, &mut cursor)?),
             _ => return Err(RepositoryError::InvalidPublicationJournal),
         };
-        let compact_manifest = if version >= 4 {
-            match take_byte(bytes, &mut cursor)? {
-                0 => None,
-                1 => Some(CompactManifestWitness::decode(
-                    bytes,
-                    &mut cursor,
-                    object_id_length,
-                )?),
-                _ => return Err(RepositoryError::InvalidPublicationJournal),
-            }
-        } else if version == 3 {
-            if take_byte(bytes, &mut cursor)? != 0 {
-                return Err(RepositoryError::InvalidPublicationJournal);
-            }
-            None
-        } else {
-            None
+        let compact_manifest = match take_byte(bytes, &mut cursor)? {
+            0 => None,
+            1 => Some(CompactManifestWitness::decode(
+                bytes,
+                &mut cursor,
+                object_id_length,
+            )?),
+            _ => return Err(RepositoryError::InvalidPublicationJournal),
         };
         let stage = PublicationJournalStage::from_code(take_byte(bytes, &mut cursor)?)?;
         let count = take_u32(bytes, &mut cursor)? as usize;
@@ -512,19 +499,15 @@ impl PublicationJournal {
             if !paths.insert(path.clone()) {
                 return Err(RepositoryError::InvalidPublicationJournal);
             }
-            let materialization = if version == 5 {
-                let phase =
-                    PublicationMaterializationPhase::from_code(take_byte(bytes, &mut cursor)?)?;
-                let quarantine = take_optional_string(bytes, &mut cursor)?;
-                if (phase == PublicationMaterializationPhase::Clean) == quarantine.is_some()
-                    || phase != PublicationMaterializationPhase::Clean && quarantine.is_none()
-                {
-                    return Err(RepositoryError::InvalidPublicationJournal);
-                }
-                PublicationMaterialization { phase, quarantine }
-            } else {
-                PublicationMaterialization::clean()
-            };
+            let phase =
+                PublicationMaterializationPhase::from_code(take_byte(bytes, &mut cursor)?)?;
+            let quarantine = take_optional_string(bytes, &mut cursor)?;
+            if (phase == PublicationMaterializationPhase::Clean) == quarantine.is_some()
+                || phase != PublicationMaterializationPhase::Clean && quarantine.is_none()
+            {
+                return Err(RepositoryError::InvalidPublicationJournal);
+            }
+            let materialization = PublicationMaterialization { phase, quarantine };
             let mut entry = PublicationJournalEntry::new(path, expected, next);
             entry.materialization = materialization;
             entries.push(entry);
@@ -588,9 +571,6 @@ impl PublicationJournal {
             && quarantine.as_deref() != Some(expected_quarantine.as_str())
         {
             return Err(RepositoryError::InvalidPublicationJournal);
-        }
-        if self.wire_version < 5 {
-            self.wire_version = 5;
         }
         let entry = self
             .entries
@@ -7525,72 +7505,6 @@ mod tests {
                 .stage(),
             PublicationJournalStage::RuntimeCompleted
         );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn legacy_journal_fixtures_preserve_lock_binding_for_versions_two_through_four() {
-        let root = tempfile::TempDir::new().unwrap();
-        let fixture = |hex: &str| {
-            assert!(hex.len().is_multiple_of(2));
-            hex.as_bytes()
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
-                .collect::<Vec<_>>()
-        };
-        let fixtures = [
-            (
-                2,
-                "4f524e412d5055422d4a4f55524e414c000228000000616161616161616161616161616161616161616161616161616161616161616161616161616161612800000062626262626262626262626262626262626262626262626262626262626262626262626262626262ffffffff0001010000001500000067656e6572617465642f6c65676163792e6f726e61060000006265666f7265050000006166746572",
-            ),
-            (
-                3,
-                "4f524e412d5055422d4a4f55524e414c000328000000616161616161616161616161616161616161616161616161616161616161616161616161616161612800000062626262626262626262626262626262626262626262626262626262626262626262626262626262ffffffff000001010000001500000067656e6572617465642f6c65676163792e6f726e61060000006265666f7265050000006166746572",
-            ),
-            (
-                4,
-                "4f524e412d5055422d4a4f55524e414c000428000000616161616161616161616161616161616161616161616161616161616161616161616161616161612800000062626262626262626262626262626262626262626262626262626262626262626262626262626262ffffffff000001010000001500000067656e6572617465642f6c65676163792e6f726e61060000006265666f7265050000006166746572",
-            ),
-        ];
-
-        for (version, hex) in fixtures {
-            let bytes = fixture(hex);
-            let decoded = PublicationJournal::decode(&bytes, 40).unwrap();
-            assert_eq!(decoded.wire_version, version);
-            assert_eq!(decoded.old_head().as_str(), &"a".repeat(40));
-            assert_eq!(decoded.new_head().as_str(), &"b".repeat(40));
-            assert!(decoded.base_index_tree().is_none());
-            assert_eq!(decoded.runtime_intent_id(), None);
-            assert_eq!(decoded.stage(), PublicationJournalStage::Prepared);
-            assert_eq!(decoded.entries().len(), 1);
-            assert_eq!(
-                decoded.entries()[0].path.as_path(),
-                Path::new("generated/legacy.orna")
-            );
-            assert_eq!(decoded.entries()[0].expected(), Some(&b"before"[..]));
-            assert_eq!(decoded.entries()[0].next(), Some(&b"after"[..]));
-
-            let binding = decoded.lock_binding().unwrap();
-            let lock_path = root.path().join(format!("index-{version}.lock"));
-            fs::write(
-                &lock_path,
-                dead_publisher_lock_bytes(binding, [version; 16]),
-            )
-            .unwrap();
-            GitIndexLock::reclaim_abandoned(lock_path.clone(), binding).unwrap();
-            assert!(!lock_path.exists());
-
-            let mismatch_path = root.path().join(format!("mismatch-{version}.lock"));
-            let original = dead_publisher_lock_bytes([version + 10; 32], [version; 16]);
-            fs::write(&mismatch_path, &original).unwrap();
-            assert!(matches!(
-                GitIndexLock::reclaim_abandoned(mismatch_path.clone(), binding),
-                Err(RepositoryError::GitIndexLockPresent)
-            ));
-            assert_eq!(fs::read(mismatch_path).unwrap(), original);
-        }
     }
 
     #[test]
