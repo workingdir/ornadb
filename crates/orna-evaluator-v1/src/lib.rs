@@ -172,9 +172,10 @@ impl StepBudget {
 }
 
 /// A deterministic name environment. Values must be canonical OVB-1 values.
-/// Qualified enum-label patterns resolve an exact `Type.variant` binding here;
-/// its enum type and variant identities are matched before payload fields bind.
+/// Qualified enum-label patterns resolve through the retained enum metadata
+/// supplied with the admitted nominal definitions.
 pub type Environment = BTreeMap<String, CanonicalValue>;
+
 
 /// A declaration-owned nominal field admitted to the evaluator.
 ///
@@ -239,6 +240,24 @@ impl NominalField {
     }
 }
 
+/// A declaration-owned enum variant retained by the evaluator.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NominalVariant {
+    variant_id: Raw,
+    name: String,
+}
+
+impl NominalVariant {
+    /// Create an admitted enum variant with its stable ObjectId.
+    #[must_use]
+    pub fn new(variant_id: [u8; 16], name: impl Into<String>) -> Self {
+        Self {
+            variant_id: object_id_raw(variant_id),
+            name: name.into(),
+        }
+    }
+}
+
 /// A declaration-owned nominal construction plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NominalDefinition {
@@ -248,6 +267,8 @@ pub struct NominalDefinition {
     owner: Option<String>,
     /// Declaration order is significant for defaults and output fields.
     fields: Vec<NominalField>,
+    /// Closed enum variants retained for qualified constructor patterns.
+    variants: Vec<NominalVariant>,
 }
 
 impl NominalDefinition {
@@ -259,12 +280,22 @@ impl NominalDefinition {
             type_id: object_id_raw(type_id),
             owner,
             fields,
+            variants: Vec::new(),
         }
+    }
+
+    /// Retain the closed enum variants for qualified constructor patterns.
+    #[must_use]
+    pub fn with_enum_variants(mut self, variants: Vec<NominalVariant>) -> Self {
+        self.variants = variants;
+        self
     }
 }
 
 /// Trusted evaluator definitions keyed by admitted source spellings.
 pub type NominalDefinitions = BTreeMap<String, NominalDefinition>;
+
+
 
 fn object_id_raw(object_id: [u8; 16]) -> Raw {
     Raw::Tag(37, Box::new(Raw::Bytes(object_id.to_vec())))
@@ -294,7 +325,11 @@ fn validate_nominal_definition(
     if !is_object_id_raw(&definition.type_id) {
         return Err(error("ORNA-EVAL-VALUE"));
     }
+    if !definition.variants.is_empty() && !definition.fields.is_empty() {
+        return Err(error("ORNA-EVAL-VALUE"));
+    }
     limits.check_items(definition.fields.len())?;
+    limits.check_items(definition.variants.len())?;
     let name_bytes = definition.owner.as_ref().map_or(0, String::len);
     let name_bytes = definition
         .fields
@@ -302,6 +337,14 @@ fn validate_nominal_definition(
         .try_fold(name_bytes, |total, field| {
             total
                 .checked_add(field.name.len())
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))
+        })?;
+    let name_bytes = definition
+        .variants
+        .iter()
+        .try_fold(name_bytes, |total, variant| {
+            total
+                .checked_add(variant.name.len())
                 .ok_or_else(|| error("ORNA-EVAL-LIMIT"))
         })?;
     if name_bytes > limits.max_string_bytes {
@@ -317,6 +360,16 @@ fn validate_nominal_definition(
             return Err(error("ORNA-EVAL-VALUE"));
         }
     }
+    let mut variant_names = BTreeSet::new();
+    let mut variant_ids = BTreeSet::new();
+    for variant in &definition.variants {
+        let Some(variant_id) = object_id_key(&variant.variant_id) else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        if !variant_names.insert(variant.name.clone()) || !variant_ids.insert(variant_id) {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+    }
     Ok(field_ids)
 }
 
@@ -326,10 +379,14 @@ fn validate_nominal_definitions(
 ) -> Result<(), EvaluationError> {
     limits.check_items(definitions.len())?;
     let mut total_fields = 0usize;
+    let mut total_variants = 0usize;
     let mut total_name_bytes = 0usize;
     for (name, definition) in definitions {
         total_fields = total_fields
             .checked_add(definition.fields.len())
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        total_variants = total_variants
+            .checked_add(definition.variants.len())
             .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
         total_name_bytes = total_name_bytes
             .checked_add(name.len())
@@ -344,8 +401,16 @@ fn validate_nominal_definitions(
                     .ok_or_else(|| error("ORNA-EVAL-LIMIT"))
             })?)
             .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        total_name_bytes = total_name_bytes
+            .checked_add(definition.variants.iter().try_fold(0usize, |total, variant| {
+                total
+                    .checked_add(variant.name.len())
+                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))
+            })?)
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
     }
     limits.check_items(total_fields)?;
+    limits.check_items(total_variants)?;
     if total_name_bytes > limits.max_string_bytes {
         return Err(error("ORNA-EVAL-LIMIT"));
     }
@@ -361,6 +426,7 @@ fn validate_nominal_definitions(
     }
     Ok(())
 }
+
 
 fn validate_admitted_nominals(
     value: &Value,
@@ -5937,6 +6003,41 @@ fn bind(
         } => bind_constructor(path, arguments, fields, value, scope, context, depth),
     }
 }
+fn enum_variant_identity<'scope>(
+    scope: &'scope Scope,
+    owner: &str,
+    variant: &str,
+) -> Option<(&'scope Raw, &'scope Raw)> {
+    if let Some(definition) = scope.3.get(owner) {
+        return definition
+            .variants
+            .iter()
+            .find(|candidate| candidate.name == variant)
+            .map(|candidate| (&definition.type_id, &candidate.variant_id));
+    }
+    if owner.contains('.') {
+        return None;
+    }
+    let mut found = None;
+    for (name, definition) in &scope.3 {
+        if name.rsplit('.').next() != Some(owner) {
+            continue;
+        }
+        let Some(candidate) = definition
+            .variants
+            .iter()
+            .find(|candidate| candidate.name == variant)
+        else {
+            continue;
+        };
+        if found.is_some() {
+            return None;
+        }
+        found = Some((&definition.type_id, &candidate.variant_id));
+    }
+    found
+}
+
 fn bind_constructor(
     path: &[orna_syntax_v1::NameSegment],
     arguments: &[Pattern],
@@ -5965,17 +6066,28 @@ fn bind_constructor(
     if path.len() < 2 || !arguments.is_empty() {
         return Err(error("ORNA-EVAL-UNSUPPORTED"));
     }
-    let qualified_name = path
+    let owner = path[..path.len() - 1]
         .iter()
         .map(|segment| segment.text.as_str())
         .collect::<Vec<_>>()
         .join(".");
-    let qualified_name = context.string(qualified_name)?;
-    let Some(Value::Enum {
-        type_id: expected_type,
-        variant_id: expected_variant,
-        ..
-    }) = scope.0.get(&qualified_name)
+    let owner = context.string(owner)?;
+    let variant = context.string(
+        path.last()
+            .expect("path length checked")
+            .text
+            .clone(),
+    )?;
+    let qualified_name = context.string(format!("{owner}.{variant}"))?;
+    let Some((expected_type, expected_variant)) = enum_variant_identity(scope, &owner, &variant)
+        .or_else(|| {
+            scope.0.get(&qualified_name).and_then(|value| match value {
+                Value::Enum {
+                    type_id, variant_id, ..
+                } => Some((type_id, variant_id)),
+                _ => None,
+            })
+        })
     else {
         return Err(error("ORNA-EVAL-UNSUPPORTED"));
     };
@@ -5996,6 +6108,7 @@ fn bind_constructor(
         (_, Some(payload)) => bind_pattern_fields(fields, *payload, scope, context, depth + 1),
     }
 }
+
 fn bind_pattern_fields(
     patterns: &[PatternField],
     value: Value,
@@ -6004,22 +6117,30 @@ fn bind_pattern_fields(
     depth: usize,
 ) -> Result<bool, EvaluationError> {
     context.depth(depth)?;
-    let Value::NominalRecord { fields, .. } = value else {
-        return Ok(false);
-    };
     for field in patterns {
-        let Some((_, value)) = fields
-            .iter()
-            .find(|(key, _)| matches!(key, Raw::Text(name) if name == &field.name))
-        else {
+        let field_value = match &value {
+            Value::Record(fields) => fields.get(&field.name),
+            Value::NominalRecord { fields, .. } => fields
+                .iter()
+                .find(|(key, _)| matches!(key, Raw::Text(name) if name == &field.name))
+                .map(|(_, value)| value),
+            _ => return Ok(false),
+        };
+        let Some(field_value) = field_value else {
             return Ok(false);
         };
         if let Some(pattern) = &field.pattern {
-            if !bind(pattern, value.clone(), scope, context, depth + 1)? {
+            if !bind(
+                pattern,
+                field_value.clone(),
+                scope,
+                context,
+                depth + 1,
+            )? {
                 return Ok(false);
             }
         } else {
-            scope.0.insert(field.name.clone(), value.clone());
+            scope.0.insert(field.name.clone(), field_value.clone());
             scope.1.remove(&field.name);
         }
     }
