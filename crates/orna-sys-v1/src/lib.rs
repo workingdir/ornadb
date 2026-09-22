@@ -985,6 +985,9 @@ impl Runtime {
     where
         E: InvocationExecutor,
     {
+        if request.mode != InvocationMode::Invoke {
+            return Err(AdmissionError::StartMode);
+        }
         match self.admit(request)? {
             Admission::New { boundary, handle } => {
                 self.mark_running(&handle)?;
@@ -1635,6 +1638,9 @@ impl RuntimeSupervisor {
     where
         E: InvocationExecutor,
     {
+        if request.mode != InvocationMode::Invoke {
+            return Err(AdmissionError::StartMode);
+        }
         let lifecycle = self
             .lifecycle
             .state
@@ -2904,6 +2910,40 @@ mod tests {
             )) if retained.canonical() == Some(b"answer".as_slice())
         ));
         assert_eq!(replay.calls, 0);
+    }
+    #[test]
+    fn run_rejects_async_mode_before_admission_or_effect() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let mut runtime_request = request(Some(value("Int", "1")), ArgumentMap::default());
+        runtime_request.mode = InvocationMode::Start;
+        runtime_request.transaction = TransactionMode::Separate;
+        let mut executor = Executor {
+            calls: 0,
+            result: InvocationResult::Success(value("Str", "must-not-run")),
+        };
+
+        assert_eq!(
+            runtime.run(runtime_request, &mut executor),
+            Err(AdmissionError::StartMode)
+        );
+        assert_eq!(executor.calls, 0);
+        assert_eq!(runtime.next_invocation, 0);
+        assert!(runtime.invocations.is_empty());
+
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("owner"));
+        let mut supervisor_request = request(Some(value("Int", "1")), ArgumentMap::default());
+        supervisor_request.mode = InvocationMode::Start;
+        supervisor_request.transaction = TransactionMode::Separate;
+        let mut executor = Executor {
+            calls: 0,
+            result: InvocationResult::Success(value("Str", "must-not-run")),
+        };
+        assert_eq!(
+            supervisor.run(supervisor_request, &mut executor),
+            Err(AdmissionError::StartMode)
+        );
+        assert_eq!(executor.calls, 0);
+        assert_eq!(supervisor.generation(), Ok(1));
     }
     #[test]
     fn run_retains_cancellation_as_a_terminal_classification() {
