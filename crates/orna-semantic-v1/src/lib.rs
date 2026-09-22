@@ -11,8 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
 use orna_syntax_v1::{
     AssignmentOperator, AssignmentTarget, ControlKind, Declaration, Expr, FieldInitializer, Item,
-    LambdaParameter, LiteralKind, Pattern, ProtocolMember, Statement, StringSegment, SyntaxTree,
-    TypeExpr, TypeMember, TypeRepresentation, UseTail, Visibility, parse_module_with_file,
+    LambdaParameter, LiteralKind, Pattern, ProtocolMember, SyntaxSpan, Statement,
+    StringSegment, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation, UseTail, Visibility,
+    parse_module_with_file,
 };
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
@@ -2893,6 +2894,7 @@ fn collect_nominal_conversion_effects(scope: &mut Scope, tree: &SyntaxTree) {
             bind_pattern(
                 &signature.parameters[0].pattern,
                 source_binding,
+                scope,
                 &mut local,
                 &mut ignored,
             );
@@ -3029,11 +3031,11 @@ fn check_item(
                 let inferred =
                     infer_contextual(value, &expected, scope, &BTreeMap::new(), diagnostics);
                 require_same(&expected, &inferred.ty, diagnostics);
-                bind_pattern(pattern, inferred.ty.clone(), symbols, diagnostics);
+                bind_pattern(pattern, inferred.ty.clone(), scope, symbols, diagnostics);
                 return Some(inferred);
             } else {
                 let inferred = infer(value, scope, &BTreeMap::new(), diagnostics);
-                bind_pattern(pattern, inferred.ty.clone(), symbols, diagnostics);
+                bind_pattern(pattern, inferred.ty.clone(), scope, symbols, diagnostics);
                 return Some(inferred);
             }
         }
@@ -3438,7 +3440,7 @@ fn validate_nested_implementation_members(
                     .unwrap_or_else(|| source.clone()),
                 _ => source.clone(),
             };
-            bind_pattern(&parameter.pattern, source_binding, &mut local, diagnostics);
+            bind_pattern(&parameter.pattern, source_binding, scope, &mut local, diagnostics);
             if matches!(target, Type::Named(name) if scope.nominal_rows.contains_key(name)) {
                 let inferred = infer_from_nominal_target(
                     body,
@@ -3843,6 +3845,7 @@ fn validate_nested_implementation_function(
         bind_pattern(
             &implementation.pattern,
             parameter_type,
+            scope,
             &mut local,
             diagnostics,
         );
@@ -5046,7 +5049,7 @@ fn infer_function_body(
                     infer(value, scope, &locals, diagnostics)
                 };
                 effects.join(&inferred.effects);
-                bind_pattern(pattern, inferred.ty, &mut locals, diagnostics);
+                bind_pattern(pattern, inferred.ty, scope, &mut locals, diagnostics);
             }
             Statement::Assert { value, .. } => {
                 let inferred = infer(value, scope, &locals, diagnostics);
@@ -5158,6 +5161,7 @@ fn check_function(
         bind_pattern(
             &parameter.pattern,
             ty.unwrap_or(Type::Error),
+            scope,
             &mut local,
             diagnostics,
         );
@@ -5704,6 +5708,7 @@ fn validate_loop_transfers(
                         .as_ref()
                         .map(type_of)
                         .unwrap_or(Type::Error),
+                    scope,
                     &mut lambda_locals,
                     diagnostics,
                 );
@@ -5727,7 +5732,7 @@ fn validate_loop_transfers(
                         let ty = annotation.as_ref().map(type_of).unwrap_or_else(|| {
                             infer(value, scope, &block_locals, &mut Vec::new()).ty
                         });
-                        bind_pattern(pattern, ty, &mut block_locals, diagnostics);
+                        bind_pattern(pattern, ty, scope, &mut block_locals, diagnostics);
                     }
                     Statement::Assert { value, .. }
                     | Statement::Expression { value, .. }
@@ -5810,7 +5815,7 @@ fn validate_loop_transfers(
                     &infer(iterable, scope, local, &mut Vec::new()).ty,
                 )
             {
-                bind_pattern(binding, element, &mut body_locals, &mut Vec::new());
+                bind_pattern(binding, element, scope, &mut body_locals, &mut Vec::new());
             }
             if let Some(loop_context) = loop_context {
                 loops.push(loop_context);
@@ -5844,18 +5849,253 @@ enum LoopTransferContext {
 fn bind_pattern(
     pattern: &Pattern,
     ty: Type,
+    scope: &Scope,
     into: &mut BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    if matches!(ty, Type::Error) {
+        return;
+    }
     match pattern {
         Pattern::Name(name, _) => {
             insert_local_binding(name, ty, into, diagnostics);
         }
         Pattern::Wildcard(_) => {}
-        _ => diagnostics.push(diag(
-            DIAG_UNSUPPORTED,
-            "destructuring pattern inference is not supported in this slice",
-        )),
+        Pattern::Literal { kind, .. } => {
+            let pattern_ty = literal_pattern_type(*kind);
+            if !types_match(&pattern_ty, &ty) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "pattern literal type does not match the value type",
+                ));
+            }
+        }
+        Pattern::Tuple { elements, .. } => match ty {
+            Type::Tuple(element_types) if element_types.len() == elements.len() => {
+                for (pattern, element_ty) in elements.iter().zip(element_types) {
+                    bind_pattern(pattern, element_ty, scope, into, diagnostics);
+                }
+            }
+            Type::Tuple(_) => diagnostics.push(diag(
+                DIAG_TYPE,
+                "tuple pattern arity does not match the value type",
+            )),
+            _ => diagnostics.push(diag(
+                DIAG_TYPE,
+                "tuple pattern requires a tuple value",
+            )),
+        },
+        Pattern::List { elements, .. } => match ty {
+            Type::List(element_ty) => {
+                for pattern in elements {
+                    bind_pattern(pattern, (*element_ty).clone(), scope, into, diagnostics);
+                }
+            }
+            _ => diagnostics.push(diag(
+                DIAG_TYPE,
+                "list pattern requires a list value",
+            )),
+        },
+        Pattern::Record { fields, .. } => {
+            bind_record_pattern(fields, &ty, scope, into, diagnostics);
+        }
+        Pattern::Constructor {
+            path,
+            arguments,
+            fields,
+            ..
+        } => {
+            bind_constructor_pattern(path, arguments, fields, &ty, scope, into, diagnostics);
+        }
+    }
+}
+
+fn literal_pattern_type(kind: LiteralKind) -> Type {
+    match kind {
+        LiteralKind::Integer => Type::Int,
+        LiteralKind::Decimal => Type::Decimal,
+        LiteralKind::Float => Type::Float,
+        LiteralKind::Date => Type::Date,
+        LiteralKind::Instant => Type::Instant,
+        LiteralKind::String => Type::Text,
+        LiteralKind::Boolean => Type::Bool,
+        LiteralKind::Null => Type::Null,
+    }
+}
+
+fn nominal_pattern_fields<'a>(ty: &Type, scope: &'a Scope) -> Option<&'a BTreeMap<String, Type>> {
+    let Type::Named(name) = ty else {
+        return None;
+    };
+    let short_name = name.rsplit('.').next().unwrap_or(name);
+    match scope
+        .nominal_rows
+        .get(name)
+        .or_else(|| scope.nominal_rows.get(short_name))
+    {
+        Some(Type::Record(fields)) => Some(fields),
+        _ => None,
+    }
+}
+
+fn bind_record_pattern(
+    fields: &[(String, Option<Pattern>, SyntaxSpan)],
+    ty: &Type,
+    scope: &Scope,
+    into: &mut BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(expected_fields) = (match ty {
+        Type::Record(fields) => Some(fields),
+        _ => nominal_pattern_fields(ty, scope),
+    }) else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "record pattern requires a record or nominal value",
+        ));
+        return;
+    };
+    let mut seen = BTreeSet::new();
+    for (name, nested, _) in fields {
+        if !seen.insert(name.as_str()) {
+            diagnostics.push(diag(DIAG_TYPE, "record pattern field is duplicated"));
+            continue;
+        }
+        if let Type::Named(nominal) = ty
+            && scope
+                .nominal_private_fields
+                .get(nominal)
+                .is_some_and(|private| private.contains(name))
+            && scope.private_field_owner.as_deref() != Some(nominal.as_str())
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "private nominal field is inaccessible in a pattern",
+            ));
+            continue;
+        }
+        let Some(field_ty) = expected_fields.get(name) else {
+            diagnostics.push(diag(DIAG_TYPE, "record pattern field cannot be resolved"));
+            continue;
+        };
+        if let Some(nested) = nested {
+            bind_pattern(nested, field_ty.clone(), scope, into, diagnostics);
+        } else {
+            insert_local_binding(name, field_ty.clone(), into, diagnostics);
+        }
+    }
+}
+
+fn bind_constructor_pattern(
+    path: &[orna_syntax_v1::NameSegment],
+    arguments: &[Pattern],
+    fields: &[orna_syntax_v1::PatternField],
+    ty: &Type,
+    scope: &Scope,
+    into: &mut BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let path_text = path
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join(".");
+    if matches!(ty, Type::Optional(_))
+        && path.len() == 1
+        && path[0].text == "Some"
+        && fields.is_empty()
+    {
+        let Type::Optional(inner) = ty else {
+            unreachable!()
+        };
+        if let [argument] = arguments {
+            bind_pattern(argument, (**inner).clone(), scope, into, diagnostics);
+        } else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "Some pattern requires exactly one payload",
+            ));
+        }
+        return;
+    }
+    if !arguments.is_empty() {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "constructor pattern arguments do not match the value type",
+        ));
+        return;
+    }
+    let expected_fields = match ty {
+        Type::Record(fields) => Some(fields),
+        Type::Named(name) => {
+            let short_name = name.rsplit('.').next().unwrap_or(name);
+            if let Some(variants) = scope
+                .enum_variants
+                .get(name)
+                .or_else(|| scope.enum_variants.get(short_name))
+            {
+                let variant = path.last().map(|segment| segment.text.as_str());
+                variant.and_then(|variant| variants.get(variant))
+            } else {
+                nominal_pattern_fields(ty, scope)
+            }
+        }
+        _ => None,
+    };
+    let target_name = match ty {
+        Type::Named(name) => name.rsplit('.').next().unwrap_or(name),
+        _ => "",
+    };
+    let owner_text = if path.len() > 1 {
+        path[..path.len() - 1]
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>()
+            .join(".")
+    } else {
+        path_text
+    };
+    let owner_name = owner_text.rsplit('.').next().unwrap_or(&owner_text);
+    let matches_nominal = !target_name.is_empty() && owner_name == target_name;
+    if expected_fields.is_none() || !matches_nominal {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "constructor pattern does not match the value type",
+        ));
+        return;
+    }
+    let expected_fields = expected_fields.expect("checked above");
+    let mut seen = BTreeSet::new();
+    for field in fields {
+        if !seen.insert(field.name.as_str()) {
+            diagnostics.push(diag(DIAG_TYPE, "constructor pattern field is duplicated"));
+            continue;
+        }
+        if let Type::Named(nominal) = ty
+            && scope
+                .nominal_private_fields
+                .get(nominal)
+                .is_some_and(|private| private.contains(&field.name))
+            && scope.private_field_owner.as_deref() != Some(nominal.as_str())
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "private nominal field is inaccessible in a pattern",
+            ));
+            continue;
+        }
+        let Some(field_ty) = expected_fields.get(&field.name) else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "constructor pattern field cannot be resolved",
+            ));
+            continue;
+        };
+        if let Some(nested) = &field.pattern {
+            bind_pattern(nested, field_ty.clone(), scope, into, diagnostics);
+        } else {
+            insert_local_binding(&field.name, field_ty.clone(), into, diagnostics);
+        }
     }
 }
 
@@ -6088,6 +6328,7 @@ fn infer_contextual_lambda(
         bind_pattern(
             &parameter.pattern,
             ty.clone(),
+            scope,
             &mut callback_locals,
             diagnostics,
         );
@@ -6443,7 +6684,7 @@ fn infer(
                             Type::Error
                         }
                     });
-                bind_pattern(&parameter.pattern, ty.clone(), &mut locals, diagnostics);
+                bind_pattern(&parameter.pattern, ty.clone(), scope, &mut locals, diagnostics);
                 types.push(ty);
             }
             let value = if matches!(
@@ -6996,7 +7237,7 @@ fn infer(
                             });
                             break;
                         }
-                        bind_pattern(pattern, ty, &mut locals, diagnostics);
+                        bind_pattern(pattern, ty, scope, &mut locals, diagnostics);
                     }
                     Statement::Assert { value, .. } => {
                         let x = infer(value, scope, &locals, diagnostics);
@@ -7777,7 +8018,7 @@ fn infer_for(
         };
     };
     let mut body_locals = local.clone();
-    bind_pattern(binding, element, &mut body_locals, diagnostics);
+    bind_pattern(binding, element, scope, &mut body_locals, diagnostics);
     let body = infer(body, scope, &body_locals, diagnostics);
     let mut effects = iterable.effects;
     effects.join(&body.effects);
@@ -15296,4 +15537,31 @@ mod tests {
                 && diagnostic.message() == "break transfer requires a loop result contract"
         }));
     }
+    #[test]
+    fn structured_parameter_patterns_bind_recursively() {
+        let analysis = checked(&[ModuleInput::new(
+            "patterns.orna",
+            r#"
+                type Point {
+                    pub x: Int,
+                    pub y: Int,
+                }
+                fn tuple((left, (right, _)): (Int, (Int, Int))): Int = left + right;
+                fn list([head, tail]: [Int]): Int = head + tail;
+                fn record({name, count: total}: {name: Str, count: Int}): Int = total;
+                fn nominal(Point { x, y: second }: Point): Int = x + second;
+            "#,
+        )]);
+        assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
+    }
+
+    #[test]
+    fn structured_parameter_pattern_shape_errors_keep_type_diagnostic() {
+        let analysis = checked(&[ModuleInput::new(
+            "invalid-pattern.orna",
+            "fn wrong((first, second): (Int,)): Int = first;",
+        )]);
+        assert!(has(&analysis, DIAG_TYPE));
+    }
+
 }
