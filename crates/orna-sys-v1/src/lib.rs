@@ -1773,11 +1773,16 @@ impl RuntimeSupervisor {
                 match terminal {
                     None => None,
                     Some(result) => {
-                        let worker = self
-                            .workers
-                            .lock()
-                            .ok()
-                            .and_then(|mut workers| workers.remove(handle.invocation().id()));
+                        let worker = match self.workers.lock() {
+                            Ok(mut workers) => {
+                                workers.remove(handle.invocation().id())
+                            }
+                            Err(poisoned) => {
+                                self.workers.clear_poison();
+                                let mut workers = poisoned.into_inner();
+                                workers.remove(handle.invocation().id())
+                            }
+                        };
                         if let Some(worker) = worker {
                             let _ = worker.join();
                         }
@@ -3373,6 +3378,48 @@ mod tests {
                 ..
             }) if retained.canonical() == Some(b"answer".as_slice())
         ));
+        assert!(supervisor.workers.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn supervised_await_reaps_completed_worker_after_workers_mutex_poison() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("r"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.mode = InvocationMode::Start;
+        request.transaction = TransactionMode::Separate;
+        let handle = supervisor
+            .start(
+                request,
+                Executor {
+                    calls: 0,
+                    result: InvocationResult::Success(value("Str", "done")),
+                },
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if matches!(
+                supervisor.state(&handle),
+                Ok(InvocationState::Terminal(
+                    RetainedInvocationResult::Success(_)
+                ))
+            ) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "worker did not complete");
+            thread::yield_now();
+        }
+
+        let workers = Arc::clone(&supervisor.workers);
+        let poisoner = thread::spawn(move || {
+            let _workers = workers.lock().unwrap();
+            panic!("poison workers mutex");
+        });
+        assert!(poisoner.join().is_err());
+
+        let result = supervisor
+            .await_invocation(&handle, Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(result.status, InvocationStatus::Succeeded);
         assert!(supervisor.workers.lock().unwrap().is_empty());
     }
 
