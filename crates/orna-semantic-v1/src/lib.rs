@@ -1680,23 +1680,26 @@ fn analyze_retaining_context(
         result.modules.insert(namespace.clone(), header);
         parsed.push((namespace, parse.value));
     }
+    let mut dependency_summaries = BTreeMap::new();
     stabilize_function_summaries(
         &parsed,
         &mut result.modules,
         &catalogue.historical_modules,
         &catalogue.attached_symbols,
+        &mut dependency_summaries,
     );
     for (namespace, tree) in &parsed {
         let Some(header) = result.modules.get(namespace).cloned() else {
             continue;
         };
-        let scope = resolve_imports(
+        let scope = resolve_imports_with_dependencies(
             namespace,
             tree,
             &header,
             &result.modules,
             &catalogue.historical_modules,
             &catalogue.attached_symbols,
+            &dependency_summaries,
             &mut result.diagnostics,
         );
         let mut symbols = header.symbols.clone();
@@ -1754,6 +1757,7 @@ fn stabilize_function_summaries(
     modules: &mut BTreeMap<Namespace, ModuleHeader>,
     historical_modules: &BTreeMap<Namespace, ModuleHeader>,
     attached_symbols: &BTreeMap<String, Symbol>,
+    dependency_summaries: &mut BTreeMap<Namespace, BTreeMap<String, BTreeSet<String>>>,
 ) {
     let pass_limit = parsed
         .iter()
@@ -1762,18 +1766,20 @@ fn stabilize_function_summaries(
         .saturating_add(1);
     for _ in 0..pass_limit {
         let before = modules.clone();
+        let dependencies_before = dependency_summaries.clone();
         for (namespace, tree) in parsed {
             let Some(header) = modules.get(namespace).cloned() else {
                 continue;
             };
             let mut discarded = Vec::new();
-            let scope = resolve_imports(
+            let scope = resolve_imports_with_dependencies(
                 namespace,
                 tree,
                 &header,
                 modules,
                 historical_modules,
                 attached_symbols,
+                dependency_summaries,
                 &mut discarded,
             );
             let mut symbols = header.symbols;
@@ -1783,6 +1789,16 @@ fn stabilize_function_summaries(
             for item in &tree.items {
                 if matches!(item.declaration, Declaration::Function { .. }) {
                     check_function(item, &mut symbols, &scope, &mut discarded);
+                }
+            }
+            let summaries = scope.function_dependencies.borrow();
+            let local_summaries = dependency_summaries.entry(namespace.clone()).or_default();
+            for item in &tree.items {
+                let Declaration::Function { signature, .. } = &item.declaration else {
+                    continue;
+                };
+                if let Some(dependencies) = summaries.get(&signature.name) {
+                    local_summaries.insert(signature.name.clone(), dependencies.clone());
                 }
             }
             let conversion_metadata = conversion_metadata(&scope);
@@ -1797,7 +1813,7 @@ fn stabilize_function_summaries(
                     .collect();
             }
         }
-        if *modules == before {
+        if *modules == before && *dependency_summaries == dependencies_before {
             break;
         }
     }
@@ -2592,6 +2608,27 @@ fn resolve_imports(
     attached_symbols: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Scope {
+    resolve_imports_with_dependencies(
+        namespace,
+        tree,
+        header,
+        modules,
+        historical_modules,
+        attached_symbols,
+        &BTreeMap::new(),
+        diagnostics,
+    )
+}
+fn resolve_imports_with_dependencies(
+    namespace: &Namespace,
+    tree: &SyntaxTree,
+    header: &ModuleHeader,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+    historical_modules: &BTreeMap<Namespace, ModuleHeader>,
+    attached_symbols: &BTreeMap<String, Symbol>,
+    dependency_summaries: &BTreeMap<Namespace, BTreeMap<String, BTreeSet<String>>>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Scope {
     let mut scope = Scope {
         names: header.symbols.clone(),
         function_dependencies: RefCell::new(BTreeMap::new()),
@@ -2944,6 +2981,85 @@ fn resolve_imports(
             scope.names.insert(name, candidates[0].clone());
         } else {
             scope.ambiguous.insert(name);
+        }
+    }
+    // Preserve dependency provenance for imported helpers without extending
+    // the public ModuleHeader/Symbol representations. Qualified calls use the
+    // module binding (including aliases); named and wildcard imports use their
+    // lexical binding.
+    for (alias, target) in scope.modules.clone() {
+        let Some(summaries) = dependency_summaries.get(&target) else {
+            continue;
+        };
+        for (name, dependencies) in summaries {
+            scope
+                .function_dependencies
+                .borrow_mut()
+                .insert(format!("{alias}.{name}"), dependencies.clone());
+        }
+    }
+    for item in &tree.items {
+        let Declaration::Use { path, tail } = &item.declaration else {
+            continue;
+        };
+        let target = Namespace(path.iter().map(|x| x.name.clone()).collect());
+        let Some(module) = modules.get(&target) else {
+            continue;
+        };
+        let mut imported = Vec::new();
+        match tail {
+            UseTail::Names(names) => {
+                imported.extend(names.iter().map(|name| name.name.clone()));
+            }
+            UseTail::Glob { .. } => {
+                imported.extend(
+                    module
+                        .exports
+                        .iter()
+                        .filter(|(_, symbol)| symbol.kind == SymbolKind::Function)
+                        .map(|(name, _)| name.clone()),
+                );
+            }
+            UseTail::None => {}
+            UseTail::Alias { name, .. } if name == "_" => {}
+            UseTail::Alias { name, .. } => {
+                if scope.modules.get(name) == Some(&target) {
+                    for function in module
+                        .exports
+                        .iter()
+                        .filter(|(_, symbol)| symbol.kind == SymbolKind::Function)
+                        .map(|(name, _)| name)
+                    {
+                        if let Some(dependencies) = dependency_summaries
+                            .get(&target)
+                            .and_then(|summaries| summaries.get(function))
+                        {
+                            scope
+                                .function_dependencies
+                                .borrow_mut()
+                                .insert(format!("{name}.{function}"), dependencies.clone());
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+        for name in imported {
+            let Some(symbol) = module.exports.get(&name) else {
+                continue;
+            };
+            if scope.names.get(&name) != Some(symbol) {
+                continue;
+            }
+            if let Some(dependencies) = dependency_summaries
+                .get(&target)
+                .and_then(|summaries| summaries.get(&name))
+            {
+                scope
+                    .function_dependencies
+                    .borrow_mut()
+                    .insert(name, dependencies.clone());
+            }
         }
     }
     canonicalize_scope_metadata(&mut scope, namespace, tree);
@@ -15243,11 +15359,17 @@ fn tables_referenced(
             } => {
                 visit(callee, names, resolved_tables, scope);
                 if let Some(scope) = scope
-                    && let Some(name) = qualified_path(callee).and_then(|path| path.last().copied())
-                    && let Some(dependencies) =
-                        scope.function_dependencies.borrow().get(name).cloned()
+                    && let Some(path) = qualified_path(callee)
                 {
-                    names.extend(dependencies);
+                    let path_key = path.join(".");
+                    let name_key = path.last().copied().unwrap_or_default();
+                    let summaries = scope.function_dependencies.borrow();
+                    if let Some(dependencies) = summaries
+                        .get(&path_key)
+                        .or_else(|| summaries.get(name_key))
+                    {
+                        names.extend(dependencies.iter().cloned());
+                    }
                 }
                 for argument in arguments {
                     visit(&argument.value, names, resolved_tables, scope);
