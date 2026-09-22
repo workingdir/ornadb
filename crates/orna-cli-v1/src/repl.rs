@@ -9,6 +9,8 @@ const MAX_INPUT_BYTES: usize = 65_536;
 const MAX_INSPECT_DEPTH: usize = 4;
 const MAX_INSPECT_ITEMS: usize = 16;
 const MAX_INSPECT_TEXT: usize = 256;
+const REPL_HELP: &str = "commands: :help [name], :at CWD|HEAD|ref, :quit";
+
 
 enum ReadSubmission {
     Eof,
@@ -96,7 +98,12 @@ fn run_loop<R: BufRead, W: Write, L: SnapshotSessionLoader + ?Sized>(
                 if command == ":quit" {
                     return Ok(());
                 }
-                if let Some(loader) = loader
+                if let Some(help) = parse_help_command(command) {
+                    match help {
+                        Ok(text) => writeln!(writer, "{text}")?,
+                        Err(()) => writeln!(writer, "error[ORNA-REPL-COMMAND]")?,
+                    }
+                } else if let Some(loader) = loader
                     && let Some(target) = parse_snapshot_target(command)
                 {
                     match target.and_then(|target| loader.load_snapshot(target).map_err(|_| ())) {
@@ -115,6 +122,24 @@ fn run_loop<R: BufRead, W: Write, L: SnapshotSessionLoader + ?Sized>(
             }
         }
     }
+}
+
+fn parse_help_command(command: &str) -> Option<Result<&'static str, ()>> {
+    let mut words = command.split_ascii_whitespace();
+    if words.next() != Some(":help") {
+        return None;
+    }
+    let topic = words.next();
+    if words.next().is_some() {
+        return Some(Err(()));
+    }
+    Some(match topic {
+        None => Ok(REPL_HELP),
+        Some("help") => Ok(":help [name]"),
+        Some("at") => Ok(":at CWD|HEAD|ref"),
+        Some("quit") => Ok(":quit"),
+        Some(_) => Err(()),
+    })
 }
 
 fn parse_snapshot_target(command: &str) -> Option<Result<SnapshotTarget, ()>> {
@@ -346,6 +371,20 @@ mod tests {
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
             "> > 42 : Int\n> "
+        );
+    }
+
+    #[test]
+    fn help_command_is_effect_free_and_lists_supported_console_operations() {
+        let mut input = b":help\n:help at\n:help unknown\n1 + 1\n:quit\n".as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        run(&mut input, &mut output, &mut session).expect("REPL runs");
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            format!(
+                "> {REPL_HELP}\n> :at CWD|HEAD|ref\n> error[ORNA-REPL-COMMAND]\n> 2 : Int\n> "
+            )
         );
     }
 
