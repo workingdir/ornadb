@@ -6,13 +6,19 @@
 //! evaluator program. Runtime table work is staged against the exact captured
 //! activation context and is never published by this crate.
 
-use std::{fmt, sync::Arc, time::UNIX_EPOCH};
-use orna_evaluator_v1::{Environment, EvaluationError, Functions, Limits, PureFunction, invoke_named};
+use orna_evaluator_v1::{
+    Environment, EvaluationError, Functions, Limits, PureFunction, invoke_named,
+};
 use orna_foundation_v1::CanonicalValue;
-use orna_runtime_v1::{NoFault, RuntimeActivationContext, RuntimeError, StagedTableActivation, TableMutation};
+use orna_live_v1::{Error as LiveError, LiveApplication};
+use orna_protocol_v1::{Envelope, Message, ResultStatus};
+use orna_runtime_v1::{
+    NoFault, RuntimeActivationContext, RuntimeError, StagedTableActivation, TableMutation,
+};
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_syntax_v1::{Declaration, parse_module_with_file};
 use sha2::{Digest, Sha256};
+use std::{collections::BTreeMap, fmt, sync::Arc, time::UNIX_EPOCH};
 
 const DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST\0";
 
@@ -37,11 +43,19 @@ impl fmt::Display for ApplicationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Parse(_) => formatter.write_str("application source failed syntax admission"),
-            Self::Semantic(_) => formatter.write_str("application source failed semantic admission"),
-            Self::MissingEntry(name) => write!(formatter, "application entry `{name}` was not admitted"),
+            Self::Semantic(_) => {
+                formatter.write_str("application source failed semantic admission")
+            }
+            Self::MissingEntry(name) => {
+                write!(formatter, "application entry `{name}` was not admitted")
+            }
             Self::Evaluation(code) => write!(formatter, "application evaluation failed: {code}"),
-            Self::Runtime(message) => write!(formatter, "runtime activation staging failed: {message}"),
-            Self::DigestEncoding => formatter.write_str("activation context could not be canonically encoded"),
+            Self::Runtime(message) => {
+                write!(formatter, "runtime activation staging failed: {message}")
+            }
+            Self::DigestEncoding => {
+                formatter.write_str("activation context could not be canonically encoded")
+            }
         }
     }
 }
@@ -190,13 +204,93 @@ impl ApplicationAuthority {
         mutation: TableMutation,
     ) -> Result<StagedTableActivation, ApplicationError> {
         let digest = Self::canonical_digest(&context, std::slice::from_ref(&mutation))?;
-        StagedTableActivation::from_source(
-            context,
-            vec![mutation],
-            digest,
-            Arc::new(NoFault),
-        )
-        .map_err(|error: RuntimeError| ApplicationError::Runtime(error.to_string()))
+        StagedTableActivation::from_source(context, vec![mutation], digest, Arc::new(NoFault))
+            .map_err(|error: RuntimeError| ApplicationError::Runtime(error.to_string()))
+    }
+}
+impl From<ApplicationError> for LiveError {
+    fn from(_: ApplicationError) -> Self {
+        Self::ApplicationRejected
+    }
+}
+
+/// Pure source-backed application adapter for the live protocol.
+///
+/// The host remains responsible for canonical envelope and fingerprint
+/// validation. This adapter only admits and evaluates the incoming Eval
+/// source; effectful transactions are intentionally outside this slice.
+#[derive(Clone, Debug)]
+pub struct ApplicationLiveAdapter {
+    authority: ApplicationAuthority,
+    logical_path: String,
+    entry: String,
+}
+
+impl ApplicationLiveAdapter {
+    /// Creates an adapter for the deterministic remote-evaluation module.
+    #[must_use]
+    pub fn new(authority: ApplicationAuthority) -> Self {
+        Self {
+            authority,
+            logical_path: "remote_eval.orna".to_owned(),
+            entry: "main".to_owned(),
+        }
+    }
+
+    /// Sets the logical module path and entry used for future Eval messages.
+    #[must_use]
+    pub fn with_module(
+        mut self,
+        logical_path: impl Into<String>,
+        entry: impl Into<String>,
+    ) -> Self {
+        self.logical_path = logical_path.into();
+        self.entry = entry.into();
+        self
+    }
+}
+
+impl LiveApplication for ApplicationLiveAdapter {
+    fn eval(
+        &mut self,
+        _session: [u8; 16],
+        request: [u8; 16],
+        message: &Message,
+    ) -> std::result::Result<Envelope, LiveError> {
+        let Message::Eval {
+            source,
+            fingerprint,
+            ..
+        } = message
+        else {
+            return Err(LiveError::ApplicationRejected);
+        };
+        let admitted = self.authority.admit_module(
+            self.logical_path.clone(),
+            source.clone(),
+            self.entry.clone(),
+        )?;
+        let value = self.authority.evaluate(&admitted, &Environment::new())?;
+        Ok(Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                fingerprint: *fingerprint,
+                diagnostic: None,
+            },
+            extensions: BTreeMap::new(),
+        })
+    }
+
+    fn watch(
+        &mut self,
+        _session: [u8; 16],
+        _request: [u8; 16],
+        _message: &Message,
+    ) -> std::result::Result<Envelope, LiveError> {
+        Err(LiveError::UnsupportedOperation)
     }
 }
 
@@ -251,5 +345,54 @@ mod tests {
         ))
         .expect("canonical integer");
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn live_adapter_evaluates_eval_and_preserves_result_identity() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let mut adapter = ApplicationLiveAdapter::new(authority);
+        let request = [8; 16];
+        let fingerprint = [9; 32];
+        let message = Message::Eval {
+            source: "pub fn main(): Int = 41;".to_owned(),
+            database: orna_protocol_v1::DatabaseContext {
+                database: [1; 16],
+                snapshot: None,
+            },
+            presentation: orna_protocol_v1::PresentationContext {
+                locale: "en-US".to_owned(),
+                timezone: None,
+                width: None,
+                theme: "terminal/default".to_owned(),
+                supported_kinds: Vec::new(),
+            },
+            fingerprint,
+        };
+        let response = LiveApplication::eval(&mut adapter, [7; 16], request, &message)
+            .expect("Eval should be admitted and evaluated");
+        assert_eq!(response.request, Some(request));
+        assert_eq!(response.watch, None);
+        let Message::Result {
+            status,
+            value,
+            fingerprint: returned_fingerprint,
+            diagnostic,
+        } = response.message
+        else {
+            panic!("adapter must return a Result envelope");
+        };
+        assert_eq!(status, ResultStatus::Success);
+        assert_eq!(returned_fingerprint, fingerprint);
+        assert_eq!(diagnostic, None);
+        assert_eq!(
+            value,
+            Some(
+                orna_foundation_v1::Value::new(orna_foundation_v1::OvbRaw::Int(
+                    num_bigint::BigInt::from(41_i64),
+                ))
+                .expect("canonical integer"),
+            )
+        );
     }
 }
