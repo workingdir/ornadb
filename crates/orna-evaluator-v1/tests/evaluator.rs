@@ -9527,3 +9527,44 @@ fn bucket_by_rejects_invalid_zone_and_period() {
         );
     }
 }
+
+#[test]
+fn admitted_eval_producer_stages_effectful_source_without_publishing() {
+    let mut session = orna_evaluator_v1::AdmittedReplSession::new(Limits::default());
+    assert_eq!(session.submit("let answer: Int = 41;"), Ok(None));
+    assert_eq!(
+        session.submit("answer"),
+        Ok(Some(Value::int(41.into())))
+    );
+    let before = session.preview("$_").expect("last result should be visible");
+    assert_eq!(
+        session
+            .stage_activation("40 + 2")
+            .unwrap_err()
+            .code(),
+        "ORNA-REPL-EFFECT",
+        "the producer boundary admits only effectful activation input"
+    );
+
+    let staged = session
+        .stage_activation("std.net.http.get(\"https://example.com\")")
+        .expect("explicit eval source should be admitted into a staged activation");
+
+    assert!(matches!(
+        staged.input(),
+        orna_syntax_v1::ReplInput::Expression(_)
+    ));
+    assert!(staged.result_type().is_some());
+    assert!(staged.effects().effects.contains("network"));
+    assert!(staged.effects().may_fail);
+    assert_eq!(
+        session.preview("$_"),
+        Ok(before),
+        "staging must not publish a new REPL result"
+    );
+    assert_eq!(
+        session.preview("answer"),
+        Ok(Value::int(41.into())),
+        "staging must not alter existing bindings"
+    );
+}
