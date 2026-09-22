@@ -599,6 +599,13 @@ mod batch_tests {
             .unwrap()
             .expect("retained function resolves at its admitted capture");
         assert_eq!(pinned, admitted);
+        let pinned_type = state
+            .catalogue_type_at("pkg.T", CatalogueTypeForm::Named, &first.capture)
+            .await
+            .unwrap()
+            .expect("retained type resolves at its admitted capture");
+        assert_eq!(pinned_type.object_id(), first.types[0].object_id());
+
 
         // Multiple later generations must not impose predecessor adjacency
         // on reads of an older pinned reference (ORNA-SYS-019).
@@ -884,6 +891,18 @@ mod module_tests {
         assert_eq!(edited.object_id(), first.object_id());
         assert_eq!(edited.object.revision_id, digest(15));
         assert_eq!(edited.snapshot(), current_capture.snapshot());
+        assert_eq!(
+            state
+                .catalogue_module_at("pkg.main", &first_capture)
+                .await
+                .unwrap(),
+            Some(first.clone())
+        );
+        assert_eq!(
+            state.catalogue_module("pkg.main").await.unwrap().unwrap(),
+            edited
+        );
+
         let mut rows = state
             .connection
             .query(
@@ -909,15 +928,23 @@ mod module_tests {
             .await
             .unwrap();
         advance(&state, lease, 19).await;
+
         let renamed = admit(
             &state,
             lease,
-            Some(first_capture),
+            Some(first_capture.clone()),
             declaration("pkg.new", 20, 21, Some("pkg.old")),
         )
         .await
         .unwrap();
         assert_eq!(renamed.object_id(), first.object_id());
+        assert_eq!(
+            state
+                .catalogue_module_at("pkg.old", &first_capture)
+                .await
+                .unwrap(),
+            Some(first.clone())
+        );
         assert_eq!(state.catalogue_module("pkg.old").await.unwrap(), None);
         assert_eq!(
             state
@@ -1795,6 +1822,68 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         Ok(Some(function))
+    }
+
+    /// Reads one type row at an exact retained CWD capture.
+    ///
+    /// The capture is validated against the durable runtime catalogue ledger
+    /// before the name lookup, so a pinned read never falls back to the
+    /// current catalogue when its generation is forged or unknown.
+    pub async fn catalogue_type_at(
+        &self,
+        qualified_name: &str,
+        form: CatalogueTypeForm,
+        capture: &orna_foundation_v1::CwdCapture,
+    ) -> Result<Option<CatalogueTypeHandle>, RuntimeError> {
+        validate_observation_text(qualified_name)?;
+        let transaction = self.catalogue_transaction_read().await?;
+        let stored = retained_capture_row_tx(&transaction, capture).await?;
+        let Some(id) = lookup_snapshot_object_id(&transaction, &stored, qualified_name).await?
+        else {
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            return Ok(None);
+        };
+        let stored_form = load_type_form_tx(&transaction, capture, id).await?;
+        if stored_form != form {
+            return Err(RuntimeError::CatalogueTypeMismatch);
+        }
+        let handle = load_type_handle_tx(&transaction, capture, id).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(Some(handle))
+    }
+
+    /// Reads one module row at an exact retained CWD capture.
+    ///
+    /// Unlike the current-runtime lookup, this method intentionally resolves
+    /// the requested qualified name only in the supplied retained snapshot.
+    pub async fn catalogue_module_at(
+        &self,
+        qualified_name: &str,
+        capture: &orna_foundation_v1::CwdCapture,
+    ) -> Result<Option<CatalogueModule>, RuntimeError> {
+        validate_observation_text(qualified_name)?;
+        let transaction = self.catalogue_transaction_read().await?;
+        let stored = retained_capture_row_tx(&transaction, capture).await?;
+        let Some(id) = lookup_snapshot_object_id(&transaction, &stored, qualified_name).await?
+        else {
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            return Ok(None);
+        };
+        let module = load_module_tx(&transaction, capture, id).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(Some(module))
     }
     async fn catalogue_transaction(&self) -> Result<Transaction, RuntimeError> {
         self.connection
