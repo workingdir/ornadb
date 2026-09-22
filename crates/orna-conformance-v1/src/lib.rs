@@ -1551,7 +1551,7 @@ fn reference_stream_checkpoint_key(
         source: component(source_identity)?,
         partition_format: component("literal-list".into())?,
         partition: None,
-        position_format: component("ordinal".into())?,
+        position_format: component("orna.list.v1".into())?,
     })
 }
 

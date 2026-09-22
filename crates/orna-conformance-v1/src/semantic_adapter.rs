@@ -4069,7 +4069,7 @@ impl ListStreamBridge {
             source: component(&self.source_identity)?,
             partition_format: component("literal-list")?,
             partition: self.partition.as_deref().map(component).transpose()?,
-            position_format: component("ordinal")?,
+            position_format: component("orna.list.v1")?,
         })
     }
 }
@@ -12375,7 +12375,7 @@ mod list_stream_tests {
             source: component("fixture:failure"),
             partition_format: component("literal-list"),
             partition: None,
-            position_format: component("ordinal"),
+            position_format: component("orna.list.v1")
         }
     }
 

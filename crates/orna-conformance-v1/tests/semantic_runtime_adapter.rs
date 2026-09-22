@@ -2765,3 +2765,208 @@ fn bounded_evaluator_redacts_missing_and_unknown_retained_function_arguments() {
         assert_eq!(diagnostic.message(), "<redacted>");
     }
 }
+#[tokio::test]
+async fn project_stream_checkpoint_restarts_by_position_and_binds_list_contents() {
+    fn project(values: &str) -> ProjectUnit {
+        ProjectUnit {
+            fixture_id: "finite-list-checkpoint".into(),
+            project_id: "finite-list-checkpoint".into(),
+            environment_id: None,
+            modules: vec![SourceUnit {
+                fixture_id: "finite-list-checkpoint".into(),
+                source_id: "finite-list-checkpoint/sensors.orna".into(),
+                parse_as: "module_unit".into(),
+                source: format!(
+                    r#"
+                        pub table Reading(id: Int) {{ value: Int, }}
+                        pub fn input() = Stream.from_list([{values}], source_identity: "same-label");
+                        pub fn ingest() {{ input() | for_each(value => {{
+                            Reading.insert({{ id: value, value: value }});
+                        }}); }}
+                    "#
+                ),
+            }],
+            loose_rows: Vec::new(),
+            expectations: ProjectExpectations {
+                environment: ProjectEnvironment {
+                    network: false,
+                    credentials: false,
+                    intrinsics: "Orna 1.0.0 core".into(),
+                    stdlib: None,
+                    initial_tables: "empty".into(),
+                },
+                steps: Vec::new(),
+                negative_cases: Vec::new(),
+            },
+        }
+    }
+
+    let temp = TempDir::new().expect("temporary repository");
+    let repository = initialized_repository(&temp);
+    let evaluator = orna_conformance_v1::DurableTransactionalEvaluator::default();
+    let identity = RuntimeIdentity {
+        database_id: [121; 16],
+        repository_id: [122; 16],
+    };
+    let owner_id = [123; 16];
+    let initial_digest = [124; 32];
+    let first = project("1, 2");
+
+    let first_outcome = evaluator
+        .execute_project_stream(
+            &repository,
+            identity,
+            owner_id,
+            initial_digest,
+            &first,
+            "sensors.ingest",
+        )
+        .await;
+    assert!(
+        matches!(first_outcome, Ok(StageOutcome::Passed)),
+        "first execution: {first_outcome:?}"
+    );
+
+    let state = RuntimeState::open(&repository, identity, initial_digest)
+        .await
+        .expect("reopen first runtime");
+    let rows = state
+        .committed_table_rows("Reading")
+        .await
+        .expect("first committed rows");
+    assert_eq!(rows.len(), 2, "both zero-based list items must be delivered");
+    let streams = state.stream_observations().await.expect("first stream");
+    assert_eq!(streams.len(), 1);
+    let first_stream = &streams[0];
+    assert!(
+        first_stream.checkpoint.partition.is_none(),
+        "a finite list has one unpartitioned source"
+    );
+    assert_eq!(
+        first_stream.checkpoint.position_format.as_str(),
+        "orna.list.v1"
+    );
+    let first_checkpoint = state
+        .stream_checkpoint(&first_stream.checkpoint)
+        .await
+        .expect("first checkpoint");
+    assert_eq!(
+        first_checkpoint
+            .committed
+            .as_ref()
+            .expect("exhausted list checkpoint")
+            .token
+            .as_str(),
+        "2",
+        "the next position after indices 0 and 1 is the list length"
+    );
+    let first_capture = state.capture().await.expect("first capture");
+    let history = state
+        .stream_checkpoint_history_at(&first_stream.checkpoint, &first_capture)
+        .await
+        .expect("checkpoint history");
+    assert_eq!(history.len(), 2, "one successor watermark per list item");
+    assert_eq!(
+        history
+            .iter()
+            .map(|watermark| watermark
+                .checkpoint
+                .committed
+                .as_ref()
+                .expect("committed watermark")
+                .token
+                .as_str())
+            .collect::<Vec<_>>(),
+        vec!["1", "2"],
+        "the provider must advance deterministically from index 0 to 1 to exhaustion"
+    );
+    drop(state);
+
+    assert!(matches!(
+        evaluator
+            .execute_project_stream(
+                &repository,
+                identity,
+                owner_id,
+                initial_digest,
+                &first,
+                "sensors.ingest",
+            )
+            .await,
+        Ok(StageOutcome::Passed)
+    ));
+    let state = RuntimeState::open(&repository, identity, initial_digest)
+        .await
+        .expect("reopen unchanged runtime");
+    assert_eq!(
+        state
+            .committed_table_rows("Reading")
+            .await
+            .expect("unchanged committed rows")
+            .len(),
+        2,
+        "restarting an exhausted immutable list must not redeliver rows"
+    );
+    drop(state);
+
+    let changed = project("3, 4");
+    assert!(matches!(
+        evaluator
+            .execute_project_stream(
+                &repository,
+                identity,
+                owner_id,
+                initial_digest,
+                &changed,
+                "sensors.ingest",
+            )
+            .await,
+        Ok(StageOutcome::Passed)
+    ));
+    let state = RuntimeState::open(&repository, identity, initial_digest)
+        .await
+        .expect("reopen changed runtime");
+    let changed_rows = state
+        .committed_table_rows("Reading")
+        .await
+        .expect("changed committed rows");
+    assert_eq!(
+        changed_rows.len(),
+        4,
+        "same label with changed immutable contents must select a fresh checkpoint"
+    );
+    for value in [3, 4] {
+        let key = Value::int(value.into()).encode().expect("encoded key");
+        assert!(
+            state
+                .committed_table_row("Reading", &key)
+                .await
+                .expect("changed list row")
+                .is_some(),
+            "changed list item {value} must be delivered from position zero"
+        );
+    }
+    let streams = state.stream_observations().await.expect("all stream observations");
+    assert_eq!(streams.len(), 2, "changed source identity creates a new stream");
+    assert_ne!(
+        streams[0].checkpoint.source,
+        streams[1].checkpoint.source,
+        "the complete immutable list content participates in source identity"
+    );
+    for stream in streams {
+        assert_eq!(stream.checkpoint.position_format.as_str(), "orna.list.v1");
+        let checkpoint = state
+            .stream_checkpoint(&stream.checkpoint)
+            .await
+            .expect("stream checkpoint");
+        assert_eq!(
+            checkpoint
+                .committed
+                .as_ref()
+                .expect("exhausted stream checkpoint")
+                .token
+                .as_str(),
+            "2"
+        );
+    }
+}
