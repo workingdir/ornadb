@@ -5732,9 +5732,13 @@ fn validate_loop_transfers(
                             });
                             require_same(expected, &actual, diagnostics);
                         }
-                        // `loop` does have an enclosing transfer target, but its
-                        // result contract is not implemented by this slice.
-                        Some(LoopTransferContext::Unsupported) => {}
+                        // `loop` has no inferred result contract yet. Reject
+                        // transfers explicitly instead of silently accepting a
+                        // value whose type cannot be checked.
+                        Some(LoopTransferContext::Unsupported) => diagnostics.push(diag(
+                            DIAG_UNSUPPORTED,
+                            "break transfer requires a loop result contract",
+                        )),
                         None => diagnostics.push(diag(
                             DIAG_UNSUPPORTED,
                             "break transfer requires an enclosing supported loop",
@@ -15261,5 +15265,16 @@ mod tests {
             &catalogue,
         );
         assert!(has(&missing_input, DIAG_TYPE));
+    }
+    #[test]
+    fn loop_break_requires_an_inferred_result_contract() {
+        let analysis = checked(&[ModuleInput::new(
+            "loop-break.orna",
+            "fn invalid() { loop { break 1; } }",
+        )]);
+        assert!(analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == DIAG_UNSUPPORTED
+                && diagnostic.message() == "break transfer requires a loop result contract"
+        }));
     }
 }
