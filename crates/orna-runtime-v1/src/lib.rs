@@ -178,6 +178,15 @@ CREATE TABLE IF NOT EXISTS stream_checkpoint (
     committed_position TEXT,
     next_fence INTEGER NOT NULL CHECK (next_fence >= 0)
 );
+CREATE TABLE IF NOT EXISTS stream_checkpoint_history (
+    key_id TEXT NOT NULL CHECK (length(key_id) > 0),
+    version INTEGER NOT NULL CHECK (version > 0),
+    committed_position TEXT NOT NULL CHECK (length(committed_position) > 0),
+    snapshot BLOB NOT NULL CHECK (length(snapshot) > 0),
+    generation_digest BLOB NOT NULL CHECK (length(generation_digest) = 32),
+    transition INTEGER NOT NULL CHECK (transition IN (1, 2)),
+    PRIMARY KEY (key_id, version)
+);
 CREATE TABLE IF NOT EXISTS stream_failure (
     identity_id TEXT PRIMARY KEY CHECK (length(identity_id) > 0),
     key_id TEXT NOT NULL CHECK (length(key_id) > 0),
@@ -1772,6 +1781,21 @@ pub enum StreamHandlerResult {
     FailAfterTable(StreamTableMutationBatch, SafeDiagnostic),
     Fail(SafeDiagnostic),
     Cancelled,
+}
+
+/// The terminal transition that committed one historical stream watermark.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamCheckpointTransition {
+    Complete,
+    Skip,
+}
+
+/// One durable stream checkpoint watermark retained for snapshot selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamCheckpointWatermark {
+    pub checkpoint: StreamCheckpoint,
+    pub capture: CwdCapture,
+    pub transition: StreamCheckpointTransition,
 }
 
 /// A provider failure retained against the exact checkpoint that was being
@@ -4104,6 +4128,17 @@ impl RuntimeState {
     ) -> Result<StreamCheckpoint, RuntimeError> {
         load_stream_checkpoint(&self.connection, key).await
     }
+    /// Reads terminal Complete/Skip watermarks retained through a selected
+    /// CWD snapshot. Rows are ordered by checkpoint version and remain bound
+    /// to the supplied stream identity.
+    pub async fn stream_checkpoint_history_at(
+        &self,
+        key: &CheckpointKey,
+        selected: &CwdCapture,
+    ) -> Result<Vec<StreamCheckpointWatermark>, RuntimeError> {
+        load_stream_checkpoint_history(&self.connection, key, selected).await
+    }
+
 
     /// Counts private durable stream-failure rows for bounded implementation
     /// evidence only.
@@ -6362,6 +6397,17 @@ impl RuntimeState {
         validator
             .validate(&rows)
             .map_err(StreamTableDeliveryError::ValidationFailed)?;
+        if let CommitResult::CheckpointAdvanced { checkpoint } = &result {
+            record_stream_checkpoint_watermark_tx(
+                &tx,
+                &checkpoint.key,
+                checkpoint,
+                &next,
+                StreamCheckpointTransition::Complete,
+            )
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
+        }
         tx.commit()
             .await
             .map_err(|_| StreamTableDeliveryError::Runtime(RuntimeError::StorageUnavailable))?;
@@ -6420,6 +6466,16 @@ impl RuntimeState {
         } else {
             append_mutations_tx(&tx, expected_capture, mutations, next_digest, faults).await?
         };
+        if let CommitResult::CheckpointAdvanced { checkpoint } = &result {
+            record_stream_checkpoint_watermark_tx(
+                &tx,
+                &checkpoint.key,
+                checkpoint,
+                &next,
+                StreamCheckpointTransition::Complete,
+            )
+            .await?;
+        }
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -9684,6 +9740,9 @@ impl AsyncFailurePayloadBackend for RuntimeStreamBackend<'_> {
         })
     }
 }
+const STREAM_CHECKPOINT_HISTORY_SELECT: &str =
+    "SELECT version, committed_position, snapshot, generation_digest, transition
+     FROM stream_checkpoint_history WHERE key_id = ?1 ORDER BY version";
 
 const STREAM_CHECKPOINT_SELECT: &str =
     "SELECT version, committed_position, next_fence FROM stream_checkpoint WHERE key_id = ?1";
@@ -10879,6 +10938,100 @@ async fn load_stream_checkpoint(
 ) -> Result<StreamCheckpoint, RuntimeError> {
     Ok(load_stream_checkpoint_state(connection, key).await?.0)
 }
+async fn load_stream_checkpoint_history(
+    connection: &Connection,
+    key: &CheckpointKey,
+    selected: &CwdCapture,
+) -> Result<Vec<StreamCheckpointWatermark>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            STREAM_CHECKPOINT_HISTORY_SELECT,
+            params![stream_key_id(key)],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut history = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let version = decode_u64(
+            row.get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let committed = decode_position(
+            row.get::<String>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let snapshot = row
+            .get::<Vec<u8>>(2)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let generation_digest = fixed(
+            row.get::<Vec<u8>>(3)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let capture = decode_capture(snapshot, generation_digest)?;
+        if capture.database_id() != selected.database_id()
+            || capture.runtime_id() != selected.runtime_id()
+            || capture.generation() > selected.generation()
+        {
+            continue;
+        }
+        let transition = match row
+            .get::<i64>(4)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?
+        {
+            1 => StreamCheckpointTransition::Complete,
+            2 => StreamCheckpointTransition::Skip,
+            _ => return Err(RuntimeError::RecoveryInvalid),
+        };
+        history.push(StreamCheckpointWatermark {
+            checkpoint: StreamCheckpoint {
+                key: key.clone(),
+                version,
+                committed: Some(committed),
+            },
+            capture,
+            transition,
+        });
+    }
+    Ok(history)
+}
+
+async fn record_stream_checkpoint_watermark_tx(
+    connection: &Connection,
+    key: &CheckpointKey,
+    checkpoint: &StreamCheckpoint,
+    capture: &CwdCapture,
+    transition: StreamCheckpointTransition,
+) -> Result<(), RuntimeError> {
+    let Some(committed) = &checkpoint.committed else {
+        return Err(RuntimeError::RecoveryInvalid);
+    };
+    let transition_code = match transition {
+        StreamCheckpointTransition::Complete => 1_i64,
+        StreamCheckpointTransition::Skip => 2_i64,
+    };
+    connection
+        .execute(
+            "INSERT INTO stream_checkpoint_history
+             (key_id, version, committed_position, snapshot, generation_digest, transition)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                stream_key_id(key),
+                i64::try_from(checkpoint.version).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                committed.token.as_str().to_owned(),
+                encode_capture(capture)?,
+                capture.generation_digest().to_vec(),
+                transition_code,
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
+}
+
 
 async fn load_stream_status(
     connection: &Connection,
@@ -11738,9 +11891,29 @@ async fn apply_stream_intent(
     ) {
         return Err(RuntimeError::RecoveryInvalid);
     }
+    let transition = match &intent {
+        CommitIntent::Complete { .. } => Some(StreamCheckpointTransition::Complete),
+        CommitIntent::Skip { .. } => Some(StreamCheckpointTransition::Skip),
+        _ => None,
+    };
     let result = apply_stream_intent_tx(&transaction, intent).await;
     match result {
         Ok(result) => {
+            if let (
+                Some(transition),
+                CommitResult::CheckpointAdvanced { checkpoint },
+            ) = (transition, &result)
+            {
+                let capture = capture_tx(&transaction).await?;
+                record_stream_checkpoint_watermark_tx(
+                    &transaction,
+                    &checkpoint.key,
+                    checkpoint,
+                    &capture,
+                    transition,
+                )
+                .await?;
+            }
             sync_stream_observation_tx(&transaction, &result).await?;
             transaction
                 .commit()
@@ -14767,6 +14940,171 @@ mod tests {
                 token: Component::new(successor).unwrap(),
             },
         }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_history_retains_complete_and_skip_by_snapshot() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(90)).await.unwrap();
+        let complete = stream_delivery("history-complete", "history-complete-next");
+        let key = complete.checkpoint_key();
+        let initial = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let capture_before = state.capture().await.unwrap();
+        let complete_lease = {
+            let mut stream = state.stream_backend(writer);
+            match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: complete,
+                    expected: initial.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected completion lease: {other:?}"),
+            }
+        };
+        let (capture_after_complete, result) = state
+            .commit_stream_delivery(StreamDeliveryCommit {
+                writer,
+                expected_capture: &capture_before,
+                mutations: &[],
+                next_digest: capture_before.generation_digest(),
+                delivery: complete_lease,
+                expected_stream: initial,
+                faults: &NoFault,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            CommitResult::CheckpointAdvanced {
+                checkpoint: StreamCheckpoint { version: 1, .. }
+            }
+        ));
+        let first = state
+            .stream_checkpoint_history_at(&key, &capture_after_complete)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].checkpoint.version, 1);
+        assert_eq!(
+            first[0].checkpoint.committed.as_ref().unwrap().token.as_str(),
+            "history-complete-next"
+        );
+        assert_eq!(
+            first[0].transition,
+            StreamCheckpointTransition::Complete
+        );
+
+        let capture_after_table = state
+            .commit(
+                writer,
+                &capture_after_complete,
+                &mutation(90),
+                digest(91),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        let checkpoint = state.stream_checkpoint(&key).await.unwrap();
+        let skip = stream_delivery("history-skip", "history-skip-next");
+        let failed = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: skip.clone(),
+                    expected: CheckpointPrecondition::from(&checkpoint),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected failure lease: {other:?}"),
+            };
+            match stream
+                .fail_with_payload_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(vec![1, 2, 3]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected failure result: {other:?}"),
+            }
+        };
+        let after_failure = state
+            .stream_checkpoint_history_at(&key, &capture_after_table)
+            .await
+            .unwrap();
+        assert_eq!(after_failure, first);
+        {
+            let mut stream = state.stream_backend(writer);
+            let skip_lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: skip,
+                    expected: CheckpointPrecondition::from(&checkpoint),
+                    purpose: LeasePurpose::Skip,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected skip lease: {other:?}"),
+            };
+            assert!(matches!(
+                stream
+                    .apply_async(CommitIntent::Skip {
+                        lease: skip_lease,
+                        expected: CheckpointPrecondition::from(&checkpoint),
+                        expected_failure_version: failed.version,
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::CheckpointAdvanced {
+                    checkpoint: StreamCheckpoint { version: 2, .. }
+                }
+            ));
+        }
+        let current = state.capture().await.unwrap();
+        let selected_first = state
+            .stream_checkpoint_history_at(&key, &capture_after_complete)
+            .await
+            .unwrap();
+        assert_eq!(selected_first.len(), 1);
+        let selected_current = state
+            .stream_checkpoint_history_at(&key, &current)
+            .await
+            .unwrap();
+        assert_eq!(selected_current.len(), 2);
+        assert_eq!(
+            selected_current[1].transition,
+            StreamCheckpointTransition::Skip
+        );
+        assert_eq!(
+            selected_current[1].checkpoint.committed.as_ref().unwrap().token.as_str(),
+            "history-skip-next"
+        );
+        assert_eq!(current, capture_after_table);
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let reopened_history = reopened
+            .stream_checkpoint_history_at(&key, &current)
+            .await
+            .unwrap();
+        assert_eq!(reopened_history, selected_current);
     }
 
     fn assertion_detail(snapshot: Snapshot) -> AssertionDiagnosticDetail {
