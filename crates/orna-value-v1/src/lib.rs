@@ -830,6 +830,24 @@ impl Decimal {
         )
     }
 }
+impl OvbCodec for Decimal {
+    fn type_label() -> &'static str {
+        "Decimal"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        Value::new(self.raw())
+    }
+
+    fn decode_value(
+        value: &Value,
+        path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
+        Decimal::from_raw(value.raw())
+            .map_err(|error| DecodeError::new(error, path.clone()))
+    }
+}
+
 
 /// An exact amount paired with its opaque nominal currency object identity.
 ///
