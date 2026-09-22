@@ -17,10 +17,15 @@ use orna_repository_v1::{
     RepositoryError, Uuid, validate_compact_page_uncompressed_sizes,
 };
 use parquet::{
-    basic::{Compression, ConvertedType, Encoding, LogicalType, TimeUnit, Type},
+    basic::{
+        ColumnOrder, Compression, ConvertedType, Encoding, LogicalType, SortOrder, TimeUnit, Type,
+    },
     column::reader::ColumnReader,
     data_type::AsBytes,
-    file::reader::{FileReader, SerializedFileReader},
+    file::{
+        reader::{FileReader, SerializedFileReader},
+        statistics::Statistics,
+    },
 };
 
 use crate::compact::{
@@ -42,6 +47,10 @@ pub enum CompactParquetError {
     DuplicateFieldColumn([u8; 16]),
     NullKey,
     MissingFloatField([u8; 16]),
+    MissingFloatColumnOrder,
+    MissingFloatStatistics,
+    InexactFloatStatistics,
+    InvalidFloatStatistics,
     RowCountMismatch { expected: u64, observed: u64 },
     UnorderedPrimaryKeys,
     ManifestKeyBoundsMismatch,
@@ -66,6 +75,18 @@ impl fmt::Display for CompactParquetError {
             }
             Self::MissingFloatField(id) => {
                 write!(f, "compact Float field column is missing: {id:?}")
+            }
+            Self::MissingFloatColumnOrder => {
+                f.write_str("compact Float column does not declare IEEE total order")
+            }
+            Self::MissingFloatStatistics => {
+                f.write_str("compact Float column is missing exact statistics")
+            }
+            Self::InexactFloatStatistics => {
+                f.write_str("compact Float statistics are truncated or deprecated")
+            }
+            Self::InvalidFloatStatistics => {
+                f.write_str("compact Float statistics are inconsistent with the row scope")
             }
             Self::NullKey => f.write_str("compact primary-key column contains a null"),
             Self::RowCountMismatch { expected, observed } => {
@@ -443,9 +464,10 @@ fn decode_verified_float_values_for_role(
     let reader = SerializedFileReader::new(Bytes::copy_from_slice(bytes))
         .map_err(|_| CompactParquetError::InvalidParquet)?;
     validate_file_metadata(&reader, profile, table, expected_row_count)?;
+    let column_index = stored_float_column_index(&reader, profile, segment_role, field_id)?;
+    validate_float_column_order(&reader, column_index)?;
     validate_compact_page_uncompressed_sizes(bytes, reader.metadata().row_groups())
         .map_err(|_| CompactParquetError::InvalidParquet)?;
-    let column_index = stored_float_column_index(&reader, profile, segment_role, field_id)?;
     let mut values = Vec::new();
     for row_group_index in 0..reader.num_row_groups() {
         let row_group = reader
@@ -464,7 +486,15 @@ fn decode_verified_float_values_for_role(
                 column == column_index,
             )?;
         }
-        values.extend(read_float_column(&*row_group, column_index, rows)?);
+        let float_values = read_float_column(&*row_group, column_index, rows)?;
+        validate_float_statistics(
+            &reader,
+            row_group_index,
+            column_index,
+            rows,
+            &float_values,
+        )?;
+        values.extend(float_values);
     }
     let observed = u64::try_from(values.len()).map_err(|_| CompactParquetError::InvalidParquet)?;
     if observed != expected_row_count {
@@ -516,6 +546,155 @@ fn stored_float_column_index(
         return Err(CompactParquetError::UnsupportedKeyMapping);
     }
     found.ok_or(CompactParquetError::MissingFloatField(field_id))
+}
+
+fn validate_float_column_order(
+    reader: &SerializedFileReader<Bytes>,
+    column_index: usize,
+) -> Result<(), CompactParquetError> {
+    let orders = reader
+        .metadata()
+        .file_metadata()
+        .column_orders()
+        .ok_or(CompactParquetError::MissingFloatColumnOrder)?;
+    if !matches!(
+        orders.get(column_index),
+        Some(ColumnOrder::TYPE_DEFINED_ORDER(SortOrder::SIGNED))
+    ) {
+        return Err(CompactParquetError::MissingFloatColumnOrder);
+    }
+    Ok(())
+}
+
+fn validate_float_statistics(
+    reader: &SerializedFileReader<Bytes>,
+    row_group_index: usize,
+    column_index: usize,
+    expected_rows: usize,
+    values: &[Option<Vec<u8>>],
+) -> Result<(), CompactParquetError> {
+    let column = reader
+        .metadata()
+        .row_group(row_group_index)
+        .column(column_index);
+    let Some(Statistics::Double(statistics)) = column.statistics() else {
+        return Err(CompactParquetError::MissingFloatStatistics);
+    };
+    if !statistics.min_is_exact() || !statistics.max_is_exact() {
+        return Err(CompactParquetError::InexactFloatStatistics);
+    }
+    let null_count = statistics
+        .null_count_opt()
+        .ok_or(CompactParquetError::MissingFloatStatistics)?;
+    let observed_nulls = values.iter().filter(|value| value.is_none()).count() as u64;
+    if null_count != observed_nulls || values.len() != expected_rows {
+        return Err(CompactParquetError::InvalidFloatStatistics);
+    }
+    let mut non_null = Vec::with_capacity(values.len());
+    for value in values.iter().flatten() {
+        let decoded = CanonicalValue::decode(value)
+            .map_err(|_| CompactParquetError::InvalidFloatStatistics)?;
+        let OvbRaw::Float(bits) = decoded.raw() else {
+            return Err(CompactParquetError::InvalidFloatStatistics);
+        };
+        non_null.push(f64::from_bits(*bits));
+    }
+    let expected_bounds = float_statistics_bounds(&non_null);
+    match expected_bounds {
+        None => {
+            if statistics.min_bytes_opt().is_some() || statistics.max_bytes_opt().is_some() {
+                return Err(CompactParquetError::InvalidFloatStatistics);
+            }
+        }
+        Some((minimum, maximum)) => {
+            let actual_minimum = statistics
+                .min_bytes_opt()
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(f64::from_le_bytes)
+                .ok_or(CompactParquetError::MissingFloatStatistics)?;
+            let actual_maximum = statistics
+                .max_bytes_opt()
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(f64::from_le_bytes)
+                .ok_or(CompactParquetError::MissingFloatStatistics)?;
+            if actual_minimum.to_bits() != minimum.to_bits()
+                || actual_maximum.to_bits() != maximum.to_bits()
+            {
+                return Err(CompactParquetError::InvalidFloatStatistics);
+            }
+        }
+    }
+    if let Some(column_indexes) = reader.metadata().column_index() {
+        let Some(row_group_indexes) = column_indexes.get(row_group_index) else {
+            return Err(CompactParquetError::InvalidFloatStatistics);
+        };
+        let Some(page_index) = row_group_indexes.get(column_index) else {
+            return Err(CompactParquetError::InvalidFloatStatistics);
+        };
+        let parquet::file::page_index::column_index::ColumnIndexMetaData::DOUBLE(page_index) =
+            page_index
+        else {
+            return Err(CompactParquetError::InvalidFloatStatistics);
+        };
+        let page_count = usize::try_from(page_index.num_pages())
+            .map_err(|_| CompactParquetError::InvalidFloatStatistics)?;
+        if page_count == 0
+            || (0..page_count).any(|index| {
+                page_index
+                    .null_count(index)
+                    .is_none_or(|count| count < 0)
+            })
+        {
+            return Err(CompactParquetError::InvalidFloatStatistics);
+        }
+    }
+    Ok(())
+}
+
+fn float_statistics_bounds(values: &[f64]) -> Option<(f64, f64)> {
+    let mut non_nan = values.iter().copied().filter(|value| !value.is_nan());
+    if let Some(first) = non_nan.next() {
+        let (minimum, maximum) = non_nan.fold((first, first), |(minimum, maximum), value| {
+            (
+                if float_total_order_key(value) < float_total_order_key(minimum) {
+                    value
+                } else {
+                    minimum
+                },
+                if float_total_order_key(value) > float_total_order_key(maximum) {
+                    value
+                } else {
+                    maximum
+                },
+            )
+        });
+        return Some((minimum, maximum));
+    }
+    let mut nans = values.iter().copied().filter(|value| value.is_nan());
+    let first = nans.next()?;
+    Some(nans.fold((first, first), |(minimum, maximum), value| {
+        (
+            if float_total_order_key(value) < float_total_order_key(minimum) {
+                value
+            } else {
+                minimum
+            },
+            if float_total_order_key(value) > float_total_order_key(maximum) {
+                value
+            } else {
+                maximum
+            },
+        )
+    }))
+}
+
+fn float_total_order_key(value: f64) -> u64 {
+    let bits = value.to_bits();
+    if bits & (1 << 63) != 0 {
+        !bits
+    } else {
+        bits ^ (1 << 63)
+    }
 }
 
 fn compare_encoded_keys(left: &[u8], right: &[u8]) -> Result<Ordering, CompactParquetError> {
