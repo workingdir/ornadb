@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 use std::io::{self, BufRead, Write};
 
+use orna_client::live_presentation::{LivePresentationUpdate, ResyncRequest, WatchPresentation};
 use orna_conformance_v1::AdmittedReplSession;
 use orna_foundation_v1::{CanonicalValue, canonical_uuid_text};
 use orna_value_v1::Raw;
@@ -9,8 +10,7 @@ const MAX_INPUT_BYTES: usize = 65_536;
 const MAX_INSPECT_DEPTH: usize = 4;
 const MAX_INSPECT_ITEMS: usize = 16;
 const MAX_INSPECT_TEXT: usize = 256;
-const REPL_HELP: &str = "commands: :help [name], :at CWD|HEAD|ref, :quit";
-
+const REPL_HELP: &str = "commands: :help [name], :at CWD|HEAD|ref, :watch expression, :quit";
 
 enum ReadSubmission {
     Eof,
@@ -50,6 +50,80 @@ pub trait SnapshotSessionLoader {
     fn load_snapshot(&self, target: SnapshotTarget) -> Result<AdmittedReplSession, Self::Error>;
 }
 
+/// A host-owned subscription source yielding complete encoded live frames.
+/// The host sends the Watch request and supplies its negotiated presentation;
+/// the REPL neither opens a connection nor encodes protocol messages.
+pub trait WatchFrameSource {
+    type Error;
+
+    fn start_watch(&mut self, source: &str) -> Result<WatchPresentation, Self::Error>;
+    fn next_frame(&mut self, watch: [u8; 16]) -> Result<Option<Vec<u8>>, Self::Error>;
+}
+
+/// Observable state for the currently subscribed REPL watch.
+#[derive(Default)]
+pub struct WatchCommandState {
+    presentation: Option<WatchPresentation>,
+}
+
+impl WatchCommandState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn published_revision(&self) -> Option<u64> {
+        self.presentation
+            .as_ref()?
+            .published()
+            .map(|published| published.revision())
+    }
+
+    pub fn watch(&self) -> Option<[u8; 16]> {
+        self.presentation.as_ref().map(WatchPresentation::watch)
+    }
+
+    pub fn awaiting_snapshot(&self) -> bool {
+        self.presentation
+            .as_ref()
+            .is_some_and(WatchPresentation::awaiting_snapshot)
+    }
+
+    /// Remains available until the host has successfully sent the resync.
+    pub fn take_resync_request(&self) -> Option<ResyncRequest> {
+        self.presentation.as_ref()?.take_resync_request()
+    }
+
+    pub fn acknowledge_resync_request(&mut self, request: ResyncRequest) {
+        if let Some(presentation) = &mut self.presentation {
+            presentation.acknowledge_resync_request(request);
+        }
+    }
+
+    pub fn begin_resubscription(&mut self) {
+        if let Some(presentation) = &mut self.presentation {
+            presentation.begin_resubscription();
+        }
+    }
+
+    /// Retain the authoritative presentation when the same watch is
+    /// re-subscribed, including its complete-snapshot barrier.
+    fn install(&mut self, presentation: WatchPresentation) {
+        if self
+            .presentation
+            .as_ref()
+            .is_some_and(|current| current.watch() == presentation.watch())
+        {
+            return;
+        }
+        self.presentation = Some(presentation);
+    }
+}
+
+struct WatchBinding<'a, S: ?Sized> {
+    source: &'a mut S,
+    state: &'a mut WatchCommandState,
+}
+
 /// Run one retained, line-oriented admitted REPL session. A malformed or
 /// rejected submission reports its redacted evaluator code and leaves the
 /// session open.
@@ -63,6 +137,7 @@ pub fn run<R: BufRead, W: Write>(
         writer,
         session,
         None::<&dyn SnapshotSessionLoader<Error = ()>>,
+        None::<WatchBinding<'_, dyn WatchFrameSource<Error = ()>>>,
     )
 }
 
@@ -77,16 +152,70 @@ pub fn run_with_snapshot_loader<R: BufRead, W: Write, L: SnapshotSessionLoader +
     session: &mut AdmittedReplSession,
     loader: &L,
 ) -> io::Result<()> {
-    run_loop(reader, writer, session, Some(loader))
+    run_loop(
+        reader,
+        writer,
+        session,
+        Some(loader),
+        None::<WatchBinding<'_, dyn WatchFrameSource<Error = ()>>>,
+    )
 }
 
-fn run_loop<R: BufRead, W: Write, L: SnapshotSessionLoader + ?Sized>(
+/// Run with a host-owned live watch frame source. The REPL receives complete
+/// encoded frames, while the host owns the subscription and resync transport.
+pub fn run_with_watch<R: BufRead, W: Write, S: WatchFrameSource + ?Sized>(
+    reader: &mut R,
+    writer: &mut W,
+    session: &mut AdmittedReplSession,
+    source: &mut S,
+    state: &mut WatchCommandState,
+) -> io::Result<()> {
+    run_loop(
+        reader,
+        writer,
+        session,
+        None::<&dyn SnapshotSessionLoader<Error = ()>>,
+        Some(WatchBinding { source, state }),
+    )
+}
+
+/// Run with both an atomic snapshot loader and a host-owned live watch.
+pub fn run_with_loader_and_watch<
+    R: BufRead,
+    W: Write,
+    L: SnapshotSessionLoader + ?Sized,
+    S: WatchFrameSource + ?Sized,
+>(
+    reader: &mut R,
+    writer: &mut W,
+    session: &mut AdmittedReplSession,
+    loader: &L,
+    source: &mut S,
+    state: &mut WatchCommandState,
+) -> io::Result<()> {
+    run_loop(
+        reader,
+        writer,
+        session,
+        Some(loader),
+        Some(WatchBinding { source, state }),
+    )
+}
+
+fn run_loop<
+    R: BufRead,
+    W: Write,
+    L: SnapshotSessionLoader + ?Sized,
+    S: WatchFrameSource + ?Sized,
+>(
     reader: &mut R,
     writer: &mut W,
     session: &mut AdmittedReplSession,
     loader: Option<&L>,
+    mut watch: Option<WatchBinding<'_, S>>,
 ) -> io::Result<()> {
     loop {
+        pump_watch_frames(&mut watch, writer)?;
         writer.write_all(b"> ")?;
         writer.flush()?;
         match read_submission(reader)? {
@@ -103,13 +232,17 @@ fn run_loop<R: BufRead, W: Write, L: SnapshotSessionLoader + ?Sized>(
                         Ok(text) => writeln!(writer, "{text}")?,
                         Err(()) => writeln!(writer, "error[ORNA-REPL-COMMAND]")?,
                     }
-                } else if let Some(loader) = loader
-                    && let Some(target) = parse_snapshot_target(command)
-                {
+                } else if let Some(target) = parse_snapshot_target(command) {
+                    let Some(loader) = loader else {
+                        writeln!(writer, "error[ORNA-REPL-COMMAND]")?;
+                        continue;
+                    };
                     match target.and_then(|target| loader.load_snapshot(target).map_err(|_| ())) {
                         Ok(candidate) => *session = candidate,
                         Err(()) => writeln!(writer, "error[ORNA-REPL-AT]")?,
                     }
+                } else if let Some(rest) = parse_watch_source(command) {
+                    dispatch_watch(rest, &mut watch, writer)?;
                 } else if source.trim_start().starts_with(':') {
                     writeln!(writer, "error[ORNA-REPL-COMMAND]")?;
                 } else {
@@ -122,6 +255,92 @@ fn run_loop<R: BufRead, W: Write, L: SnapshotSessionLoader + ?Sized>(
             }
         }
     }
+}
+/// Starts (or rebinds) the host watch, then drains available frames.
+fn dispatch_watch<W: Write, S: WatchFrameSource + ?Sized>(
+    source: &str,
+    watch: &mut Option<WatchBinding<'_, S>>,
+    writer: &mut W,
+) -> io::Result<()> {
+    let Some(binding) = watch.as_mut() else {
+        writeln!(writer, "error[ORNA-REPL-COMMAND]")?;
+        return Ok(());
+    };
+    match binding.source.start_watch(source) {
+        Ok(presentation) => {
+            binding.state.install(presentation);
+            drain_available_frames(binding, writer)?;
+        }
+        Err(_) => writeln!(writer, "error[ORNA-REPL-COMMAND]")?,
+    }
+    Ok(())
+}
+
+/// Applies one frame to the owning presentation and prints its outcome.
+fn accept_frame<W: Write>(
+    state: &mut WatchCommandState,
+    frame: Vec<u8>,
+    writer: &mut W,
+) -> io::Result<()> {
+    let Some(presentation) = state.presentation.as_mut() else {
+        return Ok(());
+    };
+    match presentation.receive_encoded(&frame) {
+        Ok(LivePresentationUpdate::SnapshotInstalled) => {
+            if let Some(published) = presentation.published() {
+                writeln!(
+                    writer,
+                    "watch: snapshot installed (rev {})",
+                    published.revision()
+                )?;
+            }
+        }
+        Ok(LivePresentationUpdate::DeltaApplied) => {
+            if let Some(published) = presentation.published() {
+                writeln!(
+                    writer,
+                    "watch: delta applied (rev {})",
+                    published.revision()
+                )?;
+            }
+        }
+        Ok(LivePresentationUpdate::ResyncRequired) => {
+            writeln!(writer, "watch: resync required")?;
+        }
+        Err(_) => writeln!(writer, "error[ORNA-REPL-WATCH-FRAME]")?,
+    }
+    Ok(())
+}
+
+/// Drains every immediately available frame; `Ok(None)` keeps the REPL
+/// interactive instead of blocking the line loop.
+fn drain_available_frames<W: Write, S: WatchFrameSource + ?Sized>(
+    binding: &mut WatchBinding<'_, S>,
+    writer: &mut W,
+) -> io::Result<()> {
+    let Some(watch) = binding.state.watch() else {
+        return Ok(());
+    };
+    loop {
+        match binding.source.next_frame(watch) {
+            Ok(Some(frame)) => accept_frame(binding.state, frame, writer)?,
+            Ok(None) => return Ok(()),
+            Err(_) => {
+                writeln!(writer, "error[ORNA-REPL-WATCH-SOURCE]")?;
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn pump_watch_frames<W: Write, S: WatchFrameSource + ?Sized>(
+    watch: &mut Option<WatchBinding<'_, S>>,
+    writer: &mut W,
+) -> io::Result<()> {
+    if let Some(binding) = watch.as_mut() {
+        drain_available_frames(binding, writer)?;
+    }
+    Ok(())
 }
 
 fn parse_help_command(command: &str) -> Option<Result<&'static str, ()>> {
@@ -161,6 +380,22 @@ fn parse_snapshot_target(command: &str) -> Option<Result<SnapshotTarget, ()>> {
         "HEAD" => SnapshotTarget::Head,
         reference => SnapshotTarget::Ref(reference.into()),
     }))
+}
+
+/// Splits a `:watch` console command into its required source expression.
+fn parse_watch_source(command: &str) -> Option<&str> {
+    let mut words = command.split_ascii_whitespace();
+    if words.next() != Some(":watch") {
+        return None;
+    }
+    let rest = command
+        .split_once(":watch")
+        .map_or("", |(_, rest)| rest)
+        .trim();
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest)
 }
 
 fn read_submission<R: BufRead>(reader: &mut R) -> io::Result<ReadSubmission> {
@@ -382,9 +617,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            format!(
-                "> {REPL_HELP}\n> :at CWD|HEAD|ref\n> error[ORNA-REPL-COMMAND]\n> 2 : Int\n> "
-            )
+            format!("> {REPL_HELP}\n> :at CWD|HEAD|ref\n> error[ORNA-REPL-COMMAND]\n> 2 : Int\n> ")
         );
     }
 
