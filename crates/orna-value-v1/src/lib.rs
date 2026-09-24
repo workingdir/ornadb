@@ -181,7 +181,10 @@ pub trait OvbCodec: Sized {
     fn encode_value(&self) -> Result<Value>;
 
     /// Converts a validated canonical value to the typed value.
-    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError>;
+    fn decode_value(
+        value: &Value,
+        path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError>;
 }
 
 /// Encodes a typed value as canonical OVB-1 bytes.
@@ -191,9 +194,8 @@ pub fn encode_typed<T: OvbCodec>(value: &T) -> Result<Vec<u8>> {
 
 /// Decodes canonical OVB-1 bytes as the requested type.
 pub fn decode_typed<T: OvbCodec>(bytes: &[u8]) -> std::result::Result<T, DecodeError> {
-    let value = Value::decode(bytes).map_err(|error| {
-        DecodeError::new(error, vec![T::type_label().to_owned()])
-    })?;
+    let value = Value::decode(bytes)
+        .map_err(|error| DecodeError::new(error, vec![T::type_label().to_owned()]))?;
     let mut path = vec![T::type_label().to_owned()];
     T::decode_value(&value, &mut path)
 }
@@ -221,7 +223,10 @@ impl OvbCodec for Value {
         Ok(self.clone())
     }
 
-    fn decode_value(value: &Value, _path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+    fn decode_value(
+        value: &Value,
+        _path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
         Ok(value.clone())
     }
 }
@@ -235,7 +240,10 @@ impl OvbCodec for Raw {
         Value::new(self.clone())
     }
 
-    fn decode_value(value: &Value, _path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+    fn decode_value(
+        value: &Value,
+        _path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
         Ok(value.raw().clone())
     }
 }
@@ -249,7 +257,10 @@ impl OvbCodec for bool {
         Value::new(Raw::Bool(*self))
     }
 
-    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+    fn decode_value(
+        value: &Value,
+        path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
         match value.raw() {
             Raw::Bool(value) => Ok(*value),
             _ => Err(decode_type_mismatch(path)),
@@ -266,7 +277,10 @@ impl OvbCodec for BigInt {
         Ok(Value::int(self.clone()))
     }
 
-    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+    fn decode_value(
+        value: &Value,
+        path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
         match value.raw() {
             Raw::Int(value) => Ok(value.clone()),
             _ => Err(decode_type_mismatch(path)),
@@ -283,7 +297,10 @@ impl OvbCodec for i64 {
         Ok(Value::int(BigInt::from(*self)))
     }
 
-    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+    fn decode_value(
+        value: &Value,
+        path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
         match value.raw() {
             Raw::Int(value) => value.to_i64().ok_or_else(|| decode_type_mismatch(path)),
             _ => Err(decode_type_mismatch(path)),
@@ -300,7 +317,10 @@ impl OvbCodec for u64 {
         Ok(Value::int(BigInt::from(*self)))
     }
 
-    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+    fn decode_value(
+        value: &Value,
+        path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
         match value.raw() {
             Raw::Int(value) => value.to_u64().ok_or_else(|| decode_type_mismatch(path)),
             _ => Err(decode_type_mismatch(path)),
@@ -317,7 +337,10 @@ impl OvbCodec for f64 {
         Ok(Value::float_bits(self.to_bits()))
     }
 
-    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+    fn decode_value(
+        value: &Value,
+        path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
         match value.raw() {
             Raw::Float(bits) => Ok(f64::from_bits(*bits)),
             _ => Err(decode_type_mismatch(path)),
@@ -334,7 +357,10 @@ impl OvbCodec for String {
         Value::new(Raw::Text(self.clone()))
     }
 
-    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+    fn decode_value(
+        value: &Value,
+        path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
         match value.raw() {
             Raw::Text(value) => Ok(value.clone()),
             _ => Err(decode_type_mismatch(path)),
@@ -351,7 +377,10 @@ impl OvbCodec for Vec<u8> {
         Value::new(Raw::Bytes(self.clone()))
     }
 
-    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+    fn decode_value(
+        value: &Value,
+        path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
         match value.raw() {
             Raw::Bytes(value) => Ok(value.clone()),
             _ => Err(decode_type_mismatch(path)),
@@ -458,7 +487,6 @@ where
     }
 }
 
-
 impl<T: OvbCodec> OvbCodec for Option<T> {
     fn type_label() -> &'static str {
         "Option"
@@ -471,7 +499,10 @@ impl<T: OvbCodec> OvbCodec for Option<T> {
         }
     }
 
-    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+    fn decode_value(
+        value: &Value,
+        path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
         let Raw::Tag(60013, payload) = value.raw() else {
             return Err(decode_type_mismatch(path));
         };
@@ -483,7 +514,8 @@ impl<T: OvbCodec> OvbCodec for Option<T> {
             [Raw::Int(flag), payload] if *flag == BigInt::from(1) => {
                 path.push(T::type_label().to_owned());
                 let result = T::decode_value(
-                    &Value::new(payload.clone()).map_err(|error| DecodeError::new(error, path.clone()))?,
+                    &Value::new(payload.clone())
+                        .map_err(|error| DecodeError::new(error, path.clone()))?,
                     path,
                 );
                 path.pop();
@@ -494,7 +526,10 @@ impl<T: OvbCodec> OvbCodec for Option<T> {
     }
 }
 
-fn tuple_components<'a>(value: &'a Value, path: &[String]) -> std::result::Result<&'a [Raw], DecodeError> {
+fn tuple_components<'a>(
+    value: &'a Value,
+    path: &[String],
+) -> std::result::Result<&'a [Raw], DecodeError> {
     let Raw::Tag(60015, payload) = value.raw() else {
         return Err(decode_type_mismatch(path));
     };
@@ -528,7 +563,10 @@ impl OvbCodec for () {
         Ok(Value::unit())
     }
 
-    fn decode_value(value: &Value, path: &mut Vec<String>) -> std::result::Result<Self, DecodeError> {
+    fn decode_value(
+        value: &Value,
+        path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
         let Raw::Tag(60014, payload) = value.raw() else {
             return Err(decode_type_mismatch(path));
         };
@@ -795,8 +833,7 @@ impl Decimal {
     /// decimal.
     pub fn from_canonical_text(text: &str) -> Result<Self> {
         let body = text.strip_suffix(".decimal").ok_or(Error::InvalidValue)?;
-        let (coefficient_text, exponent_text) =
-            body.split_once('e').ok_or(Error::InvalidValue)?;
+        let (coefficient_text, exponent_text) = body.split_once('e').ok_or(Error::InvalidValue)?;
         if coefficient_text.is_empty() || exponent_text.is_empty() {
             return Err(Error::InvalidValue);
         }
@@ -819,10 +856,7 @@ impl Decimal {
         let (negative_exponent, exponent_digits) = exponent_text
             .strip_prefix('-')
             .map_or((false, exponent_text), |digits| (true, digits));
-        if exponent_digits.is_empty()
-            || !exponent_digits
-                .bytes()
-                .all(|byte| byte.is_ascii_digit())
+        if exponent_digits.is_empty() || !exponent_digits.bytes().all(|byte| byte.is_ascii_digit())
         {
             return Err(Error::InvalidValue);
         }
@@ -960,11 +994,9 @@ impl OvbCodec for Decimal {
         value: &Value,
         path: &mut Vec<String>,
     ) -> std::result::Result<Self, DecodeError> {
-        Decimal::from_raw(value.raw())
-            .map_err(|error| DecodeError::new(error, path.clone()))
+        Decimal::from_raw(value.raw()).map_err(|error| DecodeError::new(error, path.clone()))
     }
 }
-
 
 /// An exact amount paired with its opaque nominal currency object identity.
 ///
@@ -1227,13 +1259,8 @@ pub fn parse_canonical_uuid_text(text: &str) -> Result<[u8; 16]> {
 /// Encodes bytes with the RFC 4648 standard Base64 alphabet and mandatory
 /// padding. The output never contains whitespace.
 pub fn base64_encode(bytes: &[u8]) -> Result<String> {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let groups = bytes
-        .len()
-        .checked_add(2)
-        .ok_or(Error::Limit)?
-        / 3;
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let groups = bytes.len().checked_add(2).ok_or(Error::Limit)? / 3;
     let capacity = groups.checked_mul(4).ok_or(Error::Limit)?;
     let mut output = String::with_capacity(capacity);
     for chunk in bytes.chunks(3) {
@@ -1243,8 +1270,9 @@ pub fn base64_encode(bytes: &[u8]) -> Result<String> {
         output.push(ALPHABET[(first >> 2) as usize] as char);
         output.push(ALPHABET[((first & 0x03) << 4 | second.unwrap_or(0) >> 4) as usize] as char);
         output.push(match second {
-            Some(second) => ALPHABET[((second & 0x0f) << 2 | third.unwrap_or(0) >> 6) as usize]
-                as char,
+            Some(second) => {
+                ALPHABET[((second & 0x0f) << 2 | third.unwrap_or(0) >> 6) as usize] as char
+            }
             None => '=',
         });
         output.push(match third {
@@ -1263,9 +1291,7 @@ pub fn base64_decode(input: &str) -> Result<Vec<u8>> {
     if input.len() % 4 != 0 {
         return Err(Error::InvalidValue);
     }
-    let capacity = (input.len() / 4)
-        .checked_mul(3)
-        .ok_or(Error::Limit)?;
+    let capacity = (input.len() / 4).checked_mul(3).ok_or(Error::Limit)?;
     let mut output = Vec::with_capacity(capacity);
     for (index, chunk) in input.as_bytes().chunks_exact(4).enumerate() {
         let last = index + 1 == input.len() / 4;
@@ -1308,7 +1334,6 @@ fn base64_value(byte: u8) -> Option<u8> {
         _ => None,
     }
 }
-
 
 fn hex_digit(byte: Option<u8>) -> Option<u8> {
     match byte? {
@@ -3601,6 +3626,20 @@ mod tests {
         let invalid = fixture["invalid_bare_cwd"].as_str().unwrap();
         assert!(Value::decode(&h(invalid)).is_ok());
         assert!(Snapshot::decode(Value::decode(&h(invalid)).unwrap().raw()).is_err());
+    }
+    #[test]
+    fn snapshot_cwd_rejects_negative_generation() {
+        let db = h("000102030405060708090a0b0c0d0e0f").try_into().unwrap();
+        let rt = h("101112131415161718191a1b1c1d1e1f").try_into().unwrap();
+        assert!(Snapshot::cwd(db, rt, (-1).into()).is_err());
+        let noncanonical = Raw::Array(vec![
+            Raw::Int(0.into()),
+            uuid_raw(db),
+            uuid_raw(rt),
+            Raw::Int((-1).into()),
+            Raw::Bytes([0; 32].to_vec()),
+        ]);
+        assert!(Snapshot::decode(&noncanonical).is_err());
     }
     #[test]
     fn fixture_path_vectors() {
