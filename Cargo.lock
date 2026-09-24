@@ -1239,6 +1239,7 @@ dependencies = [
  "orna-runtime-v1",
  "orna-semantic-v1",
  "orna-syntax-v1",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -1253,6 +1254,7 @@ name = "orna-cli-v1"
 version = "0.1.0"
 dependencies = [
  "orna-application-v1",
+ "orna-client",
  "orna-conformance-v1",
  "orna-evaluator-v1",
  "orna-foundation-v1",
