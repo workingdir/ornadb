@@ -98,6 +98,39 @@ fn relation_sort_by_orders_signed_scalar_keys_and_preserves_canonical_ties() {
 }
 
 #[test]
+fn relation_union_preserves_left_then_right_bounded_order() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let unit = relation_source(
+        r#"
+            pub table Note(id: Int) { value: Int, }
+            fn parent() {
+                Note.insert({ id: 1, value: 10 });
+                Note.insert({ id: 2, value: 20 });
+                Note.insert({ id: 3, value: 30 });
+                Note.insert({ id: 4, value: 40 });
+
+                let left = Note | filter(note => note.id == 3 || note.id == 1);
+                let right = Note | filter(note => note.id == 2 || note.id == 4);
+                let combined = left | union(right);
+                let direct = union(left, right);
+                let named = union(right: right, left: left);
+
+                for rows in [combined, direct, named] {
+                    assert (rows | take(1) | one()).id == 1;
+                    assert (rows | drop(1) | take(1) | one()).id == 3;
+                    assert (rows | drop(2) | take(1) | one()).id == 2;
+                    assert (rows | drop(3) | take(1) | one()).id == 4;
+                    assert (rows | count) == 4;
+                }
+            }
+        "#,
+    );
+
+    let outcome = runtime.execute_source(&unit);
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+}
+
+#[test]
 fn lexical_filter_shadow_is_not_hijacked_by_relation_intrinsic() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let unit = relation_source(

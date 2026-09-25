@@ -9205,6 +9205,7 @@ fn root_collection_intrinsic_is_unshadowed(
             | "drop"
             | "window"
             | "count"
+            | "union"
             | "sum"
             | "min"
             | "max"
@@ -10303,12 +10304,16 @@ fn infer_relation_collection_call(
                     | "min"
                     | "max"
                     | "window"
+                    | "union"
             ) && root_collection_intrinsic_is_unshadowed(operation, scope, local) =>
         {
             *operation
         }
         _ => return None,
     };
+    if operation == "union" {
+        return infer_relation_union_call(arguments, scope, local, diagnostics);
+    }
     let mut row_index = None;
     let mut callback_index = None;
     let callback_name = match operation {
@@ -10445,6 +10450,85 @@ fn infer_relation_collection_call(
         } else {
             Type::Error
         },
+        effects,
+    })
+}
+
+fn infer_relation_union_call(
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let mut slots = [None; 2];
+    let mut positional = 0usize;
+    let mut named_started = false;
+    let mut malformed = arguments.len() != 2;
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = match argument.name.as_deref() {
+            Some("left") => {
+                named_started = true;
+                Some(0)
+            }
+            Some("right") => {
+                named_started = true;
+                Some(1)
+            }
+            Some(_) => {
+                malformed = true;
+                None
+            }
+            None if named_started => {
+                malformed = true;
+                None
+            }
+            None => {
+                let slot = positional;
+                positional += 1;
+                (slot < slots.len()).then_some(slot)
+            }
+        };
+        if let Some(slot) = slot
+            && slots[slot].replace(index).is_some()
+        {
+            malformed = true;
+        }
+    }
+    let values = arguments
+        .iter()
+        .map(|argument| infer(&argument.value, scope, local, diagnostics))
+        .collect::<Vec<_>>();
+    let mut effects = EffectSummary::default();
+    for value in &values {
+        effects.join(&value.effects);
+    }
+    if malformed || slots.iter().any(Option::is_none) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "relation union arguments do not match its static signature",
+        ));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects,
+        });
+    }
+    let left = &values[slots[0].expect("validated relation union left slot")];
+    let right = &values[slots[1].expect("validated relation union right slot")];
+    let (Type::Relation(left_element), Type::Relation(right_element)) = (&left.ty, &right.ty) else {
+        return None;
+    };
+    if !types_match(left_element, right_element) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "relation union requires relations with compatible element types",
+        ));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects,
+        });
+    }
+    Some(Inferred {
+        ty: Type::Relation(left_element.clone()),
         effects,
     })
 }
@@ -10954,6 +11038,44 @@ fn infer_success_pipeline(
         return Inferred {
             ty: Type::Optional(element.clone()),
             effects: input.effects,
+        };
+    }
+    if let Type::Relation(element) = &input.ty
+        && let Expr::Call {
+            callee, arguments, ..
+        } = rhs
+        && let Expr::Name { text, .. } = callee.as_ref()
+        && text == "union"
+        && root_collection_intrinsic_is_unshadowed("union", scope, local)
+        && let [argument] = arguments.as_slice()
+        && (argument.name.is_none() || argument.name.as_deref() == Some("right"))
+    {
+        let right = infer(&argument.value, scope, local, diagnostics);
+        let mut effects = input.effects;
+        effects.join(&right.effects);
+        let Type::Relation(right_element) = right.ty else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "relation union requires a relation with a compatible element type",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        };
+        if !types_match(element, &right_element) {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "relation union requires relations with compatible element types",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        }
+        return Inferred {
+            ty: Type::Relation(element.clone()),
+            effects,
         };
     }
     if matches!(&input.ty, Type::List(_))
