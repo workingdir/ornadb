@@ -202,7 +202,7 @@ impl<'a> Lexer<'a> {
                 self.push(TokenKind::ReplBinding, start);
                 continue;
             }
-            if c == '_' || is_xid_start(c) {
+            if c == '_' || is_unicode_16_xid_start(c) {
                 self.ident(start);
                 continue;
             }
@@ -285,7 +285,9 @@ impl<'a> Lexer<'a> {
     }
     fn ident(&mut self, start: usize) {
         self.bump();
-        while self.at < self.source.len() && (self.peek() == '_' || is_xid_continue(self.peek())) {
+        while self.at < self.source.len()
+            && (self.peek() == '_' || is_unicode_16_xid_continue(self.peek()))
+        {
             self.bump()
         }
         let s = &self.source[start..self.at];
@@ -570,6 +572,66 @@ impl<'a> Lexer<'a> {
         })
     }
 }
+// unicode-ident 1.0.24 uses Unicode 17.0.0 tables. Orna 1.0 pins
+// identifier properties to Unicode 16.0.0, so exclude code points added to
+// XID_Continue in Unicode 17.0.0. XID_Start is a subset of XID_Continue.
+fn is_unicode_16_xid_start(c: char) -> bool {
+    is_xid_start(c) && !is_unicode_17_xid_addition(c)
+}
+
+fn is_unicode_16_xid_continue(c: char) -> bool {
+    is_xid_continue(c) && !is_unicode_17_xid_addition(c)
+}
+
+fn is_unicode_17_xid_addition(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x088f
+            | 0x0c5c
+            | 0x0cdc
+            | 0x1acf..=0x1add
+            | 0x1ae0..=0x1aeb
+            | 0xa7ce..=0xa7cf
+            | 0xa7d2
+            | 0xa7d4
+            | 0xa7f1
+            | 0x10940..=0x10959
+            | 0x10ec5..=0x10ec7
+            | 0x10efa..=0x10efb
+            | 0x11b60..=0x11b67
+            | 0x11db0..=0x11ddb
+            | 0x11de0..=0x11de9
+            | 0x16ea0..=0x16eb8
+            | 0x16ebb..=0x16ed3
+            | 0x16ff2..=0x16ff6
+            | 0x187f8..=0x187ff
+            | 0x18d09..=0x18d1e
+            | 0x18d80..=0x18df2
+            | 0x1e6c0..=0x1e6de
+            | 0x1e6e0..=0x1e6f5
+            | 0x1e6fe..=0x1e6ff
+            | 0x2b73a..=0x2b73f
+            | 0x2cea2..=0x2cead
+            | 0x323b0..=0x33479
+    )
+}
+
+#[cfg(test)]
+mod unicode_profile_tests {
+    use super::{is_unicode_16_xid_start, lex};
+
+    #[test]
+    fn unicode_16_identifiers_are_kept_and_unicode_17_additions_are_rejected() {
+        let source = include_str!("../tests/fixtures/unicode_17_identifier.orna");
+        let errors = lex(source).expect_err("Unicode 17-only identifier must be rejected");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].code, "ORNA-LEX-001");
+        assert_eq!((errors[0].span.start, errors[0].span.end), (16, 19));
+
+        assert!(is_unicode_16_xid_start(char::from_u32(0x03b1).unwrap()));
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CalendarLiteral {
     Date,
