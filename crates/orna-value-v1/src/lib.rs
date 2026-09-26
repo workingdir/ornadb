@@ -2496,6 +2496,7 @@ fn validate_schema(raw: &Raw) -> Result<()> {
             &definition_ids,
         )?;
     }
+    validate_schema_constructibility(fields, defs, &definition_ids)?;
     Ok(())
 }
 fn validate_type_refs(node: &Raw, definitions: &[[u8; 16]]) -> Result<()> {
@@ -2548,6 +2549,213 @@ fn validate_definition_refs(kind: u64, body: &Raw, definitions: &[[u8; 16]]) -> 
     }
     Ok(())
 }
+fn validate_schema_constructibility(
+    fields: &[Raw],
+    definitions: &[Raw],
+    definition_ids: &[[u8; 16]],
+) -> Result<()> {
+    let mut dependents = vec![Vec::new(); definitions.len()];
+    for (index, definition) in definitions.iter().enumerate() {
+        collect_constructibility_dependencies(
+            definition,
+            index,
+            definition_ids,
+            &mut dependents,
+        )?;
+    }
+
+    let mut constructible = vec![false; definitions.len()];
+    let mut pending = (0..definitions.len()).collect::<Vec<_>>();
+    while let Some(index) = pending.pop() {
+        if constructible[index] {
+            continue;
+        }
+        if definition_is_constructible(&definitions[index], definition_ids, &constructible)? {
+            constructible[index] = true;
+            pending.extend(dependents[index].iter().copied());
+        }
+    }
+    for field in fields {
+        if !type_node_constructible(&array(field)?[2], definition_ids, &constructible)? {
+            return Err(Error::InvalidSchema);
+        }
+    }
+    Ok(())
+}
+
+fn definition_is_constructible(
+    definition: &Raw,
+    definition_ids: &[[u8; 16]],
+    constructible: &[bool],
+) -> Result<bool> {
+    let definition = array(definition)?;
+    let kind = int_u64(&definition[1])?;
+    let body = &definition[2];
+    match kind {
+        0 => constructible_fields(array(body)?, definition_ids, constructible),
+        1 => {
+            for variant in array(body)? {
+                if constructible_fields(
+                    array(&array(variant)?[2])?,
+                    definition_ids,
+                    constructible,
+                )? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        2 => type_node_constructible(&array(body)?[0], definition_ids, constructible),
+        3 | 4 => Ok(true),
+        _ => Err(Error::InvalidSchema),
+    }
+}
+
+fn collect_constructibility_dependencies(
+    definition: &Raw,
+    dependent: usize,
+    definition_ids: &[[u8; 16]],
+    dependents: &mut [Vec<usize>],
+) -> Result<()> {
+    let definition = array(definition)?;
+    let body = &definition[2];
+    match int_u64(&definition[1])? {
+        0 => {
+            for field in array(body)? {
+                collect_type_dependencies(
+                    &array(field)?[2],
+                    dependent,
+                    definition_ids,
+                    dependents,
+                )?;
+            }
+        }
+        1 => {
+            for variant in array(body)? {
+                for field in array(&array(variant)?[2])? {
+                    collect_type_dependencies(
+                        &array(field)?[2],
+                        dependent,
+                        definition_ids,
+                        dependents,
+                    )?;
+                }
+            }
+        }
+        2 => collect_type_dependencies(
+            &array(body)?[0],
+            dependent,
+            definition_ids,
+            dependents,
+        )?,
+        3 | 4 => {}
+        _ => return Err(Error::InvalidSchema),
+    }
+    Ok(())
+}
+
+fn collect_type_dependencies(
+    ty: &Raw,
+    dependent: usize,
+    definition_ids: &[[u8; 16]],
+    dependents: &mut [Vec<usize>],
+) -> Result<()> {
+    let node = array(ty)?;
+    match int_u64(&node[0])? {
+        0 | 1 | 2 | 9 => {}
+        3 => {
+            for component in array(&node[1])? {
+                collect_type_dependencies(component, dependent, definition_ids, dependents)?;
+            }
+        }
+        4 => {
+            for field in array(&node[1])? {
+                collect_type_dependencies(
+                    &array(field)?[1],
+                    dependent,
+                    definition_ids,
+                    dependents,
+                )?;
+            }
+        }
+        5 | 8 => {
+            let id = uuid_array(&node[1])?;
+            let index = definition_ids
+                .binary_search(&id)
+                .map_err(|_| Error::InvalidSchema)?;
+            dependents[index].push(dependent);
+        }
+        6 => {
+            for component in array(&node[3])? {
+                collect_type_dependencies(component, dependent, definition_ids, dependents)?;
+            }
+        }
+        7 => {
+            collect_type_dependencies(&node[1], dependent, definition_ids, dependents)?;
+        }
+        _ => return Err(Error::InvalidSchema),
+    }
+    Ok(())
+}
+
+fn constructible_fields(
+    fields: &[Raw],
+    definition_ids: &[[u8; 16]],
+    constructible: &[bool],
+) -> Result<bool> {
+    for field in fields {
+        if !type_node_constructible(&array(field)?[2], definition_ids, constructible)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn type_node_constructible(
+    ty: &Raw,
+    definition_ids: &[[u8; 16]],
+    constructible: &[bool],
+) -> Result<bool> {
+    let node = array(ty)?;
+    match int_u64(&node[0])? {
+        0 | 1 | 2 | 9 => Ok(true),
+        3 => {
+            for component in array(&node[1])? {
+                if !type_node_constructible(component, definition_ids, constructible)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        4 => {
+            for field in array(&node[1])? {
+                let field = array(field)?;
+                if !type_node_constructible(&field[1], definition_ids, constructible)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        5 | 8 => {
+            let id = uuid_array(&node[1])?;
+            let index = definition_ids
+                .binary_search(&id)
+                .map_err(|_| Error::InvalidSchema)?;
+            Ok(constructible[index])
+        }
+        6 => {
+            for key_type in array(&node[3])? {
+                if !type_node_constructible(key_type, definition_ids, constructible)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        7 => type_node_constructible(&node[1], definition_ids, constructible),
+        _ => Err(Error::InvalidSchema),
+    }
+}
+
 fn validate_definition(kind: u64, body: &Raw) -> Result<()> {
     match kind {
         0 => {
@@ -2867,6 +3075,54 @@ mod tests {
             .map(|x| u8::from_str_radix(std::str::from_utf8(x).unwrap(), 16).unwrap())
             .collect()
     }
+
+    fn schema_type(code: u64, body: Raw) -> Raw {
+        Raw::Array(vec![Raw::Int(code.into()), body])
+    }
+
+    fn nominal_type(id: [u8; 16]) -> Raw {
+        schema_type(5, uuid_raw(id))
+    }
+
+    fn schema_field(id: u8, name: &str, ty: Raw, role: u64) -> Raw {
+        Raw::Array(vec![
+            uuid_raw([id; 16]),
+            Raw::Text(name.to_owned()),
+            ty,
+            Raw::Int(role.into()),
+            Raw::Array(vec![Raw::Int(0.into())]),
+        ])
+    }
+
+    fn nominal_definition(id: u8, kind: u64, body: Raw) -> Raw {
+        Raw::Array(vec![
+            uuid_raw([id; 16]),
+            Raw::Int(kind.into()),
+            body,
+        ])
+    }
+
+    fn record_definition(id: u8, fields: Vec<Raw>) -> Raw {
+        nominal_definition(id, 0, Raw::Array(fields))
+    }
+
+    fn schema_for_type(value_type: Raw, definitions: Vec<Raw>) -> Raw {
+        let type_int = schema_type(0, Raw::Text("Int".into()));
+        Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), uuid_raw([9; 16])),
+            (Raw::Int(2.into()), Raw::Array(vec![uuid_raw([1; 16])])),
+            (
+                Raw::Int(3.into()),
+                Raw::Array(vec![
+                    schema_field(1, "id", type_int, 0),
+                    schema_field(2, "value", value_type, 1),
+                ]),
+            ),
+            (Raw::Int(4.into()), Raw::Array(definitions)),
+        ])
+    }
+
 
     #[test]
     fn canonical_uuid_text_is_lowercase_and_round_trips() {
@@ -3507,6 +3763,181 @@ mod tests {
         assert!(SchemaDescriptor::new(descriptor(record_type(&["café"]))).is_ok());
         assert!(SchemaDescriptor::new(descriptor(record_type(&["cafe\u{301}"]))).is_err());
         assert!(SchemaDescriptor::new(descriptor(record_type(&["z", "a"]))).is_err());
+    }
+
+    #[test]
+    fn schema_rejects_unproductive_nominal_cycles_without_a_base_variant() {
+        let direct_id = [10; 16];
+        let direct = record_definition(
+            10,
+            vec![schema_field(
+                20,
+                "self",
+                nominal_type(direct_id),
+                1,
+            )],
+        );
+        assert!(SchemaDescriptor::new(schema_for_type(nominal_type(direct_id), vec![direct])).is_err());
+
+        let a = [10; 16];
+        let b = [11; 16];
+        let mutual = vec![
+            record_definition(10, vec![schema_field(20, "b", nominal_type(b), 1)]),
+            record_definition(11, vec![schema_field(21, "a", nominal_type(a), 1)]),
+        ];
+        assert!(SchemaDescriptor::new(schema_for_type(nominal_type(a), mutual)).is_err());
+
+        let enum_id = [12; 16];
+        let recursive_variant = Raw::Array(vec![
+            uuid_raw([30; 16]),
+            Raw::Text("recursive".into()),
+            Raw::Array(vec![schema_field(
+                31,
+                "next",
+                nominal_type(enum_id),
+                1,
+            )]),
+        ]);
+        let recursive_enum = nominal_definition(12, 1, Raw::Array(vec![recursive_variant]));
+        assert!(
+            SchemaDescriptor::new(schema_for_type(nominal_type(enum_id), vec![recursive_enum]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn schema_accepts_guarded_recursion_enum_base_and_stored_reference() {
+        let node_id = [10; 16];
+        let node_type = nominal_type(node_id);
+        let node = record_definition(
+            10,
+            vec![
+                schema_field(20, "next", schema_type(2, node_type.clone()), 1),
+                schema_field(21, "children", schema_type(1, node_type.clone()), 1),
+            ],
+        );
+        assert!(SchemaDescriptor::new(schema_for_type(node_type, vec![node])).is_ok());
+
+        let enum_id = [11; 16];
+        let enum_definition = nominal_definition(
+            11,
+            1,
+            Raw::Array(vec![
+                Raw::Array(vec![
+                    uuid_raw([30; 16]),
+                    Raw::Text("empty".into()),
+                    Raw::Array(vec![]),
+                ]),
+                Raw::Array(vec![
+                    uuid_raw([31; 16]),
+                    Raw::Text("next".into()),
+                    Raw::Array(vec![schema_field(
+                        32,
+                        "previous",
+                        nominal_type(enum_id),
+                        1,
+                    )]),
+                ]),
+            ]),
+        );
+        assert!(
+            SchemaDescriptor::new(schema_for_type(
+                nominal_type(enum_id),
+                vec![enum_definition]
+            ))
+            .is_ok()
+        );
+
+        let stored_reference = Raw::Array(vec![
+            Raw::Int(6.into()),
+            uuid_raw([8; 16]),
+            uuid_raw([9; 16]),
+            Raw::Array(vec![schema_type(0, Raw::Text("Int".into()))]),
+        ]);
+        assert!(
+            SchemaDescriptor::new(schema_for_type(stored_reference, vec![])).is_ok()
+        );
+    }
+
+    #[test]
+    fn schema_checks_required_components_but_allows_empty_lists_options_and_ranges() {
+        let bad_id = [10; 16];
+        let bad_type = nominal_type(bad_id);
+        let bad_definition = record_definition(
+            10,
+            vec![schema_field(20, "self", bad_type.clone(), 1)],
+        );
+        let tuple = Raw::Array(vec![Raw::Int(3.into()), Raw::Array(vec![bad_type.clone()])]);
+        let structural = Raw::Array(vec![
+            Raw::Int(4.into()),
+            Raw::Array(vec![Raw::Array(vec![
+                Raw::Text("member".into()),
+                bad_type.clone(),
+            ])]),
+        ]);
+        for required in [tuple, structural] {
+            assert!(
+                SchemaDescriptor::new(schema_for_type(
+                    required,
+                    vec![bad_definition.clone()]
+                ))
+                .is_err()
+            );
+        }
+
+        let refined = nominal_definition(
+            11,
+            2,
+            Raw::Array(vec![bad_type.clone(), Raw::Array(vec![])]),
+        );
+        assert!(
+            SchemaDescriptor::new(schema_for_type(
+                nominal_type([11; 16]),
+                vec![bad_definition.clone(), refined]
+            ))
+            .is_err()
+        );
+
+        let quantity = Raw::Array(vec![
+            Raw::Int(7.into()),
+            bad_type.clone(),
+            uuid_raw([30; 16]),
+        ]);
+        assert!(
+            SchemaDescriptor::new(schema_for_type(
+                quantity,
+                vec![bad_definition.clone()]
+            ))
+            .is_err()
+        );
+
+        let reference_with_unconstructible_key = Raw::Array(vec![
+            Raw::Int(6.into()),
+            uuid_raw([8; 16]),
+            uuid_raw([9; 16]),
+            Raw::Array(vec![bad_type.clone()]),
+        ]);
+        assert!(
+            SchemaDescriptor::new(schema_for_type(
+                reference_with_unconstructible_key,
+                vec![bad_definition.clone()]
+            ))
+            .is_err()
+        );
+
+        for guarded in [
+            schema_type(1, bad_type.clone()),
+            schema_type(2, bad_type.clone()),
+            schema_type(9, bad_type),
+        ] {
+            assert!(
+                SchemaDescriptor::new(schema_for_type(
+                    guarded,
+                    vec![bad_definition.clone()]
+                ))
+                .is_ok()
+            );
+        }
     }
 
     #[test]
