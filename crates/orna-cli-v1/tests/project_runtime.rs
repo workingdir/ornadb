@@ -725,35 +725,75 @@ fn binary_run_treats_a_path_like_target_as_an_ordinary_function_name() {
     reason = "the process-level regression retains the complete byte-for-byte status boundary evidence"
 )]
 fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_paths() {
-    let repository = tempfile::tempdir().expect("status repository");
-    std::fs::write(repository.path().join("tracked.txt"), "before\n").expect("tracked file");
+    let repository = function_fixture_project();
+    let source_path = repository.path().join("main.orna");
     assert!(
         Command::new("git")
-            .args(["init", "--quiet"])
+            .args(["add", "main.orna"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .current_dir(repository.path())
             .status()
-            .expect("git init")
+            .expect("stage initial fixture")
             .success()
     );
     assert!(
         Command::new("git")
-            .args(["add", "tracked.txt"])
+            .args([
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial fixture",
+            ])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .current_dir(repository.path())
             .status()
-            .expect("git add")
+            .expect("commit initial fixture")
             .success()
     );
 
-    std::fs::write(repository.path().join("tracked.txt"), "after\n").expect("modified file");
+    let original_source = std::fs::read_to_string(&source_path).expect("fixture source");
+    let staged_source = original_source.replace("value * value", "value + value");
+    assert_ne!(staged_source, original_source, "fixture expression must match");
+    std::fs::write(&source_path, &staged_source).expect("staged fixture change");
+    std::fs::write(repository.path().join("staged.orna"), &original_source)
+        .expect("staged Orna source");
+    assert!(
+        Command::new("git")
+            .args(["add", "main.orna", "staged.orna"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .current_dir(repository.path())
+            .status()
+            .expect("stage fixture changes")
+            .success()
+    );
+    let modified_source = staged_source.replace("value + value", "value - value");
+    assert_ne!(modified_source, staged_source, "staged expression must match");
+    std::fs::write(&source_path, modified_source).expect("unstaged fixture change");
+    std::fs::write(repository.path().join("untracked.orna"), &original_source)
+        .expect("untracked Orna source");
     std::fs::create_dir(repository.path().join("nested")).expect("untracked directory");
-    std::fs::write(repository.path().join("nested/untracked.txt"), "new\n")
-        .expect("untracked file");
+    std::fs::write(
+        repository.path().join("nested/untracked.orna"),
+        &original_source,
+    )
+    .expect("nested untracked Orna source");
 
     let expected = Command::new("git")
-        .args(["status", "--porcelain=v2", "-z", "--untracked-files=all"])
+        .args(["status", "--porcelain"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(repository.path())
         .output()
         .expect("git status");
+    assert!(expected.status.success());
+    let expected_text = std::str::from_utf8(&expected.stdout).expect("UTF-8 porcelain");
+    assert!(expected_text.contains("MM main.orna"));
+    assert!(expected_text.contains("A  staged.orna"));
+    assert!(expected_text.contains("?? untracked.orna"));
+    assert!(expected_text.contains("?? nested/"));
     let actual = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(repository.path())
