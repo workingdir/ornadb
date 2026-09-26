@@ -551,7 +551,7 @@ fn semantic_project_adapter_admits_sys_snapshot_string_as_pinned_read() {
 }
 #[test]
 fn semantic_project_adapter_admits_sys_current_snapshot_as_snapshot_ref_observation() {
-    let source = "pub fn current_snapshot() = sys.current.snapshot;";
+    let source = include_str!("fixtures/sys-current-snapshot.orna");
     let project = snapshot_project(source);
     let mut adapter = SemanticAdapter::default();
 
