@@ -88,6 +88,7 @@ impl CompactBaseRow {
 pub struct CompactBaseState {
     table_id: [u8; 16],
     schema_fingerprint: [u8; 32],
+    next_generation: u64,
     rows: BTreeMap<CompactKeyIdentity, CompactBaseRow>,
 }
 
@@ -175,16 +176,7 @@ impl CompactBaseState {
         if input.schema_fingerprint != self.schema_fingerprint {
             return Err(CompactBaseProjectionError::WrongSchema);
         }
-        let maximum_generation = self
-            .rows
-            .values()
-            .map(CompactBaseRow::generation)
-            .max()
-            .unwrap_or(0);
-        let next_generation = maximum_generation
-            .checked_add(1)
-            .ok_or(CompactBaseProjectionError::StaleGeneration)?;
-        if input.candidate_generation != next_generation {
+        if input.candidate_generation != self.next_generation {
             return Err(CompactBaseProjectionError::StaleGeneration);
         }
         Ok(())
@@ -428,6 +420,7 @@ impl std::error::Error for CompactBaseProjectionError {}
 pub fn fold_compact_committed_base<'a, I>(
     profile: &CompactOvbProfile,
     projections: I,
+    next_generation: u64,
 ) -> Result<CompactBaseState, CompactBaseProjectionError>
 where
     I: IntoIterator<Item = &'a CompactCommittedSegmentProjection>,
@@ -471,6 +464,7 @@ where
     Ok(CompactBaseState {
         table_id: profile.table_id(),
         schema_fingerprint: profile.schema_fingerprint(),
+        next_generation,
         rows,
     })
 }
@@ -1773,7 +1767,8 @@ mod tests {
     #[test]
     fn ordered_freeze_chains_fold_against_fixture_schema_and_committed_base() {
         let profile = fixture_profile();
-        let empty_base = fold_compact_committed_base(&profile, std::iter::empty()).unwrap();
+        let empty_base =
+            fold_compact_committed_base(&profile, std::iter::empty(), 1).unwrap();
         assert!(empty_base.rows().next().is_none());
         let existing_value = fixture_row("present", "Before", Some("before@example.test"));
         let changing_value = fixture_row("changing", "Before", None);
@@ -1797,6 +1792,7 @@ mod tests {
         let base = CompactBaseState {
             table_id: profile.table_id(),
             schema_fingerprint: profile.schema_fingerprint(),
+            next_generation: 2,
             rows,
         };
         let freeze = fixture_freeze(
@@ -2375,6 +2371,7 @@ mod tests {
         let state = CompactBaseState {
             table_id: TABLE,
             schema_fingerprint: [0x41; 32],
+            next_generation: 1,
             rows: BTreeMap::new(),
         };
         let input = CompactWriterInput {
@@ -2397,43 +2394,45 @@ mod tests {
     }
 
     #[test]
-    fn committed_base_requires_exact_next_generation() {
-        let profile = scalar_profile();
-        let key = profile.decode_key(&scalar_key(7)).unwrap();
+    fn committed_base_requires_manifest_next_generation_even_with_gaps() {
+        let profile = fixture_profile();
+        let encoded_key = fixture_key("generation-gap");
+        let key = profile.decode_key(&encoded_key).unwrap();
         let mut rows = BTreeMap::new();
         rows.insert(
-            key.clone(),
+            key,
             CompactBaseRow {
-                key: CanonicalValue::decode(&scalar_key(7)).unwrap(),
-                value: Some(row_value(7)),
-                generation: 4,
+                key: CanonicalValue::decode(&encoded_key).unwrap(),
+                value: Some(fixture_row("generation-gap", "Retained", None)),
+                generation: 5,
                 role: CompactSegmentRole::Data,
             },
         );
         let state = CompactBaseState {
-            table_id: TABLE,
+            table_id: profile.table_id(),
             schema_fingerprint: profile.schema_fingerprint(),
+            next_generation: 7,
             rows,
         };
         let input = CompactWriterInput {
-            table_id: TABLE,
+            table_id: profile.table_id(),
             schema_fingerprint: profile.schema_fingerprint(),
-            candidate_generation: 6,
+            candidate_generation: 7,
             row_encoding_identity: PublicationRowEncoding::CompactOvb1,
             value_encoding_identity: PublicationValueEncoding::Ovb1,
             mutations: Vec::new(),
             candidate_digest: [0x42; 32],
         };
-        assert_eq!(
-            state.consume_writer_input(&input),
-            Err(CompactBaseProjectionError::StaleGeneration)
-        );
-        assert!(state
-            .consume_writer_input(&CompactWriterInput {
-                candidate_generation: 5,
-                ..input
-            })
-            .is_ok());
+        assert!(state.consume_writer_input(&input).is_ok());
+        for stale_generation in [6, 8] {
+            assert_eq!(
+                state.consume_writer_input(&CompactWriterInput {
+                    candidate_generation: stale_generation,
+                    ..input.clone()
+                }),
+                Err(CompactBaseProjectionError::StaleGeneration)
+            );
+        }
     }
 
     #[test]
@@ -2443,6 +2442,7 @@ mod tests {
         let state = CompactBaseState {
             table_id: TABLE,
             schema_fingerprint: profile.schema_fingerprint(),
+            next_generation: 2,
             rows: BTreeMap::new(),
         };
         let input = CompactWriterInput {
@@ -2520,6 +2520,7 @@ mod tests {
         let base = CompactBaseState {
             table_id: TABLE,
             schema_fingerprint: profile.schema_fingerprint(),
+            next_generation: 2,
             rows,
         };
         let input = apply_migration_plan_to_compact(
