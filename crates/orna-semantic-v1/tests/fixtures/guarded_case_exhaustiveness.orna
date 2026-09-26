@@ -1,0 +1,30 @@
+pub enum State {
+    open,
+    closed,
+}
+
+pub fn positive_or_zero(value: Int?): Int =
+    case value {
+        Some(number) if number > 0: number,
+        Some(_): 0,
+        null: 0,
+    };
+
+pub fn guarded_only(value: Int?): Int =
+    case value {
+        Some(number) if number > 0: number,
+        null: 0,
+    };
+
+pub fn classify(value: State): Int =
+    case value {
+        State.open if true: 1,
+        State.open: 2,
+        State.closed: 0,
+    };
+
+pub fn guarded_state(value: State): Int =
+    case value {
+        State.open if true: 1,
+        State.closed: 0,
+    };
