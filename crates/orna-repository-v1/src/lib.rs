@@ -1962,6 +1962,7 @@ impl Repository {
         }
         let _coordination_lock = self.acquire_coordination_lock()?;
         self.require_no_pending_checkout_recovery_locked()?;
+        self.ensure_no_git_operation_in_progress()?;
         // A retained PUB-1 journal is the sole recovery authority for its
         // candidate. Never replace it with another publisher's prepared
         // journal: doing so would discard the first candidate's exact
@@ -1989,6 +1990,7 @@ impl Repository {
         // post-ref/pre-index race where an ordinary Git writer could publish
         // the captured, stale index.
         let git_lock = GitIndexLock::acquire_owned(index.with_extension("lock"), lock_binding)?;
+        self.ensure_no_git_operation_in_progress()?;
         // A managed file may have changed after preparation but before the
         // publication boundary.  Refuse that known conflict before advancing
         // the ref; the later worktree check still protects the unavoidable
@@ -2500,6 +2502,7 @@ impl Repository {
             return Err(RepositoryError::NoManagedPaths);
         }
         let _lock = self.acquire_coordination_lock()?;
+        self.ensure_no_git_operation_in_progress()?;
         self.ensure_no_git_index_lock()?;
         let actual_head = self.head()?;
         if actual_head.as_ref() != Some(expected_head) {
@@ -5282,6 +5285,17 @@ impl Repository {
             self.worktree.join(path)
         })
     }
+    fn ensure_no_git_operation_in_progress(&self) -> Result<(), RepositoryError> {
+        for marker in ["MERGE_HEAD", "rebase-merge", "rebase-apply"] {
+            let path = self.git_path(marker)?;
+            match fs::symlink_metadata(path) {
+                Ok(_) => return Err(RepositoryError::RepositoryBusy),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+            }
+        }
+        Ok(())
+    }
 
     fn ensure_no_git_index_lock(&self) -> Result<(), RepositoryError> {
         if self.git_path("index")?.with_extension("lock").exists() {
@@ -6614,7 +6628,7 @@ impl fmt::Display for RepositoryError {
                 f.write_str("publication recovery found unexpected local state")
             }
             Self::RepositoryBusy => {
-                f.write_str("another local Orna operation owns the repository lock")
+                f.write_str("repository is busy with an active Git or Orna operation")
             }
             Self::GitIndexLockPresent => {
                 f.write_str("Git index lock is present; resolve it with Git before retrying")
