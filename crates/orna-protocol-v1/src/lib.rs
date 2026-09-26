@@ -23,6 +23,7 @@ pub const MIN_MAX_NODES: usize = 100_000;
 pub struct Limits {
     pub max_message_bytes: usize,
     pub max_depth: usize,
+    /// Maximum number of decoded Present nodes in one message.
     pub max_nodes: usize,
     pub max_collection_items: usize,
 }
@@ -882,8 +883,15 @@ impl PresentNode {
     pub fn validate_with_limits(&self, limits: Limits) -> Result<()> {
         limits.validate()?;
         validate_present(&self.0.0)?;
-        let mut nodes = 0;
-        validate_bounded_node(&self.0.0, 0, &mut nodes, limits)?;
+        let mut structural_nodes = 0;
+        let mut present_nodes = 0;
+        validate_bounded_node(
+            &self.0.0,
+            0,
+            &mut structural_nodes,
+            &mut present_nodes,
+            limits,
+        )?;
         if encode_node(&self.0.0)?.len() > limits.max_message_bytes {
             return Err(Error::Limit);
         }
@@ -1187,20 +1195,27 @@ fn add_property(properties: &mut PresentProperties, key: &Node, value: Node) -> 
 fn validate_bounded_node(
     node: &Node,
     depth: usize,
-    nodes: &mut usize,
+    structural_nodes: &mut usize,
+    present_nodes: &mut usize,
     limits: Limits,
 ) -> Result<()> {
-    if depth > limits.max_depth || *nodes >= limits.max_nodes {
+    if depth > limits.max_depth || *structural_nodes >= limits.max_message_bytes {
         return Err(Error::Limit);
     }
-    *nodes += 1;
+    *structural_nodes += 1;
+    if matches!(node, Node::Tag(60012, _)) {
+        if *present_nodes >= limits.max_nodes {
+            return Err(Error::Limit);
+        }
+        *present_nodes += 1;
+    }
     match node {
         Node::Array(values) => {
             if values.len() > limits.max_collection_items {
                 return Err(Error::Limit);
             }
             for value in values {
-                validate_bounded_node(value, depth + 1, nodes, limits)?;
+                validate_bounded_node(value, depth + 1, structural_nodes, present_nodes, limits)?;
             }
         }
         Node::Map(values) => {
@@ -1208,11 +1223,13 @@ fn validate_bounded_node(
                 return Err(Error::Limit);
             }
             for (key, value) in values {
-                validate_bounded_node(key, depth + 1, nodes, limits)?;
-                validate_bounded_node(value, depth + 1, nodes, limits)?;
+                validate_bounded_node(key, depth + 1, structural_nodes, present_nodes, limits)?;
+                validate_bounded_node(value, depth + 1, structural_nodes, present_nodes, limits)?;
             }
         }
-        Node::Tag(_, value) => validate_bounded_node(value, depth + 1, nodes, limits)?,
+        Node::Tag(_, value) => {
+            validate_bounded_node(value, depth + 1, structural_nodes, present_nodes, limits)?
+        }
         Node::Null
         | Node::Bool(_)
         | Node::Int(_)
@@ -1709,7 +1726,8 @@ fn write_node(node: &Node, out: &mut Vec<u8>) -> Result<()> {
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
-    nodes: usize,
+    structural_nodes: usize,
+    present_nodes: usize,
     limits: Limits,
 }
 impl<'a> Reader<'a> {
@@ -1717,7 +1735,8 @@ impl<'a> Reader<'a> {
         Self {
             bytes,
             at: 0,
-            nodes: 0,
+            structural_nodes: 0,
+            present_nodes: 0,
             limits,
         }
     }
@@ -1746,10 +1765,10 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
     fn node(&mut self, depth: usize) -> Result<Node> {
-        if depth > self.limits.max_depth || self.nodes >= self.limits.max_nodes {
+        if depth > self.limits.max_depth || self.structural_nodes >= self.limits.max_message_bytes {
             return Err(Error::Limit);
         }
-        self.nodes += 1;
+        self.structural_nodes += 1;
         let first = self.take(1)?[0];
         let major = first >> 5;
         let ai = first & 31;
@@ -1772,6 +1791,12 @@ impl<'a> Reader<'a> {
             };
         }
         let arg = self.arg(ai)?;
+        if major == 6 && arg == 60012 {
+            if self.present_nodes >= self.limits.max_nodes {
+                return Err(Error::Limit);
+            }
+            self.present_nodes += 1;
+        }
         match major {
             0 => Ok(uint(arg)),
             1 => Ok(Node::Int(-BigInt::from(arg) - 1)),
@@ -1883,6 +1908,52 @@ mod tests {
     fn present_from_value_uses_the_renderer_neutral_value_fallback() {
         let present = PresentNode::from_value(value()).unwrap();
         present.validate_with_limits(Limits::default()).unwrap();
+    }
+    #[test]
+    fn minimum_node_limit_accepts_one_hundred_thousand_present_nodes() {
+        let children = (1..MIN_MAX_NODES)
+            .map(|_| present_node(Node::Null, vec![]))
+            .collect();
+        let present = PresentNode::decode(&present_node(Node::Null, children)).unwrap();
+        present.validate_with_limits(Limits::default()).unwrap();
+
+        let envelope = Envelope {
+            request: Some(id(1)),
+            watch: Some(id(2)),
+            message: Message::Snapshot {
+                revision: 0,
+                present: present.clone(),
+                snapshot: snapshot(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        let bytes = envelope.encode(Limits::default()).unwrap();
+        assert!(bytes.len() < Limits::default().max_message_bytes);
+        assert_eq!(
+            Envelope::decode(&bytes, Limits::default()).unwrap(),
+            envelope
+        );
+
+        let mut over_limit_tree = present.0.0.clone();
+        present_parts_mut(&mut over_limit_tree)
+            .unwrap()
+            .1
+            .push(present_node(Node::Null, vec![]));
+        let over_limit_present = PresentNode(ValueNode(over_limit_tree));
+        assert_eq!(
+            over_limit_present.validate_with_limits(Limits::default()),
+            Err(Error::Limit)
+        );
+
+        let mut over_limit_envelope = envelope;
+        let Message::Snapshot { present, .. } = &mut over_limit_envelope.message else {
+            unreachable!();
+        };
+        *present = over_limit_present;
+        assert_eq!(
+            over_limit_envelope.encode(Limits::default()),
+            Err(Error::Limit)
+        );
     }
     fn present_node(key: Node, children: Vec<Node>) -> Node {
         Node::Tag(
@@ -2571,7 +2642,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_collection_and_node_limits_before_payload_allocation() {
+    fn rejects_oversized_collections_and_below_floor_node_limits() {
         let oversized_collection = wire(
             1,
             Some(id(1)),
