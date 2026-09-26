@@ -1,0 +1,1 @@
+table Entry(id: Int) { value: Int, } fn inspect(entry: Entry): Int = 1;
