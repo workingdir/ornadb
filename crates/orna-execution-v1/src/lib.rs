@@ -521,8 +521,16 @@ impl ActivationCoordinator {
             .iter()
             .filter_map(|(child, joined)| (!*joined).then_some(*child))
             .collect::<Vec<_>>();
+        let mut cancellation_error = None;
+        for child in &pending {
+            if let Err(error) = children.request_cancellation(*child) {
+                cancellation_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = cancellation_error {
+            return Err(error);
+        }
         for child in pending {
-            children.request_cancellation(child)?;
             children.join(child)?;
             *self.children.get_mut(&child).expect("recorded child") = true;
         }
