@@ -5,9 +5,10 @@
 
 mod repl;
 
+use repl::{AnsiColor, write_styled, write_styled_display};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::io::{self, BufReader, Write as _};
+use std::io::{self, BufReader, IsTerminal, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -36,6 +37,59 @@ fn cli_request_nonce() -> u128 {
 
 
 const SENSOR_SOURCE_IDENTITY: &str = "example:sensors:v1";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ColorMode {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+impl ColorMode {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "auto" => Self::Auto,
+            "always" => Self::Always,
+            "never" => Self::Never,
+            _ => return None,
+        })
+    }
+
+    fn stdout_enabled(self) -> bool {
+        self.enabled(io::stdout().is_terminal())
+    }
+
+    fn stderr_enabled(self) -> bool {
+        self.enabled(io::stderr().is_terminal())
+    }
+
+    const fn enabled(self, is_terminal: bool) -> bool {
+        match self {
+            Self::Auto => is_terminal,
+            Self::Always => true,
+            Self::Never => false,
+        }
+    }
+}
+
+
+fn write_cli_line(
+    text: &[u8],
+    color: AnsiColor,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
+    let mut stdout = io::stdout().lock();
+    write_styled(&mut stdout, color, text, color_enabled)
+        .and_then(|()| stdout.write_all(b"\n"))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "CLI output could not be written",
+                "check the output stream, then retry the command",
+            )
+        })
+}
 #[allow(
     dead_code,
     reason = "The bounded CLI records the complete specified exit-status space."
@@ -363,6 +417,45 @@ impl fmt::Display for Diagnostic {
     }
 }
 
+fn write_diagnostic<W: io::Write>(
+    writer: &mut W,
+    diagnostic: &Diagnostic,
+    color_enabled: bool,
+) -> io::Result<()> {
+    write_styled(writer, AnsiColor::Red, b"error", color_enabled)?;
+    writer.write_all(b"[")?;
+    write_styled(
+        writer,
+        AnsiColor::Red,
+        diagnostic.code.as_bytes(),
+        color_enabled,
+    )?;
+    writer.write_all(b"]: ")?;
+    write_styled(
+        writer,
+        AnsiColor::Red,
+        diagnostic.title.as_bytes(),
+        color_enabled,
+    )?;
+    if let Some(detail) = &diagnostic.detail {
+        writer.write_all(b"\n  ")?;
+        write_styled(writer, AnsiColor::Dim, detail.as_bytes(), color_enabled)?;
+    }
+    writer.write_all(b"\nhelp: ")?;
+    write_styled(
+        writer,
+        AnsiColor::Dim,
+        diagnostic.help.as_bytes(),
+        color_enabled,
+    )?;
+    writer.write_all(b"\n")
+}
+
+fn write_success_line(message: &str, color_enabled: bool) -> Result<(), Diagnostic> {
+    write_cli_line(message.as_bytes(), AnsiColor::Green, color_enabled)
+}
+
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Endpoint {
     ManagedLocal,
@@ -542,7 +635,35 @@ enum Command {
 struct Parsed {
     endpoint: Endpoint,
     command: Command,
+    color: ColorMode,
 }
+fn requested_color_mode(arguments: &[String]) -> ColorMode {
+    let mut color = ColorMode::Auto;
+    let mut words = arguments.iter().map(String::as_str).peekable();
+    while let Some(option) = words.peek().copied() {
+        match option {
+            "--db" => {
+                words.next();
+                if words.next().is_none() {
+                    break;
+                }
+            }
+            "--color" => {
+                words.next();
+                let Some(value) = words.next() else {
+                    break;
+                };
+                let Some(mode) = ColorMode::parse(value) else {
+                    break;
+                };
+                color = mode;
+            }
+            _ => break,
+        }
+    }
+    color
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the command grammar deliberately keeps validation precedence in one auditable parser"
@@ -550,17 +671,38 @@ struct Parsed {
 fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     let mut endpoint = Endpoint::ManagedLocal;
     let mut has_explicit_endpoint = false;
+    let mut color = ColorMode::Auto;
     let mut words = arguments.iter().map(String::as_str).peekable();
-    while matches!(words.peek(), Some(&"--db")) {
-        words.next();
-        has_explicit_endpoint = true;
-        endpoint = Endpoint::parse(words.next().ok_or_else(|| {
-            Diagnostic::usage(
-                "E1001",
-                "option `--db` needs a value",
-                "supply an endpoint after `--db`",
-            )
-        })?)?;
+    while matches!(words.peek(), Some(&"--db") | Some(&"--color")) {
+        match words.next() {
+            Some("--db") => {
+                has_explicit_endpoint = true;
+                endpoint = Endpoint::parse(words.next().ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1001",
+                        "option `--db` needs a value",
+                        "supply an endpoint after `--db`",
+                    )
+                })?)?;
+            }
+            Some("--color") => {
+                let value = words.next().ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1001",
+                        "option `--color` needs a value",
+                        "choose `auto`, `always`, or `never` after `--color`",
+                    )
+                })?;
+                color = ColorMode::parse(value).ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1002",
+                        "unsupported value for `--color`",
+                        "choose `auto`, `always`, or `never`",
+                    )
+                })?;
+            }
+            _ => unreachable!("only global options enter this loop"),
+        }
     }
     let command = match words.next() {
         None => Command::Repl(None),
@@ -686,7 +828,11 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             "this bounded slice accepts no extra arguments",
         ));
     }
-    Ok(Parsed { endpoint, command })
+    Ok(Parsed {
+        endpoint,
+        command,
+        color,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -941,7 +1087,108 @@ fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-fn run_status_human(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+fn write_human_status<W: io::Write>(
+    output: &[u8],
+    writer: &mut W,
+    color_enabled: bool,
+) -> io::Result<()> {
+    for line in output.split_inclusive(|byte| *byte == b'\n') {
+        let has_newline = line.last() == Some(&b'\n');
+        let content = &line[..line.len() - usize::from(has_newline)];
+        if let Some(branch) = content.strip_prefix(b"On branch ") {
+            writer.write_all(b"On branch ")?;
+            write_styled(writer, AnsiColor::Cyan, branch, color_enabled)?;
+        } else if content.starts_with(b"Changes to be committed:")
+            || content.starts_with(b"Changes not staged for commit:")
+            || content.starts_with(b"Untracked files:")
+        {
+            write_styled(writer, AnsiColor::Yellow, content, color_enabled)?;
+        } else if content.starts_with(b"nothing to commit") {
+            write_styled(writer, AnsiColor::Green, content, color_enabled)?;
+        } else if content.starts_with(b"Your branch ") || content.starts_with(b"  (use ") {
+            write_styled(writer, AnsiColor::Dim, content, color_enabled)?;
+        } else if content.first() == Some(&b'\t')
+            && let Some(colon) = content.iter().position(|byte| *byte == b':')
+        {
+            let action = &content[1..colon];
+            let rest = &content[colon + 1..];
+            let path_start = rest
+                .iter()
+                .position(|byte| !matches!(*byte, b' ' | b'\t'))
+                .unwrap_or(rest.len());
+            let color = if action.starts_with(b"both ")
+                || action.starts_with(b"unmerged")
+                || action.starts_with(b"added by ")
+                || action.starts_with(b"deleted by ")
+            {
+                AnsiColor::Red
+            } else {
+                AnsiColor::Yellow
+            };
+            writer.write_all(b"\t")?;
+            write_styled(writer, color, action, color_enabled)?;
+            writer.write_all(b":")?;
+            writer.write_all(&rest[..path_start])?;
+            write_styled(
+                writer,
+                AnsiColor::Cyan,
+                &rest[path_start..],
+                color_enabled,
+            )?;
+        } else if content.first() == Some(&b'\t') && content.len() > 1 {
+            writer.write_all(b"\t")?;
+            write_styled(writer, AnsiColor::Cyan, &content[1..], color_enabled)?;
+        } else {
+            writer.write_all(content)?;
+        }
+        if has_newline {
+            writer.write_all(b"\n")?;
+        }
+    }
+    Ok(())
+}
+
+fn write_short_status<W: io::Write>(
+    output: &[u8],
+    writer: &mut W,
+    color_enabled: bool,
+) -> io::Result<()> {
+    for line in output.split_inclusive(|byte| *byte == b'\n') {
+        let has_newline = line.last() == Some(&b'\n');
+        let content = &line[..line.len() - usize::from(has_newline)];
+        if content.len() >= 3 && content[2] == b' ' {
+            let code = &content[..2];
+            let color = if code[0] == b'U'
+                || code[1] == b'U'
+                || matches!(
+                    (code[0], code[1]),
+                    (b'D', b'D')
+                        | (b'A', b'A')
+                        | (b'A', b'U')
+                        | (b'U', b'A')
+                        | (b'D', b'U')
+                        | (b'U', b'D')
+                )
+            {
+                AnsiColor::Red
+            } else {
+                AnsiColor::Yellow
+            };
+            write_styled(writer, color, code, color_enabled)?;
+            writer.write_all(b" ")?;
+            write_styled(writer, AnsiColor::Cyan, &content[3..], color_enabled)?;
+        } else {
+            writer.write_all(content)?;
+        }
+        if has_newline {
+            writer.write_all(b"\n")?;
+        }
+    }
+    Ok(())
+}
+
+
+fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
@@ -953,7 +1200,7 @@ fn run_status_human(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repository.worktree())
-        .arg("status")
+        .args(["-c", "color.status=false", "status"])
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
@@ -975,7 +1222,8 @@ fn run_status_human(endpoint: &Endpoint) -> Result<(), Diagnostic> {
             "check that Git can read the local worktree, then retry `status`",
         ));
     }
-    io::stdout().write_all(&output.stdout).map_err(|_| {
+    let mut stdout = io::stdout().lock();
+    write_human_status(&output.stdout, &mut stdout, color_enabled).map_err(|_| {
         Diagnostic::target(
             "E2100",
             "local Git worktree status could not be written",
@@ -985,7 +1233,7 @@ fn run_status_human(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-fn run_status_short(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+fn run_status_short(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
@@ -1038,7 +1286,7 @@ fn run_status_short(endpoint: &Endpoint) -> Result<(), Diagnostic> {
         .arg(&git_dir)
         .arg("--work-tree")
         .arg(repository.worktree())
-        .args(["status", "--short"])
+        .args(["-c", "color.status=false", "status", "--short"])
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
@@ -1060,7 +1308,8 @@ fn run_status_short(endpoint: &Endpoint) -> Result<(), Diagnostic> {
             "check that Git can read the local worktree, then retry `status --short`",
         ));
     }
-    io::stdout().write_all(&output.stdout).map_err(|_| {
+    let mut stdout = io::stdout().lock();
+    write_short_status(&output.stdout, &mut stdout, color_enabled).map_err(|_| {
         Diagnostic::target(
             "E2100",
             "local Git worktree status could not be written",
@@ -1069,6 +1318,7 @@ fn run_status_short(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     })?;
     Ok(())
 }
+
 
 fn load_project(endpoint: &Endpoint) -> Result<orna_project_v1::LoadedProject, Diagnostic> {
     let project = load_project_without_standard_rejection(endpoint)?;
@@ -1115,13 +1365,12 @@ fn semantic_catalogue() -> orna_semantic_v1::Catalogue {
     orna_semantic_v1::Catalogue::authoritative_core()
 }
 
-fn check_project(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue();
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if analysis.is_ok() {
-        println!("project valid");
-        Ok(())
+        write_success_line("project valid", color_enabled)
     } else {
         let first = analysis
             .diagnostics
@@ -1229,8 +1478,17 @@ fn invocation_owner_id(identity: RuntimeIdentity) -> [u8; 16] {
     identity.repository_id
 }
 
-fn run_project_invocation(endpoint: &Endpoint, root_entry: &str) -> Result<(), Diagnostic> {
-    run_project_invocation_with_arguments(endpoint, root_entry, &Environment::new())
+fn run_project_invocation(
+    endpoint: &Endpoint,
+    root_entry: &str,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
+    run_project_invocation_with_arguments(
+        endpoint,
+        root_entry,
+        &Environment::new(),
+        color_enabled,
+    )
 }
 
 fn public_project_function(analysis: &orna_semantic_v1::Analysis, target: &str) -> bool {
@@ -1251,7 +1509,11 @@ fn public_project_function(analysis: &orna_semantic_v1::Analysis, target: &str) 
         .and_then(|module| module.exports.get(function))
         .is_some_and(|symbol| symbol.kind == orna_semantic_v1::SymbolKind::Function)
 }
-fn run_public_project_function(endpoint: &Endpoint, target: &str) -> Result<(), Diagnostic> {
+fn run_public_project_function(
+    endpoint: &Endpoint,
+    target: &str,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue();
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
@@ -1270,12 +1532,20 @@ fn run_public_project_function(endpoint: &Endpoint, target: &str) -> Result<(), 
     }
     let execution = execution_project(&project);
     if DurableTransactionalEvaluator::default().project_stream_root_admitted(&execution, target) {
-        return run_project_stream_invocation_with_project(endpoint, target, &execution);
+        return run_project_stream_invocation_with_project(
+            endpoint,
+            target,
+            &execution,
+            color_enabled,
+        );
     }
-    run_project_invocation(endpoint, target)
+    run_project_invocation(endpoint, target, color_enabled)
 }
-
-fn run_project_stream_invocation(endpoint: &Endpoint, root_entry: &str) -> Result<(), Diagnostic> {
+fn run_project_stream_invocation(
+    endpoint: &Endpoint,
+    root_entry: &str,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue();
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
@@ -1287,13 +1557,13 @@ fn run_project_stream_invocation(endpoint: &Endpoint, root_entry: &str) -> Resul
         ));
     }
     let execution = execution_project(&project);
-    run_project_stream_invocation_with_project(endpoint, root_entry, &execution)
+    run_project_stream_invocation_with_project(endpoint, root_entry, &execution, color_enabled)
 }
-
 fn run_project_invocation_with_arguments(
     endpoint: &Endpoint,
     root_entry: &str,
     arguments: &Environment,
+    color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let repository = orna_repository_v1::Repository::discover(local_project_path(endpoint)?)
         .map_err(|_| {
@@ -1363,10 +1633,7 @@ fn run_project_invocation_with_arguments(
             )
         })?;
     match outcome {
-        StageOutcome::Passed => {
-            println!("invocation completed");
-            Ok(())
-        }
+        StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
         StageOutcome::Failed(_) => Err(Diagnostic::target(
             "E2200",
             "durable project invocation was rejected",
@@ -1378,7 +1645,7 @@ fn run_project_invocation_with_arguments(
                 && reason
                     == "project transaction admission does not run stream roots; use the explicit finite-list stream seam" =>
         {
-            run_project_stream_invocation(endpoint, root_entry)
+            run_project_stream_invocation(endpoint, root_entry, color_enabled)
         }
         StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "durable project invocation is not available",
@@ -1386,11 +1653,11 @@ fn run_project_invocation_with_arguments(
         )),
     }
 }
-
 fn run_project_stream_invocation_with_project(
     endpoint: &Endpoint,
     root_entry: &str,
     project: &ProjectUnit,
+    color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let repository = orna_repository_v1::Repository::discover(local_project_path(endpoint)?)
         .map_err(|_| {
@@ -1430,10 +1697,7 @@ fn run_project_stream_invocation_with_project(
             )
         })?;
     match outcome {
-        StageOutcome::Passed => {
-            println!("invocation completed");
-            Ok(())
-        }
+        StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
         StageOutcome::Failed(_) => Err(Diagnostic::target(
             "E2200",
             "durable project stream delivery failed",
@@ -1446,8 +1710,11 @@ fn run_project_stream_invocation_with_project(
         )),
     }
 }
-
-fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnostic> {
+fn run_pure_invocation(
+    endpoint: &Endpoint,
+    target: &str,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     if project.modules().len() == 1 {
         let identity = &project.identities()[0];
@@ -1481,7 +1748,7 @@ fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnost
                         error.to_string(),
                     )
                 })?;
-            println!("invocation completed");
+            write_success_line("invocation completed", color_enabled)?;
             return Ok(());
         }
     }
@@ -1507,10 +1774,7 @@ fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnost
         }
     }
     match evaluator.invoke(target) {
-        StageOutcome::Passed => {
-            println!("invocation completed");
-            Ok(())
-        }
+        StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "requested invocation is not available",
@@ -1518,6 +1782,10 @@ fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnost
         )),
     }
 }
+
+
+
+
 
 fn repl_session(endpoint: &Endpoint) -> Result<AdmittedReplSession, Diagnostic> {
     let project_context = match endpoint {
@@ -1614,17 +1882,37 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
     }
 }
 
-fn run_repl_submission<W: std::io::Write>(
+fn run_repl_submission<W: io::Write>(
     session: &mut AdmittedReplSession,
     source: &str,
     writer: &mut W,
+    color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     if source.trim() == ":quit" {
         return Ok(());
     }
     match session.submit(source) {
         Ok(Some(value)) => {
-            writeln!(writer, "{}", repl::inspect(&value)).map_err(|_| {
+            let rendered = repl::inspect(&value);
+            let (result, ty) = rendered
+                .rsplit_once(" : ")
+                .unwrap_or((rendered.as_str(), ""));
+            write_styled(
+                writer,
+                AnsiColor::Green,
+                result.as_bytes(),
+                color_enabled,
+            )
+            .and_then(|()| {
+                if ty.is_empty() {
+                    Ok(())
+                } else {
+                    writer.write_all(b" : ")?;
+                    write_styled(writer, AnsiColor::Dim, ty.as_bytes(), color_enabled)
+                }
+            })
+            .and_then(|()| writer.write_all(b"\n"))
+            .map_err(|_| {
                 Diagnostic::target(
                     "E2200",
                     "REPL console I/O failed",
@@ -1654,8 +1942,11 @@ fn run_repl_submission<W: std::io::Write>(
         }
     }
 }
-
-fn run_repl(endpoint: &Endpoint, expression: Option<&str>) -> Result<(), Diagnostic> {
+fn run_repl(
+    endpoint: &Endpoint,
+    expression: Option<&str>,
+    color_mode: ColorMode,
+) -> Result<(), Diagnostic> {
     if matches!(endpoint, Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_)) {
         return Err(Diagnostic::target(
             "E2100",
@@ -1664,17 +1955,24 @@ fn run_repl(endpoint: &Endpoint, expression: Option<&str>) -> Result<(), Diagnos
         ));
     }
     let mut session = repl_session(endpoint)?;
+    let color_enabled = color_mode.stdout_enabled();
     if let Some(source) = expression {
-        return run_repl_submission(&mut session, source, &mut io::stdout().lock());
+        return run_repl_submission(
+            &mut session,
+            source,
+            &mut io::stdout().lock(),
+            color_enabled,
+        );
     }
     let stdin = io::stdin();
     let stdout = io::stdout();
     let loader = ReplSnapshotSessionLoader { endpoint };
-    repl::run_with_snapshot_loader(
+    repl::run_with_snapshot_loader_and_color(
         &mut BufReader::new(stdin.lock()),
         &mut stdout.lock(),
         &mut session,
         &loader,
+        color_enabled,
     )
     .map_err(|_| {
         Diagnostic::target(
@@ -1684,6 +1982,33 @@ fn run_repl(endpoint: &Endpoint, expression: Option<&str>) -> Result<(), Diagnos
         )
     })
 }
+fn main() -> ExitCode {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let requested_color = requested_color_mode(&args);
+    let parsed = match parse_cli(&args) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = write_diagnostic(
+                &mut io::stderr().lock(),
+                &error,
+                requested_color.stderr_enabled(),
+            );
+            return ExitCode::from(error.exit as u8);
+        }
+    };
+    match execute(&parsed) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let _ = write_diagnostic(
+                &mut io::stderr().lock(),
+                &error,
+                parsed.color.stderr_enabled(),
+            );
+            ExitCode::from(error.exit as u8)
+        }
+    }
+}
+
 
 fn repository_init_diagnostic(error: &orna_repository_v1::RepositoryInitError) -> Diagnostic {
     let code = error.code();
@@ -1732,14 +2057,21 @@ fn repository_init_diagnostic(error: &orna_repository_v1::RepositoryInitError) -
     Diagnostic::target(code, title, help)
 }
 
-fn initialize_repository(target: Option<&std::path::Path>) -> Result<(), Diagnostic> {
+fn initialize_repository(
+    target: Option<&std::path::Path>,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
     let target = target.unwrap_or_else(|| std::path::Path::new("."));
     orna_repository_v1::initialize_repository(target)
         .map_err(|error| repository_init_diagnostic(&error))?;
-    println!("initialized Orna repository");
-    Ok(())
+    write_success_line("initialized Orna repository", color_enabled)
 }
-fn run_fetch(endpoint: &Endpoint, remote: &str, branch: &str) -> Result<(), Diagnostic> {
+fn run_fetch(
+    endpoint: &Endpoint,
+    remote: &str,
+    branch: &str,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
@@ -1782,16 +2114,40 @@ fn run_fetch(endpoint: &Endpoint, remote: &str, branch: &str) -> Result<(), Diag
             "check the configured remote and retry `fetch`",
         )
     })?;
-    let state = if fetched.updated() {
-        "updated"
+    let (state, state_color) = if fetched.updated() {
+        ("updated", AnsiColor::Yellow)
     } else {
-        "unchanged"
+        ("unchanged", AnsiColor::Dim)
     };
-    println!(
-        "fetched {} -> {} ({state})",
-        fetched.source(),
-        fetched.destination()
-    );
+    let mut stdout = io::stdout().lock();
+    write_styled(&mut stdout, AnsiColor::Green, b"fetched ", color_enabled)
+        .and_then(|()| {
+            write_styled_display(
+                &mut stdout,
+                AnsiColor::Cyan,
+                fetched.source(),
+                color_enabled,
+            )
+        })
+        .and_then(|()| stdout.write_all(b" -> "))
+        .and_then(|()| {
+            write_styled_display(
+                &mut stdout,
+                AnsiColor::Cyan,
+                fetched.destination(),
+                color_enabled,
+            )
+        })
+        .and_then(|()| stdout.write_all(b" ("))
+        .and_then(|()| write_styled_display(&mut stdout, state_color, state, color_enabled))
+        .and_then(|()| stdout.write_all(b")\n"))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "could not write command output",
+                "check that stdout is available, then retry the command",
+            )
+        })?;
     Ok(())
 }
 
@@ -1800,7 +2156,7 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     match parsed.command.clone() {
         Command::Help => {
             println!(
-                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|status|status --porcelain|status --short|fetch [REMOTE] [BRANCH]|check|explain CODE|invoke TARGET|run [QUALIFIED_FUNCTION]|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
+                "orna-cli-v1 [--color auto|always|never] [--db ENDPOINT] [repl [EXPRESSION]|status|status --porcelain|status --short|fetch [REMOTE] [BRANCH]|check|explain CODE|invoke TARGET|run [QUALIFIED_FUNCTION]|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
             );
             println!("orna-cli-v1 init [DIRECTORY]");
             Ok(())
@@ -1809,31 +2165,45 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             println!("orna-cli-v1 0.1.0");
             Ok(())
         }
-        Command::Init(ref target) => initialize_repository(target.as_deref()),
-        Command::Fetch { ref remote, ref branch } => run_fetch(&parsed.endpoint, remote, branch),
+        Command::Init(ref target) => {
+            initialize_repository(target.as_deref(), parsed.color.stdout_enabled())
+        }
+        Command::Fetch { ref remote, ref branch } => {
+            run_fetch(&parsed.endpoint, remote, branch, parsed.color.stdout_enabled())
+        }
         Command::Status {
             format: StatusFormat::Human,
-        } => run_status_human(&parsed.endpoint),
+        } => run_status_human(&parsed.endpoint, parsed.color.stdout_enabled()),
         Command::Status {
             format: StatusFormat::Porcelain,
         } => run_status(&parsed.endpoint),
         Command::Status {
             format: StatusFormat::Short,
-        } => run_status_short(&parsed.endpoint),
-        Command::Check => check_project(&parsed.endpoint),
-        Command::Invoke(ref target) => run_pure_invocation(&parsed.endpoint, target),
+        } => run_status_short(&parsed.endpoint, parsed.color.stdout_enabled()),
+        Command::Check => check_project(&parsed.endpoint, parsed.color.stdout_enabled()),
+        Command::Invoke(ref target) => {
+            run_pure_invocation(&parsed.endpoint, target, parsed.color.stdout_enabled())
+        }
         Command::Explain(code) => {
             println!("{}", explain_diagnostic(&code)?);
             Ok(())
         }
-        Command::Repl(ref expression) => run_repl(&parsed.endpoint, expression.as_deref()),
-        Command::Run(Invocation::Seed) => run_project_invocation(&parsed.endpoint, "main.seed"),
-        Command::Run(Invocation::Exercise) => {
-            run_project_invocation(&parsed.endpoint, "main.exercise")
+        Command::Repl(ref expression) => {
+            run_repl(&parsed.endpoint, expression.as_deref(), parsed.color)
         }
-        Command::Run(Invocation::SensorsIngest) => {
-            run_project_stream_invocation(&parsed.endpoint, "sensors.ingest")
+        Command::Run(Invocation::Seed) => {
+            run_project_invocation(&parsed.endpoint, "main.seed", parsed.color.stdout_enabled())
         }
+        Command::Run(Invocation::Exercise) => run_project_invocation(
+            &parsed.endpoint,
+            "main.exercise",
+            parsed.color.stdout_enabled(),
+        ),
+        Command::Run(Invocation::SensorsIngest) => run_project_stream_invocation(
+            &parsed.endpoint,
+            "sensors.ingest",
+            parsed.color.stdout_enabled(),
+        ),
         Command::Run(Invocation::LibraryLend {
             ref book_id,
             ref borrower,
@@ -1860,35 +2230,33 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
                     })?,
                 ),
             ]);
-            run_project_invocation_with_arguments(&parsed.endpoint, "library.lend", &arguments)
+            run_project_invocation_with_arguments(
+                &parsed.endpoint,
+                "library.lend",
+                &arguments,
+                parsed.color.stdout_enabled(),
+            )
         }
         Command::Run(Invocation::ProjectFunction(ref target)) => {
-            run_public_project_function(&parsed.endpoint, target)
+            run_public_project_function(&parsed.endpoint, target, parsed.color.stdout_enabled())
         }
     }
 }
 
-fn main() -> ExitCode {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let parsed = match parse_cli(&args) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("{error}");
-            return ExitCode::from(error.exit as u8);
-        }
-    };
-    match execute(&parsed) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("{error}");
-            ExitCode::from(error.exit as u8)
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn color_mode_respects_stream_tty_and_explicit_overrides() {
+        assert!(!ColorMode::Auto.enabled(false));
+        assert!(ColorMode::Auto.enabled(true));
+        assert!(ColorMode::Always.enabled(false));
+        assert!(ColorMode::Always.enabled(true));
+        assert!(!ColorMode::Never.enabled(false));
+        assert!(!ColorMode::Never.enabled(true));
+    }
+
     #[test]
     #[allow(
         clippy::too_many_lines,
@@ -1906,6 +2274,41 @@ mod tests {
         assert_eq!(
             parsed.endpoint,
             Endpoint::RemoteTls("orna://host/reference".into())
+        );
+        assert_eq!(
+            parse_cli(&["status".into()]).expect("default color mode parses").color,
+            ColorMode::Auto
+        );
+        let colored = parse_cli(&[
+            "--color".into(),
+            "always".into(),
+            "--db".into(),
+            "project".into(),
+            "status".into(),
+        ])
+        .expect("global color and database options parse before the command");
+        assert_eq!(colored.color, ColorMode::Always);
+        assert_eq!(colored.endpoint, Endpoint::Path("project".into()));
+        assert_eq!(
+            parse_cli(&["--color".into(), "never".into(), "status".into()])
+                .expect("never mode parses")
+                .color,
+            ColorMode::Never
+        );
+        let error = parse_cli(&["--color".into(), "invalid".into(), "status".into()])
+            .expect_err("invalid color mode is rejected");
+        assert_eq!(
+            (error.code, error.title, error.help),
+            (
+                "E1002",
+                "unsupported value for `--color`",
+                "choose `auto`, `always`, or `never`"
+            )
+        );
+        let error = parse_cli(&["--color".into()]).expect_err("color mode value is required");
+        assert_eq!(
+            (error.code, error.title),
+            ("E1001", "option `--color` needs a value")
         );
         assert_eq!(
             parse_cli(&["check".into()]).unwrap().command,
@@ -2079,6 +2482,7 @@ mod tests {
             execute(&Parsed {
                 endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
                 command: parsed.command,
+                color: ColorMode::Auto,
             }),
             Ok(())
         );
@@ -2453,14 +2857,38 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_output_preserves_detail_help_and_final_newline() {
+        let diagnostic = Diagnostic::target_with_detail(
+            "E2300",
+            "request failed",
+            "retry the operation",
+            "the expected remote response was unavailable",
+        );
+        let mut plain = Vec::new();
+        write_diagnostic(&mut plain, &diagnostic, false).expect("plain diagnostic write");
+        assert_eq!(
+            plain,
+            format!("{diagnostic}\n").as_bytes(),
+            "plain CLI diagnostic stays identical to Display plus eprintln's final newline"
+        );
+
+        let mut colored = Vec::new();
+        write_diagnostic(&mut colored, &diagnostic, true).expect("colored diagnostic write");
+        assert_eq!(
+            String::from_utf8(colored).expect("diagnostic is UTF-8"),
+            "\x1b[31merror\x1b[0m[\x1b[31mE2300\x1b[0m]: \x1b[31mrequest failed\x1b[0m\n  \x1b[2mthe expected remote response was unavailable\x1b[0m\nhelp: \x1b[2mretry the operation\x1b[0m\n"
+        );
+    }
+
+    #[test]
     fn single_expression_repl_reports_visible_success_failure_and_quit() {
         let mut session = AdmittedReplSession::new(Limits::default());
         let mut output = Vec::new();
         assert_eq!(
-            run_repl_submission(&mut session, "1 + 2", &mut output),
+            run_repl_submission(&mut session, "1 + 2", &mut output, false),
             Ok(())
         );
-        let error = run_repl_submission(&mut session, "missing()", &mut output)
+        let error = run_repl_submission(&mut session, "missing()", &mut output, false)
             .expect_err("failure is reported");
         assert_eq!(error.code, "ORNA-S012-UNRESOLVED");
         assert_eq!(error.title, "name could not be resolved");
@@ -2474,7 +2902,7 @@ mod tests {
             "error[ORNA-S012-UNRESOLVED]: name could not be resolved\nhelp: declare the name or add the matching `use` import before using it"
         );
         assert_eq!(
-            run_repl_submission(&mut session, ":quit", &mut output),
+            run_repl_submission(&mut session, ":quit", &mut output, false),
             Ok(())
         );
         assert_eq!(
@@ -2499,7 +2927,8 @@ mod tests {
     fn single_expression_repl_converts_writer_failure_to_console_diagnostic() {
         let mut session = AdmittedReplSession::new(Limits::default());
         let error =
-            run_repl_submission(&mut session, "1", &mut BrokenWriter).expect_err("writer failure");
+            run_repl_submission(&mut session, "1", &mut BrokenWriter, false)
+                .expect_err("writer failure");
         assert_eq!((error.code, error.exit), ("E2200", Exit::Target));
     }
     #[test]
@@ -2565,7 +2994,7 @@ mod tests {
         );
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        assert_eq!(check_project(&endpoint), Ok(()));
+        assert_eq!(check_project(&endpoint, false), Ok(()));
     }
 
     #[test]
@@ -2605,6 +3034,7 @@ mod tests {
             execute(&Parsed {
                 endpoint: endpoint.clone(),
                 command: Command::Check,
+                color: ColorMode::Auto,
             }),
             Ok(())
         );
@@ -2612,6 +3042,7 @@ mod tests {
             execute(&Parsed {
                 endpoint: endpoint.clone(),
                 command: Command::Run(Invocation::Seed),
+                color: ColorMode::Auto,
             }),
             Ok(())
         );
@@ -2636,6 +3067,7 @@ mod tests {
         let error = execute(&Parsed {
             endpoint: endpoint.clone(),
             command: Command::Run(Invocation::Seed),
+            color: ColorMode::Auto,
         })
         .expect_err("duplicate seed must be rejected");
         assert_eq!((error.code, error.exit), ("E2200", Exit::Target));
@@ -2643,6 +3075,7 @@ mod tests {
             execute(&Parsed {
                 endpoint: endpoint.clone(),
                 command: Command::Run(Invocation::Exercise),
+                color: ColorMode::Auto,
             }),
             Ok(())
         );
@@ -2650,6 +3083,7 @@ mod tests {
             execute(&Parsed {
                 endpoint,
                 command: Command::Run(Invocation::SensorsIngest),
+                color: ColorMode::Auto,
             }),
             Ok(())
         );
@@ -2681,6 +3115,7 @@ mod tests {
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Run(Invocation::Seed),
+            color: ColorMode::Auto,
         };
         assert_eq!(execute(&parsed), Ok(()));
     }
@@ -2709,6 +3144,7 @@ mod tests {
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Invoke("library.value".into()),
+            color: ColorMode::Auto,
         };
         assert_eq!(execute(&parsed), Ok(()));
     }
@@ -2731,7 +3167,7 @@ mod tests {
         );
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let error = check_project(&endpoint).expect_err("uncaptured standard module");
+        let error = check_project(&endpoint, false).expect_err("uncaptured standard module");
         assert_eq!(
             (error.code, error.exit, error.title, error.help),
             (
@@ -2761,7 +3197,7 @@ mod tests {
         );
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let error = check_project(&endpoint).expect_err("unbundled standard module");
+        let error = check_project(&endpoint, false).expect_err("unbundled standard module");
         assert_eq!(
             (error.code, error.exit, error.title, error.help),
             (
@@ -2792,6 +3228,7 @@ mod tests {
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Invoke("seed".into()),
+            color: ColorMode::Auto,
         };
         let error = execute(&parsed).expect_err("uncaptured standard module");
         assert_eq!(
@@ -2824,6 +3261,7 @@ mod tests {
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Invoke("seed".into()),
+            color: ColorMode::Auto,
         };
         let error = execute(&parsed).expect_err("uncaptured standard module");
         assert_eq!(
@@ -2855,7 +3293,7 @@ mod tests {
         );
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let error = check_project(&endpoint).expect_err("semantic error");
+        let error = check_project(&endpoint, false).expect_err("semantic error");
         let rendered = error.to_string();
         assert_eq!((error.code, error.exit), ("E2101", Exit::Target));
         assert!(rendered.contains("ORNA-S021-TYPE"));
@@ -3234,6 +3672,7 @@ mod tests {
                 remote: "origin".into(),
                 branch: "main".into(),
             },
+            color: ColorMode::Auto,
         })
         .expect("fetch command");
         assert_eq!(git(&local, &["rev-parse", "HEAD"]), initial);
