@@ -1336,6 +1336,14 @@ mod tests {
             CheckpointPositionMerge::Merged(Some(left.clone()))
         );
         assert_eq!(
+            merge_checkpoint_position(None, Some(&left), Some(&right)),
+            CheckpointPositionMerge::Conflict(CheckpointPositionConflict {
+                base: None,
+                left: Some(left.clone()),
+                right: Some(right.clone()),
+            })
+        );
+        assert_eq!(
             merge_checkpoint_position(Some(&base), Some(&left), Some(&right)),
             CheckpointPositionMerge::Conflict(CheckpointPositionConflict {
                 base: Some(base),
