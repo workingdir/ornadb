@@ -8703,6 +8703,64 @@ fn infer_case(
                 ));
             }
         }
+        Type::Bool => {
+            let mut covered = BTreeSet::new();
+            for arm in arms {
+                let mut arm_locals = local.clone();
+                let (literal, catch_all) = match &arm.pattern {
+                    Pattern::Literal {
+                        text,
+                        kind: LiteralKind::Boolean,
+                        ..
+                    } if text == "true" => (Some(true), false),
+                    Pattern::Literal {
+                        text,
+                        kind: LiteralKind::Boolean,
+                        ..
+                    } if text == "false" => (Some(false), false),
+                    Pattern::Wildcard(_) => (None, true),
+                    Pattern::Name(name, _) => {
+                        insert_case_binding(name, Type::Bool, &mut arm_locals, diagnostics);
+                        (None, true)
+                    }
+                    _ => {
+                        diagnostics.push(diag(
+                            DIAG_TYPE,
+                            "boolean case arm must match true, false, or bind the whole value",
+                        ));
+                        (None, false)
+                    }
+                };
+                if arm.guard.is_none() {
+                    if let Some(value) = literal {
+                        if !covered.insert(value) {
+                            diagnostics.push(diag(DIAG_TYPE, "boolean case arm is duplicated"));
+                        }
+                    } else if catch_all {
+                        for value in [false, true] {
+                            if !covered.insert(value) {
+                                diagnostics
+                                    .push(diag(DIAG_TYPE, "boolean case arm is duplicated"));
+                            }
+                        }
+                    }
+                }
+                infer_case_arm_body(
+                    arm,
+                    &arm_locals,
+                    scope,
+                    diagnostics,
+                    &mut effects,
+                    &mut result,
+                );
+            }
+            if covered != BTreeSet::from([false, true]) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "case expression does not cover true and false",
+                ));
+            }
+        }
         Type::Error => {
             for arm in arms {
                 infer_case_arm_body(arm, local, scope, diagnostics, &mut effects, &mut result);
@@ -15886,6 +15944,46 @@ mod tests {
     fn has(analysis: &Analysis, code: &str) -> bool {
         analysis.diagnostics.iter().any(|d| d.code() == code)
     }
+    #[test]
+    fn boolean_case_is_exhaustive_only_with_unguarded_coverage() {
+        let source = include_str!("../tests/fixtures/boolean_case_exhaustiveness.orna");
+        let analysis = checked(&[ModuleInput::new("boolean-case.orna", source)]);
+
+        assert!(
+            !has(&analysis, DIAG_UNSUPPORTED),
+            "Bool is a closed case scrutinee: {:?}",
+            analysis.diagnostics
+        );
+        assert_eq!(analysis.diagnostics.len(), 1, "diagnostics: {:?}", analysis.diagnostics);
+        assert_eq!(
+            analysis.diagnostics[0].message(),
+            "case expression does not cover true and false"
+        );
+        let module = analysis
+            .modules
+            .values()
+            .find(|module| module.symbols.contains_key("choose"))
+            .expect("fixture module is analyzed");
+        assert_eq!(
+            module.symbols["choose"].ty,
+            Type::Function {
+                parameters: vec![Type::Bool],
+                parameter_names: Some(vec!["flag".into()]),
+                default_parameters: BTreeSet::new(),
+                result: Box::new(Type::Int),
+            }
+        );
+        assert_eq!(
+            module.symbols["capture"].ty,
+            Type::Function {
+                parameters: vec![Type::Bool],
+                parameter_names: Some(vec!["flag".into()]),
+                default_parameters: BTreeSet::new(),
+                result: Box::new(Type::Bool),
+            }
+        );
+    }
+
     #[test]
     fn case_guards_do_not_establish_exhaustive_coverage() {
         let source = include_str!("../tests/fixtures/guarded_case_exhaustiveness.orna");

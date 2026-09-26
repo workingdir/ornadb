@@ -1,0 +1,21 @@
+pub fn choose(flag: Bool): Int =
+    case flag {
+        true: 1,
+        false: 0,
+    };
+
+pub fn default_for_true(flag: Bool): Int =
+    case flag {
+        true if flag: 1,
+        _: 0,
+    };
+
+pub fn capture(flag: Bool): Bool =
+    case flag {
+        value: value,
+    };
+
+pub fn guarded_only(flag: Bool): Int =
+    case flag {
+        true if flag: 1,
+    };
