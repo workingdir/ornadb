@@ -1574,7 +1574,7 @@ mod tests {
         let error = analyze_semantic_payloads(
             &[ModuleInput::new(
                 "payload.orna",
-                "table Entry(id: Int) { value: Int, } fn inspect(entry: Entry): Int = 1;",
+                include_str!("fixtures/table-reference-type.orna"),
             )],
             &Catalogue::empty(),
         )
