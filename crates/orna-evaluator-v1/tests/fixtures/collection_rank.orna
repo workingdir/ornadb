@@ -1,0 +1,9 @@
+fn rank_key(value: Int) = value % 10;
+fn identity(value: Int) = value;
+
+fn rank_order() = std.collection.rank([23, 21, 12, 11], rank_key);
+fn rank_empty() = std.collection.rank([], rank_key);
+fn rank_mixed_keys() = std.collection.rank([1, 2], value => if value == 1 { value } else { "two" });
+fn rank_bad_key() = std.collection.rank([1, 2], value => [value]);
+fn rank_collection_limit() = std.collection.rank([4, 3, 2, 1], identity);
+fn rank_step_limit() = std.collection.rank([1], identity);

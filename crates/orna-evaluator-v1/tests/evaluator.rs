@@ -98,6 +98,18 @@ fn call_module(source: &str, expression: &str, limits: Limits) -> Result<Value, 
         limits,
     )
 }
+fn rank_fixture_functions() -> Functions {
+    functions_from_source(include_str!("fixtures/collection_rank.orna"))
+}
+
+fn run_rank_fixture(function: &str, limits: Limits) -> Result<Value, EvaluationError> {
+    invoke_named(
+        function,
+        &rank_fixture_functions(),
+        &Environment::new(),
+        limits,
+    )
+}
 
 fn parsed_expression(source: &str) -> Expr {
     let parsed = orna_syntax_v1::parse_expression(source);
@@ -5241,107 +5253,53 @@ fn std_collection_sort_by_accepts_all_call_forms_and_preserves_stable_ties() {
 
 #[test]
 fn std_collection_rank_preserves_stable_ties_and_assigns_competition_ranks() {
-    let expected = Value::new(Raw::Array(vec![
-        Raw::Array(vec![Raw::Int(21.into()), Raw::Int(1.into())]),
-        Raw::Array(vec![Raw::Int(11.into()), Raw::Int(1.into())]),
-        Raw::Array(vec![Raw::Int(12.into()), Raw::Int(3.into())]),
-        Raw::Array(vec![Raw::Int(23.into()), Raw::Int(4.into())]),
-    ]))
-    .unwrap();
-
-    for expression in [
-        "std.collection.rank([23, 21, 12, 11], value => value % 10)",
-        "std.collection.rank(values: [23, 21, 12, 11], key: value => value % 10)",
-        "[23, 21, 12, 11] | std.collection.rank(key: value => value % 10)",
-    ] {
-        assert_eq!(evaluate(expression), expected, "{expression}");
-    }
-
     assert_eq!(
-        call_module(
-            "fn key(value: Int) = value % 10; fn run() = std.collection.rank(values: [23, 21, 12, 11], key: key);",
-            "run()",
-            Limits::default(),
-        )
-        .unwrap(),
-        expected
-    );
-}
-
-#[test]
-fn std_collection_rank_uses_lawful_callbacks_and_rejects_malformed_keys() {
-    assert_eq!(
-        evaluate("std.collection.rank([3, 1, 2], value => value * value)"),
+        run_rank_fixture("rank_order", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![
-            Raw::Array(vec![Raw::Int(1.into()), Raw::Int(1.into())]),
-            Raw::Array(vec![Raw::Int(2.into()), Raw::Int(2.into())]),
-            Raw::Array(vec![Raw::Int(3.into()), Raw::Int(3.into())]),
+            Raw::Array(vec![Raw::Int(21.into()), Raw::Int(1.into())]),
+            Raw::Array(vec![Raw::Int(11.into()), Raw::Int(1.into())]),
+            Raw::Array(vec![Raw::Int(12.into()), Raw::Int(3.into())]),
+            Raw::Array(vec![Raw::Int(23.into()), Raw::Int(4.into())]),
         ]))
         .unwrap()
     );
     assert_eq!(
-        code(evaluate_expression(
-            "std.collection.rank([1, 0, 2], value => 10 / value)",
-            &Environment::new(),
-            Limits::default(),
-        )),
-        "ORNA-EVAL-DIVIDE-BY-ZERO"
+        run_rank_fixture("rank_empty", Limits::default()).unwrap(),
+        Value::new(Raw::Array(vec![])).unwrap()
     );
+}
 
-    for (expression, expected) in [
-        ("std.collection.rank(1, value => value)", "ORNA-EVAL-TYPE"),
-        ("std.collection.rank([1], 1)", "ORNA-EVAL-TYPE"),
-        (
-            "std.collection.rank([1, 2], value => [value])",
-            "ORNA-EVAL-TYPE",
-        ),
-        (
-            "std.collection.rank([1, 2], value => if value == 1 { value } else { \"two\" })",
-            "ORNA-EVAL-TYPE",
-        ),
-        ("std.collection.rank([1])", "ORNA-EVAL-UNSUPPORTED"),
-        (
-            "std.collection.rank([1, 2], value => value, extra: 0)",
-            "ORNA-EVAL-UNSUPPORTED",
-        ),
-        (
-            "std.collection.rank(rows: [1, 2], key: value => value)",
-            "ORNA-EVAL-UNSUPPORTED",
-        ),
-    ] {
-        assert_eq!(
-            code(evaluate_expression(
-                expression,
-                &Environment::new(),
-                Limits::default(),
-            )),
-            expected,
-            "{expression}"
-        );
-    }
+#[test]
+fn std_collection_rank_rejects_mixed_and_unsupported_keys() {
+    assert_eq!(
+        code(run_rank_fixture("rank_mixed_keys", Limits::default())),
+        "ORNA-EVAL-TYPE"
+    );
+    assert_eq!(
+        code(run_rank_fixture("rank_bad_key", Limits::default())),
+        "ORNA-EVAL-TYPE"
+    );
 }
 
 #[test]
 fn std_collection_rank_honors_collection_and_step_limits() {
     assert_eq!(
-        code(evaluate_expression(
-            "std.collection.rank([4, 3, 2, 1], value => value)",
-            &Environment::new(),
+        code(run_rank_fixture(
+            "rank_collection_limit",
             Limits {
                 max_collection_items: 3,
                 ..Limits::default()
-            },
+            }
         )),
         "ORNA-EVAL-LIMIT"
     );
     assert_eq!(
-        code(evaluate_expression(
-            "std.collection.rank([1], value => value)",
-            &Environment::new(),
+        code(run_rank_fixture(
+            "rank_step_limit",
             Limits {
                 max_steps: 1,
                 ..Limits::default()
-            },
+            }
         )),
         "ORNA-EVAL-LIMIT"
     );
