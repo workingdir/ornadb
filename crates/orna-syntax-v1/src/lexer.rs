@@ -647,7 +647,11 @@ fn calendar_literal(source: &str) -> Option<(usize, CalendarLiteral)> {
         return None;
     }
     if bytes.get(10) != Some(&b'T') {
-        return Some((10, CalendarLiteral::Date));
+        let mut end = 10;
+        while !source.is_char_boundary(end) {
+            end += 1;
+        }
+        return Some((end, CalendarLiteral::Date));
     }
 
     // Once a date-shaped candidate has a `T`, it is an instant candidate even
