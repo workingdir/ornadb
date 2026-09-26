@@ -598,6 +598,23 @@ where
         Ok(())
     }
 
+    /// Stages an explicit primary-key change without exposing an intermediate row.
+    ///
+    /// The operation leaves the overlay unchanged when the old key is missing or
+    /// the new key is already occupied.
+    pub fn rekey(&mut self, old_key: Key, new_key: Key) -> Result<(), TableError> {
+        self.require_open()?;
+        let Some(row) = self.candidate(&old_key).cloned() else {
+            return Err(TableError::MissingRow);
+        };
+        if self.candidate(&new_key).is_some() {
+            return Err(TableError::DuplicateKey);
+        }
+        self.overlay.insert(old_key, None);
+        self.overlay.insert(new_key, Some(row));
+        Ok(())
+    }
+
     /// Reads the candidate relation, including this activation's own writes.
     pub fn read(&self, key: &Key) -> Result<Option<&Row>, TableError> {
         self.require_open()?;
@@ -760,6 +777,10 @@ where
 
     pub fn delete(&mut self, key: Key) -> Result<(), TableError> {
         self.activation.delete(key)
+    }
+
+    pub fn rekey(&mut self, old_key: Key, new_key: Key) -> Result<(), TableError> {
+        self.activation.rekey(old_key, new_key)
     }
 
     pub fn read(&self, key: &Key) -> Result<Option<&Row>, TableError> {
@@ -1038,6 +1059,24 @@ where
         Ok(())
     }
 
+    /// Stages an explicit primary-key change without exposing an intermediate row.
+    ///
+    /// The operation leaves the overlay unchanged when the old key is missing or
+    /// the new key is already occupied.
+    pub fn rekey(&mut self, table: Table, old_key: Key, new_key: Key) -> Result<(), TableError> {
+        self.require_open()?;
+        let Some(row) = self.candidate(&table, &old_key).cloned() else {
+            return Err(TableError::MissingRow);
+        };
+        if self.candidate(&table, &new_key).is_some() {
+            return Err(TableError::DuplicateKey);
+        }
+        let overlay = self.overlay.entry(table).or_default();
+        overlay.insert(old_key, None);
+        overlay.insert(new_key, Some(row));
+        Ok(())
+    }
+
     /// Reads the candidate relation, including all writes staged by this root.
     pub fn read(&self, table: &Table, key: &Key) -> Result<Option<&Row>, TableError> {
         self.require_open()?;
@@ -1240,6 +1279,10 @@ where
         self.activation.delete(table, key)
     }
 
+    pub fn rekey(&mut self, table: Table, old_key: Key, new_key: Key) -> Result<(), TableError> {
+        self.activation.rekey(table, old_key, new_key)
+    }
+
     pub fn read(&self, table: &Table, key: &Key) -> Result<Option<&Row>, TableError> {
         self.activation.read(table, key)
     }
@@ -1310,6 +1353,54 @@ mod tests {
                 panic_on_clone: self.panic_on_clone,
             }
         }
+    }
+
+    #[test]
+    fn rekey_checks_keys_before_staging_and_publishes_atomically() {
+        let mut table = TableRuntime::<u8, &'static str>::default();
+        table
+            .activate(|root| {
+                root.insert(1, "one")?;
+                root.insert(2, "two")?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        let mut root = table.begin();
+        let original = root.candidate_rows().unwrap();
+        assert_eq!(root.rekey(9, 3), Err(TableError::MissingRow));
+        assert_eq!(root.rekey(1, 2), Err(TableError::DuplicateKey));
+        assert_eq!(root.candidate_rows().unwrap(), original);
+        root.rekey(1, 3).unwrap();
+        assert_eq!(root.read(&1).unwrap(), None);
+        assert_eq!(root.read(&3).unwrap(), Some(&"one"));
+        root.commit().unwrap();
+        assert_eq!(table.committed(&1), None);
+        assert_eq!(table.committed(&3), Some(&"one"));
+
+        let mut database = DatabaseRuntime::<&'static str, u8, &'static str>::default();
+        database
+            .activate(|root| {
+                root.insert("orders", 1, "one")?;
+                root.insert("orders", 2, "two")?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        let mut root = database.begin();
+        let original = root.candidate_rows(&"orders").unwrap();
+        assert_eq!(root.rekey("orders", 9, 3), Err(TableError::MissingRow));
+        assert_eq!(root.rekey("orders", 1, 2), Err(TableError::DuplicateKey));
+        assert_eq!(root.candidate_rows(&"orders").unwrap(), original);
+        {
+            let mut child = root.child().unwrap();
+            child.rekey("orders", 1, 3).unwrap();
+            assert_eq!(child.read(&"orders", &1).unwrap(), None);
+            assert_eq!(child.read(&"orders", &3).unwrap(), Some(&"one"));
+        }
+        root.commit().unwrap();
+        assert_eq!(database.committed(&"orders", &1), None);
+        assert_eq!(database.committed(&"orders", &3), Some(&"one"));
     }
 
     #[test]
