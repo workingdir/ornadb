@@ -398,12 +398,35 @@ pub const SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR: SystemFunctionDescriptor =
         purpose: "Return structured causal explanation.",
     };
 
+/// Exact system-reference descriptor for `sys.admin.cancel_run`.
+pub const SYS_ADMIN_CANCEL_RUN_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.cancel_run",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.cancel_run(run: sys.RunRef, reason: Str? = null): Bool",
+        purpose: "Cancel a durable program run.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.pause_stream`.
+pub const SYS_ADMIN_PAUSE_STREAM_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.pause_stream",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.pause_stream(stream: sys.StreamRef, reason: Str? = null): Bool",
+        purpose: "Pause at an item/batch transaction boundary.",
+    };
+
 /// Returns the authoritative descriptor for a portable system function.
 ///
 /// The returned descriptor is static catalogue data.  It does not grant
 /// invocation or administrative authority.
 pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionDescriptor> {
-    (name == SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR.name).then_some(&SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR)
+    match name {
+        "sys.explain(Diagnostic)" => Some(&SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR),
+        "sys.admin.cancel_run" => Some(&SYS_ADMIN_CANCEL_RUN_DESCRIPTOR),
+        "sys.admin.pause_stream" => Some(&SYS_ADMIN_PAUSE_STREAM_DESCRIPTOR),
+        _ => None,
+    }
 }
 
 /// A descriptive object reference in an explanation.
@@ -2455,6 +2478,33 @@ mod tests {
             generics_resolved: true,
         }
     }
+    #[test]
+    fn admin_system_function_descriptors_match_the_reference() {
+        assert_eq!(
+            system_function_descriptor("sys.admin.cancel_run"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.cancel_run",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.cancel_run(run: sys.RunRef, reason: Str? = null): Bool",
+                purpose: "Cancel a durable program run.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.pause_stream"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.pause_stream",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.pause_stream(stream: sys.StreamRef, reason: Str? = null): Bool",
+                purpose: "Pause at an item/batch transaction boundary.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.explain(Diagnostic)"),
+            Some(&SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR)
+        );
+        assert_eq!(system_function_descriptor("sys.admin.unknown"), None);
+    }
+
     #[test]
     fn revision_id_is_an_exact_byte_oriented_nominal_value() {
         let bytes = [0x7e; 32];
