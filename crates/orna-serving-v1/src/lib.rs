@@ -21,6 +21,7 @@ pub struct Limits {
     pub max_replay: usize,
     pub max_page_entries: usize,
     pub max_watches_per_session: usize,
+    pub max_requests_per_session: usize,
     pub max_actions_per_watch: u64,
 }
 
@@ -31,6 +32,7 @@ impl Default for Limits {
             max_replay: 256,
             max_page_entries: 10_000,
             max_watches_per_session: 64,
+            max_requests_per_session: 4_096,
             max_actions_per_watch: 1_000_000,
         }
     }
@@ -42,6 +44,7 @@ impl Limits {
             || self.max_replay == 0
             || self.max_page_entries == 0
             || self.max_watches_per_session == 0
+            || self.max_requests_per_session == 0
             || self.max_actions_per_watch == 0
         {
             return Err(Error::InvalidLimits);
@@ -97,6 +100,7 @@ pub enum Error {
     ActionLimit,
     RequestUnknown,
     RequestTerminal,
+    RequestLimit,
     PatchMalformed,
     PageLimit,
 }
@@ -121,6 +125,7 @@ impl Error {
             Self::ActionLimit => "serving.action_limit",
             Self::RequestUnknown => "serving.request_unknown",
             Self::RequestTerminal => "serving.request_terminal",
+            Self::RequestLimit => "serving.request_limit",
             Self::PatchMalformed => "serving.patch_malformed",
             Self::PageLimit => "serving.page_limit",
         }
@@ -431,6 +436,7 @@ impl Serving {
     }
 
     pub fn reserve_request(&mut self, session_id: Id, request_id: Id) -> Result<()> {
+        let max_requests = self.limits.max_requests_per_session;
         let session = self.session_mut(session_id)?;
         // A lost WebSocket starts the finite reconnection lease, but it must
         // not admit any new client operation while that lease is running.
@@ -439,6 +445,9 @@ impl Serving {
         }
         if session.requests.contains_key(&request_id) {
             return Err(Error::RequestTerminal);
+        }
+        if session.requests.len() >= max_requests {
+            return Err(Error::RequestLimit);
         }
         session.requests.insert(request_id, RequestState::Reserved);
         Ok(())
@@ -654,6 +663,47 @@ mod tests {
         );
         state.validate_reconnect(id(1), &replacement).unwrap();
         state.reconnect(id(1), &replacement).unwrap();
+    }
+
+    #[test]
+    fn request_records_are_bounded_per_session_without_eviction() {
+        assert_eq!(
+            Limits {
+                max_requests_per_session: 0,
+                ..Limits::default()
+            }
+            .validate(),
+            Err(Error::InvalidLimits)
+        );
+
+        let mut state = Serving::new(Limits {
+            max_requests_per_session: 1,
+            ..Limits::default()
+        })
+        .unwrap();
+        state
+            .admit(id(1), credential(), Origin(id(2)), &subscribe(id(3)))
+            .unwrap();
+        state
+            .admit(id(4), credential(), Origin(id(5)), &subscribe(id(6)))
+            .unwrap();
+
+        state.reserve_request(id(1), id(7)).unwrap();
+        state.complete_request(id(1), id(7)).unwrap();
+        assert_eq!(
+            state.reserve_request(id(1), id(7)),
+            Err(Error::RequestTerminal)
+        );
+        assert_eq!(
+            state.reserve_request(id(1), id(8)),
+            Err(Error::RequestLimit)
+        );
+        assert_eq!(
+            state.request_state(id(1), id(7)),
+            Ok(RequestState::Completed)
+        );
+
+        state.reserve_request(id(4), id(8)).unwrap();
     }
 
     #[test]
