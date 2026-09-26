@@ -278,3 +278,31 @@ fn malformed_utf8_date_reports_character_boundary_span() {
     assert!(source.is_char_boundary(error.span.start));
     assert!(source.is_char_boundary(error.span.end));
 }
+
+#[test]
+fn unicode_16_fixture_preserves_nfc_and_original_utf8_spans() {
+    let fixture = include_str!("fixtures/unicode_17_identifier.orna");
+    for (line_index, expected_text, expected_normalized, expected_span) in
+        [(0, "α", "α", (4, 6)), (2, "e\u{301}", "é", (4, 7))]
+    {
+        let source = fixture
+            .lines()
+            .nth(line_index)
+            .expect("Unicode 16 identifier source exists in the fixture");
+        let token = lex(source)
+            .unwrap()
+            .into_iter()
+            .find(|token| matches!(&token.kind, TokenKind::Identifier { .. }))
+            .expect("fixture line contains a Unicode identifier");
+        let TokenKind::Identifier { normalized } = &token.kind else {
+            unreachable!("identifier token was selected");
+        };
+        assert_eq!(normalized, expected_normalized);
+        assert_eq!(token.text, expected_text);
+        assert_eq!((token.span.start, token.span.end), expected_span);
+        assert_eq!(
+            source.get(token.span.start..token.span.end),
+            Some(expected_text)
+        );
+    }
+}
