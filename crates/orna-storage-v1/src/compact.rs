@@ -122,7 +122,10 @@ impl CompactBaseState {
             .map(CompactBaseRow::generation)
             .max()
             .unwrap_or(0);
-        if input.candidate_generation <= maximum_generation {
+        let next_generation = maximum_generation
+            .checked_add(1)
+            .ok_or(CompactBaseProjectionError::StaleGeneration)?;
+        if input.candidate_generation != next_generation {
             return Err(CompactBaseProjectionError::StaleGeneration);
         }
         let mut keys = BTreeSet::new();
@@ -350,7 +353,9 @@ impl fmt::Display for CompactBaseProjectionError {
             Self::DuplicateKeyGeneration => {
                 "compact committed base repeats a key at one generation"
             }
-            Self::StaleGeneration => "compact writer generation is not newer than the base",
+            Self::StaleGeneration => {
+                "compact writer generation does not match the base next generation"
+            }
             Self::EvolutionInputMismatch => "evolution input does not match mutation IDs",
             Self::UnsupportedEvolutionOperation => {
                 "schema operation lacks a physical compact projection"
@@ -2043,6 +2048,46 @@ mod tests {
             }),
             Err(CompactBaseProjectionError::WrongTable)
         );
+    }
+
+    #[test]
+    fn committed_base_requires_exact_next_generation() {
+        let profile = scalar_profile();
+        let key = profile.decode_key(&scalar_key(7)).unwrap();
+        let mut rows = BTreeMap::new();
+        rows.insert(
+            key.clone(),
+            CompactBaseRow {
+                key: CanonicalValue::decode(&scalar_key(7)).unwrap(),
+                value: Some(row_value(7)),
+                generation: 4,
+                role: CompactSegmentRole::Data,
+            },
+        );
+        let state = CompactBaseState {
+            table_id: TABLE,
+            schema_fingerprint: profile.schema_fingerprint(),
+            rows,
+        };
+        let input = CompactWriterInput {
+            table_id: TABLE,
+            schema_fingerprint: profile.schema_fingerprint(),
+            candidate_generation: 6,
+            row_encoding_identity: PublicationRowEncoding::CompactOvb1,
+            value_encoding_identity: PublicationValueEncoding::Ovb1,
+            mutations: Vec::new(),
+            candidate_digest: [0x42; 32],
+        };
+        assert_eq!(
+            state.consume_writer_input(&input),
+            Err(CompactBaseProjectionError::StaleGeneration)
+        );
+        assert!(state
+            .consume_writer_input(&CompactWriterInput {
+                candidate_generation: 5,
+                ..input
+            })
+            .is_ok());
     }
 
     #[test]
