@@ -2692,7 +2692,7 @@ fn validate_type(v: &Raw) -> Result<()> {
                     return Err(Error::InvalidSchema);
                 }
                 let n = text(&p[0])?;
-                if n <= last {
+                if n.nfc().ne(n.chars()) || n <= last {
                     return Err(Error::InvalidSchema);
                 }
                 last = n;
@@ -3448,6 +3448,67 @@ mod tests {
         );
         assert!(Value::new(invalid).is_err());
     }
+
+    #[test]
+    fn schema_rejects_non_nfc_structural_type_names() {
+        let table = [9u8; 16];
+        let type_int = Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Int".into())]);
+        let inner_record = Raw::Array(vec![
+            Raw::Int(4.into()),
+            Raw::Array(vec![Raw::Array(vec![
+                Raw::Text("inner".into()),
+                type_int.clone(),
+            ])]),
+        ]);
+        let descriptor = |structural_type: Raw| {
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Int(1.into())),
+                (Raw::Int(1.into()), uuid_raw(table)),
+                (Raw::Int(2.into()), Raw::Array(vec![uuid_raw([1; 16])])),
+                (
+                    Raw::Int(3.into()),
+                    Raw::Array(vec![
+                        Raw::Array(vec![
+                            uuid_raw([1; 16]),
+                            Raw::Text("id".into()),
+                            type_int.clone(),
+                            Raw::Int(0.into()),
+                            Raw::Array(vec![Raw::Int(0.into())]),
+                        ]),
+                        Raw::Array(vec![
+                            uuid_raw([2; 16]),
+                            Raw::Text("record".into()),
+                            structural_type,
+                            Raw::Int(1.into()),
+                            Raw::Array(vec![Raw::Int(0.into())]),
+                        ]),
+                    ]),
+                ),
+                (Raw::Int(4.into()), Raw::Array(vec![])),
+            ])
+        };
+        let record_type = |names: &[&str]| {
+            Raw::Array(vec![
+                Raw::Int(4.into()),
+                Raw::Array(
+                    names
+                        .iter()
+                        .map(|name| {
+                            Raw::Array(vec![
+                                Raw::Text((*name).into()),
+                                inner_record.clone(),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ])
+        };
+
+        assert!(SchemaDescriptor::new(descriptor(record_type(&["café"]))).is_ok());
+        assert!(SchemaDescriptor::new(descriptor(record_type(&["cafe\u{301}"]))).is_err());
+        assert!(SchemaDescriptor::new(descriptor(record_type(&["z", "a"]))).is_err());
+    }
+
     #[test]
     fn schema_frozen_fallback_is_type_directed() {
         let table = [9u8; 16];
