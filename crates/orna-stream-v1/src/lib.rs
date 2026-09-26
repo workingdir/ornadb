@@ -747,7 +747,10 @@ impl InMemoryCheckpointBackend {
     fn consume_lease(&mut self, lease: &DeliveryLease) -> Result<(), RejectReason> {
         let key = lease.delivery.checkpoint_key();
         match self.leases.get(&key) {
-            Some(current) if current == lease => {
+            Some(current)
+                if current == lease
+                    && current.delivery.successor == lease.delivery.successor =>
+            {
                 self.leases.remove(&key);
                 self.retry_claims.remove(&key);
                 if self.pause_requested.remove(&key) {
@@ -907,13 +910,13 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                         && failure_status == Some(FailureStatus::Retrying)
                         && self.retry_claims.remove(&key)
                     {
-                        return CommitResult::Acquired {
-                            lease: DeliveryLease {
-                                delivery,
-                                fence: existing.fence,
-                                purpose: existing.purpose,
-                            },
+                        let lease = DeliveryLease {
+                            delivery,
+                            fence: existing.fence,
+                            purpose: existing.purpose,
                         };
+                        self.leases.insert(key, lease.clone());
+                        return CommitResult::Acquired { lease };
                     }
                     return CommitResult::Rejected(RejectReason::LeaseAlreadyHeld);
                 }
@@ -2315,6 +2318,36 @@ mod tests {
             }),
             CommitResult::Rejected(RejectReason::StaleCheckpoint)
         );
+    }
+
+    #[test]
+    fn active_delivery_lease_rejects_a_forged_successor() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let admitted = delivery("receipt:leased", "resume:admitted");
+        let lease = acquire(&mut backend, admitted.clone());
+        let expected = expected(&backend, &admitted);
+
+        let mut forged = lease.clone();
+        forged.delivery.successor = position("resume:forged");
+        assert_eq!(forged.delivery, admitted);
+        assert_eq!(forged.delivery.canonical(), admitted.canonical());
+
+        assert_eq!(
+            backend.apply(CommitIntent::Complete {
+                lease: forged,
+                expected: expected.clone(),
+            }),
+            CommitResult::Rejected(RejectReason::LeaseFenced)
+        );
+        let checkpoint = backend.checkpoint(&admitted.checkpoint_key());
+        assert_eq!(checkpoint.version, 0);
+        assert_eq!(checkpoint.committed, None);
+
+        assert!(matches!(
+            backend.apply(CommitIntent::Complete { lease, expected }),
+            CommitResult::CheckpointAdvanced { ref checkpoint }
+                if checkpoint.committed == Some(admitted.successor.clone())
+        ));
     }
 
     #[test]
