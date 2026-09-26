@@ -416,6 +416,15 @@ pub const SYS_ADMIN_PAUSE_STREAM_DESCRIPTOR: SystemFunctionDescriptor =
         purpose: "Pause at an item/batch transaction boundary.",
     };
 
+/// Exact system-reference descriptor for `sys.admin.resume_stream`.
+pub const SYS_ADMIN_RESUME_STREAM_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.resume_stream",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.resume_stream(stream: sys.StreamRef): Bool",
+        purpose: "Resume a paused stream.",
+    };
+
 /// Exact system-reference descriptor for `sys.admin.reset_checkpoint`.
 pub const SYS_ADMIN_RESET_CHECKPOINT_DESCRIPTOR: SystemFunctionDescriptor =
     SystemFunctionDescriptor {
@@ -423,6 +432,42 @@ pub const SYS_ADMIN_RESET_CHECKPOINT_DESCRIPTOR: SystemFunctionDescriptor =
         effect: SystemEffect::Admin,
         signature: "fn sys.admin.reset_checkpoint(checkpoint: sys.CheckpointRef, expected_version: sys.CheckpointVersion, expected_position: sys.CheckpointPosition, to: sys.CheckpointPosition, reason: Str): sys.Checkpoint",
         purpose: "Compare-and-set checkpoint reset.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.retry_failure`.
+pub const SYS_ADMIN_RETRY_FAILURE_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.retry_failure",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.retry_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.open): sys.InvocationHandle<sys.Value>",
+        purpose: "Lease and retry the same blocked delivery; keep identity stable across failed attempts.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.skip_failure`.
+pub const SYS_ADMIN_SKIP_FAILURE_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.skip_failure",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.skip_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Checkpoint",
+        purpose: "Atomically skip a supported failed position and move progress.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.replay_failure`.
+pub const SYS_ADMIN_REPLAY_FAILURE_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.replay_failure",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.replay_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.skipped): sys.InvocationHandle<sys.Value>",
+        purpose: "Reprocess a preserved skipped delivery without rewinding the live checkpoint.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.resolve_failure`.
+pub const SYS_ADMIN_RESOLVE_FAILURE_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.resolve_failure",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.resolve_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Failure",
+        purpose: "Resolve a preserved failure without marking its processing as successful.",
     };
 
 /// Returns the authoritative descriptor for a portable system function.
@@ -435,6 +480,11 @@ pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionD
         "sys.admin.cancel_run" => Some(&SYS_ADMIN_CANCEL_RUN_DESCRIPTOR),
         "sys.admin.pause_stream" => Some(&SYS_ADMIN_PAUSE_STREAM_DESCRIPTOR),
         "sys.admin.reset_checkpoint" => Some(&SYS_ADMIN_RESET_CHECKPOINT_DESCRIPTOR),
+        "sys.admin.resume_stream" => Some(&SYS_ADMIN_RESUME_STREAM_DESCRIPTOR),
+        "sys.admin.retry_failure" => Some(&SYS_ADMIN_RETRY_FAILURE_DESCRIPTOR),
+        "sys.admin.skip_failure" => Some(&SYS_ADMIN_SKIP_FAILURE_DESCRIPTOR),
+        "sys.admin.replay_failure" => Some(&SYS_ADMIN_REPLAY_FAILURE_DESCRIPTOR),
+        "sys.admin.resolve_failure" => Some(&SYS_ADMIN_RESOLVE_FAILURE_DESCRIPTOR),
         _ => None,
     }
 }
@@ -2506,6 +2556,51 @@ mod tests {
                 effect: SystemEffect::Admin,
                 signature: "fn sys.admin.pause_stream(stream: sys.StreamRef, reason: Str? = null): Bool",
                 purpose: "Pause at an item/batch transaction boundary.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.resume_stream"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.resume_stream",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.resume_stream(stream: sys.StreamRef): Bool",
+                purpose: "Resume a paused stream.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.retry_failure"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.retry_failure",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.retry_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.open): sys.InvocationHandle<sys.Value>",
+                purpose: "Lease and retry the same blocked delivery; keep identity stable across failed attempts.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.skip_failure"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.skip_failure",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.skip_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Checkpoint",
+                purpose: "Atomically skip a supported failed position and move progress.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.replay_failure"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.replay_failure",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.replay_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.skipped): sys.InvocationHandle<sys.Value>",
+                purpose: "Reprocess a preserved skipped delivery without rewinding the live checkpoint.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.resolve_failure"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.resolve_failure",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.resolve_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Failure",
+                purpose: "Resolve a preserved failure without marking its processing as successful.",
             })
         );
         assert_eq!(
