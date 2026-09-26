@@ -116,6 +116,12 @@ pub struct PlanningRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MigrationOperation {
+    DeleteTable {
+        table: Table,
+    },
+    CreateTable {
+        table: Table,
+    },
     RenameTable {
         table: ObjectId,
         from: String,
@@ -145,15 +151,17 @@ pub enum MigrationOperation {
 impl MigrationOperation {
     fn sort_key(&self) -> (ObjectId, u8, ObjectId, String) {
         match self {
-            Self::RenameTable { table, to, .. } => (*table, 0, *table, to.clone()),
+            Self::DeleteTable { table } => (table.id, 0, table.id, table.name.clone()),
+            Self::CreateTable { table } => (table.id, 1, table.id, table.name.clone()),
+            Self::RenameTable { table, to, .. } => (*table, 2, *table, to.clone()),
             Self::RenameField {
                 table, field, to, ..
-            } => (*table, 1, *field, to.clone()),
-            Self::AddOptionalField { table, field } => (*table, 2, field.id, field.name.clone()),
+            } => (*table, 3, *field, to.clone()),
+            Self::AddOptionalField { table, field } => (*table, 4, field.id, field.name.clone()),
             Self::AddRequiredFieldWithFallback { table, field } => {
-                (*table, 3, field.id, field.name.clone())
+                (*table, 5, field.id, field.name.clone())
             }
-            Self::RekeyRow { table, old_key, .. } => (*table, 4, *table, canonical_key(old_key)),
+            Self::RekeyRow { table, old_key, .. } => (*table, 6, *table, canonical_key(old_key)),
         }
     }
 }
@@ -289,29 +297,35 @@ pub fn plan(
     }
     let old_tables: BTreeMap<_, _> = from.tables.iter().map(|table| (table.id, table)).collect();
     let new_tables: BTreeMap<_, _> = to.tables.iter().map(|table| (table.id, table)).collect();
-    if let Some(table) = old_tables.keys().find(|id| !new_tables.contains_key(id)) {
-        return Err(PlanningError::MissingTableIdentity { table: *table });
-    }
-    if let Some(table) = new_tables.keys().find(|id| !old_tables.contains_key(id)) {
-        return Err(PlanningError::MissingTableIdentity { table: *table });
-    }
     let mut operations = Vec::new();
-    for (id, old) in old_tables {
-        let new = new_tables[&id];
+    for (id, old) in &old_tables {
+        let Some(new) = new_tables.get(id) else {
+            operations.push(MigrationOperation::DeleteTable {
+                table: (*old).clone(),
+            });
+            continue;
+        };
         if old.explicit_key != new.explicit_key {
             return Err(PlanningError::IncompatibleTable {
-                table: id,
+                table: *id,
                 reason: "explicit-key mode changed",
             });
         }
         if old.name != new.name {
             operations.push(MigrationOperation::RenameTable {
-                table: id,
+                table: *id,
                 from: old.name.clone(),
                 to: new.name.clone(),
             });
         }
-        compare_fields(id, old, new, &mut operations)?;
+        compare_fields(*id, old, new, &mut operations)?;
+    }
+    for (id, new) in &new_tables {
+        if !old_tables.contains_key(id) {
+            operations.push(MigrationOperation::CreateTable {
+                table: (*new).clone(),
+            });
+        }
     }
     validate_rekeys(&new_tables, &request.rekeys, &mut operations)?;
     operations.sort_by_key(MigrationOperation::sort_key);
@@ -730,6 +744,45 @@ mod tests {
                 })
             ));
         }
+    }
+    #[test]
+    fn tables_without_stable_identity_are_deleted_and_created_with_metadata() {
+        let stable_old = table(true, vec![field(2, "name", false)]);
+        let mut stable_new = stable_old.clone();
+        stable_new.name = "Person".into();
+        let deleted = Table {
+            id: id(3),
+            name: "Legacy".into(),
+            explicit_key: false,
+            fields: vec![field(4, "value", true)],
+        };
+        let created = Table {
+            id: id(5),
+            name: "Archive".into(),
+            explicit_key: true,
+            fields: vec![field(6, "payload", false)],
+        };
+        let from = Schema {
+            version: EvolutionVersion::V1_0,
+            tables: vec![deleted.clone(), stable_old],
+        };
+        let to = Schema {
+            version: EvolutionVersion::V1_0,
+            tables: vec![created.clone(), stable_new],
+        };
+
+        assert_eq!(
+            plan(&from, &to, &request(vec![])).unwrap().operations(),
+            &[
+                MigrationOperation::RenameTable {
+                    table: id(1),
+                    from: "Contact".into(),
+                    to: "Person".into(),
+                },
+                MigrationOperation::DeleteTable { table: deleted },
+                MigrationOperation::CreateTable { table: created },
+            ]
+        );
     }
 
     #[test]
