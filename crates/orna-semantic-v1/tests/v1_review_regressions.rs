@@ -131,7 +131,7 @@ fn unsupported_product_annotation_requires_type_diagnostic() {
 // Diagnostic control for the same Int/Str conflict at a checked boundary.
 #[test]
 fn incompatible_function_return_reports_type_diagnostic() {
-    let result = analyze_main(r#"pub fn bad(): Int = "wrong";"#);
+    let result = analyze_main(include_str!("fixtures/incompatible-function-return.orna"));
     expect_diagnostics(&result, &[DIAG_TYPE]);
 }
 
