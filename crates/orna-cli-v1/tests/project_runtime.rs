@@ -39,6 +39,11 @@ fn invoke(directory: &std::path::Path, command: &str, argument: &str) -> Output 
         .expect("CLI process")
 }
 
+fn contains_ansi(output: &Output) -> bool {
+    output.stdout.windows(2).any(|sequence| sequence == b"\x1b[")
+        || output.stderr.windows(2).any(|sequence| sequence == b"\x1b[")
+}
+
 fn initialize_project(directory: &std::path::Path) {
     let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -48,6 +53,17 @@ fn initialize_project(directory: &std::path::Path) {
     assert!(output.status.success(), "init stderr: {:?}", output.stderr);
     assert_eq!(output.stdout, b"initialized Orna repository\n");
     assert!(output.stderr.is_empty());
+}
+
+fn function_fixture_project() -> TempDir {
+    let directory = tempfile::tempdir().expect("function fixture project");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/function-expression.orna"),
+    )
+    .expect("reference Orna source");
+    initialize_project(directory.path());
+    directory
 }
 
 fn identity(directory: &std::path::Path) -> (RuntimeIdentity, [u8; 32]) {
@@ -260,6 +276,96 @@ fn binary_repl_executes_a_pure_expression_at_the_cli_boundary() {
     assert!(output.status.success());
     assert_eq!(output.stdout, b"3 : Int\n");
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_reference_repl_respects_color_mode() {
+    let directory = function_fixture_project();
+
+    let run_repl = |mode: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .current_dir(directory.path())
+            .args([
+                "--color",
+                mode,
+                "--db",
+                directory.path().to_str().expect("UTF-8 path"),
+                "repl",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("CLI process");
+        child
+            .stdin
+            .take()
+            .expect("REPL stdin")
+            .write_all(b"1 + 2\n:quit\n")
+            .expect("REPL input");
+        child.wait_with_output().expect("CLI process output")
+    };
+
+    let always = run_repl("always");
+    assert!(always.status.success(), "REPL stderr: {:?}", always.stderr);
+    assert!(contains_ansi(&always), "always must color captured REPL output");
+    let rendered = String::from_utf8_lossy(&always.stdout);
+    assert!(
+        rendered.contains("3") && rendered.contains("Int"),
+        "REPL arithmetic result: {rendered}"
+    );
+    assert!(always.stderr.is_empty());
+
+    let never = run_repl("never");
+    assert!(never.status.success(), "REPL stderr: {:?}", never.stderr);
+    assert!(!contains_ansi(&never), "never must not color REPL output");
+
+    let auto = run_repl("auto");
+    assert!(auto.status.success(), "REPL stderr: {:?}", auto.stderr);
+    assert!(!contains_ansi(&auto), "captured auto output must not be colored");
+}
+
+#[test]
+fn binary_reference_status_respects_color_mode() {
+    let directory = function_fixture_project();
+    let status_path = directory.path().to_str().expect("UTF-8 path");
+    let status = |mode: &str| {
+        Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .current_dir(directory.path())
+            .args(["--color", mode, "--db", status_path, "status"])
+            .output()
+            .expect("CLI human status")
+    };
+
+    let always = status("always");
+    assert!(always.status.success(), "status stderr: {:?}", always.stderr);
+    assert!(contains_ansi(&always), "always must color human status output");
+
+    let never = status("never");
+    assert!(never.status.success(), "status stderr: {:?}", never.stderr);
+    assert!(!contains_ansi(&never), "never must not color human status");
+
+    let auto = status("auto");
+    assert!(auto.status.success(), "status stderr: {:?}", auto.stderr);
+    assert!(!contains_ansi(&auto), "captured auto status must not be colored");
+    assert_eq!(never.stdout, auto.stdout);
+    assert_eq!(never.stderr, auto.stderr);
+
+    let default = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["--db", status_path, "status"])
+        .output()
+        .expect("CLI human status with default color");
+    assert!(default.status.success(), "status stderr: {:?}", default.stderr);
+    assert!(
+        !contains_ansi(&default),
+        "captured default Auto output must not be colored"
+    );
+    assert_eq!(never.stdout, default.stdout);
+    assert_eq!(never.stderr, default.stderr);
 }
 
 #[test]
@@ -629,19 +735,6 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
             .expect("git init")
             .success()
     );
-    for (key, value) in [
-        ("user.name", "Orna Test"),
-        ("user.email", "orna@example.invalid"),
-    ] {
-        assert!(
-            Command::new("git")
-                .args(["config", key, value])
-                .current_dir(repository.path())
-                .status()
-                .expect("git config")
-                .success()
-        );
-    }
     assert!(
         Command::new("git")
             .args(["add", "tracked.txt"])
@@ -650,21 +743,7 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
             .expect("git add")
             .success()
     );
-    assert!(
-        Command::new("git")
-            .args([
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "--quiet",
-                "-m",
-                "initial"
-            ])
-            .current_dir(repository.path())
-            .status()
-            .expect("git commit")
-            .success()
-    );
+
     std::fs::write(repository.path().join("tracked.txt"), "after\n").expect("modified file");
     std::fs::create_dir(repository.path().join("nested")).expect("untracked directory");
     std::fs::write(repository.path().join("nested/untracked.txt"), "new\n")
@@ -684,6 +763,46 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
     assert!(actual.status.success());
     assert_eq!(actual.stdout, expected.stdout);
     assert!(actual.stderr.is_empty());
+    let status_path = repository.path().to_str().expect("UTF-8 path");
+    let porcelain_with_color = |mode: &str| {
+        Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .current_dir(repository.path())
+            .args([
+                "--color",
+                mode,
+                "--db",
+                status_path,
+                "status",
+                "--porcelain",
+            ])
+            .output()
+            .expect("CLI colored status")
+    };
+    for (mode, output) in [
+        ("always", porcelain_with_color("always")),
+        ("never", porcelain_with_color("never")),
+        ("auto", porcelain_with_color("auto")),
+    ] {
+        assert!(
+            output.status.success(),
+            "status --color {mode} stderr: {:?}",
+            output.stderr
+        );
+        assert_eq!(
+            output.stdout, expected.stdout,
+            "status --color {mode} must preserve Git bytes"
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "status --color {mode} stderr: {:?}",
+            output.stderr
+        );
+        assert!(
+            !contains_ansi(&output),
+            "status --color {mode} must not emit ANSI"
+        );
+    }
 
     let expected_short = Command::new("git")
         .args(["status", "--short"])
