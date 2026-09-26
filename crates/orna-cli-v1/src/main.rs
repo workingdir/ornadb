@@ -1635,17 +1635,22 @@ fn run_repl_submission<W: std::io::Write>(
         }
         Ok(None) => Ok(()),
         Err(error) => {
-            writeln!(writer, "error[{}]", error.code()).map_err(|_| {
-                Diagnostic::target(
-                    "E2200",
-                    "REPL console I/O failed",
-                    "check the terminal input and output streams, then start a new session",
-                )
-            })?;
-            Err(Diagnostic::unavailable(
-                "REPL submission failed",
-                "use source supported by the current evaluator session",
-            ))
+            let diagnostic = diagnostic_documentation(error.code()).map_or_else(
+                || {
+                    Diagnostic::unavailable(
+                        "REPL expression could not be evaluated",
+                        "revise the expression using names and values available in this REPL session",
+                    )
+                },
+                |documentation| {
+                    Diagnostic::target(
+                        documentation.code,
+                        documentation.title,
+                        documentation.help,
+                    )
+                },
+            );
+            Err(diagnostic)
         }
     }
 }
@@ -2110,18 +2115,16 @@ mod tests {
         repl::run(&mut input, &mut output, &mut session).expect("scripted session");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> > > error[ORNA-S012-UNRESOLVED]\n> 42 : Int\n> "
+            "> > > error[ORNA-S012-UNRESOLVED]: name could not be resolved\nhelp: declare the name or add the matching `use` import before using it\n> 42 : Int\n> "
         );
     }
 
     #[test]
     fn project_repl_rejects_an_uncaptured_standard_import() {
         let directory = tempfile::tempdir().expect("temporary project");
-        std::fs::write(
-            directory.path().join("main.orna"),
-            "use std.math; pub fn run(): Int = std.math.increment(41);",
-        )
-        .expect("main source");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../reference/Orna-1.0.0/examples/valid/page.orna");
+        std::fs::copy(fixture, directory.path().join("main.orna")).expect("accepted source");
         assert!(
             std::process::Command::new("git")
                 .args(["init", "--quiet"])
@@ -2141,6 +2144,7 @@ mod tests {
             "use a captured standard dependency or remove the import"
         );
     }
+
 
     #[test]
     fn repl_snapshot_loader_reads_cwd_head_and_named_refs_without_git_mutation() {
@@ -2458,14 +2462,25 @@ mod tests {
         );
         let error = run_repl_submission(&mut session, "missing()", &mut output)
             .expect_err("failure is reported");
-        assert_eq!(error.code, "E2000");
+        assert_eq!(error.code, "ORNA-S012-UNRESOLVED");
+        assert_eq!(error.title, "name could not be resolved");
+        assert_eq!(
+            error.help,
+            "declare the name or add the matching `use` import before using it"
+        );
+        assert_eq!(error.exit, Exit::Target);
+        assert_eq!(
+            error.to_string(),
+            "error[ORNA-S012-UNRESOLVED]: name could not be resolved\nhelp: declare the name or add the matching `use` import before using it"
+        );
         assert_eq!(
             run_repl_submission(&mut session, ":quit", &mut output),
             Ok(())
         );
-        let output = String::from_utf8(output).expect("UTF-8");
-        assert!(output.starts_with("3 : Int\nerror[ORNA-S012-UNRESOLVED]"));
-        assert_eq!(output.matches('\n').count(), 2);
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "3 : Int\n"
+        );
     }
 
     struct BrokenWriter;
