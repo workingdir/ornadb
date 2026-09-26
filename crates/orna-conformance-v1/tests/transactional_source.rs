@@ -507,9 +507,9 @@ fn parsed_undocumented_table_count_where_member_fails_closed() {
 #[test]
 fn parsed_pipeline_count_bare_statement_observes_activation_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source(
-        r#"Note | count; Note.insert({ id: 8, text: "second" }); assert Note | count == 2;"#,
-    ));
+    let outcome = runtime.execute_source(&source(include_str!(
+        "fixtures/pipeline-count-bare.orna"
+    )));
 
     assert!(matches!(outcome, StageOutcome::Passed));
     assert!(
