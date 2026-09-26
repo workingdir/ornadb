@@ -574,6 +574,113 @@ pub const SYS_ADMIN_CREATE_BRANCH_STR_DESCRIPTOR: SystemFunctionDescriptor =
         purpose: "Resolve a Git revision expression and create a branch there.",
     };
 
+/// Exact system-reference descriptor for `sys.admin.checkout(SnapshotRef)`.
+pub const SYS_ADMIN_CHECKOUT_SNAPSHOT_REF_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.checkout(SnapshotRef)",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.checkout(target: sys.SnapshotRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+        purpose: "Validate and select an already resolved snapshot.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.checkout(CommitRef)`.
+pub const SYS_ADMIN_CHECKOUT_COMMIT_REF_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.checkout(CommitRef)",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.checkout(target: sys.CommitRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+        purpose: "Validate and select a commit snapshot.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.checkout(BranchRef)`.
+pub const SYS_ADMIN_CHECKOUT_BRANCH_REF_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.checkout(BranchRef)",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.checkout(target: sys.BranchRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+        purpose: "Validate and select a branch target.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.checkout(TagRef)`.
+pub const SYS_ADMIN_CHECKOUT_TAG_REF_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.checkout(TagRef)",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.checkout(target: sys.TagRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+        purpose: "Validate and select a peeled tag target.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.checkout(GitOid)`.
+pub const SYS_ADMIN_CHECKOUT_GIT_OID_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.checkout(GitOid)",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.checkout(target: sys.GitOid, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+        purpose: "Validate and select an exact Git object.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.checkout(Str)`.
+pub const SYS_ADMIN_CHECKOUT_STR_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.checkout(Str)",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.checkout(target: Str, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+        purpose: "Resolve, validate and select a Git revision expression.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.plan_checkout(SnapshotRef)`.
+pub const SYS_ADMIN_PLAN_CHECKOUT_SNAPSHOT_REF_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.plan_checkout(SnapshotRef)",
+        effect: SystemEffect::Read,
+        signature: "fn sys.admin.plan_checkout(target: sys.SnapshotRef): sys.CheckoutPlan",
+        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.plan_checkout(CommitRef)`.
+pub const SYS_ADMIN_PLAN_CHECKOUT_COMMIT_REF_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.plan_checkout(CommitRef)",
+        effect: SystemEffect::Read,
+        signature: "fn sys.admin.plan_checkout(target: sys.CommitRef): sys.CheckoutPlan",
+        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.plan_checkout(BranchRef)`.
+pub const SYS_ADMIN_PLAN_CHECKOUT_BRANCH_REF_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.plan_checkout(BranchRef)",
+        effect: SystemEffect::Read,
+        signature: "fn sys.admin.plan_checkout(target: sys.BranchRef): sys.CheckoutPlan",
+        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.plan_checkout(TagRef)`.
+pub const SYS_ADMIN_PLAN_CHECKOUT_TAG_REF_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.plan_checkout(TagRef)",
+        effect: SystemEffect::Read,
+        signature: "fn sys.admin.plan_checkout(target: sys.TagRef): sys.CheckoutPlan",
+        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.plan_checkout(GitOid)`.
+pub const SYS_ADMIN_PLAN_CHECKOUT_GIT_OID_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.plan_checkout(GitOid)",
+        effect: SystemEffect::Read,
+        signature: "fn sys.admin.plan_checkout(target: sys.GitOid): sys.CheckoutPlan",
+        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.plan_checkout(Str)`.
+pub const SYS_ADMIN_PLAN_CHECKOUT_STR_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.plan_checkout(Str)",
+        effect: SystemEffect::Read,
+        signature: "fn sys.admin.plan_checkout(target: Str): sys.CheckoutPlan",
+        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+    };
 
 /// Returns the authoritative descriptor for a portable system function.
 ///
@@ -604,6 +711,20 @@ pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionD
         "sys.admin.create_branch(TagRef)" => Some(&SYS_ADMIN_CREATE_BRANCH_TAG_REF_DESCRIPTOR),
         "sys.admin.create_branch(GitOid)" => Some(&SYS_ADMIN_CREATE_BRANCH_GIT_OID_DESCRIPTOR),
         "sys.admin.create_branch(Str)" => Some(&SYS_ADMIN_CREATE_BRANCH_STR_DESCRIPTOR),
+        "sys.admin.checkout(SnapshotRef)" => Some(&SYS_ADMIN_CHECKOUT_SNAPSHOT_REF_DESCRIPTOR),
+        "sys.admin.checkout(CommitRef)" => Some(&SYS_ADMIN_CHECKOUT_COMMIT_REF_DESCRIPTOR),
+        "sys.admin.checkout(BranchRef)" => Some(&SYS_ADMIN_CHECKOUT_BRANCH_REF_DESCRIPTOR),
+        "sys.admin.checkout(TagRef)" => Some(&SYS_ADMIN_CHECKOUT_TAG_REF_DESCRIPTOR),
+        "sys.admin.checkout(GitOid)" => Some(&SYS_ADMIN_CHECKOUT_GIT_OID_DESCRIPTOR),
+        "sys.admin.checkout(Str)" => Some(&SYS_ADMIN_CHECKOUT_STR_DESCRIPTOR),
+        "sys.admin.plan_checkout(SnapshotRef)" => {
+            Some(&SYS_ADMIN_PLAN_CHECKOUT_SNAPSHOT_REF_DESCRIPTOR)
+        }
+        "sys.admin.plan_checkout(CommitRef)" => Some(&SYS_ADMIN_PLAN_CHECKOUT_COMMIT_REF_DESCRIPTOR),
+        "sys.admin.plan_checkout(BranchRef)" => Some(&SYS_ADMIN_PLAN_CHECKOUT_BRANCH_REF_DESCRIPTOR),
+        "sys.admin.plan_checkout(TagRef)" => Some(&SYS_ADMIN_PLAN_CHECKOUT_TAG_REF_DESCRIPTOR),
+        "sys.admin.plan_checkout(GitOid)" => Some(&SYS_ADMIN_PLAN_CHECKOUT_GIT_OID_DESCRIPTOR),
+        "sys.admin.plan_checkout(Str)" => Some(&SYS_ADMIN_PLAN_CHECKOUT_STR_DESCRIPTOR),
         _ => None,
     }
 }
@@ -2839,6 +2960,94 @@ mod tests {
                 purpose: "Resolve a Git revision expression and create a branch there.",
             })
         );
+        for expected in [
+            SystemFunctionDescriptor {
+                name: "sys.admin.checkout(SnapshotRef)",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.checkout(target: sys.SnapshotRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+                purpose: "Validate and select an already resolved snapshot.",
+            },
+            SystemFunctionDescriptor {
+                name: "sys.admin.checkout(CommitRef)",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.checkout(target: sys.CommitRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+                purpose: "Validate and select a commit snapshot.",
+            },
+            SystemFunctionDescriptor {
+                name: "sys.admin.checkout(BranchRef)",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.checkout(target: sys.BranchRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+                purpose: "Validate and select a branch target.",
+            },
+            SystemFunctionDescriptor {
+                name: "sys.admin.checkout(TagRef)",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.checkout(target: sys.TagRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+                purpose: "Validate and select a peeled tag target.",
+            },
+            SystemFunctionDescriptor {
+                name: "sys.admin.checkout(GitOid)",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.checkout(target: sys.GitOid, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+                purpose: "Validate and select an exact Git object.",
+            },
+            SystemFunctionDescriptor {
+                name: "sys.admin.checkout(Str)",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.checkout(target: Str, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+                purpose: "Resolve, validate and select a Git revision expression.",
+            },
+            SystemFunctionDescriptor {
+                name: "sys.admin.plan_checkout(SnapshotRef)",
+                effect: SystemEffect::Read,
+                signature: "fn sys.admin.plan_checkout(target: sys.SnapshotRef): sys.CheckoutPlan",
+                purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+            },
+            SystemFunctionDescriptor {
+                name: "sys.admin.plan_checkout(CommitRef)",
+                effect: SystemEffect::Read,
+                signature: "fn sys.admin.plan_checkout(target: sys.CommitRef): sys.CheckoutPlan",
+                purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+            },
+            SystemFunctionDescriptor {
+                name: "sys.admin.plan_checkout(BranchRef)",
+                effect: SystemEffect::Read,
+                signature: "fn sys.admin.plan_checkout(target: sys.BranchRef): sys.CheckoutPlan",
+                purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+            },
+            SystemFunctionDescriptor {
+                name: "sys.admin.plan_checkout(TagRef)",
+                effect: SystemEffect::Read,
+                signature: "fn sys.admin.plan_checkout(target: sys.TagRef): sys.CheckoutPlan",
+                purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+            },
+            SystemFunctionDescriptor {
+                name: "sys.admin.plan_checkout(GitOid)",
+                effect: SystemEffect::Read,
+                signature: "fn sys.admin.plan_checkout(target: sys.GitOid): sys.CheckoutPlan",
+                purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+            },
+            SystemFunctionDescriptor {
+                name: "sys.admin.plan_checkout(Str)",
+                effect: SystemEffect::Read,
+                signature: "fn sys.admin.plan_checkout(target: Str): sys.CheckoutPlan",
+                purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+            },
+        ] {
+            assert_eq!(
+                system_function_descriptor(expected.name),
+                Some(&expected)
+            );
+        }
+        assert_eq!(
+            system_function_descriptor("sys.admin.checkout(UnknownRef)"),
+            None
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.plan_checkout(UnknownRef)"),
+            None
+        );
+
         assert_eq!(
             system_function_descriptor("sys.explain(Diagnostic)"),
             Some(&SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR)
