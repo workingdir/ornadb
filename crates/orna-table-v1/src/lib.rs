@@ -1370,6 +1370,7 @@ mod tests {
         let original = root.candidate_rows().unwrap();
         assert_eq!(root.rekey(9, 3), Err(TableError::MissingRow));
         assert_eq!(root.rekey(1, 2), Err(TableError::DuplicateKey));
+        assert_eq!(root.rekey(1, 1), Err(TableError::DuplicateKey));
         assert_eq!(root.candidate_rows().unwrap(), original);
         root.rekey(1, 3).unwrap();
         assert_eq!(root.read(&1).unwrap(), None);
@@ -1391,6 +1392,7 @@ mod tests {
         let original = root.candidate_rows(&"orders").unwrap();
         assert_eq!(root.rekey("orders", 9, 3), Err(TableError::MissingRow));
         assert_eq!(root.rekey("orders", 1, 2), Err(TableError::DuplicateKey));
+        assert_eq!(root.rekey("orders", 1, 1), Err(TableError::DuplicateKey));
         assert_eq!(root.candidate_rows(&"orders").unwrap(), original);
         {
             let mut child = root.child().unwrap();
