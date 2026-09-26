@@ -1008,6 +1008,179 @@ pub struct SystemDiagnostic {
     pub redacted: bool,
     pub trace: Option<TraceRef>,
 }
+
+/// Input envelope for the local `sys.explain` boundary.
+///
+/// The envelope deliberately owns the complete canonical diagnostic instead of
+/// projecting it into the smaller live-protocol [`Diagnostic`]. In particular,
+/// row identity, source authority, labels, structured data, and trace
+/// authority remain available to the consumer. No renderer-facing text is
+/// derived or redacted by this adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SystemDiagnosticExplanationInput {
+    diagnostic: SystemDiagnostic,
+}
+
+impl SystemDiagnosticExplanationInput {
+    /// Admit one canonical diagnostic without dropping fields at the local
+    /// explanation boundary.
+    pub fn new(diagnostic: SystemDiagnostic) -> Result<Self, SystemDiagnosticAdapterError> {
+        validate_system_diagnostic(&diagnostic)?;
+        Ok(Self { diagnostic })
+    }
+
+    pub fn diagnostic(&self) -> &SystemDiagnostic {
+        &self.diagnostic
+    }
+
+    pub fn into_diagnostic(self) -> SystemDiagnostic {
+        self.diagnostic
+    }
+
+    /// Attach the renderer-independent explanation fields returned by
+    /// `sys.explain`. Causes are copied from the admitted canonical row; the
+    /// canonical row itself remains intact in the result.
+    pub fn finish(
+        self,
+        summary: impl Into<String>,
+        suggestions: impl IntoIterator<Item = String>,
+    ) -> Result<SystemDiagnosticExplanationOutput, SystemDiagnosticAdapterError> {
+        let summary = validate_diagnostic_text("summary", summary.into())?;
+        let suggestions = suggestions
+            .into_iter()
+            .map(|suggestion| validate_diagnostic_text("suggestion", suggestion))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SystemDiagnosticExplanationOutput {
+            causes: self.diagnostic.causes.clone(),
+            diagnostic: self.diagnostic,
+            summary,
+            suggestions,
+        })
+    }
+}
+
+/// Structured output envelope for a local `sys.explain` implementation.
+///
+/// `related_objects` and `plan` are intentionally not guessed here: those
+/// fields require authority owned by the system projection. A sys/runtime
+/// consumer can add them after this envelope is produced, while every field
+/// of the canonical diagnostic remains lossless.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SystemDiagnosticExplanationOutput {
+    diagnostic: SystemDiagnostic,
+    summary: String,
+    causes: Vec<SystemDiagnostic>,
+    suggestions: Vec<String>,
+}
+
+impl SystemDiagnosticExplanationOutput {
+    pub fn diagnostic(&self) -> &SystemDiagnostic {
+        &self.diagnostic
+    }
+
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    pub fn causes(&self) -> &[SystemDiagnostic] {
+        &self.causes
+    }
+
+    pub fn suggestions(&self) -> &[String] {
+        &self.suggestions
+    }
+
+    pub fn into_parts(self) -> (SystemDiagnostic, String, Vec<SystemDiagnostic>, Vec<String>) {
+        (self.diagnostic, self.summary, self.causes, self.suggestions)
+    }
+}
+
+/// Typed failures from the canonical-to-local explanation boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SystemDiagnosticAdapterError {
+    EmptyId,
+    EmptyCode,
+    UnsafeText { field: &'static str },
+    InvalidSpan,
+}
+
+impl fmt::Display for SystemDiagnosticAdapterError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyId => formatter.write_str("system diagnostic id is empty"),
+            Self::EmptyCode => formatter.write_str("system diagnostic code is empty"),
+            Self::UnsafeText { field } => {
+                write!(formatter, "system diagnostic {field} contains unsafe text")
+            }
+            Self::InvalidSpan => formatter.write_str("system diagnostic contains an invalid span"),
+        }
+    }
+}
+
+impl std::error::Error for SystemDiagnosticAdapterError {}
+
+/// Canonical-to-local explanation adapter. This named function is the
+/// Foundation-side contract consumed by sys/runtime/CLI; it never flattens a
+/// `SystemDiagnostic` into the live-protocol diagnostic.
+pub fn system_diagnostic_explanation_input(
+    diagnostic: SystemDiagnostic,
+) -> Result<SystemDiagnosticExplanationInput, SystemDiagnosticAdapterError> {
+    SystemDiagnosticExplanationInput::new(diagnostic)
+}
+
+fn validate_system_diagnostic(
+    diagnostic: &SystemDiagnostic,
+) -> Result<(), SystemDiagnosticAdapterError> {
+    if diagnostic.id.is_empty() {
+        return Err(SystemDiagnosticAdapterError::EmptyId);
+    }
+    if diagnostic.code.is_empty() {
+        return Err(SystemDiagnosticAdapterError::EmptyCode);
+    }
+    validate_diagnostic_text("id", diagnostic.id.clone())?;
+    validate_diagnostic_text("code", diagnostic.code.clone())?;
+    validate_diagnostic_text("message", diagnostic.message.clone())?;
+    if let Some(span) = &diagnostic.primary_span {
+        validate_source_span(span)?;
+    }
+    for label in &diagnostic.labels {
+        validate_source_span(&label.span)?;
+        validate_diagnostic_text("label", label.message.clone())?;
+    }
+    for help in &diagnostic.help {
+        validate_diagnostic_text("help", help.clone())?;
+    }
+    for cause in &diagnostic.causes {
+        validate_system_diagnostic(cause)?;
+    }
+    Ok(())
+}
+
+fn validate_diagnostic_text(
+    field: &'static str,
+    text: String,
+) -> Result<String, SystemDiagnosticAdapterError> {
+    SafeText::new(text.clone())
+        .map(|_| text)
+        .map_err(|_| SystemDiagnosticAdapterError::UnsafeText { field })
+}
+
+fn validate_source_span(span: &SourceSpan) -> Result<(), SystemDiagnosticAdapterError> {
+    if span.start_byte.sign() == Sign::Minus
+        || span.end_byte < span.start_byte
+        || [
+            &span.start_line,
+            &span.start_column,
+            &span.end_line,
+            &span.end_column,
+        ]
+        .iter()
+        .any(|coordinate| coordinate.sign() != Sign::Plus)
+    {
+        return Err(SystemDiagnosticAdapterError::InvalidSpan);
+    }
+    Ok(())
+}
 /// Protocol span `[snapshot, file_path, start_byte, end_byte]`. The source
 /// path is repository-relative or the explicit `<redacted>` marker.
 #[derive(Clone, Debug, Eq, PartialEq)]
