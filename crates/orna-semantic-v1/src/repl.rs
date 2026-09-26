@@ -273,7 +273,10 @@ mod tests {
 
     #[test]
     fn rejects_failed_project_analysis() {
-        let analysis = analyze(&[ModuleInput::new("main.orna", "fn bad() = $_;")]);
+        let analysis = analyze(&[ModuleInput::new(
+            "main.orna",
+            include_str!("fixtures/repl-failed-project-analysis.orna"),
+        )]);
         assert!(ReplContext::from_analysis(&analysis).is_err());
     }
 
