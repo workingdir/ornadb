@@ -2888,7 +2888,7 @@ fn harness_maps_sys_resolve_to_semantic_pass_evidence() {
             None,
             None,
         ),
-        r#"pub fn resolve() = sys.resolve("main.main");"#,
+        include_str!("fixtures/sys-resolve-valid.orna"),
         "ORNA-SYS-076",
     );
     let fixture = &report.fixtures[0];
