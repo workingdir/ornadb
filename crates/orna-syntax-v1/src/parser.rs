@@ -118,10 +118,32 @@ pub enum EntryPoint {
 pub struct Parse<T> {
     pub value: T,
     pub diagnostics: Vec<Diagnostic>,
+    status: ParseStatus,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParseStatus {
+    Complete,
+    Incomplete,
+    Invalid,
 }
 impl<T> Parse<T> {
     pub fn is_ok(&self) -> bool {
         self.diagnostics.is_empty()
+    }
+
+    /// Returns true when the parser reached the end of input while it still
+    /// expected grammar tokens. A caller can request more input before it
+    /// reports a syntax error.
+    #[must_use]
+    pub fn is_incomplete(&self) -> bool {
+        self.status == ParseStatus::Incomplete
+    }
+
+    /// Returns true when the input has a syntax or lexical error that more
+    /// input cannot complete.
+    #[must_use]
+    pub fn is_malformed(&self) -> bool {
+        self.status == ParseStatus::Invalid
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -879,6 +901,7 @@ pub fn parse_module(source: &str) -> Parse<SyntaxTree> {
             items,
             span,
         },
+        status: p.status(),
         diagnostics: p.errors,
     }
 }
@@ -900,6 +923,7 @@ pub fn parse_row(source: &str) -> Parse<Expr> {
             fields: Vec::new(),
             span: SourceSpan::new(0, 0),
         }),
+        status: p.status(),
         diagnostics: p.errors,
     }
 }
@@ -920,6 +944,7 @@ pub fn parse_repl(source: &str) -> Parse<ReplInput> {
             elements: Vec::new(),
             span: SourceSpan::new(0, 0),
         })),
+        status: p.status(),
         diagnostics: p.errors,
     }
 }
@@ -933,6 +958,7 @@ pub fn parse_expression(source: &str) -> Parse<Expr> {
             elements: Vec::new(),
             span: SourceSpan::new(0, 0),
         }),
+        status: p.status(),
         diagnostics: p.errors,
     }
 }
@@ -1507,6 +1533,7 @@ struct Parser {
     tokens: Vec<Token>,
     at: usize,
     errors: Vec<Diagnostic>,
+    incomplete_errors: usize,
     nesting_depth: usize,
     syntax_limit_reported: bool,
 }
@@ -1517,6 +1544,7 @@ impl Parser {
                 tokens,
                 at: 0,
                 errors: Vec::new(),
+                incomplete_errors: 0,
                 nesting_depth: 0,
                 syntax_limit_reported: false,
             },
@@ -1528,6 +1556,7 @@ impl Parser {
                 }],
                 at: 0,
                 errors: es.into_iter().map(from_lex).collect(),
+                incomplete_errors: 0,
                 nesting_depth: 0,
                 syntax_limit_reported: false,
             },
@@ -1549,7 +1578,7 @@ impl Parser {
     }
     fn syntax_limit(&mut self) {
         if !self.syntax_limit_reported {
-            self.error_here("ORNA-PARSE-001", "maximum syntax nesting exceeded");
+            self.error_invalid_here("ORNA-PARSE-001", "maximum syntax nesting exceeded");
             self.syntax_limit_reported = true;
         }
     }
@@ -4993,11 +5022,32 @@ impl Parser {
         }
     }
     fn error_here(&mut self, code: &'static str, message: &str) {
+        if self.eof() {
+            self.incomplete_errors += 1;
+        }
+        self.push_error(code, message);
+    }
+
+    fn error_invalid_here(&mut self, code: &'static str, message: &str) {
+        self.push_error(code, message);
+    }
+
+    fn push_error(&mut self, code: &'static str, message: &str) {
         self.errors.push(Diagnostic::error(
             code,
             message,
             self.current().span.clone(),
         ))
+    }
+
+    fn status(&self) -> ParseStatus {
+        if self.errors.is_empty() {
+            ParseStatus::Complete
+        } else if self.incomplete_errors == self.errors.len() {
+            ParseStatus::Incomplete
+        } else {
+            ParseStatus::Invalid
+        }
     }
 }
 
@@ -5047,6 +5097,33 @@ fn literal_kind(token: &TokenKind) -> LiteralKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_complete_incomplete_and_malformed_repl_inputs() {
+        let fixture = include_str!("../tests/fixtures/repl_completion.orna");
+        let cases = fixture.lines().collect::<Vec<_>>();
+
+        assert!(parse_repl(cases[1]).is_ok());
+        assert!(!parse_repl(cases[1]).is_incomplete());
+
+        let incomplete = parse_repl(cases[3]);
+        assert!(!incomplete.is_ok());
+        assert!(incomplete.is_incomplete());
+        assert!(!incomplete.is_malformed());
+
+        let malformed = parse_repl(cases[5]);
+        assert!(!malformed.is_ok());
+        assert!(!malformed.is_incomplete());
+        assert!(malformed.is_malformed());
+
+        let lexical_error = parse_repl(cases[7]);
+        assert!(!lexical_error.is_incomplete());
+        assert!(lexical_error.is_malformed());
+
+        let nesting_limit = parse_repl(cases[9]);
+        assert!(!nesting_limit.is_incomplete());
+        assert!(nesting_limit.is_malformed());
+    }
 
     #[test]
     fn preserves_resolver_relevant_binding_assignment_and_import_structure() {

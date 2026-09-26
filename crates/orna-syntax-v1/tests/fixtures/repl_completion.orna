@@ -1,0 +1,10 @@
+// Complete input
+42
+// Incomplete input
+let answer =
+// Malformed parser input
+)
+// Malformed lexical input
+@
+// Syntax nesting limit
+(((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((42)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
