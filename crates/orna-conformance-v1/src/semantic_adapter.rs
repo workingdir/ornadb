@@ -653,7 +653,7 @@ impl BoundedEvaluator {
                 outcome => return outcome,
             }
         }
-        let parsed = parse_module("fn sample() { var slot = 1; slot }");
+        let parsed = parse_module(include_str!("fixtures/let-rebinding-removed-var.orna"));
         if !parsed.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "ORNA091-E-VAR" && diagnostic.message.contains("`let`")
         }) {

@@ -1,0 +1,1 @@
+fn sample() { var slot = 1; slot }
