@@ -1205,8 +1205,8 @@ pub struct ManagedPath(PathBuf);
 impl ManagedPath {
     /// Creates a normalized, repository-relative path.
     ///
-    /// Absolute paths, `.git` administration paths, parent traversal, and an
-    /// empty path are rejected before they can be passed to Git.
+    /// Absolute paths, `.git` administration paths, tracked `.orna/cache.db`, and
+    /// parent traversal or empty paths are rejected before they reach Git.
     pub fn new(path: impl AsRef<Path>) -> Result<Self, RepositoryError> {
         let path = path.as_ref();
         if path.as_os_str().is_empty() || path.is_absolute() {
@@ -1224,6 +1224,7 @@ impl ManagedPath {
         }
         if normalized.components().next().is_none()
             || normalized.components().next() == Some(Component::Normal(".git".as_ref()))
+            || normalized == Path::new(".orna/cache.db")
         {
             return Err(RepositoryError::UnsafeManagedPath);
         }
@@ -6840,6 +6841,18 @@ mod tests {
         GitIndexLockMarker, GitIndexLockOwnerLiveness, GitIndexLockReclaimPoint,
         ProcessStartObservation, process_owner_liveness,
     };
+
+    #[test]
+    fn managed_path_rejects_tracked_runtime_cache_path() {
+        assert!(matches!(
+            ManagedPath::new(".orna/cache.db"),
+            Err(RepositoryError::UnsafeManagedPath)
+        ));
+        assert_eq!(
+            ManagedPath::new(".orna/format.orna").unwrap().as_path(),
+            Path::new(".orna/format.orna")
+        );
+    }
 
     #[test]
     fn only_verified_remote_continuity_permits_a_continuity_claim() {
