@@ -68,13 +68,19 @@ impl AtomicCommitStore for Store {
 #[derive(Default)]
 struct Supervisor {
     events: Vec<(char, ChildId)>,
+    fail_cancellation_once: Option<ChildId>,
     fail_join_once: Option<ChildId>,
 }
 
 impl ChildSupervisor for Supervisor {
     fn request_cancellation(&mut self, child: ChildId) -> Result<(), ChildTerminationError> {
         self.events.push(('c', child));
-        Ok(())
+        if self.fail_cancellation_once == Some(child) {
+            self.fail_cancellation_once = None;
+            Err(ChildTerminationError::Incomplete)
+        } else {
+            Ok(())
+        }
     }
 
     fn join(&mut self, child: ChildId) -> Result<(), ChildTerminationError> {
@@ -210,6 +216,52 @@ fn requests_all_child_cancellations_before_joining_any_child() {
         supervisor.events,
         vec![('c', first), ('c', second), ('j', first), ('j', second)]
     );
+}
+
+#[test]
+fn cancellation_request_failure_fans_out_before_retrying_joins() {
+    let (mut coordinator, owner) = active();
+    let first = coordinator.spawn_child(owner).unwrap();
+    let second = coordinator.spawn_child(owner).unwrap();
+    let mut supervisor = Supervisor {
+        fail_cancellation_once: Some(first),
+        ..Supervisor::default()
+    };
+    let mut store = Store::default();
+
+    assert_eq!(
+        coordinator.cancel_with_children(owner, &mut supervisor),
+        Err(orna_execution_v1::CoordinationError::ChildOutstanding)
+    );
+    assert_eq!(coordinator.phase(), TransactionPhase::ChildrenJoining);
+    assert_eq!(supervisor.events, vec![('c', first), ('c', second)]);
+    assert_eq!(store.commits, 0);
+
+    coordinator
+        .cancel_with_children(owner, &mut supervisor)
+        .unwrap();
+    assert_eq!(coordinator.phase(), TransactionPhase::RolledBack);
+    assert_eq!(
+        supervisor.events,
+        vec![
+            ('c', first),
+            ('c', second),
+            ('c', first),
+            ('c', second),
+            ('j', first),
+            ('j', second),
+        ]
+    );
+
+    let mut provider = Provider;
+    let mut faults = NoFault;
+    assert_eq!(
+        coordinator.execute(owner, &mut provider, &mut store, checkpoint(), &mut faults),
+        Outcome::RolledBack {
+            reason: RollbackReason::Cancelled,
+        }
+    );
+    assert_eq!(store.commits, 0);
 }
 
 #[test]
