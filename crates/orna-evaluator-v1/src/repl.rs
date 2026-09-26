@@ -824,7 +824,7 @@ mod tests {
                 )
             })
             .collect();
-        let other = parse_module("fn add(left, right) = left + right + 100;");
+        let other = parse_module(include_str!("fixtures/repl-other-add.orna"));
         assert!(other.is_ok(), "{:?}", other.diagnostics);
         let Declaration::Function { signature, body } = other
             .value
