@@ -2405,6 +2405,19 @@ fn int_u64(v: &Raw) -> Result<u64> {
     }
 }
 
+fn validate_field_fallback(role: u64, fallback: &Raw, field_type: &Raw) -> Result<()> {
+    match array(fallback)?.as_slice() {
+        [Raw::Int(kind)] if kind.is_zero() => {}
+        [Raw::Int(kind), value] if *kind == BigInt::from(1) && role == 1 => {
+            validate_value_as_type(value, field_type).map_err(|_| Error::InvalidSchema)?;
+        }
+        [Raw::Int(kind), Raw::Bytes(bytes)]
+            if *kind == BigInt::from(2) && role == 2 && bytes.len() == 32 => {}
+        _ => return Err(Error::InvalidSchema),
+    }
+    Ok(())
+}
+
 fn validate_schema(raw: &Raw) -> Result<()> {
     let m = map(raw)?;
     if m.len() != 5 {
@@ -2436,19 +2449,7 @@ fn validate_schema(raw: &Raw) -> Result<()> {
         if role > 2 {
             return Err(Error::InvalidSchema);
         }
-        let fallback = array(&a[4])?;
-        match fallback.as_slice() {
-            [Raw::Int(kind)] if kind.is_zero() => {}
-            [Raw::Int(kind), value] if *kind == BigInt::from(1) && role != 2 => {
-                validate_value_as_type(value, &a[2]).map_err(|_| Error::InvalidSchema)?;
-            }
-            [Raw::Int(kind), Raw::Bytes(bytes)]
-                if *kind == BigInt::from(2) && role == 2 && bytes.len() == 32 => {}
-            _ => return Err(Error::InvalidSchema),
-        }
-        if role == 0 && fallback.len() != 1 {
-            return Err(Error::InvalidSchema);
-        }
+        validate_field_fallback(role, &a[4], &a[2])?;
         if role == 0 {
             key_role_ids.push(id);
         }
@@ -2616,18 +2617,11 @@ fn validate_nested_field(field: &[Raw]) -> Result<()> {
         return Err(Error::InvalidSchema);
     }
     validate_type(&field[2])?;
-    if int_u64(&field[3])? > 2 {
+    let role = int_u64(&field[3])?;
+    if role > 2 {
         return Err(Error::InvalidSchema);
     }
-    let fallback = array(&field[4])?;
-    match fallback.as_slice() {
-        [Raw::Int(x)] if x.is_zero() => {}
-        [Raw::Int(x), value] if *x == BigInt::from(1) => {
-            validate_value_as_type(value, &field[2]).map_err(|_| Error::InvalidSchema)?
-        }
-        [Raw::Int(x), Raw::Bytes(bytes)] if *x == BigInt::from(2) && bytes.len() == 32 => {}
-        _ => return Err(Error::InvalidSchema),
-    }
+    validate_field_fallback(role, &field[4], &field[2])?;
     Ok(())
 }
 fn validate_nested_field_list(fields: &[Raw]) -> Result<()> {
@@ -3499,6 +3493,91 @@ mod tests {
                 Raw::Int(1.into()),
                 Raw::Text("not-an-int".into())
             ])))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn nested_field_fallbacks_follow_role_for_records_and_enum_payloads() {
+        let table = [9u8; 16];
+        let type_int = Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Int".into())]);
+        let field = |id: u8, role: i64, fallback: Raw| {
+            Raw::Array(vec![
+                uuid_raw([id; 16]),
+                Raw::Text(format!("field-{id}")),
+                type_int.clone(),
+                Raw::Int(role.into()),
+                fallback,
+            ])
+        };
+        let schema = |definition: Raw| {
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Int(1.into())),
+                (Raw::Int(1.into()), uuid_raw(table)),
+                (Raw::Int(2.into()), Raw::Array(vec![uuid_raw([1; 16])])),
+                (
+                    Raw::Int(3.into()),
+                    Raw::Array(vec![Raw::Array(vec![
+                        uuid_raw([1; 16]),
+                        Raw::Text("key".into()),
+                        type_int.clone(),
+                        Raw::Int(0.into()),
+                        Raw::Array(vec![Raw::Int(0.into())]),
+                    ])]),
+                ),
+                (Raw::Int(4.into()), Raw::Array(vec![definition])),
+            ])
+        };
+        let record = |fields: Vec<Raw>| {
+            Raw::Array(vec![
+                uuid_raw([3; 16]),
+                Raw::Int(0.into()),
+                Raw::Array(fields),
+            ])
+        };
+        let enum_payload = |fields: Vec<Raw>| {
+            Raw::Array(vec![
+                uuid_raw([4; 16]),
+                Raw::Int(1.into()),
+                Raw::Array(vec![Raw::Array(vec![
+                    uuid_raw([5; 16]),
+                    Raw::Text("Variant".into()),
+                    Raw::Array(fields),
+                ])]),
+            ])
+        };
+        let valid_fields = || {
+            vec![
+                field(10, 0, Raw::Array(vec![Raw::Int(0.into())])),
+                field(
+                    11,
+                    1,
+                    Raw::Array(vec![Raw::Int(1.into()), Raw::Int(7.into())]),
+                ),
+                field(
+                    12,
+                    2,
+                    Raw::Array(vec![Raw::Int(2.into()), Raw::Bytes(vec![8; 32])]),
+                ),
+            ]
+        };
+
+        assert!(SchemaDescriptor::new(schema(record(valid_fields()))).is_ok());
+        assert!(SchemaDescriptor::new(schema(enum_payload(valid_fields()))).is_ok());
+        assert!(
+            SchemaDescriptor::new(schema(record(vec![field(
+                10,
+                0,
+                Raw::Array(vec![Raw::Int(1.into()), Raw::Int(7.into())]),
+            )])))
+            .is_err()
+        );
+        assert!(
+            SchemaDescriptor::new(schema(enum_payload(vec![field(
+                10,
+                1,
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Bytes(vec![8; 32])]),
+            )])))
             .is_err()
         );
     }
