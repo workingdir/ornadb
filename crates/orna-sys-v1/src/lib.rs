@@ -398,6 +398,49 @@ pub const SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR: SystemFunctionDescriptor =
         purpose: "Return structured causal explanation.",
     };
 
+/// Exact system-reference descriptor for `sys.admin.flush`.
+pub const SYS_ADMIN_FLUSH_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
+    name: "sys.admin.flush",
+    effect: SystemEffect::Admin,
+    signature: "fn sys.admin.flush(table: sys.TableRef? = null): sys.FlushResult",
+    purpose: "Durably seal pending rows without changing logical contents.",
+};
+
+/// Exact system-reference descriptor for `sys.admin.compact`.
+pub const SYS_ADMIN_COMPACT_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
+    name: "sys.admin.compact",
+    effect: SystemEffect::Admin,
+    signature: "fn sys.admin.compact(table: sys.TableRef? = null): sys.CompactionResult",
+    purpose: "Rewrite physical segments atomically.",
+};
+
+/// Exact system-reference descriptor for `sys.admin.set_storage_preference`.
+pub const SYS_ADMIN_SET_STORAGE_PREFERENCE_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.set_storage_preference",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.set_storage_preference(table: sys.TableRef, preference: sys.StoragePreference): sys.Storage",
+        purpose: "Set future automatic placement preference without rewriting existing rows.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.rewrite_storage`.
+pub const SYS_ADMIN_REWRITE_STORAGE_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.rewrite_storage",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.rewrite_storage(table: sys.TableRef, to: sys.StorageRewriteTarget): sys.StorageRewriteResult",
+        purpose: "Atomically rewrite physical placement while preserving logical rows.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.verify`.
+pub const SYS_ADMIN_VERIFY_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.verify",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.verify(scope: sys.VerifyScope = sys.VerifyScope.database): sys.VerificationReport",
+        purpose: "Verify repository, metadata, storage and checkpoint invariants.",
+    };
+
 /// Exact system-reference descriptor for `sys.admin.cancel_run`.
 pub const SYS_ADMIN_CANCEL_RUN_DESCRIPTOR: SystemFunctionDescriptor =
     SystemFunctionDescriptor {
@@ -477,6 +520,11 @@ pub const SYS_ADMIN_RESOLVE_FAILURE_DESCRIPTOR: SystemFunctionDescriptor =
 pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionDescriptor> {
     match name {
         "sys.explain(Diagnostic)" => Some(&SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR),
+        "sys.admin.flush" => Some(&SYS_ADMIN_FLUSH_DESCRIPTOR),
+        "sys.admin.compact" => Some(&SYS_ADMIN_COMPACT_DESCRIPTOR),
+        "sys.admin.set_storage_preference" => Some(&SYS_ADMIN_SET_STORAGE_PREFERENCE_DESCRIPTOR),
+        "sys.admin.rewrite_storage" => Some(&SYS_ADMIN_REWRITE_STORAGE_DESCRIPTOR),
+        "sys.admin.verify" => Some(&SYS_ADMIN_VERIFY_DESCRIPTOR),
         "sys.admin.cancel_run" => Some(&SYS_ADMIN_CANCEL_RUN_DESCRIPTOR),
         "sys.admin.pause_stream" => Some(&SYS_ADMIN_PAUSE_STREAM_DESCRIPTOR),
         "sys.admin.reset_checkpoint" => Some(&SYS_ADMIN_RESET_CHECKPOINT_DESCRIPTOR),
@@ -2540,6 +2588,51 @@ mod tests {
     }
     #[test]
     fn admin_system_function_descriptors_match_the_reference() {
+        assert_eq!(
+            system_function_descriptor("sys.admin.flush"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.flush",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.flush(table: sys.TableRef? = null): sys.FlushResult",
+                purpose: "Durably seal pending rows without changing logical contents.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.compact"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.compact",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.compact(table: sys.TableRef? = null): sys.CompactionResult",
+                purpose: "Rewrite physical segments atomically.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.set_storage_preference"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.set_storage_preference",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.set_storage_preference(table: sys.TableRef, preference: sys.StoragePreference): sys.Storage",
+                purpose: "Set future automatic placement preference without rewriting existing rows.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.rewrite_storage"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.rewrite_storage",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.rewrite_storage(table: sys.TableRef, to: sys.StorageRewriteTarget): sys.StorageRewriteResult",
+                purpose: "Atomically rewrite physical placement while preserving logical rows.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.verify"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.verify",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.verify(scope: sys.VerifyScope = sys.VerifyScope.database): sys.VerificationReport",
+                purpose: "Verify repository, metadata, storage and checkpoint invariants.",
+            })
+        );
         assert_eq!(
             system_function_descriptor("sys.admin.cancel_run"),
             Some(&SystemFunctionDescriptor {
