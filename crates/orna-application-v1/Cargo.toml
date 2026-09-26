@@ -16,3 +16,4 @@ orna-syntax-v1 = { path = "../orna-syntax-v1" }
 orna-live-v1 = { path = "../orna-live-v1" }
 orna-protocol-v1 = { path = "../orna-protocol-v1" }
 num-bigint = "0.4.6"
+sha2 = "0.10.9"
