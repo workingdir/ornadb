@@ -2021,6 +2021,7 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
                 || (flavour == "repo"
                     && (!value.is_ascii()
                         || value.starts_with('/')
+                        || value.contains('\\')
                         || value
                             .split('/')
                             .any(|x| x.is_empty() || x == "." || x == "..")))
@@ -2925,6 +2926,27 @@ mod tests {
         assert_eq!(date("0000-01-01"), Err(Error::InvalidTag));
         assert!(date("0001-01-01").is_ok());
         assert!(date("9999-12-31").is_ok());
+    }
+
+    #[test]
+    fn repo_paths_reject_backslashes_without_restricting_host_paths() {
+        let path = |flavour: &str, value: &str| {
+            Value::new(tag(
+                60024,
+                Raw::Array(vec![
+                    Raw::Text(flavour.to_owned()),
+                    Raw::Text(value.to_owned()),
+                ]),
+            ))
+        };
+
+        assert!(path("repo", "crates/orna-value-v1/src/lib.rs").is_ok());
+        assert!(matches!(
+            path("repo", r"crates\orna-value-v1\src\lib.rs"),
+            Err(Error::InvalidTag)
+        ));
+        assert!(path("posix", r"/tmp/literal\backslash").is_ok());
+        assert!(path("windows", r"C:\Users\Ada\file.orna").is_ok());
     }
 
     #[test]
