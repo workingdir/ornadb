@@ -1068,15 +1068,33 @@ fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
             "run the command inside a Git worktree or provide a local project path",
         )
     })?;
-    let state = repository.worktree_state().map_err(|_| {
-        Diagnostic::target(
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository.worktree())
+        .args(["-c", "color.status=false", "status", "--porcelain"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .output()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "local Git worktree status could not be read",
+                "check that Git can read the local worktree, then retry `status --porcelain`",
+            )
+        })?;
+    if !output.status.success() {
+        return Err(Diagnostic::target(
             "E2100",
             "local Git worktree status could not be read",
             "check that Git can read the local worktree, then retry `status --porcelain`",
-        )
-    })?;
+        ));
+    }
     io::stdout()
-        .write_all(state.as_porcelain_v2_z())
+        .write_all(&output.stdout)
         .map_err(|_| {
             Diagnostic::target(
                 "E2100",
