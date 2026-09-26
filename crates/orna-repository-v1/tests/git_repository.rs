@@ -101,6 +101,28 @@ fn repository() -> TempDir {
     temp
 }
 
+fn repository_with_checked_in_orna_fixture() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    git(temp.path(), &["init", "-b", "main"]);
+    git(temp.path(), &["config", "user.email", "kieran@drewett.dev"]);
+    git(temp.path(), &["config", "user.name", "kierandrewett"]);
+    git(temp.path(), &["config", "commit.gpgsign", "false"]);
+    fs::write(
+        temp.path().join("main.orna"),
+        include_bytes!("../../orna-syntax/testdata/accepted-client.orna"),
+    )
+    .unwrap();
+    fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
+    fs::create_dir_all(temp.path().join(".orna")).unwrap();
+    fs::write(temp.path().join(".orna/format.orna"), "format 1\n").unwrap();
+    git(temp.path(), &["add", "."]);
+    git(
+        temp.path(),
+        &["commit", "-m", "initial with checked-in Orna fixture"],
+    );
+    temp
+}
+
 fn configure_hostile_git_environment(command: &mut Command, hostile: &Path) {
     command
         .env("GIT_DIR", hostile.join(".git"))
@@ -5477,6 +5499,218 @@ fn publication_pauses_for_an_existing_git_index_lock_before_ref_change() {
         orna_repository_v1::PublicationJournalStage::Prepared
     );
 }
+
+#[test]
+fn publication_pauses_during_unfinished_merge_and_rebase() {
+    for operation in ["merge", "rebase"] {
+        let root = repository_with_checked_in_orna_fixture();
+        let repo = Repository::discover(root.path()).unwrap();
+        let head = repo.head().unwrap().unwrap();
+        let index_before = repo.index_generation().unwrap();
+        let managed = ManagedPath::new("generated/row.orna").unwrap();
+        let candidate = repo
+            .build_private_commit(
+                &head,
+                &[orna_repository_v1::ManagedFileChange::new(
+                    managed.clone(),
+                    Some(b"candidate row\n".to_vec()),
+                )],
+                "orna: publish runtime data",
+            )
+            .unwrap();
+        let mut journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+            head,
+            candidate.commit().clone(),
+            index_before.tree().unwrap().clone(),
+            [11; 16],
+            vec![orna_repository_v1::PublicationJournalEntry::new(
+                managed.clone(),
+                None,
+                Some(b"candidate row\n".to_vec()),
+            )],
+        )
+        .unwrap();
+
+        git(root.path(), &["switch", "-c", "topic"]);
+        fs::write(root.path().join("main.orna"), b"topic change\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "topic change"]);
+        git(root.path(), &["switch", "main"]);
+
+        let marker_name = if operation == "merge" {
+            git(root.path(), &["merge", "--no-commit", "--no-ff", "topic"]);
+            "MERGE_HEAD"
+        } else {
+            fs::write(root.path().join("main.orna"), b"main change\n").unwrap();
+            git(root.path(), &["add", "main.orna"]);
+            git(root.path(), &["commit", "-m", "main change"]);
+            let rebase = Command::new("git")
+                .current_dir(root.path())
+                .args(["rebase", "main", "topic"])
+                .output()
+                .unwrap();
+            assert!(
+                !rebase.status.success(),
+                "expected topic rebase to stop on a content conflict"
+            );
+            fs::write(root.path().join("main.orna"), b"resolved rebase conflict\n").unwrap();
+            git(root.path(), &["add", "main.orna"]);
+            let rebase_merge = PathBuf::from(git(
+                root.path(),
+                &["rev-parse", "--git-path", "rebase-merge"],
+            ));
+            if rebase_merge.is_absolute() {
+                if rebase_merge.exists() {
+                    "rebase-merge"
+                } else {
+                    "rebase-apply"
+                }
+            } else if root.path().join(&rebase_merge).exists() {
+                "rebase-merge"
+            } else {
+                "rebase-apply"
+            }
+        };
+
+        let marker_path =
+            PathBuf::from(git(root.path(), &["rev-parse", "--git-path", marker_name]));
+        let marker_path = if marker_path.is_absolute() {
+            marker_path
+        } else {
+            root.path().join(marker_path)
+        };
+        assert!(marker_path.exists(), "{operation} marker missing");
+        assert_eq!(
+            git(root.path(), &["diff", "--name-only", "--diff-filter=U"]),
+            "",
+            "{operation} index must be resolved and usable"
+        );
+
+        let capture_head = repo.head().unwrap().unwrap();
+        let capture_index = repo.index_generation().unwrap();
+        let before = git_state(&repo, root.path());
+        let index_bytes = fs::read(root.path().join(".git/index")).unwrap();
+        let worktree_bytes = fs::read(root.path().join("main.orna")).unwrap();
+
+        assert!(matches!(
+            repo.capture_managed_publication_state(
+                &capture_head,
+                &capture_index,
+                std::slice::from_ref(&managed)
+            ),
+            Err(orna_repository_v1::RepositoryError::RepositoryBusy)
+        ));
+        assert!(matches!(
+            repo.publish_candidate(&index_before, &candidate, &mut journal),
+            Err(orna_repository_v1::RepositoryError::RepositoryBusy)
+        ));
+        assert_eq!(git_state(&repo, root.path()), before);
+        assert_eq!(
+            fs::read(root.path().join(".git/index")).unwrap(),
+            index_bytes
+        );
+        assert_eq!(
+            fs::read(root.path().join("main.orna")).unwrap(),
+            worktree_bytes
+        );
+        assert!(marker_path.exists(), "{operation} marker was removed");
+        assert_eq!(
+            journal.stage(),
+            orna_repository_v1::PublicationJournalStage::Prepared
+        );
+        assert_eq!(repo.read_publication_journal().unwrap(), None);
+    }
+}
+
+#[test]
+fn publication_uses_worktree_scoped_git_operation_markers() {
+    let root = repository_with_checked_in_orna_fixture();
+    let sibling_repo = Repository::discover(root.path()).unwrap();
+    let linked_container = TempDir::new().unwrap();
+    let linked_root = linked_container.path().join("linked");
+    let linked_root_text = linked_root.to_str().unwrap().to_owned();
+    git(
+        root.path(),
+        &["worktree", "add", "-b", "linked", &linked_root_text],
+    );
+    git(&linked_root, &["switch", "-c", "topic"]);
+    fs::write(linked_root.join("main.orna"), b"topic change\n").unwrap();
+    git(&linked_root, &["add", "main.orna"]);
+    git(&linked_root, &["commit", "-m", "topic change"]);
+    git(&linked_root, &["switch", "linked"]);
+    git(&linked_root, &["merge", "--no-commit", "--no-ff", "topic"]);
+
+    let linked_repo = Repository::discover(&linked_root).unwrap();
+    let linked_head = linked_repo.head().unwrap().unwrap();
+    let linked_index = linked_repo.index_generation().unwrap();
+    let managed = ManagedPath::new("main.orna").unwrap();
+    let git_admin_path = |directory: &Path, name: &str| {
+        let path = PathBuf::from(git(directory, &["rev-parse", "--git-path", name]));
+        if path.is_absolute() {
+            path
+        } else {
+            directory.join(path)
+        }
+    };
+    let linked_marker = git_admin_path(&linked_root, "MERGE_HEAD");
+    let sibling_marker = git_admin_path(root.path(), "MERGE_HEAD");
+    let linked_index_path = git_admin_path(&linked_root, "index");
+    let sibling_index_path = git_admin_path(root.path(), "index");
+    assert!(linked_marker.exists());
+    assert!(!sibling_marker.exists());
+    assert_eq!(
+        git(&linked_root, &["diff", "--name-only", "--diff-filter=U"]),
+        ""
+    );
+
+    let sibling_before = git_state(&sibling_repo, root.path());
+    let sibling_index_before = fs::read(&sibling_index_path).unwrap();
+    let sibling_source_before = fs::read(root.path().join("main.orna")).unwrap();
+    let linked_before = git_state(&linked_repo, &linked_root);
+    let linked_index_before = fs::read(&linked_index_path).unwrap();
+    let linked_source_before = fs::read(linked_root.join("main.orna")).unwrap();
+    let sibling_head = sibling_repo.head().unwrap().unwrap();
+    let sibling_index = sibling_repo.index_generation().unwrap();
+    let sibling_managed = ManagedPath::new("main.orna").unwrap();
+    assert_eq!(
+        sibling_repo
+            .capture_managed_publication_state(
+                &sibling_head,
+                &sibling_index,
+                std::slice::from_ref(&sibling_managed)
+            )
+            .unwrap(),
+        vec![Some(sibling_source_before.clone())]
+    );
+
+    assert!(matches!(
+        linked_repo.capture_managed_publication_state(
+            &linked_head,
+            &linked_index,
+            std::slice::from_ref(&managed)
+        ),
+        Err(orna_repository_v1::RepositoryError::RepositoryBusy)
+    ));
+
+    assert_eq!(git_state(&sibling_repo, root.path()), sibling_before);
+    assert_eq!(fs::read(&sibling_index_path).unwrap(), sibling_index_before);
+    assert_eq!(
+        fs::read(root.path().join("main.orna")).unwrap(),
+        sibling_source_before
+    );
+    assert_eq!(git_state(&linked_repo, &linked_root), linked_before);
+    assert_eq!(fs::read(&linked_index_path).unwrap(), linked_index_before);
+    assert_eq!(
+        fs::read(linked_root.join("main.orna")).unwrap(),
+        linked_source_before
+    );
+    assert!(linked_marker.exists());
+    assert!(!sibling_marker.exists());
+    assert!(!git_admin_path(&linked_root, "index.lock").exists());
+    assert!(!git_admin_path(root.path(), "index.lock").exists());
+    assert_eq!(git(root.path(), &["status", "--porcelain"]), "");
+}
+
 
 #[test]
 fn publication_rejects_a_known_managed_edit_before_ref_advance() {
