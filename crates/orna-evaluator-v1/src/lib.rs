@@ -1309,7 +1309,7 @@ impl DecimalValue {
             fives += 1;
         }
         if denominator != BigInt::from(1) {
-            return Err(error("ORNA-EVAL-VALUE"));
+            return Err(error("InexactDivision"));
         }
         let scale = twos.max(fives);
         if scale > DEFAULT_INTEGER_DIGITS {
@@ -1983,6 +1983,9 @@ impl Context<'_, '_> {
     fn numeric_postfix(&self, value: BigInt, name: &str) -> Result<Value, EvaluationError> {
         let unit = name.rsplit('.').next().unwrap_or(name);
         match unit {
+            "decimal" => self
+                .checked_decimal(DecimalValue::new(value, BigInt::zero())?)
+                .map(Value::Decimal),
             "day" | "days" => Ok(Value::Period { days: value }),
             "hour" | "hours" => Ok(Value::Duration {
                 seconds: value
@@ -8079,5 +8082,14 @@ mod tests {
         assert_eq!(field("action_id"), &Raw::Text("save".into()));
         assert_eq!(field("input_type"), &Raw::Text("std.text".into()));
         assert_eq!(field("debug_kind"), &Raw::Text("button".into()));
+    }
+
+    #[test]
+    fn non_terminating_decimal_division_reports_its_typed_failure_from_source() {
+        let source = include_str!("../tests/fixtures/consumer_gap.orna");
+        let failure = evaluate_expression(source, &Environment::new(), Limits::default())
+            .expect_err("one third has no finite decimal representation");
+
+        assert_eq!(failure.code(), "InexactDivision");
     }
 }
