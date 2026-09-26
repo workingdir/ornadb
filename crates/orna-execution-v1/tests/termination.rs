@@ -475,8 +475,8 @@ fn transient_partial_join_failure_retries_normal_completion_without_publication(
         supervisor.events,
         vec![
             ('c', first),
-            ('j', first),
             ('c', second),
+            ('j', first),
             ('j', second),
             ('c', second),
             ('j', second),
