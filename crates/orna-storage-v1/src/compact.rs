@@ -104,9 +104,68 @@ impl CompactBaseState {
         self.rows.values()
     }
 
-    /// Consumes the generated writer input at the same schema/generation
-    /// boundary used by the committed base provider.
+    /// Folds a digest-verified ordered candidate against this committed base.
+    ///
+    /// A final deletion is omitted only when the verified base proves the key
+    /// was absent. The candidate digest remains that of the original ordered
+    /// freeze, not this compacted writer representation.
+    pub fn fold_writer_input(
+        &self,
+        input: &CompactWriterInput,
+    ) -> Result<CompactWriterInput, CompactBaseProjectionError> {
+        self.validate_writer_input_identity(input)?;
+        let mut latest = BTreeMap::new();
+        for mutation in &input.mutations {
+            latest.insert(mutation.key.clone(), mutation.clone());
+        }
+        let mut mutations: Vec<_> = latest
+            .into_values()
+            .filter(|mutation| match &mutation.state {
+                CompactWriterMutationState::Replacement { .. } => true,
+                CompactWriterMutationState::Deletion => self
+                    .rows
+                    .get(&mutation.key)
+                    .is_some_and(|row| row.value.is_some()),
+            })
+            .collect();
+        mutations.sort_by_key(|mutation| mutation.sequence);
+        let folded = CompactWriterInput {
+            table_id: input.table_id,
+            schema_fingerprint: input.schema_fingerprint,
+            candidate_generation: input.candidate_generation,
+            row_encoding_identity: input.row_encoding_identity,
+            value_encoding_identity: input.value_encoding_identity,
+            mutations,
+            candidate_digest: input.candidate_digest,
+        };
+        self.validate_writer_input(&folded)?;
+        Ok(folded)
+    }
+
+    /// Consumes generated writer input at the schema/generation boundary used
+    /// by the committed base provider.
     pub fn consume_writer_input(
+        &self,
+        input: &CompactWriterInput,
+    ) -> Result<(), CompactBaseProjectionError> {
+        self.validate_writer_input(input)
+    }
+
+    fn validate_writer_input(
+        &self,
+        input: &CompactWriterInput,
+    ) -> Result<(), CompactBaseProjectionError> {
+        self.validate_writer_input_identity(input)?;
+        let mut keys = BTreeSet::new();
+        for mutation in &input.mutations {
+            if !keys.insert(mutation.key.clone()) {
+                return Err(CompactBaseProjectionError::DuplicateKeyGeneration);
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_writer_input_identity(
         &self,
         input: &CompactWriterInput,
     ) -> Result<(), CompactBaseProjectionError> {
@@ -127,12 +186,6 @@ impl CompactBaseState {
             .ok_or(CompactBaseProjectionError::StaleGeneration)?;
         if input.candidate_generation != next_generation {
             return Err(CompactBaseProjectionError::StaleGeneration);
-        }
-        let mut keys = BTreeSet::new();
-        for mutation in &input.mutations {
-            if !keys.insert(mutation.key.clone()) {
-                return Err(CompactBaseProjectionError::DuplicateKeyGeneration);
-            }
         }
         Ok(())
     }
@@ -380,9 +433,7 @@ where
     I: IntoIterator<Item = &'a CompactCommittedSegmentProjection>,
 {
     let mut rows: BTreeMap<CompactKeyIdentity, CompactBaseRow> = BTreeMap::new();
-    let mut seen_segment = false;
     for projection in projections {
-        seen_segment = true;
         if projection.table_id().as_bytes() != &profile.table_id() {
             return Err(CompactBaseProjectionError::WrongTable);
         }
@@ -416,9 +467,6 @@ where
             }
             rows.insert(key, candidate);
         }
-    }
-    if !seen_segment {
-        return Err(CompactBaseProjectionError::Empty);
     }
     Ok(CompactBaseState {
         table_id: profile.table_id(),
@@ -505,7 +553,6 @@ pub fn lower_publication_freeze(
     let mut table_name: Option<&str> = None;
     let mut previous_sequence = 0;
     let mut mutation_ids = BTreeSet::new();
-    let mut keys = BTreeSet::new();
     let mut lowered = Vec::with_capacity(freeze.mutations.len());
     let mut candidate_bytes = Vec::new();
     candidate_bytes.extend_from_slice(b"ORNA-COMPACT-CANDIDATE-1\0");
@@ -546,9 +593,6 @@ pub fn lower_publication_freeze(
         let key = profile
             .decode_key(&mutation.logical_key)
             .map_err(CompactLoweringError::InvalidKey)?;
-        if !keys.insert(key.clone()) {
-            return Err(CompactLoweringError::DuplicateKey);
-        }
         let key_digest: [u8; 32] = Sha256::digest(&mutation.logical_key).into();
         if mutation.equivalence_witness.key_digest != key_digest {
             return Err(CompactLoweringError::KeyWitnessMismatch);
@@ -1563,6 +1607,306 @@ mod tests {
             ])),
         ))
         .unwrap()
+    }
+    fn fixture_profile() -> CompactOvbProfile {
+        const SOURCE: &str =
+            include_str!("../../../../../../../reference/Orna-1.0.0/examples/valid/table-explicit-key.orna");
+        let header = SOURCE
+            .lines()
+            .find(|line| line.trim_start().starts_with("pub table "))
+            .expect("checked-in schema fixture has a table declaration")
+            .trim();
+        let declaration = header
+            .strip_prefix("pub table ")
+            .expect("fixture table declaration is public");
+        let (table_name, key_declarations) = declaration
+            .split_once('(')
+            .expect("fixture table declares an explicit key");
+        assert_eq!(table_name, "Contact");
+        let (key_declaration, _) = key_declarations
+            .split_once(')')
+            .expect("fixture key declaration closes");
+        let (key_name, key_type) = key_declaration
+            .split_once(':')
+            .expect("fixture key has a type");
+        let mut fields = vec![field(
+            KEY_A,
+            key_name.trim(),
+            primitive(key_type.trim()),
+        )];
+        let body = SOURCE
+            .split_once('{')
+            .expect("fixture table has a body")
+            .1
+            .split_once('}')
+            .expect("fixture table body closes")
+            .0;
+        for declaration in body.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let (name, ty) = declaration
+                .trim_end_matches(',')
+                .split_once(':')
+                .expect("fixture stored field has a type");
+            let id = match name.trim() {
+                "name" => KEY_B,
+                "email" => [0x22; 16],
+                other => panic!("unexpected Contact field {other}"),
+            };
+            let ty = ty.trim().trim_end_matches(',');
+            let optional = ty.ends_with('?');
+            let base_type = ty.trim_end_matches('?').trim();
+            let field_type = primitive(base_type);
+            let field_type = if optional {
+                OvbRaw::Array(vec![OvbRaw::Int(9.into()), field_type])
+            } else {
+                field_type
+            };
+            fields.push(OvbRaw::Array(vec![
+                uuid_raw(id),
+                OvbRaw::Text(name.trim().to_owned()),
+                field_type,
+                OvbRaw::Int(1.into()),
+                OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+            ]));
+        }
+        CompactOvbProfile::new(schema(fields, vec![uuid_raw(KEY_A)])).unwrap()
+    }
+
+    fn fixture_key(value: &str) -> Vec<u8> {
+        CanonicalValue::new(OvbRaw::Text(value.to_owned()))
+            .unwrap()
+            .encode()
+            .unwrap()
+    }
+
+    fn fixture_row(key: &str, name: &str, email: Option<&str>) -> CanonicalValue {
+        CanonicalValue::new(OvbRaw::Tag(
+            60009,
+            Box::new(OvbRaw::Array(vec![
+                OvbRaw::Null,
+                OvbRaw::Array(vec![
+                    OvbRaw::Array(vec![uuid_raw(KEY_A), OvbRaw::Text(key.to_owned())]),
+                    OvbRaw::Array(vec![uuid_raw(KEY_B), OvbRaw::Text(name.to_owned())]),
+                    OvbRaw::Array(vec![
+                        uuid_raw([0x22; 16]),
+                        email.map_or(OvbRaw::Null, |value| OvbRaw::Text(value.to_owned())),
+                    ]),
+                ]),
+            ])),
+        ))
+        .unwrap()
+    }
+
+    fn publication_mutation(
+        profile: &CompactOvbProfile,
+        sequence: u64,
+        key: &str,
+        state: PublicationMutationState,
+    ) -> orna_runtime_v1::PublicationFreezeMutation {
+        let logical_key = fixture_key(key);
+        let key_digest = Sha256::digest(&logical_key).into();
+        let value_digest = match &state {
+            PublicationMutationState::Replacement { value } => {
+                Some(Sha256::digest(value).into())
+            }
+            PublicationMutationState::Deletion => None,
+        };
+        orna_runtime_v1::PublicationFreezeMutation {
+            table_id: profile.table_id(),
+            sequence,
+            mutation_id: [sequence as u8; 16],
+            table: "Contact".to_owned(),
+            logical_key,
+            state,
+            schema_fingerprint: profile.schema_fingerprint(),
+            row_encoding_identity: PublicationRowEncoding::CompactOvb1,
+            value_encoding_identity: PublicationValueEncoding::Ovb1,
+            candidate_generation: 2,
+            equivalence_witness: orna_runtime_v1::PublicationEquivalenceWitness {
+                key_digest,
+                value_digest,
+                candidate_digest: [0; 32],
+            },
+        }
+    }
+
+    fn fixture_freeze(
+        _profile: &CompactOvbProfile,
+        mut mutations: Vec<orna_runtime_v1::PublicationFreezeMutation>,
+    ) -> PublicationFreeze {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"ORNA-COMPACT-CANDIDATE-1\0");
+        bytes.extend_from_slice(&2_u64.to_be_bytes());
+        for mutation in &mutations {
+            bytes.extend_from_slice(&mutation.sequence.to_be_bytes());
+            bytes.extend_from_slice(&(mutation.logical_key.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(&mutation.logical_key);
+            match &mutation.state {
+                PublicationMutationState::Replacement { value } => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(value);
+                }
+                PublicationMutationState::Deletion => {
+                    bytes.push(2);
+                    bytes.extend_from_slice(&0_u64.to_be_bytes());
+                }
+            }
+        }
+        let candidate_digest: [u8; 32] = Sha256::digest(&bytes).into();
+        for mutation in &mut mutations {
+            mutation.equivalence_witness.candidate_digest = candidate_digest;
+        }
+        PublicationFreeze {
+            intent_id: [0x77; 16],
+            checkpoint: orna_runtime_v1::Checkpoint {
+                generation: 2,
+                digest: [0x78; 32],
+                mutation_sequence: mutations.last().unwrap().sequence,
+            },
+            candidate_digest,
+            mutations,
+        }
+    }
+
+    #[test]
+    fn ordered_freeze_chains_fold_against_fixture_schema_and_committed_base() {
+        let profile = fixture_profile();
+        let empty_base = fold_compact_committed_base(&profile, std::iter::empty()).unwrap();
+        assert!(empty_base.rows().next().is_none());
+        let existing_value = fixture_row("present", "Before", Some("before@example.test"));
+        let changing_value = fixture_row("changing", "Before", None);
+        let mut rows = BTreeMap::new();
+        for (key_text, value) in [
+            ("present", existing_value),
+            ("changing", changing_value),
+        ] {
+            let encoded_key = fixture_key(key_text);
+            let key = profile.decode_key(&encoded_key).unwrap();
+            rows.insert(
+                key,
+                CompactBaseRow {
+                    key: CanonicalValue::decode(&encoded_key).unwrap(),
+                    value: Some(value),
+                    generation: 1,
+                    role: CompactSegmentRole::Data,
+                },
+            );
+        }
+        let base = CompactBaseState {
+            table_id: profile.table_id(),
+            schema_fingerprint: profile.schema_fingerprint(),
+            rows,
+        };
+        let freeze = fixture_freeze(
+            &profile,
+            vec![
+                publication_mutation(
+                    &profile,
+                    1,
+                    "new",
+                    PublicationMutationState::Replacement {
+                        value: fixture_row("new", "Temporary", None).encode().unwrap(),
+                    },
+                ),
+                publication_mutation(
+                    &profile,
+                    2,
+                    "new",
+                    PublicationMutationState::Deletion,
+                ),
+                publication_mutation(
+                    &profile,
+                    3,
+                    "present",
+                    PublicationMutationState::Replacement {
+                        value: fixture_row("present", "Updated", None).encode().unwrap(),
+                    },
+                ),
+                publication_mutation(
+                    &profile,
+                    4,
+                    "present",
+                    PublicationMutationState::Deletion,
+                ),
+                publication_mutation(
+                    &profile,
+                    5,
+                    "changing",
+                    PublicationMutationState::Deletion,
+                ),
+                publication_mutation(
+                    &profile,
+                    6,
+                    "changing",
+                    PublicationMutationState::Replacement {
+                        value: fixture_row("changing", "Final", None).encode().unwrap(),
+                    },
+                ),
+            ],
+        );
+
+        let raw = lower_publication_freeze(&profile, &freeze).unwrap();
+        assert_eq!(raw.mutations.len(), 6);
+        assert_eq!(raw.candidate_digest, freeze.candidate_digest);
+        let folded = base.fold_writer_input(&raw).unwrap();
+        base.consume_writer_input(&folded).unwrap();
+
+        assert_eq!(folded.mutations.len(), 2);
+        assert_eq!(folded.mutations[0].sequence, 4);
+        assert_eq!(
+            folded.mutations[0].key.encoded(),
+            fixture_key("present")
+        );
+        assert_eq!(folded.mutations[0].state, CompactWriterMutationState::Deletion);
+        assert_eq!(folded.mutations[1].sequence, 6);
+        assert_eq!(
+            folded.mutations[1].key.encoded(),
+            fixture_key("changing")
+        );
+        let CompactWriterMutationState::Replacement { value } = &folded.mutations[1].state
+        else {
+            panic!("last replacement must remain the complete final mutation");
+        };
+        assert_eq!(
+            CanonicalValue::decode(value).unwrap(),
+            fixture_row("changing", "Final", None)
+        );
+        assert_eq!(folded.candidate_digest, freeze.candidate_digest);
+    }
+
+    #[test]
+    fn ordered_freeze_rejects_bad_raw_candidate_witnesses_and_digest() {
+        let profile = fixture_profile();
+        let valid = || {
+            fixture_freeze(
+                &profile,
+                vec![publication_mutation(
+                    &profile,
+                    1,
+                    "new",
+                    PublicationMutationState::Replacement {
+                        value: fixture_row("new", "Final", None).encode().unwrap(),
+                    },
+                )],
+            )
+        };
+
+        let mut bad_witness = valid();
+        bad_witness.mutations[0].equivalence_witness.candidate_digest = [0x99; 32];
+        assert_eq!(
+            lower_publication_freeze(&profile, &bad_witness),
+            Err(CompactLoweringError::CandidateWitnessMismatch)
+        );
+
+        let mut bad_digest = valid();
+        bad_digest.candidate_digest = [0x98; 32];
+        bad_digest.mutations[0]
+            .equivalence_witness
+            .candidate_digest = bad_digest.candidate_digest;
+        assert_eq!(
+            lower_publication_freeze(&profile, &bad_digest),
+            Err(CompactLoweringError::CandidateDigestMismatch)
+        );
     }
 
 
