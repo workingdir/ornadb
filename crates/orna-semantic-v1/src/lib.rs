@@ -8651,9 +8651,12 @@ fn infer_case(
                     variants,
                     &mut arm_locals,
                     diagnostics,
-                ) && !covered.insert(variant)
-                {
-                    diagnostics.push(diag(DIAG_TYPE, "case enum variant is duplicated"));
+                ) {
+                    // Guards can fail at runtime, so only an unguarded arm
+                    // establishes coverage for a closed enum.
+                    if arm.guard.is_none() && !covered.insert(variant) {
+                        diagnostics.push(diag(DIAG_TYPE, "case enum variant is duplicated"));
+                    }
                 }
                 infer_case_arm_body(
                     arm,
@@ -8677,9 +8680,12 @@ fn infer_case(
                 let mut arm_locals = local.clone();
                 if let Some(part) =
                     bind_optional_case_pattern(&arm.pattern, inner, &mut arm_locals, diagnostics)
-                    && !covered.insert(part)
                 {
-                    diagnostics.push(diag(DIAG_TYPE, "case optional arm is duplicated"));
+                    // A guarded Some/null arm is conditional coverage; a
+                    // later unguarded arm may provide the exhaustive fallback.
+                    if arm.guard.is_none() && !covered.insert(part) {
+                        diagnostics.push(diag(DIAG_TYPE, "case optional arm is duplicated"));
+                    }
                 }
                 infer_case_arm_body(
                     arm,
@@ -8877,10 +8883,6 @@ fn infer_case_arm_body(
         let guard = infer(guard, scope, local, diagnostics);
         effects.join(&guard.effects);
         require_same(&Type::Bool, &guard.ty, diagnostics);
-        diagnostics.push(diag(
-            DIAG_UNSUPPORTED,
-            "guarded case arms are outside this semantic slice",
-        ));
     }
     let body = infer(&arm.body, scope, local, diagnostics);
     effects.join(&body.effects);
@@ -15884,6 +15886,69 @@ mod tests {
     fn has(analysis: &Analysis, code: &str) -> bool {
         analysis.diagnostics.iter().any(|d| d.code() == code)
     }
+    #[test]
+    fn case_guards_do_not_establish_exhaustive_coverage() {
+        let source = include_str!("../tests/fixtures/guarded_case_exhaustiveness.orna");
+        let analysis = checked(&[ModuleInput::new("guarded-case.orna", source)]);
+
+        assert!(
+            !has(&analysis, DIAG_UNSUPPORTED),
+            "guards are supported and type-checked: {:?}",
+            analysis.diagnostics
+        );
+        assert_eq!(
+            analysis
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.message()
+                    == "case expression must cover Some and null exactly once")
+                .count(),
+            1,
+            "the guarded-only Some arm must not count as exhaustive: {:?}",
+            analysis.diagnostics
+        );
+        assert_eq!(
+            analysis
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.message()
+                    == "case expression does not cover every enum variant")
+                .count(),
+            1,
+            "guarded enum variants must not establish coverage: {:?}",
+            analysis.diagnostics
+        );
+        assert_eq!(
+            analysis.diagnostics.len(),
+            2,
+            "unguarded optional and enum fallbacks must remain exhaustive: {:?}",
+            analysis.diagnostics
+        );
+        let module = analysis
+            .modules
+            .values()
+            .find(|module| module.symbols.contains_key("positive_or_zero"))
+            .expect("fixture module is analyzed");
+        assert_eq!(
+            module.symbols["positive_or_zero"].ty,
+            Type::Function {
+                parameters: vec![Type::Optional(Box::new(Type::Int))],
+                parameter_names: Some(vec!["value".into()]),
+                default_parameters: BTreeSet::new(),
+                result: Box::new(Type::Int),
+            }
+        );
+        assert_eq!(
+            module.symbols["classify"].ty,
+            Type::Function {
+                parameters: vec![Type::Named("State".into())],
+                parameter_names: Some(vec!["value".into()]),
+                default_parameters: BTreeSet::new(),
+                result: Box::new(Type::Int),
+            }
+        );
+    }
+
     #[test]
     fn maps_main_and_leaf_paths() {
         let a = checked(&[
