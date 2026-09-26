@@ -7140,7 +7140,7 @@ fn infer(
             {
                 diagnostics.push(diag(
                     DIAG_TYPE,
-                    "a durable consumer function may own only one checkpointed source root",
+                    "a durable consumer function may own only one checkpointed source root; extract separate named consumer functions",
                 ));
             }
             if matches!(
@@ -10942,8 +10942,9 @@ fn infer_success_pipeline(
         };
     }
     if diagnostics.iter().any(|diagnostic| {
-        diagnostic.message()
-            == "a durable consumer function may own only one checkpointed source root"
+        diagnostic.message().starts_with(
+            "a durable consumer function may own only one checkpointed source root"
+        )
     }) {
         return Inferred {
             ty: Type::Error,
@@ -16274,8 +16275,9 @@ mod tests {
             &Catalogue::authoritative_fixture(),
         );
         assert!(a.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message()
-                == "a durable consumer function may own only one checkpointed source root"
+            diagnostic.message().starts_with(
+                "a durable consumer function may own only one checkpointed source root"
+            )
         }));
     }
 
@@ -16294,9 +16296,33 @@ mod tests {
             a.diagnostics
         );
         assert!(a.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message()
-                == "a durable consumer function may own only one checkpointed source root"
+            diagnostic.message().starts_with(
+                "a durable consumer function may own only one checkpointed source root"
+            )
         }));
+    }
+
+    #[test]
+    fn multiple_checkpointed_roots_explain_the_required_refactoring() {
+        let source = include_str!("../tests/fixtures/semantic_consumer_gap.orna");
+        let analysis = analyze_with_catalogue(
+            &[ModuleInput::new(
+                "examples/invalid/semantic-consumer-gap.orna",
+                source,
+            )],
+            &Catalogue::authoritative_fixture(),
+        );
+
+        assert!(
+            !has(&analysis, DIAG_UNRESOLVED),
+            "fixture provider roots must resolve before checking ownership: {:?}",
+            analysis.diagnostics
+        );
+        assert!(analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message().contains(
+                "a durable consumer function may own only one checkpointed source root"
+            ) && diagnostic.message().contains("extract separate named consumer functions")
+        }), "diagnostics: {:?}", analysis.diagnostics);
     }
 
     #[test]
