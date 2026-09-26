@@ -686,7 +686,6 @@ impl RuntimePublicationCoordinator {
         freeze: &PublicationFreeze,
         plan: CompactPublicationPlan,
     ) -> Result<IndexGeneration, Error> {
-        let writer_input = lower_compact_freeze(profile, freeze)?;
         let table = Uuid::from_bytes(profile.table_id());
         if plan.manifest().table() != table
             || plan.manifest().schema() != profile.schema_fingerprint()
@@ -707,6 +706,10 @@ impl RuntimePublicationCoordinator {
             )
             .map_err(map_publication_repository_error)?;
         let base = fold_compact_committed_base(profile, projections.iter())
+            .map_err(|_| Error::InvalidTransition)?;
+        let writer_input = lower_compact_freeze(profile, freeze)?;
+        let writer_input = base
+            .fold_writer_input(&writer_input)
             .map_err(|_| Error::InvalidTransition)?;
         base.consume_writer_input(&writer_input)
             .map_err(|_| Error::InvalidTransition)?;
