@@ -3431,9 +3431,13 @@ impl RuntimeState {
         if provider.checkpoint_key() != request.key || !provider.supports_reset_target(&request.to)
         {
             let error = RuntimeError::CheckpointNotReplayable;
-            self.record_failed_admin_invocation(&operation, lease, &error)
-                .await?;
-            return Err(error);
+            return match self
+                .record_failed_admin_invocation(&operation, lease, &error)
+                .await
+            {
+                Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
+                Err(audit_error) => Err(audit_error),
+            };
         }
         self.apply_admin_invocation(lease, expected_capture, operation)
             .await
@@ -3551,9 +3555,13 @@ impl RuntimeState {
             }
             Err(error) => {
                 drop(transaction);
-                self.record_failed_admin_descriptor(&descriptor, lease, &error)
-                    .await?;
-                Err(error)
+                match self
+                    .record_failed_admin_descriptor(&descriptor, lease, &error)
+                    .await
+                {
+                    Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
+                    Err(audit_error) => Err(audit_error),
+                }
             }
         }
     }
@@ -3580,6 +3588,7 @@ impl RuntimeState {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&transaction, lease).await?;
         let observed_generation = capture_tx(&transaction)
             .await
             .ok()
