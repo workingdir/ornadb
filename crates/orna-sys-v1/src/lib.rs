@@ -416,6 +416,15 @@ pub const SYS_ADMIN_PAUSE_STREAM_DESCRIPTOR: SystemFunctionDescriptor =
         purpose: "Pause at an item/batch transaction boundary.",
     };
 
+/// Exact system-reference descriptor for `sys.admin.reset_checkpoint`.
+pub const SYS_ADMIN_RESET_CHECKPOINT_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.reset_checkpoint",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.reset_checkpoint(checkpoint: sys.CheckpointRef, expected_version: sys.CheckpointVersion, expected_position: sys.CheckpointPosition, to: sys.CheckpointPosition, reason: Str): sys.Checkpoint",
+        purpose: "Compare-and-set checkpoint reset.",
+    };
+
 /// Returns the authoritative descriptor for a portable system function.
 ///
 /// The returned descriptor is static catalogue data.  It does not grant
@@ -425,6 +434,7 @@ pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionD
         "sys.explain(Diagnostic)" => Some(&SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR),
         "sys.admin.cancel_run" => Some(&SYS_ADMIN_CANCEL_RUN_DESCRIPTOR),
         "sys.admin.pause_stream" => Some(&SYS_ADMIN_PAUSE_STREAM_DESCRIPTOR),
+        "sys.admin.reset_checkpoint" => Some(&SYS_ADMIN_RESET_CHECKPOINT_DESCRIPTOR),
         _ => None,
     }
 }
@@ -2496,6 +2506,15 @@ mod tests {
                 effect: SystemEffect::Admin,
                 signature: "fn sys.admin.pause_stream(stream: sys.StreamRef, reason: Str? = null): Bool",
                 purpose: "Pause at an item/batch transaction boundary.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.reset_checkpoint"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.reset_checkpoint",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.reset_checkpoint(checkpoint: sys.CheckpointRef, expected_version: sys.CheckpointVersion, expected_position: sys.CheckpointPosition, to: sys.CheckpointPosition, reason: Str): sys.Checkpoint",
+                purpose: "Compare-and-set checkpoint reset.",
             })
         );
         assert_eq!(
