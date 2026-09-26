@@ -512,6 +512,68 @@ pub const SYS_ADMIN_RESOLVE_FAILURE_DESCRIPTOR: SystemFunctionDescriptor =
         signature: "fn sys.admin.resolve_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Failure",
         purpose: "Resolve a preserved failure without marking its processing as successful.",
     };
+/// Exact system-reference descriptor for `sys.admin.commit`.
+pub const SYS_ADMIN_COMMIT_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
+    name: "sys.admin.commit",
+    effect: SystemEffect::Admin,
+    signature: "fn sys.admin.commit(message: Str, author: sys.PersonIdentity? = null): sys.CommitRef",
+    purpose: "Commit the validated staged state, preserving unstaged CWD changes and unpublished tail.",
+};
+
+/// Exact system-reference descriptor for `sys.admin.create_branch(SnapshotRef)`.
+pub const SYS_ADMIN_CREATE_BRANCH_SNAPSHOT_REF_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.create_branch(SnapshotRef)",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.create_branch(name: Str, at: sys.SnapshotRef? = null): sys.BranchRef",
+        purpose: "Create a branch at the supplied committed snapshot or current HEAD; do not switch or commit pending changes.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.create_branch(CommitRef)`.
+pub const SYS_ADMIN_CREATE_BRANCH_COMMIT_REF_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.create_branch(CommitRef)",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.create_branch(name: Str, at: sys.CommitRef): sys.BranchRef",
+        purpose: "Create a Git branch at a commit.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.create_branch(BranchRef)`.
+pub const SYS_ADMIN_CREATE_BRANCH_BRANCH_REF_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.create_branch(BranchRef)",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.create_branch(name: Str, at: sys.BranchRef): sys.BranchRef",
+        purpose: "Create a Git branch at another branch target.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.create_branch(TagRef)`.
+pub const SYS_ADMIN_CREATE_BRANCH_TAG_REF_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.create_branch(TagRef)",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.create_branch(name: Str, at: sys.TagRef): sys.BranchRef",
+        purpose: "Create a Git branch at a peeled tag target.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.create_branch(GitOid)`.
+pub const SYS_ADMIN_CREATE_BRANCH_GIT_OID_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.create_branch(GitOid)",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.create_branch(name: Str, at: sys.GitOid): sys.BranchRef",
+        purpose: "Create a Git branch at an exact Git object.",
+    };
+
+/// Exact system-reference descriptor for `sys.admin.create_branch(Str)`.
+pub const SYS_ADMIN_CREATE_BRANCH_STR_DESCRIPTOR: SystemFunctionDescriptor =
+    SystemFunctionDescriptor {
+        name: "sys.admin.create_branch(Str)",
+        effect: SystemEffect::Admin,
+        signature: "fn sys.admin.create_branch(name: Str, at: Str): sys.BranchRef",
+        purpose: "Resolve a Git revision expression and create a branch there.",
+    };
+
 
 /// Returns the authoritative descriptor for a portable system function.
 ///
@@ -533,6 +595,15 @@ pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionD
         "sys.admin.skip_failure" => Some(&SYS_ADMIN_SKIP_FAILURE_DESCRIPTOR),
         "sys.admin.replay_failure" => Some(&SYS_ADMIN_REPLAY_FAILURE_DESCRIPTOR),
         "sys.admin.resolve_failure" => Some(&SYS_ADMIN_RESOLVE_FAILURE_DESCRIPTOR),
+        "sys.admin.commit" => Some(&SYS_ADMIN_COMMIT_DESCRIPTOR),
+        "sys.admin.create_branch(SnapshotRef)" => {
+            Some(&SYS_ADMIN_CREATE_BRANCH_SNAPSHOT_REF_DESCRIPTOR)
+        }
+        "sys.admin.create_branch(CommitRef)" => Some(&SYS_ADMIN_CREATE_BRANCH_COMMIT_REF_DESCRIPTOR),
+        "sys.admin.create_branch(BranchRef)" => Some(&SYS_ADMIN_CREATE_BRANCH_BRANCH_REF_DESCRIPTOR),
+        "sys.admin.create_branch(TagRef)" => Some(&SYS_ADMIN_CREATE_BRANCH_TAG_REF_DESCRIPTOR),
+        "sys.admin.create_branch(GitOid)" => Some(&SYS_ADMIN_CREATE_BRANCH_GIT_OID_DESCRIPTOR),
+        "sys.admin.create_branch(Str)" => Some(&SYS_ADMIN_CREATE_BRANCH_STR_DESCRIPTOR),
         _ => None,
     }
 }
@@ -2703,6 +2774,69 @@ mod tests {
                 effect: SystemEffect::Admin,
                 signature: "fn sys.admin.reset_checkpoint(checkpoint: sys.CheckpointRef, expected_version: sys.CheckpointVersion, expected_position: sys.CheckpointPosition, to: sys.CheckpointPosition, reason: Str): sys.Checkpoint",
                 purpose: "Compare-and-set checkpoint reset.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.commit"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.commit",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.commit(message: Str, author: sys.PersonIdentity? = null): sys.CommitRef",
+                purpose: "Commit the validated staged state, preserving unstaged CWD changes and unpublished tail.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.create_branch(SnapshotRef)"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.create_branch(SnapshotRef)",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.create_branch(name: Str, at: sys.SnapshotRef? = null): sys.BranchRef",
+                purpose: "Create a branch at the supplied committed snapshot or current HEAD; do not switch or commit pending changes.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.create_branch(CommitRef)"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.create_branch(CommitRef)",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.create_branch(name: Str, at: sys.CommitRef): sys.BranchRef",
+                purpose: "Create a Git branch at a commit.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.create_branch(BranchRef)"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.create_branch(BranchRef)",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.create_branch(name: Str, at: sys.BranchRef): sys.BranchRef",
+                purpose: "Create a Git branch at another branch target.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.create_branch(TagRef)"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.create_branch(TagRef)",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.create_branch(name: Str, at: sys.TagRef): sys.BranchRef",
+                purpose: "Create a Git branch at a peeled tag target.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.create_branch(GitOid)"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.create_branch(GitOid)",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.create_branch(name: Str, at: sys.GitOid): sys.BranchRef",
+                purpose: "Create a Git branch at an exact Git object.",
+            })
+        );
+        assert_eq!(
+            system_function_descriptor("sys.admin.create_branch(Str)"),
+            Some(&SystemFunctionDescriptor {
+                name: "sys.admin.create_branch(Str)",
+                effect: SystemEffect::Admin,
+                signature: "fn sys.admin.create_branch(name: Str, at: Str): sys.BranchRef",
+                purpose: "Resolve a Git revision expression and create a branch there.",
             })
         );
         assert_eq!(
