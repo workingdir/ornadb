@@ -177,10 +177,39 @@ fn success_cancels_and_joins_children_in_child_id_order_before_commit() {
     ));
     assert_eq!(
         supervisor.events,
-        vec![('c', first), ('j', first), ('c', second), ('j', second)]
+        vec![('c', first), ('c', second), ('j', first), ('j', second)]
     );
     assert_eq!(store.commits, 1);
     assert_eq!(coordinator.phase(), TransactionPhase::Committed);
+}
+
+#[test]
+fn requests_all_child_cancellations_before_joining_any_child() {
+    let (mut coordinator, owner) = active();
+    let first = coordinator.spawn_child(owner).unwrap();
+    let second = coordinator.spawn_child(owner).unwrap();
+    let mut supervisor = Supervisor::default();
+
+    coordinator
+        .cancel_with_children(owner, &mut supervisor)
+        .unwrap();
+
+    assert_eq!(coordinator.phase(), TransactionPhase::RolledBack);
+
+    let mut provider = Provider;
+    let mut store = Store::default();
+    let mut faults = NoFault;
+    assert_eq!(
+        coordinator.execute(owner, &mut provider, &mut store, checkpoint(), &mut faults),
+        Outcome::RolledBack {
+            reason: RollbackReason::Cancelled,
+        }
+    );
+    assert_eq!(store.commits, 0);
+    assert_eq!(
+        supervisor.events,
+        vec![('c', first), ('c', second), ('j', first), ('j', second)]
+    );
 }
 
 #[test]
@@ -446,8 +475,8 @@ fn transient_partial_join_failure_retries_normal_completion_without_publication(
         supervisor.events,
         vec![
             ('c', first),
-            ('j', first),
             ('c', second),
+            ('j', first),
             ('j', second),
             ('c', second),
             ('j', second),
