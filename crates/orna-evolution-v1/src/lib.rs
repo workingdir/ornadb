@@ -127,6 +127,10 @@ pub enum MigrationOperation {
         from: String,
         to: String,
     },
+    DeleteField {
+        table: ObjectId,
+        field: Field,
+    },
     RenameField {
         table: ObjectId,
         field: ObjectId,
@@ -154,14 +158,15 @@ impl MigrationOperation {
             Self::DeleteTable { table } => (table.id, 0, table.id, table.name.clone()),
             Self::CreateTable { table } => (table.id, 1, table.id, table.name.clone()),
             Self::RenameTable { table, to, .. } => (*table, 2, *table, to.clone()),
+            Self::DeleteField { table, field } => (*table, 3, field.id, field.name.clone()),
             Self::RenameField {
                 table, field, to, ..
-            } => (*table, 3, *field, to.clone()),
-            Self::AddOptionalField { table, field } => (*table, 4, field.id, field.name.clone()),
+            } => (*table, 4, *field, to.clone()),
+            Self::AddOptionalField { table, field } => (*table, 5, field.id, field.name.clone()),
             Self::AddRequiredFieldWithFallback { table, field } => {
-                (*table, 5, field.id, field.name.clone())
+                (*table, 6, field.id, field.name.clone())
             }
-            Self::RekeyRow { table, old_key, .. } => (*table, 6, *table, canonical_key(old_key)),
+            Self::RekeyRow { table, old_key, .. } => (*table, 7, *table, canonical_key(old_key)),
         }
     }
 }
@@ -230,10 +235,6 @@ pub enum PlanningError {
     },
     MissingTableIdentity {
         table: ObjectId,
-    },
-    MissingFieldIdentity {
-        table: ObjectId,
-        field: ObjectId,
     },
     IncompatibleField {
         table: ObjectId,
@@ -421,14 +422,26 @@ fn compare_fields(
 ) -> Result<(), PlanningError> {
     let before: BTreeMap<_, _> = old.fields.iter().map(|field| (field.id, field)).collect();
     let after: BTreeMap<_, _> = new.fields.iter().map(|field| (field.id, field)).collect();
-    if let Some(field) = before.keys().find(|id| !after.contains_key(id)) {
-        return Err(PlanningError::MissingFieldIdentity {
+    for (&id, old_field) in &before {
+        if after.contains_key(&id) {
+            continue;
+        }
+        if old_field.role == FieldRole::Key {
+            return Err(PlanningError::IncompatibleField {
+                table,
+                field: id,
+                reason: "primary-key fields cannot be removed during schema evolution",
+            });
+        }
+        operations.push(MigrationOperation::DeleteField {
             table,
-            field: *field,
+            field: (*old_field).clone(),
         });
     }
     for (&id, old_field) in &before {
-        let new_field = after[&id];
+        let Some(new_field) = after.get(&id) else {
+            continue;
+        };
         if old_field.ty != new_field.ty {
             return Err(PlanningError::IncompatibleField {
                 table,
@@ -837,6 +850,58 @@ mod tests {
         for next in cases {
             assert!(plan(&old, &next, &request(vec![])).is_err());
         }
+    }
+
+    #[test]
+    fn replacing_field_identity_plans_delete_and_add() {
+        let old_field = field(2, "name", false);
+        let new_field = field(3, "name", true);
+        let from = schema(table(true, vec![old_field.clone()]));
+        let to = schema(table(true, vec![new_field.clone()]));
+
+        assert_eq!(
+            plan(&from, &to, &request(vec![])).unwrap().operations(),
+            &[
+                MigrationOperation::DeleteField {
+                    table: id(1),
+                    field: old_field,
+                },
+                MigrationOperation::AddOptionalField {
+                    table: id(1),
+                    field: new_field,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn stable_field_identity_renames_and_key_removal_is_rejected() {
+        let old_name = field(2, "name", false);
+        let renamed = field(2, "display_name", false);
+        let from = schema(table(true, vec![old_name]));
+        let to = schema(table(true, vec![renamed]));
+        assert_eq!(
+            plan(&from, &to, &request(vec![])).unwrap().operations(),
+            &[MigrationOperation::RenameField {
+                table: id(1),
+                field: id(2),
+                from: "name".into(),
+                to: "display_name".into(),
+            }]
+        );
+
+        let mut key = field(2, "account_id", false);
+        key.role = FieldRole::Key;
+        let keyed = schema(table(true, vec![key]));
+        let without_key = schema(table(true, vec![]));
+        assert!(matches!(
+            plan(&keyed, &without_key, &request(vec![])),
+            Err(PlanningError::IncompatibleField {
+                table,
+                field,
+                reason: "primary-key fields cannot be removed during schema evolution",
+            }) if table == id(1) && field == id(2)
+        ));
     }
     #[test]
     fn adding_a_primary_key_field_fails_closed_instead_of_emitting_a_column_add() {
