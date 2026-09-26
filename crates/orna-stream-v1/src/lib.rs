@@ -186,6 +186,49 @@ pub struct Checkpoint {
     pub committed: Option<Position>,
 }
 
+/// The result of merging a checkpoint position from two branches.
+///
+/// ORNA-CONSUMER-008 permits equal positions and a branch that retains the
+/// base position to merge. Distinct opaque positions have no defined order
+/// and must remain a conflict for the database merge owner to report as
+/// `sys.CheckpointConflict`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CheckpointPositionMerge {
+    Merged(Option<Position>),
+    Conflict(CheckpointPositionConflict),
+}
+
+/// The exact positions that the database merge owner needs for a checkpoint
+/// conflict record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointPositionConflict {
+    pub base: Option<Position>,
+    pub left: Option<Position>,
+    pub right: Option<Position>,
+}
+
+/// Merge three branch positions without treating opaque provider tokens as
+/// ordered values.
+pub fn merge_checkpoint_position(
+    base: Option<&Position>,
+    left: Option<&Position>,
+    right: Option<&Position>,
+) -> CheckpointPositionMerge {
+    if left == right {
+        CheckpointPositionMerge::Merged(left.cloned())
+    } else if left == base {
+        CheckpointPositionMerge::Merged(right.cloned())
+    } else if right == base {
+        CheckpointPositionMerge::Merged(left.cloned())
+    } else {
+        CheckpointPositionMerge::Conflict(CheckpointPositionConflict {
+            base: base.cloned(),
+            left: left.cloned(),
+            right: right.cloned(),
+        })
+    }
+}
+
 /// Durable admission state for one ordered stream.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamStatus {
@@ -1269,6 +1312,38 @@ mod tests {
         Position {
             token: component(token),
         }
+    }
+
+    #[test]
+    fn checkpoint_merge_adopts_equal_or_unchanged_positions_and_preserves_divergence() {
+        let base = position("base-token");
+        let left = position("zeta-token");
+        let right = position("alpha-token");
+
+        assert_eq!(
+            merge_checkpoint_position(Some(&base), Some(&left), Some(&left)),
+            CheckpointPositionMerge::Merged(Some(left.clone()))
+        );
+        assert_eq!(
+            merge_checkpoint_position(Some(&base), Some(&base), Some(&right)),
+            CheckpointPositionMerge::Merged(Some(right.clone()))
+        );
+        assert_eq!(
+            merge_checkpoint_position(Some(&base), Some(&left), Some(&base)),
+            CheckpointPositionMerge::Merged(Some(left.clone()))
+        );
+        assert_eq!(
+            merge_checkpoint_position(Some(&base), Some(&left), Some(&right)),
+            CheckpointPositionMerge::Conflict(CheckpointPositionConflict {
+                base: Some(base),
+                left: Some(left),
+                right: Some(right),
+            })
+        );
+        assert_eq!(
+            merge_checkpoint_position(None, None, Some(&position("first-token"))),
+            CheckpointPositionMerge::Merged(Some(position("first-token")))
+        );
     }
 
     struct ReadyAsyncBackend {
