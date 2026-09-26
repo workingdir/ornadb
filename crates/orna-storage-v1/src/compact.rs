@@ -1609,8 +1609,10 @@ mod tests {
         .unwrap()
     }
     fn fixture_profile() -> CompactOvbProfile {
-        const SOURCE: &str =
-            include_str!("../../../../../../../reference/Orna-1.0.0/examples/valid/table-explicit-key.orna");
+        const SOURCE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../reference/Orna-1.0.0/examples/valid/table-explicit-key.orna"
+        ));
         let header = SOURCE
             .lines()
             .find(|line| line.trim_start().starts_with("pub table "))
