@@ -70,6 +70,17 @@ where
     F: FnOnce(&RuntimeTableActivationSnapshot) -> Fut,
     Fut: Future<Output = Result<ActivationWork<T>, E>>,
 {
+    // Reject an owner superseded before evaluation starts. The commit repeats
+    // this check transactionally to catch a takeover racing this precheck.
+    if state
+        .current_lease()
+        .await
+        .map_err(ActivationError::Runtime)?
+        != Some(lease)
+    {
+        return Err(ActivationError::Runtime(RuntimeError::OwnerLost));
+    }
+
     let snapshot = state
         .begin_table_activation(tables)
         .await
