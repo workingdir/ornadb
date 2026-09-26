@@ -98,16 +98,7 @@ fn relational_callbacks_preserve_effects_and_failure_before_planning() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "relation-callback-effects.orna",
-            r#"
-                pub table Note(id: Int) { value: Int, }
-                pub fn pure(rows: Relation<Note>) = rows | filter(note => note.value > 0);
-                pub fn database(rows: Relation<Note>) = rows | filter(note => Note.count() > 0);
-                pub fn direct_one(rows: Relation<Note>) = one(rows);
-                pub fn predicate_one(rows: Relation<Note>) = one(rows, note => note.value > 0);
-                pub fn failed(rows: Relation<Note>) = one(rows, note => Note.one().value > 0);
-                pub fn direct_flat_map(rows: Relation<Note>) = flat_map(rows, note => [note.value]);
-                pub fn piped_flat_map(rows: Relation<Note>) = rows | flat_map(note => [note.value]);
-            "#,
+            include_str!("fixtures/relation-callback-effects.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
