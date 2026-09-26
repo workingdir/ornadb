@@ -521,7 +521,7 @@ fn semantic_project_adapter_rejects_non_string_sys_resolve_argument_at_typecheck
 
 #[test]
 fn semantic_project_adapter_admits_sys_snapshot_string_as_pinned_read() {
-    let source = r#"pub fn before_change() = sys.snapshot("HEAD~3");"#;
+    let source = include_str!("fixtures/sys-snapshot-string.orna");
     let project = snapshot_project(source);
     let mut adapter = SemanticAdapter::default();
 
