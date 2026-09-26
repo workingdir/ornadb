@@ -2188,6 +2188,50 @@ impl Context<'_, '_> {
                 ..
             } => self.case(condition, arms, scope, depth),
             Expr::Control {
+                kind: ControlKind::While,
+                binding: None,
+                condition: Some(condition),
+                body: Some(body),
+                arms,
+                alternate: None,
+                ..
+            } if arms.is_empty() => loop {
+                match self.evaluate(condition, scope, depth + 1)? {
+                    _ if self.transfer.is_some() => return Ok(Value::Null),
+                    Value::Bool(false) => break Ok(Value::Unit),
+                    Value::Bool(true) => {}
+                    _ => break Err(error("ORNA-EVAL-TYPE")),
+                }
+                self.evaluate(body, scope, depth + 1)?;
+                match self.transfer.take() {
+                    None | Some(Transfer::Continue) => {}
+                    Some(Transfer::Break(value)) => break Ok(value),
+                    Some(transfer @ Transfer::Return(_)) => {
+                        self.transfer = Some(transfer);
+                        break Ok(Value::Null);
+                    }
+                }
+            },
+            Expr::Control {
+                kind: ControlKind::Loop,
+                binding: None,
+                condition: None,
+                body: Some(body),
+                arms,
+                alternate: None,
+                ..
+            } if arms.is_empty() => loop {
+                self.evaluate(body, scope, depth + 1)?;
+                match self.transfer.take() {
+                    None | Some(Transfer::Continue) => {}
+                    Some(Transfer::Break(value)) => break Ok(value),
+                    Some(transfer @ Transfer::Return(_)) => {
+                        self.transfer = Some(transfer);
+                        break Ok(Value::Null);
+                    }
+                }
+            },
+            Expr::Control {
                 kind: ControlKind::For,
                 binding: Some(binding),
                 condition: Some(iterable),
@@ -8091,5 +8135,23 @@ mod tests {
             .expect_err("one third has no finite decimal representation");
 
         assert_eq!(failure.code(), "InexactDivision");
+    }
+
+    #[test]
+    fn source_while_and_loop_execute_with_continue_break_and_step_bounds() {
+        let source = include_str!("../tests/fixtures/control_flow_loop_gap.orna");
+        let parsed = parse_expression(source);
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+        let value = evaluate_expression(source, &Environment::new(), Limits::default())
+            .expect("while statement and loop value should evaluate");
+        assert_eq!(value.raw(), &Raw::Int(5.into()));
+
+        let limits = Limits {
+            max_steps: 4,
+            ..Limits::default()
+        };
+        let failure = evaluate_expression(source, &Environment::new(), limits)
+            .expect_err("the same loop must stop when its activation budget is exhausted");
+        assert_eq!(failure.code(), "ORNA-EVAL-LIMIT");
     }
 }
