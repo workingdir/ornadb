@@ -699,7 +699,7 @@ fn parse_set_cookie(
             return Err(LiveTransportError::Response("invalid session cookie"));
         }
     }
-    if !path_ok || !http_only || !same_site_strict || secure != secure_transport {
+    if !path_ok || !http_only || !same_site_strict || (secure_transport && !secure) {
         return Err(LiveTransportError::Response("invalid session cookie"));
     }
     Ok(pair.to_owned())
@@ -1286,6 +1286,20 @@ mod tests {
         let distinct =
             parse_session(valid_response(), &valid_cookie(), Limits::default(), true).unwrap();
         assert_ne!(distinct.cookie, format!("orna_session={}", valid_token()));
+    }
+
+    #[test]
+    fn session_cookie_secure_attribute_is_required_only_for_tls() {
+        let path = "/orna/live/00000000-0000-0000-0000-000000000001";
+        let secure_cookie =
+            format!("orna_session=opaque-cookie; Path={path}; HttpOnly; SameSite=Strict; Secure");
+        let loopback_cookie =
+            format!("orna_session=opaque-cookie; Path={path}; HttpOnly; SameSite=Strict");
+
+        assert!(parse_set_cookie(&secure_cookie, path, false).is_ok());
+        assert!(parse_set_cookie(&loopback_cookie, path, false).is_ok());
+        assert!(parse_set_cookie(&secure_cookie, path, true).is_ok());
+        assert!(parse_set_cookie(&loopback_cookie, path, true).is_err());
     }
 
     #[test]
