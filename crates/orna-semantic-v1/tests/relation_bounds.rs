@@ -50,12 +50,7 @@ fn direct_relation_bounds_reject_nonpositive_constants() {
 fn declared_relation_helper_shadows_the_core_filter_name() {
     let result = analyze(&[ModuleInput::new(
         "declared-filter.orna",
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            fn filter(rows: Relation<Note>): Int = 99;
-            fn direct() = filter(Note) == 99;
-            fn piped() = (Note | filter) == 99;
-        "#,
+        include_str!("fixtures/relation-bound.orna"),
     )]);
     assert!(result.is_ok(), "{:#?}", result.diagnostics);
 }
