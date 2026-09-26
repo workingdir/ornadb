@@ -25,9 +25,9 @@ use std::{
 
 use orna_foundation_v1::{CwdCapture, RepositoryGenerationAdapter, RepositoryIdentity};
 use orna_repository_v1::{
-    CompactPublicationPlan, CompactPublicationRecovery, GitCommitRef, IndexGeneration,
-    ManagedFileChange, ManagedPath, PrivateCommit, PublicationJournal, PublicationJournalEntry,
-    Repository, RepositoryError, Uuid,
+    CompactManifest, CompactPublicationPlan, CompactPublicationRecovery, GitCommitRef,
+    IndexGeneration, ManagedFileChange, ManagedPath, PrivateCommit, PublicationJournal,
+    PublicationJournalEntry, Repository, RepositoryError, Uuid,
 };
 use orna_runtime_v1::{
     PublicationCommitId, PublicationFreeze, RuntimeError, RuntimeState, TableMutation,
@@ -696,6 +696,12 @@ impl RuntimePublicationCoordinator {
             .head()
             .map_err(map_publication_repository_error)?
             .ok_or(Error::InvalidTransition)?;
+        let manifest = repository
+            .read_compact_manifest(&expected_head, table)
+            .map_err(map_publication_repository_error)?
+            .unwrap_or_else(|| {
+                CompactManifest::empty(table, profile.schema_fingerprint())
+            });
         let projections = repository
             .read_compact_committed_base(
                 &expected_head,
@@ -705,8 +711,12 @@ impl RuntimePublicationCoordinator {
                 |_entry, projection| Ok(projection.clone()),
             )
             .map_err(map_publication_repository_error)?;
-        let base = fold_compact_committed_base(profile, projections.iter())
-            .map_err(|_| Error::InvalidTransition)?;
+        let base = fold_compact_committed_base(
+            profile,
+            projections.iter(),
+            manifest.next_generation(),
+        )
+        .map_err(|_| Error::InvalidTransition)?;
         let writer_input = lower_compact_freeze(profile, freeze)?;
         let writer_input = base
             .fold_writer_input(&writer_input)
@@ -3696,7 +3706,18 @@ mod tests {
                 |_entry, projection| Ok(projection.clone()),
             )
             .unwrap();
-        let base = fold_compact_committed_base(&profile, projections.iter()).unwrap();
+        let manifest = repository
+            .read_compact_manifest(pending.commit(), Uuid::from_u128(1))
+            .unwrap()
+            .unwrap_or_else(|| {
+                CompactManifest::empty(
+                    Uuid::from_u128(1),
+                    profile.schema_fingerprint(),
+                )
+            });
+        let base =
+            fold_compact_committed_base(&profile, projections.iter(), manifest.next_generation())
+                .unwrap();
         assert_eq!(freeze.checkpoint.mutation_sequence, 1);
         (profile, base)
     }
