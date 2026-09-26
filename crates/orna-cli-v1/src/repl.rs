@@ -124,6 +124,60 @@ struct WatchBinding<'a, S: ?Sized> {
     state: &'a mut WatchCommandState,
 }
 
+#[cfg(not(test))]
+fn diagnostic_presentation(
+    code: &str,
+    condition: &'static str,
+    remedy: &'static str,
+) -> (&'static str, &'static str) {
+    super::diagnostic_documentation(code).map_or((condition, remedy), |documentation| {
+        (documentation.title, documentation.help)
+    })
+}
+
+/// The watch integration test compiles this file without the CLI root module.
+/// Keep the shared catalogue wording it exercises available in that context.
+#[cfg(test)]
+fn diagnostic_presentation(
+    code: &str,
+    condition: &'static str,
+    remedy: &'static str,
+) -> (&'static str, &'static str) {
+    match code {
+        "ORNA-S010-IMPORT" => (
+            "imported module is unavailable",
+            "use a captured standard dependency or remove the import",
+        ),
+        "ORNA-S012-UNRESOLVED" => (
+            "name could not be resolved",
+            "declare the name or add the matching `use` import before using it",
+        ),
+        "ORNA-S021-TYPE" => (
+            "expression has the wrong type",
+            "change the expression or its declared type so the value and requirement agree",
+        ),
+        "ORNA-REPL-EFFECT" => (
+            "REPL preview cannot perform an effect",
+            "evaluate a pure expression or invoke the operation through its admitted runtime entry point",
+        ),
+        "ORNA-REPL-AT" => (
+            "snapshot selection failed",
+            "choose an existing snapshot and keep the repository available while selecting it",
+        ),
+        _ => (condition, remedy),
+    }
+}
+
+fn write_diagnostic<W: Write>(
+    writer: &mut W,
+    code: &str,
+    condition: &'static str,
+    remedy: &'static str,
+) -> io::Result<()> {
+    let (title, help) = diagnostic_presentation(code, condition, remedy);
+    writeln!(writer, "error[{code}]: {title}\nhelp: {help}")
+}
+
 /// Run one retained, line-oriented admitted REPL session. A malformed or
 /// rejected submission reports its redacted evaluator code and leaves the
 /// session open.
@@ -220,8 +274,18 @@ fn run_loop<
         writer.flush()?;
         match read_submission(reader)? {
             ReadSubmission::Eof => return Ok(()),
-            ReadSubmission::TooLong => writeln!(writer, "error[ORNA-REPL-INPUT-LIMIT]")?,
-            ReadSubmission::InvalidUtf8 => writeln!(writer, "error[ORNA-REPL-INPUT-UTF8]")?,
+            ReadSubmission::TooLong => write_diagnostic(
+                writer,
+                "ORNA-REPL-INPUT-LIMIT",
+                "Orna input exceeds the REPL limit",
+                "split it into smaller submissions",
+            )?,
+            ReadSubmission::InvalidUtf8 => write_diagnostic(
+                writer,
+                "ORNA-REPL-INPUT-UTF8",
+                "REPL input is not valid UTF-8",
+                "re-enter the Orna source or command using valid UTF-8 text",
+            )?,
             ReadSubmission::Source(source) => {
                 let command = source.trim();
                 if command == ":quit" {
@@ -230,26 +294,51 @@ fn run_loop<
                 if let Some(help) = parse_help_command(command) {
                     match help {
                         Ok(text) => writeln!(writer, "{text}")?,
-                        Err(()) => writeln!(writer, "error[ORNA-REPL-COMMAND]")?,
+                        Err(()) => write_diagnostic(
+                            writer,
+                            "ORNA-REPL-COMMAND",
+                            "REPL command is unknown or has invalid arguments",
+                            "use :help to see supported commands and argument forms",
+                        )?,
                     }
                 } else if let Some(target) = parse_snapshot_target(command) {
                     let Some(loader) = loader else {
-                        writeln!(writer, "error[ORNA-REPL-COMMAND]")?;
+                        write_diagnostic(
+                            writer,
+                            "ORNA-REPL-COMMAND",
+                            "snapshot selection is unavailable in this REPL session",
+                            "use a project-backed REPL session to select CWD, HEAD, or a reference",
+                        )?;
                         continue;
                     };
                     match target.and_then(|target| loader.load_snapshot(target).map_err(|_| ())) {
                         Ok(candidate) => *session = candidate,
-                        Err(()) => writeln!(writer, "error[ORNA-REPL-AT]")?,
+                        Err(()) => write_diagnostic(
+                            writer,
+                            "ORNA-REPL-AT",
+                            "snapshot selection failed",
+                            "choose an existing snapshot and keep the repository available",
+                        )?,
                     }
                 } else if let Some(rest) = parse_watch_source(command) {
                     dispatch_watch(rest, &mut watch, writer)?;
                 } else if source.trim_start().starts_with(':') {
-                    writeln!(writer, "error[ORNA-REPL-COMMAND]")?;
+                    write_diagnostic(
+                        writer,
+                        "ORNA-REPL-COMMAND",
+                        "REPL command is unknown or has invalid arguments",
+                        "use :help to see supported commands and argument forms",
+                    )?;
                 } else {
                     match session.submit(&source) {
                         Ok(Some(value)) => writeln!(writer, "{}", inspect(&value))?,
                         Ok(None) => {}
-                        Err(error) => writeln!(writer, "error[{}]", error.code())?,
+                        Err(error) => write_diagnostic(
+                            writer,
+                            error.code(),
+                            "Orna submission was rejected",
+                            "revise the expression or declaration, then submit it again",
+                        )?,
                     }
                 }
             }
@@ -263,7 +352,12 @@ fn dispatch_watch<W: Write, S: WatchFrameSource + ?Sized>(
     writer: &mut W,
 ) -> io::Result<()> {
     let Some(binding) = watch.as_mut() else {
-        writeln!(writer, "error[ORNA-REPL-COMMAND]")?;
+        write_diagnostic(
+            writer,
+            "ORNA-REPL-COMMAND",
+            "live watch is unavailable in this REPL session",
+            "evaluate an Orna expression for a one-time preview instead",
+        )?;
         return Ok(());
     };
     match binding.source.start_watch(source) {
@@ -271,7 +365,12 @@ fn dispatch_watch<W: Write, S: WatchFrameSource + ?Sized>(
             binding.state.install(presentation);
             drain_available_frames(binding, writer)?;
         }
-        Err(_) => writeln!(writer, "error[ORNA-REPL-COMMAND]")?,
+        Err(_) => write_diagnostic(
+            writer,
+            "ORNA-REPL-COMMAND",
+            "live watch could not be started for that Orna expression",
+            "revise the Orna expression and try :watch again",
+        )?,
     }
     Ok(())
 }
@@ -307,7 +406,12 @@ fn accept_frame<W: Write>(
         Ok(LivePresentationUpdate::ResyncRequired) => {
             writeln!(writer, "watch: resync required")?;
         }
-        Err(_) => writeln!(writer, "error[ORNA-REPL-WATCH-FRAME]")?,
+        Err(_) => write_diagnostic(
+            writer,
+            "ORNA-REPL-WATCH-FRAME",
+            "live watch update could not be applied",
+            "restart the watch with :watch and the same Orna expression",
+        )?,
     }
     Ok(())
 }
@@ -326,7 +430,12 @@ fn drain_available_frames<W: Write, S: WatchFrameSource + ?Sized>(
             Ok(Some(frame)) => accept_frame(binding.state, frame, writer)?,
             Ok(None) => return Ok(()),
             Err(_) => {
-                writeln!(writer, "error[ORNA-REPL-WATCH-SOURCE]")?;
+                write_diagnostic(
+                    writer,
+                    "ORNA-REPL-WATCH-SOURCE",
+                    "live watch update is unavailable",
+                    "restart the watch with :watch and the same Orna expression",
+                )?;
                 return Ok(());
             }
         }
@@ -617,7 +726,9 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            format!("> {REPL_HELP}\n> :at CWD|HEAD|ref\n> error[ORNA-REPL-COMMAND]\n> 2 : Int\n> ")
+            format!(
+                "> {REPL_HELP}\n> :at CWD|HEAD|ref\n> error[ORNA-REPL-COMMAND]: REPL command is unknown or has invalid arguments\nhelp: use :help to see supported commands and argument forms\n> 2 : Int\n> "
+            )
         );
     }
 
@@ -677,7 +788,7 @@ mod tests {
         assert_eq!(loader.calls.get(), 0);
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-REPL-AT]\n> error[ORNA-REPL-AT]\n> error[ORNA-REPL-AT]\n> "
+            "> error[ORNA-REPL-AT]: snapshot selection failed\nhelp: choose an existing snapshot and keep the repository available while selecting it\n> error[ORNA-REPL-AT]: snapshot selection failed\nhelp: choose an existing snapshot and keep the repository available while selecting it\n> error[ORNA-REPL-AT]: snapshot selection failed\nhelp: choose an existing snapshot and keep the repository available while selecting it\n> "
         );
     }
 
@@ -695,7 +806,7 @@ mod tests {
         .expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> > error[ORNA-REPL-AT]\n> 42 : Int\n> "
+            "> > error[ORNA-REPL-AT]: snapshot selection failed\nhelp: choose an existing snapshot and keep the repository available while selecting it\n> 42 : Int\n> "
         );
     }
 
@@ -727,7 +838,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL recovers");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-REPL-INPUT-LIMIT]\n> 1 : Int\n> "
+            "> error[ORNA-REPL-INPUT-LIMIT]: Orna input exceeds the REPL limit\nhelp: split it into smaller submissions\n> 1 : Int\n> "
         );
     }
 
@@ -751,7 +862,7 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         let output = String::from_utf8(output).expect("UTF-8");
-        assert!(output.starts_with("> 2 : Int\n> error[ORNA-S021-TYPE]"));
+        assert!(output.starts_with("> 2 : Int\n> error[ORNA-S021-TYPE]: expression has the wrong type\nhelp: change the expression or its declared type so the value and requirement agree\n"));
         assert!(output.ends_with("> 2 : Int\n> "));
     }
 
@@ -763,7 +874,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-S021-TYPE]\n> {\"code\": \"ORNA-S021-TYPE\", \"message\": \"<redacted>\", \"redacted\": true, \"severity\": \"error\"} : Map\n> 42 : Int\n> null : Null\n> "
+            "> error[ORNA-S021-TYPE]: expression has the wrong type\nhelp: change the expression or its declared type so the value and requirement agree\n> {\"code\": \"ORNA-S021-TYPE\", \"message\": \"<redacted>\", \"redacted\": true, \"severity\": \"error\"} : Map\n> 42 : Int\n> null : Null\n> "
         );
     }
 
@@ -777,7 +888,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> > 2 : Int\n> error[ORNA-REPL-EFFECT]\n> 2 : Int\n> "
+            "> > 2 : Int\n> error[ORNA-REPL-EFFECT]: REPL preview cannot perform an effect\nhelp: evaluate a pure expression or invoke the operation through its admitted runtime entry point\n> 2 : Int\n> "
         );
     }
 
@@ -789,7 +900,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL recovers");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> 2 : Int\n> error[ORNA-REPL-INPUT-UTF8]\n> 2 : Int\n> "
+            "> 2 : Int\n> error[ORNA-REPL-INPUT-UTF8]: REPL input is not valid UTF-8\nhelp: re-enter the Orna source or command using valid UTF-8 text\n> 2 : Int\n> "
         );
     }
 
