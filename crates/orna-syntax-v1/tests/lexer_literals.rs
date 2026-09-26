@@ -1,4 +1,4 @@
-use orna_syntax_v1::{Expr, LiteralKind, TokenKind, lex, parse_expression};
+use orna_syntax_v1::{lex, parse_expression, Expr, LiteralKind, TokenKind};
 
 fn kinds(source: &str) -> Vec<TokenKind> {
     lex(source)
@@ -262,4 +262,19 @@ fn malformed_instant_offsets_are_one_full_span_diagnostic() {
         assert_eq!(error.span.start, 0, "{source}");
         assert_eq!(error.span.end, source.len(), "{source}");
     }
+}
+
+#[test]
+fn malformed_utf8_date_reports_character_boundary_span() {
+    let fixture = include_str!("fixtures/unicode_17_identifier.orna");
+    let source = format!("{fixture}\n2024-01-0é");
+    let start = fixture.len() + 1;
+    let errors = lex(&source).expect_err("a date containing a non-ASCII digit must be rejected");
+    let error = errors
+        .iter()
+        .find(|error| error.code == "ORNA-LEX-007" && error.span.start == start)
+        .expect("expected invalid-date diagnostic for the fixture suffix");
+    assert_eq!(error.span.end, source.len());
+    assert!(source.is_char_boundary(error.span.start));
+    assert!(source.is_char_boundary(error.span.end));
 }
