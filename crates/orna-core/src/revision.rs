@@ -4233,20 +4233,34 @@ mod module_namespace_tests {
         let duplicate = SourceUnitId::from_bytes([2; 16]);
 
         assert_eq!(
-            validate_source_units(&[
-                stored_unit(first, 0, "x.orna"),
-                stored_unit(duplicate, 1, "x/main.orna"),
-            ]),
+            StoredSourceRevision::new(
+                SourceBundleId::from_bytes([3; 16]),
+                SourceRevisionId::from_bytes([4; 16]),
+                None,
+                vec![
+                    stored_unit(first, 0, "x.orna"),
+                    stored_unit(duplicate, 1, "x/main.orna"),
+                ],
+                Sha256Digest::from_bytes([0; 32]),
+                Sha256Digest::from_bytes([0; 32]),
+            ),
             Err(RevisionInvariantError::DuplicateModuleNamespace {
                 namespace: "x".to_owned(),
                 first,
                 duplicate,
             })
         );
-        validate_source_units(&[
-            stored_unit(first, 0, "x.orna"),
-            stored_unit(duplicate, 1, "y/main.orna"),
-        ])
+        StoredSourceRevision::new(
+            SourceBundleId::from_bytes([5; 16]),
+            SourceRevisionId::from_bytes([6; 16]),
+            None,
+            vec![
+                stored_unit(first, 0, "x.orna"),
+                stored_unit(duplicate, 1, "y/main.orna"),
+            ],
+            Sha256Digest::from_bytes([0; 32]),
+            Sha256Digest::from_bytes([0; 32]),
+        )
         .unwrap();
     }
 }
