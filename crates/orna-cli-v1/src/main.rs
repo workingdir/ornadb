@@ -1087,10 +1087,198 @@ fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     Ok(())
 }
 
+fn osc8_terminal_supports(
+    term: Option<&str>,
+    terminal_program: Option<&str>,
+    terminal_program_version: Option<&str>,
+    vte_version: Option<&str>,
+    windows_terminal_session: Option<&str>,
+    inside_tmux: bool,
+) -> bool {
+    if inside_tmux {
+        return false;
+    }
+
+    let known_term = matches!(
+        term,
+        Some(
+            "xterm-kitty"
+                | "xterm-ghostty"
+                | "foot"
+                | "foot-extra"
+                | "wezterm"
+                | "wezterm-256color"
+                | "alacritty"
+                | "contour"
+        )
+    );
+    let known_program = matches!(terminal_program, Some("WezTerm" | "ghostty"));
+    let iterm_supports_osc8 = terminal_program == Some("iTerm.app")
+        && terminal_program_version.is_some_and(|version| version_at_least(version, (3, 1, 0)));
+    let alacritty_supports_osc8 = terminal_program == Some("Alacritty")
+        && terminal_program_version.is_some_and(|version| version_at_least(version, (0, 13, 0)));
+    let vscode_supports_osc8 = terminal_program == Some("vscode")
+        && terminal_program_version.is_some_and(|version| version_at_least(version, (1, 72, 0)));
+    let vte_supports_osc8 = vte_version
+        .and_then(|version| version.parse::<u32>().ok())
+        .is_some_and(|version| version >= 5000);
+    let windows_terminal_supports_osc8 =
+        windows_terminal_session.is_some_and(|session| !session.is_empty());
+
+    known_term
+        || known_program
+        || iterm_supports_osc8
+        || alacritty_supports_osc8
+        || vscode_supports_osc8
+        || vte_supports_osc8
+        || windows_terminal_supports_osc8
+}
+
+fn version_at_least(version: &str, minimum: (u32, u32, u32)) -> bool {
+    let mut components = version.split('.');
+    let Some(major) = components.next().and_then(|part| part.parse::<u32>().ok()) else {
+        return false;
+    };
+    let Some(minor) = components.next().and_then(|part| part.parse::<u32>().ok()) else {
+        return false;
+    };
+    let patch = match components.next() {
+        Some(part) => match part.parse::<u32>() {
+            Ok(patch) => patch,
+            Err(_) => return false,
+        },
+        None => 0,
+    };
+    (major, minor, patch) >= minimum
+}
+
+fn terminal_supports_osc8() -> bool {
+    let term = std::env::var("TERM").ok();
+    let terminal_program = std::env::var("TERM_PROGRAM").ok();
+    let terminal_program_version = std::env::var("TERM_PROGRAM_VERSION").ok();
+    let vte_version = std::env::var("VTE_VERSION").ok();
+    let windows_terminal_session = std::env::var("WT_SESSION").ok();
+    let inside_tmux = std::env::var_os("TMUX").is_some();
+    osc8_terminal_supports(
+        term.as_deref(),
+        terminal_program.as_deref(),
+        terminal_program_version.as_deref(),
+        vte_version.as_deref(),
+        windows_terminal_session.as_deref(),
+        inside_tmux,
+    )
+}
+
+fn file_url_for_status_path(root: &std::path::Path, display_token: &[u8]) -> Option<String> {
+    if !root.is_absolute()
+        || display_token.is_empty()
+        || display_token.first() == Some(&b'"')
+        || display_token.iter().any(u8::is_ascii_control)
+    {
+        return None;
+    }
+    let path_text = std::str::from_utf8(display_token).ok()?;
+    if path_text.chars().any(char::is_control) {
+        return None;
+    }
+
+    let relative_path = std::path::Path::new(path_text);
+    if relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let absolute_path = root.join(relative_path);
+    let absolute_path = absolute_path.to_str()?;
+    let absolute_path = if cfg!(windows) {
+        absolute_path.replace('\\', "/")
+    } else {
+        absolute_path.to_owned()
+    };
+    let mut url = String::with_capacity(7 + absolute_path.len().saturating_mul(3));
+    if cfg!(windows) {
+        url.push_str("file:///");
+    } else {
+        url.push_str("file://");
+    }
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for byte in absolute_path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            url.push(char::from(byte));
+        } else {
+            url.push('%');
+            url.push(char::from(HEX[usize::from(byte >> 4)]));
+            url.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    Some(url)
+}
+
+fn write_status_path<W: io::Write>(
+    writer: &mut W,
+    color: AnsiColor,
+    path: &[u8],
+    color_enabled: bool,
+    link_root: Option<&std::path::Path>,
+) -> io::Result<()> {
+    let Some(url) = link_root.and_then(|root| file_url_for_status_path(root, path)) else {
+        return write_styled(writer, color, path, color_enabled);
+    };
+    writer.write_all(b"\x1b]8;;")?;
+    writer.write_all(url.as_bytes())?;
+    writer.write_all(b"\x1b\\")?;
+    write_styled(writer, color, path, color_enabled)?;
+    writer.write_all(b"\x1b]8;;\x1b\\")
+}
+
+fn write_human_status_path<W: io::Write>(
+    writer: &mut W,
+    color: AnsiColor,
+    action: &[u8],
+    path: &[u8],
+    color_enabled: bool,
+    link_root: Option<&std::path::Path>,
+) -> io::Result<()> {
+    if matches!(action, b"renamed" | b"copied") {
+        let separator = b" -> ";
+        let Some(separator_start) = path
+            .windows(separator.len())
+            .position(|window| window == separator)
+        else {
+            return write_styled(writer, color, path, color_enabled);
+        };
+        if path[separator_start + separator.len()..]
+            .windows(separator.len())
+            .any(|window| window == separator)
+        {
+            return write_styled(writer, color, path, color_enabled);
+        }
+        write_status_path(
+            writer,
+            color,
+            &path[..separator_start],
+            color_enabled,
+            link_root,
+        )?;
+        writer.write_all(separator)?;
+        return write_status_path(
+            writer,
+            color,
+            &path[separator_start + separator.len()..],
+            color_enabled,
+            link_root,
+        );
+    }
+    write_status_path(writer, color, path, color_enabled, link_root)
+}
+
 fn write_human_status<W: io::Write>(
     output: &[u8],
     writer: &mut W,
     color_enabled: bool,
+    link_root: Option<&std::path::Path>,
 ) -> io::Result<()> {
     for line in output.split_inclusive(|byte| *byte == b'\n') {
         let has_newline = line.last() == Some(&b'\n');
@@ -1129,15 +1317,35 @@ fn write_human_status<W: io::Write>(
             write_styled(writer, color, action, color_enabled)?;
             writer.write_all(b":")?;
             writer.write_all(&rest[..path_start])?;
-            write_styled(
+            write_human_status_path(
                 writer,
                 AnsiColor::Cyan,
+                action,
                 &rest[path_start..],
                 color_enabled,
+                link_root,
             )?;
         } else if content.first() == Some(&b'\t') && content.len() > 1 {
+            let rest = &content[1..];
+            let path_start = rest
+                .iter()
+                .position(|byte| !matches!(*byte, b' ' | b'\t'))
+                .unwrap_or(rest.len());
             writer.write_all(b"\t")?;
-            write_styled(writer, AnsiColor::Cyan, &content[1..], color_enabled)?;
+            writer.write_all(&rest[..path_start])?;
+            let path = &rest[path_start..];
+            if path.first() == Some(&b'(') {
+                write_styled(writer, AnsiColor::Cyan, path, color_enabled)?;
+            } else {
+                write_human_status_path(
+                    writer,
+                    AnsiColor::Cyan,
+                    b"",
+                    path,
+                    color_enabled,
+                    link_root,
+                )?;
+            }
         } else {
             writer.write_all(content)?;
         }
@@ -1222,14 +1430,22 @@ fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diag
             "check that Git can read the local worktree, then retry `status`",
         ));
     }
-    let mut stdout = io::stdout().lock();
-    write_human_status(&output.stdout, &mut stdout, color_enabled).map_err(|_| {
-        Diagnostic::target(
-            "E2100",
-            "local Git worktree status could not be written",
-            "retry `status`",
-        )
-    })?;
+    let stdout = io::stdout();
+    let link_root = if stdout.is_terminal() && terminal_supports_osc8() {
+        repository.worktree().canonicalize().ok()
+    } else {
+        None
+    };
+    let mut stdout = stdout.lock();
+    write_human_status(&output.stdout, &mut stdout, color_enabled, link_root.as_deref()).map_err(
+        |_| {
+            Diagnostic::target(
+                "E2100",
+                "local Git worktree status could not be written",
+                "retry `status`",
+            )
+        },
+    )?;
     Ok(())
 }
 
@@ -2464,6 +2680,130 @@ mod tests {
                 "frozen diagnostic {code} must have user guidance"
             );
         }
+    }
+
+    #[test]
+    fn human_status_links_safe_paths_only_for_supported_terminal_capabilities() {
+        const FIXTURE: &str = include_str!("../tests/fixtures/function-expression.orna");
+        let directory = tempfile::tempdir().expect("status repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git init")
+                .success()
+        );
+        for name in ["function-expression.orna", "function expression#?.orna"] {
+            std::fs::write(directory.path().join(name), FIXTURE).expect("fixture source");
+        }
+
+        let human_output = std::process::Command::new("git")
+            .args(["-c", "color.status=false", "status", "--untracked-files=all"])
+            .current_dir(directory.path())
+            .output()
+            .expect("human Git status");
+        assert!(human_output.status.success());
+        let root = directory.path().canonicalize().expect("absolute repository root");
+        let mut without_links = Vec::new();
+        write_human_status(&human_output.stdout, &mut without_links, true, None)
+            .expect("unlinked human status");
+        let mut linked = Vec::new();
+        write_human_status(
+            &human_output.stdout,
+            &mut linked,
+            true,
+            Some(&root),
+        )
+        .expect("linked human status");
+
+        let linked_text = std::str::from_utf8(&linked).expect("UTF-8 human status");
+        for (name, encoded_suffix) in [
+            ("function-expression.orna", "/function-expression.orna"),
+            ("function expression#?.orna", "/function%20expression%23%3F.orna"),
+        ] {
+            let url = file_url_for_status_path(&root, name.as_bytes()).expect("safe file URL");
+            assert!(url.starts_with("file:///"));
+            assert!(url.ends_with(encoded_suffix), "{url}");
+            assert!(
+                linked_text.contains(&format!("\x1b]8;;{url}\x1b\\")),
+                "missing OSC 8 URL for {name:?}"
+            );
+            assert!(linked_text.contains(name), "missing visible path {name:?}");
+        }
+        assert_eq!(visible_without_osc8(&linked), without_links);
+        assert!(file_url_for_status_path(&root, b"\"quoted path\"").is_none());
+        assert!(file_url_for_status_path(&root, b"control\npath").is_none());
+        assert!(file_url_for_status_path(&root, b"../outside").is_none());
+        assert!(file_url_for_status_path(&root, &[0xff]).is_none());
+
+        assert!(osc8_terminal_supports(
+            Some("xterm-kitty"),
+            None,
+            None,
+            None,
+            None,
+            false,
+        ));
+        assert!(!osc8_terminal_supports(
+            Some("xterm-256color"),
+            None,
+            None,
+            None,
+            None,
+            false,
+        ));
+        assert!(!osc8_terminal_supports(
+            Some("xterm-kitty"),
+            None,
+            None,
+            None,
+            None,
+            true,
+        ));
+        assert!(osc8_terminal_supports(
+            None,
+            Some("iTerm.app"),
+            Some("3.1.0"),
+            None,
+            None,
+            false,
+        ));
+        assert!(!osc8_terminal_supports(
+            None,
+            Some("iTerm.app"),
+            Some("3.0.9"),
+            None,
+            None,
+            false,
+        ));
+
+        let short_output = std::process::Command::new("git")
+            .args(["status", "--short", "--untracked-files=all"])
+            .current_dir(directory.path())
+            .output()
+            .expect("short Git status");
+        assert!(short_output.status.success());
+        let mut rendered_short = Vec::new();
+        write_short_status(&short_output.stdout, &mut rendered_short, false)
+            .expect("rendered short status");
+        assert_eq!(rendered_short, short_output.stdout);
+    }
+
+    fn visible_without_osc8(output: &[u8]) -> Vec<u8> {
+        let mut visible = Vec::with_capacity(output.len());
+        let mut remaining = output;
+        while let Some(start) = remaining.windows(4).position(|window| window == b"\x1b]8;") {
+            visible.extend_from_slice(&remaining[..start]);
+            let link = &remaining[start..];
+            let end = link
+                .windows(2)
+                .position(|window| window == b"\x1b\\")
+                .expect("OSC 8 terminator");
+            remaining = &link[end + 2..];
+        }
+        visible.extend_from_slice(remaining);
+        visible
     }
 
     #[test]
