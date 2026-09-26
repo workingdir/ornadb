@@ -454,7 +454,7 @@ impl SessionBoundary {
         let outcome = match current.as_ref() {
             None => AttachOutcome::Attached,
             Some(Attachment::Active(existing)) => AttachOutcome::Replaced(*existing),
-            Some(Attachment::Disconnected(lease)) if now <= lease.expires_at => {
+            Some(Attachment::Disconnected(lease)) if now < lease.expires_at => {
                 AttachOutcome::Reconnected
             }
             Some(Attachment::Disconnected(_)) => return Err(BoundaryError::Expired),
@@ -756,7 +756,7 @@ mod tests {
             8
         );
         assert_eq!(
-            boundary.attach(session, &app, &credential, attachment(3), 8),
+            boundary.attach(session, &app, &credential, attachment(3), 7),
             Ok(AttachOutcome::Reconnected)
         );
     }
@@ -799,11 +799,11 @@ mod tests {
         boundary.disconnect(session, attachment(1), 2).unwrap();
 
         assert_eq!(
-            boundary.attach(session, &app, &credential, attachment(2), 8),
+            boundary.attach(session, &app, &credential, attachment(2), 7),
             Err(BoundaryError::Expired)
         );
         assert_eq!(
-            boundary.attach(session, &app, &credential, attachment(2), 8),
+            boundary.attach(session, &app, &credential, attachment(2), 7),
             Err(BoundaryError::Expired)
         );
     }
