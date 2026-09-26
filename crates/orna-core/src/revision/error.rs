@@ -27,6 +27,12 @@ pub enum RevisionInvariantError {
         first: SourceUnitId,
         duplicate: SourceUnitId,
     },
+    /// A source revision contains two units defining the same module namespace.
+    DuplicateModuleNamespace {
+        namespace: String,
+        first: SourceUnitId,
+        duplicate: SourceUnitId,
+    },
     /// A source revision names itself as its parent.
     SourceRevisionSelfParent { revision: SourceRevisionId },
     /// A standard-library source revision has a parent.
@@ -417,6 +423,14 @@ impl fmt::Display for RevisionInvariantError {
             DuplicateLogicalPath { .. } => {
                 formatter.write_str("duplicate stored source logical path")
             }
+            DuplicateModuleNamespace {
+                namespace,
+                first,
+                duplicate,
+            } => write!(
+                formatter,
+                "stored source units {first:?} and {duplicate:?} define module namespace {namespace:?}"
+            ),
             SourceRevisionSelfParent { .. } => {
                 formatter.write_str("source revision is its own parent")
             }
