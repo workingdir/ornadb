@@ -582,7 +582,7 @@ fn semantic_project_adapter_admits_sys_current_snapshot_as_snapshot_ref_observat
 
 #[test]
 fn semantic_project_adapter_rejects_unsupported_sys_current_member_at_typecheck() {
-    let source = "pub fn legacy() = sys.current.legacy_member;";
+    let source = include_str!("fixtures/sys-current-unsupported-member.orna");
     let project = snapshot_project(source);
     let mut adapter = SemanticAdapter::default();
 
