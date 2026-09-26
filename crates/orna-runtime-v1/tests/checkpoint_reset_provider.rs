@@ -12,10 +12,13 @@ use std::{
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     CheckpointKey, CheckpointResetAudit, CheckpointResetProvider, CheckpointResetRequest,
-    Component, ConsumerIdentity, RuntimeError, RuntimeIdentity, RuntimeState,
+    Component, ConsumerIdentity, FailureStatus, RuntimeError, RuntimeIdentity, RuntimeState,
     StreamAdministrationOutcome,
 };
-use orna_stream_v1::{CheckpointPrecondition, Position};
+use orna_stream_v1::{
+    AsyncCheckpointBackend, CheckpointPrecondition, CommitIntent, CommitResult, DeliveryIdentity,
+    DiagnosticClass, DiagnosticCode, LeasePurpose, Position, SafeDiagnostic, StreamFailurePayload,
+};
 use tempfile::{Builder, TempDir};
 
 #[derive(Clone)]
@@ -154,7 +157,6 @@ async fn unsupported_target_and_key_format_mismatch_fail_before_mutation() {
     assert_eq!(audits[1].function, "sys.admin.reset_checkpoint");
     assert!(audits[1].terminal_outcome.contains("not replayable"));
 
-
     let mut mismatched_key = key.clone();
     mismatched_key.position_format = Component::new("position-format-v2").unwrap();
     let mismatch_provider = provider(mismatched_key, true);
@@ -281,6 +283,120 @@ async fn stale_version_and_position_map_to_conflict_without_mutation() {
 }
 
 #[tokio::test]
+async fn blocking_failure_rejects_provider_supported_reset_without_mutation() {
+    let (_directory, repository) = repository();
+    let state = RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [1; 16],
+            repository_id: [2; 16],
+        },
+        [3; 32],
+    )
+    .await
+    .expect("open runtime");
+    let writer = state.acquire_lease([4; 16]).await.expect("acquire writer");
+    let key = CheckpointKey {
+        consumer: ConsumerIdentity {
+            principal: Component::new("principal").unwrap(),
+            root: Component::new("root").unwrap(),
+            function: Component::new("consume").unwrap(),
+            binding: Component::new("binding").unwrap(),
+        },
+        source_format: Component::new("source-format").unwrap(),
+        source: Component::new("source").unwrap(),
+        partition_format: Component::new("partition-format").unwrap(),
+        partition: Some(Component::new("partition").unwrap()),
+        position_format: Component::new("position-format-v1").unwrap(),
+    };
+    let before = state
+        .stream_backend(writer)
+        .checkpoint_async(&key)
+        .await
+        .unwrap();
+
+    let delivery = DeliveryIdentity {
+        consumer: key.consumer.clone(),
+        source_format: key.source_format.clone(),
+        source: key.source.clone(),
+        partition_format: key.partition_format.clone(),
+        partition: key.partition.clone(),
+        position_format: key.position_format.clone(),
+        position: position("failed-delivery"),
+        successor: position("after-failure"),
+    };
+    let mut stream = state.stream_backend(writer);
+    let lease = match stream
+        .apply_async(CommitIntent::Acquire {
+            delivery: delivery.clone(),
+            expected: expected_initial(),
+            purpose: LeasePurpose::Deliver,
+        })
+        .await
+        .unwrap()
+    {
+        CommitResult::Acquired { lease } => lease,
+        other => panic!("expected delivery lease, got {other:?}"),
+    };
+    let failure = match stream
+        .fail_async(
+            lease,
+            SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Permanent,
+            },
+            StreamFailurePayload::Plaintext(vec![1, 2, 3]),
+        )
+        .await
+        .unwrap()
+    {
+        CommitResult::Failed { failure } => failure,
+        other => panic!("expected blocking failure, got {other:?}"),
+    };
+    assert_eq!(failure.status, FailureStatus::Failed);
+    assert_eq!(
+        state.pause_stream(writer, key.clone()).await.unwrap(),
+        StreamAdministrationOutcome::Paused { changed: true }
+    );
+
+    let provider = provider(key.clone(), true);
+    let rejected = state
+        .reset_checkpoint_with_provider(
+            writer,
+            CheckpointResetRequest {
+                key: key.clone(),
+                expected: CheckpointPrecondition {
+                    version: before.version,
+                    committed: before.committed.clone(),
+                },
+                to: position("provider-supported-target"),
+                reason: "reset must not discard blocking failure".into(),
+            },
+            &provider,
+        )
+        .await;
+
+    assert!(
+        rejected.is_err(),
+        "reset must reject a current blocking delivery failure"
+    );
+
+    assert_eq!(provider.validations.load(Ordering::Relaxed), 1);
+    assert_eq!(state.stream_checkpoint(&key).await.unwrap(), before);
+    assert!(
+        state
+            .checkpoint_reset_audits(&key)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let invocations = state.admin_invocation_audits().await.unwrap();
+    let reset = invocations.last().unwrap();
+    assert_eq!(reset.function, "sys.admin.reset_checkpoint");
+    assert!(!reset.succeeded);
+}
+
+#[tokio::test]
 async fn generic_admin_audit_is_redacted_atomic_and_reopenable() {
     let (_directory, state, writer, key) = fixture().await;
     assert_eq!(
@@ -363,5 +479,4 @@ async fn generic_admin_audit_is_redacted_atomic_and_reopenable() {
     assert!(audits[3].terminal_outcome.starts_with("failure:"));
     assert!(audits[3].redacted);
     assert!(!audits[3].safe_arguments.contains("secret"));
-
 }
