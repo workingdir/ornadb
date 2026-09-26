@@ -475,7 +475,7 @@ fn resolve_project(source: &str) -> ProjectUnit {
 
 #[test]
 fn semantic_project_adapter_admits_sys_resolve_string_as_object_ref_read() {
-    let source = r#"pub fn lookup() = sys.resolve("main.main");"#;
+    let source = include_str!("fixtures/sys-resolve-string.orna");
     let project = resolve_project(source);
     let mut adapter = SemanticAdapter::default();
 
