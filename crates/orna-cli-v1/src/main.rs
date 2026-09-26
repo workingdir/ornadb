@@ -20,7 +20,9 @@ use orna_conformance_v1::{
 use orna_application_v1::ApplicationAuthority;
 use orna_evaluator_v1::{Environment, Limits};
 use orna_foundation_v1::{OvbRaw, Value};
-use orna_runtime_v1::{RunObservationStatus, RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::{
+    RunObservationStatus, RuntimeIdentity, RuntimeState, StreamObservationStatus,
+};
 
 static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -985,7 +987,30 @@ fn run_status_human(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     Ok(())
 }
 
+fn short_status_runtime_error() -> Diagnostic {
+    Diagnostic::target(
+        "E2100",
+        "runtime CWD status could not be read",
+        "check that Orna can read the local runtime state, then retry `status --short`",
+    )
+}
+
+fn short_status_output_error() -> Diagnostic {
+    Diagnostic::target(
+        "E2100",
+        "local Git worktree status could not be written",
+        "retry `status --short`",
+    )
+}
+
 fn run_status_short(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+    run_status_short_with_writer(endpoint, &mut io::stdout())
+}
+
+fn run_status_short_with_writer<W: io::Write>(
+    endpoint: &Endpoint,
+    writer: &mut W,
+) -> Result<(), Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
@@ -1060,14 +1085,98 @@ fn run_status_short(endpoint: &Endpoint) -> Result<(), Diagnostic> {
             "check that Git can read the local worktree, then retry `status --short`",
         ));
     }
-    io::stdout().write_all(&output.stdout).map_err(|_| {
-        Diagnostic::target(
-            "E2100",
-            "local Git worktree status could not be written",
-            "retry `status --short`",
-        )
-    })?;
+
+    let metadata = orna_repository_v1::inspect_metadata(&repository)
+        .map_err(|_| short_status_runtime_error())?;
+    let runtime_observations = if metadata.is_some() {
+        let (identity, initial_digest) =
+            runtime_identity(&repository).map_err(|_| short_status_runtime_error())?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| short_status_runtime_error())?;
+        Some(runtime.block_on(async {
+            let state = RuntimeState::open(&repository, identity, initial_digest)
+                .await
+                .map_err(|_| short_status_runtime_error())?;
+            let runs = state
+                .run_observations()
+                .await
+                .map_err(|_| short_status_runtime_error())?;
+            let streams = state
+                .stream_observations()
+                .await
+                .map_err(|_| short_status_runtime_error())?;
+            Ok::<_, Diagnostic>((runs, streams))
+        })?)
+    } else {
+        None
+    };
+
+    writer
+        .write_all(&output.stdout)
+        .map_err(|_| short_status_output_error())?;
+    if let Some((mut runs, mut streams)) = runtime_observations {
+        runs.sort_by(|left, right| {
+            short_run_status_code(left.status)
+                .cmp(short_run_status_code(right.status))
+                .then_with(|| left.function.cmp(&right.function))
+        });
+        for run in runs {
+            writeln!(
+                writer,
+                "{} {}",
+                short_run_status_code(run.status),
+                run.function
+            )
+            .map_err(|_| short_status_output_error())?;
+        }
+
+        streams.sort_by(|left, right| {
+            short_stream_status_code(left.status)
+                .cmp(short_stream_status_code(right.status))
+                .then_with(|| left.producer.cmp(&right.producer))
+                .then_with(|| left.consumer.cmp(&right.consumer))
+        });
+        for stream in streams {
+            write!(
+                writer,
+                "{} {}",
+                short_stream_status_code(stream.status),
+                stream.producer
+            )
+            .map_err(|_| short_status_output_error())?;
+            if let Some(consumer) = stream.consumer.as_deref() {
+                write!(writer, " {consumer}").map_err(|_| short_status_output_error())?;
+            }
+            writeln!(writer).map_err(|_| short_status_output_error())?;
+        }
+    }
     Ok(())
+}
+
+const fn short_run_status_code(status: RunObservationStatus) -> &'static str {
+    match status {
+        RunObservationStatus::Starting => "RS",
+        RunObservationStatus::Running => "RR",
+        RunObservationStatus::Completed => "RC",
+        RunObservationStatus::Failed => "RF",
+        RunObservationStatus::Cancelled => "RX",
+        RunObservationStatus::Orphaned => "RO",
+    }
+}
+
+const fn short_stream_status_code(status: StreamObservationStatus) -> &'static str {
+    match status {
+        StreamObservationStatus::Starting => "SS",
+        StreamObservationStatus::Running => "SR",
+        StreamObservationStatus::Paused => "SP",
+        StreamObservationStatus::BackingOff => "SB",
+        StreamObservationStatus::Completed => "SC",
+        StreamObservationStatus::Failed => "SF",
+        StreamObservationStatus::Cancelled => "SX",
+        StreamObservationStatus::Orphaned => "SO",
+    }
 }
 
 fn load_project(endpoint: &Endpoint) -> Result<orna_project_v1::LoadedProject, Diagnostic> {
@@ -2077,6 +2186,76 @@ mod tests {
             }),
             Ok(())
         );
+    }
+
+    #[test]
+    fn short_status_preserves_git_records_and_adds_stable_runtime_codes() {
+        let directory = tempfile::tempdir().expect("status repository");
+        let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .map(|ancestor| ancestor.join("reference/Orna-1.0.0/examples/reference"))
+            .find(|path| path.is_dir())
+            .expect("reference project sources");
+        for name in [
+            "main.orna",
+            "library.orna",
+            "warehouse.orna",
+            "sensors.orna",
+            "values.orna",
+        ] {
+            std::fs::copy(reference.join(name), directory.path().join(name))
+                .expect("copy real Orna project source");
+        }
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git init")
+                .success()
+        );
+        orna_repository_v1::initialize_repository(directory.path())
+            .expect("initialize Orna runtime");
+        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
+        run_project_invocation(&endpoint, "main.seed").expect("run real project function");
+
+        for (status, code) in [
+            (RunObservationStatus::Starting, "RS"),
+            (RunObservationStatus::Running, "RR"),
+            (RunObservationStatus::Completed, "RC"),
+            (RunObservationStatus::Failed, "RF"),
+            (RunObservationStatus::Cancelled, "RX"),
+            (RunObservationStatus::Orphaned, "RO"),
+        ] {
+            assert_eq!(short_run_status_code(status), code);
+        }
+        for (status, code) in [
+            (StreamObservationStatus::Starting, "SS"),
+            (StreamObservationStatus::Running, "SR"),
+            (StreamObservationStatus::Paused, "SP"),
+            (StreamObservationStatus::BackingOff, "SB"),
+            (StreamObservationStatus::Completed, "SC"),
+            (StreamObservationStatus::Failed, "SF"),
+            (StreamObservationStatus::Cancelled, "SX"),
+            (StreamObservationStatus::Orphaned, "SO"),
+        ] {
+            assert_eq!(short_stream_status_code(status), code);
+        }
+
+        let mut expected = std::process::Command::new("git")
+            .args(["status", "--short"])
+            .current_dir(directory.path())
+            .output()
+            .expect("Git compact status");
+        assert!(expected.status.success(), "Git status succeeds");
+        expected.stdout.extend_from_slice(b"RC main.seed\n");
+        let mut output = Vec::new();
+        run_status_short_with_writer(&endpoint, &mut output).expect("short status");
+        assert_eq!(output, expected.stdout);
+
+        let mut repeated = Vec::new();
+        run_status_short_with_writer(&endpoint, &mut repeated).expect("repeat short status");
+        assert_eq!(repeated, output);
     }
 
     #[test]
