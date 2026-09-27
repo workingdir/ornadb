@@ -5328,6 +5328,9 @@ impl RuntimeState {
         self.require_owner(&self.connection, writer)
             .await
             .map_err(StreamStepError::Runtime)?;
+        ensure_stream_position_format_compatible(&self.connection, key)
+            .await
+            .map_err(StreamStepError::Runtime)?;
         let checkpoint = self
             .stream_backend(writer)
             .checkpoint_async(key)
@@ -5856,6 +5859,9 @@ impl RuntimeState {
                 RuntimeError::StreamIdentityMismatch,
             ));
         }
+        ensure_stream_position_format_compatible(&self.connection, key)
+            .await
+            .map_err(StreamStepError::Runtime)?;
         let mut checkpoint = self
             .stream_backend(writer)
             .checkpoint_async(key)
@@ -11964,6 +11970,49 @@ async fn ensure_stream_checkpoint(
         )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
+}
+
+/// Position formats are part of the checkpoint encoding, while the natural
+/// stream identity is consumer/source/partition. Reusing that stream under a
+/// different position format would otherwise create a second empty row and
+/// silently restart provider progress. Require an explicit migration before
+/// the runner can poll such a provider.
+async fn ensure_stream_position_format_compatible(
+    connection: &Connection,
+    key: &CheckpointKey,
+) -> Result<(), RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT 1 FROM stream_checkpoint
+             WHERE consumer_principal = ?1 AND consumer_root = ?2
+               AND consumer_function = ?3 AND consumer_binding = ?4
+               AND source_format = ?5 AND source = ?6
+               AND partition_format = ?7 AND partition IS ?8
+               AND position_format != ?9
+             LIMIT 1",
+            params![
+                key.consumer.principal.as_str().to_owned(),
+                key.consumer.root.as_str().to_owned(),
+                key.consumer.function.as_str().to_owned(),
+                key.consumer.binding.as_str().to_owned(),
+                key.source_format.as_str().to_owned(),
+                key.source.as_str().to_owned(),
+                key.partition_format.as_str().to_owned(),
+                key.partition.as_ref().map(|value| value.as_str().to_owned()),
+                key.position_format.as_str().to_owned(),
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some()
+    {
+        return Err(RuntimeError::StreamIdentityMismatch);
+    }
     Ok(())
 }
 
@@ -18656,6 +18705,52 @@ mod tests {
         gate.release_admission();
         assert!(!gate.acquire_admission());
         assert!(!gate.cancel());
+    }
+
+    #[tokio::test]
+    async fn stream_runner_rejects_position_format_change_before_provider_poll() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let original = stream_delivery("format-guard", "format-guard-next").checkpoint_key();
+        assert!(matches!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Pause {
+                    key: original.clone(),
+                })
+                .await
+                .unwrap(),
+            CommitResult::StreamStatusChanged { changed: true, .. }
+        ));
+        let changed = CheckpointKey {
+            position_format: Component::new("position-format-v2").unwrap(),
+            ..original
+        };
+        let mut source = TestSource {
+            key: changed.clone(),
+            item: None,
+            polls: 0,
+        };
+        let mut handler = CommitHandler { calls: 0 };
+
+        let result = state
+            .run_stream_once(writer, &changed, &mut source, &mut handler)
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StreamStepError::Runtime(RuntimeError::StreamIdentityMismatch))
+        );
+        assert_eq!(source.polls, 0);
+        assert_eq!(handler.calls, 0);
+        let mut rows = state
+            .connection
+            .query("SELECT COUNT(*) FROM stream_checkpoint", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 1);
     }
 
     #[tokio::test]
