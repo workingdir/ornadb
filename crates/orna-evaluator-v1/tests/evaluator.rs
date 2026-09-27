@@ -1091,9 +1091,7 @@ fn named_collection_callback_preserves_public_nominal_selection() {
         None,
         vec![nominal_field("value", true, None)],
     );
-    let functions = functions_from_source(
-        "fn select(value: Int) = value.value; fn run() = std.collection.map([Thing { value: 7 }], select);",
-    );
+    let functions = functions_from_source(include_str!("fixtures/nominal_map_callback.orna"));
 
     let result = invoke_named_with_nominals(
         "run",
