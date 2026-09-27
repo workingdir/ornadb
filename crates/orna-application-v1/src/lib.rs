@@ -880,8 +880,9 @@ mod tests {
     fn source_admission_reaches_real_evaluator() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let source = include_str!("../tests/fixtures/source-admission-main.orna");
         let admitted = authority
-            .admit_module("main.orna", "pub fn main(): Int = 41;", "main")
+            .admit_module("main.orna", source, "main")
             .expect("source should be admitted");
         let result = authority
             .evaluate(&admitted, &Environment::new())
@@ -901,7 +902,7 @@ mod tests {
         let request = [8; 16];
         let fingerprint = [9; 32];
         let message = Message::Eval {
-            source: "pub fn main(): Int = 41;".to_owned(),
+            source: include_str!("../tests/fixtures/source-admission-main.orna").to_owned(),
             database: orna_protocol_v1::DatabaseContext {
                 database: [1; 16],
                 snapshot: None,
@@ -1024,7 +1025,7 @@ mod tests {
         )
         .expect("admitted catalogue should initialize a session");
         session
-            .submit("let key: Str = \"person-1\";")
+            .submit(include_str!("../tests/fixtures/remote-repl-contact-key.orna"))
             .expect("session binding should be retained");
         session
             .submit(include_str!(
