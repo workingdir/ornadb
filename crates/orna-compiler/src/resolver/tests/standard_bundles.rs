@@ -2741,8 +2741,8 @@ fn rejects_every_ui_unit_content_variation_closed() {
     );
 }
 
-const STANDARD_V5_JSON_SOURCE: &str = include_str!("../../../../../stdlib/std/json.orna");
-const STANDARD_V6_ACTION_SOURCE: &str = include_str!("../../../../../stdlib/std/action.orna");
+const STANDARD_V5_JSON_SOURCE: &str = include_str!("../../../tests/fixtures/standard/json.orna");
+const STANDARD_V6_ACTION_SOURCE: &str = include_str!("../../../tests/fixtures/standard/action.orna");
 
 fn standard_v5_catalogue() -> CatalogueSnapshot {
     let base = standard_v4_catalogue(true);
