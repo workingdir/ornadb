@@ -22,16 +22,6 @@ fn fixture_source(source: &str) -> SourceUnit {
     }
 }
 
-fn source_with_table_assertion(assertion: &str, parent_body: &str) -> SourceUnit {
-    SourceUnit {
-        fixture_id: "txn-source".into(),
-        source_id: "txn-source.orna".into(),
-        parse_as: "module_unit".into(),
-        source: format!(
-            "pub table Note(id: Int) {{ text: Str, assert {assertion}; }} fn parent() {{ {parent_body} }}"
-        ),
-    }
-}
 fn decimal_body_table_assertion_source(assertion: &str, parent_body: &str) -> SourceUnit {
     SourceUnit {
         fixture_id: "txn-decimal-table-assertion".into(),
@@ -699,10 +689,9 @@ fn parsed_rekey_collision_rolls_back_all_activation_writes() {
 #[test]
 fn table_every_assertion_observes_all_candidate_rows_before_publication() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source_with_table_assertion(
-        r#"every(note => note.text != "")"#,
-        r#"Note.insert({ id: 7, text: "valid" }); Note.insert({ id: 8, text: "" });"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-every-rejects-empty.orna"
+    )));
 
     assert!(matches!(
         outcome,
@@ -715,10 +704,9 @@ fn table_every_assertion_observes_all_candidate_rows_before_publication() {
 #[test]
 fn table_every_assertion_permits_atomic_publication() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source_with_table_assertion(
-        r#"every(note => note.text != "")"#,
-        r#"Note.insert({ id: 7, text: "first" }); Note.insert({ id: 8, text: "second" });"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-every-allows-rows.orna"
+    )));
 
     assert!(matches!(outcome, StageOutcome::Passed));
     assert!(
@@ -736,10 +724,9 @@ fn table_every_assertion_permits_atomic_publication() {
 #[test]
 fn table_every_assertion_evaluation_failure_rolls_back_the_activation() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source_with_table_assertion(
-        r#"every(note => note.text[1] == "x")"#,
-        r#"Note.insert({ id: 7, text: "a" }); Note.insert({ id: 8, text: "" });"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-every-evaluation-failure.orna"
+    )));
 
     assert!(matches!(outcome, StageOutcome::Failed(_)));
     assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
@@ -749,10 +736,9 @@ fn table_every_assertion_evaluation_failure_rolls_back_the_activation() {
 #[test]
 fn table_all_unique_assertion_rejects_duplicate_candidate_projections() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source_with_table_assertion(
-        "all_unique(note => note.text)",
-        r#"Note.insert({ id: 7, text: "duplicate" }); Note.insert({ id: 8, text: "duplicate" });"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-rejects-duplicates.orna"
+    )));
 
     assert!(matches!(
         outcome,
@@ -765,10 +751,9 @@ fn table_all_unique_assertion_rejects_duplicate_candidate_projections() {
 #[test]
 fn table_all_unique_assertion_permits_atomic_publication() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source_with_table_assertion(
-        "all_unique(note => note.text)",
-        r#"Note.insert({ id: 7, text: "first" }); Note.insert({ id: 8, text: "second" });"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-allows-rows.orna"
+    )));
 
     assert!(matches!(outcome, StageOutcome::Passed));
     assert!(
