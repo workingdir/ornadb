@@ -1808,7 +1808,7 @@ fn invoke_named_remains_effect_free_for_non_pure_field_calls() {
 
 #[test]
 fn source_calls_bind_positional_named_and_nested_defaults() {
-    let source = "fn twice(value: Int) = value + value; fn add(value: Int, extra = twice(3)) = value + extra;";
+    let source = include_str!("fixtures/source_calls_defaults.orna");
     for expression in [
         "add(10)",
         "add(value: 10)",
@@ -1841,12 +1841,12 @@ fn source_calls_bind_positional_named_and_nested_defaults() {
 
 #[test]
 fn source_calls_are_lexical_and_respect_value_shadowing() {
-    let source = "fn inner() = secret; fn outer(secret: Int) = inner();";
+    let source = include_str!("fixtures/source_calls_lexical.orna");
     assert_eq!(
         code(call_module(source, "outer(7)", Limits::default())),
         "ORNA-EVAL-NAME"
     );
-    let source = "fn identity(value: Int) = value;";
+    let source = include_str!("fixtures/source_calls_identity.orna");
     assert_eq!(
         code(call_module(
             source,
@@ -1859,7 +1859,7 @@ fn source_calls_are_lexical_and_respect_value_shadowing() {
 
 #[test]
 fn source_call_arguments_evaluate_in_source_order() {
-    let source = "fn encode(a: Int, b: Int) = 10 * a + b; fn caller() { let counter = 0; encode(b: if true { counter += 1; counter } else { 0 }, a: if true { counter += 1; counter } else { 0 }) }";
+    let source = include_str!("fixtures/source_calls_order.orna");
     assert_eq!(
         call_module(source, "caller()", Limits::default()).unwrap(),
         Value::int(21.into())
@@ -1919,7 +1919,7 @@ fn wildcard_and_structured_lambda_parameters_bind_by_position() {
 
 #[test]
 fn named_functions_share_structured_parameter_binding_and_defaults() {
-    let source = "fn add((a, b) = (1, 2)) = a + b; fn ignore(_, _) = 7;";
+    let source = include_str!("fixtures/structured_function_parameters.orna");
     for (expression, expected) in [
         ("add()", 3),
         ("add((10, 20))", 30),
@@ -1935,49 +1935,29 @@ fn named_functions_share_structured_parameter_binding_and_defaults() {
 
 #[test]
 fn closures_capture_immutable_snapshots_and_support_nested_calls() {
-    for (source, expression, expected) in [
-        (
-            "fn make(seed: Int) = value => seed + value;",
-            "make(10)(5)",
-            15,
-        ),
-        (
-            "fn run() { let seed = 1; let read = () => seed; seed = 9; read() }",
-            "run()",
-            1,
-        ),
-        (
-            "fn run() { let seed = 1; let replace = seed => seed + 1; replace(10) }",
-            "run()",
-            11,
-        ),
-        ("fn make(a: Int) = b => c => a + b + c;", "make(1)(2)(3)", 6),
-        (
-            "fn run() { let seed = 1; let local = () => { let seed = 10; seed += 1; seed }; local() }",
-            "run()",
-            11,
-        ),
-        (
-            "fn run() { let seed = 1; let local = seed => { seed += 1; seed }; local(10) }",
-            "run()",
-            11,
-        ),
+    let source = include_str!("fixtures/closures.orna");
+    for (expression, expected) in [
+        ("make(10)(5)", 15),
+        ("read_after_reassignment()", 1),
+        ("parameter_shadow()", 11),
+        ("make_nested(1)(2)(3)", 6),
+        ("local_block_shadow()", 11),
+        ("parameter_block_shadow(0)", 11),
     ] {
         assert_eq!(
             call_module(source, expression, Limits::default()).unwrap(),
             Value::int(expected.into())
         );
     }
-    let source = "fn run() { let seed = 1; let mutate = () => { seed += 1; seed }; mutate() }";
     assert_eq!(
-        code(call_module(source, "run()", Limits::default())),
+        code(call_module(source, "mutate_capture()", Limits::default())),
         "ORNA-EVAL-IMMUTABLE-CAPTURE"
     );
 }
 
 #[test]
 fn function_values_pass_through_locals_arguments_and_collections() {
-    let source = "fn increment(value: Int) = value + 1; fn apply(operation, value: Int) = operation(value); fn run() { let choices = [increment, value => value * 2]; apply(choices[0], 20) + apply(choices[1], 10) }";
+    let source = include_str!("fixtures/function_values.orna");
     assert_eq!(
         call_module(source, "run()", Limits::default()).unwrap(),
         Value::int(41.into())
@@ -2033,8 +2013,7 @@ fn anonymous_pipeline_stages_share_callable_binding_and_limits() {
 
 #[test]
 fn pipelines_insert_the_input_before_explicit_arguments_and_defaults() {
-    let source =
-        "fn add(value: Int, extra = 6) = value + extra; fn double(value: Int) = value * 2;";
+    let source = include_str!("fixtures/pipelines.orna");
     for expression in [
         "10 | add",
         "10 | add()",
@@ -2060,33 +2039,25 @@ fn pipelines_insert_the_input_before_explicit_arguments_and_defaults() {
         );
     }
     assert_eq!(
-        code(call_module(
-            "fn no_input() = 1;",
-            "10 | no_input",
-            Limits::default()
-        )),
+        code(call_module(source, "10 | no_input", Limits::default())),
         "ORNA-EVAL-ARGUMENT"
     );
 }
 
 #[test]
 fn pipeline_input_runs_once_and_before_stage_arguments() {
-    let source = "fn encode(a: Int, b: Int) = 10 * a + b; fn caller() { let counter = 0; (if true { counter += 1; counter } else { 0 }) | encode(b: if true { counter += 1; counter } else { 0 }) }";
+    let source = include_str!("fixtures/pipelines.orna");
     assert_eq!(
-        call_module(source, "caller()", Limits::default()).unwrap(),
+        call_module(source, "pipeline_caller()", Limits::default()).unwrap(),
         Value::int(12.into())
     );
     assert_eq!(
-        code(call_module(
-            "fn add(a: Int, b: Int) = a + b;",
-            "(1 / 0) | add(missing)",
-            Limits::default()
-        )),
+        code(call_module(source, "(1 / 0) | add(missing)", Limits::default())),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
     );
     assert_eq!(
         code(call_module(
-            "fn recurse(n: Int) = n | recurse;",
+            source,
             "1 | recurse",
             Limits {
                 max_steps: 12,

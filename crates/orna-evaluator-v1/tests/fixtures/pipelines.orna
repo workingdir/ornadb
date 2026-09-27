@@ -1,0 +1,19 @@
+fn add(value: Int, extra = 6) = value + extra;
+fn double(value: Int) = value * 2;
+fn no_input() = 1;
+fn encode(a: Int, b: Int) = 10 * a + b;
+fn recurse(n: Int) = n | recurse;
+
+fn caller() {
+    let counter = 0;
+    encode(
+        b: if true { counter += 1; counter } else { 0 },
+        a: if true { counter += 1; counter } else { 0 }
+    )
+}
+
+fn pipeline_caller() {
+    let counter = 0;
+    (if true { counter += 1; counter } else { 0 })
+        | encode(b: if true { counter += 1; counter } else { 0 })
+}
