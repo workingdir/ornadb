@@ -244,30 +244,49 @@ fn calendar_buckets_require_typed_zones_and_do_not_conflate_elapsed_durations() 
 
 #[test]
 fn table_selectors_are_callable_and_reject_rows_from_other_tables() {
-    let declaration = "table Person(id: Str) { name: Str, } table Team(id: Str) { name: Str, }";
-    for (body, valid) in [
-        ("fn name(person: Person): Str = Person.name(person);", true),
-        ("fn name(person: Person): Str = person | Person.name;", true),
-        ("fn names() = Person | map(Person.name);", true),
+    for (source, body, valid) in [
         (
+            include_str!("fixtures/table-selector-call.orna"),
+            "fn name(person: Person): Str = Person.name(person);",
+            true,
+        ),
+        (
+            include_str!("fixtures/table-selector-pipe.orna"),
+            "fn name(person: Person): Str = person | Person.name;",
+            true,
+        ),
+        (
+            include_str!("fixtures/table-selector-map.orna"),
+            "fn names() = Person | map(Person.name);",
+            true,
+        ),
+        (
+            include_str!("fixtures/table-selector-local-shadow.orna"),
             "fn local(): Int { let Person = { name: 1 }; Person.name }",
             true,
         ),
         (
+            include_str!("fixtures/table-selector-higher-order.orna"),
             "fn name(person: Person): Str { let selector = Person.name; selector(person) }",
             true,
         ),
-        ("fn wrong(team: Team) = Person.name(team);", false),
-        ("fn wrong() = Team | map(Person.name);", false),
         (
+            include_str!("fixtures/table-selector-reject-other-table-call.orna"),
+            "fn wrong(team: Team) = Person.name(team);",
+            false,
+        ),
+        (
+            include_str!("fixtures/table-selector-reject-other-table-map.orna"),
+            "fn wrong() = Team | map(Person.name);",
+            false,
+        ),
+        (
+            include_str!("fixtures/table-selector-reject-struct-row.orna"),
             "fn wrong() = Person.name({ id: \"a\", name: \"Alice\" });",
             false,
         ),
     ] {
-        let result = analyze(&[ModuleInput::new(
-            "selectors.orna",
-            format!("{declaration} {body}"),
-        )]);
+        let result = analyze(&[ModuleInput::new("selectors.orna", source)]);
         if valid {
             assert!(result.is_ok(), "{body}: {:?}", result.diagnostics);
         } else {
@@ -275,23 +294,30 @@ fn table_selectors_are_callable_and_reject_rows_from_other_tables() {
         }
     }
     let catalogue = Catalogue::authoritative_fixture();
-    for (body, valid) in [
+    for (source, body, valid) in [
         (
+            include_str!("fixtures/table-selector-import-aliased.orna"),
             "use contacts as addressbook; fn name(contact: contacts.Contact): Str = addressbook.Contact.name(contact);",
             true,
         ),
         (
+            include_str!("fixtures/table-selector-import-qualified-map.orna"),
             "fn names() = contacts.Contact | map(contacts.Contact.name);",
             true,
         ),
-        ("fn wrong() = contacts.Contact | map(Contact.name);", false),
         (
+            include_str!("fixtures/table-selector-import-reject-unqualified-map.orna"),
+            "fn wrong() = contacts.Contact | map(Contact.name);",
+            false,
+        ),
+        (
+            include_str!("fixtures/table-selector-import-local-shadow.orna"),
             "fn local(contacts: { Contact: { name: Int } }): Int = contacts.Contact.name;",
             true,
         ),
     ] {
         let result =
-            analyze_with_catalogue(&[ModuleInput::new("selectors.orna", body)], &catalogue);
+            analyze_with_catalogue(&[ModuleInput::new("selectors.orna", source)], &catalogue);
         if valid {
             assert!(result.is_ok(), "{body}: {:?}", result.diagnostics);
         } else {
