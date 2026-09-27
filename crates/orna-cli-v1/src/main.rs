@@ -26,7 +26,7 @@ use orna_conformance_v1::{
 };
 use orna_evaluator_v1::{Environment, Limits};
 use orna_foundation_v1::{OvbRaw, Value};
-use orna_runtime_v1::RuntimeIdentity;
+use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 
 static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -947,6 +947,14 @@ fn run_status_json(endpoint: &Endpoint) -> Result<(), Diagnostic> {
             "retry `status --format json`",
         )
     })?;
+    let unpublished_count = unpublished_mutation_count(&repository)?;
+    let json = append_unpublished_count_json(json, unpublished_count).ok_or_else(|| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be read",
+            "retry `status --format json`",
+        )
+    })?;
     io::stdout().lock().write_all(&json).map_err(|_| {
         Diagnostic::target(
             "E2100",
@@ -955,6 +963,57 @@ fn run_status_json(endpoint: &Endpoint) -> Result<(), Diagnostic> {
         )
     })?;
     Ok(())
+}
+
+fn unpublished_mutation_count(
+    repository: &orna_repository_v1::Repository,
+) -> Result<usize, Diagnostic> {
+    if !repository.runtime_paths().state_db().exists() {
+        return Ok(0);
+    }
+    let (identity, initial_digest) = runtime_identity(repository)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication status could not be read",
+                "retry `status` after checking the local runtime state",
+            )
+        })?;
+    let state = runtime
+        .block_on(RuntimeState::open(repository, identity, initial_digest))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication status could not be read",
+                "retry `status` after checking the local runtime state",
+            )
+        })?;
+    runtime
+        .block_on(state.pending_count())
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication status could not be read",
+                "retry `status` after checking the local runtime state",
+            )
+        })
+}
+
+fn write_unpublished_summary<W: io::Write>(writer: &mut W, count: usize) -> io::Result<()> {
+    let noun = if count == 1 { "mutation" } else { "mutations" };
+    writeln!(writer, "Unpublished CWD changes: {count} runtime {noun}")
+}
+
+fn append_unpublished_count_json(mut json: Vec<u8>, count: usize) -> Option<Vec<u8>> {
+    let prefix = json.strip_suffix(b"]}\n")?.len();
+    json.truncate(prefix);
+    json.extend_from_slice(b"],\"unpublished_runtime_mutations\":");
+    json.extend_from_slice(count.to_string().as_bytes());
+    json.extend_from_slice(b"}\n");
+    Some(json)
 }
 
 fn osc8_terminal_supports(
@@ -1275,6 +1334,7 @@ fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diag
             "run the command inside a Git worktree or provide a local project path",
         )
     })?;
+    let unpublished_count = unpublished_mutation_count(&repository)?;
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repository.worktree())
@@ -1316,6 +1376,13 @@ fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diag
             )
         },
     )?;
+    write_unpublished_summary(&mut stdout, unpublished_count).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be written",
+            "retry `status`",
+        )
+    })?;
     Ok(())
 }
 
@@ -2242,7 +2309,8 @@ fn run_fetch(
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use orna_runtime_v1::{RunObservationStatus, RuntimeState};
+    use orna_runtime_v1::{Mutation, NoFault, RunObservationStatus, RuntimeState};
+    use sha2::{Digest, Sha256};
     #[test]
     fn color_mode_respects_stream_tty_and_explicit_overrides() {
         assert!(!ColorMode::Auto.enabled(false));
@@ -2576,6 +2644,76 @@ mod tests {
         write_short_status(&short_output.stdout, &mut rendered_short, false)
             .expect("rendered short status");
         assert_eq!(rendered_short, short_output.stdout);
+    }
+
+    #[test]
+    fn unpublished_status_summary_reports_zero_and_remaining_runtime_mutations() {
+        let mut rendered = Vec::new();
+        write_unpublished_summary(&mut rendered, 0).expect("empty unpublished summary");
+        write_unpublished_summary(&mut rendered, 1).expect("singular unpublished summary");
+        write_unpublished_summary(&mut rendered, 2).expect("plural unpublished summary");
+        assert_eq!(
+            rendered,
+            b"Unpublished CWD changes: 0 runtime mutations\nUnpublished CWD changes: 1 runtime mutation\nUnpublished CWD changes: 2 runtime mutations\n"
+        );
+    }
+
+    #[test]
+    fn json_status_includes_unpublished_runtime_mutation_count() {
+        assert_eq!(
+            append_unpublished_count_json(
+                b"{\"branch\":\"main\",\"changes\":[]}\n".to_vec(),
+                4,
+            )
+            .expect("JSON status terminator"),
+            b"{\"branch\":\"main\",\"changes\":[],\"unpublished_runtime_mutations\":4}\n"
+        );
+        assert!(append_unpublished_count_json(b"{}".to_vec(), 0).is_none());
+    }
+
+    #[test]
+    fn unpublished_mutation_count_reads_the_runtime_pending_tail() {
+        let directory = tempfile::tempdir().expect("status repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git init")
+                .success()
+        );
+        orna_repository_v1::initialize_repository(directory.path())
+            .expect("initialize Orna repository");
+        let repository = orna_repository_v1::Repository::discover(directory.path())
+            .expect("discover initialized repository");
+        let (identity, initial_digest) = runtime_identity(&repository).expect("runtime identity");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime executor");
+        let state = runtime
+            .block_on(RuntimeState::open(&repository, identity, initial_digest))
+            .expect("open runtime state");
+        assert_eq!(unpublished_mutation_count(&repository), Ok(0));
+
+        let payload = b"pending table mutation".to_vec();
+        let mutation = Mutation {
+            id: [1; 16],
+            digest: Sha256::digest(&payload).into(),
+            payload,
+        };
+        runtime
+            .block_on(async {
+                let lease = state.acquire_lease(identity.repository_id).await?;
+                let capture = state.capture().await?;
+                state
+                    .commit(lease, &capture, &mutation, [2; 32], &NoFault)
+                    .await
+            })
+            .expect("append durable runtime mutation");
+        drop(state);
+
+        assert_eq!(unpublished_mutation_count(&repository), Ok(1));
     }
 
     fn visible_without_osc8(output: &[u8]) -> Vec<u8> {
