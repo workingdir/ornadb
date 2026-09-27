@@ -1153,21 +1153,7 @@ async fn project_stream_rolls_back_when_affected_module_assertion_fails() {
             fixture_id: "stream-assertion-failure".into(),
             source_id: "stream-assertion-failure/sensors.orna".into(),
             parse_as: "module_unit".into(),
-            source: r#"
-                pub type Sample { pub sensor: Str, pub sequence: Int, pub value: Decimal, }
-                pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }
-                pub table Marker(id: Int) { note: Str, }
-                assert every(Reading, reading =>
-                    exists(Marker, marker => marker.id == reading.sequence)
-                );
-                pub fn input() = Stream.from_list([
-                    Sample { sensor: "greenhouse", sequence: 0, value: 18.25 },
-                ], source_identity: "example:sensors:assertion-failure");
-                pub fn ingest() { input() | for_each(sample => {
-                    Reading.insert({ sensor: sample.sensor, sequence: sample.sequence, value: sample.value });
-                }); }
-            "#
-            .into(),
+            source: include_str!("fixtures/stream-assertion-failure.orna").into(),
         }],
         loose_rows: Vec::new(),
         expectations: ProjectExpectations {
@@ -1286,21 +1272,7 @@ async fn project_stream_admission_rejects_multiple_applicable_module_assertions(
             fixture_id: "stream-assertion-ordering".into(),
             source_id: "stream-assertion-ordering/sensors.orna".into(),
             parse_as: "module_unit".into(),
-            source: r#"
-                pub table Reading(id: Int) { value: Int, }
-                pub table Marker(id: Int) { note: Str, }
-                assert every(Reading, reading =>
-                    exists(Marker, marker => marker.id == reading.id)
-                );
-                assert every(Reading, reading =>
-                    exists(Marker, marker => marker.id != reading.id)
-                );
-                pub fn input() = Stream.from_list([1], source_identity: "example:ordering");
-                pub fn ingest() { input() | for_each(value => {
-                    Reading.insert({ id: value, value: value });
-                }); }
-            "#
-            .into(),
+            source: include_str!("fixtures/stream-assertion-ordering.orna").into(),
         }],
         loose_rows: Vec::new(),
         expectations: ProjectExpectations {
