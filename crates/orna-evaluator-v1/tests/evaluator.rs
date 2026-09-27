@@ -6530,19 +6530,15 @@ fn finite_for_break_values_stop_iteration_and_preserve_loop_boundaries() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "if true { break 1; }",
+            include_str!("fixtures/control_flow_break_outside_loop.orna").trim(),
             &Environment::new(),
             Limits::default(),
         )),
         "ORNA-EVAL-UNSUPPORTED"
     );
     assert_eq!(
-        code(evaluate_expression(
-            "if true { while true { break 1; } }",
-            &Environment::new(),
-            Limits::default(),
-        )),
-        "ORNA-EVAL-UNSUPPORTED"
+        evaluate(include_str!("fixtures/control_flow_while_break_value.orna")),
+        Value::int(1.into())
     );
 }
 
