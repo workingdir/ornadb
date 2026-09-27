@@ -150,7 +150,9 @@ fn parsed_repeated_primary_key_declaration_is_rejected_before_transaction_admiss
 fn parsed_update_patches_only_stored_fields() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     assert!(matches!(
-        runtime.execute_source(&source(r#"Note.update(7, { text: "changed" });"#)),
+        runtime.execute_source(&fixture_source(include_str!(
+            "fixtures/transaction-update-patches-stored-fields.orna"
+        ))),
         StageOutcome::Passed
     ));
     let row = runtime
@@ -168,9 +170,9 @@ fn parsed_update_patches_only_stored_fields() {
 fn parsed_upsert_patches_existing_rows_and_inserts_absent_rows() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     assert!(matches!(
-        runtime.execute_source(&source(
-            r#"Note.upsert({ id: 7, text: "updated" }); Note.upsert({ id: 8, text: "new" });"#,
-        )),
+        runtime.execute_source(&fixture_source(include_str!(
+            "fixtures/transaction-upsert-patches-and-inserts.orna"
+        ))),
         StageOutcome::Passed
     ));
     let updated = runtime
@@ -193,7 +195,9 @@ fn parsed_upsert_patches_existing_rows_and_inserts_absent_rows() {
 fn parsed_table_count_observes_nested_read_your_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     assert!(matches!(
-        runtime.execute_source(&source("assert Note.count() == 1;")),
+        runtime.execute_source(&fixture_source(include_str!(
+            "fixtures/transaction-nested-table-count.orna"
+        ))),
         StageOutcome::Passed
     ));
 }
