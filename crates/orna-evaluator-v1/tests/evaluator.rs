@@ -5226,7 +5226,7 @@ fn std_collection_rank_preserves_stable_ties_and_assigns_competition_ranks() {
 
     assert_eq!(
         call_module(
-            "fn key(value: Int) = value % 10; fn run() = std.collection.rank(values: [23, 21, 12, 11], key: key);",
+            include_str!("fixtures/collection_rank_named_callback.orna"),
             "run()",
             Limits::default(),
         )
