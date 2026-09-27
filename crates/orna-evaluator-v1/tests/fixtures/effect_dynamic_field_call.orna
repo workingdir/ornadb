@@ -1,0 +1,2 @@
+fn make() = Note.insert(1);
+fn run() = make().field(Note.insert(2));
