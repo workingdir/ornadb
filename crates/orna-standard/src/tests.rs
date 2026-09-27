@@ -321,12 +321,17 @@ fn retained_standard_selection_is_pinned_and_fail_closed() {
         STANDARD_LIBRARY_V6_REVISION_ID,
         STANDARD_LIBRARY_V7_REVISION_ID,
         STANDARD_LIBRARY_V8_REVISION_ID,
-        STANDARD_LIBRARY_V9_REVISION_ID,
     ] {
         let selected = select_verified_standard_library(revision)
             .expect("registered standard revision is retained and verified");
         assert_eq!(selected.revision(), revision);
     }
+
+    assert!(matches!(
+        select_verified_standard_library(STANDARD_LIBRARY_V9_REVISION_ID),
+        Err(StandardLibraryError::UnsupportedRevision { revision })
+            if revision == STANDARD_LIBRARY_V9_REVISION_ID
+    ));
 
     assert!(matches!(
         select_verified_standard_library(STANDARD_LIBRARY_V10_REVISION_ID),
