@@ -1,0 +1,2 @@
+fn twice(value: Int) = value + value;
+fn add(value: Int, extra = twice(3)) = value + extra;

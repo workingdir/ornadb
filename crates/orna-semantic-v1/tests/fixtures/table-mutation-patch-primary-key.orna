@@ -1,0 +1,4 @@
+fn change() {
+    let patch = { id: "b" };
+    Person.update("a", patch);
+}

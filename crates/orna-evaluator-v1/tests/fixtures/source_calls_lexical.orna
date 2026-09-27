@@ -1,0 +1,2 @@
+fn inner() = secret;
+fn outer(secret: Int) = inner();

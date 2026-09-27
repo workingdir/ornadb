@@ -55,14 +55,7 @@ fn cancellation_project() -> ProjectUnit {
             fixture_id: "stream-cancellation".into(),
             source_id: "stream-cancellation/sensors.orna".into(),
             parse_as: "module_unit".into(),
-            source: r#"
-                pub table Reading(id: Int) { value: Int, }
-                pub fn input() = Stream.from_list([1, 2], source_identity: "example:cancellation");
-                pub fn ingest() { input() | for_each(value => {
-                    Reading.insert({ id: value, value: value });
-                }); }
-            "#
-            .into(),
+            source: include_str!("fixtures/stream-cancellation-sensors.orna").into(),
         }],
         loose_rows: Vec::new(),
         expectations: ProjectExpectations {
@@ -160,29 +153,19 @@ fn semantic_adapter_executes_the_v1_analyzer_with_logical_fixture_names() {
 
 #[test]
 fn admitted_source_relation_pages_traverse_decimal_keys() {
-    fn source(body: &str) -> SourceUnit {
+    fn source(source: &str) -> SourceUnit {
         SourceUnit {
             fixture_id: "decimal-cursor-source".into(),
             source_id: "decimal-cursor-source.orna".into(),
             parse_as: "module_unit".into(),
-            source: format!(
-                r#"
-                    pub table Reading(value: Decimal) {{ label: Str, }}
-                    fn main() {{ {body} }}
-                "#
-            ),
+            source: source.into(),
         }
     }
 
     let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
-    let inserted = evaluator.execute_source(&source(
-        r#"
-            Reading.insert({ value: 2.0, label: "two" });
-            Reading.insert({ value: 0.1, label: "one-tenth" });
-            Reading.insert({ value: 1.0, label: "one" });
-            Reading.insert({ value: 0.01, label: "one-hundredth" });
-        "#
-    ));
+    let inserted = evaluator.execute_source(&source(include_str!(
+        "fixtures/decimal-cursor-insert.orna"
+    )));
     assert!(
         matches!(inserted, StageOutcome::Passed),
         "source insertion failed: {inserted:?}"
@@ -191,15 +174,9 @@ fn admitted_source_relation_pages_traverse_decimal_keys() {
     // Relation evaluation is admitted source execution. Decimal-key pages
     // must resume at the canonical numeric successor without replaying or
     // skipping a row.
-    let paged = evaluator.execute_source(&source(
-        r#"
-            assert (Reading | count) == 4;
-            assert (Reading | take(1) | count) == 1;
-            assert (Reading | take(3) | count) == 3;
-            assert (Reading | drop(3) | count) == 1;
-            assert (Reading | drop(4) | count) == 0;
-        "#
-    ));
+    let paged = evaluator.execute_source(&source(include_str!(
+        "fixtures/decimal-cursor-pages.orna"
+    )));
     assert!(
         matches!(paged, StageOutcome::Passed),
         "Decimal page assertions failed: {paged:?}"
@@ -218,13 +195,13 @@ fn semantic_project_resolution_uses_project_relative_module_names() {
                 fixture_id: "project".into(),
                 source_id: "examples/reference/main.orna".into(),
                 parse_as: "module_unit".into(),
-                source: "use library;".into(),
+                source: include_str!("fixtures/project-resolution-main.orna").into(),
             },
             SourceUnit {
                 fixture_id: "project".into(),
                 source_id: "examples/reference/library.orna".into(),
                 parse_as: "module_unit".into(),
-                source: "pub fn pick(value: Int): Int = value;".into(),
+                source: include_str!("fixtures/project-resolution-library.orna").into(),
             },
         ],
         loose_rows: Vec::new(),
@@ -261,14 +238,13 @@ fn semantic_adapter_typechecks_imported_generic_sys_meta_with_declared_metadata(
                 fixture_id: "imported-generic-sys-meta".into(),
                 source_id: "logical/project/library.orna".into(),
                 parse_as: "module_unit".into(),
-                source: "pub fn lookup<T>(value: T) = sys.meta<T>(value);".into(),
+                source: include_str!("fixtures/imported-generic-sys-meta-library.orna").into(),
             },
             SourceUnit {
                 fixture_id: "imported-generic-sys-meta".into(),
                 source_id: "logical/project/main.orna".into(),
                 parse_as: "module_unit".into(),
-                source: "use library; pub fn read(value: Int) = library.lookup<Int>(value);"
-                    .into(),
+                source: include_str!("fixtures/imported-generic-sys-meta-main.orna").into(),
             },
         ],
         loose_rows: Vec::new(),
@@ -297,11 +273,11 @@ fn semantic_adapter_typechecks_imported_generic_sys_meta_with_declared_metadata(
         &[
             ModuleInput::new(
                 "library.orna",
-                "pub fn lookup<T>(value: T) = sys.meta<T>(value);",
+                include_str!("fixtures/imported-generic-sys-meta-library.orna"),
             ),
             ModuleInput::new(
                 "main.orna",
-                "use library; pub fn read(value: Int) = library.lookup<Int>(value);",
+                include_str!("fixtures/imported-generic-sys-meta-main.orna"),
             ),
         ],
         &Catalogue::authoritative_fixture(),
@@ -340,14 +316,13 @@ fn semantic_adapter_rejects_invalid_imported_generic_sys_meta_argument() {
                 fixture_id: "invalid-imported-generic-sys-meta".into(),
                 source_id: "logical/project/library.orna".into(),
                 parse_as: "module_unit".into(),
-                source: "pub fn lookup<T>(value: T) = sys.meta<T>(value);".into(),
+                source: include_str!("fixtures/imported-generic-sys-meta-library.orna").into(),
             },
             SourceUnit {
                 fixture_id: "invalid-imported-generic-sys-meta".into(),
                 source_id: "logical/project/main.orna".into(),
                 parse_as: "module_unit".into(),
-                source: "use library; pub fn invalid(value: Int) = library.lookup<Str>(value);"
-                    .into(),
+                source: include_str!("fixtures/imported-generic-sys-meta-invalid-main.orna").into(),
             },
         ],
         loose_rows: Vec::new(),
@@ -475,7 +450,7 @@ fn resolve_project(source: &str) -> ProjectUnit {
 
 #[test]
 fn semantic_project_adapter_admits_sys_resolve_string_as_object_ref_read() {
-    let source = r#"pub fn lookup() = sys.resolve("main.main");"#;
+    let source = include_str!("fixtures/sys-resolve-string.orna");
     let project = resolve_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -506,7 +481,7 @@ fn semantic_project_adapter_admits_sys_resolve_string_as_object_ref_read() {
 
 #[test]
 fn semantic_project_adapter_rejects_non_string_sys_resolve_argument_at_typecheck() {
-    let source = "pub fn invalid() = sys.resolve(1);";
+    let source = include_str!("fixtures/sys-resolve-non-string-argument.orna");
     let project = resolve_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -521,7 +496,7 @@ fn semantic_project_adapter_rejects_non_string_sys_resolve_argument_at_typecheck
 
 #[test]
 fn semantic_project_adapter_admits_sys_snapshot_string_as_pinned_read() {
-    let source = r#"pub fn before_change() = sys.snapshot("HEAD~3");"#;
+    let source = include_str!("fixtures/sys-snapshot-string.orna");
     let project = snapshot_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -551,7 +526,7 @@ fn semantic_project_adapter_admits_sys_snapshot_string_as_pinned_read() {
 }
 #[test]
 fn semantic_project_adapter_admits_sys_current_snapshot_as_snapshot_ref_observation() {
-    let source = "pub fn current_snapshot() = sys.current.snapshot;";
+    let source = include_str!("fixtures/sys-current-snapshot.orna");
     let project = snapshot_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -582,7 +557,7 @@ fn semantic_project_adapter_admits_sys_current_snapshot_as_snapshot_ref_observat
 
 #[test]
 fn semantic_project_adapter_rejects_unsupported_sys_current_member_at_typecheck() {
-    let source = "pub fn legacy() = sys.current.legacy_member;";
+    let source = include_str!("fixtures/sys-current-unsupported-member.orna");
     let project = snapshot_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -597,7 +572,7 @@ fn semantic_project_adapter_rejects_unsupported_sys_current_member_at_typecheck(
 
 #[test]
 fn semantic_project_adapter_rejects_non_string_sys_snapshot_argument_at_typecheck() {
-    let source = "pub fn invalid() = sys.snapshot(3);";
+    let source = include_str!("fixtures/sys-snapshot-non-string-argument.orna");
     let project = snapshot_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -611,7 +586,7 @@ fn semantic_project_adapter_rejects_non_string_sys_snapshot_argument_at_typechec
 
 #[test]
 fn semantic_project_adapter_admits_sys_database_cwd_as_snapshot_ref_read() {
-    let source = "pub fn cwd() = sys.snapshot(sys.database.cwd);";
+    let source = include_str!("fixtures/sys-database-cwd.orna");
     let project = database_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -641,7 +616,7 @@ fn semantic_project_adapter_admits_sys_database_cwd_as_snapshot_ref_read() {
 }
 #[test]
 fn semantic_project_adapter_admits_sys_database_writable_as_bool_read() {
-    let source = "pub fn writable() { let _snapshot = sys.snapshot(sys.database.cwd); sys.database.writable }";
+    let source = include_str!("fixtures/sys-database-writable.orna");
     let project = database_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -672,7 +647,7 @@ fn semantic_project_adapter_admits_sys_database_writable_as_bool_read() {
 
 #[test]
 fn semantic_project_adapter_rejects_unsupported_sys_database_member_at_typecheck() {
-    let source = "pub fn invalid() = sys.database.legacy_member;";
+    let source = include_str!("fixtures/sys-database-unsupported-member.orna");
     let project = database_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -686,7 +661,7 @@ fn semantic_project_adapter_rejects_unsupported_sys_database_member_at_typecheck
 
 #[test]
 fn semantic_project_adapter_admits_sys_runtime_info_with_read_effect() {
-    let source = "pub fn runtime_info() = sys.rt.info();";
+    let source = include_str!("fixtures/sys-rt-info.orna");
     let project = runtime_info_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -717,7 +692,7 @@ fn semantic_project_adapter_admits_sys_runtime_info_with_read_effect() {
 
 #[test]
 fn semantic_project_adapter_rejects_removed_sys_runtime_with_native_diagnostic() {
-    let source = "pub fn runtime_info() = sys.runtime;";
+    let source = include_str!("fixtures/sys-runtime-removed.orna");
     let project = runtime_info_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -760,10 +735,8 @@ fn typed_invoke_project(source: &str) -> ProjectUnit {
 
 #[test]
 fn semantic_project_adapter_admits_typed_sys_invoke_with_explicit_witness() {
-    let project = typed_invoke_project(
-        "pub fn invoke_int(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.invoke<Int>(function, arguments, as: Int);",
-    );
+    let source = include_str!("fixtures/adapter-typed-invoke-valid.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
@@ -773,10 +746,8 @@ fn semantic_project_adapter_admits_typed_sys_invoke_with_explicit_witness() {
 
 #[test]
 fn semantic_project_adapter_rejects_typed_sys_invoke_mismatched_witness() {
-    let project = typed_invoke_project(
-        "pub fn invoke_wrong(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.invoke<Str>(function, arguments, as: Int);",
-    );
+    let source = include_str!("fixtures/adapter-typed-invoke-mismatch.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
@@ -792,9 +763,7 @@ fn semantic_project_adapter_rejects_typed_sys_invoke_mismatched_witness() {
 }
 #[test]
 fn semantic_project_adapter_admits_erased_sys_invoke_with_value_result_and_invoke_effect() {
-    let source =
-        "pub fn erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.invoke(function, arguments);";
+    let source = include_str!("fixtures/erased-invoke-valid.orna");
     let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -825,10 +794,8 @@ fn semantic_project_adapter_admits_erased_sys_invoke_with_value_result_and_invok
 
 #[test]
 fn semantic_project_adapter_rejects_typed_sys_invoke_without_explicit_witness() {
-    let project = typed_invoke_project(
-        "pub fn missing(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.invoke<Int>(function, arguments);",
-    );
+    let source = include_str!("fixtures/erased-invoke-missing-witness.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
@@ -845,8 +812,7 @@ fn semantic_project_adapter_rejects_typed_sys_invoke_without_explicit_witness() 
 
 #[test]
 fn semantic_project_adapter_admits_typed_sys_start_with_explicit_witness() {
-    let source = "pub fn start_int(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.start<Int>(function, arguments, as: Int);";
+    let source = include_str!("fixtures/adapter-typed-start-valid.orna");
     let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -879,9 +845,7 @@ fn semantic_project_adapter_admits_typed_sys_start_with_explicit_witness() {
 }
 #[test]
 fn semantic_project_adapter_admits_erased_sys_start_with_value_handle_and_invoke_effect() {
-    let source =
-        "pub fn start_erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.start(function, arguments);";
+    let source = include_str!("fixtures/adapter-erased-start-valid.orna");
     let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -915,10 +879,8 @@ fn semantic_project_adapter_admits_erased_sys_start_with_value_handle_and_invoke
 
 #[test]
 fn semantic_project_adapter_rejects_typed_sys_start_without_explicit_witness() {
-    let project = typed_invoke_project(
-        "pub fn start_missing(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.start<Int>(function, arguments);",
-    );
+    let source = include_str!("fixtures/adapter-typed-start-missing-witness.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
@@ -936,10 +898,8 @@ fn semantic_project_adapter_rejects_typed_sys_start_without_explicit_witness() {
 
 #[test]
 fn semantic_project_adapter_rejects_typed_sys_start_mismatched_witness() {
-    let project = typed_invoke_project(
-        "pub fn start_wrong(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.start<Str>(function, arguments, as: Int);",
-    );
+    let source = include_str!("fixtures/typed-start-mismatch.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
@@ -957,14 +917,8 @@ fn semantic_project_adapter_rejects_typed_sys_start_mismatched_witness() {
 
 #[test]
 fn semantic_project_adapter_admits_inferred_and_explicit_typed_sys_await() {
-    let project = typed_invoke_project(
-        r#"
-            pub fn inferred_await(job: sys.InvocationHandle<Int>) =
-                sys.await(job, timeout: 1.s);
-            pub fn explicit_await(job: sys.InvocationHandle<Int>) =
-                sys.await<Int>(invocation: job, timeout: null);
-        "#,
-    );
+    let source = include_str!("fixtures/adapter-typed-sys-await-valid.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
@@ -974,14 +928,8 @@ fn semantic_project_adapter_admits_inferred_and_explicit_typed_sys_await() {
 
 #[test]
 fn semantic_project_adapter_admits_inferred_and_explicit_typed_sys_cancel() {
-    let project = typed_invoke_project(
-        r#"
-            pub fn inferred_cancel(job: sys.InvocationHandle<Int>) =
-                sys.cancel(job);
-            pub fn explicit_cancel(job: sys.InvocationHandle<Int>) =
-                sys.cancel<Int>(job, reason: "stop");
-        "#,
-    );
+    let source = include_str!("fixtures/adapter-typed-sys-cancel-valid.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
@@ -991,9 +939,8 @@ fn semantic_project_adapter_admits_inferred_and_explicit_typed_sys_cancel() {
 
 #[test]
 fn semantic_project_adapter_rejects_mismatched_explicit_sys_await_type() {
-    let project = typed_invoke_project(
-        "pub fn mismatched(job: sys.InvocationHandle<Int>) = sys.await<Str>(job);",
-    );
+    let source = include_str!("fixtures/adapter-typed-sys-await-mismatch.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
@@ -1032,29 +979,13 @@ async fn project_stream_ignores_unrelated_false_module_assertion() {
                 fixture_id: "stream-assertion-scope".into(),
                 source_id: "stream-assertion-scope/library.orna".into(),
                 parse_as: "module_unit".into(),
-                source: r#"
-                    pub table Book(id: Str) { title: Str, }
-                    pub table Loan(book_id: Str) { borrower: Str, }
-                    assert every(Loan, loan => exists(Book, book => book.id == loan.book_id));
-                "#
-                .into(),
+                source: include_str!("fixtures/stream-assertion-scope-library.orna").into(),
             },
             SourceUnit {
                 fixture_id: "stream-assertion-scope".into(),
                 source_id: "stream-assertion-scope/sensors.orna".into(),
                 parse_as: "module_unit".into(),
-                source: r#"
-                    pub type Sample { pub sensor: Str, pub sequence: Int, pub value: Decimal, }
-                    pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }
-                    pub fn input() = Stream.from_list([
-                        Sample { sensor: "greenhouse", sequence: 0, value: 18.25 },
-                        Sample { sensor: "greenhouse", sequence: 1, value: 18.50 },
-                    ], source_identity: "example:sensors:v1");
-                    pub fn ingest() { input() | for_each(sample => {
-                        Reading.insert({ sensor: sample.sensor, sequence: sample.sequence, value: sample.value });
-                    }); }
-                "#
-                .into(),
+                source: include_str!("fixtures/stream-assertion-scope-sensors.orna").into(),
             },
         ],
         loose_rows: Vec::new(),
@@ -1197,21 +1128,7 @@ async fn project_stream_rolls_back_when_affected_module_assertion_fails() {
             fixture_id: "stream-assertion-failure".into(),
             source_id: "stream-assertion-failure/sensors.orna".into(),
             parse_as: "module_unit".into(),
-            source: r#"
-                pub type Sample { pub sensor: Str, pub sequence: Int, pub value: Decimal, }
-                pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }
-                pub table Marker(id: Int) { note: Str, }
-                assert every(Reading, reading =>
-                    exists(Marker, marker => marker.id == reading.sequence)
-                );
-                pub fn input() = Stream.from_list([
-                    Sample { sensor: "greenhouse", sequence: 0, value: 18.25 },
-                ], source_identity: "example:sensors:assertion-failure");
-                pub fn ingest() { input() | for_each(sample => {
-                    Reading.insert({ sensor: sample.sensor, sequence: sample.sequence, value: sample.value });
-                }); }
-            "#
-            .into(),
+            source: include_str!("fixtures/stream-assertion-failure.orna").into(),
         }],
         loose_rows: Vec::new(),
         expectations: ProjectExpectations {
@@ -1330,21 +1247,7 @@ async fn project_stream_admission_rejects_multiple_applicable_module_assertions(
             fixture_id: "stream-assertion-ordering".into(),
             source_id: "stream-assertion-ordering/sensors.orna".into(),
             parse_as: "module_unit".into(),
-            source: r#"
-                pub table Reading(id: Int) { value: Int, }
-                pub table Marker(id: Int) { note: Str, }
-                assert every(Reading, reading =>
-                    exists(Marker, marker => marker.id == reading.id)
-                );
-                assert every(Reading, reading =>
-                    exists(Marker, marker => marker.id != reading.id)
-                );
-                pub fn input() = Stream.from_list([1], source_identity: "example:ordering");
-                pub fn ingest() { input() | for_each(value => {
-                    Reading.insert({ id: value, value: value });
-                }); }
-            "#
-            .into(),
+            source: include_str!("fixtures/stream-assertion-ordering.orna").into(),
         }],
         loose_rows: Vec::new(),
         expectations: ProjectExpectations {
@@ -1537,7 +1440,7 @@ fn bounded_pure_function_admission_retains_a_digest_bound_executable_namespace()
         fixture_id: "pure-function-witness".into(),
         source_id: "main.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub fn add_one(value: Int): Int = value + 1;".into(),
+        source: include_str!("fixtures/row-admission/pure-function.orna").into(),
     };
     let arguments = BTreeMap::from([(
         "value".into(),
@@ -1576,13 +1479,13 @@ fn project_row_admission_resolves_declared_owner_path_key_and_evaluated_body() {
             fixture_id: "project-rows".into(),
             source_id: "logical/project/inventory.orna".into(),
             parse_as: "module_unit".into(),
-            source: "pub table Item(id: Int) { name: Str, available: Bool, price: Decimal, description: Str = \"default\", }".into(),
+            source: include_str!("fixtures/row-admission/inventory.orna").into(),
         }],
         loose_rows: vec![SourceUnit {
             fixture_id: "project-rows".into(),
             source_id: "logical/project/inventory/Item/42.orna".into(),
             parse_as: "row_unit".into(),
-            source: "{ name: \"Pencil\", available: true, price: 1.00 + 0.25 }".into(),
+            source: include_str!("fixtures/row-admission/item-42.orna").into(),
         }],
         expectations: ProjectExpectations {
             environment: ProjectEnvironment {
@@ -1626,13 +1529,13 @@ fn project_row_admission_rejects_unsupported_key_types_without_string_fallback()
             fixture_id: "project-rows-unsupported".into(),
             source_id: "logical/project/calendar.orna".into(),
             parse_as: "module_unit".into(),
-            source: "pub table Event(id: Date) { name: Str, }".into(),
+            source: include_str!("fixtures/row-admission/calendar.orna").into(),
         }],
         loose_rows: vec![SourceUnit {
             fixture_id: "project-rows-unsupported".into(),
             source_id: "logical/project/calendar/Event/2026-09-05.orna".into(),
             parse_as: "row_unit".into(),
-            source: "{ name: \"Review\" }".into(),
+            source: include_str!("fixtures/row-admission/event-unsupported-key.orna").into(),
         }],
         expectations: ProjectExpectations {
             environment: ProjectEnvironment {
@@ -1661,52 +1564,52 @@ fn project_row_admission_rejects_path_key_and_schema_failures() {
         fixture_id: "project-rows-negative".into(),
         source_id: "logical/project/inventory.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub table Item(id: Int) { name: Str, }".into(),
+        source: include_str!("fixtures/row-admission/path-key-schema-inventory.orna").into(),
     };
     for (source_id, source, code) in [
         (
             "logical/project/inventory/Item/not-an-int.orna",
-            "{ name: \"Pencil\" }",
+            include_str!("fixtures/row-admission/path-key-schema-valid-row.orna"),
             "ORNA-CONFORMANCE-ROW-PATH",
         ),
         (
             "logical/project/inventory/Item/042.orna",
-            "{ name: \"Pencil\" }",
+            include_str!("fixtures/row-admission/path-key-schema-valid-row.orna"),
             "ORNA-CONFORMANCE-ROW-PATH",
         ),
         (
             "logical/project/inventory/Item/+42.orna",
-            "{ name: \"Pencil\" }",
+            include_str!("fixtures/row-admission/path-key-schema-valid-row.orna"),
             "ORNA-CONFORMANCE-ROW-PATH",
         ),
         (
             "logical/project/inventory/Item/-0.orna",
-            "{ name: \"Pencil\" }",
+            include_str!("fixtures/row-admission/path-key-schema-valid-row.orna"),
             "ORNA-CONFORMANCE-ROW-PATH",
         ),
         (
             "logical/project/inventory/Item/42/extra.orna",
-            "{ name: \"Pencil\" }",
+            include_str!("fixtures/row-admission/path-key-schema-valid-row.orna"),
             "ORNA-CONFORMANCE-ROW-PATH",
         ),
         (
             "logical/project/inventory/Item/42.orna",
-            "{ id: 42, name: \"Pencil\" }",
+            include_str!("fixtures/row-admission/path-key-schema-explicit-key.orna"),
             "E3004",
         ),
         (
             "logical/project/inventory/Item/42.orna",
-            "{}",
+            include_str!("fixtures/row-admission/path-key-schema-missing-field.orna"),
             "ORNA-CONFORMANCE-ROW-MISSING",
         ),
         (
             "logical/project/inventory/Item/42.orna",
-            "{ name: true }",
+            include_str!("fixtures/row-admission/path-key-schema-wrong-type.orna"),
             "ORNA-CONFORMANCE-ROW-TYPE",
         ),
         (
             "logical/project/inventory/Item/42.orna",
-            "{ unknown: \"Pencil\" }",
+            include_str!("fixtures/row-admission/path-key-schema-unknown-field.orna"),
             "ORNA-CONFORMANCE-ROW-UNKNOWN",
         ),
     ] {
@@ -1752,20 +1655,20 @@ fn project_row_admission_admits_automatic_and_composite_keys() {
             fixture_id: "project-rows-key-shapes".into(),
             source_id: "logical/project/inventory.orna".into(),
             parse_as: "module_unit".into(),
-            source: "pub table Note { text: Str, } pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }".into(),
+            source: include_str!("fixtures/row-admission/key-shapes-inventory.orna").into(),
         }],
         loose_rows: vec![
             SourceUnit {
                 fixture_id: "project-rows-key-shapes".into(),
                 source_id: "logical/project/inventory/Note/7.orna".into(),
                 parse_as: "row_unit".into(),
-                source: "{ text: \"memo\" }".into(),
+                source: include_str!("fixtures/row-admission/key-shapes-note-7.orna").into(),
             },
             SourceUnit {
                 fixture_id: "project-rows-key-shapes".into(),
                 source_id: "logical/project/inventory/Reading/greenhouse/2.orna".into(),
                 parse_as: "row_unit".into(),
-                source: "{ value: 18.50 }".into(),
+                source: include_str!("fixtures/row-admission/key-shapes-reading-greenhouse-2.orna").into(),
             },
         ],
         expectations: ProjectExpectations {
@@ -1797,13 +1700,13 @@ fn project_row_admission_rejects_computed_fields() {
             fixture_id: "project-rows-computed".into(),
             source_id: "logical/project/inventory.orna".into(),
             parse_as: "module_unit".into(),
-            source: "pub table Item(id: Int) { name: Str, label: Str => name, }".into(),
+            source: include_str!("fixtures/row-admission/computed-field-inventory.orna").into(),
         }],
         loose_rows: vec![SourceUnit {
             fixture_id: "project-rows-computed".into(),
             source_id: "logical/project/inventory/Item/42.orna".into(),
             parse_as: "row_unit".into(),
-            source: "{ name: \"Pencil\", label: \"Pencil\" }".into(),
+            source: include_str!("fixtures/row-admission/computed-field-row.orna").into(),
         }],
         expectations: ProjectExpectations {
             environment: ProjectEnvironment {
@@ -1880,12 +1783,12 @@ fn project_row_admission_rejects_wrong_container_members_and_shapes() {
 #[test]
 fn project_row_admission_reports_unsupported_nested_field_types() {
     let project = admission_project(
-        "pub table Item(id: Int) { opaque_ids: [Uuid], }",
+        include_str!("fixtures/row-admission/unsupported-nested-type-inventory.orna"),
         vec![SourceUnit {
             fixture_id: "row-admission-containers".into(),
             source_id: "logical/project/inventory/Item/42.orna".into(),
             parse_as: "row_unit".into(),
-            source: "{ opaque_ids: [\"not-an-admitted-uuid\"] }".into(),
+            source: include_str!("fixtures/row-admission/unsupported-nested-type-row.orna").into(),
         }],
     );
     let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
@@ -1901,7 +1804,7 @@ fn semantic_adapter_keeps_type_errors_in_the_typecheck_phase() {
         fixture_id: "type-error".into(),
         source_id: "logical/type-error.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub table Bad(value: Float) { text: Str, }".into(),
+        source: include_str!("fixtures/semantic-validation/type-error-bad-table.orna").into(),
     };
     let mut adapter = SemanticAdapter::default();
     assert!(matches!(adapter.resolve(&unit), StageOutcome::Passed));
@@ -1917,7 +1820,7 @@ fn calendar_zone_rejection_preserves_published_diagnostic_identity() {
         fixture_id: "calendar-zone".into(),
         source_id: "calendar-zone.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub fn bad() = energy.Reading | bucket_by(1.day);".into(),
+        source: include_str!("fixtures/semantic-validation/calendar-zone-no-zone.orna").into(),
     };
     let mut adapter = SemanticAdapter::default();
     let StageOutcome::Failed(diagnostic) = adapter.typecheck(&unit) else {
@@ -2116,7 +2019,7 @@ fn bounded_evaluator_executes_expression_units_and_redacts_failures() {
         fixture_id: "test-valid".into(),
         source_id: "logical/test.orna".into(),
         parse_as: "row_unit".into(),
-        source: "{ total: std.math.increment(1) }".into(),
+        source: include_str!("fixtures/bounded-expression-valid-row.orna").into(),
     };
     assert_eq!(evaluator.evaluate(&valid), StageOutcome::Passed);
 
@@ -2124,7 +2027,7 @@ fn bounded_evaluator_executes_expression_units_and_redacts_failures() {
         fixture_id: "test-invalid".into(),
         source_id: "logical/test.orna".into(),
         parse_as: "row_unit".into(),
-        source: "{ total: missing }".into(),
+        source: include_str!("fixtures/bounded-expression-unresolved-row.orna").into(),
     };
     let StageOutcome::Failed(diagnostic) = evaluator.evaluate(&invalid) else {
         panic!("unknown name must fail");
@@ -2308,7 +2211,7 @@ fn bounded_evaluator_defers_invalid_function_bodies_until_explicit_invocation() 
         fixture_id: "test-module".into(),
         source_id: "logical/pure.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub fn secret() = missing;".into(),
+        source: include_str!("fixtures/bounded-invalid-function-body.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&pure_module), StageOutcome::Passed);
@@ -2330,28 +2233,13 @@ fn bounded_project_retains_owner_scoped_nominal_plans_for_functions_and_expressi
             fixture_id: "nominal-project".into(),
             source_id: "nominal/owner.orna".into(),
             parse_as: "module_unit".into(),
-            source: r#"
-                fn private_seed() = 7;
-                pub type Box {
-                    pub value: Int = private_seed(),
-                    secret: Int = private_seed(),
-                }
-                pub type Required { pub value: Int, }
-                pub fn omitted() = Box { };
-                pub fn missing_required() = Required { };
-            "#
-            .into(),
+            source: include_str!("fixtures/bounded-project-nominal-owner.orna").into(),
         },
         SourceUnit {
             fixture_id: "nominal-project".into(),
             source_id: "nominal/caller.orna".into(),
             parse_as: "module_unit".into(),
-            source: r#"
-                use nominal.owner;
-                pub fn external() = nominal.owner.Box { value: 3 };
-                pub fn external_omitted() = nominal.owner.Box { };
-            "#
-            .into(),
+            source: include_str!("fixtures/bounded-project-nominal-caller.orna").into(),
         },
     ]);
     let mut evaluator = BoundedEvaluator::default();
@@ -2425,7 +2313,7 @@ fn bounded_evaluator_invokes_a_function_with_its_earlier_immutable_binding() {
         fixture_id: "test-module".into(),
         source_id: "logical/pure.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub fn incremented() = if true { let answer = 41; std.math.increment(answer) } else { 0 };".into(),
+        source: include_str!("fixtures/bounded-earlier-immutable-binding.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&pure_module), StageOutcome::Passed);
@@ -2472,7 +2360,7 @@ fn bounded_evaluator_invokes_retained_functions_with_named_arguments_and_default
         fixture_id: "test-module".into(),
         source_id: "logical/pure.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub fn increment(number, label) = std.math.increment(number); pub fn add_one(value, increment = 1) = value + increment;".into(),
+        source: include_str!("fixtures/bounded-evaluator-retained-functions.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&pure_module), StageOutcome::Passed);
@@ -2496,7 +2384,8 @@ fn bounded_evaluator_invokes_retained_functions_with_named_arguments_and_default
 
 #[test]
 fn bounded_evaluator_executes_only_profile_verified_pure_standard_sources() {
-    let source = "pub fn increment(value: Int): Int = value + 1;";
+    let source = include_str!("fixtures/bounded-evaluator-standard-math.orna");
+    let unverified_source = include_str!("fixtures/bounded-evaluator-standard-math-unverified.orna");
     let profile = orna_semantic_v1::StandardDependencyProfile::from_sources(
         "std-snapshot-1",
         [("std/math.orna".into(), source.into())],
@@ -2517,10 +2406,7 @@ fn bounded_evaluator_executes_only_profile_verified_pure_standard_sources() {
     assert!(matches!(
         evaluator.load_standard_sources(
             &profile,
-            [(
-                "std/math.orna".into(),
-                "pub fn increment(value: Int): Int = value;".into()
-            )],
+            [("std/math.orna".into(), unverified_source.into())],
         ),
         StageOutcome::Failed(_)
     ));
@@ -2532,7 +2418,7 @@ fn module_admission_checks_source_and_zero_limits_before_parsing() {
         fixture_id: "module-admission".into(),
         source_id: "logical/module-admission.orna".into(),
         parse_as: "module_unit".into(),
-        source: "invalid(".into(),
+        source: include_str!("fixtures/module-admission-invalid.orna").into(),
     };
     for limits in [
         orna_evaluator_v1::Limits {
@@ -2565,7 +2451,7 @@ fn rejected_project_capacity_does_not_publish_partial_function_updates() {
         fixture_id: "retained-limit".into(),
         source_id: "logical/retained-limit.orna".into(),
         parse_as: "module_unit".into(),
-        source: "fn stable() = 1;".into(),
+        source: include_str!("fixtures/capacity-stable-initial.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::new(orna_evaluator_v1::Limits {
         max_collection_items: 2,
@@ -2573,11 +2459,11 @@ fn rejected_project_capacity_does_not_publish_partial_function_updates() {
     });
     assert_eq!(evaluator.evaluate(&original), StageOutcome::Passed);
     let replacement = SourceUnit {
-        source: "fn stable() = 99; fn added() = 2;".into(),
+        source: include_str!("fixtures/capacity-stable-replacement.orna").into(),
         ..original.clone()
     };
     let overflow = SourceUnit {
-        source: "fn excess() = 3;".into(),
+        source: include_str!("fixtures/capacity-excess.orna").into(),
         ..original.clone()
     };
     let StageOutcome::Failed(diagnostic) =
@@ -2592,13 +2478,13 @@ fn rejected_project_capacity_does_not_publish_partial_function_updates() {
     ));
     let probe = SourceUnit {
         parse_as: "expression_unit".into(),
-        source: "if stable() == 1 { 1 } else { 1 / 0 }".into(),
+        source: include_str!("fixtures/capacity-stable-probe.orna").into(),
         ..original.clone()
     };
     assert_eq!(evaluator.evaluate(&probe), StageOutcome::Passed);
     // Replacing an existing definition does not consume another retained slot.
     let replacement = SourceUnit {
-        source: "fn stable() = 1; fn added() = 2;".into(),
+        source: include_str!("fixtures/capacity-stable-and-added.orna").into(),
         ..original
     };
     assert_eq!(evaluator.evaluate(&replacement), StageOutcome::Passed);
@@ -2611,18 +2497,18 @@ fn expression_units_use_retained_functions_and_rejected_modules_preserve_them() 
         fixture_id: "retained-functions".into(),
         source_id: "logical/retained-functions.orna".into(),
         parse_as: "module_unit".into(),
-        source: "fn increment(value: Int) = value + 1;".into(),
+        source: include_str!("fixtures/retained-functions-module.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
     let expression = SourceUnit {
         parse_as: "expression_unit".into(),
-        source: "if increment(41) == 42 { 1 } else { 1 / 0 }".into(),
+        source: include_str!("fixtures/retained-functions-expression.orna").into(),
         ..module.clone()
     };
     assert_eq!(evaluator.evaluate(&expression), StageOutcome::Passed);
     let failed_module = SourceUnit {
-        source: "fn increment(value: Int) = value + 100; let answer = increment(1);".into(),
+        source: include_str!("fixtures/retained-functions-rejected-module.orna").into(),
         ..module
     };
     let StageOutcome::Failed(diagnostic) = evaluator.evaluate(&failed_module) else {
@@ -2642,7 +2528,7 @@ fn registry_expression_dispatch_preserves_source_limits() {
         fixture_id: "source-budget".into(),
         source_id: "logical/source-budget.orna".into(),
         parse_as: "expression_unit".into(),
-        source: "invalid(".into(),
+        source: include_str!("fixtures/source-limit-invalid.orna").into(),
     };
     let StageOutcome::Failed(diagnostic) = evaluator.evaluate(&unit) else {
         panic!("source size limits apply before parsing");
@@ -2657,7 +2543,7 @@ fn retained_functions_admit_structured_parameters_and_wildcards() {
         fixture_id: "parameter-patterns".into(),
         source_id: "logical/parameter-patterns.orna".into(),
         parse_as: "module_unit".into(),
-        source: "fn add((a, b) = (1, 2)) = a + b; fn ignore(_, _) = 7; fn verify() = if add((10, 20)) == 30 && ignore(1, 2) == 7 { 1 } else { 1 / 0 }; fn reject() = add(1);".into(),
+        source: include_str!("fixtures/retained-structured-parameters.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
@@ -2675,7 +2561,7 @@ fn retained_functions_execute_closures_without_mutating_captures() {
         fixture_id: "closure-capture".into(),
         source_id: "logical/closure-capture.orna".into(),
         parse_as: "module_unit".into(),
-        source: "fn verify() { let seed = 2; let compute = value => value + seed; seed = 9; if (10 | compute) == 12 { 1 } else { 1 / 0 } } fn reject() { let seed = 1; let mutate = () => { seed += 1; seed }; mutate() }".into(),
+        source: include_str!("fixtures/retained-closure-capture.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
@@ -2693,7 +2579,7 @@ fn retained_function_pipeline_executes_and_checks_its_result() {
         fixture_id: "function-pipeline".into(),
         source_id: "logical/function-pipeline.orna".into(),
         parse_as: "module_unit".into(),
-        source: "fn add(value: Int, extra = 6) = value + extra; fn verify() = if (10 | add(extra: 6)) == 16 { 1 } else { 1 / 0 }; fn reject() = 10 | add(value: 3);".into(),
+        source: include_str!("fixtures/retained-function-pipeline.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
@@ -2710,7 +2596,7 @@ fn retained_module_functions_call_helpers_in_defaults_and_bodies() {
         fixture_id: "nested-functions".into(),
         source_id: "logical/nested-functions.orna".into(),
         parse_as: "module_unit".into(),
-        source: "fn entry(value = helper(40)) = helper(value); fn helper(value: Int) = value + 1; fn recurse() = recurse();".into(),
+        source: include_str!("fixtures/retained-module-helper-defaults.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
@@ -2728,7 +2614,7 @@ fn retained_function_defaults_cannot_reset_the_invocation_budget() {
         fixture_id: "default-budget".into(),
         source_id: "logical/default-budget.orna".into(),
         parse_as: "module_unit".into(),
-        source: "fn compute(first = 1 + 2, second = 3 + 4) = first + second;".into(),
+        source: include_str!("fixtures/retained-function-default-budget.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::new(orna_evaluator_v1::Limits {
         max_steps: 6,
@@ -2748,7 +2634,7 @@ fn bounded_evaluator_redacts_missing_and_unknown_retained_function_arguments() {
         fixture_id: "test-module".into(),
         source_id: "logical/pure.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub fn increment(value) = std.math.increment(value);".into(),
+        source: include_str!("fixtures/bounded-evaluator-retained-argument-redaction.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&pure_module), StageOutcome::Passed);

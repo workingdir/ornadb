@@ -1,0 +1,12 @@
+pub table Note(id: Int) { value: Int, }
+fn one(rows: Relation<Note>): Int = 11;
+fn count(rows: Relation<Note>): Int = 12;
+fn window(rows: Relation<Note>, size: Int): Int = 13;
+fn parent() {
+    assert (Note | filter(note => note.id == 1) | one()) == 11;
+    assert (Note | filter(note => note.value == 1) | one()) == 11;
+    assert (Note | filter(note => note.value == 1) | count) == 12;
+    assert (Note | count) == 12;
+    assert window(Note, 2) == 13;
+    assert (Note | window(2)) == 13;
+}

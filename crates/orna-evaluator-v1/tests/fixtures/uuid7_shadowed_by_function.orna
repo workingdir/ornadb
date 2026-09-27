@@ -1,0 +1,2 @@
+fn uuid7() = 7;
+fn main() = uuid7();

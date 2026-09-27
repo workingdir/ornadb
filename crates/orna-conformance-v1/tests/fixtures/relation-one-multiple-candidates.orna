@@ -1,0 +1,7 @@
+pub table Note(id: Int) { text: Str, }
+fn find_note(text: Str) = Note | filter(note => note.text == text) | one();
+fn parent() {
+    Note.insert({ id: 1, text: "duplicate" });
+    Note.insert({ id: 2, text: "duplicate" });
+    find_note("duplicate");
+}

@@ -1,0 +1,6 @@
+40 + 2
+let pending: Int = 1 / 0;
+pending
+$_
+let pending: Str = "ready";
+pending

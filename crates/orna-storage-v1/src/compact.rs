@@ -247,7 +247,10 @@ pub fn apply_migration_plan_to_compact(
             return Err(CompactBaseProjectionError::MissingBaseValue);
         };
         if old_identity == new_identity
-            || base.rows.contains_key(&new_identity)
+            || base
+                .rows
+                .get(&new_identity)
+                .is_some_and(|row| row.value.is_some())
             || !targets.insert(new_identity.clone())
         {
             return Err(CompactBaseProjectionError::DuplicateEvolutionKey);
@@ -2474,23 +2477,22 @@ mod tests {
     }
     #[test]
     fn evolution_rekey_consumes_verified_base_and_emits_writer_input() {
-        let profile = scalar_profile();
-        let table = orna_evolution_v1::ObjectId::new(TABLE);
-        let field = orna_evolution_v1::Field {
-            id: orna_evolution_v1::ObjectId::new(KEY_A),
-            name: "id".into(),
-            ty: orna_evolution_v1::FieldType::Int,
-            role: orna_evolution_v1::FieldRole::Key,
-            optional: false,
-            introduction_fallback: None,
-        };
+        let profile = fixture_profile();
+        let table = orna_evolution_v1::ObjectId::new(profile.table_id());
         let schema = orna_evolution_v1::Schema {
             version: orna_evolution_v1::EvolutionVersion::V1_0,
             tables: vec![orna_evolution_v1::Table {
                 id: table,
-                name: "accounts".into(),
+                name: "Contact".into(),
                 explicit_key: true,
-                fields: vec![field],
+                fields: vec![orna_evolution_v1::Field {
+                    id: orna_evolution_v1::ObjectId::new(KEY_A),
+                    name: "id".into(),
+                    ty: orna_evolution_v1::FieldType::Str,
+                    role: orna_evolution_v1::FieldRole::Key,
+                    optional: false,
+                    introduction_fallback: None,
+                }],
             }],
         };
         let plan = orna_evolution_v1::plan(
@@ -2500,54 +2502,93 @@ mod tests {
                 fence: orna_evolution_v1::VersionFence::V1,
                 rekeys: vec![orna_evolution_v1::RekeyIntent {
                     table,
-                    old_key: CanonicalValue::new(OvbRaw::Int(7.into())).unwrap(),
-                    new_key: CanonicalValue::new(OvbRaw::Int(8.into())).unwrap(),
+                    old_key: CanonicalValue::new(OvbRaw::Text("source".into())).unwrap(),
+                    new_key: CanonicalValue::new(OvbRaw::Text("vacated".into())).unwrap(),
                 }],
             },
         )
         .unwrap();
-        let old = profile.decode_key(&scalar_key(7)).unwrap();
+
+        let source_bytes = fixture_key("source");
+        let vacated_bytes = fixture_key("vacated");
+        let source = profile.decode_key(&source_bytes).unwrap();
+        let vacated = profile.decode_key(&vacated_bytes).unwrap();
         let mut rows = BTreeMap::new();
         rows.insert(
-            old,
+            source,
             CompactBaseRow {
-                key: CanonicalValue::decode(&scalar_key(7)).unwrap(),
-                value: Some(row_value(7)),
+                key: CanonicalValue::decode(&source_bytes).unwrap(),
+                value: Some(fixture_row("source", "Ada", Some("ada@example.test"))),
                 generation: 1,
                 role: CompactSegmentRole::Data,
             },
         );
+        rows.insert(
+            vacated.clone(),
+            CompactBaseRow {
+                key: CanonicalValue::decode(&vacated_bytes).unwrap(),
+                value: None,
+                generation: 2,
+                role: CompactSegmentRole::Deletion,
+            },
+        );
         let base = CompactBaseState {
-            table_id: TABLE,
+            table_id: profile.table_id(),
             schema_fingerprint: profile.schema_fingerprint(),
-            next_generation: 2,
+            next_generation: 3,
             rows,
         };
+
         let input = apply_migration_plan_to_compact(
             &profile,
             &base,
             &plan,
-            2,
+            3,
             &[[0x55; 16], [0x56; 16]],
             [0x66; 32],
         )
         .unwrap();
-        assert_eq!(input.candidate_generation, 2);
+        assert_eq!(input.candidate_generation, 3);
         assert_eq!(input.mutations.len(), 2);
-        assert_eq!(input.mutations[0].key.encoded(), scalar_key(7));
+        assert_eq!(input.mutations[0].key.encoded(), source_bytes);
         assert!(matches!(
             input.mutations[0].state,
             CompactWriterMutationState::Deletion
         ));
-        assert_eq!(input.mutations[1].key.encoded(), scalar_key(8));
-        assert!(matches!(
-            input.mutations[1].state,
-            CompactWriterMutationState::Replacement { .. }
-        ));
+        assert_eq!(input.mutations[1].key.encoded(), vacated_bytes);
         let CompactWriterMutationState::Replacement { value } = &input.mutations[1].state else {
-            panic!("rekey must emit a replacement");
+            panic!("rekey must emit a complete replacement");
         };
-        assert_eq!(CanonicalValue::decode(value).unwrap(), row_value(8));
+        assert_eq!(
+            CanonicalValue::decode(value).unwrap(),
+            fixture_row("vacated", "Ada", Some("ada@example.test"))
+        );
+
+        let mut live_rows = base.rows.clone();
+        live_rows.insert(
+            vacated.clone(),
+            CompactBaseRow {
+                key: CanonicalValue::decode(&fixture_key("vacated")).unwrap(),
+                value: Some(fixture_row("vacated", "Grace", None)),
+                generation: 2,
+                role: CompactSegmentRole::Data,
+            },
+        );
+        let live_base = CompactBaseState {
+            rows: live_rows,
+            ..base.clone()
+        };
+        assert_eq!(
+            apply_migration_plan_to_compact(
+                &profile,
+                &live_base,
+                &plan,
+                3,
+                &[[0x57; 16], [0x58; 16]],
+                [0x66; 32],
+            ),
+            Err(CompactBaseProjectionError::DuplicateEvolutionKey)
+        );
 
         let mut evolved_schema = schema.clone();
         evolved_schema.tables[0].fields.push(orna_evolution_v1::Field {
@@ -2572,8 +2613,8 @@ mod tests {
                 &profile,
                 &base,
                 &schema_plan,
-                2,
-                &[[0x57; 16], [0x58; 16]],
+                3,
+                &[[0x59; 16], [0x5a; 16]],
                 [0x66; 32],
             ),
             Err(CompactBaseProjectionError::UnsupportedEvolutionOperation)

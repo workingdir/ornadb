@@ -1,0 +1,2 @@
+use checks as c;
+assert c.related();

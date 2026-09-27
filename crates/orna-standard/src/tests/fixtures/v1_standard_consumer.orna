@@ -1,0 +1,3 @@
+use std.math.{increment};
+
+pub fn next_value(): Int = increment(1);

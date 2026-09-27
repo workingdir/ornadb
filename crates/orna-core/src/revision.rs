@@ -2698,6 +2698,7 @@ pub fn validate_persistable_catalogue(
 fn validate_source_units(units: &[StoredSourceUnit]) -> Result<(), RevisionInvariantError> {
     let mut ids = HashSet::with_capacity(units.len());
     let mut paths = HashMap::with_capacity(units.len());
+    let mut namespaces = HashMap::with_capacity(units.len());
     for (index, unit) in units.iter().enumerate() {
         let expected =
             u32::try_from(index).map_err(|_| RevisionInvariantError::SourceOrdinalOutOfRange {
@@ -2722,8 +2723,40 @@ fn validate_source_units(units: &[StoredSourceUnit]) -> Result<(), RevisionInvar
                 duplicate: unit.id,
             });
         }
+        if let Some(namespace) = stored_source_module_namespace(&unit.logical_path) {
+            match namespaces.entry(namespace) {
+                std::collections::hash_map::Entry::Occupied(entry) => {
+                    let first = *entry.get();
+                    return Err(RevisionInvariantError::DuplicateModuleNamespace {
+                        namespace: entry.key().clone(),
+                        first,
+                        duplicate: unit.id,
+                    });
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(unit.id);
+                }
+            }
+        }
     }
     Ok(())
+}
+
+fn stored_source_module_namespace(logical_path: &str) -> Option<String> {
+    let (directory, filename) = logical_path.rsplit_once('/').unwrap_or(("", logical_path));
+    let mut namespace = directory.replace('/', ".");
+    if filename == "main.orna" {
+        return Some(namespace);
+    }
+    let stem = filename.strip_suffix(".orna")?;
+    if stem.is_empty() {
+        return None;
+    }
+    if !namespace.is_empty() {
+        namespace.push('.');
+    }
+    namespace.push_str(stem);
+    Some(namespace)
 }
 
 fn validate_artifact_parts(
@@ -4178,3 +4211,56 @@ enum ReferenceTargetKind {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod module_namespace_tests {
+    use super::*;
+
+    fn stored_unit(id: SourceUnitId, ordinal: u32, logical_path: &str) -> StoredSourceUnit {
+        StoredSourceUnit::new(
+            id,
+            ordinal,
+            logical_path,
+            "",
+            Sha256Digest::from_bytes([0; 32]),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rejects_module_namespace_aliases_but_accepts_distinct_namespaces() {
+        let first = SourceUnitId::from_bytes([1; 16]);
+        let duplicate = SourceUnitId::from_bytes([2; 16]);
+
+        assert_eq!(
+            StoredSourceRevision::new(
+                SourceBundleId::from_bytes([3; 16]),
+                SourceRevisionId::from_bytes([4; 16]),
+                None,
+                vec![
+                    stored_unit(first, 0, "x.orna"),
+                    stored_unit(duplicate, 1, "x/main.orna"),
+                ],
+                Sha256Digest::from_bytes([0; 32]),
+                Sha256Digest::from_bytes([0; 32]),
+            ),
+            Err(RevisionInvariantError::DuplicateModuleNamespace {
+                namespace: "x".to_owned(),
+                first,
+                duplicate,
+            })
+        );
+        StoredSourceRevision::new(
+            SourceBundleId::from_bytes([5; 16]),
+            SourceRevisionId::from_bytes([6; 16]),
+            None,
+            vec![
+                stored_unit(first, 0, "x.orna"),
+                stored_unit(duplicate, 1, "y/main.orna"),
+            ],
+            Sha256Digest::from_bytes([0; 32]),
+            Sha256Digest::from_bytes([0; 32]),
+        )
+        .unwrap();
+    }
+}

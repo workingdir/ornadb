@@ -46,12 +46,7 @@ fn assert_message(admission: &orna_semantic_v1::RowUnitAdmission, code: &str, me
 
 fn contact_analysis() -> Analysis {
     analysis_for(
-        r#"
-            pub table Contact(id: Str) {
-                name: Str,
-                emails: [Str],
-            }
-        "#,
+        include_str!("fixtures/contact-schema.orna"),
     )
 }
 

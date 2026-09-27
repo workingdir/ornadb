@@ -243,7 +243,7 @@ fn vm_admission_rejects_mismatched_inner_opaque_plan_type() {
     .encode()
     .expect("capability opaque payload");
     let (active, function, pair, _) = version_two_active_with_artifact(
-        standard_v6(),
+        standard_v5(),
         orna_standard::OPAQUE_TOKEN_TYPE_ID,
         DefinitionReferenceTarget::ValueType(orna_standard::OPAQUE_TOKEN_TYPE_ID),
         DefinitionReferenceKind::NamedType,
@@ -383,7 +383,7 @@ fn vm_admission_binds_full_capability_arguments_and_rejects_missing_parameters()
         .expect("capability payload")
     };
     let (active, function, pair, _) = version_two_active_with_artifact(
-        standard_v6(),
+        standard_v5(),
         orna_standard::BOOLEAN_TYPE_ID,
         DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
         DefinitionReferenceKind::NamedType,
@@ -432,7 +432,7 @@ fn vm_admission_binds_full_capability_arguments_and_rejects_missing_parameters()
     ));
 
     let (unknown_active, unknown_function, unknown_pair, _) = version_two_active_with_artifact(
-        standard_v6(),
+        standard_v5(),
         orna_standard::BOOLEAN_TYPE_ID,
         DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
         DefinitionReferenceKind::NamedType,
@@ -470,7 +470,7 @@ fn vm_admission_binds_full_capability_arguments_and_rejects_missing_parameters()
     ));
 
     let (missing_active, _, missing_pair, _) = version_two_active_with_artifact(
-        standard_v6(),
+        standard_v5(),
         orna_standard::BOOLEAN_TYPE_ID,
         DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
         DefinitionReferenceKind::NamedType,
@@ -749,20 +749,6 @@ fn client_resource_lifecycle_rejects_stale_and_invalid_results() {
     resource.invalidate().unwrap();
     assert_eq!(resource.status(), super::super::ClientResourceStatus::Idle);
     assert_eq!(resource.generation().value(), 4);
-}
-
-#[test]
-fn client_action_argument_error_preserves_display_and_equality() {
-    let resource_error = super::super::ClientResourceError::DuplicateArgument {
-        parameter: ParameterId::from_bytes([0x7b; 16]),
-    };
-    let action_error = super::super::ClientActionError::Arguments(Box::new(resource_error.clone()));
-
-    assert_eq!(action_error.to_string(), resource_error.to_string());
-    assert_eq!(
-        action_error,
-        super::super::ClientActionError::Arguments(Box::new(resource_error)),
-    );
 }
 
 #[test]
@@ -3208,91 +3194,6 @@ fn replacing_resource_key_across_revision_releases_old_executor_request() {
     assert_eq!(
         state.resource(new_key).map(ClientResource::status),
         Some(ClientResourceStatus::Idle),
-    );
-}
-
-#[test]
-fn replacing_resource_key_retains_nested_request_when_abandon_fails() {
-    let (active, _, pair, _) = version_two_client_call_active();
-    let standard = active
-        .catalogue_hash_context()
-        .standard()
-        .expect("version-two fixture pins the verified standard snapshot");
-    let target = InvocationTarget::verified_standard(
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
-        pair,
-        standard.revision(),
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    );
-    let argument = FunctionArgument::new(
-        orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
-        RuntimeValue::Integer(42),
-    )
-    .unwrap();
-    let digest =
-        ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
-            .unwrap();
-    let key_a = ClientResourceKey::new(
-        target,
-        PrincipalId::from_bytes([0x7a; 16]),
-        digest,
-        Sha256Digest::from_bytes([0xe4; 32]),
-    );
-    let key_b = ClientResourceKey::new(
-        target,
-        PrincipalId::from_bytes([0x7a; 16]),
-        digest,
-        Sha256Digest::from_bytes([0xe5; 32]),
-    );
-    let mut state = ClientStateStore::new();
-    let request = state
-        .get_or_create_resource(key_a, ResolvedType::Scalar(StandardScalar::Integer))
-        .begin_request(&active, vec![argument])
-        .unwrap();
-    let mut executor = RecordingActionExecutor::new(None)
-        .with_cancel_pending()
-        .with_abandon_failure();
-    executor.pending = Some(request.clone());
-    let pending_identity = (request.request_id(), request.key(), request.generation());
-    let mut nested = super::super::ClientActionNestedExecutor {
-        inner: &mut executor,
-        pending_request: None,
-    };
-
-    let result = state.get_or_create_resource_with_executor(
-        &active,
-        key_b,
-        ResolvedType::Scalar(StandardScalar::Integer),
-        &mut nested,
-    );
-
-    assert!(matches!(
-        result,
-        Err(super::super::ClientResourceError::Executor(message))
-            if message == "resource executor cannot abandon a pending request"
-    ));
-    let mut mismatch_state = ClientStateStore::new();
-    let mismatched_request = mismatch_state
-        .get_or_create_resource(key_b, ResolvedType::Scalar(StandardScalar::Integer))
-        .begin_request(&active, request.arguments().to_vec())
-        .unwrap();
-    assert_eq!(
-        nested.abandon(mismatched_request),
-        Err("resource executor request mismatch".to_owned()),
-    );
-    assert_eq!(nested.pending_request_identity(), Some(pending_identity));
-    assert!(nested.release_failed());
-    assert_eq!(nested.pending_request_identity(), Some(pending_identity));
-    drop(nested);
-    assert_eq!(executor.cancelled, vec![request.clone()]);
-    assert_eq!(executor.abandoned, vec![request.clone()]);
-    assert_eq!(executor.pending.as_ref(), Some(&request));
-    assert!(state.resource(key_b).is_none());
-    assert_eq!(
-        state
-            .resource(key_a)
-            .map(super::super::ClientResource::status),
-        Some(super::super::ClientResourceStatus::Loading),
     );
 }
 

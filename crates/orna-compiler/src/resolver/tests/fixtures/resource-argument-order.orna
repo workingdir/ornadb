@@ -1,0 +1,7 @@
+CREATE SCHEMA ui;
+CREATE CLIENT FUNCTION ui.run() RETURNS INTEGER IS BEGIN
+    RETURN AWAIT std.data.resource(
+        target => tasks.find,
+        arguments => std.call.args(p_high => 8, p_low => 7)
+    );
+END;

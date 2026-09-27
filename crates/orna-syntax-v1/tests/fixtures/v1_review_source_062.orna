@@ -1,0 +1,1 @@
+fn f() = value | match status { Status.ready => "ready" };

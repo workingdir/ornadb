@@ -15,7 +15,7 @@ use std::{
 };
 
 use orna_artifact::client_plan::{
-    ActionClientPlan, ActionTargetDomain, CAPABILITY_FORMAT_VERSION, CapabilityArgumentSource,
+    CAPABILITY_FORMAT_VERSION, CapabilityArgumentSource,
     CapabilityClientPlan, ClientExpressionNode, ClientLocal, ClientLocalKind, ClientPlan,
     ClientPlanError, ControlFlowBinaryOperator, ControlFlowClientPlan, ControlFlowStatement,
     ControlFlowUnaryOperator, EXPRESSION_FORMAT_VERSION, ExpressionClientPlan, FORMAT_IDENTITY,
@@ -101,9 +101,8 @@ impl ClientExecutionFuel {
 }
 
 use orna_standard::{
-    ACTION_MAGIC, BINARY_LARGE_OBJECT_TYPE_ID, RegisteredOpaqueCodecsError,
-    STANDARD_CATALOGUE_V9_REVISION_ID, STANDARD_CATALOGUE_V10_REVISION_ID,
-    STANDARD_LIBRARY_V9_REVISION_ID, STANDARD_LIBRARY_V10_REVISION_ID, STD_ACTION_TYPE_ID,
+    BINARY_LARGE_OBJECT_TYPE_ID, RegisteredOpaqueCodecsError,
+    STANDARD_CATALOGUE_V10_REVISION_ID, STANDARD_LIBRARY_V10_REVISION_ID,
     STD_UI_BUTTON_ENABLED_PARAMETER_ID, STD_UI_BUTTON_FUNCTION_ID,
     STD_UI_BUTTON_FUNCTION_REVISION_ID, STD_UI_BUTTON_LABEL_PARAMETER_ID,
     STD_UI_BUTTON_RUNTIME_CONTRACT, STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
@@ -124,8 +123,7 @@ mod execution;
 pub use execution::{
     ClientActiveRevisionError, ClientArtifactIntegrityError, ClientExecutionError,
     ClientExecutionRule, ClientExpressionError, ClientOpaqueValueError,
-    ClientResourceExecutionError, ClientStateError, cancel_client_action_with_executor,
-    complete_client_action, decode_action_payload, encode_action_payload, evaluate_client_function,
+    ClientResourceExecutionError, ClientStateError, evaluate_client_function,
     evaluate_client_function_in_state_context,
     evaluate_client_function_in_state_context_with_grants_and_arguments,
     evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation,
@@ -137,7 +135,7 @@ pub use execution::{
     evaluate_client_function_with_state_and_grants_and_arguments,
     evaluate_client_function_with_state_and_grants_and_arguments_and_executor,
     evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation,
-    trigger_client_action, validate_client_artifact_integrity,
+    validate_client_artifact_integrity,
 };
 
 pub mod capability;
@@ -376,190 +374,7 @@ impl ClientExecutionResult {
     }
 }
 
-/// Authority-free call descriptor carried by a transient std.action.Action.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ClientActionDescriptor {
-    domain: ActionTargetDomain,
-    target: FunctionId,
-    target_revision: RevisionPair,
-    call_site: CallSiteId,
-    result_type: TypeId,
-    arguments: Vec<FunctionArgument>,
-}
-impl ClientActionDescriptor {
-    pub fn new(
-        domain: ActionTargetDomain,
-        target: FunctionId,
-        target_revision: RevisionPair,
-        call_site: CallSiteId,
-        arguments: Vec<FunctionArgument>,
-        result_type: TypeId,
-    ) -> Self {
-        Self {
-            domain,
-            target,
-            target_revision,
-            call_site,
-            result_type,
-            arguments,
-        }
-    }
-    pub const fn domain(&self) -> ActionTargetDomain {
-        self.domain
-    }
-    pub const fn target(&self) -> FunctionId {
-        self.target
-    }
-    pub const fn target_revision(&self) -> RevisionPair {
-        self.target_revision
-    }
-    pub const fn call_site(&self) -> CallSiteId {
-        self.call_site
-    }
-    pub const fn result_type(&self) -> TypeId {
-        self.result_type
-    }
-    pub fn arguments(&self) -> &[FunctionArgument] {
-        &self.arguments
-    }
-    // ClientActionError preserves its public diagnostic layout and wire-facing variants.
-    #[allow(clippy::result_large_err)]
-    pub fn encode_payload(
-        &self,
-        active: &ActiveDatabaseRevision,
-    ) -> Result<Vec<u8>, ClientActionError> {
-        encode_action_payload(active, self)
-    }
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ClientActionOutcome {
-    Completed,
-    Failed { code: String },
-    Cancelled,
-}
-
-const ACTION_FAILURE_CODE: &str = "action.failed";
 const EXTERNAL_CONTRACT_RUNTIME_UNAVAILABLE: &str = "external_contract.runtime_unavailable";
-// Keep action framing within the shared opaque codec payload ceiling.
-const MAX_ACTION_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024;
-
-/// Caller-owned lifecycle state for one SERVER action trigger.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ClientActionState {
-    resource: Option<ClientResource>,
-    request: Option<ClientResourceRequest>,
-    tombstone: ClientResourceGeneration,
-    invocation_id: Option<InvocationId>,
-}
-
-impl Default for ClientActionState {
-    fn default() -> Self {
-        Self {
-            resource: None,
-            request: None,
-            tombstone: ClientResourceGeneration(0),
-            invocation_id: None,
-        }
-    }
-}
-impl ClientActionState {
-    pub fn status(&self) -> ClientResourceStatus {
-        self.resource
-            .as_ref()
-            .map_or(ClientResourceStatus::Idle, ClientResource::status)
-    }
-    /// Returns the active request generation.
-    pub fn generation(&self) -> Option<ClientResourceGeneration> {
-        self.resource.as_ref().map(ClientResource::generation)
-    }
-    /// Returns the fresh identity assigned to the currently staged action.
-    pub fn invocation_id(&self) -> Option<InvocationId> {
-        self.invocation_id
-    }
-    fn resource_mut(&mut self) -> Option<&mut ClientResource> {
-        self.resource.as_mut()
-    }
-    fn set_resource(&mut self, resource: ClientResource) {
-        if resource.generation().value() > self.tombstone.value() {
-            self.tombstone = resource.generation();
-        }
-        self.resource = Some(resource);
-    }
-    fn stage_request(&mut self, request: ClientResourceRequest) {
-        self.request = Some(request);
-    }
-    fn stage_invocation(&mut self, invocation_id: InvocationId) {
-        self.invocation_id = Some(invocation_id);
-    }
-    fn clear(&mut self) {
-        if let Some(resource) = self.resource.take()
-            && resource.generation().value() > self.tombstone.value()
-        {
-            self.tombstone = resource.generation();
-        }
-        self.request = None;
-        self.invocation_id = None;
-    }
-    fn is_stale(&self, generation: ClientResourceGeneration) -> bool {
-        generation.value() <= self.tombstone.value()
-    }
-}
-fn redacted_action_failure() -> ClientActionOutcome {
-    ClientActionOutcome::Failed {
-        code: ACTION_FAILURE_CODE.to_owned(),
-    }
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ClientActionError {
-    InvalidValue,
-    InvalidPayload(String),
-    Registry(String),
-    RevisionMismatch,
-    TargetMismatch,
-    ResultTypeMismatch,
-    Arguments(Box<ClientResourceError>),
-    Pending,
-    StaleCompletion,
-    Executor(String),
-    /// The executor still owns a nested resource request after cancellation
-    /// could not complete synchronously.
-    ///
-    /// The caller owns the retained resource in `ClientStateStore` and can use
-    /// this identity to match a later executor completion or release attempt.
-    ExecutorPending {
-        code: String,
-        request_id: InvocationId,
-        key: ClientResourceKey,
-        generation: ClientResourceGeneration,
-    },
-    Evaluation(String),
-}
-impl fmt::Display for ClientActionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidValue => f.write_str("the CLIENT action value is invalid"),
-            Self::InvalidPayload(m) => write!(f, "the CLIENT action payload is invalid: {m}"),
-            Self::Registry(m) => write!(f, "the CLIENT action codec registry is invalid: {m}"),
-            Self::RevisionMismatch => {
-                f.write_str("the CLIENT action target revision is not active")
-            }
-            Self::TargetMismatch => f.write_str("the CLIENT action target is invalid"),
-            Self::ResultTypeMismatch => f.write_str("the CLIENT action result type is invalid"),
-            Self::Arguments(e) => e.fmt(f),
-            Self::Pending => f.write_str("the CLIENT action remains pending"),
-            Self::StaleCompletion => f.write_str("the CLIENT action completion is stale"),
-            Self::Executor(m) => write!(f, "the CLIENT action executor failed: {m}"),
-            Self::ExecutorPending { code, .. } => {
-                write!(
-                    f,
-                    "the CLIENT action executor retains a pending resource: {code}"
-                )
-            }
-            Self::Evaluation(m) => write!(f, "the CLIENT action target failed evaluation: {m}"),
-        }
-    }
-}
-impl Error for ClientActionError {}
 /// The cache identity for one CLIENT resource request.
 ///
 /// All four components are part of the cache boundary. A resource result must
@@ -3155,31 +2970,6 @@ fn resolve_unclassified_target<'a>(
         }
         _ => None,
     }
-}
-
-// ClientActionError preserves its public diagnostic layout at this resolver boundary.
-#[allow(clippy::result_large_err)]
-fn resolve_action_target<'a>(
-    active: &'a ActiveDatabaseRevision,
-    descriptor: &ClientActionDescriptor,
-) -> Result<ResolvedResourceTarget<'a>, ClientActionError> {
-    if descriptor.target_revision != active.pair() {
-        return Err(ClientActionError::RevisionMismatch);
-    }
-    let Some(resolved) = resolve_unclassified_target(
-        active,
-        InvocationTarget::new(descriptor.target, descriptor.target_revision),
-    ) else {
-        return Err(ClientActionError::TargetMismatch);
-    };
-    let expected_domain = match descriptor.domain {
-        ActionTargetDomain::Client => FunctionDomain::Client,
-        ActionTargetDomain::Server => FunctionDomain::Server,
-    };
-    if resolved.definition.domain() != expected_domain {
-        return Err(ClientActionError::TargetMismatch);
-    }
-    Ok(resolved)
 }
 
 /// Returns whether raw arguments match a function's exact active signature.

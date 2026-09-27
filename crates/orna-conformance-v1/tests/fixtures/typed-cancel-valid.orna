@@ -1,0 +1,4 @@
+pub fn inferred_cancel(job: sys.InvocationHandle<Int>) =
+    sys.cancel(job);
+pub fn explicit_cancel(job: sys.InvocationHandle<Int>) =
+    sys.cancel<Int>(job, reason: "stop");

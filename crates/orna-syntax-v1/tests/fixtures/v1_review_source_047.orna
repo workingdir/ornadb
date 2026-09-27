@@ -1,0 +1,1 @@
+type match { match: match, } table match(match: match) { match: match, } protocol match { static match: match; fn match(match: match): match; } enum match { match { match: match }, } fn match(match: match): match { let match: match = match; match = replacement; { match: match }; match.member; namespace.match; call(match: match); match }

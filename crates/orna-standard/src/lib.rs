@@ -2,21 +2,17 @@
 
 use std::{error::Error, fmt};
 
-use orna_artifact::client_plan::{ClientExpressionNode, ExpressionClientPlan};
-use orna_artifact::server_terminal_table;
 use orna_compiler::{
     CheckedStandardLibrary, PrepareStandardUpgradeError, PreparedStandardUpgrade,
-    StandardLibraryCheckError, StandardSourceIdentitySeed, check_standard_library_source,
-    check_standard_source, prepare_checked_standard_upgrade, prepare_standard_source,
+    StandardLibraryCheckError, check_standard_library_source, prepare_checked_standard_upgrade,
 };
 use orna_core::{
-    CatalogueRevisionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, SourceBundleId,
-    SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeBindingId, TypeId,
+    CatalogueRevisionId, FunctionId, FunctionRevisionId, SchemaId, SourceBundleId, SourceRevisionId,
+    SourceUnitId, StandardLibraryRevisionId, TypeBindingId, TypeId,
     canonical_hash::{
         CanonicalHashError, artifact_payload_digest, calculate_standard_library_digest,
-        catalogue_digest_with_context, function_declaration_digest,
-        function_semantic_digest_with_version, source_bundle_digest, source_revision_record_digest,
-        source_unit_content_digest, standard_library_digest,
+        function_declaration_digest, function_semantic_digest_with_version, source_bundle_digest,
+        source_revision_record_digest, source_unit_content_digest, standard_library_digest,
         verify_standard_library_snapshot as verify_canonical_standard_library_snapshot,
         verify_standard_library_v2_snapshot as verify_canonical_standard_library_v2_snapshot,
     },
@@ -28,11 +24,10 @@ use orna_core::{
         ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
-        ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
-        CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
+        ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
         ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord,
-        FunctionSemanticHashVersion, RevisionInvariantError, RevisionPair, Sha256Digest,
-        SourceOrigin, StandardExecutable, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+        FunctionSemanticHashVersion, RevisionInvariantError, Sha256Digest, SourceOrigin,
+        StandardExecutable, StandardLibraryDigestVersion, StandardLibrarySnapshot,
         StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
     types::{ResolvedType, StandardScalar},
@@ -40,6 +35,9 @@ use orna_core::{
         INSPECT_CARRIER_CODEC_REGISTRATIONS, InspectCarrierCodecRegistration,
         OpaqueCodecRegistration, OpaqueCodecRegistry, OpaqueCodecRegistryError,
     },
+};
+use orna_semantic_v1::{
+    Catalogue as StandardCatalogueV1, StandardCatalogueError, StandardDependencyProfile,
 };
 use orna_syntax::{NamePart, PrimitiveValueTypePersistence, QualifiedName, TypeExportTarget};
 
@@ -53,31 +51,25 @@ pub use codecs::{
     registered_inspect_carrier_codecs, registered_opaque_codecs,
 };
 use executables::{
-    retained_json_executable, retained_terminal_table_executable,
-    retained_ui_constructor_executables, retained_v2_executable, retained_window_executable,
+    retained_json_executable,
+    retained_v2_executable,
 };
 use retained::{
-    reconcile_retained_action_source, reconcile_retained_data_source,
     reconcile_retained_invoke_source, reconcile_retained_json_source,
     reconcile_retained_output_source, reconcile_retained_source_with_unit,
-    reconcile_retained_ui_constructors_source, reconcile_retained_ui_source,
-    reconcile_retained_window_source, retained_standard_library_snapshot_from_source,
+    reconcile_retained_ui_source,
+    retained_standard_library_snapshot_from_source,
     retained_standard_library_v2_snapshot_from_source,
     retained_standard_library_v3_snapshot_from_source,
 };
 use snapshot_builders::{
     retained_standard_library_v4_snapshot_from_source,
     retained_standard_library_v5_snapshot_from_source,
-    retained_standard_library_v6_snapshot_from_source,
-    retained_standard_library_v7_snapshot_from_source,
-    retained_standard_library_v8_snapshot_from_source,
-    retained_standard_library_v9_snapshot_from_source,
-    retained_standard_library_v10_snapshot_from_source,
 };
 
 pub use orna_compiler::StandardUpgradeIdentity;
 pub use orna_compiler::{
-    CheckedStandardUiConstructor, CheckedStandardUiWindow, STD_DATA_ROWS_TYPE_BINDING_ID,
+    STD_DATA_ROWS_TYPE_BINDING_ID,
     STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_DATA_SOURCE_UNIT_ID, STD_INTEGER_TYPE_ID,
     STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
     STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
@@ -89,7 +81,7 @@ pub use orna_compiler::{
     STD_UI_BUTTON_FUNCTION_REVISION_ID, STD_UI_BUTTON_LABEL_PARAMETER_ID,
     STD_UI_BUTTON_RUNTIME_CONTRACT, STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
     STD_UI_COLUMN_FUNCTION_REVISION_ID, STD_UI_COLUMN_RUNTIME_CONTRACT,
-    STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID, STD_UI_PANEL_CONTENT_PARAMETER_ID,
+    STD_UI_PANEL_CONTENT_PARAMETER_ID,
     STD_UI_PANEL_FUNCTION_ID, STD_UI_PANEL_FUNCTION_REVISION_ID, STD_UI_PANEL_RUNTIME_CONTRACT,
     STD_UI_ROW_CONTENT_PARAMETER_ID, STD_UI_ROW_FUNCTION_ID, STD_UI_ROW_FUNCTION_REVISION_ID,
     STD_UI_ROW_RUNTIME_CONTRACT, STD_UI_TABS_CONTENT_PARAMETER_ID, STD_UI_TABS_FUNCTION_ID,
@@ -100,13 +92,49 @@ pub use orna_compiler::{
     STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID, STD_UI_TEXT_PARAMETER_ID, STD_UI_TEXT_RUNTIME_CONTRACT,
     STD_UI_WINDOW_CONTENT_PARAMETER_ID, STD_UI_WINDOW_FUNCTION_ID,
     STD_UI_WINDOW_FUNCTION_REVISION_ID, STD_UI_WINDOW_REVISION_NUMBER,
-    STD_UI_WINDOW_RUNTIME_CONTRACT, STD_UI_WINDOW_TITLE_PARAMETER_ID, STD_WINDOW_SOURCE_UNIT_ID,
-    check_standard_terminal_present_table, check_standard_ui_constructor, check_standard_ui_window,
+    STD_UI_WINDOW_RUNTIME_CONTRACT, STD_UI_WINDOW_TITLE_PARAMETER_ID,
+    check_standard_terminal_present_table,
 };
 pub use orna_core::inspect::INSPECT_RENDER_CONTRACT;
 
 /// The standard-library version represented by this manifest.
 pub const STANDARD_LIBRARY_VERSION_IDENTITY: &str = "orna.std/1";
+
+/// Logical source path of the pinned Orna 1.0.0 reference math module.
+pub const REFERENCE_STANDARD_MATH_PATH_V1: &str = "std/math.orna";
+
+const REFERENCE_STANDARD_MATH_SOURCE_V1: &str = include_str!("v1/std/math.orna");
+
+/// Source units for the Orna 1.0.0 reference standard dependency.
+///
+/// This is the current source-backed standard boundary. The retained `orna.std/1`–
+/// `orna.std/11` APIs below model older, explicitly versioned snapshots.
+#[must_use]
+pub fn reference_standard_sources_v1() -> [(String, String); 1] {
+    [(
+        REFERENCE_STANDARD_MATH_PATH_V1.into(),
+        REFERENCE_STANDARD_MATH_SOURCE_V1.into(),
+    )]
+}
+
+/// Profile that pins the exact 1.0.0 reference-standard source bytes.
+#[must_use]
+pub fn reference_standard_profile_v1() -> StandardDependencyProfile {
+    StandardDependencyProfile::from_sources(
+        "orna.std/v1-pure-math",
+        reference_standard_sources_v1(),
+    )
+    .expect("the bundled Orna 1.0.0 standard module path is valid")
+}
+
+/// Builds the semantic catalogue from the pinned Orna 1.0.0 source, without
+/// routing through the pre-1.0 SQL parser/compiler used by retained snapshots.
+pub fn reference_standard_catalogue_v1() -> Result<StandardCatalogueV1, StandardCatalogueError> {
+    StandardCatalogueV1::from_standard_sources(
+        &reference_standard_profile_v1(),
+        reference_standard_sources_v1(),
+    )
+}
 
 /// The language version associated with this standard-library version.
 pub const LANGUAGE_VERSION_IDENTITY: &str = "orna.language/1";
@@ -483,82 +511,15 @@ pub const STANDARD_CATALOGUE_V6_REVISION_ID: CatalogueRevisionId =
 pub const STANDARD_SOURCE_V6_BUNDLE_ID: SourceBundleId = SourceBundleId::from_bytes(reserved_id(6));
 pub const STANDARD_SOURCE_V6_REVISION_ID: SourceRevisionId =
     SourceRevisionId::from_bytes(reserved_id(6));
-pub const STD_ACTION_SOURCE_LOGICAL_PATH: &str = "std/action.orna";
-pub const STD_ACTION_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes(reserved_id(7));
-pub const STD_ACTION_SCHEMA_ID: SchemaId = SchemaId::from_bytes(reserved_id(9));
-pub const STD_ACTION_TYPE_ID: TypeId = TypeId::from_bytes(reserved_id(20));
-pub const STD_ACTION_CONTRACT: &str = "orna.std.value.action@1";
 pub const ACTION_MAGIC: &str = "ORNA-ACTION/1 ";
 
-const RETAINED_STANDARD_ACTION_SOURCE: &str = include_str!("../../../stdlib/std/action.orna");
-const ACCEPTED_V6_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_TYPES_CONTENT_DIGEST;
-const ACCEPTED_V6_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_INVOKE_CONTENT_DIGEST;
-const ACCEPTED_V6_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_OUTPUT_CONTENT_DIGEST;
-const ACCEPTED_V6_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_UI_CONTENT_DIGEST;
-const ACCEPTED_V6_JSON_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_JSON_CONTENT_DIGEST;
-const ACCEPTED_V6_ACTION_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x67, 0x6c, 0xf6, 0x55, 0x53, 0x5c, 0x72, 0xad, 0x0a, 0x2d, 0x1c, 0x51, 0x00, 0x92, 0x31, 0x3c,
-    0x2a, 0x9e, 0x1a, 0x8c, 0xe8, 0xaf, 0x04, 0x56, 0xfe, 0xca, 0x28, 0x95, 0xc7, 0x72, 0xef, 0x7a,
-]);
-const ACCEPTED_V6_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x0d, 0x3e, 0xe1, 0x9e, 0xf8, 0x51, 0xec, 0xbd, 0x9b, 0x8a, 0xe6, 0x6f, 0x49, 0x86, 0xf1, 0x70,
-    0x71, 0xb6, 0x3e, 0x6b, 0xf8, 0xff, 0xb4, 0x40, 0xeb, 0x06, 0x88, 0xc3, 0x76, 0xb2, 0xf7, 0x40,
-]);
-const ACCEPTED_V6_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xba, 0xd0, 0x13, 0x10, 0x53, 0x02, 0xa0, 0x48, 0x04, 0x4e, 0xce, 0xa7, 0x35, 0x1f, 0xde, 0x97,
-    0x72, 0x11, 0x9c, 0x3c, 0x95, 0x4c, 0x69, 0x70, 0xcd, 0x03, 0xf2, 0x0e, 0x0f, 0x9e, 0x87, 0xe2,
-]);
-const ACCEPTED_V6_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V5_ARTIFACT_DIGEST;
-const ACCEPTED_V6_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V5_SEMANTIC_DIGEST;
-const ACCEPTED_V6_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x79, 0x5c, 0xa1, 0xd8, 0xbb, 0x5b, 0x8a, 0x9c, 0x8e, 0x42, 0xc4, 0x7f, 0x79, 0x0a, 0xc5, 0x47,
-    0x27, 0xd9, 0x3f, 0xc3, 0xe8, 0xd5, 0x3e, 0x05, 0xc1, 0x08, 0xbc, 0x4a, 0x53, 0x4f, 0xe0, 0xbd,
-]);
 /// The standard-library version represented by the V7 manifest (ADR 0019).
 pub const STANDARD_LIBRARY_V7_VERSION_IDENTITY: &str = "orna.std/7";
 pub const STANDARD_LIBRARY_V7_REVISION_ID: StandardLibraryRevisionId =
     StandardLibraryRevisionId::from_bytes(reserved_id(7));
 pub const STANDARD_CATALOGUE_V7_REVISION_ID: CatalogueRevisionId =
     CatalogueRevisionId::from_bytes(reserved_id(7));
-pub const STANDARD_SOURCE_V7_BUNDLE_ID: SourceBundleId = SourceBundleId::from_bytes(reserved_id(7));
-pub const STANDARD_SOURCE_V7_REVISION_ID: SourceRevisionId =
-    SourceRevisionId::from_bytes(reserved_id(7));
-pub const STD_WINDOW_SOURCE_LOGICAL_PATH: &str = "std/window.orna";
-pub const STD_UI_WINDOW_CONTRACT: &str = STD_UI_WINDOW_RUNTIME_CONTRACT;
 
-const RETAINED_STANDARD_WINDOW_SOURCE: &str = include_str!("../../../stdlib/std/window.orna");
-const ACCEPTED_V7_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V6_TYPES_CONTENT_DIGEST;
-const ACCEPTED_V7_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V6_INVOKE_CONTENT_DIGEST;
-const ACCEPTED_V7_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V6_OUTPUT_CONTENT_DIGEST;
-const ACCEPTED_V7_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V6_UI_CONTENT_DIGEST;
-const ACCEPTED_V7_JSON_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V6_JSON_CONTENT_DIGEST;
-const ACCEPTED_V7_ACTION_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V6_ACTION_CONTENT_DIGEST;
-const ACCEPTED_V7_WINDOW_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xcd, 0x58, 0x17, 0xf9, 0x3c, 0x4f, 0x42, 0xb7, 0x27, 0xb1, 0xea, 0xb4, 0x82, 0x8c, 0x1c, 0xf0,
-    0xb8, 0xc7, 0xa9, 0x69, 0x42, 0x98, 0x3a, 0xc0, 0x8f, 0xe1, 0x1b, 0xc0, 0xf4, 0x30, 0x78, 0x18,
-]);
-const ACCEPTED_V7_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x5d, 0x9b, 0x80, 0x91, 0x08, 0x2f, 0xc3, 0xf7, 0xf2, 0xde, 0x47, 0xbe, 0x02, 0xcf, 0x66, 0xa6,
-    0xe2, 0x15, 0x35, 0xf8, 0xe7, 0x07, 0x91, 0x8c, 0xfc, 0x5a, 0x2b, 0xb1, 0x2c, 0x03, 0x47, 0x36,
-]);
-const ACCEPTED_V7_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x74, 0xd7, 0xb9, 0x6e, 0xe3, 0x62, 0x18, 0x8e, 0x35, 0x77, 0x72, 0x68, 0xf2, 0xc5, 0x30, 0x53,
-    0xcf, 0x41, 0x5b, 0xcc, 0x5b, 0x7f, 0x36, 0xa9, 0xc4, 0x17, 0x4b, 0xf8, 0xaf, 0x14, 0xad, 0x68,
-]);
-const ACCEPTED_V7_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V6_ARTIFACT_DIGEST;
-const ACCEPTED_V7_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V6_SEMANTIC_DIGEST;
-const ACCEPTED_V7_WINDOW_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x34, 0xaf, 0xe2, 0x8b, 0x87, 0x01, 0xbe, 0x44, 0x1e, 0xb7, 0xe8, 0x71, 0x57, 0x95, 0x50, 0x82,
-    0xbd, 0x31, 0xce, 0x8d, 0x13, 0xba, 0xdd, 0x2b, 0x70, 0xbf, 0xe6, 0x06, 0x46, 0x54, 0x75, 0x86,
-]);
-const ACCEPTED_V7_WINDOW_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xd3, 0xa1, 0x28, 0xa4, 0x25, 0x13, 0x1a, 0x15, 0xe6, 0xfd, 0xa3, 0xcf, 0x0f, 0x09, 0x00, 0x36,
-    0x2a, 0x6e, 0xb9, 0xc5, 0x30, 0x34, 0x29, 0xa6, 0x57, 0xc1, 0xf2, 0x6b, 0x80, 0xbd, 0x84, 0x13,
-]);
-const ACCEPTED_V7_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x44, 0xc7, 0x01, 0x00, 0xd2, 0x40, 0xc8, 0xc5, 0x49, 0x40, 0xf4, 0xae, 0x29, 0x13, 0x32, 0x62,
-    0x3b, 0x02, 0x36, 0xc2, 0x81, 0x83, 0x6c, 0x21, 0x7b, 0x43, 0x2f, 0xd6, 0xe5, 0x2e, 0x30, 0x8e,
-]);
 /// The standard-library version represented by the V8 manifest (Work ADR 0087).
 pub const STANDARD_LIBRARY_V8_VERSION_IDENTITY: &str = "orna.std/8";
 pub const STANDARD_LIBRARY_V8_REVISION_ID: StandardLibraryRevisionId =
@@ -573,42 +534,6 @@ pub const STD_DATA_ROWS_CONTRACT: &str = "orna.std.value.rows@1";
 pub const STD_DATA_ROWS_SEMANTIC_NAME: &str = "std.data.rows";
 pub const STD_DATA_ROWS_EXPORT_NAME: &str = "std.Rows";
 
-const RETAINED_STANDARD_DATA_SOURCE: &str = include_str!("../../../stdlib/std/data.orna");
-
-const ACCEPTED_V8_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_TYPES_CONTENT_DIGEST;
-const ACCEPTED_V8_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_INVOKE_CONTENT_DIGEST;
-const ACCEPTED_V8_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_OUTPUT_CONTENT_DIGEST;
-const ACCEPTED_V8_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_UI_CONTENT_DIGEST;
-const ACCEPTED_V8_JSON_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_JSON_CONTENT_DIGEST;
-const ACCEPTED_V8_ACTION_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_ACTION_CONTENT_DIGEST;
-const ACCEPTED_V8_WINDOW_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_WINDOW_CONTENT_DIGEST;
-const ACCEPTED_V8_DATA_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xd6, 0x8b, 0x4b, 0xae, 0x00, 0xc7, 0xe4, 0xa8, 0xc5, 0x0a, 0x8f, 0x32, 0x35, 0x1b, 0x0c, 0x8c,
-    0xea, 0x41, 0x08, 0x95, 0xa7, 0xda, 0x7c, 0x8c, 0x90, 0xa4, 0xff, 0x8a, 0xf3, 0x26, 0xda, 0xc3,
-]);
-const ACCEPTED_V8_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x1b, 0x64, 0x21, 0xb5, 0xbe, 0xc8, 0xaa, 0xe3, 0xdd, 0xc2, 0x08, 0x38, 0x7a, 0xb3, 0xe1, 0xee,
-    0x8c, 0xe7, 0xc9, 0x2d, 0x92, 0x5c, 0x41, 0xa4, 0xc0, 0x30, 0x44, 0x57, 0xb7, 0xb8, 0xfd, 0xee,
-]);
-const ACCEPTED_V8_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x3f, 0x73, 0xa0, 0xaa, 0x79, 0xa9, 0x1b, 0x20, 0x76, 0x8a, 0xb4, 0xa0, 0x44, 0xf8, 0x7e, 0x84,
-    0x60, 0xc9, 0x58, 0x85, 0xbe, 0x96, 0x72, 0x1c, 0xbe, 0x12, 0x97, 0x9b, 0xe2, 0x38, 0x4f, 0x59,
-]);
-const ACCEPTED_V8_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V7_ARTIFACT_DIGEST;
-const ACCEPTED_V8_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V7_SEMANTIC_DIGEST;
-const ACCEPTED_V8_TABLE_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x33, 0x38, 0x0f, 0x5d, 0x50, 0x5c, 0x31, 0x75, 0x7b, 0xc6, 0x8c, 0x66, 0xf2, 0x0a, 0x4f, 0x13,
-    0x9e, 0x9d, 0x61, 0x30, 0xd4, 0x0a, 0xd8, 0xb3, 0x0d, 0x02, 0xc0, 0xfa, 0x44, 0x01, 0x03, 0x94,
-]);
-const ACCEPTED_V8_TABLE_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x83, 0xa5, 0x6f, 0x9c, 0x3e, 0xc1, 0x2b, 0xb5, 0xa4, 0x08, 0x7f, 0xed, 0x57, 0x09, 0xca, 0xc4,
-    0x51, 0xf4, 0x9b, 0xd8, 0x86, 0xff, 0x76, 0xef, 0x9c, 0x75, 0x52, 0xc7, 0x85, 0xc5, 0x4b, 0x46,
-]);
-const ACCEPTED_V8_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xc8, 0xc1, 0xed, 0x9e, 0xe5, 0x51, 0xe4, 0x52, 0x66, 0xd5, 0x8f, 0x0e, 0xee, 0x38, 0x3d, 0xed,
-    0xee, 0x6e, 0x77, 0xa3, 0xfe, 0x25, 0x70, 0xd1, 0x84, 0x39, 0xe8, 0x77, 0xea, 0x6b, 0xf0, 0x68,
-]);
-
 /// The standard-library version represented by the V9 manifest (Work ADR 0088).
 pub const STANDARD_LIBRARY_V9_VERSION_IDENTITY: &str = "orna.std/9";
 pub const STANDARD_LIBRARY_V9_REVISION_ID: StandardLibraryRevisionId =
@@ -618,10 +543,7 @@ pub const STANDARD_CATALOGUE_V9_REVISION_ID: CatalogueRevisionId =
 pub const STANDARD_SOURCE_V9_BUNDLE_ID: SourceBundleId = SourceBundleId::from_bytes(reserved_id(9));
 pub const STANDARD_SOURCE_V9_REVISION_ID: SourceRevisionId =
     SourceRevisionId::from_bytes(reserved_id(9));
-pub const STD_UI_CONSTRUCTORS_SOURCE_LOGICAL_PATH: &str = "std/ui_constructors.orna";
 
-const RETAINED_STANDARD_UI_CONSTRUCTORS_SOURCE: &str =
-    include_str!("../../../stdlib/std/ui_constructors.orna");
 /// The standard-library version represented by the V10 manifest.
 pub const STANDARD_LIBRARY_V10_VERSION_IDENTITY: &str = "orna.std/10";
 pub const STANDARD_LIBRARY_V10_REVISION_ID: StandardLibraryRevisionId =
@@ -639,52 +561,9 @@ pub const STD_CLI_REPL_FUNCTION_ID: FunctionId = FunctionId::from_bytes(reserved
 pub const STD_CLI_REPL_FUNCTION_REVISION_ID: FunctionRevisionId =
     FunctionRevisionId::from_bytes(reserved_id(0x1C));
 pub const STD_CLI_REPL_REVISION_NUMBER: u64 = 1;
-/// The standard-library version represented by the V11 manifest.
-pub const STANDARD_LIBRARY_V11_VERSION_IDENTITY: &str = "orna.std/11";
-pub const STANDARD_LIBRARY_V11_REVISION_ID: StandardLibraryRevisionId =
-    StandardLibraryRevisionId::from_bytes(reserved_id(11));
-pub const STANDARD_CATALOGUE_V11_REVISION_ID: CatalogueRevisionId =
-    CatalogueRevisionId::from_bytes(reserved_id(11));
-pub const STANDARD_SOURCE_V11_BUNDLE_ID: SourceBundleId =
-    SourceBundleId::from_bytes(reserved_id(11));
-pub const STANDARD_SOURCE_V11_REVISION_ID: SourceRevisionId =
-    SourceRevisionId::from_bytes(reserved_id(11));
-pub const STD_MATH_SOURCE_LOGICAL_PATH: &str = "std/math.orna";
-pub const STD_MATH_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes(reserved_id(12));
-pub const STD_MATH_SCHEMA_ID: SchemaId = SchemaId::from_bytes(reserved_id(11));
-const RETAINED_STANDARD_MATH_SOURCE: &str = include_str!("../../../stdlib/std/math.orna");
-const RETAINED_STANDARD_CLI_SOURCE: &str = include_str!("../../../stdlib/std/cli.orna");
-const ACCEPTED_V11_MATH_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x9b, 0x57, 0x8c, 0xcd, 0x92, 0x78, 0x63, 0xfa, 0xfe, 0x37, 0x71, 0x1c, 0x1c, 0x69, 0x59, 0x85,
-    0x29, 0x91, 0x9f, 0x3d, 0x28, 0x66, 0xe2, 0x95, 0xd8, 0x60, 0xd1, 0x32, 0x8d, 0x74, 0x52, 0x7f,
-]);
-const ACCEPTED_V11_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xe3, 0xae, 0xda, 0xa3, 0x6c, 0x16, 0xc7, 0x91, 0x2a, 0x60, 0x55, 0xf7, 0xe3, 0xf4, 0x55, 0x74,
-    0x3b, 0x65, 0xd8, 0x9d, 0xb7, 0x9d, 0xc2, 0xe1, 0x48, 0x97, 0x66, 0xe2, 0xff, 0x01, 0xea, 0xb8,
-]);
-const ACCEPTED_V11_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x72, 0x40, 0x86, 0x61, 0xd2, 0xa8, 0x96, 0x0a, 0x84, 0xd9, 0xa6, 0x09, 0x11, 0x02, 0x02, 0x89,
-    0x91, 0x0a, 0xb2, 0x67, 0x49, 0x09, 0x3e, 0x6a, 0x13, 0xa5, 0xd7, 0x11, 0xbb, 0x26, 0x3c, 0x6f,
-]);
-const ACCEPTED_V11_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x19, 0xc8, 0x28, 0xa7, 0x7e, 0xef, 0xfe, 0xac, 0x5a, 0x95, 0xb6, 0xd0, 0x6c, 0xbe, 0x91, 0x2c,
-    0x9c, 0x22, 0xab, 0xce, 0xc5, 0x18, 0x3c, 0x1e, 0xfa, 0xde, 0xe9, 0x3d, 0x72, 0x3d, 0x91, 0x98,
-]);
 const ACCEPTED_V10_CLI_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x1e, 0x99, 0xf3, 0x2f, 0xf7, 0xc2, 0xf0, 0x65, 0x4d, 0x67, 0x61, 0xa6, 0xa9, 0xce, 0xd8, 0x26,
     0x95, 0x6c, 0x09, 0x5d, 0xdf, 0xd1, 0x2e, 0xbb, 0xdc, 0xc1, 0x8e, 0xc4, 0xe9, 0xab, 0x19, 0xc4,
-]);
-const ACCEPTED_V10_CLI_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xb4, 0xa2, 0xd8, 0xcb, 0x75, 0x7e, 0x49, 0x17, 0xcc, 0x1e, 0xe5, 0x1e, 0x92, 0xc4, 0x5f, 0x0a,
-    0x68, 0xd6, 0x90, 0xbd, 0x04, 0x68, 0xd2, 0x3c, 0x0e, 0xba, 0x50, 0x35, 0xfd, 0x44, 0x74, 0x47,
-]);
-const ACCEPTED_V10_CLI_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x20, 0xf8, 0xae, 0xd5, 0x7b, 0x6b, 0xa6, 0x57, 0xbd, 0x29, 0xc1, 0xe9, 0x94, 0x9b, 0x5a, 0xce,
-    0x81, 0x31, 0x4d, 0xe7, 0xb0, 0xda, 0x06, 0x28, 0x59, 0xb9, 0x26, 0x34, 0xa6, 0x89, 0x91, 0xf3,
-]);
-const ACCEPTED_V10_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xb1, 0xf0, 0xdb, 0x01, 0xe1, 0xce, 0x87, 0xd2, 0x2a, 0x2c, 0x60, 0x9d, 0x93, 0xbf, 0xa7, 0x4a,
-    0xa4, 0xd8, 0x52, 0xc3, 0x68, 0x8e, 0x35, 0xc2, 0xb1, 0x61, 0x37, 0xd2, 0x83, 0x3c, 0x0b, 0x1c,
 ]);
 const ACCEPTED_V10_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0xe9, 0x35, 0x47, 0x5a, 0x86, 0x4d, 0xaa, 0x61, 0x66, 0x01, 0x9a, 0xda, 0xf1, 0x59, 0x86, 0xc4,
@@ -693,90 +572,6 @@ const ACCEPTED_V10_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_byt
 const ACCEPTED_V10_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x9b, 0x72, 0xf3, 0x38, 0x8b, 0x46, 0xe5, 0x28, 0x42, 0x5a, 0x84, 0x1c, 0x5b, 0x90, 0x61, 0x65,
     0xf7, 0x31, 0x61, 0xe9, 0x2c, 0x9f, 0x93, 0xe6, 0x01, 0x99, 0x81, 0x76, 0x10, 0x6d, 0xdb, 0xbd,
-]);
-const ACCEPTED_V9_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_TYPES_CONTENT_DIGEST;
-const ACCEPTED_V9_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_INVOKE_CONTENT_DIGEST;
-const ACCEPTED_V9_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_OUTPUT_CONTENT_DIGEST;
-const ACCEPTED_V9_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_UI_CONTENT_DIGEST;
-const ACCEPTED_V9_JSON_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_JSON_CONTENT_DIGEST;
-const ACCEPTED_V9_ACTION_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V6_ACTION_CONTENT_DIGEST;
-const ACCEPTED_V9_WINDOW_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_WINDOW_CONTENT_DIGEST;
-const ACCEPTED_V9_DATA_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_DATA_CONTENT_DIGEST;
-const ACCEPTED_V9_UI_CONSTRUCTORS_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xdd, 0x5d, 0xc7, 0x93, 0xb0, 0xf8, 0x61, 0x45, 0xdd, 0x3e, 0xd2, 0x05, 0x5a, 0x55, 0x89, 0x82,
-    0xc3, 0x42, 0x52, 0xc9, 0xb7, 0xfb, 0x47, 0xe7, 0xb3, 0x72, 0xb8, 0x21, 0x81, 0x73, 0x56, 0x87,
-]);
-const ACCEPTED_V9_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V8_ARTIFACT_DIGEST;
-const ACCEPTED_V9_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V8_SEMANTIC_DIGEST;
-const ACCEPTED_V9_TABLE_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V8_TABLE_ARTIFACT_DIGEST;
-const ACCEPTED_V9_TABLE_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V8_TABLE_SEMANTIC_DIGEST;
-const ACCEPTED_V9_UI_TEXT_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xde, 0x76, 0xc9, 0xf8, 0x46, 0x9e, 0x49, 0xdf, 0x37, 0xee, 0x4e, 0x89, 0x8d, 0x56, 0x67, 0x40,
-    0x8d, 0xb2, 0x7e, 0xba, 0xfe, 0x37, 0x2e, 0xe1, 0xdf, 0xab, 0x34, 0x41, 0x0c, 0xd0, 0x73, 0x51,
-]);
-const ACCEPTED_V9_UI_TEXT_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xfe, 0x59, 0x16, 0x6c, 0xba, 0xce, 0x28, 0xb8, 0x11, 0x9f, 0xbb, 0x27, 0x6f, 0xdb, 0xa0, 0x8c,
-    0x1e, 0xcf, 0xc9, 0xb3, 0x92, 0xd5, 0x72, 0xbc, 0x82, 0xac, 0xbc, 0xea, 0xf7, 0x0c, 0x4f, 0x51,
-]);
-const ACCEPTED_V9_UI_BUTTON_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x37, 0x70, 0x17, 0x0a, 0xfd, 0xcb, 0x13, 0x74, 0x0c, 0x19, 0xde, 0xe8, 0x32, 0x7d, 0x87, 0xea,
-    0x51, 0x01, 0x8b, 0x41, 0xfd, 0xae, 0x61, 0x18, 0xe3, 0x7b, 0x15, 0xbf, 0x2e, 0x17, 0x64, 0x5e,
-]);
-const ACCEPTED_V9_UI_BUTTON_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x70, 0x56, 0x57, 0x99, 0xc0, 0xed, 0x55, 0xcd, 0xdf, 0x59, 0xf2, 0x51, 0x0f, 0x78, 0xd9, 0x68,
-    0x26, 0xd8, 0x9b, 0xe4, 0xb6, 0xaf, 0x24, 0x56, 0x22, 0x12, 0x7e, 0x3c, 0x1f, 0xb4, 0xf4, 0x3f,
-]);
-const ACCEPTED_V9_UI_PANEL_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xcf, 0xe4, 0x8f, 0x3d, 0x05, 0xc1, 0x28, 0x38, 0x28, 0x78, 0x40, 0x2f, 0xa2, 0x35, 0xf0, 0xcc,
-    0x42, 0x97, 0x32, 0x6a, 0x89, 0xff, 0x1a, 0x36, 0x40, 0xbc, 0x10, 0xd2, 0xa9, 0x0d, 0x85, 0x09,
-]);
-const ACCEPTED_V9_UI_PANEL_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x09, 0x6a, 0xcf, 0x62, 0x31, 0x09, 0x5e, 0xca, 0x7b, 0x21, 0x50, 0x51, 0x03, 0x42, 0x0b, 0x55,
-    0xda, 0xcd, 0xfd, 0xb6, 0x52, 0xde, 0x1a, 0x47, 0xcd, 0x06, 0x9a, 0x59, 0x6f, 0x54, 0xe8, 0x14,
-]);
-const ACCEPTED_V9_UI_ROW_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xfe, 0x9f, 0x16, 0xac, 0x45, 0xd0, 0x99, 0x23, 0x42, 0xf7, 0x8c, 0xf5, 0xb2, 0x7b, 0x69, 0xa9,
-    0x17, 0x17, 0x72, 0x7c, 0xa2, 0x64, 0x4a, 0x16, 0x23, 0x34, 0xa1, 0x7a, 0x74, 0x7a, 0xd6, 0x9b,
-]);
-const ACCEPTED_V9_UI_ROW_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xf5, 0x8e, 0x0b, 0x07, 0x56, 0xa2, 0xa3, 0x10, 0x63, 0xcc, 0xb7, 0x32, 0xb4, 0xe1, 0x1d, 0x32,
-    0xfa, 0x69, 0x74, 0x95, 0x12, 0xe4, 0xf7, 0x91, 0x97, 0x56, 0xbf, 0x00, 0x86, 0x7f, 0x58, 0x1d,
-]);
-const ACCEPTED_V9_UI_COLUMN_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x46, 0x04, 0x29, 0x19, 0xab, 0x2a, 0x30, 0xf9, 0x03, 0x18, 0xf4, 0x81, 0x6e, 0x13, 0x51, 0x42,
-    0xe3, 0x4c, 0xe7, 0x61, 0x95, 0xf6, 0x69, 0x7a, 0xe3, 0xaa, 0xd4, 0x5f, 0xf7, 0x2f, 0xb6, 0x20,
-]);
-const ACCEPTED_V9_UI_COLUMN_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x2f, 0x66, 0x24, 0xec, 0x28, 0x19, 0x31, 0xcc, 0xe8, 0xd5, 0x81, 0x10, 0x28, 0x75, 0xfb, 0xe1,
-    0xda, 0x67, 0x20, 0xe3, 0x88, 0x59, 0x68, 0xd3, 0x10, 0x43, 0x48, 0x9d, 0x97, 0xc6, 0xe0, 0x7b,
-]);
-const ACCEPTED_V9_UI_TEXT_INPUT_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xb4, 0xb8, 0xeb, 0x44, 0x1e, 0x04, 0x38, 0xac, 0x2e, 0xd7, 0x43, 0x14, 0x05, 0x23, 0x1a, 0x18,
-    0xa4, 0x68, 0x0c, 0xed, 0x92, 0x3f, 0x47, 0xb3, 0xc2, 0x7d, 0xff, 0x03, 0xed, 0x08, 0x34, 0x87,
-]);
-const ACCEPTED_V9_UI_TEXT_INPUT_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xe0, 0x71, 0x71, 0x0e, 0x94, 0x94, 0x1c, 0x48, 0x22, 0x89, 0xa9, 0x3f, 0x2a, 0xa7, 0x78, 0x09,
-    0xd6, 0xe5, 0xeb, 0x5b, 0xf6, 0xaa, 0xef, 0x0c, 0x90, 0xd0, 0x12, 0x25, 0x48, 0x3c, 0x4a, 0x70,
-]);
-const ACCEPTED_V9_UI_TABS_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x12, 0x40, 0x90, 0xf3, 0x7c, 0x20, 0xd9, 0x3a, 0x92, 0xef, 0xf5, 0x91, 0x4e, 0x70, 0x17, 0x25,
-    0x04, 0xbc, 0x2b, 0x34, 0xbd, 0xdc, 0xf0, 0xe4, 0x77, 0xe0, 0x6d, 0xfd, 0x8f, 0x0c, 0x48, 0x32,
-]);
-const ACCEPTED_V9_UI_TABS_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x37, 0xaa, 0x1a, 0x41, 0xce, 0x04, 0x6d, 0xd0, 0x18, 0x33, 0x41, 0x98, 0x9d, 0x39, 0x28, 0x19,
-    0x8d, 0x0c, 0x01, 0x79, 0x70, 0xbf, 0xb2, 0x42, 0x8d, 0x5e, 0xa2, 0xc5, 0xbb, 0x4b, 0x21, 0x76,
-]);
-const ACCEPTED_V9_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x9f, 0x0a, 0xd9, 0xbd, 0x40, 0xc3, 0x6c, 0x8f, 0x20, 0x43, 0x83, 0x04, 0xbd, 0x81, 0xee, 0xfe,
-    0x50, 0xec, 0xe4, 0xfd, 0x03, 0x98, 0x62, 0x08, 0xf3, 0x76, 0x77, 0xc6, 0x21, 0x78, 0x48, 0x2e,
-]);
-const ACCEPTED_V9_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x1b, 0xde, 0x03, 0x54, 0xa9, 0x87, 0x22, 0x4f, 0xf8, 0x0c, 0x01, 0xab, 0xcc, 0xfd, 0xc7, 0x3f,
-    0xc8, 0xf3, 0xec, 0x4d, 0xbb, 0x8a, 0xe6, 0x6b, 0x2d, 0x74, 0xdf, 0x2d, 0x69, 0x26, 0x23, 0xa5,
-]);
-const ACCEPTED_V9_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xe2, 0xf7, 0xb7, 0x73, 0x89, 0x77, 0x04, 0x69, 0xbf, 0xbe, 0x6d, 0x94, 0x84, 0x3c, 0x43, 0x1a,
-    0x3d, 0xc4, 0x00, 0x8a, 0x50, 0x52, 0x15, 0xc6, 0xaf, 0xd5, 0x6d, 0x26, 0x07, 0xa5, 0xb7, 0x56,
 ]);
 #[derive(Clone, Copy)]
 struct ValueTypeFact {
@@ -1644,9 +1439,6 @@ impl StandardLibraryV6Manifest {
     pub const fn json_source_unit(&self) -> SourceUnitId {
         STD_JSON_SOURCE_UNIT_ID
     }
-    pub const fn action_source_unit(&self) -> SourceUnitId {
-        STD_ACTION_SOURCE_UNIT_ID
-    }
     pub const fn types_source_logical_path(&self) -> &'static str {
         SOURCE_LOGICAL_PATH
     }
@@ -1662,46 +1454,23 @@ impl StandardLibraryV6Manifest {
     pub const fn json_source_logical_path(&self) -> &'static str {
         STD_JSON_SOURCE_LOGICAL_PATH
     }
-    pub const fn action_source_logical_path(&self) -> &'static str {
-        STD_ACTION_SOURCE_LOGICAL_PATH
-    }
     pub const fn catalogue(&self) -> &CatalogueSnapshot {
         &self.catalogue
     }
 }
 
-/// Builds and validates the append-only V6 catalogue over V5.
+/// Returns the retired V6 catalogue identity over the V5 catalogue surface.
+///
+/// The historical `std.Action` declaration is no longer reconstructed.
 pub fn standard_library_v6_manifest()
 -> Result<StandardLibraryV6Manifest, StandardLibraryManifestError> {
     let version_five = standard_library_v5_manifest()?;
-    let mut schemas = version_five.catalogue().schemas().to_vec();
-    schemas.push(SchemaDefinition::new(
-        STD_ACTION_SCHEMA_ID,
-        semantic_name("std.action", ["std", "action"])?,
-    ));
-    let mut value_types = version_five.catalogue().value_types().to_vec();
-    value_types.push(ValueTypeDefinition::opaque(
-        STD_ACTION_TYPE_ID,
-        semantic_name("std.action.action", ["std", "action", "action"])?,
-        STD_ACTION_CONTRACT,
-    ));
-    let mut type_bindings = version_five.catalogue().type_bindings().to_vec();
-    let action_name = semantic_name("std.action", ["std", "action"])?;
-    let action_lookup = TypeLookupName::qualified(action_name.clone());
-    let action_binding =
-        TypeBinding::qualified(action_name, STD_ACTION_TYPE_ID).map_err(|source| {
-            StandardLibraryManifestError::TypeBinding {
-                name: action_lookup,
-                source,
-            }
-        })?;
-    type_bindings.push(action_binding);
     let catalogue = CatalogueSnapshot::new_with_functions_and_types(
         STANDARD_CATALOGUE_V6_REVISION_ID,
-        schemas,
+        version_five.catalogue().schemas().to_vec(),
         Vec::new(),
-        value_types,
-        type_bindings,
+        version_five.catalogue().value_types().to_vec(),
+        version_five.catalogue().type_bindings().to_vec(),
         version_five.catalogue().functions().to_vec(),
     )
     .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
@@ -1723,54 +1492,6 @@ impl StandardLibraryV7Manifest {
     }
     pub const fn language_version(&self) -> &'static str {
         LANGUAGE_VERSION_IDENTITY
-    }
-    pub const fn source_bundle(&self) -> SourceBundleId {
-        STANDARD_SOURCE_V7_BUNDLE_ID
-    }
-    pub const fn source_revision(&self) -> SourceRevisionId {
-        STANDARD_SOURCE_V7_REVISION_ID
-    }
-    pub const fn types_source_unit(&self) -> SourceUnitId {
-        STD_TYPES_SOURCE_UNIT_ID
-    }
-    pub const fn invoke_source_unit(&self) -> SourceUnitId {
-        STD_INVOKE_SOURCE_UNIT_ID
-    }
-    pub const fn output_source_unit(&self) -> SourceUnitId {
-        STD_OUTPUT_SOURCE_UNIT_ID
-    }
-    pub const fn ui_source_unit(&self) -> SourceUnitId {
-        STD_UI_SOURCE_UNIT_ID
-    }
-    pub const fn json_source_unit(&self) -> SourceUnitId {
-        STD_JSON_SOURCE_UNIT_ID
-    }
-    pub const fn action_source_unit(&self) -> SourceUnitId {
-        STD_ACTION_SOURCE_UNIT_ID
-    }
-    pub const fn window_source_unit(&self) -> SourceUnitId {
-        STD_WINDOW_SOURCE_UNIT_ID
-    }
-    pub const fn types_source_logical_path(&self) -> &'static str {
-        SOURCE_LOGICAL_PATH
-    }
-    pub const fn invoke_source_logical_path(&self) -> &'static str {
-        STD_INVOKE_SOURCE_LOGICAL_PATH
-    }
-    pub const fn output_source_logical_path(&self) -> &'static str {
-        STD_OUTPUT_SOURCE_LOGICAL_PATH
-    }
-    pub const fn ui_source_logical_path(&self) -> &'static str {
-        STD_UI_SOURCE_LOGICAL_PATH
-    }
-    pub const fn json_source_logical_path(&self) -> &'static str {
-        STD_JSON_SOURCE_LOGICAL_PATH
-    }
-    pub const fn action_source_logical_path(&self) -> &'static str {
-        STD_ACTION_SOURCE_LOGICAL_PATH
-    }
-    pub const fn window_source_logical_path(&self) -> &'static str {
-        STD_WINDOW_SOURCE_LOGICAL_PATH
     }
     pub const fn catalogue(&self) -> &CatalogueSnapshot {
         &self.catalogue
@@ -1867,14 +1588,6 @@ impl StandardLibraryV8Manifest {
         STD_JSON_SOURCE_UNIT_ID
     }
 
-    pub const fn action_source_unit(&self) -> SourceUnitId {
-        STD_ACTION_SOURCE_UNIT_ID
-    }
-
-    pub const fn window_source_unit(&self) -> SourceUnitId {
-        STD_WINDOW_SOURCE_UNIT_ID
-    }
-
     pub const fn data_source_unit(&self) -> SourceUnitId {
         STD_DATA_SOURCE_UNIT_ID
     }
@@ -1897,14 +1610,6 @@ impl StandardLibraryV8Manifest {
 
     pub const fn json_source_logical_path(&self) -> &'static str {
         STD_JSON_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn action_source_logical_path(&self) -> &'static str {
-        STD_ACTION_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn window_source_logical_path(&self) -> &'static str {
-        STD_WINDOW_SOURCE_LOGICAL_PATH
     }
 
     pub const fn data_source_logical_path(&self) -> &'static str {
@@ -2031,20 +1736,8 @@ impl StandardLibraryV9Manifest {
         STD_JSON_SOURCE_UNIT_ID
     }
 
-    pub const fn action_source_unit(&self) -> SourceUnitId {
-        STD_ACTION_SOURCE_UNIT_ID
-    }
-
-    pub const fn window_source_unit(&self) -> SourceUnitId {
-        STD_WINDOW_SOURCE_UNIT_ID
-    }
-
     pub const fn data_source_unit(&self) -> SourceUnitId {
         STD_DATA_SOURCE_UNIT_ID
-    }
-
-    pub const fn ui_constructors_source_unit(&self) -> SourceUnitId {
-        STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID
     }
 
     pub const fn types_source_logical_path(&self) -> &'static str {
@@ -2067,21 +1760,10 @@ impl StandardLibraryV9Manifest {
         STD_JSON_SOURCE_LOGICAL_PATH
     }
 
-    pub const fn action_source_logical_path(&self) -> &'static str {
-        STD_ACTION_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn window_source_logical_path(&self) -> &'static str {
-        STD_WINDOW_SOURCE_LOGICAL_PATH
-    }
-
     pub const fn data_source_logical_path(&self) -> &'static str {
         STD_DATA_SOURCE_LOGICAL_PATH
     }
 
-    pub const fn ui_constructors_source_logical_path(&self) -> &'static str {
-        STD_UI_CONSTRUCTORS_SOURCE_LOGICAL_PATH
-    }
     pub const fn catalogue(&self) -> &CatalogueSnapshot {
         &self.catalogue
     }
@@ -2092,152 +1774,6 @@ pub fn standard_library_v9_manifest()
 -> Result<StandardLibraryV9Manifest, StandardLibraryManifestError> {
     let version_eight = standard_library_v8_manifest()?;
     let mut functions = version_eight.catalogue().functions().to_vec();
-    functions.extend([
-        FunctionDefinition::new(
-            STD_UI_TEXT_FUNCTION_ID,
-            semantic_name("std.ui.text", ["std", "ui", "text"])?,
-            FunctionDomain::Client,
-            vec![ParameterDefinition::new(
-                STD_UI_TEXT_PARAMETER_ID,
-                "text",
-                0,
-                ResolvedType::value(CHARACTER_LARGE_OBJECT_TYPE_ID),
-                None,
-            )],
-            FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-            STD_UI_TEXT_FUNCTION_REVISION_ID,
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Immutable,
-        ),
-        FunctionDefinition::new(
-            STD_UI_BUTTON_FUNCTION_ID,
-            semantic_name("std.ui.button", ["std", "ui", "button"])?,
-            FunctionDomain::Client,
-            vec![
-                ParameterDefinition::new(
-                    STD_UI_BUTTON_LABEL_PARAMETER_ID,
-                    "label",
-                    0,
-                    ResolvedType::value(CHARACTER_LARGE_OBJECT_TYPE_ID),
-                    None,
-                ),
-                ParameterDefinition::new(
-                    STD_UI_BUTTON_ENABLED_PARAMETER_ID,
-                    "enabled",
-                    1,
-                    ResolvedType::value(BOOLEAN_TYPE_ID),
-                    None,
-                ),
-            ],
-            FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-            STD_UI_BUTTON_FUNCTION_REVISION_ID,
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Immutable,
-        ),
-        FunctionDefinition::new(
-            STD_UI_PANEL_FUNCTION_ID,
-            semantic_name("std.ui.panel", ["std", "ui", "panel"])?,
-            FunctionDomain::Client,
-            vec![ParameterDefinition::new(
-                STD_UI_PANEL_CONTENT_PARAMETER_ID,
-                "content",
-                0,
-                ResolvedType::value(STD_UI_TYPE_ID),
-                None,
-            )],
-            FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-            STD_UI_PANEL_FUNCTION_REVISION_ID,
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Immutable,
-        ),
-        FunctionDefinition::new(
-            STD_UI_ROW_FUNCTION_ID,
-            semantic_name("std.ui.row", ["std", "ui", "row"])?,
-            FunctionDomain::Client,
-            vec![ParameterDefinition::new(
-                STD_UI_ROW_CONTENT_PARAMETER_ID,
-                "content",
-                0,
-                ResolvedType::value(STD_UI_TYPE_ID),
-                None,
-            )],
-            FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-            STD_UI_ROW_FUNCTION_REVISION_ID,
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Immutable,
-        ),
-        FunctionDefinition::new(
-            STD_UI_COLUMN_FUNCTION_ID,
-            semantic_name("std.ui.column", ["std", "ui", "column"])?,
-            FunctionDomain::Client,
-            vec![ParameterDefinition::new(
-                STD_UI_COLUMN_CONTENT_PARAMETER_ID,
-                "content",
-                0,
-                ResolvedType::value(STD_UI_TYPE_ID),
-                None,
-            )],
-            FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-            STD_UI_COLUMN_FUNCTION_REVISION_ID,
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Immutable,
-        ),
-        FunctionDefinition::new(
-            STD_UI_TEXT_INPUT_FUNCTION_ID,
-            semantic_name("std.ui.text_input", ["std", "ui", "text_input"])?,
-            FunctionDomain::Client,
-            vec![
-                ParameterDefinition::new(
-                    STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID,
-                    "text",
-                    0,
-                    ResolvedType::value(CHARACTER_LARGE_OBJECT_TYPE_ID),
-                    None,
-                ),
-                ParameterDefinition::new(
-                    STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID,
-                    "placeholder",
-                    1,
-                    ResolvedType::value(CHARACTER_LARGE_OBJECT_TYPE_ID),
-                    None,
-                ),
-                ParameterDefinition::new(
-                    STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID,
-                    "enabled",
-                    2,
-                    ResolvedType::value(BOOLEAN_TYPE_ID),
-                    None,
-                ),
-            ],
-            FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-            STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID,
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Immutable,
-        ),
-        FunctionDefinition::new(
-            STD_UI_TABS_FUNCTION_ID,
-            semantic_name("std.ui.tabs", ["std", "ui", "tabs"])?,
-            FunctionDomain::Client,
-            vec![ParameterDefinition::new(
-                STD_UI_TABS_CONTENT_PARAMETER_ID,
-                "content",
-                0,
-                ResolvedType::value(STD_UI_TYPE_ID),
-                None,
-            )],
-            FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-            STD_UI_TABS_FUNCTION_REVISION_ID,
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Immutable,
-        ),
-    ]);
     functions.sort_by_key(|function| function.id());
     let catalogue = CatalogueSnapshot::new_with_functions_and_types(
         STANDARD_CATALOGUE_V9_REVISION_ID,
@@ -2335,58 +1871,6 @@ fn semantic_name<const N: usize>(
     })
 }
 
-fn standard_math_function_definitions()
--> Result<Vec<FunctionDefinition>, StandardLibraryManifestError> {
-    let definitions = [
-        ("increment", 0x30_u8, 0x40_u8, &["p_value"][..]),
-        ("decrement", 0x31_u8, 0x41_u8, &["p_value"][..]),
-        ("is_zero", 0x32_u8, 0x42_u8, &["p_value"][..]),
-        ("min", 0x33_u8, 0x43_u8, &["p_left", "p_right"][..]),
-        ("max", 0x34_u8, 0x44_u8, &["p_left", "p_right"][..]),
-        (
-            "clamp",
-            0x35_u8,
-            0x45_u8,
-            &["p_value", "p_min", "p_max"][..],
-        ),
-    ];
-    definitions
-        .into_iter()
-        .map(|(name, function_byte, revision_byte, parameter_names)| {
-            let parameters = parameter_names
-                .iter()
-                .enumerate()
-                .map(|(ordinal, parameter_name)| {
-                    ParameterDefinition::new(
-                        ParameterId::from_bytes(reserved_id(
-                            0xB0 + (function_byte - 0x30) * 4 + ordinal as u8,
-                        )),
-                        *parameter_name,
-                        ordinal as u32,
-                        ResolvedType::value(INTEGER_TYPE_ID),
-                        None,
-                    )
-                })
-                .collect();
-            let return_type = if name == "is_zero" {
-                ResolvedType::value(BOOLEAN_TYPE_ID)
-            } else {
-                ResolvedType::value(INTEGER_TYPE_ID)
-            };
-            Ok(FunctionDefinition::new(
-                FunctionId::from_bytes(reserved_id(0xA0 + function_byte - 0x30)),
-                semantic_name(format!("std.math.{name}"), ["std", "math", name])?,
-                FunctionDomain::Client,
-                parameters,
-                FunctionReturn::Single(return_type),
-                FunctionRevisionId::from_bytes(reserved_id(0xC0 + revision_byte - 0x40)),
-                FunctionSecurity::Invoker,
-                None,
-                FunctionVolatility::Immutable,
-            ))
-        })
-        .collect()
-}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StandardLibraryManifestError {
     /// One accepted qualified name is not valid under the core name contract.
@@ -2798,64 +2282,14 @@ pub fn prepare_standard_upgrade_v4_to_v5(
 pub fn prepare_standard_upgrade_v5_to_v6(
     active: &ActiveDatabaseRevision,
 ) -> Result<StandardUpgrade, StandardUpgradeError> {
-    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V5_REVISION_ID)?;
-
-    let version_five = retained_standard_library_v5_snapshot()
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    verify_standard_library_v5_snapshot(version_five)
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    prepare_standard_upgrade_with(
-        active,
-        retained_standard_library_v6_snapshot,
-        verify_standard_library_v6_snapshot,
-        check_standard_library_source,
-        prepare_checked_standard_upgrade,
-    )
+    let _ = active;
+    Err(StandardUpgradeError::UnsupportedStandardUpgrade {
+        from: STANDARD_LIBRARY_V5_REVISION_ID,
+        to: STANDARD_LIBRARY_V6_REVISION_ID,
+    })
 }
-/// Prepares the append-only `orna.std/6` to `orna.std/7` standard upgrade
-/// (ADR 0019). It fails closed unless `orna.std/6` is the installed parent;
-/// the retained V6 parent is verified before the V7 child.
-pub fn prepare_standard_upgrade_v6_to_v7(
-    active: &ActiveDatabaseRevision,
-) -> Result<StandardUpgrade, StandardUpgradeError> {
-    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V6_REVISION_ID)?;
-
-    let version_six = retained_standard_library_v6_snapshot()
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    verify_standard_library_v6_snapshot(version_six)
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    prepare_standard_upgrade_with(
-        active,
-        retained_standard_library_v7_snapshot,
-        verify_standard_library_v7_snapshot,
-        check_standard_library_source,
-        prepare_checked_standard_upgrade,
-    )
-}
-/// Prepares the append-only `orna.std/7` to `orna.std/8` standard upgrade
-/// (Work ADR 0087). It fails closed unless `orna.std/7` is the installed
-/// parent; the retained V7 parent is verified before the V8 child.
-pub fn prepare_standard_upgrade_v7_to_v8(
-    active: &ActiveDatabaseRevision,
-) -> Result<StandardUpgrade, StandardUpgradeError> {
-    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V7_REVISION_ID)?;
-
-    let version_seven = retained_standard_library_v7_snapshot()
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    verify_standard_library_v7_snapshot(version_seven)
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    prepare_standard_upgrade_with(
-        active,
-        retained_standard_library_v8_snapshot,
-        verify_standard_library_v8_snapshot,
-        check_standard_library_source,
-        prepare_checked_standard_upgrade,
-    )
-}
-
-/// Prepares the append-only `orna.std/8` to `orna.std/9` standard upgrade
-/// (Work ADR 0088). It fails closed unless `orna.std/8` is the installed
-/// parent; the retained V8 Rows snapshot is verified before the V9 child.
+/// Retired `orna.std/8` to `orna.std/9` upgrade entrypoint. Verification of
+/// the V8 parent fails closed before a V9 child can be prepared.
 pub fn prepare_standard_upgrade_v8_to_v9(
     active: &ActiveDatabaseRevision,
 ) -> Result<StandardUpgrade, StandardUpgradeError> {
@@ -2869,42 +2303,6 @@ pub fn prepare_standard_upgrade_v8_to_v9(
         active,
         retained_standard_library_v9_snapshot,
         verify_standard_library_v9_snapshot,
-        check_standard_library_source,
-        prepare_checked_standard_upgrade,
-    )
-}
-
-/// Prepares the append-only `orna.std/9` to `orna.std/10` standard upgrade.
-pub fn prepare_standard_upgrade_v9_to_v10(
-    active: &ActiveDatabaseRevision,
-) -> Result<StandardUpgrade, StandardUpgradeError> {
-    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V9_REVISION_ID)?;
-    let version_nine = retained_standard_library_v9_snapshot()
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    verify_standard_library_v9_snapshot(version_nine)
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    prepare_standard_upgrade_with(
-        active,
-        retained_standard_library_v10_snapshot,
-        verify_standard_library_v10_snapshot,
-        check_standard_library_source,
-        prepare_checked_standard_upgrade,
-    )
-}
-
-/// Prepares the append-only `orna.std/10` to `orna.std/11` standard upgrade.
-pub fn prepare_standard_upgrade_v10_to_v11(
-    active: &ActiveDatabaseRevision,
-) -> Result<StandardUpgrade, StandardUpgradeError> {
-    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V10_REVISION_ID)?;
-    let version_ten = retained_standard_library_v10_snapshot()
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    verify_standard_library_v10_snapshot(version_ten)
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    prepare_standard_upgrade_with(
-        active,
-        retained_standard_library_v11_snapshot,
-        verify_standard_library_v11_snapshot,
         check_standard_library_source,
         prepare_checked_standard_upgrade,
     )
@@ -3173,208 +2571,62 @@ pub fn verify_standard_library_v5_snapshot(
 /// Retains the canonical V6 action standard source as an unverified snapshot.
 pub fn retained_standard_library_v6_snapshot()
 -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    retained_standard_library_v6_snapshot_from_source(
-        RETAINED_STANDARD_SOURCE,
-        RETAINED_STANDARD_INVOKE_SOURCE,
-        RETAINED_STANDARD_OUTPUT_SOURCE,
-        RETAINED_STANDARD_UI_SOURCE,
-        RETAINED_STANDARD_JSON_SOURCE,
-        RETAINED_STANDARD_ACTION_SOURCE,
-    )
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V6_REVISION_ID,
+    })
 }
 
 /// Verifies a retained V6 action standard snapshot and returns authority.
 pub fn verify_standard_library_v6_snapshot(
-    snapshot: StandardLibrarySnapshot,
+    _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    let actual_catalogue = snapshot.catalogue().revision();
-    if actual_catalogue != STANDARD_CATALOGUE_V6_REVISION_ID {
-        return Err(StandardLibraryError::CatalogueIdentityMismatch {
-            expected: STANDARD_CATALOGUE_V6_REVISION_ID,
-            actual: actual_catalogue,
-        });
-    }
-    let actual_digest = snapshot.digest();
-    if actual_digest != ACCEPTED_V6_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V6_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-    verify_canonical_standard_library_v2_snapshot(snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V6_REVISION_ID,
+    })
 }
-/// Retains the canonical V7 window standard source as an unverified snapshot.
-pub fn retained_standard_library_v7_snapshot()
--> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    retained_standard_library_v7_snapshot_from_source(
-        RETAINED_STANDARD_SOURCE,
-        RETAINED_STANDARD_INVOKE_SOURCE,
-        RETAINED_STANDARD_OUTPUT_SOURCE,
-        RETAINED_STANDARD_UI_SOURCE,
-        RETAINED_STANDARD_JSON_SOURCE,
-        RETAINED_STANDARD_ACTION_SOURCE,
-        RETAINED_STANDARD_WINDOW_SOURCE,
-    )
+/// Rejects caller-supplied historical V7 snapshots after source retirement.
+pub fn verify_standard_library_v7_snapshot(
+    _snapshot: StandardLibrarySnapshot,
+) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V7_REVISION_ID,
+    })
 }
 
-/// Verifies a retained V7 window standard snapshot and returns authority.
-pub fn verify_standard_library_v7_snapshot(
-    snapshot: StandardLibrarySnapshot,
-) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    let actual_catalogue = snapshot.catalogue().revision();
-    if actual_catalogue != STANDARD_CATALOGUE_V7_REVISION_ID {
-        return Err(StandardLibraryError::CatalogueIdentityMismatch {
-            expected: STANDARD_CATALOGUE_V7_REVISION_ID,
-            actual: actual_catalogue,
-        });
-    }
-    let actual_digest = snapshot.digest();
-    if actual_digest != ACCEPTED_V7_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V7_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-    verify_canonical_standard_library_v2_snapshot(snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })
-}
-/// Retains the canonical V8 Rows standard source as an unverified snapshot.
+/// V8 Rows source is retired; requesting its historical snapshot fails closed.
 pub fn retained_standard_library_v8_snapshot()
 -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    retained_standard_library_v8_snapshot_from_source(
-        RETAINED_STANDARD_SOURCE,
-        RETAINED_STANDARD_INVOKE_SOURCE,
-        RETAINED_STANDARD_OUTPUT_SOURCE,
-        RETAINED_STANDARD_UI_SOURCE,
-        RETAINED_STANDARD_JSON_SOURCE,
-        RETAINED_STANDARD_ACTION_SOURCE,
-        RETAINED_STANDARD_WINDOW_SOURCE,
-        RETAINED_STANDARD_DATA_SOURCE,
-    )
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V8_REVISION_ID,
+    })
 }
 
-/// Verifies a retained V8 Rows standard snapshot and returns authority.
+/// Rejects supplied V8 Rows snapshots after source retirement.
 pub fn verify_standard_library_v8_snapshot(
-    snapshot: StandardLibrarySnapshot,
+    _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    let actual_catalogue = snapshot.catalogue().revision();
-    if actual_catalogue != STANDARD_CATALOGUE_V8_REVISION_ID {
-        return Err(StandardLibraryError::CatalogueIdentityMismatch {
-            expected: STANDARD_CATALOGUE_V8_REVISION_ID,
-            actual: actual_catalogue,
-        });
-    }
-    let actual_digest = snapshot.digest();
-    if actual_digest != ACCEPTED_V8_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V8_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-    verify_canonical_standard_library_v2_snapshot(snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V8_REVISION_ID,
+    })
 }
 
-/// Retains the canonical V9 structural UI constructor source as an
-/// unverified snapshot.
+/// V9 predates the pinned Orna 1.0 standard and is no longer retained.
 pub fn retained_standard_library_v9_snapshot()
 -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    retained_standard_library_v9_snapshot_from_source(
-        RETAINED_STANDARD_SOURCE,
-        RETAINED_STANDARD_INVOKE_SOURCE,
-        RETAINED_STANDARD_OUTPUT_SOURCE,
-        RETAINED_STANDARD_UI_SOURCE,
-        RETAINED_STANDARD_JSON_SOURCE,
-        RETAINED_STANDARD_ACTION_SOURCE,
-        RETAINED_STANDARD_WINDOW_SOURCE,
-        RETAINED_STANDARD_DATA_SOURCE,
-        RETAINED_STANDARD_UI_CONSTRUCTORS_SOURCE,
-    )
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V9_REVISION_ID,
+    })
 }
 
-/// Verifies a retained V9 structural UI constructor snapshot and returns
-/// authority.
+/// Historical V9 verification fails closed after its source bundle retired.
 pub fn verify_standard_library_v9_snapshot(
-    snapshot: StandardLibrarySnapshot,
+    _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    let actual_catalogue = snapshot.catalogue().revision();
-    if actual_catalogue != STANDARD_CATALOGUE_V9_REVISION_ID {
-        return Err(StandardLibraryError::CatalogueIdentityMismatch {
-            expected: STANDARD_CATALOGUE_V9_REVISION_ID,
-            actual: actual_catalogue,
-        });
-    }
-    let actual_digest = snapshot.digest();
-    if actual_digest != ACCEPTED_V9_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V9_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-    verify_canonical_standard_library_v2_snapshot(snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V9_REVISION_ID,
+    })
 }
 
-/// Source-independent facts required to recognise `orna.std/11`.
-#[derive(Clone, Debug)]
-pub struct StandardLibraryV11Manifest {
-    catalogue: CatalogueSnapshot,
-}
-
-impl StandardLibraryV11Manifest {
-    pub const fn standard_library_version(&self) -> &'static str {
-        STANDARD_LIBRARY_V11_VERSION_IDENTITY
-    }
-
-    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
-        STANDARD_LIBRARY_V11_REVISION_ID
-    }
-
-    pub const fn language_version(&self) -> &'static str {
-        LANGUAGE_VERSION_IDENTITY
-    }
-
-    pub const fn source_bundle(&self) -> SourceBundleId {
-        STANDARD_SOURCE_V11_BUNDLE_ID
-    }
-
-    pub const fn source_revision(&self) -> SourceRevisionId {
-        STANDARD_SOURCE_V11_REVISION_ID
-    }
-
-    pub const fn math_source_unit(&self) -> SourceUnitId {
-        STD_MATH_SOURCE_UNIT_ID
-    }
-
-    pub const fn catalogue(&self) -> &CatalogueSnapshot {
-        &self.catalogue
-    }
-}
-
-/// Builds the append-only V11 catalogue over V10.
-pub fn standard_library_v11_manifest()
--> Result<StandardLibraryV11Manifest, StandardLibraryManifestError> {
-    let version_ten = standard_library_v10_manifest()?;
-    let mut schemas = version_ten.catalogue().schemas().to_vec();
-    schemas.push(SchemaDefinition::new(
-        STD_MATH_SCHEMA_ID,
-        semantic_name("std.math", ["std", "math"])?,
-    ));
-    let mut functions = version_ten.catalogue().functions().to_vec();
-    functions.extend(standard_math_function_definitions()?);
-    functions.sort_by_key(|function| function.id());
-    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
-        STANDARD_CATALOGUE_V11_REVISION_ID,
-        schemas,
-        version_ten.catalogue().object_types().to_vec(),
-        version_ten.catalogue().value_types().to_vec(),
-        version_ten.catalogue().type_bindings().to_vec(),
-        functions,
-    )
-    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
-    Ok(StandardLibraryV11Manifest { catalogue })
-}
 /// Source-independent facts required to recognise `orna.std/10`.
 #[derive(Clone, Debug)]
 pub struct StandardLibraryV10Manifest {
@@ -3421,20 +2673,8 @@ impl StandardLibraryV10Manifest {
         STD_JSON_SOURCE_UNIT_ID
     }
 
-    pub const fn action_source_unit(&self) -> SourceUnitId {
-        STD_ACTION_SOURCE_UNIT_ID
-    }
-
-    pub const fn window_source_unit(&self) -> SourceUnitId {
-        STD_WINDOW_SOURCE_UNIT_ID
-    }
-
     pub const fn data_source_unit(&self) -> SourceUnitId {
         STD_DATA_SOURCE_UNIT_ID
-    }
-
-    pub const fn ui_constructors_source_unit(&self) -> SourceUnitId {
-        STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID
     }
 
     pub const fn cli_source_unit(&self) -> SourceUnitId {
@@ -3449,221 +2689,6 @@ impl StandardLibraryV10Manifest {
         &self.catalogue
     }
 }
-/// Retains the source-authored V11 math unit.
-pub fn retained_standard_library_v11_snapshot()
--> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    let parent = retained_standard_library_v10_snapshot()?;
-    let prepared = prepare_retained_v11_math()?;
-    let math_unit = prepared
-        .source()
-        .units()
-        .first()
-        .ok_or(StandardLibraryError::RetainedSourceMismatch)?
-        .clone();
-    let mut units = parent.source().units().to_vec();
-    let math_unit = StoredSourceUnit::new(
-        math_unit.id(),
-        units.len() as u32,
-        math_unit.logical_path(),
-        math_unit.content(),
-        math_unit.content_hash(),
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    units.push(math_unit);
-    let bundle_hash = source_bundle_digest(&units)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if bundle_hash != ACCEPTED_V11_SOURCE_BUNDLE_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let revision_hash = source_revision_record_digest(
-        STANDARD_SOURCE_V11_BUNDLE_ID,
-        Some(STANDARD_SOURCE_V10_REVISION_ID),
-        bundle_hash,
-    )
-    .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if revision_hash != ACCEPTED_V11_SOURCE_REVISION_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let parent_manifest = standard_library_v10_manifest()
-        .map_err(|source| StandardLibraryError::Manifest { source })?;
-    let mut catalogue_functions = parent_manifest.catalogue().functions().to_vec();
-    catalogue_functions.extend(prepared.candidate().functions().iter().cloned());
-    let mut catalogue_schemas = parent_manifest.catalogue().schemas().to_vec();
-    catalogue_schemas.extend(prepared.candidate().schemas().iter().cloned());
-    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
-        STANDARD_CATALOGUE_V11_REVISION_ID,
-        catalogue_schemas,
-        parent_manifest.catalogue().object_types().to_vec(),
-        parent_manifest.catalogue().value_types().to_vec(),
-        parent_manifest.catalogue().type_bindings().to_vec(),
-        catalogue_functions,
-    )
-    .map_err(|source| StandardLibraryError::Manifest {
-        source: StandardLibraryManifestError::Catalogue { source },
-    })?;
-    let mut origins = parent.origins().to_vec();
-    origins.extend(prepared.origins().iter().cloned());
-    let mut executables = parent.executables().to_vec();
-    let math_executables = prepared
-        .new_function_revisions()
-        .iter()
-        .map(|revision| {
-            StandardExecutable::new(
-                revision.function(),
-                revision.clone(),
-                prepared
-                    .references()
-                    .iter()
-                    .filter(|reference| reference.source_function() == revision.function())
-                    .cloned()
-                    .collect(),
-            )
-            .map_err(|source| StandardLibraryError::Revision { source })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    executables.extend(math_executables);
-    let source = StoredSourceRevision::new(
-        STANDARD_SOURCE_V11_BUNDLE_ID,
-        STANDARD_SOURCE_V11_REVISION_ID,
-        Some(STANDARD_SOURCE_V10_REVISION_ID),
-        units,
-        bundle_hash,
-        revision_hash,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let provisional = StandardLibrarySnapshot::new_with_executables(
-        STANDARD_LIBRARY_V11_REVISION_ID,
-        StandardLibraryDigestVersion::Version2,
-        source,
-        LANGUAGE_VERSION_IDENTITY,
-        catalogue,
-        executables,
-        origins,
-        Sha256Digest::from_bytes([0; 32]),
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let digest = calculate_standard_library_digest(&provisional)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if digest != ACCEPTED_V11_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    StandardLibrarySnapshot::new_with_executables(
-        STANDARD_LIBRARY_V11_REVISION_ID,
-        StandardLibraryDigestVersion::Version2,
-        provisional.source().clone(),
-        LANGUAGE_VERSION_IDENTITY,
-        provisional.catalogue().clone(),
-        provisional.executables().to_vec(),
-        provisional.origins().to_vec(),
-        digest,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })
-}
-
-fn prepare_retained_v11_math() -> Result<DeployableRevision, StandardLibraryError> {
-    let parent = retained_standard_library_v10_snapshot()?;
-    let verified = verify_standard_library_v10_snapshot(parent.clone())?;
-    let checked = check_standard_library_source(&verified)
-        .map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
-    let bundle = orna_core::source::SourceBundle::new([orna_core::source::SourceUnit::new(
-        STD_MATH_SOURCE_LOGICAL_PATH,
-        RETAINED_STANDARD_MATH_SOURCE,
-    )])
-    .map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
-    let base = CatalogueSnapshot::new_with_functions_and_types(
-        CatalogueRevisionId::from_bytes([0x21; 16]),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    )
-    .map_err(|source| StandardLibraryError::Manifest {
-        source: StandardLibraryManifestError::Catalogue { source },
-    })?;
-    let context = CatalogueHashContext::version_two(verified.clone());
-    let catalogue_hash = catalogue_digest_with_context(&context, &base, &[], &[], &[], &[])
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
-        ActiveDatabaseRevisionInput::new(
-            RevisionPair::new(verified.source().id(), base.revision()),
-            parent.source().clone(),
-            base.clone(),
-            catalogue_hash,
-            ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-        ),
-        context,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let report = check_standard_source(&bundle, active.catalogue(), &checked);
-    if !report.diagnostics().is_empty() {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let parsed = orna_syntax::parse(RETAINED_STANDARD_MATH_SOURCE);
-    let functions = parsed.client_functions();
-    let seed = StandardSourceIdentitySeed {
-        catalogue_revision: STANDARD_CATALOGUE_V11_REVISION_ID,
-        source_bundle: STANDARD_SOURCE_V11_BUNDLE_ID,
-        source_revision: STANDARD_SOURCE_V11_REVISION_ID,
-        source_units: vec![STD_MATH_SOURCE_UNIT_ID],
-        schema: STD_MATH_SCHEMA_ID,
-        functions: (0..functions.len())
-            .map(|index| FunctionId::from_bytes(reserved_id(0xA0 + index as u8)))
-            .collect(),
-        parameters: functions
-            .iter()
-            .enumerate()
-            .map(|(index, function)| {
-                (0..function.parameters.len())
-                    .map(|parameter| {
-                        ParameterId::from_bytes(reserved_id(0xB0 + (index * 4 + parameter) as u8))
-                    })
-                    .collect()
-            })
-            .collect(),
-        revisions: (0..functions.len())
-            .map(|index| FunctionRevisionId::from_bytes(reserved_id(0xC0 + index as u8)))
-            .collect(),
-    };
-    prepare_standard_source(&report, active.pair(), &active, &seed)
-        .map_err(|_| StandardLibraryError::RetainedSourceMismatch)
-}
-
-/// Verifies the retained V11 snapshot and its canonical source structure.
-pub fn verify_standard_library_v11_snapshot(
-    snapshot: StandardLibrarySnapshot,
-) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    if snapshot.revision() != STANDARD_LIBRARY_V11_REVISION_ID
-        || snapshot.catalogue().revision() != STANDARD_CATALOGUE_V11_REVISION_ID
-        || snapshot.source().id() != STANDARD_SOURCE_V11_REVISION_ID
-        || snapshot.source().bundle() != STANDARD_SOURCE_V11_BUNDLE_ID
-        || snapshot.source().parent() != Some(STANDARD_SOURCE_V10_REVISION_ID)
-        || snapshot.source().units().len() != 11
-        || snapshot.executables().len() != 18
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let Some(math_unit) = snapshot.source().units().iter().find(|unit| {
-        unit.id() == STD_MATH_SOURCE_UNIT_ID && unit.logical_path() == STD_MATH_SOURCE_LOGICAL_PATH
-    }) else {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    };
-    if math_unit.content() != RETAINED_STANDARD_MATH_SOURCE {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    if math_unit.content_hash() != ACCEPTED_V11_MATH_CONTENT_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    if snapshot.source().revision_hash() != ACCEPTED_V11_SOURCE_REVISION_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    if snapshot.digest() != ACCEPTED_V11_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    verify_canonical_standard_library_v2_snapshot(snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })
-}
-
 /// Builds the append-only V10 catalogue over V9.
 pub fn standard_library_v10_manifest()
 -> Result<StandardLibraryV10Manifest, StandardLibraryManifestError> {
@@ -3698,13 +2723,17 @@ pub fn standard_library_v10_manifest()
     Ok(StandardLibraryV10Manifest { catalogue })
 }
 
-/// Retains the source-authored V10 CLI session unit.
+/// The pre-1.0 V10 CLI source is no longer bundled or selected as a product
+/// standard. Historical V10 snapshots can still be verified when explicitly
+/// supplied by their stored revision; no replacement source is synthesized.
 pub fn retained_standard_library_v10_snapshot()
 -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    retained_standard_library_v10_snapshot_from_source(RETAINED_STANDARD_CLI_SOURCE)
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V10_REVISION_ID,
+    })
 }
 
-/// Verifies the retained source-authored V10 CLI session snapshot.
+/// Verifies an explicitly supplied historical V10 CLI session snapshot.
 pub fn verify_standard_library_v10_snapshot(
     snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
@@ -3754,23 +2783,15 @@ pub fn select_verified_standard_library(
         STANDARD_LIBRARY_V5_REVISION_ID => {
             verify_standard_library_v5_snapshot(retained_standard_library_v5_snapshot()?)
         }
-        STANDARD_LIBRARY_V6_REVISION_ID => {
-            verify_standard_library_v6_snapshot(retained_standard_library_v6_snapshot()?)
-        }
+        STANDARD_LIBRARY_V6_REVISION_ID => Err(StandardLibraryError::UnsupportedRevision { revision }),
         STANDARD_LIBRARY_V7_REVISION_ID => {
-            verify_standard_library_v7_snapshot(retained_standard_library_v7_snapshot()?)
+            Err(StandardLibraryError::UnsupportedRevision { revision })
         }
         STANDARD_LIBRARY_V8_REVISION_ID => {
             verify_standard_library_v8_snapshot(retained_standard_library_v8_snapshot()?)
         }
         STANDARD_LIBRARY_V9_REVISION_ID => {
-            verify_standard_library_v9_snapshot(retained_standard_library_v9_snapshot()?)
-        }
-        STANDARD_LIBRARY_V10_REVISION_ID => {
-            verify_standard_library_v10_snapshot(retained_standard_library_v10_snapshot()?)
-        }
-        STANDARD_LIBRARY_V11_REVISION_ID => {
-            verify_standard_library_v11_snapshot(retained_standard_library_v11_snapshot()?)
+            Err(StandardLibraryError::UnsupportedRevision { revision })
         }
         _ => Err(StandardLibraryError::UnsupportedRevision { revision }),
     }

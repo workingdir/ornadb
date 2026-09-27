@@ -1,0 +1,5 @@
+pub table Reading(id: Int) { value: Int, assert every(reading => reading.value > 0); }
+fn parent() {
+    Reading.insert({ id: 1, value: 1 });
+    Reading.insert({ id: 2, value: 2 });
+}

@@ -1163,6 +1163,27 @@
       ]
     },
     {
+      "name": "sys.PublicationPolicy",
+      "kind": "record",
+      "purpose": "Effective compact publication target, file bound and maximum pending age.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "compressed_target_bytes",
+          "type": "Int"
+        },
+        {
+          "name": "max_file_bytes",
+          "type": "Int"
+        },
+        {
+          "name": "max_pending_age_seconds",
+          "type": "Int"
+        }
+      ],
+      "invariants": []
+    },
+    {
       "name": "sys.VerificationReport",
       "kind": "record",
       "purpose": "Structured integrity-verification outcome.",
@@ -5346,6 +5367,14 @@
           "type": "Instant?"
         },
         {
+          "name": "published_rows",
+          "type": "Int"
+        },
+        {
+          "name": "published_bytes",
+          "type": "Int"
+        },
+        {
           "name": "last_snapshot",
           "type": "sys.SnapshotRef?"
         },
@@ -5355,7 +5384,7 @@
         },
         {
           "name": "publication_policy",
-          "type": "sys.Value"
+          "type": "sys.PublicationPolicy"
         },
         {
           "name": "verification",
@@ -5755,6 +5784,30 @@
         {
           "name": "status",
           "type": "sys.BuildStatus"
+        },
+        {
+          "name": "publication_policy",
+          "type": "sys.PublicationPolicy"
+        },
+        {
+          "name": "pending_rows",
+          "type": "Int"
+        },
+        {
+          "name": "pending_bytes",
+          "type": "Int"
+        },
+        {
+          "name": "published_rows",
+          "type": "Int"
+        },
+        {
+          "name": "published_bytes",
+          "type": "Int"
+        },
+        {
+          "name": "last_publication",
+          "type": "Instant?"
         },
         {
           "name": "progress",
@@ -6525,7 +6578,7 @@
     "singletons": 4,
     "opaque_identifiers": 21,
     "reference_aliases": 78,
-    "value_types": 34,
+    "value_types": 35,
     "enums": 44,
     "relations": 78,
     "functions": 66,

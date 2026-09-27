@@ -1,0 +1,12 @@
+pub table Note(id: Int) { value: Int, }
+fn parent() {
+    Note.insert({ id: 1, value: 2 });
+    Note.insert({ id: 0, value: -1 });
+    Note.insert({ id: -2, value: 0 });
+    Note.insert({ id: -1, value: -1 });
+
+    assert (Note | sort_by(note => note.value) | take(1) | one()).id == -1;
+    assert (Note | sort_by(note => note.value) | drop(1) | take(1) | one()).id == 0;
+    assert (Note | sort_by(note => note.value) | drop(2) | take(1) | one()).id == -2;
+    assert (Note | sort_by(note => note.value) | drop(3) | take(1) | one()).id == 1;
+}

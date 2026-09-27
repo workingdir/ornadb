@@ -1,0 +1,2 @@
+fn bad(value: Int, other: Int) = value;
+fn run() = std.collection.map([1], bad);

@@ -12,13 +12,14 @@ use orna_foundation_v1::{
 };
 use orna_project_v1::LoadedProject;
 use orna_semantic_v1::{
-    Catalogue, EffectSummary, ReplAdmission, ReplContext, Type, analyze_with_catalogue,
+    Analysis, Catalogue, EffectSummary, ModuleInput, ReplAdmission, ReplContext, SymbolKind, Type,
+    analyze_with_catalogue,
 };
 use orna_syntax_v1::{Declaration, ReplInput, parse_module};
 
 use crate::{
     CancellationToken, Environment, EvaluationError, Functions, Limits, PureFunction, ReplSession,
-    parse_admitted_repl,
+    parse_admitted_repl, reference_standard_profile, reference_standard_sources,
 };
 
 /// Redacted failure from the admitted REPL boundary.
@@ -165,6 +166,54 @@ impl AdmittedReplSession {
         }
     }
 
+    /// Starts a typed session with the verified reference standard modules.
+    ///
+    /// The source bundle and semantic catalogue share the profile used by the
+    /// local bounded REPL, so ordinary imports (including wildcard imports)
+    /// resolve and execute under the same rules.
+    pub fn with_reference_standard(limits: Limits) -> Result<Self, ReplError> {
+        let standard_sources = reference_standard_sources().into_iter().collect::<Vec<_>>();
+        let catalogue = Catalogue::authoritative_core()
+            .with_standard_sources(&reference_standard_profile(), standard_sources.clone())
+            .map_err(|_| ReplError::fixed("ORNA-REPL-STANDARD"))?;
+        Self::from_catalogue(&[], catalogue, standard_sources, limits)
+    }
+
+    /// Starts an isolated session from an already admitted catalogue and
+    /// caller supplied module and standard sources.
+    pub fn from_catalogue(
+        modules: &[ModuleInput],
+        catalogue: Catalogue,
+        standard_sources: impl IntoIterator<Item = (String, String)>,
+        limits: Limits,
+    ) -> Result<Self, ReplError> {
+        let standard_sources = standard_sources.into_iter().collect::<Vec<_>>();
+        let analysis = analyze_with_catalogue(modules, &catalogue);
+        if !analysis.is_ok() {
+            return Err(semantic_error(analysis.diagnostics));
+        }
+        limits
+            .check_items(analysis.modules.len())
+            .map_err(ReplError::runtime)?;
+        let runtime_modules = modules
+            .iter()
+            .map(|module| {
+                (
+                    module_namespace(&module.logical_path),
+                    module.source.clone(),
+                )
+            })
+            .collect();
+        let table_names = admitted_table_names(&analysis);
+        let runtime =
+            admitted_runtime_sources(runtime_modules, standard_sources, table_names, limits)?;
+        Ok(Self {
+            limits,
+            semantic: ReplContext::from_analysis(&analysis).map_err(semantic_error)?,
+            runtime,
+        })
+    }
+
     /// Admits one loaded project and verified standard-source set.
     ///
     /// The supplied project is the caller's pinned source set. This boundary
@@ -197,7 +246,12 @@ impl AdmittedReplSession {
         if !analysis.is_ok() {
             return Err(semantic_error(analysis.diagnostics));
         }
-        let runtime = admitted_runtime(project, standard_sources, limits)?;
+        let runtime = admitted_runtime(
+            project,
+            standard_sources,
+            admitted_table_names(&analysis),
+            limits,
+        )?;
         let semantic = ReplContext::from_analysis(&analysis).map_err(semantic_error)?;
         Ok(Self {
             limits,
@@ -260,6 +314,26 @@ impl AdmittedReplSession {
             effects,
             admission,
         })
+    }
+
+    /// Evaluates one admitted effectful input into an unpublished session
+    /// successor. The caller publishes that successor only after its host
+    /// transaction commits.
+    pub fn evaluate_staged_with_effects(
+        &self,
+        staged: StagedReplActivation,
+        effects: &mut dyn crate::EffectHandler,
+    ) -> Result<(Option<CanonicalValue>, Self), ReplError> {
+        let mut successor = self.clone();
+        let value = successor
+            .runtime
+            .submit_admitted_with_effects(staged.input(), effects)
+            .map_err(ReplError::runtime)?;
+        staged.commit_semantic(&mut successor)?;
+        successor.runtime.set_last_status(
+            CanonicalValue::new(orna_foundation_v1::OvbRaw::Null).expect("null is canonical"),
+        );
+        Ok((value, successor))
     }
 
     /// Executes one already-admitted input with an explicit cancellation
@@ -325,17 +399,10 @@ impl AdmittedReplSession {
 fn admitted_runtime(
     project: &LoadedProject,
     standard_sources: Vec<(String, String)>,
+    table_names: Vec<String>,
     limits: Limits,
 ) -> Result<ReplSession, ReplError> {
-    let module_count = project
-        .modules()
-        .len()
-        .checked_add(standard_sources.len())
-        .ok_or_else(|| ReplError::fixed("ORNA-EVAL-LIMIT"))?;
-    limits
-        .check_items(module_count)
-        .map_err(ReplError::runtime)?;
-    let mut modules = project
+    let modules = project
         .modules()
         .iter()
         .zip(project.identities())
@@ -346,6 +413,22 @@ fn admitted_runtime(
             )
         })
         .collect::<Vec<_>>();
+    admitted_runtime_sources(modules, standard_sources, table_names, limits)
+}
+
+fn admitted_runtime_sources(
+    mut modules: Vec<(Option<String>, String)>,
+    standard_sources: Vec<(String, String)>,
+    table_names: Vec<String>,
+    limits: Limits,
+) -> Result<ReplSession, ReplError> {
+    let module_count = modules
+        .len()
+        .checked_add(standard_sources.len())
+        .ok_or_else(|| ReplError::fixed("ORNA-EVAL-LIMIT"))?;
+    limits
+        .check_items(module_count)
+        .map_err(ReplError::runtime)?;
     modules.extend(
         standard_sources
             .into_iter()
@@ -384,7 +467,30 @@ fn admitted_runtime(
             }
         }
     }
-    ReplSession::with_bindings(limits, Environment::new(), functions).map_err(ReplError::runtime)
+    ReplSession::with_bindings(limits, Environment::new(), functions)
+        .map(|session| session.with_table_names(table_names))
+        .map_err(ReplError::runtime)
+}
+
+fn admitted_table_names(analysis: &Analysis) -> Vec<String> {
+    analysis
+        .modules
+        .values()
+        .flat_map(|header| {
+            header
+                .symbols
+                .iter()
+                .filter(|(_, symbol)| symbol.kind == SymbolKind::Table)
+                .map(|(name, _)| {
+                    if header.namespace.0.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{}.{}", header.namespace.0.join("."), name)
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 fn module_namespace(logical_path: &str) -> Option<String> {

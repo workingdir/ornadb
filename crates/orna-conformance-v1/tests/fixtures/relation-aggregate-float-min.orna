@@ -1,0 +1,6 @@
+pub table Reading(id: Int) { value: Float, }
+fn minimum() = Reading | map(reading => reading.value) | min();
+fn parent() {
+    Reading.insert({ id: 1, value: 1.5f });
+    minimum();
+}

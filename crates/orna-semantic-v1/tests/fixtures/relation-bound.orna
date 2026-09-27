@@ -1,0 +1,4 @@
+pub table Note(id: Int) { value: Int, }
+fn filter(rows: Relation<Note>): Int = 99;
+fn direct() = filter(Note) == 99;
+fn piped() = (Note | filter) == 99;

@@ -11,6 +11,58 @@ const MAX_INSPECT_DEPTH: usize = 4;
 const MAX_INSPECT_ITEMS: usize = 16;
 const MAX_INSPECT_TEXT: usize = 256;
 const REPL_HELP: &str = "commands: :help [name], :at CWD|HEAD|ref, :watch expression, :quit";
+#[derive(Clone, Copy)]
+pub(super) enum AnsiColor {
+    Green,
+    Yellow,
+    Red,
+    Cyan,
+    Dim,
+}
+
+impl AnsiColor {
+    const fn sequence(self) -> &'static [u8] {
+        match self {
+            Self::Green => b"\x1b[32m",
+            Self::Yellow => b"\x1b[33m",
+            Self::Red => b"\x1b[31m",
+            Self::Cyan => b"\x1b[36m",
+            Self::Dim => b"\x1b[2m",
+        }
+    }
+}
+
+pub(super) fn write_styled<W: io::Write>(
+    writer: &mut W,
+    color: AnsiColor,
+    text: &[u8],
+    enabled: bool,
+) -> io::Result<()> {
+    if enabled {
+        writer.write_all(color.sequence())?;
+    }
+    writer.write_all(text)?;
+    if enabled {
+        writer.write_all(b"\x1b[0m")?;
+    }
+    Ok(())
+}
+
+pub(super) fn write_styled_display<W: io::Write, T: std::fmt::Display>(
+    writer: &mut W,
+    color: AnsiColor,
+    value: T,
+    enabled: bool,
+) -> io::Result<()> {
+    if enabled {
+        writer.write_all(color.sequence())?;
+    }
+    write!(writer, "{value}")?;
+    if enabled {
+        writer.write_all(b"\x1b[0m")?;
+    }
+    Ok(())
+}
 
 enum ReadSubmission {
     Eof,
@@ -124,6 +176,99 @@ struct WatchBinding<'a, S: ?Sized> {
     state: &'a mut WatchCommandState,
 }
 
+fn repl_error_documentation(code: &str) -> (&'static str, &'static str) {
+    match code {
+        "ORNA-REPL-INPUT-LIMIT" => (
+            "submission is longer than the REPL input limit",
+            "shorten the submission and enter it again",
+        ),
+        "ORNA-REPL-INPUT-UTF8" => (
+            "submission is not valid UTF-8 text",
+            "re-enter the submission using valid UTF-8",
+        ),
+        "ORNA-REPL-COMMAND" => (
+            "command is unknown or unavailable in this REPL",
+            "enter `:help` to see the supported commands",
+        ),
+        "ORNA-REPL-AT" => (
+            "requested project snapshot could not be loaded",
+            "choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`",
+        ),
+        "ORNA-REPL-EFFECT" => (
+            "REPL preview cannot perform an effect",
+            "evaluate a pure expression or invoke the operation through its admitted runtime entry point",
+        ),
+        "ORNA-REPL-WATCH-FRAME" => (
+            "live update could not be read",
+            "start the watch again with `:watch expression`",
+        ),
+        "ORNA-REPL-WATCH-SOURCE" => (
+            "live update source is unavailable",
+            "start the watch again with `:watch expression`",
+        ),
+        "ORNA-S010-IMPORT" => (
+            "imported module is unavailable",
+            "use a captured standard dependency or remove the import",
+        ),
+        "ORNA-S012-UNRESOLVED" => (
+            "name could not be resolved",
+            "declare the name or add the matching `use` import before using it",
+        ),
+        "ORNA-S021-TYPE" => (
+            "expression has the wrong type",
+            "change the expression or its declared type so the value and requirement agree",
+        ),
+        _ => (
+            "expression could not be evaluated",
+            "review the expression and try again",
+        ),
+    }
+}
+
+fn write_repl_error<W: Write>(writer: &mut W, code: &str, color_enabled: bool) -> io::Result<()> {
+    let (title, help) = repl_error_documentation(code);
+    write_styled(writer, AnsiColor::Red, b"error", color_enabled)?;
+    writer.write_all(b"[")?;
+    write_styled(
+        writer,
+        AnsiColor::Red,
+        code.as_bytes(),
+        color_enabled,
+    )?;
+    writer.write_all(b"]: ")?;
+    writer.write_all(title.as_bytes())?;
+    writer.write_all(b"\nhelp: ")?;
+    writer.write_all(help.as_bytes())?;
+    writer.write_all(b"\n")
+}
+
+fn write_repl_value<W: Write>(
+    writer: &mut W,
+    value: &CanonicalValue,
+    color_enabled: bool,
+) -> io::Result<()> {
+    let rendered = inspect(value);
+    let (result, ty) = rendered
+        .rsplit_once(" : ")
+        .unwrap_or((rendered.as_str(), ""));
+    write_styled(
+        writer,
+        AnsiColor::Green,
+        result.as_bytes(),
+        color_enabled,
+    )?;
+    if !ty.is_empty() {
+        writer.write_all(b" : ")?;
+        write_styled(
+            writer,
+            AnsiColor::Dim,
+            ty.as_bytes(),
+            color_enabled,
+        )?;
+    }
+    writer.write_all(b"\n")
+}
+
 /// Run one retained, line-oriented admitted REPL session. A malformed or
 /// rejected submission reports its redacted evaluator code and leaves the
 /// session open.
@@ -138,6 +283,7 @@ pub fn run<R: BufRead, W: Write>(
         session,
         None::<&dyn SnapshotSessionLoader<Error = ()>>,
         None::<WatchBinding<'_, dyn WatchFrameSource<Error = ()>>>,
+        false,
     )
 }
 
@@ -158,6 +304,29 @@ pub fn run_with_snapshot_loader<R: BufRead, W: Write, L: SnapshotSessionLoader +
         session,
         Some(loader),
         None::<WatchBinding<'_, dyn WatchFrameSource<Error = ()>>>,
+        false,
+    )
+}
+
+/// Run an admitted REPL session with color enabled according to the CLI mode.
+pub fn run_with_snapshot_loader_and_color<
+    R: BufRead,
+    W: Write,
+    L: SnapshotSessionLoader + ?Sized,
+>(
+    reader: &mut R,
+    writer: &mut W,
+    session: &mut AdmittedReplSession,
+    loader: &L,
+    color_enabled: bool,
+) -> io::Result<()> {
+    run_loop(
+        reader,
+        writer,
+        session,
+        Some(loader),
+        None::<WatchBinding<'_, dyn WatchFrameSource<Error = ()>>>,
+        color_enabled,
     )
 }
 
@@ -176,6 +345,7 @@ pub fn run_with_watch<R: BufRead, W: Write, S: WatchFrameSource + ?Sized>(
         session,
         None::<&dyn SnapshotSessionLoader<Error = ()>>,
         Some(WatchBinding { source, state }),
+        false,
     )
 }
 
@@ -199,6 +369,7 @@ pub fn run_with_loader_and_watch<
         session,
         Some(loader),
         Some(WatchBinding { source, state }),
+        false,
     )
 }
 
@@ -213,15 +384,25 @@ fn run_loop<
     session: &mut AdmittedReplSession,
     loader: Option<&L>,
     mut watch: Option<WatchBinding<'_, S>>,
+    color_enabled: bool,
 ) -> io::Result<()> {
     loop {
-        pump_watch_frames(&mut watch, writer)?;
-        writer.write_all(b"> ")?;
+        pump_watch_frames(&mut watch, writer, color_enabled)?;
+        write_styled(
+            writer,
+            AnsiColor::Dim,
+            b"> ",
+            color_enabled,
+        )?;
         writer.flush()?;
         match read_submission(reader)? {
             ReadSubmission::Eof => return Ok(()),
-            ReadSubmission::TooLong => writeln!(writer, "error[ORNA-REPL-INPUT-LIMIT]")?,
-            ReadSubmission::InvalidUtf8 => writeln!(writer, "error[ORNA-REPL-INPUT-UTF8]")?,
+            ReadSubmission::TooLong => {
+                write_repl_error(writer, "ORNA-REPL-INPUT-LIMIT", color_enabled)?;
+            }
+            ReadSubmission::InvalidUtf8 => {
+                write_repl_error(writer, "ORNA-REPL-INPUT-UTF8", color_enabled)?;
+            }
             ReadSubmission::Source(source) => {
                 let command = source.trim();
                 if command == ":quit" {
@@ -229,27 +410,37 @@ fn run_loop<
                 }
                 if let Some(help) = parse_help_command(command) {
                     match help {
-                        Ok(text) => writeln!(writer, "{text}")?,
-                        Err(()) => writeln!(writer, "error[ORNA-REPL-COMMAND]")?,
+                        Ok(text) => write_styled(
+                            writer,
+                            AnsiColor::Cyan,
+                            text.as_bytes(),
+                            color_enabled,
+                        )?,
+                        Err(()) => {
+                            write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?;
+                        }
+                    }
+                    if help.is_ok() {
+                        writer.write_all(b"\n")?;
                     }
                 } else if let Some(target) = parse_snapshot_target(command) {
                     let Some(loader) = loader else {
-                        writeln!(writer, "error[ORNA-REPL-COMMAND]")?;
+                        write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?;
                         continue;
                     };
                     match target.and_then(|target| loader.load_snapshot(target).map_err(|_| ())) {
                         Ok(candidate) => *session = candidate,
-                        Err(()) => writeln!(writer, "error[ORNA-REPL-AT]")?,
+                        Err(()) => write_repl_error(writer, "ORNA-REPL-AT", color_enabled)?,
                     }
                 } else if let Some(rest) = parse_watch_source(command) {
-                    dispatch_watch(rest, &mut watch, writer)?;
+                    dispatch_watch(rest, &mut watch, writer, color_enabled)?;
                 } else if source.trim_start().starts_with(':') {
-                    writeln!(writer, "error[ORNA-REPL-COMMAND]")?;
+                    write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?;
                 } else {
                     match session.submit(&source) {
-                        Ok(Some(value)) => writeln!(writer, "{}", inspect(&value))?,
+                        Ok(Some(value)) => write_repl_value(writer, &value, color_enabled)?,
                         Ok(None) => {}
-                        Err(error) => writeln!(writer, "error[{}]", error.code())?,
+                        Err(error) => write_repl_error(writer, error.code(), color_enabled)?,
                     }
                 }
             }
@@ -261,26 +452,27 @@ fn dispatch_watch<W: Write, S: WatchFrameSource + ?Sized>(
     source: &str,
     watch: &mut Option<WatchBinding<'_, S>>,
     writer: &mut W,
+    color_enabled: bool,
 ) -> io::Result<()> {
     let Some(binding) = watch.as_mut() else {
-        writeln!(writer, "error[ORNA-REPL-COMMAND]")?;
+        write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?;
         return Ok(());
     };
     match binding.source.start_watch(source) {
         Ok(presentation) => {
             binding.state.install(presentation);
-            drain_available_frames(binding, writer)?;
+            drain_available_frames(binding, writer, color_enabled)?;
         }
-        Err(_) => writeln!(writer, "error[ORNA-REPL-COMMAND]")?,
+        Err(_) => write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?,
     }
     Ok(())
 }
-
 /// Applies one frame to the owning presentation and prints its outcome.
 fn accept_frame<W: Write>(
     state: &mut WatchCommandState,
     frame: Vec<u8>,
     writer: &mut W,
+    color_enabled: bool,
 ) -> io::Result<()> {
     let Some(presentation) = state.presentation.as_mut() else {
         return Ok(());
@@ -288,60 +480,86 @@ fn accept_frame<W: Write>(
     match presentation.receive_encoded(&frame) {
         Ok(LivePresentationUpdate::SnapshotInstalled) => {
             if let Some(published) = presentation.published() {
-                writeln!(
+                write_styled(
                     writer,
-                    "watch: snapshot installed (rev {})",
-                    published.revision()
+                    AnsiColor::Green,
+                    b"watch: snapshot installed",
+                    color_enabled,
                 )?;
+                writer.write_all(b" (rev ")?;
+                write_styled_display(
+                    writer,
+                    AnsiColor::Dim,
+                    published.revision(),
+                    color_enabled,
+                )?;
+                writer.write_all(b")\n")?;
             }
         }
         Ok(LivePresentationUpdate::DeltaApplied) => {
             if let Some(published) = presentation.published() {
-                writeln!(
+                write_styled(
                     writer,
-                    "watch: delta applied (rev {})",
-                    published.revision()
+                    AnsiColor::Green,
+                    b"watch: delta applied",
+                    color_enabled,
                 )?;
+                writer.write_all(b" (rev ")?;
+                write_styled_display(
+                    writer,
+                    AnsiColor::Dim,
+                    published.revision(),
+                    color_enabled,
+                )?;
+                writer.write_all(b")\n")?;
             }
         }
         Ok(LivePresentationUpdate::ResyncRequired) => {
-            writeln!(writer, "watch: resync required")?;
+            write_styled(
+                writer,
+                AnsiColor::Yellow,
+                b"watch: resync required\n",
+                color_enabled,
+            )?;
         }
-        Err(_) => writeln!(writer, "error[ORNA-REPL-WATCH-FRAME]")?,
+        Err(_) => write_repl_error(writer, "ORNA-REPL-WATCH-FRAME", color_enabled)?,
     }
     Ok(())
 }
+
 
 /// Drains every immediately available frame; `Ok(None)` keeps the REPL
 /// interactive instead of blocking the line loop.
 fn drain_available_frames<W: Write, S: WatchFrameSource + ?Sized>(
     binding: &mut WatchBinding<'_, S>,
     writer: &mut W,
+    color_enabled: bool,
 ) -> io::Result<()> {
     let Some(watch) = binding.state.watch() else {
         return Ok(());
     };
     loop {
         match binding.source.next_frame(watch) {
-            Ok(Some(frame)) => accept_frame(binding.state, frame, writer)?,
+            Ok(Some(frame)) => accept_frame(binding.state, frame, writer, color_enabled)?,
             Ok(None) => return Ok(()),
             Err(_) => {
-                writeln!(writer, "error[ORNA-REPL-WATCH-SOURCE]")?;
+                write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
                 return Ok(());
             }
         }
     }
 }
-
 fn pump_watch_frames<W: Write, S: WatchFrameSource + ?Sized>(
     watch: &mut Option<WatchBinding<'_, S>>,
     writer: &mut W,
+    color_enabled: bool,
 ) -> io::Result<()> {
     if let Some(binding) = watch.as_mut() {
-        drain_available_frames(binding, writer)?;
+        drain_available_frames(binding, writer, color_enabled)?;
     }
     Ok(())
 }
+
 
 fn parse_help_command(command: &str) -> Option<Result<&'static str, ()>> {
     let mut words = command.split_ascii_whitespace();
@@ -617,7 +835,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            format!("> {REPL_HELP}\n> :at CWD|HEAD|ref\n> error[ORNA-REPL-COMMAND]\n> 2 : Int\n> ")
+            format!("> {REPL_HELP}\n> :at CWD|HEAD|ref\n> error[ORNA-REPL-COMMAND]: command is unknown or unavailable in this REPL\nhelp: enter `:help` to see the supported commands\n> 2 : Int\n> ")
         );
     }
 
@@ -677,7 +895,7 @@ mod tests {
         assert_eq!(loader.calls.get(), 0);
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-REPL-AT]\n> error[ORNA-REPL-AT]\n> error[ORNA-REPL-AT]\n> "
+            "> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> "
         );
     }
 
@@ -695,7 +913,7 @@ mod tests {
         .expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> > error[ORNA-REPL-AT]\n> 42 : Int\n> "
+            "> > error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> 42 : Int\n> "
         );
     }
 
@@ -727,7 +945,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL recovers");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-REPL-INPUT-LIMIT]\n> 1 : Int\n> "
+            "> error[ORNA-REPL-INPUT-LIMIT]: submission is longer than the REPL input limit\nhelp: shorten the submission and enter it again\n> 1 : Int\n> "
         );
     }
 
@@ -751,7 +969,7 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         let output = String::from_utf8(output).expect("UTF-8");
-        assert!(output.starts_with("> 2 : Int\n> error[ORNA-S021-TYPE]"));
+        assert!(output.starts_with("> 2 : Int\n> error[ORNA-S021-TYPE]: expression has the wrong type\nhelp: change the expression or its declared type so the value and requirement agree\n"));
         assert!(output.ends_with("> 2 : Int\n> "));
     }
 
@@ -763,7 +981,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-S021-TYPE]\n> {\"code\": \"ORNA-S021-TYPE\", \"message\": \"<redacted>\", \"redacted\": true, \"severity\": \"error\"} : Map\n> 42 : Int\n> null : Null\n> "
+            "> error[ORNA-S021-TYPE]: expression has the wrong type\nhelp: change the expression or its declared type so the value and requirement agree\n> {\"code\": \"ORNA-S021-TYPE\", \"message\": \"<redacted>\", \"redacted\": true, \"severity\": \"error\"} : Map\n> 42 : Int\n> null : Null\n> "
         );
     }
 
@@ -777,7 +995,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> > 2 : Int\n> error[ORNA-REPL-EFFECT]\n> 2 : Int\n> "
+            "> > 2 : Int\n> error[ORNA-REPL-EFFECT]: REPL preview cannot perform an effect\nhelp: evaluate a pure expression or invoke the operation through its admitted runtime entry point\n> 2 : Int\n> "
         );
     }
 
@@ -789,7 +1007,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL recovers");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> 2 : Int\n> error[ORNA-REPL-INPUT-UTF8]\n> 2 : Int\n> "
+            "> 2 : Int\n> error[ORNA-REPL-INPUT-UTF8]: submission is not valid UTF-8 text\nhelp: re-enter the submission using valid UTF-8\n> 2 : Int\n> "
         );
     }
 

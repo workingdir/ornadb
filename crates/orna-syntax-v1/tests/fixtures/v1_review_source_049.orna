@@ -1,0 +1,1 @@
+fn f() = { value: match => { let f = x => x; f } };

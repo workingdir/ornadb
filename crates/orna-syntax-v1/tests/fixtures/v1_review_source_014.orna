@@ -1,0 +1,1 @@
+type var { var: var, } table var(var: var) { var: var, } protocol var { static var: var; fn var(var: var): var; } enum var { var { var: var }, } fn var(var: var): var { let var: var = var; var = replacement; { var: var }; var.member; namespace.var; call(var: var); var }

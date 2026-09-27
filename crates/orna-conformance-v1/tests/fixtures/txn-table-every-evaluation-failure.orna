@@ -1,0 +1,9 @@
+pub table Note(id: Int) {
+    text: Str,
+    assert every(note => note.text[1] == "x");
+}
+
+fn parent() {
+    Note.insert({ id: 7, text: "a" });
+    Note.insert({ id: 8, text: "" });
+}

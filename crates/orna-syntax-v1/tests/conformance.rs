@@ -12,41 +12,53 @@ fn reference(path: &str) -> String {
     .unwrap()
 }
 
+fn fixture(name: &str) -> String {
+    std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name),
+    )
+    .unwrap()
+}
+
 #[test]
 fn accepts_reference_language_shapes() {
-    for source in [
-        "use std.math.{abs, min,};\npub table Book(id: Int) { title: Text, assert > 0; }\nfn f(x: Int): Int = x + 1;",
-        "pub enum Outcome<T> { Ok { value: T }, Err { message: Text }, }\npub type Point { x: Int, y: Int, }",
-        "fn map<T impl std.Show>(x: T) { let y = x | show; if true { y } else { x } }",
+    for name in [
+        "valid-shape-1.orna",
+        "valid-shape-2.orna",
+        "valid-shape-3.orna",
     ] {
-        let parsed = parse_module(source);
-        assert!(parsed.is_ok(), "{source:?}: {:?}", parsed.diagnostics);
+        let source = fixture(name);
+        let parsed = parse_module(&source);
+        assert!(parsed.is_ok(), "{name}: {:?}", parsed.diagnostics);
     }
 }
 #[test]
 fn entrypoints_and_precedence() {
-    assert!(parse_row("{ name: \"Orna\", count: 1, };").is_ok());
-    assert!(parse_repl("$_ |? recover").is_ok());
-    let x = parse_expression("a + b * c ^ d ?? e");
+    assert!(parse_row(&fixture("entry-row.orna")).is_ok());
+    assert!(parse_repl(&fixture("entry-repl.orna")).is_ok());
+    let expression = fixture("entry-precedence.orna");
+    let x = parse_expression(&expression);
     assert!(x.is_ok(), "{:?}", x.diagnostics);
 }
 #[test]
 fn range_token_wins_over_numeric_dot() {
-    let t = lex("1..=2").unwrap();
+    let t = lex(&fixture("range-token.orna")).unwrap();
     assert!(matches!(t[0].kind, TokenKind::Integer));
     assert_eq!(t[1].text, "..=");
 }
 #[test]
 fn parses_bounded_and_optional_ranges_without_placeholder_endpoints() {
-    for (source, lower, upper, operator) in [
-        ("1..5", true, true, ".."),
-        ("1..", true, false, ".."),
-        ("..5", false, true, ".."),
-        ("1..=5", true, true, "..="),
-        ("..=5", false, true, "..="),
+    for (name, lower, upper, operator) in [
+        ("range-bounded.orna", true, true, ".."),
+        ("range-open-upper.orna", true, false, ".."),
+        ("range-open-lower.orna", false, true, ".."),
+        ("range-inclusive.orna", true, true, "..="),
+        ("range-inclusive-open.orna", false, true, "..="),
     ] {
-        let parsed = parse_expression(source);
-        assert!(parsed.is_ok(), "{source:?}: {:?}", parsed.diagnostics);
+        let source = fixture(name);
+        let parsed = parse_expression(&source);
+        assert!(parsed.is_ok(), "{name}: {:?}", parsed.diagnostics);
         match parsed.value {
             Expr::Range {
                 lower: actual_lower,
@@ -54,18 +66,18 @@ fn parses_bounded_and_optional_ranges_without_placeholder_endpoints() {
                 upper: actual_upper,
                 ..
             } => {
-                assert_eq!(actual_lower.is_some(), lower, "{source}");
-                assert_eq!(actual_upper.is_some(), upper, "{source}");
-                assert_eq!(actual_operator, operator, "{source}");
+                assert_eq!(actual_lower.is_some(), lower, "{name}");
+                assert_eq!(actual_upper.is_some(), upper, "{name}");
+                assert_eq!(actual_operator, operator, "{name}");
             }
-            other => panic!("expected range for {source}, got {other:?}"),
+            other => panic!("expected range for {name}, got {other:?}"),
         }
     }
 }
 
 #[test]
 fn rejects_non_associative_range_chaining() {
-    let parsed = parse_expression("1..2..3");
+    let parsed = parse_expression(&fixture("range-chain.orna"));
 
     assert!(!parsed.is_ok());
     assert_eq!(parsed.diagnostics.len(), 1);
@@ -87,7 +99,7 @@ fn rejects_non_associative_range_chaining() {
 
 #[test]
 fn rejects_prefix_range_as_unparenthesized_endpoint() {
-    let parsed = parse_expression("1.. ..2");
+    let parsed = parse_expression(&fixture("range-prefix-chain.orna"));
 
     assert!(!parsed.is_ok());
     assert_eq!(parsed.diagnostics.len(), 1);
@@ -113,7 +125,7 @@ fn rejects_prefix_range_as_unparenthesized_endpoint() {
 
 #[test]
 fn unicode_nfc_comments_and_literals() {
-    let t = lex("/* one /* two */ one */ fn cafe\u{301}() = 2026-09-05T12:30:00Z;").unwrap();
+    let t = lex(&fixture("unicode-nfc-comments.orna")).unwrap();
     let ident = t
         .iter()
         .find(|t| matches!(t.kind, TokenKind::Identifier { .. }))
@@ -126,45 +138,71 @@ fn unicode_nfc_comments_and_literals() {
 }
 #[test]
 fn malformed_calendar_instant_and_escape_literals_are_rejected() {
-    for source in [
-        "2025-02-29",
-        "2024-13-01",
-        "2024-01-01T24:00:00Z",
-        "0000-01-01",
-        "2024-01-01T01:02:03.1234567890Z",
-        "2024-01-01T01:02:03+24:00",
-        "0b102",
-        "0x_FF",
-        "\"bad\\q\"",
-        "\"bad\\u{D800}\"",
-        "\"bad ${value\"",
+    for name in [
+        "bad-calendar-leap.orna",
+        "bad-calendar-month.orna",
+        "bad-instant-hour.orna",
+        "bad-year-zero.orna",
+        "bad-instant-precision.orna",
+        "bad-instant-offset.orna",
+        "bad-binary.orna",
+        "bad-hex.orna",
+        "bad-escape.orna",
+        "bad-unicode-escape.orna",
+        "bad-interpolation.orna",
     ] {
-        assert!(lex(source).is_err(), "{source}");
+        let source = fixture(name);
+        assert!(lex(&source).is_err(), "{name}: {source}");
     }
 }
 #[test]
 fn stable_errors_reject_legacy_and_bad_lexemes() {
-    let old = parse_module("CREATE TABLE things;");
+    let old = parse_module(&fixture("legacy-sql.orna"));
     assert_eq!(old.diagnostics[0].code, "ORNA-PARSE-001");
-    let bad = lex("/* never").unwrap_err();
+    let bad = lex(&fixture("bad-comment.orna")).unwrap_err();
     assert_eq!(bad[0].code, "ORNA-LEX-004");
 }
 
 #[test]
 fn grammar_recovery_codes_are_token_driven_under_layout_variations() {
-    for (source, code) in [
-        ("fn f() = a < b < c;", "E1302"),
-        ("fn f() = value | item => item;", "E1204"),
-        ("fn f() = (slot = value);", "E1301"),
-        ("assert ;", "ORNA-A091-011"),
-        ("assert true", "ORNA-A091-005"),
-        ("assert true else false;", "ORNA-A091-006"),
+    for (name, padded_name, code) in [
+        (
+            "bad-comparison-chain.orna",
+            "bad-comparison-chain-padded.orna",
+            "E1302",
+        ),
+        (
+            "bad-pipeline-lambda.orna",
+            "bad-pipeline-lambda-padded.orna",
+            "E1204",
+        ),
+        (
+            "bad-assignment-expression.orna",
+            "bad-assignment-expression-padded.orna",
+            "E1301",
+        ),
+        (
+            "bad-empty-assert.orna",
+            "bad-empty-assert-padded.orna",
+            "ORNA-A091-011",
+        ),
+        (
+            "bad-missing-assert-semicolon.orna",
+            "bad-missing-assert-semicolon-padded.orna",
+            "ORNA-A091-005",
+        ),
+        (
+            "bad-assert-else.orna",
+            "bad-assert-else-padded.orna",
+            "ORNA-A091-006",
+        ),
     ] {
-        let parsed = parse_module(source);
-        assert_eq!(parsed.diagnostics[0].code, code, "{source}");
-        let padded = source.replace(' ', " /* gap */ ");
+        let source = fixture(name);
+        let parsed = parse_module(&source);
+        assert_eq!(parsed.diagnostics[0].code, code, "{name}");
+        let padded = fixture(padded_name);
         let parsed = parse_module(&padded);
-        assert_eq!(parsed.diagnostics[0].code, code, "{padded}");
+        assert_eq!(parsed.diagnostics[0].code, code, "{padded_name}");
     }
 }
 
@@ -298,7 +336,7 @@ fn authoritative_parse_invalid_primary_codes_match_manifest() {
 
 #[test]
 fn expression_ast_observes_precedence() {
-    let parsed = parse_expression("a + b * c");
+    let parsed = parse_expression(&fixture("expression-precedence.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     match parsed.value {
         Expr::Binary { op, lhs, .. } => {
@@ -311,11 +349,11 @@ fn expression_ast_observes_precedence() {
 
 #[test]
 fn expression_ast_retains_control_and_postfix_structure() {
-    let indexed = parse_expression("items[0].name");
+    let indexed = parse_expression(&fixture("expression-index-field.orna"));
     assert!(
         matches!(indexed.value, Expr::Field { base, .. } if matches!(*base, Expr::Index { .. }))
     );
-    let control = parse_expression("if ready { value } else { fallback }");
+    let control = parse_expression(&fixture("expression-control.orna"));
     assert!(matches!(
         control.value,
         Expr::Control {
@@ -329,7 +367,7 @@ fn expression_ast_retains_control_and_postfix_structure() {
 
 #[test]
 fn generic_type_constructor_is_admitted_as_a_call_callee() {
-    let parsed = parse_module("pub fn bad(value: Float) = Money<GBP>(value);");
+    let parsed = parse_module(&fixture("generic-money-call.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     let Declaration::Function { body, .. } = &parsed.value.items[0].declaration else {
         panic!("expected function declaration");
@@ -351,7 +389,7 @@ fn generic_type_constructor_is_admitted_as_a_call_callee() {
 
 #[test]
 fn bare_generic_call_retains_type_arguments_structurally() {
-    let parsed = parse_expression("f<Int>(x)");
+    let parsed = parse_expression(&fixture("generic-call.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     let Expr::GenericCall {
         callee,
@@ -380,7 +418,7 @@ fn bare_generic_call_retains_type_arguments_structurally() {
 
 #[test]
 fn qualified_generic_call_retains_type_arguments_structurally() {
-    let parsed = parse_expression("sys.await<Int>(job)");
+    let parsed = parse_expression(&fixture("generic-qualified-call.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     let Expr::GenericCall {
         callee,
@@ -411,24 +449,32 @@ fn qualified_generic_call_retains_type_arguments_structurally() {
 
 #[test]
 fn generic_calls_require_a_qualified_name_callee() {
-    for source in ["f().g<Int>(x)", "items[0].g<Int>(x)"] {
-        let parsed = parse_expression(source);
-        assert!(!parsed.is_ok(), "{source:?} unexpectedly parsed");
-        assert!(!parsed.diagnostics.is_empty(), "{source:?}");
+    for name in [
+        "generic-call-after-call.orna",
+        "generic-call-after-index.orna",
+    ] {
+        let source = fixture(name);
+        let parsed = parse_expression(&source);
+        assert!(!parsed.is_ok(), "{name} unexpectedly parsed");
+        assert!(!parsed.diagnostics.is_empty(), "{name}");
     }
 }
 
 #[test]
 fn empty_generic_call_arguments_are_rejected_at_parse_stage() {
-    for source in ["f<>(x)", "sys.await<>(x)"] {
-        let parsed = parse_expression(source);
-        assert!(!parsed.is_ok(), "{source:?} unexpectedly parsed");
+    for name in [
+        "generic-call-empty.orna",
+        "generic-qualified-call-empty.orna",
+    ] {
+        let source = fixture(name);
+        let parsed = parse_expression(&source);
+        assert!(!parsed.is_ok(), "{name} unexpectedly parsed");
         assert!(
             parsed.diagnostics.iter().any(|diagnostic| {
                 diagnostic.code == "ORNA-PARSE-001"
                     && diagnostic.message == "generic calls require at least one type argument"
             }),
-            "{source:?}: {:?}",
+            "{name}: {:?}",
             parsed.diagnostics
         );
     }
@@ -456,28 +502,33 @@ fn generic_type_arguments_reject_trailing_commas_at_every_type_argument_level() 
             );
         }};
     }
-    for source in ["f<Int,>(x)", "f<List<Int,>>(x)"] {
-        assert_rejected!(source, parse_expression(source));
+    for name in [
+        "generic-call-trailing-comma.orna",
+        "generic-nested-trailing-comma.orna",
+    ] {
+        let source = fixture(name);
+        assert_rejected!(&source, parse_expression(&source));
     }
-    let source = "fn f(value: List<Int,>) = value;";
-    assert_rejected!(source, parse_module(source));
+    let source = fixture("generic-type-trailing-comma.orna");
+    assert_rejected!(&source, parse_module(&source));
 }
 
 #[test]
 fn lexical_layout_is_semantically_inert_and_strings_are_not_comments() {
-    let forms = [
-        "fn f() = 1 + 2;",
-        "/* outer /* nested */ */ fn /*x*/ f ( ) = 1+2 ;",
-        "fn f()=\"/* not comment */\";",
-    ];
-    for source in forms {
-        assert!(parse_module(source).is_ok(), "{source}");
-    }
-    for source in [
-        "fn f() = { value };",
-        "fn f() = a < b < c;",
-        "fn f() = value | item => item;",
+    for name in [
+        "layout-plain.orna",
+        "layout-commented.orna",
+        "layout-comment-in-string.orna",
     ] {
-        assert!(!parse_module(source).is_ok(), "{source}");
+        let source = fixture(name);
+        assert!(parse_module(&source).is_ok(), "{name}");
+    }
+    for name in [
+        "layout-bad-block-expression.orna",
+        "layout-bad-comparison-chain.orna",
+        "layout-bad-pipeline-lambda.orna",
+    ] {
+        let source = fixture(name);
+        assert!(!parse_module(&source).is_ok(), "{name}");
     }
 }

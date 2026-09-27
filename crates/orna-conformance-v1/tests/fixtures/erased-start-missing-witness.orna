@@ -1,0 +1,2 @@
+pub fn missing(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+    sys.start<Int>(function, arguments);

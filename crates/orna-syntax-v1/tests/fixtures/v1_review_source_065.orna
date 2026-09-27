@@ -1,0 +1,1 @@
+fn f() = for item in match status { Status.ready => item } { item };

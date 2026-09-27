@@ -1,0 +1,2 @@
+use checks.{related};
+assert related();

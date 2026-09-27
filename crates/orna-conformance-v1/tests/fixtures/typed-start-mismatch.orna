@@ -1,0 +1,2 @@
+pub fn start_wrong(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+    sys.start<Str>(function, arguments, as: Int);

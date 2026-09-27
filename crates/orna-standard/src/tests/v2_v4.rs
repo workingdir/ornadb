@@ -53,6 +53,141 @@ fn tampered_v2_snapshot(types: &str, invoke: &str) -> StandardLibrarySnapshot {
     .expect("the tampered V2 snapshot remains structurally valid")
 }
 
+fn tampered_v4_snapshot(
+    types: &str,
+    invoke: &str,
+    output: &str,
+    ui: &str,
+) -> StandardLibrarySnapshot {
+    // A structurally valid V4 snapshot whose unit content differs from the
+    // retained source. The catalogue, origins, executable, and retained
+    // digest are the accepted ones; only the source bytes and the
+    // recomputed source hashes change, so the canonical digest encoder
+    // must reject the resulting snapshot.
+    let snapshot =
+        retained_standard_library_v4_snapshot().expect("the retained V4 standard source is valid");
+    let types_unit = StoredSourceUnit::new(
+        STD_TYPES_SOURCE_UNIT_ID,
+        0,
+        SOURCE_LOGICAL_PATH,
+        types,
+        source_unit_content_digest(types).expect("the tampered types digest is valid"),
+    )
+    .expect("the tampered types unit is valid");
+    let invoke_unit = StoredSourceUnit::new(
+        STD_INVOKE_SOURCE_UNIT_ID,
+        1,
+        STD_INVOKE_SOURCE_LOGICAL_PATH,
+        invoke,
+        source_unit_content_digest(invoke).expect("the tampered invoke digest is valid"),
+    )
+    .expect("the tampered invoke unit is valid");
+    let output_unit = StoredSourceUnit::new(
+        STD_OUTPUT_SOURCE_UNIT_ID,
+        2,
+        STD_OUTPUT_SOURCE_LOGICAL_PATH,
+        output,
+        source_unit_content_digest(output).expect("the tampered output digest is valid"),
+    )
+    .expect("the tampered output unit is valid");
+    let ui_unit = StoredSourceUnit::new(
+        STD_UI_SOURCE_UNIT_ID,
+        3,
+        STD_UI_SOURCE_LOGICAL_PATH,
+        ui,
+        source_unit_content_digest(ui).expect("the tampered ui digest is valid"),
+    )
+    .expect("the tampered ui unit is valid");
+    let units = vec![types_unit, invoke_unit, output_unit, ui_unit];
+    let bundle_hash = source_bundle_digest(&units).expect("the tampered bundle digest is valid");
+    let source = StoredSourceRevision::new(
+        STANDARD_SOURCE_V4_BUNDLE_ID,
+        STANDARD_SOURCE_V4_REVISION_ID,
+        Some(STANDARD_SOURCE_V3_REVISION_ID),
+        units,
+        bundle_hash,
+        source_revision_record_digest(
+            STANDARD_SOURCE_V4_BUNDLE_ID,
+            Some(STANDARD_SOURCE_V3_REVISION_ID),
+            bundle_hash,
+        )
+        .expect("the tampered source revision digest is valid"),
+    )
+    .expect("the tampered stored source revision is valid");
+    StandardLibrarySnapshot::new_with_executables(
+        STANDARD_LIBRARY_V4_REVISION_ID,
+        StandardLibraryDigestVersion::Version2,
+        source,
+        LANGUAGE_VERSION_IDENTITY,
+        snapshot.catalogue().clone(),
+        snapshot.executables().to_vec(),
+        snapshot.origins().to_vec(),
+        snapshot.digest(),
+    )
+    .expect("the tampered V4 snapshot remains structurally valid")
+}
+
+fn tampered_v3_snapshot(types: &str, invoke: &str, output: &str) -> StandardLibrarySnapshot {
+    // A structurally valid V3 snapshot whose unit content differs from the
+    // retained source. The catalogue, origins, executable, and retained
+    // digest are the accepted ones; only the source bytes and the
+    // recomputed source hashes change, so the canonical digest encoder
+    // must reject the resulting snapshot.
+    let snapshot =
+        retained_standard_library_v3_snapshot().expect("the retained V3 standard source is valid");
+    let types_unit = StoredSourceUnit::new(
+        STD_TYPES_SOURCE_UNIT_ID,
+        0,
+        SOURCE_LOGICAL_PATH,
+        types,
+        source_unit_content_digest(types).expect("the tampered types digest is valid"),
+    )
+    .expect("the tampered types unit is valid");
+    let invoke_unit = StoredSourceUnit::new(
+        STD_INVOKE_SOURCE_UNIT_ID,
+        1,
+        STD_INVOKE_SOURCE_LOGICAL_PATH,
+        invoke,
+        source_unit_content_digest(invoke).expect("the tampered invoke digest is valid"),
+    )
+    .expect("the tampered invoke unit is valid");
+    let output_unit = StoredSourceUnit::new(
+        STD_OUTPUT_SOURCE_UNIT_ID,
+        2,
+        STD_OUTPUT_SOURCE_LOGICAL_PATH,
+        output,
+        source_unit_content_digest(output).expect("the tampered output digest is valid"),
+    )
+    .expect("the tampered output unit is valid");
+    let units = vec![types_unit, invoke_unit, output_unit];
+    let bundle_hash = source_bundle_digest(&units).expect("the tampered bundle digest is valid");
+    let source = StoredSourceRevision::new(
+        STANDARD_SOURCE_V3_BUNDLE_ID,
+        STANDARD_SOURCE_V3_REVISION_ID,
+        Some(STANDARD_SOURCE_V2_REVISION_ID),
+        units,
+        bundle_hash,
+        source_revision_record_digest(
+            STANDARD_SOURCE_V3_BUNDLE_ID,
+            Some(STANDARD_SOURCE_V2_REVISION_ID),
+            bundle_hash,
+        )
+        .expect("the tampered source revision digest is valid"),
+    )
+    .expect("the tampered stored source revision is valid");
+    StandardLibrarySnapshot::new_with_executables(
+        STANDARD_LIBRARY_V3_REVISION_ID,
+        StandardLibraryDigestVersion::Version2,
+        source,
+        LANGUAGE_VERSION_IDENTITY,
+        snapshot.catalogue().clone(),
+        snapshot.executables().to_vec(),
+        snapshot.origins().to_vec(),
+        snapshot.digest(),
+    )
+    .expect("the tampered V3 snapshot remains structurally valid")
+}
+
 #[test]
 fn manifest_v2_exposes_the_reserved_executable_standard_facts() {
     let manifest = standard_library_v2_manifest().expect("the accepted V2 manifest is valid");
@@ -821,151 +956,6 @@ CREATE TYPE std.ui.UI AS VALUE
 EXPORT TYPE std.ui.UI AS std.UI;
 "#;
 
-pub(super) const EXPECTED_RETAINED_ACTION_SOURCE: &str = r#"CREATE SCHEMA std.action;
-
-CREATE TYPE std.action.Action AS VALUE
-    OPAQUE
-    KERNEL CONTRACT 'orna.std.value.action@1'
-    IMMUTABLE
-    TRANSIENT;
-
-EXPORT TYPE std.action.Action AS std.Action;
-"#;
-
-fn tampered_v4_snapshot(
-    types: &str,
-    invoke: &str,
-    output: &str,
-    ui: &str,
-) -> StandardLibrarySnapshot {
-    // A structurally valid V4 snapshot whose unit content differs from the
-    // retained source. The catalogue, origins, executable, and retained
-    // digest are the accepted ones; only the source bytes and the
-    // recomputed source hashes change, so the canonical digest encoder
-    // must reject the resulting snapshot.
-    let snapshot =
-        retained_standard_library_v4_snapshot().expect("the retained V4 standard source is valid");
-    let types_unit = StoredSourceUnit::new(
-        STD_TYPES_SOURCE_UNIT_ID,
-        0,
-        SOURCE_LOGICAL_PATH,
-        types,
-        source_unit_content_digest(types).expect("the tampered types digest is valid"),
-    )
-    .expect("the tampered types unit is valid");
-    let invoke_unit = StoredSourceUnit::new(
-        STD_INVOKE_SOURCE_UNIT_ID,
-        1,
-        STD_INVOKE_SOURCE_LOGICAL_PATH,
-        invoke,
-        source_unit_content_digest(invoke).expect("the tampered invoke digest is valid"),
-    )
-    .expect("the tampered invoke unit is valid");
-    let output_unit = StoredSourceUnit::new(
-        STD_OUTPUT_SOURCE_UNIT_ID,
-        2,
-        STD_OUTPUT_SOURCE_LOGICAL_PATH,
-        output,
-        source_unit_content_digest(output).expect("the tampered output digest is valid"),
-    )
-    .expect("the tampered output unit is valid");
-    let ui_unit = StoredSourceUnit::new(
-        STD_UI_SOURCE_UNIT_ID,
-        3,
-        STD_UI_SOURCE_LOGICAL_PATH,
-        ui,
-        source_unit_content_digest(ui).expect("the tampered ui digest is valid"),
-    )
-    .expect("the tampered ui unit is valid");
-    let units = vec![types_unit, invoke_unit, output_unit, ui_unit];
-    let bundle_hash = source_bundle_digest(&units).expect("the tampered bundle digest is valid");
-    let source = StoredSourceRevision::new(
-        STANDARD_SOURCE_V4_BUNDLE_ID,
-        STANDARD_SOURCE_V4_REVISION_ID,
-        Some(STANDARD_SOURCE_V3_REVISION_ID),
-        units,
-        bundle_hash,
-        source_revision_record_digest(
-            STANDARD_SOURCE_V4_BUNDLE_ID,
-            Some(STANDARD_SOURCE_V3_REVISION_ID),
-            bundle_hash,
-        )
-        .expect("the tampered source revision digest is valid"),
-    )
-    .expect("the tampered stored source revision is valid");
-    StandardLibrarySnapshot::new_with_executables(
-        STANDARD_LIBRARY_V4_REVISION_ID,
-        StandardLibraryDigestVersion::Version2,
-        source,
-        LANGUAGE_VERSION_IDENTITY,
-        snapshot.catalogue().clone(),
-        snapshot.executables().to_vec(),
-        snapshot.origins().to_vec(),
-        snapshot.digest(),
-    )
-    .expect("the tampered V4 snapshot remains structurally valid")
-}
-
-fn tampered_v3_snapshot(types: &str, invoke: &str, output: &str) -> StandardLibrarySnapshot {
-    // A structurally valid V3 snapshot whose unit content differs from the
-    // retained source. The catalogue, origins, executable, and retained
-    // digest are the accepted ones; only the source bytes and the
-    // recomputed source hashes change, so the canonical digest encoder
-    // must reject the resulting snapshot.
-    let snapshot =
-        retained_standard_library_v3_snapshot().expect("the retained V3 standard source is valid");
-    let types_unit = StoredSourceUnit::new(
-        STD_TYPES_SOURCE_UNIT_ID,
-        0,
-        SOURCE_LOGICAL_PATH,
-        types,
-        source_unit_content_digest(types).expect("the tampered types digest is valid"),
-    )
-    .expect("the tampered types unit is valid");
-    let invoke_unit = StoredSourceUnit::new(
-        STD_INVOKE_SOURCE_UNIT_ID,
-        1,
-        STD_INVOKE_SOURCE_LOGICAL_PATH,
-        invoke,
-        source_unit_content_digest(invoke).expect("the tampered invoke digest is valid"),
-    )
-    .expect("the tampered invoke unit is valid");
-    let output_unit = StoredSourceUnit::new(
-        STD_OUTPUT_SOURCE_UNIT_ID,
-        2,
-        STD_OUTPUT_SOURCE_LOGICAL_PATH,
-        output,
-        source_unit_content_digest(output).expect("the tampered output digest is valid"),
-    )
-    .expect("the tampered output unit is valid");
-    let units = vec![types_unit, invoke_unit, output_unit];
-    let bundle_hash = source_bundle_digest(&units).expect("the tampered bundle digest is valid");
-    let source = StoredSourceRevision::new(
-        STANDARD_SOURCE_V3_BUNDLE_ID,
-        STANDARD_SOURCE_V3_REVISION_ID,
-        Some(STANDARD_SOURCE_V2_REVISION_ID),
-        units,
-        bundle_hash,
-        source_revision_record_digest(
-            STANDARD_SOURCE_V3_BUNDLE_ID,
-            Some(STANDARD_SOURCE_V2_REVISION_ID),
-            bundle_hash,
-        )
-        .expect("the tampered source revision digest is valid"),
-    )
-    .expect("the tampered stored source revision is valid");
-    StandardLibrarySnapshot::new_with_executables(
-        STANDARD_LIBRARY_V3_REVISION_ID,
-        StandardLibraryDigestVersion::Version2,
-        source,
-        LANGUAGE_VERSION_IDENTITY,
-        snapshot.catalogue().clone(),
-        snapshot.executables().to_vec(),
-        snapshot.origins().to_vec(),
-        snapshot.digest(),
-    )
-    .expect("the tampered V3 snapshot remains structurally valid")
-}
 
 #[test]
 fn manifest_v3_exposes_the_reserved_output_standard_facts() {
@@ -2242,10 +2232,6 @@ fn append_only_standard_upgrades_require_an_installed_parent() {
             "V4-to-V5",
             super::super::prepare_standard_upgrade_v4_to_v5(&active),
         ),
-        (
-            "V5-to-V6",
-            super::super::prepare_standard_upgrade_v5_to_v6(&active),
-        ),
     ] {
         let error = result.expect_err("an append-only upgrade must require its parent");
         assert!(
@@ -2263,6 +2249,14 @@ fn append_only_standard_upgrades_require_an_installed_parent() {
             Some(expected_error.to_owned()),
         );
     }
+
+    let v5_to_v6 = super::super::prepare_standard_upgrade_v5_to_v6(&active)
+        .expect_err("the retired V6 upgrade must fail closed even without a V5 parent");
+    assert!(matches!(
+        v5_to_v6,
+        StandardUpgradeError::UnsupportedStandardUpgrade { from, to }
+            if from == STANDARD_LIBRARY_V5_REVISION_ID && to == STANDARD_LIBRARY_V6_REVISION_ID
+    ));
 }
 
 #[test]

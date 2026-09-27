@@ -5,7 +5,6 @@ pub(super) fn check_resource_constructor(
     expression: &ClientExpression,
     input: &ResolvedClientFunctionInput<'_>,
     targets: &HashMap<QualifiedSemanticName, ClientExpressionTarget>,
-    action_targets: &HashMap<QualifiedSemanticName, ClientActionTarget>,
     resource_targets: &HashMap<QualifiedSemanticName, ClientResourceTarget>,
     query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
     base: &CatalogueSnapshot,
@@ -271,7 +270,6 @@ pub(super) fn check_resource_constructor(
             &argument.value,
             input,
             targets,
-            action_targets,
             resource_targets,
             query_catalogue,
             base,
@@ -307,7 +305,6 @@ pub(super) fn check_resource_constructor(
         ));
         return None;
     }
-    checked_arguments.sort_by_key(|(parameter, _)| *parameter);
     let operation_location = location(input.logical_path, span);
     let call_site = client_resource_call_site_id(&operation_location, &input.name);
     references.push(CheckedDefinitionReference {
@@ -331,337 +328,11 @@ pub(super) fn check_resource_constructor(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn check_action_constructor(
-    expression: &ClientExpression,
-    input: &ResolvedClientFunctionInput<'_>,
-    targets: &HashMap<QualifiedSemanticName, ClientExpressionTarget>,
-    action_targets: &HashMap<QualifiedSemanticName, ClientActionTarget>,
-    resource_targets: &HashMap<QualifiedSemanticName, ClientResourceTarget>,
-    query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
-    base: &CatalogueSnapshot,
-    server_names: &[QualifiedSemanticName],
-    standard: Option<&CheckedStandardLibrary>,
-    diagnostics: &mut Vec<CompilerDiagnostic>,
-    references: &mut Vec<CheckedDefinitionReference>,
-    used_capabilities: &mut HashSet<QualifiedSemanticName>,
-    locals: &ClientLocalEnvironment,
-) -> Option<(CheckedClientExpression, ClientExpressionType)> {
-    let action_name =
-        QualifiedSemanticName::new(["std", "action", "call"]).expect("std.action.call is valid");
-    let Some(action_type) = standard
-        .and_then(|standard| {
-            standard.value_types().iter().find(|value| {
-                value.id() == STD_ACTION_TYPE_ID
-                    && value.kind() == ValueTypeKind::Opaque
-                    && value.representation_contract() == STD_ACTION_CONTRACT
-            })
-        })
-        .map(|_| ClientExpressionType {
-            semantic_type: SemanticType::Named(CheckedTypeId::Existing(STD_ACTION_TYPE_ID)),
-            standard_value_type: Some(STD_ACTION_TYPE_ID),
-            result_shape: ClientExpressionResultShape::Value,
-        })
-    else {
-        diagnostics.push(diagnostic(
-            DiagnosticCode::TypeMismatch,
-            "the checked standard library does not provide std.action.Action",
-            input.logical_path,
-            expression.span(),
-        ));
-        return None;
-    };
-    let ClientExpression::Call {
-        callee,
-        arguments,
-        span,
-    } = expression
-    else {
-        return None;
-    };
-    if semantic_name(callee) != action_name {
-        return None;
-    }
-    if arguments.len() != 2 {
-        diagnostics.push(diagnostic(
-            DiagnosticCode::TypeMismatch,
-            "std.action.call requires exactly one target and one arguments value",
-            input.logical_path,
-            span,
-        ));
-        return None;
-    }
-    let mut target_expression = None;
-    let mut arguments_expression = None;
-    for argument in arguments {
-        let Some(name) = &argument.name else {
-            diagnostics.push(diagnostic(
-                DiagnosticCode::TypeMismatch,
-                "std.action.call arguments must be named target and arguments",
-                input.logical_path,
-                &argument.span,
-            ));
-            return None;
-        };
-        match semantic_part(name).as_str() {
-            "target" if target_expression.is_none() => {
-                target_expression = Some(&argument.value);
-            }
-            "arguments" if arguments_expression.is_none() => {
-                arguments_expression = Some(&argument.value);
-            }
-            "target" | "arguments" => {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::DuplicateDefinition,
-                    "duplicate std.action.call argument",
-                    input.logical_path,
-                    &argument.span,
-                ));
-                return None;
-            }
-            _ => {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::UnknownQualifiedName,
-                    "std.action.call accepts only target and arguments",
-                    input.logical_path,
-                    &argument.span,
-                ));
-                return None;
-            }
-        }
-    }
-    let (Some(target_expression), Some(arguments_expression)) =
-        (target_expression, arguments_expression)
-    else {
-        diagnostics.push(diagnostic(
-            DiagnosticCode::TypeMismatch,
-            "std.action.call requires both target and arguments",
-            input.logical_path,
-            span,
-        ));
-        return None;
-    };
-    let ClientExpression::FieldPath { root, members, .. } = target_expression else {
-        diagnostics.push(diagnostic(
-            DiagnosticCode::TypeMismatch,
-            "std.action.call target must be a qualified function name",
-            input.logical_path,
-            target_expression.span(),
-        ));
-        return None;
-    };
-    if members.is_empty() {
-        diagnostics.push(diagnostic(
-            DiagnosticCode::TypeMismatch,
-            "std.action.call target must include a schema and function name",
-            input.logical_path,
-            target_expression.span(),
-        ));
-        return None;
-    }
-    let mut target_parts = Vec::with_capacity(members.len() + 1);
-    target_parts.push(semantic_part(root));
-    target_parts.extend(members.iter().map(semantic_part));
-    let Ok(target_name) = QualifiedSemanticName::new(target_parts) else {
-        diagnostics.push(diagnostic(
-            DiagnosticCode::UnknownQualifiedName,
-            "std.action.call target must be a qualified function name",
-            input.logical_path,
-            target_expression.span(),
-        ));
-        return None;
-    };
-    let Some(target) = action_targets.get(&target_name) else {
-        let message = if server_names.contains(&target_name)
-            || base.function_by_name(&target_name).is_some()
-        {
-            format!("std.action.call target {target_name} does not return one durable value")
-        } else {
-            format!("unknown std.action.call target {target_name}")
-        };
-        diagnostics.push(diagnostic(
-            DiagnosticCode::UnknownQualifiedName,
-            message,
-            input.logical_path,
-            target_expression.span(),
-        ));
-        return None;
-    };
-    let ClientExpression::Call {
-        callee: args_callee,
-        arguments: target_arguments,
-        ..
-    } = arguments_expression
-    else {
-        diagnostics.push(diagnostic(
-            DiagnosticCode::TypeMismatch,
-            "std.action.call arguments must be a std.call.args value",
-            input.logical_path,
-            arguments_expression.span(),
-        ));
-        return None;
-    };
-    if semantic_name(args_callee)
-        != QualifiedSemanticName::new(["std", "call", "args"]).expect("std.call.args is valid")
-    {
-        diagnostics.push(diagnostic(
-            DiagnosticCode::TypeMismatch,
-            "std.action.call arguments must be a std.call.args value",
-            input.logical_path,
-            arguments_expression.span(),
-        ));
-        return None;
-    }
-    if target.parameters.iter().any(|parameter| {
-        !action_argument_type_is_orv3_encodable(parameter.expression_type, base, standard)
-    }) {
-        diagnostics.push(diagnostic(
-            DiagnosticCode::TypeMismatch,
-            format!(
-                "std.action.call target {target_name} has a parameter that is not ORV3-encodable"
-            ),
-            input.logical_path,
-            target_expression.span(),
-        ));
-        return None;
-    }
-    let mut bound = vec![false; target.parameters.len()];
-    let mut positional = 0usize;
-    let mut checked_arguments = Vec::with_capacity(target_arguments.len());
-    for argument in target_arguments {
-        let parameter_index = if let Some(name) = &argument.name {
-            let parameter_name = semantic_part(name);
-            let Some(index) = target
-                .parameters
-                .iter()
-                .position(|parameter| parameter.name == parameter_name)
-            else {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::UnknownQualifiedName,
-                    format!("unknown std.action.call parameter {parameter_name}"),
-                    input.logical_path,
-                    &argument.span,
-                ));
-                return None;
-            };
-            index
-        } else {
-            while positional < bound.len() && bound[positional] {
-                positional += 1;
-            }
-            if positional >= bound.len() {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::TypeMismatch,
-                    format!("too many arguments for std.action.call target {target_name}"),
-                    input.logical_path,
-                    &argument.span,
-                ));
-                return None;
-            }
-            let index = positional;
-            positional += 1;
-            index
-        };
-        if bound[parameter_index] {
-            diagnostics.push(diagnostic(
-                DiagnosticCode::DuplicateDefinition,
-                format!(
-                    "duplicate std.action.call parameter {}",
-                    target.parameters[parameter_index].name
-                ),
-                input.logical_path,
-                &argument.span,
-            ));
-            return None;
-        }
-        let (checked, expression_type) = check_client_expression(
-            &argument.value,
-            input,
-            targets,
-            action_targets,
-            resource_targets,
-            query_catalogue,
-            base,
-            server_names,
-            standard,
-            diagnostics,
-            references,
-            used_capabilities,
-            locals,
-        )?;
-        let parameter = &target.parameters[parameter_index];
-        if client_expression_contains_await_or_resource(&checked, locals) {
-            diagnostics.push(diagnostic(
-                DiagnosticCode::TypeMismatch,
-                format!(
-                    "std.action.call argument for parameter {} is not ORV3-encodable",
-                    parameter.name
-                ),
-                input.logical_path,
-                &argument.span,
-            ));
-            return None;
-        }
-        if !client_expression_types_compatible(expression_type, parameter.expression_type) {
-            diagnostics.push(diagnostic(
-                DiagnosticCode::TypeMismatch,
-                format!(
-                    "std.action.call argument does not match parameter {}",
-                    parameter.name
-                ),
-                input.logical_path,
-                &argument.span,
-            ));
-            return None;
-        }
-        if !action_argument_type_is_orv3_encodable(expression_type, base, standard) {
-            diagnostics.push(diagnostic(
-                DiagnosticCode::TypeMismatch,
-                format!(
-                    "std.action.call argument for parameter {} is not ORV3-encodable",
-                    parameter.name
-                ),
-                input.logical_path,
-                &argument.span,
-            ));
-            return None;
-        }
-        bound[parameter_index] = true;
-        checked_arguments.push((parameter.id, checked));
-    }
-    if bound.iter().any(|bound| !bound) {
-        diagnostics.push(diagnostic(
-            DiagnosticCode::TypeMismatch,
-            format!("missing argument for std.action.call target {target_name}"),
-            input.logical_path,
-            span,
-        ));
-        return None;
-    }
-    checked_arguments.sort_by_key(|(parameter, _)| *parameter);
-    let operation_location = location(input.logical_path, span);
-    references.push(CheckedDefinitionReference {
-        target: CheckedDefinitionReferenceTarget::Function(target.id),
-        kind: DefinitionReferenceKind::FunctionCall,
-        location: operation_location.clone(),
-    });
-    let operation = CheckedActionOperation {
-        target_domain: target.domain,
-        target: target.id,
-        call_site: client_resource_call_site_id(&operation_location, &input.name),
-        arguments: checked_arguments,
-        result_type: target.return_type.semantic_type,
-        standard_result_type: target.return_type.standard_value_type,
-        location: operation_location,
-    };
-    Some((CheckedClientExpression::Action { operation }, action_type))
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_inspect_call(
     expression: &ClientExpression,
     input: &ResolvedClientFunctionInput<'_>,
     targets: &HashMap<QualifiedSemanticName, ClientExpressionTarget>,
-    action_targets: &HashMap<QualifiedSemanticName, ClientActionTarget>,
     resource_targets: &HashMap<QualifiedSemanticName, ClientResourceTarget>,
     query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
     base: &CatalogueSnapshot,
@@ -807,7 +478,6 @@ pub(super) fn check_inspect_call(
         &target_argument.value,
         input,
         targets,
-        action_targets,
         resource_targets,
         query_catalogue,
         base,

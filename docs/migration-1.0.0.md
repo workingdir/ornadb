@@ -149,26 +149,15 @@ adapter implementation detail and does not alter the source language.
 
 ## Standard-library compatibility (managed-product evidence)
 
-Standard-library snapshots are content-addressed and immutable. The code in
-this checkout defines retained revisions from `orna.std/1` through
-`orna.std/11` and contains sequential upgrade preparation through V11. An
-upgrade step requires the exact expected parent revision and verifies the
-parent before constructing the child; an already-installed or mismatched base
-fails closed.
-
-There is an unresolved release-evidence discrepancy: the current maintainer
-runbook still describes the accepted chain as V1 through V9, while the decision
-index has no complete tracked work decision for the V10/V11 addition and the
-implementation/source-apply selection paths include V10 and V11. Consequently:
-
-- Treat V10/V11 as implementation evidence only, not as a 1.0 compatibility
-  promise.
-- Do not overwrite or rename a historical standard snapshot to make revisions
-  appear compatible.
-- Before publishing 1.0, reconcile the runbook, decision index, standard
-  acceptance record, and product baseline. Until then, preserve the exact
-  source/catalogue identities and report an unavailable compatibility result
-  rather than claiming conformance.
+Standard-library snapshots are content-addressed and immutable. Product
+selection retains revisions `orna.std/1` through `orna.std/9`. The pre-1.0 V10
+`std/cli.orna` source and V9-to-V10 upgrade constructor have been retired; the
+V10 revision identity remains reserved, and a stored V10 snapshot can only be
+verified when explicitly supplied. V10 is never reconstructed or replaced with
+different source. V11's SQL-shaped math source is retired as well; pure math
+comes from the pinned Orna 1.0 source. Each supported upgrade requires the
+exact expected parent revision and verifies the parent before constructing the
+child; an already-installed or mismatched base fails closed.
 
 ### Source-level pinned pure-module boundary
 
@@ -270,7 +259,7 @@ prerequisites and evidence vocabulary. In particular:
 | Explicit Unix/remote endpoint | Bounded current-socket `invoke` only for Unix; remote transport unavailable | No migration or general remote-session support |
 | Application source revisions | Typed ledger, hashes, atomic apply | Supported only on a ready compatible engine |
 | Engine predecessor upgrade | Empty accepted predecessor/edge sets | No 0.x/development in-place upgrade |
-| Standard library | Code through V11; acceptance records through V9 | V10/V11 not promised until evidence is reconciled |
+| Standard library | Code through V10; acceptance records through V9; pinned Orna 1.0 pure-math source | V10 not promised until evidence is reconciled; V11 legacy math retired |
 | Package distribution | Historical ADR0047 Debian plan plus tracked minimal `packaging/linux/` artifact recipe; no Debian package | No distribution mandate and no product upgrade source |
 
 For command details and the current evidence map, see the

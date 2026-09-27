@@ -7,6 +7,7 @@
 
 mod compact;
 mod compact_parquet;
+mod publication_policy;
 
 pub use compact::{
     apply_migration_plan_to_compact, fold_compact_committed_base, lower_publication_freeze,
@@ -17,6 +18,11 @@ pub use compact::{
     CompactWriterMutationState, COMPACT_STORAGE_PROFILE, OVB_PROFILE,
 };
 pub use compact_parquet::{CompactParquetError, CompactParquetKeySource};
+pub use publication_policy::{
+    CompactPublicationPolicy, CompactPublicationPolicyError, COMPACT_FILE_BOUND_BYTES,
+    DEFAULT_COMPRESSED_TARGET_BYTES, MAX_COMPRESSED_TARGET_BYTES,
+    MIN_COMPRESSED_TARGET_BYTES,
+};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1061,12 +1067,13 @@ fn map_compact_runtime_error(error: RuntimeError) -> Error {
         | RuntimeError::ConflictingPublicationIntent
         | RuntimeError::ConflictingPublicationCommit
         | RuntimeError::InvalidPublicationCommit
+        | RuntimeError::InvalidPublicationPolicy
         | RuntimeError::CompactPublicationRequired
         | RuntimeError::CompactReceiptKeyMismatch
         | RuntimeError::InvalidCompactReceipt
         | RuntimeError::RecoveryInvalid
         | RuntimeError::CheckpointNotReplayable => Error::InvalidTransition,
-        RuntimeError::RecoveryPending => Error::RuntimeUnavailable,
+        RuntimeError::RecoveryPending | RuntimeError::AdminBusy => Error::RuntimeUnavailable,
         RuntimeError::StreamIdentityMismatch
         | RuntimeError::StreamCheckpointStale
         | RuntimeError::LeaseHeld
@@ -1432,6 +1439,14 @@ mod tests {
     fn recovery_pending_maps_to_temporary_storage_unavailability() {
         assert_eq!(
             map_compact_runtime_error(RuntimeError::RecoveryPending),
+            Error::RuntimeUnavailable
+        );
+    }
+
+    #[test]
+    fn admin_busy_maps_to_temporary_storage_unavailability() {
+        assert_eq!(
+            map_compact_runtime_error(RuntimeError::AdminBusy),
             Error::RuntimeUnavailable
         );
     }

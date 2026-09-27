@@ -1,0 +1,2 @@
+pub fn await_wrong(job: sys.InvocationHandle<Int>) =
+    sys.await<Str>(job, timeout: 1.s);

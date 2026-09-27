@@ -1,0 +1,2 @@
+pub fn cancel_wrong(job: sys.InvocationHandle<Int>) =
+    sys.cancel<Str>(job);

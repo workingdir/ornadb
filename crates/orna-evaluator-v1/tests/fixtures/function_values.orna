@@ -1,0 +1,7 @@
+fn increment(value: Int) = value + 1;
+fn apply(operation, value: Int) = operation(value);
+
+fn run() {
+    let choices = [increment, value => value * 2];
+    apply(choices[0], 20) + apply(choices[1], 10)
+}

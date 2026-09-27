@@ -1,0 +1,2 @@
+use checks.{hidden};
+pub fn ok(): Bool = true;

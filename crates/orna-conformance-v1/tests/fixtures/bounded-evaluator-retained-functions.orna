@@ -1,0 +1,2 @@
+pub fn increment(number, label) = std.math.increment(number);
+pub fn add_one(value, increment = 1) = value + increment;

@@ -1,0 +1,9 @@
+-note.id
+-note.render()
+-note.items[0]
+--note.id
+-note.id ^ 2
+-note.id * 2
+!note.ready
++note.value
+(-note).id

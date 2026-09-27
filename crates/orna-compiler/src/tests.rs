@@ -58,7 +58,7 @@ const NON_STD_SCHEMA_STANDARD_DIGEST: [u8; 32] = [
     0x12, 0x36, 0x60, 0xae, 0x7f, 0x65, 0xc2, 0x76, 0x8c, 0x5b, 0x0d, 0x9a, 0xcf, 0x94, 0x35, 0x49,
 ];
 
-const CANONICAL_STANDARD_SOURCE: &str = include_str!("../../../stdlib/std/types.orna");
+const CANONICAL_STANDARD_SOURCE: &str = include_str!("../tests/fixtures/standard/types.orna");
 
 static PREPARE_CATALOGUE_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static PREPARE_BUNDLE_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);

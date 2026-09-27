@@ -4,7 +4,7 @@ use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
 use orna_artifact::{
     client_plan::{
-        ActionTargetDomain, ControlFlowBinaryOperator, ControlFlowUnaryOperator, ResourceKind,
+        ControlFlowBinaryOperator, ControlFlowUnaryOperator, ResourceKind,
     },
     server_parameter_echo::ServerParameterEchoError,
 };
@@ -634,11 +634,6 @@ pub(crate) enum CheckedClientExpression {
         /// The resolved resource operation metadata and bound arguments.
         operation: CheckedResourceOperation,
     },
-    /// A checked CLIENT action operation value.
-    Action {
-        /// The resolved action operation metadata and bound arguments.
-        operation: CheckedActionOperation,
-    },
     /// A sealed `sys.inspect` operation over an immutable inspection carrier.
     Inspect {
         /// The checked sealed operation and its nested target expression.
@@ -828,42 +823,6 @@ impl CheckedResourceOperation {
         self.standard_result_type
     }
     /// Returns the source location of the constructor expression.
-    pub(crate) fn location(&self) -> &SourceLocation {
-        &self.location
-    }
-}
-
-/// One checked CLIENT action operation (ADR 0079).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CheckedActionOperation {
-    pub(super) target_domain: ActionTargetDomain,
-    pub(super) target: CheckedFunctionId,
-    pub(super) call_site: CallSiteId,
-    pub(super) arguments: Vec<(CheckedParameterId, CheckedClientExpression)>,
-    pub(super) result_type: SemanticType<CheckedTypeId>,
-    pub(super) standard_result_type: Option<TypeId>,
-    pub(super) location: SourceLocation,
-}
-
-impl CheckedActionOperation {
-    pub(crate) const fn target_domain(&self) -> ActionTargetDomain {
-        self.target_domain
-    }
-    pub(crate) const fn target(&self) -> CheckedFunctionId {
-        self.target
-    }
-    pub(crate) const fn call_site(&self) -> CallSiteId {
-        self.call_site
-    }
-    pub(crate) fn arguments(&self) -> &[(CheckedParameterId, CheckedClientExpression)] {
-        &self.arguments
-    }
-    pub(crate) const fn result_type(&self) -> SemanticType<CheckedTypeId> {
-        self.result_type
-    }
-    pub(crate) const fn standard_result_type(&self) -> Option<TypeId> {
-        self.standard_result_type
-    }
     pub(crate) fn location(&self) -> &SourceLocation {
         &self.location
     }
@@ -1708,9 +1667,6 @@ pub const STANDARD_LIBRARY_V4_REVISION_ID: StandardLibraryRevisionId =
 /// The fixed ADR 0075 `orna.std/5` standard-library revision identity: `...05`.
 pub const STANDARD_LIBRARY_V5_REVISION_ID: StandardLibraryRevisionId =
     StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05]);
-/// The fixed `orna.std/11` standard-library revision identity.
-pub const STANDARD_LIBRARY_V11_REVISION_ID: StandardLibraryRevisionId =
-    StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0b]);
 /// The fixed ADR 0079 `orna.std/6` standard-library revision identity: `...06`.
 pub const STANDARD_LIBRARY_V6_REVISION_ID: StandardLibraryRevisionId =
     StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06]);
@@ -1740,7 +1696,7 @@ pub const STD_CLI_REPL_FUNCTION_REVISION_ID: FunctionRevisionId =
     FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1C]);
 /// The source-authored `std.cli.repl` function revision number.
 pub const STD_CLI_REPL_REVISION_NUMBER: u64 = 1;
-/// The fixed Work ADR 0088 `std/ui_constructors.orna` source-unit identity: `...0A`.
+/// Retired V9 source-unit identity reserved for fail-closed historical handling: `...0A`.
 pub const STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0A]);
 /// The fixed Work ADR 0087 `std/data.orna` source-unit identity: `...09`.
@@ -1752,9 +1708,6 @@ pub const STD_DATA_SOURCE_UNIT_ID: SourceUnitId =
 pub const STD_DATA_ROWS_TYPE_BINDING_ID: TypeBindingId = TypeBindingId::from_bytes([
     0x04, 0xe2, 0x43, 0x98, 0x0b, 0x43, 0xc2, 0xaa, 0xa0, 0x0e, 0x0e, 0x79, 0xc4, 0xce, 0xea, 0x10,
 ]);
-/// The fixed ADR 0019 `std/window.orna` source-unit identity: `...08`.
-pub const STD_WINDOW_SOURCE_UNIT_ID: SourceUnitId =
-    SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08]);
 /// The fixed ADR 0019 `std.ui.window` function identity: `...14`.
 pub const STD_UI_WINDOW_FUNCTION_ID: FunctionId =
     FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x14]);
@@ -1869,12 +1822,6 @@ pub const STD_CHARACTER_LARGE_OBJECT_TYPE_ID: TypeId =
 /// The fixed ADR 0062 `std/ui.orna` source-unit identity: `...05`.
 pub const STD_UI_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05]);
-/// The fixed ADR 0079 `std/action.orna` source-unit identity: `...07`.
-pub const STD_ACTION_SOURCE_UNIT_ID: SourceUnitId =
-    SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x07]);
-/// The fixed ADR 0079 `std.action` schema identity: `...09`.
-pub const STD_ACTION_SCHEMA_ID: SchemaId =
-    SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x09]);
 /// The fixed ADR 0075 `std/json.orna` source-unit identity: `...06`.
 pub const STD_JSON_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06]);
@@ -1888,11 +1835,6 @@ pub const STD_UI_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13]);
 /// The fixed ADR 0062 `std.ui.UI` kernel representation contract.
 pub const STD_UI_CONTRACT: &str = "orna.std.value.ui@1";
-/// The fixed ADR 0079 `std.action.Action` value-type identity: `reserved_id(20)`.
-pub const STD_ACTION_TYPE_ID: TypeId =
-    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x14]);
-/// The fixed ADR 0079 `std.action.Action` kernel representation contract.
-pub const STD_ACTION_CONTRACT: &str = "orna.std.value.action@1";
 /// The fixed ADR 0055 `std.invoke` schema identity: 15 zero bytes then `0x03`.
 pub const STD_INVOKE_SCHEMA_ID: SchemaId =
     SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
@@ -2054,72 +1996,6 @@ impl CheckedStandardJsonEncode {
         self.revision_id
     }
 }
-/// The checked declaration facts for the accepted ADR 0019 external
-/// `std.ui.window` CLIENT function.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CheckedStandardUiWindow {
-    pub(super) function_id: FunctionId,
-    pub(super) title_parameter_id: ParameterId,
-    pub(super) content_parameter_id: ParameterId,
-    pub(super) revision_id: FunctionRevisionId,
-}
-
-impl CheckedStandardUiWindow {
-    /// Returns the fixed `std.ui.window` function identity.
-    pub const fn function_id(&self) -> FunctionId {
-        self.function_id
-    }
-
-    /// Returns the fixed `std.ui.window.title` parameter identity.
-    pub const fn title_parameter_id(&self) -> ParameterId {
-        self.title_parameter_id
-    }
-
-    /// Returns the fixed `std.ui.window.content` parameter identity.
-    pub const fn content_parameter_id(&self) -> ParameterId {
-        self.content_parameter_id
-    }
-
-    /// Returns the fixed version-1 function-revision identity.
-    pub const fn revision_id(&self) -> FunctionRevisionId {
-        self.revision_id
-    }
-}
-/// The checked declaration facts for one Work ADR 0088 UI constructor.
-///
-/// The constructor set is closed and source-authored: each value retains the
-/// exact function, ordered parameter, revision, and external-contract facts
-/// checked against the V9 catalogue.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CheckedStandardUiConstructor {
-    pub(super) function_id: FunctionId,
-    pub(super) parameter_ids: Vec<ParameterId>,
-    pub(super) revision_id: FunctionRevisionId,
-    pub(super) runtime_contract: &'static str,
-}
-
-impl CheckedStandardUiConstructor {
-    /// Returns the fixed constructor function identity.
-    pub const fn function_id(&self) -> FunctionId {
-        self.function_id
-    }
-
-    /// Returns ordered constructor parameter identities.
-    pub fn parameter_ids(&self) -> &[ParameterId] {
-        &self.parameter_ids
-    }
-
-    /// Returns the fixed version-1 function-revision identity.
-    pub const fn revision_id(&self) -> FunctionRevisionId {
-        self.revision_id
-    }
-
-    /// Returns the exact external runtime-contract identity.
-    pub const fn runtime_contract(&self) -> &'static str {
-        self.runtime_contract
-    }
-}
-
 /// The checked declaration facts for the one accepted ADR 0057 terminal
 /// table presenter function (`std.terminal.present_table`).
 ///

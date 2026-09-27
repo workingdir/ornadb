@@ -1,0 +1,6 @@
+pub table Note(id: Int) { text: Str, }
+
+pub fn main(stream: sys.StreamRef) {
+  Note.insert({ id: 7, text: "staged before pause" });
+  sys.admin.pause_stream(stream)
+}

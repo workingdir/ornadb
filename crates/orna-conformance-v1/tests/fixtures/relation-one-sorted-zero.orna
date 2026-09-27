@@ -1,0 +1,5 @@
+pub table Note(id: Int) { value: Int, }
+fn selected() = Note | sort_by(note => -note.id) | one();
+fn parent() {
+    selected();
+}

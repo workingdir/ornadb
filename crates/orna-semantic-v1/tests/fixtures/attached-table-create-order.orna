@@ -1,0 +1,1 @@
+pub fn create(customer: Customer): Order = Order.insert({ customer: customer, created: now() });

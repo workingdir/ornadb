@@ -24,11 +24,11 @@ fn repository() -> (TempDir, Repository) {
     git(directory.path(), &["init", "--quiet"]);
     git(
         directory.path(),
-        &["config", "user.email", "test@example.invalid"],
+        &["config", "user.email", "kieran@drewett.dev"],
     );
     git(
         directory.path(),
-        &["config", "user.name", "conformance test"],
+        &["config", "user.name", "kierandrewett"],
     );
     let repository = Repository::discover(directory.path()).expect("repository");
     (directory, repository)
@@ -46,16 +46,7 @@ fn stream_source() -> SourceUnit {
         fixture_id: "stream-load-boundary".into(),
         source_id: "stream-load-boundary.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Reading(id: Int) { value: Int, }
-            fn main() {
-                Stream.from_list([1, 2], source_identity: "fixture:readings")
-                    | for_each(value => {
-                        Reading.insert({ id: value, value: value });
-                    });
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/stream-load-boundary.orna").into(),
     }
 }
 

@@ -1,0 +1,1 @@
+fn f(value: fixture_keyword) = value;

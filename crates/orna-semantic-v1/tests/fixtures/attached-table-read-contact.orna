@@ -1,0 +1,2 @@
+use contacts as addressbook;
+pub fn read(): contacts.Contact = addressbook.Contact.one();

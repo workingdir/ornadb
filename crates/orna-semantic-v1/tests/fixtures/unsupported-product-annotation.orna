@@ -1,0 +1,2 @@
+pub fn bad(value: Int * Int): Bool = value;
+pub fn caller(): Bool = bad("wrong");

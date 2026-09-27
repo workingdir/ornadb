@@ -29,15 +29,14 @@ use orna_foundation_v1::{
     CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value,
 };
 use orna_protocol_v1::{
-
     Envelope, Limits as ProtocolLimits, Message, RequestState, ResultBody, ResultStatus,
     TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime_v1::{
     Component, ConsumerIdentity, FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
     RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
-    RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState, StagedTableActivation,
-    TableMutation, TerminalOutcome, WriterLease,
+    RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState,
+    StagedTableActivation, TableMutation, TerminalOutcome, WriterLease,
 };
 use orna_security_v1::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
@@ -95,6 +94,7 @@ pub enum Error {
     UnsupportedOperation,
     RequestMismatch,
     ApplicationRejected,
+    AdminBusy,
     /// The application deliberately left an admitted request nonterminal.
     ///
     /// The host must not replace this outcome with its generic retained
@@ -120,6 +120,7 @@ impl Error {
             Self::UnsupportedOperation => "live.unsupported_operation",
             Self::RequestMismatch => "wire.request_mismatch",
             Self::ApplicationRejected => "live.application_rejected",
+            Self::AdminBusy => "sys.admin.busy",
             Self::ApplicationDeferred => "live.application_deferred",
             Self::RuntimeUnavailable => "live.runtime_unavailable",
         }
@@ -725,6 +726,7 @@ pub struct LiveEvalTransaction {
     pub mutations: Vec<TableMutation>,
     pub next_digest: [u8; 32],
     pub faults: Arc<dyn FaultInjector>,
+    after_commit: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl LiveEvalTransaction {
@@ -738,7 +740,16 @@ impl LiveEvalTransaction {
             mutations,
             next_digest,
             faults,
+            after_commit: None,
         }
+    }
+
+    /// Registers application-owned ephemeral state to publish after the host
+    /// commits this activation's durable writes and terminal request outcome.
+    #[must_use]
+    pub fn after_commit(mut self, callback: impl FnOnce() + Send + 'static) -> Self {
+        self.after_commit = Some(Box::new(callback));
+        self
     }
 }
 
@@ -953,7 +964,6 @@ impl ActionAuthority for ActionAuthorityRegistry {
     }
 }
 
-
 /// Narrow seam for application-owned source execution. The adapter owns wire
 /// admission and response identity; implementations must return a canonical
 /// host response rather than an untyped success flag.
@@ -1070,6 +1080,21 @@ pub trait LiveApplication {
         })
     }
 
+    /// Dispatches an Eval with the host's trusted stream-administration
+    /// capability. The default preserves applications that do not implement
+    /// runtime-backed source effects.
+    fn dispatch_eval_with_effects<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        context: Option<&'a RuntimeActivationContext>,
+        work: &'a mut LiveApplicationWorkLease,
+        _effects: Option<&'a dyn LiveAdminEffectDispatcher>,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse>> + 'a>> {
+        self.dispatch_eval_with_work(session, request, message, context, work)
+    }
+
     /// Dispatches an admitted page action under the same host-owned runtime
     /// transaction seam as Eval. Existing applications inherit a pure result;
     /// action-capable adapters may return staged table mutations.
@@ -1090,7 +1115,6 @@ pub trait LiveApplication {
             Ok(LiveEvalResponse::pure(response))
         })
     }
-
 
     /// Dispatches an admitted application operation under its ownership
     /// lease. Existing synchronous implementations inherit this compatibility
@@ -1130,6 +1154,92 @@ pub trait LiveApplication {
     }
 }
 
+/// Host capability for one admitted source-level stream pause. Implementors
+/// must validate the portable reference against the current writer owner and
+/// the activation's pinned capture before changing runtime state.
+pub trait LiveAdminEffectDispatcher: Send + Sync {
+    /// Returns the durable snapshot projected into the two publication
+    /// metadata system relations. The host owns the runtime read authority;
+    /// the application consumes only canonical rows through its normal
+    /// relation-page effect boundary.
+    fn publication_metadata_rows<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = std::result::Result<
+                        Option<orna_runtime_v1::RuntimePublicationMetadataRows>,
+                        String,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn pause_stream<'a>(
+        &'a self,
+        stream: CanonicalValue,
+        reason: Option<String>,
+        context: &'a RuntimeActivationContext,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>;
+}
+
+struct RuntimeAdminEffectDispatcher {
+    runtime: Arc<RuntimeState>,
+    lease: WriterLease,
+}
+
+impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
+    fn publication_metadata_rows<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = std::result::Result<
+                        Option<orna_runtime_v1::RuntimePublicationMetadataRows>,
+                        String,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.runtime
+                .publication_metadata_rows()
+                .await
+                .map(Some)
+                .map_err(|_| "sys.storage.metadata_unavailable".to_owned())
+        })
+    }
+
+    fn pause_stream<'a>(
+        &'a self,
+        stream: CanonicalValue,
+        reason: Option<String>,
+        context: &'a RuntimeActivationContext,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let outcome = self
+                .runtime
+                .pause_stream_reference_at_capture(self.lease, stream, reason, context.capture())
+                .await
+                .map_err(|error| match error {
+                    RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
+                    _ => "sys.admin.unavailable".to_owned(),
+                })?;
+            let accepted = matches!(
+                outcome,
+                orna_runtime_v1::StreamAdministrationOutcome::Paused { .. }
+                    | orna_runtime_v1::StreamAdministrationOutcome::PausePending { .. }
+            );
+            CanonicalValue::new(OvbRaw::Bool(accepted)).map_err(|_| "sys.admin.result".to_owned())
+        })
+    }
+}
+
 impl LiveSessionChildren for LiveApplicationWorkSupervisor {
     fn cancel_and_join_session<'a>(
         &'a mut self,
@@ -1154,6 +1264,9 @@ pub struct LiveApplicationTicket {
     watch: Option<[u8; 16]>,
     fingerprint: [u8; 32],
     eval_context: Option<RuntimeActivationContext>,
+    admin_effects: Option<Arc<dyn LiveAdminEffectDispatcher>>,
+    activation_runtime: Option<Arc<RuntimeState>>,
+    activation_lease: Option<WriterLease>,
     work: LiveApplicationWorkLease,
     invoke_callback: bool,
     resync_revisions: usize,
@@ -1230,15 +1343,29 @@ impl LiveApplicationTicket {
     ) -> LiveApplicationCompletion {
         let response = if self.invoke_callback {
             if matches!(self.message, Message::Eval { .. }) {
+                let session = self.session;
+                let request = self.request;
+                let message = &self.message;
+                let context = self.eval_context.as_ref();
+                let work = &mut self.work;
+                let effects = self.admin_effects.as_deref();
+                let execute = move || async move {
                 application
-                    .dispatch_eval_with_work(
-                        self.session,
-                        self.request,
-                        &self.message,
-                        self.eval_context.as_ref(),
-                        &mut self.work,
+                        .dispatch_eval_with_effects(
+                            session, request, message, context, work, effects,
                     )
                     .await
+                };
+                if let (Some(runtime), Some(lease)) =
+                    (self.activation_runtime.as_ref(), self.activation_lease)
+                {
+                    match orna_runtime_v1::with_activation_scope(runtime, lease, execute).await {
+                        Ok(result) => result,
+                        Err(error) => Err(map_runtime(&error)),
+                    }
+                } else {
+                    execute().await
+                }
             } else if matches!(self.message, Message::Event { .. }) {
                 application
                     .dispatch_event_with_work(
@@ -1414,7 +1541,8 @@ impl HttpResponse {
                 | Error::ReplayRequired
                 | Error::UnsupportedOperation
                 | Error::RequestMismatch
-                | Error::ApplicationRejected => 400,
+                | Error::ApplicationRejected
+                | Error::AdminBusy => 400,
                 Error::ApplicationDeferred | Error::RuntimeUnavailable => 503,
             },
             headers: Vec::new(),
@@ -1438,7 +1566,7 @@ pub struct LiveHost {
     watches: BTreeSet<([u8; 16], [u8; 16])>,
     application_sessions: BTreeSet<[u8; 16]>,
     deleted_sessions: BTreeMap<[u8; 16], DeletedSession>,
-    runtime: Option<RuntimeState>,
+    runtime: Option<Arc<RuntimeState>>,
     runtime_owner: Option<[u8; 16]>,
     writer_lease: Option<WriterLease>,
     recovered_owner: Option<RequestOwner>,
@@ -1569,7 +1697,7 @@ impl LiveHost {
             watches: BTreeSet::new(),
             application_sessions: BTreeSet::new(),
             deleted_sessions: BTreeMap::new(),
-            runtime,
+            runtime: runtime.map(Arc::new),
             runtime_owner,
             writer_lease: None,
             recovered_owner,
@@ -2375,12 +2503,20 @@ impl LiveHost {
             self.retain_failure(session, request, fingerprint).await?;
             return Err(error);
         }
+        let activation_lease = if self.runtime.is_some()
+            && matches!(
+                envelope.message,
+                Message::Eval { .. } | Message::Event { .. }
+            ) {
+            Some(self.writer_lease().await?)
+        } else {
+            None
+        };
         let eval_context = if self.runtime.is_some()
             && matches!(
                 envelope.message,
                 Message::Eval { .. } | Message::Event { .. }
-            )
-        {
+            ) {
             Some(
                 self.runtime
                     .as_ref()
@@ -2391,6 +2527,14 @@ impl LiveHost {
             )
         } else {
             None
+        };
+        let admin_effects = match (self.runtime.as_ref(), activation_lease) {
+            (Some(runtime), Some(lease)) => Some(Arc::new(RuntimeAdminEffectDispatcher {
+                runtime: Arc::clone(runtime),
+                lease,
+            })
+                as Arc<dyn LiveAdminEffectDispatcher>),
+            _ => None,
         };
         if let Some((target, target_kind, target_active, durable_request)) = cancel_target
             && target_active
@@ -2432,6 +2576,9 @@ impl LiveHost {
             watch: envelope.watch,
             fingerprint,
             eval_context,
+            admin_effects,
+            activation_runtime: self.runtime.clone(),
+            activation_lease,
             work,
             invoke_callback,
             resync_revisions,
@@ -2459,6 +2606,9 @@ impl LiveHost {
             watch,
             fingerprint,
             eval_context,
+            admin_effects: _,
+            activation_runtime: _,
+            activation_lease: _,
             work,
             resync_revisions,
             cancel_target,
@@ -3127,6 +3277,12 @@ impl LiveHost {
         message: &Message,
         fingerprint: [u8; 32],
     ) -> Result<Envelope> {
+        let activation_runtime = self.runtime.clone();
+        let activation_lease = if activation_runtime.is_some() {
+            Some(self.writer_lease().await?)
+        } else {
+            None
+        };
         let context = if self.runtime.is_some() {
             Some(
                 self.runtime
@@ -3139,16 +3295,42 @@ impl LiveHost {
         } else {
             None
         };
+        let admin_effects = match (&activation_runtime, activation_lease) {
+            (Some(runtime), Some(lease)) => Some(RuntimeAdminEffectDispatcher {
+                runtime: Arc::clone(runtime),
+                lease,
+            }),
+            _ => None,
+        };
         let mut work = self.application_work.admit(session, request)?;
-        let result = application
-            .dispatch_eval_with_work(
-                session,
-                request,
+        let context_ref = context.as_ref();
+        let work_ref = &mut work;
+        let effects_ref = admin_effects
+            .as_ref()
+            .map(|dispatcher| dispatcher as &dyn LiveAdminEffectDispatcher);
+        let session_id = session;
+        let request_id = request;
+        let execute = move || async move {
+            application
+                .dispatch_eval_with_effects(
+                    session_id,
+                    request_id,
                 message,
-                context.as_ref(),
-                &mut work,
+                    context_ref,
+                    work_ref,
+                    effects_ref,
             )
-            .await;
+                .await
+        };
+        let result = match (&activation_runtime, activation_lease) {
+            (Some(runtime), Some(lease)) => {
+                match orna_runtime_v1::with_activation_scope(runtime, lease, execute).await {
+                    Ok(result) => result,
+                    Err(error) => Err(map_runtime(&error)),
+                }
+            }
+            _ => execute().await,
+        };
         work.complete();
         let result = result?;
         match result {
@@ -3165,9 +3347,7 @@ impl LiveHost {
                     request,
                     fingerprint,
                     None,
-                    context
-                        .as_ref()
-                        .ok_or(Error::UnsupportedOperation)?,
+                    context.as_ref().ok_or(Error::UnsupportedOperation)?,
                     response,
                     transaction,
                 )
@@ -3224,9 +3404,7 @@ impl LiveHost {
                     request,
                     fingerprint,
                     watch,
-                    context
-                        .as_ref()
-                        .ok_or(Error::UnsupportedOperation)?,
+                    context.as_ref().ok_or(Error::UnsupportedOperation)?,
                     response,
                     transaction,
                 )
@@ -3797,6 +3975,12 @@ impl LiveHost {
             return Err(Error::ApplicationRejected);
         }
         let mutating = !transaction.mutations.is_empty();
+        let LiveEvalTransaction {
+            mutations,
+            next_digest,
+            faults,
+            after_commit,
+        } = transaction;
         let lease = self.writer_lease().await?;
         let runtime = self.runtime.as_ref().ok_or(Error::UnsupportedOperation)?;
         let identity = RequestIdentity {
@@ -3807,23 +3991,16 @@ impl LiveHost {
             outcome: FrameOutcome::Accepted,
             response: Some(response),
         })?;
-        let staged = StagedTableActivation::from_source(
-            context.clone(),
-            transaction.mutations,
-            transaction.next_digest,
-            transaction.faults,
-        )
+        let staged =
+            StagedTableActivation::from_source(context.clone(), mutations, next_digest, faults)
         .map_err(|error| map_runtime(&error))?;
         let committed = runtime
-            .commit_staged_table_request_activation(
-                lease,
-                identity,
-                fingerprint,
-                &staged,
-                terminal,
-            )
+            .commit_staged_table_request_activation(lease, identity, fingerprint, &staged, terminal)
             .await
             .map_err(|error| map_runtime(&error))?;
+        if let Some(after_commit) = after_commit {
+            after_commit();
+        }
         let retained = committed
             .request
             .terminal_outcome
@@ -3832,7 +4009,8 @@ impl LiveHost {
         let response = self.decode(retained.as_bytes())?;
         self.validate_recovered_response(&committed.request, &response)
             .await?;
-        let response = validate_result_response(request, fingerprint, response, self.limits.protocol)?
+        let response =
+            validate_result_response(request, fingerprint, response, self.limits.protocol)?
             .response
             .ok_or(Error::ApplicationRejected)?;
         if mutating {
@@ -7053,6 +7231,7 @@ impl LiveTransport {
         let (code, watch) = match error {
             Error::RequestMismatch => (Error::RequestMismatch.code(), None),
             Error::UnsupportedOperation => ("wire.unsupported", None),
+            Error::AdminBusy => (Error::AdminBusy.code(), None),
             // A denied event on a live watch is an action-handle rejection;
             // one without a live watch (including resync) is an unknown
             // operational handle. Only these request shapes use Denied for
@@ -7710,8 +7889,7 @@ fn validate_close_payload(payload: &[u8]) -> Result<(Option<u16>, Vec<u8>)> {
     if !(matches!(code, 1000..=1003 | 1007..=1014) || matches!(code, 3000..=4999)) {
         return Err(Error::InvalidFrame);
     }
-    core::str::from_utf8(&payload[2..])
-        .map_err(|_| Error::InvalidFrame)?;
+    core::str::from_utf8(&payload[2..]).map_err(|_| Error::InvalidFrame)?;
     Ok((Some(code), payload[2..].to_vec()))
 }
 
@@ -7859,7 +8037,7 @@ mod tests {
         Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText, Value,
     };
     use orna_repository_v1::Repository;
-    use orna_runtime_v1::RuntimeIdentity;
+    use orna_runtime_v1::{FaultPoint, NoFault, RuntimeIdentity};
     use std::{
         fs,
         process::Command,
@@ -7904,6 +8082,18 @@ mod tests {
 
         fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
             Err(Error::UnsupportedOperation)
+        }
+    }
+
+    struct FailBeforeTableWrite;
+
+    impl FaultInjector for FailBeforeTableWrite {
+        fn check(&self, point: FaultPoint) -> std::result::Result<(), RuntimeError> {
+            if point == FaultPoint::BeforeTableWrite {
+                Err(RuntimeError::FaultInjected(point))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -8844,6 +9034,69 @@ mod tests {
     }
 
     #[test]
+    fn admitted_eval_ticket_carries_runtime_publication_rows() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+            || std::path::PathBuf::from("target"),
+            std::path::PathBuf::from,
+        );
+        fs::create_dir_all(&target).unwrap();
+        let root = target.join(format!("orna-live-publication-read-{nonce}"));
+        fs::create_dir(&root).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(&root).unwrap();
+        let runtime = futures::executor::block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [31; 16],
+                repository_id: [32; 16],
+            },
+            [33; 32],
+        ))
+        .unwrap();
+        let mut host = subscribed_host(Some(runtime));
+        let ticket = match futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            2,
+            Frame::Binary(eval_frame([34; 16])),
+        ))
+        .unwrap()
+        {
+            ApplicationPreparation::Work(ticket) => ticket,
+            ApplicationPreparation::Completed(_) => panic!("Eval must admit application work"),
+        };
+        let runtime_rows = futures::executor::block_on(
+            host.runtime
+                .as_ref()
+                .expect("the durable host retains its runtime")
+                .publication_metadata_rows(),
+        )
+        .unwrap();
+        let dispatched_rows = futures::executor::block_on(
+            ticket
+                .admin_effects
+                .as_ref()
+                .expect("durable Eval installs the runtime admin dispatcher")
+                .publication_metadata_rows(),
+        )
+        .unwrap()
+        .expect("runtime dispatcher supplies publication rows");
+        assert_eq!(dispatched_rows, runtime_rows);
+        drop(ticket);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn prepare_request_status_reused_id_mismatch_returns_correlated_diagnostic() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -9352,6 +9605,97 @@ mod tests {
     }
 
     #[test]
+    fn transaction_completion_hook_runs_only_after_durable_commit() {
+        for fail in [false, true] {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("orna-live-commit-hook-{nonce}"));
+            fs::create_dir(&root).unwrap();
+            assert!(
+                Command::new("git")
+                    .args(["init", "-b", "main"])
+                    .current_dir(&root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let repository = Repository::discover(&root).unwrap();
+            let runtime = futures::executor::block_on(RuntimeState::open(
+                &repository,
+                RuntimeIdentity {
+                    database_id: [26; 16],
+                    repository_id: [27; 16],
+                },
+                [28; 32],
+            ))
+            .unwrap();
+            let owner = futures::executor::block_on(runtime.acquire_lease([9; 16])).unwrap();
+            let identity = RequestIdentity {
+                session_id: [1; 16],
+                request_id: [29; 16],
+            };
+            let fingerprint = [30; 32];
+            let (_, capability) = futures::executor::block_on(
+                runtime.reserve_request_with_admission(identity, fingerprint),
+            )
+            .unwrap();
+            futures::executor::block_on(runtime.start_request_with_owner_and_admission(
+                identity,
+                fingerprint,
+                owner,
+                capability.expect("reservation should have an owner capability"),
+            ))
+            .unwrap();
+            let context = futures::executor::block_on(runtime.begin_activation()).unwrap();
+            let mut host = subscribed_host(Some(runtime));
+            let committed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let value = CanonicalValue::unit().encode().unwrap();
+            let mutation =
+                TableMutation::new([23; 16], "Hook", value.clone(), Some(value)).unwrap();
+            let response = Envelope {
+                request: Some(identity.request_id),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Success,
+                    value: Some(CanonicalValue::unit()),
+                    fingerprint,
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            };
+            let committed_on_success = Arc::clone(&committed);
+            let transaction = LiveEvalTransaction::new(
+                vec![mutation],
+                [24; 32],
+                if fail {
+                    Arc::new(FailBeforeTableWrite)
+                } else {
+                    Arc::new(NoFault)
+                },
+            )
+            .after_commit(move || {
+                committed_on_success.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            let result = futures::executor::block_on(host.commit_eval_transaction(
+                identity.session_id,
+                identity.request_id,
+                fingerprint,
+                None,
+                &context,
+                response,
+                transaction,
+            ));
+            assert_eq!(result.is_ok(), !fail, "dispatch result: {result:?}");
+            assert_eq!(committed.load(std::sync::atomic::Ordering::SeqCst), !fail);
+
+            drop(host);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn ordinary_application_error_still_retains_a_failure_terminal() {
         let mut host = subscribed_host(None);
         let request = [6; 16];
@@ -9698,11 +10042,7 @@ mod tests {
         let descriptor = ActionDescriptor::new("save", "std.text", [4; 32]);
         let mut registry = ActionAuthorityRegistry::new();
         assert_eq!(
-            registry.register_descriptor(
-                binding,
-                descriptor.clone(),
-                DescriptorActionHandler,
-            ),
+            registry.register_descriptor(binding, descriptor.clone(), DescriptorActionHandler,),
             Ok(())
         );
         assert_eq!(registry.descriptor(binding), Some(&descriptor));

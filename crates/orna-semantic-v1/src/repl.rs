@@ -273,14 +273,17 @@ mod tests {
 
     #[test]
     fn rejects_failed_project_analysis() {
-        let analysis = analyze(&[ModuleInput::new("main.orna", "fn bad() = $_;")]);
+        let analysis = analyze(&[ModuleInput::new(
+            "main.orna",
+            include_str!("fixtures/repl-failed-project-analysis.orna"),
+        )]);
         assert!(ReplContext::from_analysis(&analysis).is_err());
     }
 
     #[test]
     fn typed_let_mismatch_is_rejected() {
         let context = ReplContext::empty();
-        let parsed = parse_repl("let count: Int = \"wrong\";");
+        let parsed = parse_repl(include_str!("fixtures/repl-typed-let-mismatch.orna"));
         assert!(parsed.is_ok());
         assert!(context.stage(&parsed.value).is_err());
     }
@@ -343,7 +346,7 @@ mod tests {
         let name = parse_repl("count");
         assert!(context.stage(&name.value).is_err());
         context.commit(pending).expect("current admission commits");
-        let mismatch = parse_repl("let count: Int = \"wrong\";");
+        let mismatch = parse_repl(include_str!("fixtures/repl-typed-let-mismatch.orna"));
         assert!(context.stage(&mismatch.value).is_err());
         assert_eq!(staged(&context, "count").ty, Some(Type::Int));
     }

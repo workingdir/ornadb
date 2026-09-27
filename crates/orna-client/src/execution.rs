@@ -1,6 +1,5 @@
 use super::*;
 
-mod action;
 mod control_flow;
 mod error;
 mod inspect;
@@ -13,13 +12,6 @@ pub use error::{
     ClientResourceExecutionError, ClientStateError,
 };
 
-use action::evaluate_action_operation;
-#[cfg(test)]
-use action::{ClientActionNestedExecutor, action_target_result_type};
-pub use action::{
-    cancel_client_action_with_executor, complete_client_action, decode_action_payload,
-    encode_action_payload, trigger_client_action,
-};
 use control_flow::{evaluate_control_flow_plan, validate_control_flow_plan_types};
 pub(super) use inspect::inspect_invocation_target;
 pub(crate) use inspect::stable_inspect_provider_error;
@@ -32,14 +24,12 @@ use inspect::{
     evaluate_external_contract, evaluate_inspect_expression, inspect_carrier_value_matches,
     inspect_render_ui_value_matches, validate_inspect_render_contract,
 };
-#[cfg(test)]
-use ui::decode_ui_constructor_body;
 use ui::{evaluate_standard_ui_constructor, standard_ui_constructor_spec};
 #[cfg(test)]
 use validation::is_expression_reference_allowed;
 pub use validation::validate_client_artifact_integrity;
 pub(super) use validation::{
-    ClientReturnShape, preflight_client_action_calls, preflight_client_control_flow_calls,
+    ClientReturnShape, preflight_client_control_flow_calls,
     preflight_client_expression_calls, preflight_client_inner_plan_calls,
     preflight_client_procedural_calls, preflight_client_state_calls, validate_artifact,
     validate_function_shape, validate_selected_references,
@@ -1136,28 +1126,6 @@ fn evaluate_plan(
             )
             .map_err(Box::new)
         }
-        ClientReturnShape::Action(_expected) => {
-            let plan = ActionClientPlan::decode(payload).map_err(|source| {
-                Box::new(ClientExecutionError::InvalidArtifact { context, source })
-            })?;
-            preflight_client_action_calls(active, plan.operation(), context)?;
-            evaluate_action_operation(
-                active,
-                plan.operation(),
-                context,
-                lineage,
-                arguments,
-                declarations,
-                grants,
-                state,
-                depth,
-                principal,
-                executor,
-                local_environment,
-                fuel,
-            )
-            .map_err(Box::new)
-        }
         ClientReturnShape::StreamResource(expected) => {
             let plan = ResourceClientPlan::decode(payload).map_err(|source| {
                 Box::new(ClientExecutionError::InvalidArtifact { context, source })
@@ -2042,26 +2010,10 @@ fn evaluate_capability_plan(
                 fuel,
             )
         }
-        InnerClientPlan::Action(inner) => {
-            let ClientReturnShape::Action(_) = return_shape else {
-                unreachable!("function shape was validated against the inner plan version");
-            };
-            evaluate_action_operation(
-                active,
-                inner.operation(),
-                context,
-                lineage,
-                arguments,
-                declarations,
-                grants,
-                state,
-                depth,
-                principal,
-                executor,
-                local_environment,
-                fuel,
-            )
-        }
+        InnerClientPlan::Action(_) => Err(expression_error(
+            context,
+            ClientExpressionError::TypeMismatch,
+        )),
         InnerClientPlan::Resource(inner) => {
             if let ClientReturnShape::StreamResource(expected) = return_shape {
                 return evaluate_stream_resource_plan(
@@ -2706,22 +2658,10 @@ fn evaluate_expression_with_fuel(
             fuel,
         )
         .map_err(Into::into),
-        ClientExpressionNode::Action { operation } => evaluate_action_operation(
-            active,
-            operation,
+        ClientExpressionNode::Action { .. } => Err(Box::new(expression_error(
             context,
-            *lineage,
-            arguments,
-            declarations,
-            grants,
-            state,
-            depth,
-            principal,
-            executor,
-            local_environment,
-            fuel,
-        )
-        .map_err(Into::into),
+            ClientExpressionError::TypeMismatch,
+        ))),
         ClientExpressionNode::Inspect { operation } => evaluate_inspect_expression(
             active,
             operation,

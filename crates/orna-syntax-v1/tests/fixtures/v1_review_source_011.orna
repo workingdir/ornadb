@@ -1,0 +1,1 @@
+fn f() = case { value: 1 } { true: 1 };

@@ -1,0 +1,2 @@
+pub fn observed_profile(storage: sys.Storage): sys.StorageProfile = storage.profile;
+pub fn future_preference(storage: sys.Storage): sys.StoragePreference = storage.preference;

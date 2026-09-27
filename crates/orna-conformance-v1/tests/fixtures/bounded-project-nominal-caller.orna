@@ -1,0 +1,3 @@
+use nominal.owner;
+pub fn external() = nominal.owner.Box { value: 3 };
+pub fn external_omitted() = nominal.owner.Box { };

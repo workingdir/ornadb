@@ -1,0 +1,1 @@
+fn f() = for item in ready && Model.Status { value: raw } { 1 };

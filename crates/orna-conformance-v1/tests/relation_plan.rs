@@ -10,18 +10,9 @@ fn relation_source(source: &str) -> SourceUnit {
     }
 }
 
-fn assert_relation_one_error(insertions: &str, expression: &str, expected: &str) {
+fn assert_relation_one_error(fixture: &str, expected: &str) {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let unit = relation_source(&format!(
-        r#"
-            pub table Note(id: Int) {{ value: Int, }}
-            fn selected() = {expression};
-            fn parent() {{
-                {insertions}
-                selected();
-            }}
-        "#,
-    ));
+    let unit = relation_source(fixture);
 
     match runtime.execute_source(&unit) {
         StageOutcome::Failed(diagnostic) => assert_eq!(diagnostic.code(), expected),
@@ -32,19 +23,7 @@ fn assert_relation_one_error(insertions: &str, expression: &str, expected: &str)
 #[test]
 fn take_before_sort_bounds_source_and_post_sort_callbacks() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let unit = relation_source(
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            fn parent() {
-                Note.insert({ id: 1, value: 10 });
-                Note.insert({ id: 2, value: 20 });
-                assert ((Note | take(0) | sort_by(note => note.id)
-                    | map(note => note.id % (note.id - note.id)) | first()) ?? -1) == -1;
-                assert ((Note | sort_by(note => -note.id)
-                    | map(note => note.id % (note.id - 1)) | first()) ?? -1) == 0;
-            }
-        "#,
-    );
+    let unit = relation_source(include_str!("fixtures/relation-plan-take-before-sort.orna"));
 
     let outcome = runtime.execute_source(&unit);
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
@@ -53,21 +32,7 @@ fn take_before_sort_bounds_source_and_post_sort_callbacks() {
 #[test]
 fn bound_relation_variables_support_direct_terminals() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let unit = relation_source(
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            fn parent() {
-                Note.insert({ id: 1, value: 1 });
-                Note.insert({ id: 2, value: 2 });
-                let relation = Note | filter(note => note.value > 1);
-                let sorted = sort_by(rows: relation, key: note => -note.id);
-                assert (first(rows: sorted) ?? Note.insert({ id: 99, value: 0 })).id == 2;
-                let named_relation = filter(rows: Note, predicate: note => note.value > 1);
-                let named_sorted = sort_by(rows: named_relation, key: note => -note.id);
-                assert (first(rows: named_sorted) ?? Note.insert({ id: 98, value: 0 })).id == 2;
-            }
-        "#,
-    );
+    let unit = relation_source(include_str!("fixtures/relation-plan-bound-variables.orna"));
 
     let outcome = runtime.execute_source(&unit);
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
@@ -76,22 +41,7 @@ fn bound_relation_variables_support_direct_terminals() {
 #[test]
 fn relation_sort_by_orders_signed_scalar_keys_and_preserves_canonical_ties() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let unit = relation_source(
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            fn parent() {
-                Note.insert({ id: 1, value: 2 });
-                Note.insert({ id: 0, value: -1 });
-                Note.insert({ id: -2, value: 0 });
-                Note.insert({ id: -1, value: -1 });
-
-                assert (Note | sort_by(note => note.value) | take(1) | one()).id == -1;
-                assert (Note | sort_by(note => note.value) | drop(1) | take(1) | one()).id == 0;
-                assert (Note | sort_by(note => note.value) | drop(2) | take(1) | one()).id == -2;
-                assert (Note | sort_by(note => note.value) | drop(3) | take(1) | one()).id == 1;
-            }
-        "#,
-    );
+    let unit = relation_source(include_str!("fixtures/relation-plan-signed-sort.orna"));
 
     let outcome = runtime.execute_source(&unit);
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
@@ -100,31 +50,7 @@ fn relation_sort_by_orders_signed_scalar_keys_and_preserves_canonical_ties() {
 #[test]
 fn relation_union_preserves_left_then_right_bounded_order() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let unit = relation_source(
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            fn parent() {
-                Note.insert({ id: 1, value: 10 });
-                Note.insert({ id: 2, value: 20 });
-                Note.insert({ id: 3, value: 30 });
-                Note.insert({ id: 4, value: 40 });
-
-                let left = Note | filter(note => note.id == 3 || note.id == 1);
-                let right = Note | filter(note => note.id == 2 || note.id == 4);
-                let combined = left | union(right);
-                let direct = union(left, right);
-                let named = union(right: right, left: left);
-
-                for rows in [combined, direct, named] {
-                    assert (rows | take(1) | one()).id == 1;
-                    assert (rows | drop(1) | take(1) | one()).id == 3;
-                    assert (rows | drop(2) | take(1) | one()).id == 2;
-                    assert (rows | drop(3) | take(1) | one()).id == 4;
-                    assert (rows | count) == 4;
-                }
-            }
-        "#,
-    );
+    let unit = relation_source(include_str!("fixtures/relation-plan-union-order.orna"));
 
     let outcome = runtime.execute_source(&unit);
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
@@ -133,16 +59,7 @@ fn relation_union_preserves_left_then_right_bounded_order() {
 #[test]
 fn lexical_filter_shadow_is_not_hijacked_by_relation_intrinsic() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let unit = relation_source(
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            fn apply(filter: Int) = Note | filter(note => true) | count;
-            fn parent() {
-                Note.insert({ id: 1, value: 1 });
-                apply(1);
-            }
-        "#,
-    );
+    let unit = relation_source(include_str!("fixtures/relation-plan-shadow.orna"));
 
     assert!(matches!(
         runtime.execute_source(&unit),
@@ -157,16 +74,7 @@ fn lexical_filter_shadow_is_not_hijacked_by_relation_intrinsic() {
 #[test]
 fn declared_filter_executes_instead_of_the_relation_intrinsic() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let unit = relation_source(
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            fn filter(rows: Relation<Note>): Int = 99;
-            fn parent() {
-                assert filter(Note) == 99;
-                assert (Note | filter) == 99;
-            }
-        "#,
-    );
+    let unit = relation_source(include_str!("fixtures/relation-plan-declared-filter.orna"));
     let outcome = runtime.execute_source(&unit);
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
 }
@@ -174,22 +82,7 @@ fn declared_filter_executes_instead_of_the_relation_intrinsic() {
 #[test]
 fn declared_relation_helpers_shadow_all_specialized_lowering_paths() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let unit = relation_source(
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            fn one(rows: Relation<Note>): Int = 11;
-            fn count(rows: Relation<Note>): Int = 12;
-            fn window(rows: Relation<Note>, size: Int): Int = 13;
-            fn parent() {
-                assert (Note | filter(note => note.id == 1) | one()) == 11;
-                assert (Note | filter(note => note.value == 1) | one()) == 11;
-                assert (Note | filter(note => note.value == 1) | count) == 12;
-                assert (Note | count) == 12;
-                assert window(Note, 2) == 13;
-                assert (Note | window(2)) == 13;
-            }
-        "#,
-    );
+    let unit = relation_source(include_str!("fixtures/relation-plan-declared-helpers.orna"));
     let outcome = runtime.execute_source(&unit);
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
 }
@@ -199,40 +92,34 @@ fn relation_one_preserves_exact_cardinality_errors_before_and_after_sort() {
     const ZERO: &str = "ORNA-EVAL-RELATION-ONE-ZERO";
     const MULTIPLE: &str = "ORNA-EVAL-RELATION-ONE-MULTIPLE";
 
-    for (insertions, expression, expected) in [
-        ("", "Note | one()", ZERO),
+    for (fixture, expected) in [
+        (include_str!("fixtures/relation-one-zero.orna"), ZERO),
         (
-            "Note.insert({ id: 1, value: 1 }); Note.insert({ id: 2, value: 2 });",
-            "Note | one()",
+            include_str!("fixtures/relation-one-multiple.orna"),
             MULTIPLE,
         ),
         (
-            "Note.insert({ id: 1, value: 1 }); Note.insert({ id: 2, value: 2 });",
-            "Note | one(note => note.id == 99)",
+            include_str!("fixtures/relation-one-filtered-zero.orna"),
             ZERO,
         ),
         (
-            "Note.insert({ id: 1, value: 1 }); Note.insert({ id: 2, value: 2 });",
-            "Note | one(note => note.id > 0)",
+            include_str!("fixtures/relation-one-filtered-multiple.orna"),
             MULTIPLE,
         ),
-        ("", "Note | sort_by(note => -note.id) | one()", ZERO),
+        (include_str!("fixtures/relation-one-sorted-zero.orna"), ZERO),
         (
-            "Note.insert({ id: 1, value: 1 }); Note.insert({ id: 2, value: 2 });",
-            "Note | sort_by(note => -note.id) | one()",
+            include_str!("fixtures/relation-one-sorted-multiple.orna"),
             MULTIPLE,
         ),
         (
-            "Note.insert({ id: 1, value: 1 }); Note.insert({ id: 2, value: 2 });",
-            "Note | sort_by(note => -note.id) | one(note => note.id == 99)",
+            include_str!("fixtures/relation-one-sorted-filtered-zero.orna"),
             ZERO,
         ),
         (
-            "Note.insert({ id: 1, value: 1 }); Note.insert({ id: 2, value: 2 });",
-            "Note | sort_by(note => -note.id) | one(note => note.id > 0)",
+            include_str!("fixtures/relation-one-sorted-filtered-multiple.orna"),
             MULTIPLE,
         ),
     ] {
-        assert_relation_one_error(insertions, expression, expected);
+        assert_relation_one_error(fixture, expected);
     }
 }

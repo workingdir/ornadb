@@ -1,0 +1,7 @@
+use first;
+pub type Final {
+    value: Str,
+    impl From<first.Mid> {
+        fn from(value) = Final { value: "final" };
+    }
+}

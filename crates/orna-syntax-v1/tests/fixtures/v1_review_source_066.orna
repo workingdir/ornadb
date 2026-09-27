@@ -1,0 +1,1 @@
+fn f() = case match status { Status.ready => true } { true: 1 };

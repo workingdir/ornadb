@@ -9,66 +9,57 @@ fn has_message(result: &orna_semantic_v1::Analysis, expected: &str) -> bool {
         .any(|diagnostic| diagnostic.message() == expected)
 }
 
+macro_rules! fixture {
+    ($name:literal) => {
+        ModuleInput::new($name, include_str!(concat!("fixtures/", $name)))
+    };
+}
+
 #[test]
 fn direct_relation_bounds_reject_nonpositive_constants() {
-    for (body, expected) in [
-        ("take(Note, -1)", "relation take count must be nonnegative"),
-        (
-            "take(rows: Note, count: -1)",
-            "relation take count must be nonnegative",
-        ),
-        ("drop(Note, -1)", "relation drop count must be nonnegative"),
-        (
-            "drop(rows: Note, count: -1)",
-            "relation drop count must be nonnegative",
-        ),
-        ("window(Note, 0)", "window size must be positive"),
-        (
-            "window(rows: Note, size: 0)",
-            "window size must be positive",
-        ),
-        ("window(Note, -1)", "window size must be positive"),
-        ("window(Note, 2, step: 0)", "window step must be positive"),
-        (
-            "window(rows: Note, size: 2, step: -1)",
-            "window step must be positive",
-        ),
-    ] {
-        let result = analyze(&[ModuleInput::new(
-            "direct-relation-bounds.orna",
-            format!("pub table Note(id: Int) {{ value: Int, }} fn invalid() = {body};"),
-        )]);
-        assert!(
-            has_message(&result, expected),
-            "{body}: {:?}",
-            result.diagnostics
-        );
-    }
+    let result = analyze(&[fixture!("relation-direct-bounds.orna")]);
+    let diagnostic_count = |expected: &str| {
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message() == expected)
+            .count()
+    };
+    assert_eq!(
+        diagnostic_count("relation take count must be nonnegative"),
+        2,
+        "take bounds: {:?}",
+        result.diagnostics
+    );
+    assert_eq!(
+        diagnostic_count("relation drop count must be nonnegative"),
+        2,
+        "drop bounds: {:?}",
+        result.diagnostics
+    );
+    assert_eq!(
+        diagnostic_count("window size must be positive"),
+        3,
+        "window sizes: {:?}",
+        result.diagnostics
+    );
+    assert_eq!(
+        diagnostic_count("window step must be positive"),
+        2,
+        "window steps: {:?}",
+        result.diagnostics
+    );
 }
 
 #[test]
 fn declared_relation_helper_shadows_the_core_filter_name() {
-    let result = analyze(&[ModuleInput::new(
-        "declared-filter.orna",
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            fn filter(rows: Relation<Note>): Int = 99;
-            fn direct() = filter(Note) == 99;
-            fn piped() = (Note | filter) == 99;
-        "#,
-    )]);
+    let result = analyze(&[fixture!("relation-bound.orna")]);
     assert!(result.is_ok(), "{:#?}", result.diagnostics);
 }
 
 #[test]
 fn piped_relation_flat_map_rejects_wrong_argument_names_and_respects_shadowing() {
-    let invalid = analyze(&[ModuleInput::new(
-        "piped-flat-map-shape.orna",
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            pub fn invalid(rows: Relation<Note>) = rows | flat_map(predicate: note => [note.value]);
-        "#,
-    )]);
+    let invalid = analyze(&[fixture!("relation-piped-flat-map-shape.orna")]);
     assert!(
         has_message(
             &invalid,
@@ -87,33 +78,14 @@ fn piped_relation_flat_map_rejects_wrong_argument_names_and_respects_shadowing()
         Type::Function { result, .. } if result.as_ref() == &Type::Error
     ));
 
-    let shadowed = analyze(&[ModuleInput::new(
-        "piped-flat-map-shadowing.orna",
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            fn flat_map(rows: Relation<Note>): Relation<Note> = rows;
-            pub fn shadowed(rows: Relation<Note>) = rows | flat_map;
-        "#,
-    )]);
+    let shadowed = analyze(&[fixture!("relation-piped-flat-map-shadowing.orna")]);
     assert!(shadowed.is_ok(), "{:#?}", shadowed.diagnostics);
 }
 
 #[test]
 fn relational_callbacks_preserve_effects_and_failure_before_planning() {
     let result = analyze_with_catalogue(
-        &[ModuleInput::new(
-            "relation-callback-effects.orna",
-            r#"
-                pub table Note(id: Int) { value: Int, }
-                pub fn pure(rows: Relation<Note>) = rows | filter(note => note.value > 0);
-                pub fn database(rows: Relation<Note>) = rows | filter(note => Note.count() > 0);
-                pub fn direct_one(rows: Relation<Note>) = one(rows);
-                pub fn predicate_one(rows: Relation<Note>) = one(rows, note => note.value > 0);
-                pub fn failed(rows: Relation<Note>) = one(rows, note => Note.one().value > 0);
-                pub fn direct_flat_map(rows: Relation<Note>) = flat_map(rows, note => [note.value]);
-                pub fn piped_flat_map(rows: Relation<Note>) = rows | flat_map(note => [note.value]);
-            "#,
-        )],
+        &[fixture!("relation-callback-effects.orna")],
         &Catalogue::authoritative_core(),
     );
     assert!(result.is_ok(), "{:#?}", result.diagnostics);
@@ -125,12 +97,7 @@ fn relational_callbacks_preserve_effects_and_failure_before_planning() {
 
     assert!(module.symbols["pure"].effects.effects.is_empty());
     assert!(!module.symbols["pure"].effects.may_fail);
-    assert!(
-        module.symbols["database"]
-            .effects
-            .effects
-            .contains("database read")
-    );
+    assert!(module.symbols["database"].effects.effects.contains("database read"));
     assert!(module.symbols["database"].effects.may_fail);
     assert!(module.symbols["direct_one"].effects.may_fail);
     assert!(module.symbols["predicate_one"].effects.may_fail);
@@ -153,17 +120,7 @@ fn relational_callbacks_preserve_effects_and_failure_before_planning() {
 #[test]
 fn relational_callbacks_reject_mutations_and_external_effects() {
     let result = analyze_with_catalogue(
-        &[ModuleInput::new(
-            "relation-callback-effect-rejection.orna",
-            r#"
-                pub table Note(id: Int) { value: Int, }
-                pub fn mutating(rows: Relation<Note>) = rows | filter(note => {
-                    Note.insert({ id: note.id, value: note.value });
-                    true
-                });
-                pub fn external(rows: Relation<Note>) = rows | filter(note => std.net.http.get("https://example.com") == "ok");
-            "#,
-        )],
+        &[fixture!("relation-callback-effect-rejection.orna")],
         &Catalogue::authoritative_core(),
     );
     let rejections = result
@@ -176,13 +133,10 @@ fn relational_callbacks_reject_mutations_and_external_effects() {
         .count();
     assert_eq!(rejections, 2, "{:#?}", result.diagnostics);
     assert!(
-        result
-            .diagnostics
-            .iter()
-            .all(
-                |diagnostic| diagnostic.message() != "relation query callback must be read-only"
-                    || diagnostic.code() == DIAG_TYPE,
-            ),
+        result.diagnostics.iter().all(|diagnostic| {
+            diagnostic.message() != "relation query callback must be read-only"
+                || diagnostic.code() == DIAG_TYPE
+        }),
         "relation callback effect diagnostic: {:#?}",
         result.diagnostics
     );
@@ -191,17 +145,7 @@ fn relational_callbacks_reject_mutations_and_external_effects() {
 #[test]
 fn relation_flat_map_rejects_mutations_and_external_effects_in_both_call_forms() {
     let result = analyze_with_catalogue(
-        &[ModuleInput::new(
-            "relation-flat-map-effect-rejection.orna",
-            r#"
-                pub table Note(id: Int) { value: Int, }
-                pub fn direct_mutating(rows: Relation<Note>) = flat_map(rows, note => {
-                    Note.insert({ id: note.id, value: note.value });
-                    [note.value]
-                });
-                pub fn piped_external(rows: Relation<Note>) = rows | flat_map(note => [std.net.http.get("https://example.com")]);
-            "#,
-        )],
+        &[fixture!("relation-flat-map-effect-rejection.orna")],
         &Catalogue::authoritative_core(),
     );
     let rejections = result
@@ -218,24 +162,7 @@ fn relation_flat_map_rejects_mutations_and_external_effects_in_both_call_forms()
 #[test]
 fn relation_every_exists_pipeline_callbacks_are_read_only_in_all_call_forms() {
     let result = analyze_with_catalogue(
-        &[ModuleInput::new(
-            "relation-every-exists-effect-rejection.orna",
-            r#"
-                pub table Note(id: Int) { value: Int, }
-                pub fn pure_every(rows: Relation<Note>) = rows | every(note => note.value > 0);
-                pub fn pure_exists(rows: Relation<Note>) = rows | exists(predicate: note => note.value > 0);
-                pub fn piped_every(rows: Relation<Note>) = rows | every(note => {
-                    Note.insert({ id: note.id, value: note.value });
-                    true
-                });
-                pub fn piped_exists(rows: Relation<Note>) = rows | exists(predicate: note => std.net.http.get("https://example.com") == "ok");
-                pub fn direct_every(rows: Relation<Note>) = every(rows: rows, predicate: note => {
-                    Note.insert({ id: note.id, value: note.value });
-                    true
-                });
-                pub fn direct_exists(rows: Relation<Note>) = exists(predicate: note => std.net.http.get("https://example.com") == "ok", rows: rows);
-            "#,
-        )],
+        &[fixture!("relation-every-exists-effect-rejection.orna")],
         &Catalogue::authoritative_core(),
     );
     let read_only = result
@@ -267,13 +194,7 @@ fn relation_every_exists_pipeline_callbacks_are_read_only_in_all_call_forms() {
 
 #[test]
 fn relational_callbacks_keep_existing_shape_diagnostics() {
-    let result = analyze(&[ModuleInput::new(
-        "relation-callback-shape.orna",
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            pub fn invalid(rows: Relation<Note>) = rows | filter(note => note.value);
-        "#,
-    )]);
+    let result = analyze(&[fixture!("relation-callback-shape.orna")]);
     assert!(
         result
             .diagnostics
@@ -286,13 +207,7 @@ fn relational_callbacks_keep_existing_shape_diagnostics() {
 
 #[test]
 fn malformed_direct_relation_shape_preserves_later_argument_diagnostic() {
-    let result = analyze(&[ModuleInput::new(
-        "relation-callback-order.orna",
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            pub fn invalid(rows: Relation<Note>) = every(rows, unexpected: missing);
-        "#,
-    )]);
+    let result = analyze(&[fixture!("relation-callback-order.orna")]);
     assert!(
         result
             .diagnostics
@@ -313,13 +228,7 @@ fn malformed_direct_relation_shape_preserves_later_argument_diagnostic() {
 
 #[test]
 fn relation_callback_and_later_argument_diagnostics_are_both_preserved() {
-    let result = analyze(&[ModuleInput::new(
-        "relation-callback-order.orna",
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            pub fn invalid(rows: Relation<Note>) = every(rows, value => value, unexpected: later_missing);
-        "#,
-    )]);
+    let result = analyze(&[fixture!("relation-callback-later-argument.orna")]);
     assert!(
         result
             .diagnostics
@@ -340,24 +249,25 @@ fn relation_callback_and_later_argument_diagnostics_are_both_preserved() {
 
 #[test]
 fn malformed_direct_one_calls_report_the_static_signature_diagnostic() {
-    for body in [
-        "one(rows, unexpected: 1)",
-        "one(rows, 1, 2)",
-        "one(rows: rows, rows: rows)",
-    ] {
-        let result = analyze(&[ModuleInput::new(
-            "malformed-direct-one.orna",
-            format!(
-                "pub table Note(id: Int) {{ value: Int, }} pub fn invalid(rows: Relation<Note>) = {body};"
-            ),
-        )]);
-        assert!(
-            has_message(
-                &result,
-                "relation one arguments do not match its static signature"
-            ),
-            "{body}: {:#?}",
-            result.diagnostics
-        );
-    }
+    let result = analyze(&[fixture!("relation-malformed-one.orna")]);
+    assert!(
+        has_message(
+            &result,
+            "relation one arguments do not match its static signature"
+        ),
+        "{:#?}",
+        result.diagnostics
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.message() == "relation one arguments do not match its static signature"
+            })
+            .count(),
+        3,
+        "{:#?}",
+        result.diagnostics
+    );
 }

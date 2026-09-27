@@ -1,0 +1,2 @@
+pub fn main(job: sys.InvocationHandle<Int>, reason: Str) =
+    sys.cancel(job, reason: reason);

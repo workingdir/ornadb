@@ -1,0 +1,2 @@
+use library;
+pub fn invalid(value: Int) = library.lookup<Str>(value);

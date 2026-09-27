@@ -1,0 +1,2 @@
+42
+std.net.http.get("https://example.com")

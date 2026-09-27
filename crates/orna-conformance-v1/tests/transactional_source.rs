@@ -13,46 +13,12 @@ fn source(parent_body: &str) -> SourceUnit {
     }
 }
 
-fn composite_source(parent_body: &str) -> SourceUnit {
+fn fixture_source(source: &str) -> SourceUnit {
     SourceUnit {
         fixture_id: "txn-source".into(),
         source_id: "txn-source.orna".into(),
         parse_as: "module_unit".into(),
-        source: format!(
-            "pub table Stock(location: Str, sku: Str) {{ quantity: Int, }} fn parent() {{ Stock.insert({{ location: \"north\", sku: \"pencil\", quantity: 12 }}); {parent_body} }}"
-        ),
-    }
-}
-
-fn source_with_count_function(count_body: &str, parent_body: &str) -> SourceUnit {
-    SourceUnit {
-        fixture_id: "txn-source".into(),
-        source_id: "txn-source.orna".into(),
-        parse_as: "module_unit".into(),
-        source: format!(
-            "pub table Note(id: Int) {{ text: Str, }} fn count_notes() = {count_body}; fn parent() {{ {parent_body} }}"
-        ),
-    }
-}
-
-fn source_with_table_assertion(assertion: &str, parent_body: &str) -> SourceUnit {
-    SourceUnit {
-        fixture_id: "txn-source".into(),
-        source_id: "txn-source.orna".into(),
-        parse_as: "module_unit".into(),
-        source: format!(
-            "pub table Note(id: Int) {{ text: Str, assert {assertion}; }} fn parent() {{ {parent_body} }}"
-        ),
-    }
-}
-fn decimal_body_table_assertion_source(assertion: &str, parent_body: &str) -> SourceUnit {
-    SourceUnit {
-        fixture_id: "txn-decimal-table-assertion".into(),
-        source_id: "txn-decimal-table-assertion.orna".into(),
-        parse_as: "module_unit".into(),
-        source: format!(
-            "pub table Reading(id: Int) {{ value: Decimal, label: Str, assert {assertion}; }} fn parent() {{ {parent_body} }}"
-        ),
+        source: source.into(),
     }
 }
 
@@ -104,7 +70,9 @@ fn quantifier_source(fixture_id: &str, definitions: &str, parent_body: &str) -> 
 #[test]
 fn parsed_nested_insert_is_rolled_back_when_parent_assertion_escapes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source("assert false;"));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/transaction-nested-assertion-rollback.orna"
+    )));
 
     assert!(matches!(
         outcome,
@@ -117,7 +85,9 @@ fn parsed_nested_insert_is_rolled_back_when_parent_assertion_escapes() {
 fn parsed_nested_insert_commits_when_parent_returns_successfully() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     assert!(matches!(
-        runtime.execute_source(&source("")),
+        runtime.execute_source(&fixture_source(include_str!(
+            "fixtures/transaction-nested-commit.orna"
+        ))),
         StageOutcome::Passed
     ));
     assert!(
@@ -130,7 +100,9 @@ fn parsed_nested_insert_commits_when_parent_returns_successfully() {
 #[test]
 fn parsed_duplicate_insert_rolls_back_the_complete_activation() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source("Note.insert({ id: 7, text: \"duplicate\" });"));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/transaction-duplicate-insert-rollback.orna"
+    )));
 
     assert!(matches!(
         outcome,
@@ -146,7 +118,7 @@ fn parsed_repeated_primary_key_declaration_is_rejected_before_transaction_admiss
         fixture_id: "transaction-key-schema".into(),
         source_id: "transaction-key-schema.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub table Reading(sensor: Str, sensor: Str) { value: Int, } fn write() { Reading.insert({ sensor: \"north\", value: 1 }); }".into(),
+        source: include_str!("fixtures/transaction-key-schema.orna").into(),
     };
 
     let outcome = runtime.execute_source(&unit);
@@ -167,7 +139,9 @@ fn parsed_repeated_primary_key_declaration_is_rejected_before_transaction_admiss
 fn parsed_update_patches_only_stored_fields() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     assert!(matches!(
-        runtime.execute_source(&source(r#"Note.update(7, { text: "changed" });"#)),
+        runtime.execute_source(&fixture_source(include_str!(
+            "fixtures/transaction-update-patches-stored-fields.orna"
+        ))),
         StageOutcome::Passed
     ));
     let row = runtime
@@ -185,9 +159,9 @@ fn parsed_update_patches_only_stored_fields() {
 fn parsed_upsert_patches_existing_rows_and_inserts_absent_rows() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     assert!(matches!(
-        runtime.execute_source(&source(
-            r#"Note.upsert({ id: 7, text: "updated" }); Note.upsert({ id: 8, text: "new" });"#,
-        )),
+        runtime.execute_source(&fixture_source(include_str!(
+            "fixtures/transaction-upsert-patches-and-inserts.orna"
+        ))),
         StageOutcome::Passed
     ));
     let updated = runtime
@@ -210,7 +184,9 @@ fn parsed_upsert_patches_existing_rows_and_inserts_absent_rows() {
 fn parsed_table_count_observes_nested_read_your_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     assert!(matches!(
-        runtime.execute_source(&source("assert Note.count() == 1;")),
+        runtime.execute_source(&fixture_source(include_str!(
+            "fixtures/transaction-nested-table-count.orna"
+        ))),
         StageOutcome::Passed
     ));
 }
@@ -268,15 +244,7 @@ fn parsed_keyed_relation_one_observes_candidate_rows_and_absence_rolls_back() {
         fixture_id: "relation-one".into(),
         source_id: "relation-one.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Note(id: Int) { text: Str, }
-            fn find_note(id: Int) = Note | filter(note => note.id == id) | one();
-            fn parent() {
-                Note.insert({ id: 7, text: "candidate" });
-                assert find_note(7).text == "candidate";
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-one-candidate-row.orna").into(),
     };
     let mut committed = TransactionalEvaluator::new("parent", Limits::default());
     assert!(matches!(
@@ -293,15 +261,7 @@ fn parsed_keyed_relation_one_observes_candidate_rows_and_absence_rolls_back() {
         fixture_id: "relation-one-missing".into(),
         source_id: "relation-one-missing.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Note(id: Int) { text: Str, }
-            fn find_note(id: Int) = Note | filter(note => note.id == id) | one();
-            fn parent() {
-                Note.insert({ id: 7, text: "candidate" });
-                find_note(99);
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-one-absence-rollback.orna").into(),
     };
     let mut rolled_back = TransactionalEvaluator::new("parent", Limits::default());
     assert!(matches!(
@@ -320,16 +280,7 @@ fn parsed_relation_one_rejects_multiple_candidate_matches_and_rolls_back() {
         fixture_id: "relation-one-multiple".into(),
         source_id: "relation-one-multiple.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Note(id: Int) { text: Str, }
-            fn find_note(text: Str) = Note | filter(note => note.text == text) | one();
-            fn parent() {
-                Note.insert({ id: 1, text: "duplicate" });
-                Note.insert({ id: 2, text: "duplicate" });
-                find_note("duplicate");
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-one-multiple-candidates.orna").into(),
     };
     let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
 
@@ -349,10 +300,9 @@ fn parsed_relation_one_rejects_multiple_candidate_matches_and_rolls_back() {
 #[test]
 fn parsed_pipeline_count_in_a_direct_function_body_observes_activation_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source_with_count_function(
-        "Note | count",
-        r#"Note.insert({ id: 7, text: "first" }); assert count_notes() == 1;"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/transactional-direct-pipeline-count.orna"
+    )));
 
     assert!(matches!(outcome, StageOutcome::Passed));
     assert!(
@@ -369,23 +319,7 @@ fn parsed_relation_windows_execute_direct_and_piped_complete_windows() {
         fixture_id: "relation-window".into(),
         source_id: "relation-window.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Note(id: Int) { text: Str, }
-            fn default_step() = Note | window(3) | count;
-            fn piped() = Note | window(3, step: 3) | count;
-            fn direct() = window(Note, size: 2, step: 3) | count;
-            fn parent() {
-                Note.insert({ id: 1, text: "one" });
-                Note.insert({ id: 2, text: "two" });
-                Note.insert({ id: 3, text: "three" });
-                Note.insert({ id: 4, text: "four" });
-                Note.insert({ id: 5, text: "five" });
-                assert default_step() == 3;
-                assert piped() == 1;
-                assert direct() == 2;
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-window-positive.orna").into(),
     };
 
     assert!(matches!(
@@ -401,15 +335,7 @@ fn parsed_relation_windows_reject_dynamic_non_positive_parameters_without_publis
         fixture_id: "relation-window-invalid".into(),
         source_id: "relation-window-invalid.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Note(id: Int) { text: Str, }
-            fn count_windows(size: Int, step: Int) = Note | window(size, step) | count;
-            fn parent() {
-                Note.insert({ id: 1, text: "one" });
-                assert count_windows(0, 1) == 0;
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-window-zero-rejected.orna").into(),
     };
 
     assert!(matches!(
@@ -426,15 +352,7 @@ fn parsed_relation_windows_reject_dynamic_negative_parameters_without_publish() 
         fixture_id: "relation-window-negative".into(),
         source_id: "relation-window-negative.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Note(id: Int) { text: Str, }
-            fn count_windows(size: Int, step: Int) = window(Note, size, step) | count;
-            fn parent() {
-                Note.insert({ id: 1, text: "one" });
-                assert count_windows(0 - 1, 1) == 0;
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-window-negative-rejected.orna").into(),
     };
 
     assert!(matches!(
@@ -447,10 +365,9 @@ fn parsed_relation_windows_reject_dynamic_negative_parameters_without_publish() 
 #[test]
 fn parsed_pipeline_count_call_in_a_direct_function_body_observes_activation_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source_with_count_function(
-        "Note | count()",
-        r#"Note.insert({ id: 7, text: "first" }); assert count_notes() == 1;"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/transactional-direct-pipeline-count-call.orna"
+    )));
 
     assert!(matches!(outcome, StageOutcome::Passed));
     assert!(
@@ -463,9 +380,9 @@ fn parsed_pipeline_count_call_in_a_direct_function_body_observes_activation_writ
 #[test]
 fn parsed_filter_count_pipeline_observes_candidate_rows_and_read_your_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source(
-        r#"Note.insert({ id: 8, text: "second" }); assert Note | filter(note => note.text == "nested") | count == 1; assert Note | filter(note => note.text == "second") | count() == 1;"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/filter-count-read-your-writes.orna"
+    )));
 
     assert!(matches!(outcome, StageOutcome::Passed));
     assert!(
@@ -483,9 +400,9 @@ fn parsed_filter_count_pipeline_observes_candidate_rows_and_read_your_writes() {
 #[test]
 fn parsed_filter_count_failure_rolls_back_candidate_rows() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source(
-        r#"Note.insert({ id: 8, text: "second" }); assert Note | filter(note => note.text == "second") | count == 1; assert false;"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/filter-count-rollback.orna"
+    )));
 
     assert!(matches!(
         outcome,
@@ -507,9 +424,9 @@ fn parsed_undocumented_table_count_where_member_fails_closed() {
 #[test]
 fn parsed_pipeline_count_bare_statement_observes_activation_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source(
-        r#"Note | count; Note.insert({ id: 8, text: "second" }); assert Note | count == 2;"#,
-    ));
+    let outcome = runtime.execute_source(&source(include_str!(
+        "fixtures/pipeline-count-bare.orna"
+    )));
 
     assert!(matches!(outcome, StageOutcome::Passed));
     assert!(
@@ -634,9 +551,12 @@ fn parsed_rekey_moves_the_row_atomically() {
 #[test]
 fn parsed_composite_rekey_moves_every_key_component_in_declaration_order() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&composite_source(
-        r#"Stock.rekey(("north", "pencil"), ("south", "pencil"));"#,
-    ));
+    let outcome = runtime.execute_source(&SourceUnit {
+        fixture_id: "txn-composite-rekey-moves".into(),
+        source_id: "txn-composite-rekey-moves.orna".into(),
+        parse_as: "module_unit".into(),
+        source: include_str!("fixtures/txn-composite-rekey-moves.orna").into(),
+    });
     assert!(matches!(outcome, StageOutcome::Passed));
 
     let north = Value::new(orna_foundation_v1::OvbRaw::Array(vec![
@@ -668,9 +588,12 @@ fn parsed_composite_rekey_moves_every_key_component_in_declaration_order() {
 #[test]
 fn parsed_composite_rekey_rejects_a_non_tuple_target_key_without_publication() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&composite_source(
-        r#"Stock.rekey(("north", "pencil"), "south");"#,
-    ));
+    let outcome = runtime.execute_source(&SourceUnit {
+        fixture_id: "txn-composite-rekey-non-tuple-target".into(),
+        source_id: "txn-composite-rekey-non-tuple-target.orna".into(),
+        parse_as: "module_unit".into(),
+        source: include_str!("fixtures/txn-composite-rekey-non-tuple-target.orna").into(),
+    });
 
     assert!(matches!(
         outcome,
@@ -702,10 +625,9 @@ fn parsed_rekey_collision_rolls_back_all_activation_writes() {
 #[test]
 fn table_every_assertion_observes_all_candidate_rows_before_publication() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source_with_table_assertion(
-        r#"every(note => note.text != "")"#,
-        r#"Note.insert({ id: 7, text: "valid" }); Note.insert({ id: 8, text: "" });"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-every-rejects-empty.orna"
+    )));
 
     assert!(matches!(
         outcome,
@@ -718,10 +640,9 @@ fn table_every_assertion_observes_all_candidate_rows_before_publication() {
 #[test]
 fn table_every_assertion_permits_atomic_publication() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source_with_table_assertion(
-        r#"every(note => note.text != "")"#,
-        r#"Note.insert({ id: 7, text: "first" }); Note.insert({ id: 8, text: "second" });"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-every-allows-rows.orna"
+    )));
 
     assert!(matches!(outcome, StageOutcome::Passed));
     assert!(
@@ -739,10 +660,9 @@ fn table_every_assertion_permits_atomic_publication() {
 #[test]
 fn table_every_assertion_evaluation_failure_rolls_back_the_activation() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source_with_table_assertion(
-        r#"every(note => note.text[1] == "x")"#,
-        r#"Note.insert({ id: 7, text: "a" }); Note.insert({ id: 8, text: "" });"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-every-evaluation-failure.orna"
+    )));
 
     assert!(matches!(outcome, StageOutcome::Failed(_)));
     assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
@@ -752,10 +672,9 @@ fn table_every_assertion_evaluation_failure_rolls_back_the_activation() {
 #[test]
 fn table_all_unique_assertion_rejects_duplicate_candidate_projections() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source_with_table_assertion(
-        "all_unique(note => note.text)",
-        r#"Note.insert({ id: 7, text: "duplicate" }); Note.insert({ id: 8, text: "duplicate" });"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-rejects-duplicates.orna"
+    )));
 
     assert!(matches!(
         outcome,
@@ -768,10 +687,9 @@ fn table_all_unique_assertion_rejects_duplicate_candidate_projections() {
 #[test]
 fn table_all_unique_assertion_permits_atomic_publication() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source_with_table_assertion(
-        "all_unique(note => note.text)",
-        r#"Note.insert({ id: 7, text: "first" }); Note.insert({ id: 8, text: "second" });"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-allows-rows.orna"
+    )));
 
     assert!(matches!(outcome, StageOutcome::Passed));
     assert!(
@@ -789,13 +707,9 @@ fn table_all_unique_assertion_permits_atomic_publication() {
 #[test]
 fn table_all_unique_decimal_body_rejects_scale_alias_and_rolls_back_candidates() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&decimal_body_table_assertion_source(
-        "all_unique(reading => reading.value)",
-        r#"
-            Reading.insert({ id: 1, value: 18.25, label: "canonical" });
-            Reading.insert({ id: 2, value: 18.2500, label: "scale-alias" });
-        "#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-decimal-body-rejects-scale-alias.orna"
+    )));
 
     assert!(
         matches!(
@@ -817,13 +731,9 @@ fn table_all_unique_decimal_body_rejects_scale_alias_and_rolls_back_candidates()
 #[test]
 fn table_all_unique_decimal_body_permits_distinct_values() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&decimal_body_table_assertion_source(
-        "all_unique(reading => reading.value)",
-        r#"
-            Reading.insert({ id: 1, value: 18.25, label: "first" });
-            Reading.insert({ id: 2, value: 18.26, label: "second" });
-        "#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-decimal-body-allows-distinct-values.orna"
+    )));
 
     assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
     for id in [1, 2] {

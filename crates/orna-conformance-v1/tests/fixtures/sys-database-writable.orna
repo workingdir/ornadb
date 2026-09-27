@@ -1,0 +1,4 @@
+pub fn writable() {
+    let _snapshot = sys.snapshot(sys.database.cwd);
+    sys.database.writable
+}

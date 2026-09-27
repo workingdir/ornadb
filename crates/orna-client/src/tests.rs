@@ -1,15 +1,13 @@
 use super::{
-    ACTION_FAILURE_CODE, ClientActionDescriptor, ClientActionError, ClientActionOutcome,
-    ClientActionState, ClientExecutionContext, ClientExecutionError, ClientExpressionError,
-    ClientExternalContractRequest, ClientReferenceLoader, ClientReferenceLoaderError,
+    ClientExecutionContext, ClientExecutionError, ClientExpressionError,
+    ClientReferenceLoader, ClientReferenceLoaderError,
     ClientReferenceLoaderFixture, ClientReferenceObject, ClientResource, ClientResourceCompletion,
     ClientResourceExecutor, ClientResourceKey, ClientResourceRequest, ClientResourceStatus,
     ClientStateStore, ControlFlowBinaryOperator, DeterministicClientResourceExecutor, ResourceKind,
-    action_target_result_type, capability, complete_client_action, decode_action_payload,
-    encode_action_payload, evaluate_client_function_with_executor, trigger_client_action,
+    capability, evaluate_client_function_with_executor,
 };
 use orna_artifact::client_plan::{
-    ActionTargetDomain, ClientExpressionNode, ControlFlowClientPlan, InspectProjection,
+    ClientExpressionNode, ControlFlowClientPlan, InspectProjection,
 };
 use std::{cell::Cell, collections::HashMap, rc::Rc, time::SystemTime};
 
@@ -357,42 +355,6 @@ impl ClientResourceExecutor for FailingActionExecutor {
     }
 }
 
-fn v9_constructor_value(
-    active: &ActiveDatabaseRevision,
-    function: FunctionId,
-    revision: FunctionRevisionId,
-    identity: &str,
-    arguments: Vec<(ParameterId, RuntimeValue)>,
-) -> RuntimeValue {
-    let context = super::ClientExecutionContext {
-        pair: active.pair(),
-        function,
-        function_revision: revision,
-        parent_invocation_id: InvocationId::from_bytes([0x92; 16]),
-        observer_lineage: None,
-    };
-    let spec = super::standard_ui_constructor_spec(active, context, identity)
-        .expect("the V9 standard constructor is intrinsically recognised");
-    super::evaluate_standard_ui_constructor(active, context, spec, &arguments)
-        .expect("the V9 standard constructor accepts its checked arguments")
-}
-
-fn v9_constructor_body(
-    active: &ActiveDatabaseRevision,
-    function: FunctionId,
-    revision: FunctionRevisionId,
-    identity: &str,
-    arguments: Vec<(ParameterId, RuntimeValue)>,
-) -> serde_json::Value {
-    let RuntimeValue::Opaque(value) =
-        v9_constructor_value(active, function, revision, identity, arguments)
-    else {
-        panic!("the constructor returns std.ui.UI");
-    };
-    super::decode_ui_constructor_body(value.canonical_payload())
-        .expect("the generated frame is canonical")
-}
-
 fn reference_field_path_fixture() -> (
     ActiveDatabaseRevision,
     ClientExecutionContext,
@@ -407,7 +369,7 @@ fn reference_field_path_fixture() -> (
     AuthorisedInvocation,
 ) {
     let (base, function, pair, function_revision) = version_two_active_with_artifact(
-        standard_v6(),
+        standard_v5(),
         orna_standard::BOOLEAN_TYPE_ID,
         DefinitionReferenceTarget::Function(orna_standard::STD_INVOKE_ECHO_FUNCTION_ID),
         DefinitionReferenceKind::FunctionCall,
@@ -772,9 +734,9 @@ fn prepared_client_constant(literal: &str) -> DeployableRevision {
     ))
 }
 
-fn prepared_client_source_v6(source: &str) -> DeployableRevision {
-    let snapshot = orna_standard::retained_standard_library_v6_snapshot().unwrap();
-    let verified = orna_standard::verify_standard_library_v6_snapshot(snapshot).unwrap();
+fn prepared_client_source_v5(source: &str) -> DeployableRevision {
+    let snapshot = orna_standard::retained_standard_library_v5_snapshot().unwrap();
+    let verified = orna_standard::verify_standard_library_v5_snapshot(snapshot).unwrap();
     let standard = orna_compiler::check_standard_library_source(&verified).unwrap();
     let active = empty_version_two_active(&verified);
     let context =
@@ -871,7 +833,7 @@ fn prepared_client_call_chain_with_state_root(
         "CREATE CLIENT FUNCTION app.f{call_edges}() RETURNS BOOLEAN RETURN TRUE;"
     ));
 
-    let prepared = prepared_client_source_v6(&source);
+    let prepared = prepared_client_source_v5(&source);
     let function = prepared
         .candidate()
         .functions()
@@ -1171,12 +1133,6 @@ fn active_with_content(
         active.catalogue_hash_context().clone(),
     )
 }
-fn standard_v9() -> VerifiedStandardLibrarySnapshot {
-    orna_standard::verify_standard_library_v9_snapshot(
-        orna_standard::retained_standard_library_v9_snapshot().unwrap(),
-    )
-    .unwrap()
-}
 fn active_with_application_ui_text_identity() -> ActiveDatabaseRevision {
     let (base, _, pair, _) = version_one_active(true);
     let prior_function = base.catalogue().functions()[0].clone();
@@ -1287,22 +1243,16 @@ const fn semantic_hash_version_for(
 ) -> FunctionSemanticHashVersion {
     semantic_hash_version
 }
-fn standard_v5() -> VerifiedStandardLibrarySnapshot {
+fn standard_v1() -> VerifiedStandardLibrarySnapshot {
     orna_standard::verify_standard_library_snapshot(
         orna_standard::retained_standard_library_snapshot().unwrap(),
     )
     .unwrap()
 }
 
-fn standard_v6() -> VerifiedStandardLibrarySnapshot {
-    orna_standard::verify_standard_library_v6_snapshot(
-        orna_standard::retained_standard_library_v6_snapshot().unwrap(),
-    )
-    .unwrap()
-}
-fn standard_v7() -> VerifiedStandardLibrarySnapshot {
-    orna_standard::verify_standard_library_v7_snapshot(
-        orna_standard::retained_standard_library_v7_snapshot().unwrap(),
+fn standard_v5() -> VerifiedStandardLibrarySnapshot {
+    orna_standard::verify_standard_library_v5_snapshot(
+        orna_standard::retained_standard_library_v5_snapshot().unwrap(),
     )
     .unwrap()
 }
@@ -1317,7 +1267,7 @@ fn version_two_value_active(
     FunctionRevisionId,
 ) {
     version_two_active_with_artifact(
-        standard_v5(),
+        standard_v1(),
         return_type,
         DefinitionReferenceTarget::ValueType(reference_target),
         DefinitionReferenceKind::NamedType,
@@ -1336,7 +1286,7 @@ fn version_two_opaque_active(
     FunctionRevisionId,
 ) {
     version_two_active_with_artifact(
-        standard_v5(),
+        standard_v1(),
         orna_standard::OPAQUE_TOKEN_TYPE_ID,
         DefinitionReferenceTarget::ValueType(orna_standard::OPAQUE_TOKEN_TYPE_ID),
         DefinitionReferenceKind::NamedType,
@@ -1359,7 +1309,7 @@ fn version_two_value_active_with_artifact(
     FunctionRevisionId,
 ) {
     version_two_active_with_artifact(
-        standard_v5(),
+        standard_v1(),
         return_type,
         DefinitionReferenceTarget::ValueType(reference_target),
         DefinitionReferenceKind::NamedType,
@@ -1375,7 +1325,7 @@ fn version_two_client_call_active() -> (
     FunctionRevisionId,
 ) {
     version_two_active_with_artifact(
-        standard_v6(),
+        standard_v5(),
         orna_standard::BOOLEAN_TYPE_ID,
         DefinitionReferenceTarget::Function(FunctionId::from_bytes([6; 16])),
         DefinitionReferenceKind::FunctionCall,
@@ -1525,8 +1475,8 @@ fn version_two_local_action_active() -> (
         target_origin,
     ));
     let revisions = vec![parent_revision, target_revision];
-    let standard = orna_standard::verify_standard_library_v6_snapshot(
-        orna_standard::retained_standard_library_v6_snapshot().unwrap(),
+    let standard = orna_standard::verify_standard_library_v5_snapshot(
+        orna_standard::retained_standard_library_v5_snapshot().unwrap(),
     )
     .unwrap();
     let context = orna_core::revision::CatalogueHashContext::version_two(standard);
@@ -1745,7 +1695,7 @@ fn version_two_server_active(
     FunctionRevisionId,
 ) {
     let (initial, function_id, pair, function_revision_id) = version_two_active_with_artifact(
-        standard_v6(),
+        standard_v5(),
         orna_standard::BOOLEAN_TYPE_ID,
         DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
         DefinitionReferenceKind::NamedType,
@@ -1857,7 +1807,7 @@ fn version_two_server_record_stream_active() -> (
     const OTHER_FIELD_ID: FieldId = FieldId::from_bytes([0x94; 16]);
 
     let (initial, function_id, pair, function_revision_id) = version_two_active_with_artifact(
-        standard_v6(),
+        standard_v5(),
         orna_standard::BOOLEAN_TYPE_ID,
         DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
         DefinitionReferenceKind::NamedType,
@@ -2760,7 +2710,7 @@ fn version_six_client_resource_action_active() -> (
         .position(|candidate| candidate.function() == function)
         .unwrap();
     revisions[client_revision_index] = rebuilt_client_revision;
-    let context = orna_core::revision::CatalogueHashContext::version_two(standard_v6());
+    let context = orna_core::revision::CatalogueHashContext::version_two(standard_v5());
     let catalogue_hash = catalogue_digest_with_context(
         &context,
         base.catalogue(),
@@ -2940,26 +2890,6 @@ fn version_six_client_action_provenance_active() -> (
         pair,
         parent_revision_id,
         parameter,
-    )
-}
-
-fn action_value(
-    active: &ActiveDatabaseRevision,
-    domain: ActionTargetDomain,
-    target: FunctionId,
-    pair: RevisionPair,
-    call_site: CallSiteId,
-    arguments: Vec<FunctionArgument>,
-    result_type: TypeId,
-) -> RuntimeValue {
-    let descriptor =
-        ClientActionDescriptor::new(domain, target, pair, call_site, arguments, result_type);
-    let payload = encode_action_payload(active, &descriptor).unwrap();
-    let registry =
-        super::registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap())
-            .unwrap();
-    RuntimeValue::Opaque(
-        OpaqueValue::new(active, &registry, super::STD_ACTION_TYPE_ID, payload).unwrap(),
     )
 }
 
@@ -3248,8 +3178,6 @@ fn source_metadata_maps_malformed_capability_envelope_to_unknown() {
     );
 }
 
-#[path = "tests/actions.rs"]
-mod actions;
 #[path = "tests/capabilities.rs"]
 mod capabilities;
 #[path = "tests/resources.rs"]
