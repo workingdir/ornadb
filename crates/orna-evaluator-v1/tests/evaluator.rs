@@ -684,7 +684,9 @@ fn nominal_admission_rejects_malformed_host_arguments_even_when_unselected() {
         (field_id_raw("value"), Raw::Int(7.into())),
     ]);
     let arguments = Environment::from([("value".into(), malformed)]);
-    let functions = functions_from_source("fn ignore(value: Int) = 1;");
+    let functions = functions_from_source(include_str!(
+        "fixtures/nominal_admission_unselected_argument.orna"
+    ));
 
     assert_eq!(
         code(invoke_named_with_nominals(
@@ -1091,9 +1093,7 @@ fn named_collection_callback_preserves_public_nominal_selection() {
         None,
         vec![nominal_field("value", true, None)],
     );
-    let functions = functions_from_source(
-        "fn select(value: Int) = value.value; fn run() = std.collection.map([Thing { value: 7 }], select);",
-    );
+    let functions = functions_from_source(include_str!("fixtures/nominal_map_callback.orna"));
 
     let result = invoke_named_with_nominals(
         "run",
@@ -1546,7 +1546,7 @@ impl EffectHandler for BudgetedEffects {
 
 #[test]
 fn effect_budget_hook_shares_activation_steps_and_exhausts() {
-    let functions = functions_from_source("fn entry() = Note.insert(1);");
+    let functions = functions_from_source(include_str!("fixtures/effect_budget_entry.orna"));
     let mut effects = BudgetedEffects;
 
     assert_eq!(
@@ -1566,7 +1566,7 @@ fn effect_budget_hook_shares_activation_steps_and_exhausts() {
 
 #[test]
 fn legacy_effect_handler_keeps_existing_budget_behavior() {
-    let functions = functions_from_source("fn entry() = Note.insert(1);");
+    let functions = functions_from_source(include_str!("fixtures/effect_entry.orna"));
     let mut effects = NoteEffects::default();
 
     assert_eq!(
@@ -1589,7 +1589,7 @@ fn legacy_effect_handler_keeps_existing_budget_behavior() {
 #[test]
 fn fail_reemits_the_original_error_instead_of_returning_a_value() {
     let result = evaluate_expression(
-        "(1 / 0) |? (failure => fail(failure))",
+        include_str!("fixtures/fail_reemits_the_original_error.orna").trim(),
         &Environment::new(),
         Limits::default(),
     );
@@ -1600,14 +1600,14 @@ fn fail_reemits_the_original_error_instead_of_returning_a_value() {
 #[test]
 fn fail_from_a_recovery_handler_reaches_the_next_recovery_boundary() {
     assert_eq!(
-        evaluate("(1 / 0) |? (failure => fail(failure)) |? (failure => 7)"),
+        evaluate(include_str!("fixtures/fail_from_recovery_handler.orna").trim()),
         Value::int(7.into())
     );
 }
 
 #[test]
 fn effect_handler_can_return_unit_values() {
-    let functions = functions_from_source("fn entry() = Note.delete(1);");
+    let functions = functions_from_source(include_str!("fixtures/effect_unit_entry.orna"));
     let mut effects = UnitEffects;
 
     assert_eq!(
@@ -1657,11 +1657,11 @@ fn admission_limits_reject_zero_configuration_and_count_source_bytes() {
 
 #[test]
 fn source_namespace_entry_checks_values_and_limits_before_parsing() {
-    let functions = functions_from_source("fn increment(value: Int) = value + 1;");
+    let functions = functions_from_source(include_str!("fixtures/source_namespace_increment.orna"));
     let environment = Environment::from([("input".into(), Value::int(41.into()))]);
     assert_eq!(
         orna_evaluator_v1::evaluate_expression_with_functions(
-            "input | increment",
+            include_str!("fixtures/source_namespace_pipeline.orna"),
             &environment,
             &functions,
             Limits::default()
@@ -1670,7 +1670,7 @@ fn source_namespace_entry_checks_values_and_limits_before_parsing() {
         Value::int(42.into())
     );
     let failure = orna_evaluator_v1::evaluate_expression_with_functions(
-        "invalid(",
+        include_str!("fixtures/source_namespace_invalid_expression.orna"),
         &environment,
         &functions,
         Limits {
@@ -1683,7 +1683,7 @@ fn source_namespace_entry_checks_values_and_limits_before_parsing() {
     assert_eq!(failure.diagnostic().message(), "<redacted>");
     assert_eq!(
         code(orna_evaluator_v1::evaluate_expression_with_functions(
-            "invalid(",
+            include_str!("fixtures/source_namespace_invalid_expression.orna"),
             &environment,
             &functions,
             Limits::default()
@@ -1694,9 +1694,8 @@ fn source_namespace_entry_checks_values_and_limits_before_parsing() {
 
 #[test]
 fn host_invocation_uses_the_same_named_function_namespace() {
-    let functions = functions_from_source(
-        "fn helper(value: Int) = value + 1; fn entry(value = helper(40)) = helper(value);",
-    );
+    let functions =
+        functions_from_source(include_str!("fixtures/host_invocation_same_namespace.orna"));
     assert_eq!(
         orna_evaluator_v1::invoke_named(
             "entry",
@@ -1732,9 +1731,8 @@ fn host_invocation_uses_the_same_named_function_namespace() {
 
 #[test]
 fn effect_handler_runs_for_a_nested_non_pure_field_call_with_once_evaluated_arguments() {
-    let functions = functions_from_source(
-        "fn child(value: Int) = Note.insert(value); fn entry() { let counter = 0; child(if true { counter += 1; counter } else { 0 }); counter }",
-    );
+    let functions =
+        functions_from_source(include_str!("fixtures/effect_nested_field_call.orna"));
     let mut effects = NoteEffects::default();
 
     assert_eq!(
@@ -1753,9 +1751,8 @@ fn effect_handler_runs_for_a_nested_non_pure_field_call_with_once_evaluated_argu
 
 #[test]
 fn dynamic_field_calls_evaluate_callee_before_effectful_arguments() {
-    let functions = functions_from_source(
-        "fn make() = Note.insert(1); fn run() = make().field(Note.insert(2));",
-    );
+    let functions =
+        functions_from_source(include_str!("fixtures/effect_dynamic_field_call.orna"));
     let mut effects = NoteEffects::default();
 
     assert_eq!(
@@ -1774,7 +1771,7 @@ fn dynamic_field_calls_evaluate_callee_before_effectful_arguments() {
 #[test]
 fn effect_handler_none_falls_through_without_intercepting_pure_calls() {
     let functions =
-        functions_from_source("fn helper(value: Int) = value + 1; fn entry() = helper(41);");
+        functions_from_source(include_str!("fixtures/effect_pure_call.orna"));
     let mut effects = NoteEffects::default();
 
     assert_eq!(
@@ -1793,7 +1790,7 @@ fn effect_handler_none_falls_through_without_intercepting_pure_calls() {
 
 #[test]
 fn invoke_named_remains_effect_free_for_non_pure_field_calls() {
-    let functions = functions_from_source("fn entry() = Note.insert(1);");
+    let functions = functions_from_source(include_str!("fixtures/effect_entry.orna"));
 
     assert_eq!(
         code(invoke_named(
@@ -1808,7 +1805,7 @@ fn invoke_named_remains_effect_free_for_non_pure_field_calls() {
 
 #[test]
 fn source_calls_bind_positional_named_and_nested_defaults() {
-    let source = "fn twice(value: Int) = value + value; fn add(value: Int, extra = twice(3)) = value + extra;";
+    let source = include_str!("fixtures/source_calls_defaults.orna");
     for expression in [
         "add(10)",
         "add(value: 10)",
@@ -1841,12 +1838,12 @@ fn source_calls_bind_positional_named_and_nested_defaults() {
 
 #[test]
 fn source_calls_are_lexical_and_respect_value_shadowing() {
-    let source = "fn inner() = secret; fn outer(secret: Int) = inner();";
+    let source = include_str!("fixtures/source_calls_lexical.orna");
     assert_eq!(
         code(call_module(source, "outer(7)", Limits::default())),
         "ORNA-EVAL-NAME"
     );
-    let source = "fn identity(value: Int) = value;";
+    let source = include_str!("fixtures/source_calls_identity.orna");
     assert_eq!(
         code(call_module(
             source,
@@ -1859,7 +1856,7 @@ fn source_calls_are_lexical_and_respect_value_shadowing() {
 
 #[test]
 fn source_call_arguments_evaluate_in_source_order() {
-    let source = "fn encode(a: Int, b: Int) = 10 * a + b; fn caller() { let counter = 0; encode(b: if true { counter += 1; counter } else { 0 }, a: if true { counter += 1; counter } else { 0 }) }";
+    let source = include_str!("fixtures/source_calls_order.orna");
     assert_eq!(
         call_module(source, "caller()", Limits::default()).unwrap(),
         Value::int(21.into())
@@ -1869,13 +1866,13 @@ fn source_call_arguments_evaluate_in_source_order() {
 #[test]
 fn wildcard_and_structured_lambda_parameters_bind_by_position() {
     for (expression, expected) in [
-        ("(_ => 7)(123)", 7),
-        ("((_, _) => 7)(1, 2)", 7),
-        ("10 | (_ => 7)", 7),
-        ("(((a, b)) => a + b)((1, 2))", 3),
-        ("(([a, b]) => a + b)([1, 2])", 3),
-        ("(({a, b}) => a + b)({a: 1, b: 2})", 3),
-        ("(1, 2) | (((a, b)) => a + b)", 3),
+        (include_str!("fixtures/wildcard_structured_lambda/wildcard-single-argument.orna").trim(), 7),
+        (include_str!("fixtures/wildcard_structured_lambda/wildcard-two-arguments.orna").trim(), 7),
+        (include_str!("fixtures/wildcard_structured_lambda/wildcard-pipeline.orna").trim(), 7),
+        (include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-call.orna").trim(), 3),
+        (include_str!("fixtures/wildcard_structured_lambda/array-destructure-call.orna").trim(), 3),
+        (include_str!("fixtures/wildcard_structured_lambda/record-destructure-call.orna").trim(), 3),
+        (include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-pipeline.orna").trim(), 3),
     ] {
         assert_eq!(
             evaluate(expression),
@@ -1885,13 +1882,16 @@ fn wildcard_and_structured_lambda_parameters_bind_by_position() {
     }
     assert_eq!(
         code(evaluate_expression(
-            "(_ => 7)(1 / 0)",
+            include_str!("fixtures/wildcard_structured_lambda/wildcard-divide-by-zero.orna").trim(),
             &Environment::new(),
             Limits::default()
         )),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
     );
-    for expression in ["(((a, b)) => a + b)(1)", "(([a, b]) => a + b)([1])"] {
+    for expression in [
+        include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-wrong-arity.orna").trim(),
+        include_str!("fixtures/wildcard_structured_lambda/array-destructure-wrong-arity.orna").trim(),
+    ] {
         assert_eq!(
             code(evaluate_expression(
                 expression,
@@ -1902,9 +1902,9 @@ fn wildcard_and_structured_lambda_parameters_bind_by_position() {
         );
     }
     for expression in [
-        "((_, _) => 7)(1)",
-        "(((a, b)) => a + b)(a: 1, b: 2)",
-        "(({a}, a) => a)({a: 1}, 2)",
+        include_str!("fixtures/wildcard_structured_lambda/wildcard-wrong-arity.orna").trim(),
+        include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-named-arguments.orna").trim(),
+        include_str!("fixtures/wildcard_structured_lambda/record-destructure-duplicate-binding.orna").trim(),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -1919,7 +1919,7 @@ fn wildcard_and_structured_lambda_parameters_bind_by_position() {
 
 #[test]
 fn named_functions_share_structured_parameter_binding_and_defaults() {
-    let source = "fn add((a, b) = (1, 2)) = a + b; fn ignore(_, _) = 7;";
+    let source = include_str!("fixtures/structured_function_parameters.orna");
     for (expression, expected) in [
         ("add()", 3),
         ("add((10, 20))", 30),
@@ -1935,49 +1935,29 @@ fn named_functions_share_structured_parameter_binding_and_defaults() {
 
 #[test]
 fn closures_capture_immutable_snapshots_and_support_nested_calls() {
-    for (source, expression, expected) in [
-        (
-            "fn make(seed: Int) = value => seed + value;",
-            "make(10)(5)",
-            15,
-        ),
-        (
-            "fn run() { let seed = 1; let read = () => seed; seed = 9; read() }",
-            "run()",
-            1,
-        ),
-        (
-            "fn run() { let seed = 1; let replace = seed => seed + 1; replace(10) }",
-            "run()",
-            11,
-        ),
-        ("fn make(a: Int) = b => c => a + b + c;", "make(1)(2)(3)", 6),
-        (
-            "fn run() { let seed = 1; let local = () => { let seed = 10; seed += 1; seed }; local() }",
-            "run()",
-            11,
-        ),
-        (
-            "fn run() { let seed = 1; let local = seed => { seed += 1; seed }; local(10) }",
-            "run()",
-            11,
-        ),
+    let source = include_str!("fixtures/closures.orna");
+    for (expression, expected) in [
+        ("make(10)(5)", 15),
+        ("read_after_reassignment()", 1),
+        ("parameter_shadow()", 11),
+        ("make_nested(1)(2)(3)", 6),
+        ("local_block_shadow()", 11),
+        ("parameter_block_shadow(0)", 11),
     ] {
         assert_eq!(
             call_module(source, expression, Limits::default()).unwrap(),
             Value::int(expected.into())
         );
     }
-    let source = "fn run() { let seed = 1; let mutate = () => { seed += 1; seed }; mutate() }";
     assert_eq!(
-        code(call_module(source, "run()", Limits::default())),
+        code(call_module(source, "mutate_capture()", Limits::default())),
         "ORNA-EVAL-IMMUTABLE-CAPTURE"
     );
 }
 
 #[test]
 fn function_values_pass_through_locals_arguments_and_collections() {
-    let source = "fn increment(value: Int) = value + 1; fn apply(operation, value: Int) = operation(value); fn run() { let choices = [increment, value => value * 2]; apply(choices[0], 20) + apply(choices[1], 10) }";
+    let source = include_str!("fixtures/function_values.orna");
     assert_eq!(
         call_module(source, "run()", Limits::default()).unwrap(),
         Value::int(41.into())
@@ -1988,14 +1968,19 @@ fn function_values_pass_through_locals_arguments_and_collections() {
 
 #[test]
 fn anonymous_pipeline_stages_share_callable_binding_and_limits() {
-    assert_eq!(evaluate("10 | (value => value + 2)"), Value::int(12.into()));
     assert_eq!(
-        evaluate("(10 | (value => value + 2)) | (value => value * 2)"),
+        evaluate(include_str!("fixtures/anonymous_pipeline_stages/direct_call.orna").trim()),
+        Value::int(12.into())
+    );
+    assert_eq!(
+        evaluate(
+            include_str!("fixtures/anonymous_pipeline_stages/chained_stages.orna").trim()
+        ),
         Value::int(24.into())
     );
     assert_eq!(
         code(evaluate_expression(
-            "((value => value)(1))",
+            include_str!("fixtures/anonymous_pipeline_stages/step_limit.orna").trim(),
             &Environment::new(),
             Limits {
                 max_steps: 2,
@@ -2004,7 +1989,10 @@ fn anonymous_pipeline_stages_share_callable_binding_and_limits() {
         )),
         "ORNA-EVAL-LIMIT"
     );
-    for expression in ["(a => a)(1, 2)", "(() => 1)(2)"] {
+    for expression in [
+        include_str!("fixtures/anonymous_pipeline_stages/too_many_arguments.orna").trim(),
+        include_str!("fixtures/anonymous_pipeline_stages/zero_parameter_argument.orna").trim(),
+    ] {
         assert_eq!(
             code(evaluate_expression(
                 expression,
@@ -2015,10 +2003,10 @@ fn anonymous_pipeline_stages_share_callable_binding_and_limits() {
         );
     }
     for expression in [
-        "value => value",
-        "[value => value]",
-        "{ callback: value => value }",
-        "(value => value) == (value => value)",
+        include_str!("fixtures/anonymous_pipeline_stages/function_value.orna").trim(),
+        include_str!("fixtures/anonymous_pipeline_stages/function_array.orna").trim(),
+        include_str!("fixtures/anonymous_pipeline_stages/function_record.orna").trim(),
+        include_str!("fixtures/anonymous_pipeline_stages/function_equality.orna").trim(),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -2033,8 +2021,7 @@ fn anonymous_pipeline_stages_share_callable_binding_and_limits() {
 
 #[test]
 fn pipelines_insert_the_input_before_explicit_arguments_and_defaults() {
-    let source =
-        "fn add(value: Int, extra = 6) = value + extra; fn double(value: Int) = value * 2;";
+    let source = include_str!("fixtures/pipelines.orna");
     for expression in [
         "10 | add",
         "10 | add()",
@@ -2060,33 +2047,25 @@ fn pipelines_insert_the_input_before_explicit_arguments_and_defaults() {
         );
     }
     assert_eq!(
-        code(call_module(
-            "fn no_input() = 1;",
-            "10 | no_input",
-            Limits::default()
-        )),
+        code(call_module(source, "10 | no_input", Limits::default())),
         "ORNA-EVAL-ARGUMENT"
     );
 }
 
 #[test]
 fn pipeline_input_runs_once_and_before_stage_arguments() {
-    let source = "fn encode(a: Int, b: Int) = 10 * a + b; fn caller() { let counter = 0; (if true { counter += 1; counter } else { 0 }) | encode(b: if true { counter += 1; counter } else { 0 }) }";
+    let source = include_str!("fixtures/pipelines.orna");
     assert_eq!(
-        call_module(source, "caller()", Limits::default()).unwrap(),
+        call_module(source, "pipeline_caller()", Limits::default()).unwrap(),
         Value::int(12.into())
     );
     assert_eq!(
-        code(call_module(
-            "fn add(a: Int, b: Int) = a + b;",
-            "(1 / 0) | add(missing)",
-            Limits::default()
-        )),
+        code(call_module(source, "(1 / 0) | add(missing)", Limits::default())),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
     );
     assert_eq!(
         code(call_module(
-            "fn recurse(n: Int) = n | recurse;",
+            source,
             "1 | recurse",
             Limits {
                 max_steps: 12,
@@ -3614,7 +3593,7 @@ fn std_collection_float_min_and_max_use_total_order_and_ordinary_equality_separa
         }
     }
 
-    let source = "fn lowest(rows: [Float]) = min(rows); fn highest(rows: [Float]) = std.collection.max(rows);";
+    let source = include_str!("fixtures/collection_min_max_float.orna");
     assert_eq!(
         call_module(source, "lowest([-3.0f, 2.0f])", Limits::default()).unwrap(),
         Value::option(Some(Value::float_bits((-3.0f64).to_bits()))).unwrap()
@@ -3759,7 +3738,7 @@ fn std_collection_date_min_and_max_accept_all_call_forms_and_preserve_order() {
         }
     }
 
-    let source = "fn earliest(rows: [Date]) = min(rows); fn latest(rows: [Date]) = std.collection.max(rows);";
+    let source = include_str!("fixtures/collection_min_max_date.orna");
     assert_eq!(
         call_module(
             source,
@@ -3802,7 +3781,7 @@ fn std_collection_instant_min_and_max_use_normalized_utc_order() {
     }
 
     let source =
-        "fn earliest(rows: [Instant]) = min(rows); fn latest(rows: [Instant]) = max(rows);";
+        include_str!("fixtures/collection_min_max_instant.orna");
     assert_eq!(
         call_module(
             source,
@@ -3881,7 +3860,7 @@ fn std_collection_min_and_max_accept_integer_lists_in_all_call_forms() {
     }
 
     let source =
-        "fn lowest(rows: [Int]) = min(rows); fn highest(rows: [Int]) = std.collection.max(rows);";
+        include_str!("fixtures/collection_min_max_int.orna");
     assert_eq!(
         call_module(source, "lowest([3, 1, 2])", Limits::default()).unwrap(),
         Value::option(Some(Value::int(1.into()))).unwrap()
@@ -4399,7 +4378,7 @@ fn std_collection_every_and_exists_accept_all_call_forms_and_function_callbacks(
         false_value
     );
 
-    let source = "fn positive(value: Int) = value > 0; fn all(rows: [Int]) = every(rows, positive); fn any(rows: [Int]) = std.collection.exists(predicate: positive, rows: rows);";
+    let source = include_str!("fixtures/every_exists_named_callbacks.orna");
     assert_eq!(
         call_module(source, "all([1, 2, 3])", Limits::default()).unwrap(),
         true_value
@@ -4857,7 +4836,7 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
 
 #[test]
 fn std_collection_partition_accepts_lawful_predicates_and_enforces_limits() {
-    let source = "fn keep_even(value: Int) = value % 2 == 0; fn run() = std.collection.partition([1, 2, 3, 4], keep_even);";
+    let source = include_str!("fixtures/partition_callbacks.orna");
     assert_eq!(
         call_module(source, "run()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![
@@ -4867,11 +4846,7 @@ fn std_collection_partition_accepts_lawful_predicates_and_enforces_limits() {
         .unwrap()
     );
     assert_eq!(
-        code(call_module(
-            "fn bad(value: Int, other: Int) = true; fn run() = std.collection.partition([1], bad);",
-            "run()",
-            Limits::default(),
-        )),
+        code(call_module(source, "bad_arity()", Limits::default())),
         "ORNA-EVAL-ARGUMENT"
     );
     assert_eq!(
@@ -4902,10 +4877,7 @@ fn std_collection_partition_preserves_order_empty_and_invokes_predicate_once_per
             .unwrap()
     );
 
-    let functions = functions_from_source(
-        "fn seen(value: Int) = Note.insert(value) == 1 && value % 2 == 0; \
-         fn run(values: [Int]) = std.collection.partition(values, seen);",
-    );
+    let functions = functions_from_source(include_str!("fixtures/partition_effect_callback.orna"));
     let arguments = Environment::from([(
         "values".into(),
         Value::new(Raw::Array(vec![
@@ -5033,7 +5005,7 @@ fn std_collection_filter_accepts_direct_pipeline_and_named_calls() {
     );
     assert_eq!(
         call_module(
-            "fn keep_even(value: Int) = value % 2 == 0; fn run() = std.collection.filter([1, 2, 3, 4], keep_even);",
+            include_str!("fixtures/collection_filter_named_callback.orna"),
             "run()",
             Limits::default(),
         )
@@ -5145,7 +5117,7 @@ fn std_collection_map_preserves_order_for_direct_pipeline_named_and_function_cal
     }
     assert_eq!(
         call_module(
-            "fn scale(value: Int) = value * 10; fn run() = std.collection.map([3, 1, 2], scale);",
+            include_str!("fixtures/collection_map_named_callback.orna"),
             "run()",
             Limits::default(),
         )
@@ -5181,7 +5153,7 @@ fn std_collection_flat_map_preserves_outer_and_inner_order_for_all_call_forms() 
     }
     assert_eq!(
         call_module(
-            "fn expand(value: Int) = [value, value + 10]; fn run() = std.collection.flat_map([3, 1, 2], expand);",
+            include_str!("fixtures/collection_flat_map_named_callback.orna"),
             "run()",
             Limits::default(),
         )
@@ -5215,7 +5187,7 @@ fn std_collection_sort_by_accepts_all_call_forms_and_preserves_stable_ties() {
     }
     assert_eq!(
         call_module(
-            "fn key(value: Int) = value % 10; fn run() = std.collection.sort_by(rows: [12, 3, 1], key: key);",
+            include_str!("fixtures/collection_sort_by_named_callback.orna"),
             "run()",
             Limits::default(),
         )
@@ -5259,7 +5231,7 @@ fn std_collection_rank_preserves_stable_ties_and_assigns_competition_ranks() {
 
     assert_eq!(
         call_module(
-            "fn key(value: Int) = value % 10; fn run() = std.collection.rank(values: [23, 21, 12, 11], key: key);",
+            include_str!("fixtures/collection_rank_named_callback.orna"),
             "run()",
             Limits::default(),
         )
@@ -5512,9 +5484,7 @@ fn std_collection_sort_by_evaluates_callbacks_before_sorting_and_fails_closed() 
         "ORNA-EVAL-LIMIT"
     );
 
-    let functions = functions_from_source(
-        "fn key(value: Int) = Note.insert(value); fn run() = sort_by([3, 1], key);",
-    );
+    let functions = functions_from_source(include_str!("fixtures/sort_by_effect_callback.orna"));
     let mut effects = NoteEffects::default();
     assert_eq!(
         invoke_named_with_effects(
@@ -5537,7 +5507,7 @@ fn std_collection_sort_by_evaluates_callbacks_before_sorting_and_fails_closed() 
 fn root_map_names_remain_shadowable_by_admitted_functions_and_locals() {
     assert_eq!(
         call_module(
-            "fn map(value: Int) = value + 100; fn run() = map(1);",
+            include_str!("fixtures/root_map_shadow_function.orna"),
             "run()",
             Limits::default(),
         )
@@ -5573,7 +5543,7 @@ fn std_collection_map_and_flat_map_propagate_callback_errors() {
     }
     assert_eq!(
         code(call_module(
-            "fn bad(value: Int, other: Int) = value; fn run() = std.collection.map([1], bad);",
+            include_str!("fixtures/map_invalid_callback.orna"),
             "run()",
             Limits::default(),
         )),
@@ -5639,9 +5609,9 @@ fn std_collection_map_and_flat_map_enforce_collection_limits() {
 
 #[test]
 fn std_collection_split_when_accepts_functions_and_enforces_limits() {
-    let source = "fn boundary(value: Int) = value % 2 == 0; fn run() = std.collection.split_when([1, 2, 3, 4], boundary);";
+    let source = include_str!("fixtures/split_when_callbacks.orna");
     assert_eq!(
-        call_module(source, "run()", Limits::default()).unwrap(),
+        call_module(source, "function_callback()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![Raw::Int(1.into())]),
             Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
@@ -5651,15 +5621,15 @@ fn std_collection_split_when_accepts_functions_and_enforces_limits() {
     );
     assert_eq!(
         code(call_module(
-            "fn bad(value: Int, other: Int) = true; fn run() = std.collection.split_when([1], bad);",
-            "run()",
+            source,
+            "callback_arity_is_checked()",
             Limits::default(),
         )),
         "ORNA-EVAL-ARGUMENT"
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.split_when([1, 2, 3], value => true)",
+            include_str!("fixtures/split_when_collection_limit.orna").trim(),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -5669,10 +5639,25 @@ fn std_collection_split_when_accepts_functions_and_enforces_limits() {
         "ORNA-EVAL-LIMIT"
     );
 }
+
+#[test]
+fn std_collection_split_when_rejects_invalid_callback_calls() {
+    let source = include_str!("fixtures/split_when_callbacks.orna");
+    for (function, expected) in [
+        ("invalid_collection()", "ORNA-EVAL-TYPE"),
+        ("non_callback()", "ORNA-EVAL-TYPE"),
+        ("callback_result_must_be_bool()", "ORNA-EVAL-TYPE"),
+        ("callback_arity_is_checked()", "ORNA-EVAL-ARGUMENT"),
+        ("extra_argument()", "ORNA-EVAL-UNSUPPORTED"),
+    ] {
+        assert_eq!(code(call_module(source, function, Limits::default())), expected);
+    }
+}
 #[test]
 fn std_collection_split_when_preserves_order_and_omits_empty_groups() {
+    let source = include_str!("fixtures/split_when_callbacks.orna");
     assert_eq!(
-        evaluate("std.collection.split_when([3, 1, 2, 4], value => value % 2 == 0)"),
+        call_module(source, "odd_runs()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())]),
             Raw::Array(vec![Raw::Int(2.into())]),
@@ -5681,7 +5666,7 @@ fn std_collection_split_when_preserves_order_and_omits_empty_groups() {
         .unwrap()
     );
     assert_eq!(
-        evaluate("std.collection.split_when([2, 4, 5], value => value % 2 == 0)"),
+        call_module(source, "begins_with_boundary()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![Raw::Int(2.into())]),
             Raw::Array(vec![Raw::Int(4.into()), Raw::Int(5.into())]),
@@ -5689,15 +5674,16 @@ fn std_collection_split_when_preserves_order_and_omits_empty_groups() {
         .unwrap()
     );
     assert_eq!(
-        evaluate("std.collection.split_when([], value => 1 / 0 == 0)"),
+        call_module(source, "empty_skips_callback()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![])).unwrap()
     );
 }
 
 #[test]
 fn std_collection_split_when_requires_bool_and_propagates_callback_failures() {
+    let source = include_str!("fixtures/split_when_callbacks.orna");
     assert_eq!(
-        evaluate("std.collection.split_when([1, 2, 3], value => value == 2)"),
+        call_module(source, "splits_at_two()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![Raw::Int(1.into())]),
             Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
@@ -5705,17 +5691,17 @@ fn std_collection_split_when_requires_bool_and_propagates_callback_failures() {
         .unwrap()
     );
     assert_eq!(
-        code(evaluate_expression(
-            "std.collection.split_when([1], value => value)",
-            &Environment::new(),
+        code(call_module(
+            source,
+            "callback_result_must_be_bool()",
             Limits::default(),
         )),
         "ORNA-EVAL-TYPE"
     );
     assert_eq!(
-        code(evaluate_expression(
-            "std.collection.split_when([1, 0, 2], value => 10 / value > 0)",
-            &Environment::new(),
+        code(call_module(
+            source,
+            "callback_failure_propagates()",
             Limits::default(),
         )),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
@@ -5724,7 +5710,7 @@ fn std_collection_split_when_requires_bool_and_propagates_callback_failures() {
 
 #[test]
 fn std_collection_split_when_debits_one_step_per_scanned_value_without_duplicate_traversal_charging() {
-    let expression = "std.collection.split_when([1, 2], value => true)";
+    let expression = include_str!("fixtures/split_when_step_budget.orna").trim();
     assert_eq!(
         code(evaluate_expression(
             expression,
@@ -5762,9 +5748,9 @@ fn std_collection_split_when_debits_one_step_per_scanned_value_without_duplicate
 
 #[test]
 fn std_collection_group_by_accepts_functions_and_enforces_limits() {
-    let source = "fn parity(value: Int) = value % 2; fn run() = std.collection.group_by([3, 2, 1, 4], parity);";
+    let source = include_str!("fixtures/group_by_callbacks.orna");
     assert_eq!(
-        call_module(source, "run()", Limits::default()).unwrap(),
+        call_module(source, "function_callback()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![
                 Raw::Int(0.into()),
@@ -5779,7 +5765,7 @@ fn std_collection_group_by_accepts_functions_and_enforces_limits() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.group_by([1, 2, 3], value => value)",
+            include_str!("fixtures/group_by_collection_limit.orna").trim(),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -5789,10 +5775,24 @@ fn std_collection_group_by_accepts_functions_and_enforces_limits() {
         "ORNA-EVAL-LIMIT"
     );
 }
+
+#[test]
+fn std_collection_group_by_rejects_invalid_callback_calls() {
+    let source = include_str!("fixtures/group_by_callbacks.orna");
+    for (function, expected) in [
+        ("invalid_collection()", "ORNA-EVAL-TYPE"),
+        ("non_callback()", "ORNA-EVAL-TYPE"),
+        ("array_key_is_rejected()", "ORNA-EVAL-TYPE"),
+        ("extra_argument()", "ORNA-EVAL-UNSUPPORTED"),
+    ] {
+        assert_eq!(code(call_module(source, function, Limits::default())), expected);
+    }
+}
 #[test]
 fn std_collection_group_by_sorts_keys_and_preserves_input_row_order() {
+    let source = include_str!("fixtures/group_by_callbacks.orna");
     assert_eq!(
-        evaluate("std.collection.group_by([12, 1, 7, 4, 2, 5], value => value % 3)"),
+        call_module(source, "sorted_keys_and_stable_rows()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![
                 Raw::Int(0.into()),
@@ -5818,40 +5818,38 @@ fn std_collection_group_by_sorts_keys_and_preserves_input_row_order() {
 #[test]
 fn std_collection_group_by_empty_input_does_not_invoke_key_callback() {
     assert_eq!(
-        evaluate("std.collection.group_by([], value => 1 / 0)"),
+        call_module(
+            include_str!("fixtures/group_by_callbacks.orna"),
+            "empty_skips_callback()",
+            Limits::default(),
+        )
+        .unwrap(),
         Value::new(Raw::Array(vec![])).unwrap()
     );
 }
 
 #[test]
 fn std_collection_group_by_requires_lawful_keys_and_propagates_callback_failures() {
+    let source = include_str!("fixtures/group_by_callbacks.orna");
     for expression in [
-        "std.collection.group_by([1], value => [value])",
-        "std.collection.group_by([1, 2], value => if value == 1 { 1 } else { \"two\" })",
+        "array_key_is_rejected()",
+        "mixed_key_is_rejected()",
     ] {
         assert_eq!(
-            code(evaluate_expression(
-                expression,
-                &Environment::new(),
-                Limits::default(),
-            )),
+            code(call_module(source, expression, Limits::default())),
             "ORNA-EVAL-TYPE",
             "{expression} must reject keys without a lawful total comparison",
         );
     }
     assert_eq!(
-        code(evaluate_expression(
-            "std.collection.group_by([1, 0, 2], value => 10 / value)",
-            &Environment::new(),
-            Limits::default(),
-        )),
+        code(call_module(source, "callback_failure_propagates()", Limits::default())),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
     );
 }
 
 #[test]
 fn std_collection_group_by_debits_one_step_per_scanned_value_without_duplicate_traversal_charging() {
-    let expression = "std.collection.group_by([1, 2], value => value)";
+    let expression = include_str!("fixtures/group_by_step_budget.orna").trim();
     assert_eq!(
         code(evaluate_expression(
             expression,
@@ -5895,7 +5893,7 @@ fn std_collection_group_by_debits_one_step_per_scanned_value_without_duplicate_t
 
 #[test]
 fn recursive_calls_terminate_or_hit_shared_limits() {
-    let source = "fn factorial(n: Int) = if n == 0 { 1 } else { n * factorial(n - 1) };";
+    let source = include_str!("fixtures/recursive_calls_limits.orna");
     assert_eq!(
         call_module(source, "factorial(5)", Limits::default()).unwrap(),
         Value::int(120.into())
@@ -5911,11 +5909,11 @@ fn recursive_calls_terminate_or_hit_shared_limits() {
         },
     ] {
         assert_eq!(
-            code(call_module("fn recur() = recur();", "recur()", limits)),
+            code(call_module(source, "recur()", limits)),
             "ORNA-EVAL-LIMIT"
         );
     }
-    let source = "fn small() = 1 + 2; fn combined() = small() + small();";
+    let source = include_str!("fixtures/small_combined_function_step_budget.orna");
     assert_eq!(
         code(call_module(
             source,
@@ -5931,8 +5929,7 @@ fn recursive_calls_terminate_or_hit_shared_limits() {
 
 #[test]
 fn function_defaults_return_values_and_see_earlier_parameters() {
-    let source =
-        "fn compute(first: Int, second = first + 1, third = second + 1) = first + second + third;";
+    let source = include_str!("fixtures/function_defaults_values.orna");
     let arguments = Environment::from([("first".into(), Value::int(10.into()))]);
     assert_eq!(
         invoke(source, &arguments, Limits::default()).unwrap(),
@@ -5954,7 +5951,7 @@ fn function_defaults_return_values_and_see_earlier_parameters() {
 
 #[test]
 fn supplied_arguments_do_not_evaluate_their_defaults() {
-    let source = "fn choose(value: Int = 1 / 0) = value;";
+    let source = include_str!("fixtures/function_defaults_supplied_argument.orna");
     let arguments = Environment::from([("value".into(), Value::int(7.into()))]);
     assert_eq!(
         invoke(source, &arguments, Limits::default()).unwrap(),
@@ -5968,7 +5965,7 @@ fn supplied_arguments_do_not_evaluate_their_defaults() {
 
 #[test]
 fn function_defaults_and_body_share_a_single_step_budget() {
-    let source = "fn compute(first = 1 + 2, second = 3 + 4) = first + second;";
+    let source = include_str!("fixtures/function_defaults_step_budget.orna");
     let limits = Limits {
         max_steps: 6,
         ..Limits::default()
@@ -5991,15 +5988,15 @@ fn function_defaults_and_body_share_a_single_step_budget() {
 fn function_argument_admission_precedes_default_evaluation_and_redacts_errors() {
     for (source, arguments) in [
         (
-            "fn compute(first = 1 / 0, second: Int) = first;",
+            include_str!("fixtures/function_argument_missing_required.orna"),
             Environment::new(),
         ),
         (
-            "fn compute(first = 1 / 0) = first;",
+            include_str!("fixtures/function_argument_unknown_argument.orna"),
             Environment::from([("secret".into(), Value::int(1.into()))]),
         ),
         (
-            "fn compute(first: Int, first: Int) = first;",
+            include_str!("fixtures/function_argument_duplicate_parameter.orna"),
             Environment::from([("first".into(), Value::int(1.into()))]),
         ),
     ] {
@@ -6531,19 +6528,15 @@ fn finite_for_break_values_stop_iteration_and_preserve_loop_boundaries() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "if true { break 1; }",
+            include_str!("fixtures/control_flow_break_outside_loop.orna").trim(),
             &Environment::new(),
             Limits::default(),
         )),
         "ORNA-EVAL-UNSUPPORTED"
     );
     assert_eq!(
-        code(evaluate_expression(
-            "if true { while true { break 1; } }",
-            &Environment::new(),
-            Limits::default(),
-        )),
-        "ORNA-EVAL-UNSUPPORTED"
+        evaluate(include_str!("fixtures/control_flow_while_break_value.orna")),
+        Value::int(1.into())
     );
 }
 
@@ -7498,8 +7491,7 @@ fn matches_qualified_enum_patterns_from_retained_definitions_without_scope_senti
         ]),
     )]);
     let mut environment = Environment::from([("value".into(), waiting)]);
-    let source =
-        "case value { Availability.ready: \"ready\", Availability.waiting { reason }: \"waiting: {reason}\" }";
+    let source = include_str!("fixtures/qualified_enum_retained_definition.orna").trim();
     assert_eq!(
         evaluate_parsed_with_nominals(
             &parsed_expression(source),
@@ -7530,7 +7522,7 @@ fn matches_tagged_optional_some_and_null() {
         "value".into(),
         Value::option(Some(Value::new(Raw::Text("Kieran".into())).unwrap())).unwrap(),
     )]);
-    let source = "case value { Some(name): name, null: \"anonymous\" }";
+    let source = include_str!("fixtures/optional_some_null_case.orna").trim();
     assert_eq!(
         evaluate_expression(source, &environment, Limits::default()).unwrap(),
         Value::new(Raw::Text("Kieran".into())).unwrap()
@@ -9259,7 +9251,7 @@ fn relation_aggregate_calls_reject_invalid_arguments_and_values() {
 fn root_sum_and_min_remain_shadowable_by_admitted_functions() {
     assert_eq!(
         call_module(
-            "fn sum(value: Int) = value + 100; fn run() = sum(1);",
+            include_str!("fixtures/root_sum_shadow_function.orna"),
             "run()",
             Limits::default(),
         )
@@ -9268,7 +9260,7 @@ fn root_sum_and_min_remain_shadowable_by_admitted_functions() {
     );
     assert_eq!(
         call_module(
-            "fn min(value: Int) = value + 100; fn run() = min(1);",
+            include_str!("fixtures/root_min_shadow_function.orna"),
             "run()",
             Limits::default(),
         )
@@ -9304,7 +9296,7 @@ fn uuid7_is_root_effect_intrinsic_and_tag37_round_trips() {
         0xab, 0xcd,
     ];
     let expected = Value::uuid(bytes);
-    let functions = functions_from_source("fn main() = uuid7();");
+    let functions = functions_from_source(include_str!("fixtures/uuid7_main_effect.orna"));
     let mut effects = Uuid7Effects {
         calls: 0,
         arguments: Vec::new(),
@@ -9333,7 +9325,7 @@ fn uuid7_direct_evaluation_fails_closed_without_an_effect_handler() {
     assert_eq!(
         code(invoke_named(
             "main",
-            &functions_from_source("fn main() = uuid7();"),
+            &functions_from_source(include_str!("fixtures/uuid7_main_effect.orna")),
             &Environment::new(),
             Limits::default(),
         )),
@@ -9344,7 +9336,7 @@ fn uuid7_direct_evaluation_fails_closed_without_an_effect_handler() {
 #[test]
 fn uuid7_rejects_arguments_and_preserves_function_shadowing() {
     let expected = Value::uuid([0x42; 16]);
-    let functions = functions_from_source("fn main() = uuid7(1);");
+    let functions = functions_from_source(include_str!("fixtures/uuid7_with_argument.orna"));
     let mut effects = Uuid7Effects {
         calls: 0,
         arguments: Vec::new(),
@@ -9362,7 +9354,7 @@ fn uuid7_rejects_arguments_and_preserves_function_shadowing() {
     );
     assert_eq!(effects.calls, 0);
 
-    let functions = functions_from_source("fn uuid7() = 7; fn main() = uuid7();");
+    let functions = functions_from_source(include_str!("fixtures/uuid7_shadowed_by_function.orna"));
     let mut effects = Uuid7Effects {
         calls: 0,
         arguments: Vec::new(),

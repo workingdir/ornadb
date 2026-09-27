@@ -13,6 +13,7 @@ num-integer = "0.1.47"
 num-traits = "0.2.19"
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-project-v1 = { path = "../orna-project-v1" }
+orna-standard = { path = "../orna-standard" }
 orna-semantic-v1 = { path = "../orna-semantic-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
 orna-value-v1 = { path = "../orna-value-v1" }

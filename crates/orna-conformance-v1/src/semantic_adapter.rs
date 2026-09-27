@@ -25,7 +25,8 @@ use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     CheckpointResetRequest, FaultInjector, FaultPoint, ListStreamSource, NoFault, RequestIdentity,
     RequestStatus, RunObservationRegistration, RunningTableRequestContinuation, RuntimeError,
-    RuntimeIdentity, RuntimeState, StreamFailurePayload, StreamHandler, StreamHandlerResult,
+    RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState, StreamFailurePayload,
+    StreamHandler, StreamHandlerResult,
     StreamItem, StreamObservationRegistration, StreamRunControl, StreamRunOutcome, StreamSource,
     StreamSourcePoll, StreamStep, StreamTableCandidateValidator, StreamTableDeliveryError,
     StreamTableMutationBatch, StreamValidatedTableDeliveryCommit,
@@ -653,7 +654,7 @@ impl BoundedEvaluator {
                 outcome => return outcome,
             }
         }
-        let parsed = parse_module("fn sample() { var slot = 1; slot }");
+        let parsed = parse_module(include_str!("fixtures/let-rebinding-removed-var.orna"));
         if !parsed.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "ORNA091-E-VAR" && diagnostic.message.contains("`let`")
         }) {
@@ -1829,6 +1830,7 @@ pub struct TransactionalEvaluator {
     limits: EvaluatorLimits,
     database: TransactionDatabase,
     activation_time: Option<SystemTime>,
+    publication_rows: Option<RuntimePublicationMetadataRows>,
 }
 
 impl TransactionalEvaluator {
@@ -1839,11 +1841,17 @@ impl TransactionalEvaluator {
             limits,
             database: TransactionDatabase::default(),
             activation_time: None,
+            publication_rows: None,
         }
     }
 
     fn with_activation_time(mut self, activation_time: SystemTime) -> Self {
         self.activation_time = Some(activation_time);
+        self
+    }
+
+    fn with_publication_rows(mut self, rows: RuntimePublicationMetadataRows) -> Self {
+        self.publication_rows = Some(rows);
         self
     }
 
@@ -2003,6 +2011,7 @@ impl TransactionalEvaluator {
                 next_mutation: 0,
                 limits,
                 activation_time: self.activation_time,
+                publication_rows: self.publication_rows.clone(),
             };
             let mut budget = StepBudget::new(limits.max_steps);
             let result = invoke_named_with_effects_and_budget(
@@ -3573,10 +3582,12 @@ impl DurableTransactionalEvaluator {
             .map(String::as_str)
             .collect::<Vec<_>>();
         let snapshot = state.begin_table_activation(&tables).await?;
+        let publication_rows = state.publication_metadata_rows().await?;
         let context = snapshot.context();
         self.record_activation_time(context.activation_time());
         let mut evaluator = TransactionalEvaluator::new(entry, self.limits)
-            .with_activation_time(context.activation_time());
+            .with_activation_time(context.activation_time())
+            .with_publication_rows(publication_rows);
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = Value::decode(row).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -3650,10 +3661,17 @@ impl DurableTransactionalEvaluator {
                 return fail_observed_request_runtime(state, request, fingerprint, lease).await;
             }
         };
+        let publication_rows = match state.publication_metadata_rows().await {
+            Ok(rows) => rows,
+            Err(_) => {
+                return fail_observed_request_runtime(state, request, fingerprint, lease).await;
+            }
+        };
         let context = snapshot.context();
         self.record_activation_time(context.activation_time());
         let mut evaluator = TransactionalEvaluator::new(entry, self.limits)
-            .with_activation_time(context.activation_time());
+            .with_activation_time(context.activation_time())
+            .with_publication_rows(publication_rows);
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = match Value::decode(row) {
@@ -5321,6 +5339,7 @@ struct TableEffectHandler<'activation, 'runtime> {
     next_mutation: u64,
     limits: EvaluatorLimits,
     activation_time: Option<SystemTime>,
+    publication_rows: Option<RuntimePublicationMetadataRows>,
 }
 
 impl EffectHandler for TableEffectHandler<'_, '_> {
@@ -5334,6 +5353,23 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
         if max_rows == 0 {
             return Ok(Some(RelationPage {
                 rows: Vec::new(),
+                next: None,
+            }));
+        }
+        if let Some(row) = match (source, self.publication_rows.as_ref()) {
+            ("sys.Storage", Some(rows)) => Some(&rows.sys_storage),
+            ("sys.MaintenanceJob", Some(rows)) => Some(&rows.maintenance_job),
+            _ => None,
+        } {
+            if after.is_some() {
+                return Ok(Some(RelationPage {
+                    rows: Vec::new(),
+                    next: None,
+                }));
+            }
+            budget.debit(1)?;
+            return Ok(Some(RelationPage {
+                rows: vec![row.clone()],
                 next: None,
             }));
         }
@@ -9027,6 +9063,7 @@ mod transaction_admission_tests {
                     next_mutation: 0,
                     limits,
                     activation_time: None,
+                    publication_rows: None,
                 };
                 let mut budget = StepBudget::new(limits.max_steps);
 
@@ -9341,6 +9378,7 @@ mod transaction_admission_tests {
                     next_mutation: 0,
                     limits,
                     activation_time: None,
+                    publication_rows: None,
                 };
                 let mut budget = StepBudget::new(limits.max_steps);
                 let first = handler
@@ -9528,6 +9566,7 @@ mod transaction_admission_tests {
                     next_mutation: 0,
                     limits,
                     activation_time: None,
+                    publication_rows: None,
                 };
                 let mut budget = StepBudget::new(limits.max_steps);
                 let first = handler

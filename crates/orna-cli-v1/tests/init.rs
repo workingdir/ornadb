@@ -9,6 +9,10 @@ use tempfile::TempDir;
 const FORMAT: &str = ".orna/format.orna";
 const DATABASE: &str = ".orna/database.orna";
 const INIT_STATUS: &[u8] = b"initialized Orna repository\n";
+const PRESERVED_SOURCE: &[u8] = include_bytes!("fixtures/init/preserved.orna");
+const VERSION_1_SOURCE: &[u8] = include_bytes!("fixtures/init/version-1.orna");
+const VERSION_2_SOURCE: &[u8] = include_bytes!("fixtures/init/version-2.orna");
+const FOREIGN_SOURCE: &[u8] = include_bytes!("fixtures/init/foreign.orna");
 
 fn command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
@@ -151,9 +155,9 @@ fn commit_fixture_source(root: &Path, source: &[u8]) {
         root,
         &[
             "-c",
-            "user.name=Orna Test",
+            "user.name=kierandrewett",
             "-c",
-            "user.email=orna-test@example.invalid",
+            "user.email=kieran@drewett.dev",
             "commit",
             "--quiet",
             "-m",
@@ -209,7 +213,7 @@ fn init_directory_creates_a_git_repository_and_persists_one_uuid_identity() {
 #[test]
 fn init_defaults_to_current_directory_and_preserves_existing_source() {
     let fixture = tempfile::tempdir().expect("temporary fixture");
-    let source = b"pub fn preserved(): Int = 42;\n";
+    let source = PRESERVED_SOURCE;
     fs::write(fixture.path().join("main.orna"), source).expect("fixture source written");
 
     let output = run_init(fixture.path(), None);
@@ -246,7 +250,7 @@ fn init_accepts_a_dash_prefixed_directory_after_the_option_terminator() {
 fn malformed_or_partial_metadata_fails_without_changing_repository_state() {
     for partial in [false, true] {
         let fixture = initialized_repository();
-        commit_fixture_source(fixture.path(), b"pub fn preserved(): Int = 42;\n");
+        commit_fixture_source(fixture.path(), PRESERVED_SOURCE);
         let format = fixture.path().join(FORMAT);
         let database = fixture.path().join(DATABASE);
         if partial {
@@ -377,10 +381,10 @@ fn init_rejects_symlinked_metadata_or_source_without_touching_targets() {
 #[test]
 fn successful_reinitialization_preserves_git_and_metadata_state() {
     let fixture = initialized_repository();
-    commit_fixture_source(fixture.path(), b"pub fn version(): Int = 1;\n");
+    commit_fixture_source(fixture.path(), VERSION_1_SOURCE);
     fs::write(
         fixture.path().join("main.orna"),
-        b"pub fn version(): Int = 2;\n",
+        VERSION_2_SOURCE,
     )
     .expect("unstaged source written");
 
@@ -448,19 +452,16 @@ fn init_ignores_hostile_git_routing_variables() {
     let foreign = fixture.path().join("foreign");
     fs::create_dir(&foreign).expect("foreign repository directory");
     git_succeeds(&foreign, &["init", "--quiet"]);
-    fs::write(
-        foreign.join("tracked.orna"),
-        b"pub fn foreign(): Int = 7;\n",
-    )
+    fs::write(foreign.join("tracked.orna"), FOREIGN_SOURCE)
     .expect("foreign source written");
     git_succeeds(&foreign, &["add", "tracked.orna"]);
     git_succeeds(
         &foreign,
         &[
             "-c",
-            "user.name=Orna Test",
+            "user.name=kierandrewett",
             "-c",
-            "user.email=orna-test@example.invalid",
+            "user.email=kieran@drewett.dev",
             "commit",
             "--quiet",
             "-m",

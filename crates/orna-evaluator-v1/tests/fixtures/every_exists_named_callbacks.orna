@@ -1,0 +1,3 @@
+fn positive(value: Int) = value > 0;
+fn all(rows: [Int]) = every(rows, positive);
+fn any(rows: [Int]) = std.collection.exists(predicate: positive, rows: rows);

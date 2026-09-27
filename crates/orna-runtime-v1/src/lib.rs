@@ -24,16 +24,19 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use libsql::{Builder, Connection, Transaction, TransactionBehavior, params};
 use num_bigint::{BigInt, Sign};
 use orna_foundation_v1::{
-    AssertionRef, CanonicalSnapshot, CheckpointRef, CwdCapture, ExpressionRef, FailureRef,
-    InvocationRef, ObjectRef, OvbRaw, RowRef, RunRef, SYS_RUN_TABLE_ID, SYS_STREAM_TABLE_ID,
-    SafeText, Snapshot, SnapshotRef, SourceSpan, StreamRef, Value, checkpoint_reference,
-    failure_reference, invocation_reference, snapshot_reference, validate_checkpoint_reference,
-    validate_failure_reference, validate_invocation_reference, validate_run_reference,
-    validate_stream_reference,
+    AssertionRef, CanonicalSnapshot, CanonicalValue, CheckpointRef, CwdCapture, ExpressionRef,
+    FailureRef, InvocationRef, ObjectRef, OvbRaw, RowRef, RunRef, SYS_RUN_TABLE_ID,
+    SYS_STREAM_TABLE_ID, SafeText, Snapshot, SnapshotRef, SourceSpan, StreamRef, Value,
+    checkpoint_reference, failure_reference, invocation_reference, snapshot_reference,
+    validate_checkpoint_reference, validate_failure_reference, validate_invocation_reference,
+    validate_run_reference, validate_stream_reference,
 };
 #[cfg(test)]
 use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
-use orna_repository_v1::{CompactPublicationPending, CompactRuntimeReceipt, Repository};
+use orna_repository_v1::{
+    CommittedTreeEntryKind, CompactPublicationPending, CompactRuntimeReceipt, GitCommitRef,
+    Repository,
+};
 use orna_stream_v1::{
     AssertionDiagnosticCode, AssertionDiagnosticDetail, AssertionOwnerKind,
     AsyncFailurePayloadBackend, CancellationClassification, CheckpointPrecondition, CommitIntent,
@@ -50,7 +53,7 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 mod activation;
-pub use activation::{ActivationError, ActivationWork, run_table_activation};
+pub use activation::{ActivationError, ActivationWork, run_table_activation, with_activation_scope};
 mod catalogue;
 pub use catalogue::{
     CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
@@ -125,6 +128,15 @@ CREATE TABLE IF NOT EXISTS publication_commit (
     commit_id BLOB NOT NULL CHECK (length(commit_id) IN (40, 64)),
     compact_receipt BLOB
 );
+CREATE TABLE IF NOT EXISTS publication_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    compressed_target_bytes INTEGER NOT NULL DEFAULT 16777216
+        CHECK (compressed_target_bytes BETWEEN 8388608 AND 33554432),
+    published_mutations INTEGER NOT NULL DEFAULT 0 CHECK (published_mutations >= 0),
+    published_payload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (published_payload_bytes >= 0),
+    last_publication_ms INTEGER
+);
+INSERT OR IGNORE INTO publication_metadata (singleton) VALUES (1);
 CREATE TABLE IF NOT EXISTS request_ledger (
     session_id BLOB NOT NULL CHECK (length(session_id) = 16),
     request_id BLOB NOT NULL CHECK (length(request_id) = 16),
@@ -444,6 +456,111 @@ pub struct Mutation {
     pub id: [u8; 16],
     pub payload: Vec<u8>,
     pub digest: [u8; 32],
+}
+
+/// Effective publication policy used by the runtime's compact publisher.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimePublicationPolicy {
+    /// Target compressed bytes per publication batch.
+    pub compressed_target_bytes: u64,
+    /// Maximum encoded file size for the active compact profile.
+    pub max_file_bytes: u64,
+    /// Maximum age, in seconds, for a pending batch before publication.
+    pub max_pending_age_seconds: u64,
+}
+
+impl Default for RuntimePublicationPolicy {
+    fn default() -> Self {
+        Self {
+            compressed_target_bytes: 16 * 1024 * 1024,
+            max_file_bytes: 64 * 1024 * 1024,
+            max_pending_age_seconds: 60,
+        }
+    }
+}
+
+/// One coherent read of effective policy and durable publication state.
+///
+/// Published counters and `last_publication_ms` cover completions recorded
+/// since this metadata ledger was installed. Publications completed before
+/// installation cannot be reconstructed because their pending payloads have
+/// already been removed; a zero count after upgrading an older runtime means
+/// "not recorded by this ledger," not necessarily "never published."
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimePublicationMetadata {
+    pub publication_policy: RuntimePublicationPolicy,
+    /// Durable mutations waiting for publication.
+    pub pending_rows: u64,
+    /// Encoded payload bytes waiting for publication.
+    pub pending_bytes: u64,
+    /// Durable mutations consumed by completed publications.
+    pub published_rows: u64,
+    /// Encoded payload bytes consumed by completed publications.
+    pub published_bytes: u64,
+    /// Unix epoch milliseconds for the most recently completed publication.
+    pub last_publication_ms: Option<i64>,
+}
+
+/// Canonical publication field records corresponding to both system views.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimePublicationMetadataRows {
+    pub sys_storage: CanonicalValue,
+    pub maintenance_job: CanonicalValue,
+}
+
+fn publication_metadata_record(
+    metadata: &RuntimePublicationMetadata,
+) -> Result<CanonicalValue, RuntimeError> {
+    let policy = publication_text_map(vec![
+        (
+            "compressed_target_bytes",
+            OvbRaw::Int(metadata.publication_policy.compressed_target_bytes.into()),
+        ),
+        (
+            "max_file_bytes",
+            OvbRaw::Int(metadata.publication_policy.max_file_bytes.into()),
+        ),
+        (
+            "max_pending_age_seconds",
+            OvbRaw::Int(metadata.publication_policy.max_pending_age_seconds.into()),
+        ),
+    ]);
+    let last_publication = match metadata.last_publication_ms {
+        Some(milliseconds) => {
+            let seconds = milliseconds.div_euclid(1_000);
+            let nanoseconds = milliseconds.rem_euclid(1_000) * 1_000_000;
+            OvbRaw::Tag(
+                60002,
+                Box::new(OvbRaw::Array(vec![
+                    OvbRaw::Int(seconds.into()),
+                    OvbRaw::Int(nanoseconds.into()),
+                ])),
+            )
+        }
+        None => OvbRaw::Null,
+    };
+    CanonicalValue::new(publication_text_map(vec![
+        ("publication_policy", policy),
+        ("pending_rows", OvbRaw::Int(metadata.pending_rows.into())),
+        ("pending_bytes", OvbRaw::Int(metadata.pending_bytes.into())),
+        ("published_rows", OvbRaw::Int(metadata.published_rows.into())),
+        ("published_bytes", OvbRaw::Int(metadata.published_bytes.into())),
+        ("last_publication", last_publication),
+    ]))
+    .map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn publication_text_map(fields: Vec<(&str, OvbRaw)>) -> OvbRaw {
+    let mut fields = fields;
+    fields.sort_by(|(left, _), (right, _)| {
+        left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+    });
+    OvbRaw::Map(
+        fields
+            .into_iter()
+            .map(|(key, value)| (OvbRaw::Text(key.into()), value))
+            .collect(),
+    )
 }
 
 const MAX_TABLE_MUTATION_BYTES: usize = 16 * 1024 * 1024;
@@ -1355,6 +1472,7 @@ pub enum RuntimeError {
     StreamCheckpointStale,
     CheckpointNotReplayable,
     LeaseHeld,
+    AdminBusy,
     OwnerLost,
     RecoveryPending,
     StaleCapture { current: Box<CwdCapture> },
@@ -1364,6 +1482,7 @@ pub enum RuntimeError {
     ConflictingPublicationIntent,
     ConflictingPublicationCommit,
     InvalidPublicationCommit,
+    InvalidPublicationPolicy,
     CompactPublicationRequired,
     CompactReceiptKeyMismatch,
     InvalidCompactReceipt,
@@ -1386,6 +1505,7 @@ impl RuntimeError {
     /// internal to this crate's existing error convention.
     pub fn public_code(&self) -> Option<&'static str> {
         match self {
+            Self::AdminBusy => Some("sys.admin.busy"),
             Self::StreamCheckpointStale => Some("sys.checkpoint.conflict"),
             Self::CheckpointNotReplayable => Some("sys.checkpoint.not_replayable"),
             _ => None,
@@ -1404,6 +1524,7 @@ impl fmt::Display for RuntimeError {
             Self::StreamCheckpointStale => "stream checkpoint is stale",
             Self::CheckpointNotReplayable => "checkpoint target is not replayable",
             Self::LeaseHeld => "runtime writer is held",
+            Self::AdminBusy => "runtime administration callback is busy",
             Self::OwnerLost => "runtime writer ownership was lost",
             Self::RecoveryPending => "runtime takeover recovery is pending",
             Self::StaleCapture { .. } => "runtime capture is stale",
@@ -1413,6 +1534,7 @@ impl fmt::Display for RuntimeError {
             Self::ConflictingPublicationIntent => "conflicting publication intent",
             Self::ConflictingPublicationCommit => "conflicting publication commit",
             Self::InvalidPublicationCommit => "invalid publication commit",
+            Self::InvalidPublicationPolicy => "invalid publication policy",
             Self::CompactPublicationRequired => {
                 "compact-bound publication requires a runtime receipt"
             }
@@ -1810,6 +1932,353 @@ pub struct StreamCheckpointWatermark {
     pub capture: CwdCapture,
     pub transition: StreamCheckpointTransition,
 }
+
+const CHECKPOINT_SNAPSHOT_HEADER: &[u8] = b"ORNA-CHECKPOINT-SNAPSHOT/";
+const CHECKPOINT_SNAPSHOT_VERSION: u64 = 1;
+
+/// A checkpoint snapshot watermark decoded without local CWD state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PortableStreamCheckpointWatermark {
+    pub checkpoint: StreamCheckpoint,
+    pub transition: StreamCheckpointTransition,
+}
+
+/// Failure to encode or decode a tracked checkpoint snapshot watermark.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckpointSnapshotCodecError {
+    InvalidMagic,
+    InvalidHeader,
+    UnsupportedVersion,
+    Truncated,
+    TrailingBytes,
+    InvalidEncoding,
+    InvalidComponent,
+    InvalidPartitionMarker,
+    InvalidTransition,
+    ZeroCheckpointVersion,
+    MissingCommittedPosition,
+}
+
+impl fmt::Display for CheckpointSnapshotCodecError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidMagic => "invalid checkpoint snapshot magic",
+            Self::InvalidHeader => "invalid checkpoint snapshot header",
+            Self::UnsupportedVersion => "unsupported checkpoint snapshot version",
+            Self::Truncated => "truncated checkpoint snapshot",
+            Self::TrailingBytes => "trailing checkpoint snapshot bytes",
+            Self::InvalidEncoding => "invalid checkpoint snapshot encoding",
+            Self::InvalidComponent => "invalid checkpoint snapshot component",
+            Self::InvalidPartitionMarker => "invalid checkpoint snapshot partition marker",
+            Self::InvalidTransition => "invalid checkpoint snapshot transition",
+            Self::ZeroCheckpointVersion => {
+                "checkpoint snapshot watermark version must be positive"
+            }
+            Self::MissingCommittedPosition => "checkpoint snapshot has no committed position",
+        })
+    }
+}
+
+impl std::error::Error for CheckpointSnapshotCodecError {}
+
+/// Encodes the portable, committed portion of a stream watermark for a
+/// versioned `.orna/checkpoints/` snapshot file. The local CWD capture is
+/// intentionally excluded.
+pub fn encode_checkpoint_snapshot_watermark(
+    watermark: &StreamCheckpointWatermark,
+) -> Result<Vec<u8>, CheckpointSnapshotCodecError> {
+    let checkpoint = &watermark.checkpoint;
+    if checkpoint.version == 0 {
+        return Err(CheckpointSnapshotCodecError::ZeroCheckpointVersion);
+    }
+    let committed = checkpoint
+        .committed
+        .as_ref()
+        .ok_or(CheckpointSnapshotCodecError::MissingCommittedPosition)?;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(CHECKPOINT_SNAPSHOT_HEADER);
+    append_decimal_line(&mut bytes, CHECKPOINT_SNAPSHOT_VERSION);
+
+    let key = &checkpoint.key;
+    append_component(&mut bytes, &key.consumer.principal)?;
+    append_component(&mut bytes, &key.consumer.root)?;
+    append_component(&mut bytes, &key.consumer.function)?;
+    append_component(&mut bytes, &key.consumer.binding)?;
+    append_component(&mut bytes, &key.source_format)?;
+    append_component(&mut bytes, &key.source)?;
+    append_component(&mut bytes, &key.partition_format)?;
+    match &key.partition {
+        None => bytes.extend_from_slice(b"0\n"),
+        Some(partition) => {
+            bytes.extend_from_slice(b"1\n");
+            append_component(&mut bytes, partition)?;
+        }
+    }
+    append_component(&mut bytes, &key.position_format)?;
+    append_decimal_line(&mut bytes, checkpoint.version);
+    bytes.push(match watermark.transition {
+        StreamCheckpointTransition::Complete => b'C',
+        StreamCheckpointTransition::Skip => b'S',
+    });
+    bytes.push(b'\n');
+    append_component(&mut bytes, &committed.token)?;
+    Ok(bytes)
+}
+
+/// Decodes one canonical snapshot watermark into a portable checkpoint
+/// record. The result contains no local CWD capture or runtime identity.
+pub fn decode_checkpoint_snapshot_watermark(
+    bytes: &[u8],
+) -> Result<PortableStreamCheckpointWatermark, CheckpointSnapshotCodecError> {
+    let mut reader = CheckpointSnapshotReader { bytes, cursor: 0 };
+    if reader.take(CHECKPOINT_SNAPSHOT_HEADER.len())? != CHECKPOINT_SNAPSHOT_HEADER {
+        return Err(CheckpointSnapshotCodecError::InvalidMagic);
+    }
+    let version = reader.decimal(b'\n').map_err(|error| match error {
+        CheckpointSnapshotCodecError::InvalidEncoding => {
+            CheckpointSnapshotCodecError::InvalidHeader
+        }
+        other => other,
+    })?;
+    if version != CHECKPOINT_SNAPSHOT_VERSION {
+        return Err(CheckpointSnapshotCodecError::UnsupportedVersion);
+    }
+
+    let consumer = ConsumerIdentity {
+        principal: reader.component()?,
+        root: reader.component()?,
+        function: reader.component()?,
+        binding: reader.component()?,
+    };
+    let source_format = reader.component()?;
+    let source = reader.component()?;
+    let partition_format = reader.component()?;
+    let partition = match reader.byte()? {
+        b'0' => {
+            reader.expect_newline()?;
+            None
+        }
+        b'1' => {
+            reader.expect_newline()?;
+            Some(reader.component()?)
+        }
+        _ => return Err(CheckpointSnapshotCodecError::InvalidPartitionMarker),
+    };
+    let position_format = reader.component()?;
+    let version = reader.decimal(b'\n')?;
+    if version == 0 {
+        return Err(CheckpointSnapshotCodecError::ZeroCheckpointVersion);
+    }
+    let transition = match reader.byte()? {
+        b'C' => StreamCheckpointTransition::Complete,
+        b'S' => StreamCheckpointTransition::Skip,
+        _ => return Err(CheckpointSnapshotCodecError::InvalidTransition),
+    };
+    reader.expect_newline()?;
+    if reader.cursor == bytes.len() {
+        return Err(CheckpointSnapshotCodecError::MissingCommittedPosition);
+    }
+    let committed = Position {
+        token: reader.component()?,
+    };
+    if reader.cursor != bytes.len() {
+        return Err(CheckpointSnapshotCodecError::TrailingBytes);
+    }
+
+    Ok(PortableStreamCheckpointWatermark {
+        checkpoint: StreamCheckpoint {
+            key: CheckpointKey {
+                consumer,
+                source_format,
+                source,
+                partition_format,
+                partition,
+                position_format,
+            },
+            version,
+            committed: Some(committed),
+        },
+        transition,
+    })
+}
+
+const CHECKPOINT_SNAPSHOT_MAX_TREE_ENTRIES: usize = 4_096;
+const CHECKPOINT_SNAPSHOT_MAX_RECORD_BYTES: usize = 64 * 1024;
+const CHECKPOINT_SNAPSHOT_DIRECTORY: &str = ".orna/checkpoints";
+
+/// Reads the unique portable checkpoint watermark for `key` from the selected
+/// immutable commit. It never consults HEAD, the index, the worktree, or
+/// runtime state.
+pub fn read_checkpoint_snapshot_watermark(
+    repository: &Repository,
+    selected_commit: &GitCommitRef,
+    key: &CheckpointKey,
+) -> Result<Option<PortableStreamCheckpointWatermark>, RuntimeError> {
+    read_checkpoint_snapshot_watermark_bounded(
+        repository,
+        selected_commit,
+        key,
+        CHECKPOINT_SNAPSHOT_MAX_TREE_ENTRIES,
+        CHECKPOINT_SNAPSHOT_MAX_RECORD_BYTES,
+    )
+}
+
+fn read_checkpoint_snapshot_watermark_bounded(
+    repository: &Repository,
+    selected_commit: &GitCommitRef,
+    key: &CheckpointKey,
+    max_tree_entries: usize,
+    max_record_bytes: usize,
+) -> Result<Option<PortableStreamCheckpointWatermark>, RuntimeError> {
+    if max_tree_entries == 0 || max_record_bytes == 0 {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+
+    let entries = repository
+        .list_committed_tree(selected_commit, max_tree_entries)
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if entries.len() > max_tree_entries {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+
+    let checkpoint_directory = Path::new(CHECKPOINT_SNAPSHOT_DIRECTORY);
+    let mut matching = None;
+    for entry in entries {
+        let path = entry.path().as_path();
+        let Ok(relative_path) = path.strip_prefix(checkpoint_directory) else {
+            continue;
+        };
+        if relative_path.as_os_str().is_empty() {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        match entry.kind() {
+            CommittedTreeEntryKind::File { .. } => {}
+            CommittedTreeEntryKind::Symlink | CommittedTreeEntryKind::Submodule => {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+        }
+
+        let bytes = repository
+            .read_committed_file(selected_commit, path, max_record_bytes)
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let watermark =
+            decode_checkpoint_snapshot_watermark(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if watermark.checkpoint.key == *key {
+            if matching.is_some() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            matching = Some(watermark);
+        }
+    }
+
+    Ok(matching)
+}
+
+fn append_component(
+    bytes: &mut Vec<u8>,
+    component: &Component,
+) -> Result<(), CheckpointSnapshotCodecError> {
+    let value = component.as_str();
+    let length = u32::try_from(value.len())
+        .map_err(|_| CheckpointSnapshotCodecError::InvalidComponent)?;
+    append_decimal(bytes, u64::from(length));
+    bytes.extend_from_slice(value.as_bytes());
+    bytes.push(b'\n');
+    Ok(())
+}
+
+fn append_decimal(bytes: &mut Vec<u8>, value: u64) {
+    append_decimal_delimited(bytes, value, b':');
+}
+
+fn append_decimal_line(bytes: &mut Vec<u8>, value: u64) {
+    append_decimal_delimited(bytes, value, b'\n');
+}
+
+fn append_decimal_delimited(bytes: &mut Vec<u8>, value: u64, delimiter: u8) {
+    let mut buffer = [0; 20];
+    let mut start = buffer.len();
+    let mut remaining = value;
+    loop {
+        start -= 1;
+        buffer[start] = b'0' + (remaining % 10) as u8;
+        remaining /= 10;
+        if remaining == 0 {
+            break;
+        }
+    }
+    bytes.extend_from_slice(&buffer[start..]);
+    bytes.push(delimiter);
+}
+
+struct CheckpointSnapshotReader<'a> {
+    bytes: &'a [u8],
+    cursor: usize,
+}
+
+impl CheckpointSnapshotReader<'_> {
+    fn take(&mut self, length: usize) -> Result<&[u8], CheckpointSnapshotCodecError> {
+        let end = self
+            .cursor
+            .checked_add(length)
+            .ok_or(CheckpointSnapshotCodecError::Truncated)?;
+        let value = self
+            .bytes
+            .get(self.cursor..end)
+            .ok_or(CheckpointSnapshotCodecError::Truncated)?;
+        self.cursor = end;
+        Ok(value)
+    }
+
+    fn byte(&mut self) -> Result<u8, CheckpointSnapshotCodecError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn expect_newline(&mut self) -> Result<(), CheckpointSnapshotCodecError> {
+        if self.byte()? != b'\n' {
+            return Err(CheckpointSnapshotCodecError::InvalidEncoding);
+        }
+        Ok(())
+    }
+
+    fn decimal(
+        &mut self,
+        delimiter: u8,
+    ) -> Result<u64, CheckpointSnapshotCodecError> {
+        let start = self.cursor;
+        while let Some(&byte) = self.bytes.get(self.cursor) {
+            if byte == delimiter {
+                let digits = &self.bytes[start..self.cursor];
+                if digits.is_empty() || (digits.len() > 1 && digits[0] == b'0') {
+                    return Err(CheckpointSnapshotCodecError::InvalidEncoding);
+                }
+                let digits = std::str::from_utf8(digits)
+                    .map_err(|_| CheckpointSnapshotCodecError::InvalidEncoding)?;
+                let value = digits
+                    .parse()
+                    .map_err(|_| CheckpointSnapshotCodecError::InvalidEncoding)?;
+                self.cursor += 1;
+                return Ok(value);
+            }
+            if !byte.is_ascii_digit() {
+                return Err(CheckpointSnapshotCodecError::InvalidEncoding);
+            }
+            self.cursor += 1;
+        }
+        Err(CheckpointSnapshotCodecError::Truncated)
+    }
+
+    fn component(&mut self) -> Result<Component, CheckpointSnapshotCodecError> {
+        let length = usize::try_from(self.decimal(b':')?)
+            .map_err(|_| CheckpointSnapshotCodecError::InvalidEncoding)?;
+        let value = std::str::from_utf8(self.take(length)?)
+            .map_err(|_| CheckpointSnapshotCodecError::InvalidComponent)?
+            .to_owned();
+        self.expect_newline()?;
+        Component::new(value).map_err(|_| CheckpointSnapshotCodecError::InvalidComponent)
+    }
+}
+
 
 /// A provider failure retained against the exact checkpoint that was being
 /// polled. It has no delivery identity because no item was admitted.
@@ -2453,6 +2922,7 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         Self::initialize_runtime_meta(&connection, identity, initial_digest).await?;
+        migrate_publication_policy_schema(&connection).await?;
         migrate_compact_receipt_schema(&connection).await?;
         let (compact_receipt_signing_key, compact_receipt_public_key) =
             initialize_compact_receipt_key(&connection).await?;
@@ -3343,6 +3813,89 @@ impl RuntimeState {
         .and_then(admin_stream_result)
     }
 
+    /// Resolves an admitted portable `sys.StreamRef` against the live writer's
+    /// owner-fenced current-runtime observations, then pauses that exact stream
+    /// only while its activation capture remains current.
+    pub async fn pause_stream_reference_at_capture(
+        &self,
+        lease: WriterLease,
+        reference: Value,
+        reason: Option<String>,
+        expected_capture: &CwdCapture,
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        if activation::runtime_activation_active(self) {
+            let reason_redacted = reason
+                .as_deref()
+                .map(admin_argument_redacted)
+                .unwrap_or(false);
+            let reason_digest = reason
+                .as_deref()
+                .map(|value| admin_digest(value.as_bytes()))
+                .unwrap_or_else(|| "none".into());
+            let reason_marker = match reason.as_deref() {
+                None => "<none>",
+                Some(_) if reason_redacted => "<redacted>",
+                Some(_) => "<safe>",
+            };
+            let reference_digest = reference
+                .encode()
+                .ok()
+                .map(|encoded| admin_digest(&encoded))
+                .unwrap_or_else(|| "unavailable".into());
+            let descriptor = AdminInvocationDescriptor {
+                invocation_id: Uuid::new_v4().into_bytes(),
+                function: if reason.is_some() {
+                    "sys.admin.pause_stream_with_reason"
+                } else {
+                    "sys.admin.pause_stream"
+                },
+                safe_arguments: format!(
+                    "stream_ref_digest={reference_digest};reason_digest={reason_digest};reason={reason_marker}"
+                ),
+                redacted: reason_redacted,
+            };
+            return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
+        }
+        let row = decode_row_ref(
+            reference
+                .encode()
+                .map_err(|_| RuntimeError::InvalidObservationReference)?,
+        )?;
+        let requested = validate_stream_reference(row, expected_capture)
+            .map_err(|_| RuntimeError::InvalidObservationReference)?;
+        let fence = self.runtime_observation_fence(lease).await?;
+        if fence.capture() != expected_capture {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(fence.capture().clone()),
+            });
+        }
+        let view = self.current_runtime_observations(&fence).await?;
+        let key = view
+            .streams
+            .iter()
+            .find_map(|stream| {
+                let run = view.runs.iter().find(|run| run.id == stream.run)?;
+                (stream.reference(run).ok().as_ref() == Some(&requested))
+                    .then(|| stream.checkpoint.clone())
+            })
+            .ok_or(RuntimeError::InvalidObservationReference)?;
+        match reason {
+            Some(reason) => {
+                self.pause_stream_with_reason_at_capture(
+                    lease,
+                    key,
+                    reason,
+                    Some(expected_capture),
+                )
+                .await
+            }
+            None => {
+                self.pause_stream_at_capture(lease, key, Some(expected_capture))
+                    .await
+            }
+        }
+    }
+
     /// Applies a writer-fenced pause while retaining its supplied reason in
     /// the same local transaction that admits the pause. A no-op pause never
     /// overwrites the reason already attached to the existing pause.
@@ -3431,9 +3984,13 @@ impl RuntimeState {
         if provider.checkpoint_key() != request.key || !provider.supports_reset_target(&request.to)
         {
             let error = RuntimeError::CheckpointNotReplayable;
-            self.record_failed_admin_invocation(&operation, lease, &error)
-                .await?;
-            return Err(error);
+            return match self
+                .record_failed_admin_invocation(&operation, lease, &error)
+                .await
+            {
+                Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
+                Err(audit_error) => Err(audit_error),
+            };
         }
         self.apply_admin_invocation(lease, expected_capture, operation)
             .await
@@ -3511,6 +4068,9 @@ impl RuntimeState {
         operation: AdminInvocationOperation,
     ) -> Result<AdminOperationResult, RuntimeError> {
         let descriptor = admin_invocation_descriptor(&operation);
+        if activation::runtime_activation_active(self) {
+            return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
+        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3551,9 +4111,13 @@ impl RuntimeState {
             }
             Err(error) => {
                 drop(transaction);
-                self.record_failed_admin_descriptor(&descriptor, lease, &error)
-                    .await?;
-                Err(error)
+                match self
+                    .record_failed_admin_descriptor(&descriptor, lease, &error)
+                    .await
+                {
+                    Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
+                    Err(audit_error) => Err(audit_error),
+                }
             }
         }
     }
@@ -3569,6 +4133,21 @@ impl RuntimeState {
             .await
     }
 
+    async fn reentrant_admin_busy_error(
+        &self,
+        descriptor: &AdminInvocationDescriptor,
+        lease: WriterLease,
+    ) -> RuntimeError {
+        let error = RuntimeError::AdminBusy;
+        match self
+            .record_failed_admin_descriptor(descriptor, lease, &error)
+            .await
+        {
+            Ok(()) | Err(RuntimeError::OwnerLost) => error,
+            Err(audit_error) => audit_error,
+        }
+    }
+
     async fn record_failed_admin_descriptor(
         &self,
         descriptor: &AdminInvocationDescriptor,
@@ -3580,6 +4159,7 @@ impl RuntimeState {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&transaction, lease).await?;
         let observed_generation = capture_tx(&transaction)
             .await
             .ok()
@@ -4748,6 +5328,9 @@ impl RuntimeState {
         self.require_owner(&self.connection, writer)
             .await
             .map_err(StreamStepError::Runtime)?;
+        ensure_stream_position_format_compatible(&self.connection, key)
+            .await
+            .map_err(StreamStepError::Runtime)?;
         let checkpoint = self
             .stream_backend(writer)
             .checkpoint_async(key)
@@ -4865,19 +5448,15 @@ impl RuntimeState {
                     return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
                 }
             };
-            if control.cancelled() {
-                self.release_stream_lease(writer, lease.clone()).await?;
-                return Ok(StreamStep::Cancelled { checkpoint });
-            }
+            // Delivery admission is the inter-item cancellation boundary.
+            // Once admitted, start this activation and let the bounded
+            // execution check below roll it back if cancellation interrupts
+            // its open work.
             let failure_payload = source.failure_payload(&item);
             if matches!(&failure_payload, StreamFailurePayload::Unavailable) {
                 self.release_stream_lease_best_effort(writer, lease.clone())
                     .await;
                 return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
-            }
-            if control.cancelled() {
-                self.release_stream_lease(writer, lease.clone()).await?;
-                return Ok(StreamStep::Cancelled { checkpoint });
             }
             (lease, failure_payload)
         };
@@ -5280,6 +5859,9 @@ impl RuntimeState {
                 RuntimeError::StreamIdentityMismatch,
             ));
         }
+        ensure_stream_position_format_compatible(&self.connection, key)
+            .await
+            .map_err(StreamStepError::Runtime)?;
         let mut checkpoint = self
             .stream_backend(writer)
             .checkpoint_async(key)
@@ -7238,6 +7820,106 @@ impl RuntimeState {
         Ok(out)
     }
 
+    /// Returns the number of durable mutations still in the unpublished CWD tail.
+    ///
+    /// This summary query avoids loading mutation payloads when a caller only
+    /// needs to report whether and how much local state remains unpublished.
+    pub async fn pending_count(&self) -> Result<usize, RuntimeError> {
+        let mut rows = self
+            .connection
+            .query("SELECT COUNT(*) FROM pending_mutation", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let count: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        usize::try_from(count).map_err(|_| RuntimeError::RecoveryInvalid)
+    }
+
+    /// Reads effective publication policy and pending/published state from one
+    /// SQLite statement so maintenance and storage projections share a
+    /// coherent snapshot. Row and byte counts describe durable runtime
+    /// mutation payloads, not physical compact-file layout.
+    pub async fn set_publication_compressed_target_bytes(
+        &self,
+        compressed_target_bytes: u64,
+    ) -> Result<(), RuntimeError> {
+        if !(8 * 1024 * 1024..=32 * 1024 * 1024).contains(&compressed_target_bytes) {
+            return Err(RuntimeError::InvalidPublicationPolicy);
+        }
+        self.connection
+            .execute(
+                "UPDATE publication_metadata SET compressed_target_bytes = ?1 \
+                 WHERE singleton = 1",
+                [i64::try_from(compressed_target_bytes)
+                    .map_err(|_| RuntimeError::InvalidPublicationPolicy)?],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(())
+    }
+
+    pub async fn publication_metadata(&self) -> Result<RuntimePublicationMetadata, RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT (SELECT COUNT(*) FROM pending_mutation), \
+                 (SELECT COALESCE(SUM(length(payload)), 0) FROM pending_mutation), \
+                 compressed_target_bytes, published_mutations, published_payload_bytes, last_publication_ms \
+                 FROM publication_metadata WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let pending_rows: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let pending_bytes: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let compressed_target_bytes: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let compressed_target_bytes = u64::try_from(compressed_target_bytes)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if !(8 * 1024 * 1024..=32 * 1024 * 1024).contains(&compressed_target_bytes) {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let published_rows: i64 = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let published_bytes: i64 = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        Ok(RuntimePublicationMetadata {
+            publication_policy: RuntimePublicationPolicy {
+                compressed_target_bytes,
+                ..RuntimePublicationPolicy::default()
+            },
+            pending_rows: u64::try_from(pending_rows).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            pending_bytes: u64::try_from(pending_bytes)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            published_rows: u64::try_from(published_rows)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            published_bytes: u64::try_from(published_bytes)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            last_publication_ms: row
+                .get(5)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        })
+    }
+
+    /// Reads one durable snapshot and projects its publication fields into
+    /// records corresponding to the declared `sys.Storage` and
+    /// `sys.MaintenanceJob` views.
+    pub async fn publication_metadata_rows(
+        &self,
+    ) -> Result<RuntimePublicationMetadataRows, RuntimeError> {
+        let row = publication_metadata_record(&self.publication_metadata().await?)?;
+        Ok(RuntimePublicationMetadataRows {
+            sys_storage: row.clone(),
+            maintenance_job: row,
+        })
+    }
+
     /// Returns only the pending mutation prefix covered by a persisted freeze.
     /// Mutations appended after the freeze are intentionally excluded.
     pub async fn pending_through(
@@ -7642,6 +8324,30 @@ impl RuntimeState {
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
             return Ok(existing);
         }
+        let mut batch_rows = tx
+            .query(
+                "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) \
+                 FROM pending_mutation WHERE sequence <= ?1",
+                params![upper],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let batch = batch_rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let published_rows: i64 = batch.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let published_bytes: i64 = batch.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        tx.execute(
+            "UPDATE publication_metadata SET \
+             published_mutations = published_mutations + ?1, \
+             published_payload_bytes = published_payload_bytes + ?2, \
+             last_publication_ms = ?3 WHERE singleton = 1",
+            params![published_rows, published_bytes, now_ms()?],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
         tx.execute(
             "INSERT INTO publication_commit (intent_id, commit_id, compact_receipt)
              VALUES (?1, ?2, ?3)",
@@ -7736,6 +8442,30 @@ impl RuntimeState {
             tx.execute(
                 "INSERT INTO publication_commit (intent_id, commit_id) VALUES (?1, ?2)",
                 params![freeze.intent_id.to_vec(), commit_id.as_bytes().to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let mut batch_rows = tx
+                .query(
+                    "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) \
+                     FROM pending_mutation WHERE sequence <= ?1",
+                    params![upper],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let batch = batch_rows
+                .next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+                .ok_or(RuntimeError::RecoveryInvalid)?;
+            let published_rows: i64 = batch.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let published_bytes: i64 = batch.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            tx.execute(
+                "UPDATE publication_metadata SET \
+                 published_mutations = published_mutations + ?1, \
+                 published_payload_bytes = published_payload_bytes + ?2, \
+                 last_publication_ms = ?3 WHERE singleton = 1",
+                params![published_rows, published_bytes, now_ms()?],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -11243,6 +11973,49 @@ async fn ensure_stream_checkpoint(
     Ok(())
 }
 
+/// Position formats are part of the checkpoint encoding, while the natural
+/// stream identity is consumer/source/partition. Reusing that stream under a
+/// different position format would otherwise create a second empty row and
+/// silently restart provider progress. Require an explicit migration before
+/// the runner can poll such a provider.
+async fn ensure_stream_position_format_compatible(
+    connection: &Connection,
+    key: &CheckpointKey,
+) -> Result<(), RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT 1 FROM stream_checkpoint
+             WHERE consumer_principal = ?1 AND consumer_root = ?2
+               AND consumer_function = ?3 AND consumer_binding = ?4
+               AND source_format = ?5 AND source = ?6
+               AND partition_format = ?7 AND partition IS ?8
+               AND position_format != ?9
+             LIMIT 1",
+            params![
+                key.consumer.principal.as_str().to_owned(),
+                key.consumer.root.as_str().to_owned(),
+                key.consumer.function.as_str().to_owned(),
+                key.consumer.binding.as_str().to_owned(),
+                key.source_format.as_str().to_owned(),
+                key.source.as_str().to_owned(),
+                key.partition_format.as_str().to_owned(),
+                key.partition.as_ref().map(|value| value.as_str().to_owned()),
+                key.position_format.as_str().to_owned(),
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some()
+    {
+        return Err(RuntimeError::StreamIdentityMismatch);
+    }
+    Ok(())
+}
+
 async fn load_stream_checkpoint_state(
     connection: &Connection,
     key: &CheckpointKey,
@@ -14111,6 +14884,33 @@ async fn append_mutations_with_catalogue_tx(
     Ok(capture)
 }
 
+async fn migrate_publication_policy_schema(connection: &Connection) -> Result<(), RuntimeError> {
+    let mut columns = connection
+        .query("PRAGMA table_info(publication_metadata)", ())
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    while let Some(row) = columns
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let name: String = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if name == "compressed_target_bytes" {
+            return Ok(());
+        }
+    }
+    connection
+        .execute(
+            "ALTER TABLE publication_metadata ADD COLUMN compressed_target_bytes \
+             INTEGER NOT NULL DEFAULT 16777216 \
+             CHECK (compressed_target_bytes BETWEEN 8388608 AND 33554432)",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
+}
+
 async fn migrate_compact_receipt_schema(connection: &Connection) -> Result<(), RuntimeError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -14439,6 +15239,405 @@ mod tests {
         sync::atomic::{AtomicBool, Ordering},
     };
     use tempfile::TempDir;
+
+    fn checkpoint_snapshot_component(value: &str) -> Component {
+        Component::new(value).expect("test checkpoint component is valid")
+    }
+
+    fn checkpoint_snapshot_key(partition: Option<&str>) -> CheckpointKey {
+        CheckpointKey {
+            consumer: ConsumerIdentity {
+                principal: checkpoint_snapshot_component("urn:consumer:ledger"),
+                root: checkpoint_snapshot_component("app.root"),
+                function: checkpoint_snapshot_component("processor.consume"),
+                binding: checkpoint_snapshot_component("input.orders"),
+            },
+            source_format: checkpoint_snapshot_component("kafka/v1"),
+            source: checkpoint_snapshot_component("orders/primary"),
+            partition_format: checkpoint_snapshot_component("kafka-partition/v1"),
+            partition: partition.map(checkpoint_snapshot_component),
+            position_format: checkpoint_snapshot_component("offset/utf8"),
+        }
+    }
+
+    fn checkpoint_snapshot_capture(
+        database: u8,
+        runtime: u8,
+        generation: u64,
+        digest: u8,
+    ) -> CwdCapture {
+        CwdCapture::new(
+            Snapshot::cwd(
+                [database; 16],
+                [runtime; 16],
+                BigInt::from(generation),
+            )
+            .unwrap(),
+            [digest; 32],
+        )
+        .unwrap()
+    }
+
+    fn checkpoint_snapshot_watermark(
+        partition: Option<&str>,
+        version: u64,
+        position: &str,
+        transition: StreamCheckpointTransition,
+    ) -> StreamCheckpointWatermark {
+        StreamCheckpointWatermark {
+            checkpoint: StreamCheckpoint {
+                key: checkpoint_snapshot_key(partition),
+                version,
+                committed: Some(Position {
+                    token: checkpoint_snapshot_component(position),
+                }),
+            },
+            capture: checkpoint_snapshot_capture(11, 12, 13, 14),
+            transition,
+        }
+    }
+
+    #[test]
+    fn checkpoint_snapshot_codec_matches_golden_metadata_fixture() {
+        let watermark = checkpoint_snapshot_watermark(
+            Some("tenant:west/17"),
+            42,
+            "offset:0001/β",
+            StreamCheckpointTransition::Complete,
+        );
+        let encoded = encode_checkpoint_snapshot_watermark(&watermark).unwrap();
+        assert_eq!(
+            encoded.as_slice(),
+            include_bytes!("../tests/fixtures/checkpoint_snapshot_v1.orna")
+        );
+    }
+
+    #[test]
+    fn checkpoint_snapshot_codec_round_trips_full_portable_identity() {
+        for (partition, version, position, transition) in [
+            (
+                Some("tenant:west/17"),
+                42,
+                "offset:0001/β",
+                StreamCheckpointTransition::Complete,
+            ),
+            (
+                None,
+                1,
+                "opaque:one",
+                StreamCheckpointTransition::Skip,
+            ),
+            (
+                Some("partition/β"),
+                u64::MAX,
+                "opaque:β/000",
+                StreamCheckpointTransition::Skip,
+            ),
+        ] {
+            let watermark =
+                checkpoint_snapshot_watermark(partition, version, position, transition);
+            let portable = PortableStreamCheckpointWatermark {
+                checkpoint: watermark.checkpoint.clone(),
+                transition,
+            };
+            let encoded = encode_checkpoint_snapshot_watermark(&watermark).unwrap();
+            assert_eq!(
+                decode_checkpoint_snapshot_watermark(&encoded).unwrap(),
+                portable
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_snapshot_codec_is_stable_and_excludes_local_capture() {
+        let watermark = checkpoint_snapshot_watermark(
+            Some("tenant:west/17"),
+            42,
+            "offset:0001/β",
+            StreamCheckpointTransition::Complete,
+        );
+        let mut another_local_capture = watermark.clone();
+        another_local_capture.capture = checkpoint_snapshot_capture(91, 92, 93, 94);
+
+        let first = encode_checkpoint_snapshot_watermark(&watermark).unwrap();
+        assert_eq!(first, encode_checkpoint_snapshot_watermark(&watermark).unwrap());
+        assert_eq!(
+            first,
+            encode_checkpoint_snapshot_watermark(&another_local_capture).unwrap()
+        );
+    }
+
+    #[test]
+    fn checkpoint_snapshot_codec_rejects_malformed_and_incomplete_records() {
+        let fixture = include_bytes!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        let mut unsupported_version = fixture.to_vec();
+        unsupported_version[CHECKPOINT_SNAPSHOT_HEADER.len()] = b'2';
+        assert_eq!(
+            decode_checkpoint_snapshot_watermark(&unsupported_version),
+            Err(CheckpointSnapshotCodecError::UnsupportedVersion)
+        );
+        let checkpoint_version_offset = fixture
+            .windows(b"42\nC\n".len())
+            .position(|window| window == b"42\nC\n")
+            .unwrap();
+        let mut zero_version_record = fixture.to_vec();
+        zero_version_record[checkpoint_version_offset] = b'0';
+        zero_version_record.remove(checkpoint_version_offset + 1);
+        assert_eq!(
+            decode_checkpoint_snapshot_watermark(&zero_version_record),
+            Err(CheckpointSnapshotCodecError::ZeroCheckpointVersion)
+        );
+
+        let transition_end = fixture
+            .windows(b"42\nC\n".len())
+            .position(|window| window == b"42\nC\n")
+            .unwrap()
+            + b"42\nC\n".len();
+        for length in 0..fixture.len() {
+            if length == transition_end {
+                continue;
+            }
+            assert_eq!(
+                decode_checkpoint_snapshot_watermark(&fixture[..length]),
+                Err(CheckpointSnapshotCodecError::Truncated),
+                "prefix of length {length} must not be accepted"
+            );
+        }
+
+        let mut trailing = fixture.to_vec();
+        trailing.push(b'!');
+        assert_eq!(
+            decode_checkpoint_snapshot_watermark(&trailing),
+            Err(CheckpointSnapshotCodecError::TrailingBytes)
+        );
+
+        let mut invalid_component = CHECKPOINT_SNAPSHOT_HEADER.to_vec();
+        invalid_component.extend_from_slice(b"1\n0:\n");
+        assert_eq!(
+            decode_checkpoint_snapshot_watermark(&invalid_component),
+            Err(CheckpointSnapshotCodecError::InvalidComponent)
+        );
+
+        let partition_marker = fixture
+            .windows(b"18:kafka-partition/v1\n".len())
+            .position(|window| window == b"18:kafka-partition/v1\n")
+            .unwrap()
+            + b"18:kafka-partition/v1\n".len();
+        let mut invalid_partition = fixture.to_vec();
+        invalid_partition[partition_marker] = b'x';
+        assert_eq!(
+            decode_checkpoint_snapshot_watermark(&invalid_partition),
+            Err(CheckpointSnapshotCodecError::InvalidPartitionMarker)
+        );
+
+
+        assert_eq!(
+            decode_checkpoint_snapshot_watermark(&fixture[..transition_end]),
+            Err(CheckpointSnapshotCodecError::MissingCommittedPosition)
+        );
+
+        let mut absent_committed_position = checkpoint_snapshot_watermark(
+            Some("tenant:west/17"),
+            42,
+            "offset:0001/β",
+            StreamCheckpointTransition::Complete,
+        );
+        absent_committed_position.checkpoint.committed = None;
+        assert_eq!(
+            encode_checkpoint_snapshot_watermark(&absent_committed_position),
+            Err(CheckpointSnapshotCodecError::MissingCommittedPosition)
+        );
+        let mut zero_checkpoint_version =
+            checkpoint_snapshot_watermark(None, 1, "opaque:one", StreamCheckpointTransition::Skip);
+        zero_checkpoint_version.checkpoint.version = 0;
+        assert_eq!(
+            encode_checkpoint_snapshot_watermark(&zero_checkpoint_version),
+            Err(CheckpointSnapshotCodecError::ZeroCheckpointVersion)
+        );
+    }
+
+    fn write_checkpoint_snapshot_file(repo: &Repository, name: &str, bytes: &[u8]) {
+        let directory = repo.worktree().join(".orna/checkpoints");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(name), bytes).unwrap();
+    }
+
+    fn commit_checkpoint_snapshot(repo: &Repository, message: &str) -> GitCommitRef {
+        git(repo.worktree(), &["add", "--", ".orna/checkpoints"]);
+        git(repo.worktree(), &["commit", "-m", message]);
+        repo.head().unwrap().unwrap()
+    }
+
+    #[test]
+    fn checkpoint_snapshot_reader_uses_selected_commit_and_full_nullable_key() {
+        let (_temp, repo) = repository();
+        let fixture = include_bytes!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        let fixture_watermark = decode_checkpoint_snapshot_watermark(fixture).unwrap();
+        write_checkpoint_snapshot_file(&repo, "fixture.orna", fixture);
+
+        let nullable_record = encode_checkpoint_snapshot_watermark(&checkpoint_snapshot_watermark(
+            None,
+            9,
+            "opaque:nullable",
+            StreamCheckpointTransition::Skip,
+        ))
+        .unwrap();
+        let nullable_watermark = decode_checkpoint_snapshot_watermark(&nullable_record).unwrap();
+        write_checkpoint_snapshot_file(&repo, "nullable.orna", &nullable_record);
+        let selected_commit = commit_checkpoint_snapshot(&repo, "checkpoint snapshot");
+
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &selected_commit,
+                &checkpoint_snapshot_key(Some("tenant:west/17")),
+            )
+            .unwrap(),
+            Some(fixture_watermark.clone())
+        );
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &selected_commit,
+                &checkpoint_snapshot_key(None),
+            )
+            .unwrap(),
+            Some(nullable_watermark)
+        );
+
+        let mut different_source = checkpoint_snapshot_key(Some("tenant:west/17"));
+        different_source.source = checkpoint_snapshot_component("orders/other");
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(&repo, &selected_commit, &different_source).unwrap(),
+            None
+        );
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &selected_commit,
+                &checkpoint_snapshot_key(Some("tenant:east/99")),
+            )
+            .unwrap(),
+            None
+        );
+
+        let newer_record = encode_checkpoint_snapshot_watermark(&checkpoint_snapshot_watermark(
+            Some("tenant:west/17"),
+            99,
+            "opaque:newer-head",
+            StreamCheckpointTransition::Complete,
+        ))
+        .unwrap();
+        write_checkpoint_snapshot_file(&repo, "fixture.orna", &newer_record);
+        let newer_head = commit_checkpoint_snapshot(&repo, "newer checkpoint snapshot");
+        assert_ne!(newer_head, selected_commit);
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &selected_commit,
+                &checkpoint_snapshot_key(Some("tenant:west/17")),
+            )
+            .unwrap(),
+            Some(fixture_watermark)
+        );
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &newer_head,
+                &checkpoint_snapshot_key(Some("tenant:west/17")),
+            )
+            .unwrap()
+            .unwrap()
+            .checkpoint
+            .version,
+            99
+        );
+    }
+
+    #[test]
+    fn checkpoint_snapshot_reader_fails_closed_for_duplicate_and_malformed_records() {
+        let (_temp, repo) = repository();
+        let fixture = include_bytes!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        write_checkpoint_snapshot_file(&repo, "first.orna", fixture);
+        write_checkpoint_snapshot_file(&repo, "second.orna", fixture);
+        let duplicate_commit = commit_checkpoint_snapshot(&repo, "duplicate checkpoint records");
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &duplicate_commit,
+                &checkpoint_snapshot_key(Some("tenant:west/17")),
+            ),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+
+        let (_malformed_temp, malformed_repo) = repository();
+        write_checkpoint_snapshot_file(&malformed_repo, "valid.orna", fixture);
+        write_checkpoint_snapshot_file(&malformed_repo, "malformed.orna", b"not a checkpoint");
+        let malformed_commit =
+            commit_checkpoint_snapshot(&malformed_repo, "malformed checkpoint record");
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark(
+                &malformed_repo,
+                &malformed_commit,
+                &checkpoint_snapshot_key(Some("tenant:west/17")),
+            ),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_snapshot_reader_rejects_unsafe_entries_and_invalid_bounds() {
+        let (_temp, repo) = repository();
+        let fixture = include_bytes!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        write_checkpoint_snapshot_file(&repo, "fixture.orna", fixture);
+        let first_commit = commit_checkpoint_snapshot(&repo, "checkpoint snapshot base");
+        let key = checkpoint_snapshot_key(Some("tenant:west/17"));
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark_bounded(&repo, &first_commit, &key, 0, 64),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark_bounded(&repo, &first_commit, &key, 8, 0),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark_bounded(&repo, &first_commit, &key, 8, 1),
+            Err(RuntimeError::StorageUnavailable)
+        ));
+
+        std::os::unix::fs::symlink(
+            "fixture.orna",
+            repo.worktree().join(".orna/checkpoints/symlink.orna"),
+        )
+        .unwrap();
+        let symlink_commit = commit_checkpoint_snapshot(&repo, "checkpoint symlink");
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark(&repo, &symlink_commit, &key),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+
+        let (_submodule_temp, submodule_repo) = repository();
+        write_checkpoint_snapshot_file(&submodule_repo, "fixture.orna", fixture);
+        let base_commit = commit_checkpoint_snapshot(&submodule_repo, "checkpoint snapshot base");
+        let gitlink = format!(
+            "160000,{},.orna/checkpoints/submodule",
+            base_commit.as_str()
+        );
+        git(
+            submodule_repo.worktree(),
+            &["update-index", "--add", "--cacheinfo", &gitlink],
+        );
+        git(
+            submodule_repo.worktree(),
+            &["commit", "-m", "checkpoint submodule"],
+        );
+        let submodule_commit = submodule_repo.head().unwrap().unwrap();
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark(&submodule_repo, &submodule_commit, &key),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+    }
 
     struct Fail(FaultPoint);
     impl FaultInjector for Fail {
@@ -17509,6 +18708,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_runner_rejects_position_format_change_before_provider_poll() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let original = stream_delivery("format-guard", "format-guard-next").checkpoint_key();
+        assert!(matches!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Pause {
+                    key: original.clone(),
+                })
+                .await
+                .unwrap(),
+            CommitResult::StreamStatusChanged { changed: true, .. }
+        ));
+        let changed = CheckpointKey {
+            position_format: Component::new("position-format-v2").unwrap(),
+            ..original
+        };
+        let mut source = TestSource {
+            key: changed.clone(),
+            item: None,
+            polls: 0,
+        };
+        let mut handler = CommitHandler { calls: 0 };
+
+        let result = state
+            .run_stream_once(writer, &changed, &mut source, &mut handler)
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StreamStepError::Runtime(RuntimeError::StreamIdentityMismatch))
+        );
+        assert_eq!(source.polls, 0);
+        assert_eq!(handler.calls, 0);
+        let mut rows = state
+            .connection
+            .query("SELECT COUNT(*) FROM stream_checkpoint", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 1);
+    }
+
+    #[tokio::test]
     async fn runtime_stream_runner_repeats_until_exhaustion_and_fences_cancellation() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -19396,6 +20641,83 @@ mod tests {
             reopened.stream_pause_reason(&key).await,
             Ok(Some("maintenance boundary".into())),
         );
+    }
+
+    #[tokio::test]
+    async fn reentrant_stream_reference_pause_retains_failed_invocation_audit() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("busy-audit", "busy-audit-next").checkpoint_key();
+        let request = request(41, 42);
+        state.reserve_request(request, digest(42)).await.unwrap();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: key.consumer.clone(),
+                function: "pkg.consume".into(),
+                source_identity: None,
+                invocation_id: id(43),
+            })
+            .await
+            .unwrap();
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: Some("pkg.consume".into()),
+                checkpoint: key,
+            })
+            .await
+            .unwrap();
+        let stream_reference = stream.reference(&run).unwrap();
+        let capture_before = state.capture().await.unwrap();
+        let table_before = state.committed_table_row("books", &[1]).await.unwrap();
+        let fence = state.runtime_observation_fence(writer).await.unwrap();
+        let streams_before = state
+            .current_runtime_observations(&fence)
+            .await
+            .unwrap()
+            .streams;
+        let reference = Value::new(row_reference_raw(stream_reference.as_row_ref())).unwrap();
+
+        let callback_result = with_activation_scope(&state, writer, || async {
+            state
+                .pause_stream_reference_at_capture(
+                    writer,
+                    reference,
+                    Some("maintenance boundary".into()),
+                    &capture_before,
+                )
+                .await
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(callback_result, Err(RuntimeError::AdminBusy));
+        assert_eq!(state.capture().await.unwrap(), capture_before);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            table_before
+        );
+        let fence = state.runtime_observation_fence(writer).await.unwrap();
+        assert_eq!(
+            state
+                .current_runtime_observations(&fence)
+                .await
+                .unwrap()
+                .streams,
+            streams_before
+        );
+        drop(state);
+        let reopened = open_state(&repo).await;
+        let audits = reopened.admin_invocation_audits().await.unwrap();
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].function, "sys.admin.pause_stream_with_reason");
+        assert!(audits[0].safe_arguments.contains("stream_ref_digest="));
+        assert!(audits[0].safe_arguments.contains("reason_digest="));
+        assert!(!audits[0].succeeded);
+        assert!(audits[0].terminal_outcome.starts_with("failure:"));
     }
 
     #[tokio::test]

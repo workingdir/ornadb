@@ -26,7 +26,7 @@ mod system_api;
 
 pub use semantic_payload::{
     DeclarationExplicitness, LocalSourceOrigin, NamedSemanticParameter, SEMANTIC_PAYLOAD_DOMAIN,
-    SEMANTIC_PAYLOAD_VERSION, SemanticDeclaration, SemanticDeclarationKind,
+    SEMANTIC_PAYLOAD_VERSION, SemanticDeclaration, SemanticDeclarationKind, SemanticParameter,
     SemanticPayloadAnalysis, SemanticPayloadError, SemanticPayloadErrorKind,
     analyze_semantic_payloads,
 };
@@ -674,6 +674,36 @@ impl Catalogue {
                 std::iter::empty::<&str>(),
             ),
         );
+        modules.insert(
+            Namespace(vec!["std".into(), "concurrent".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "concurrent".into()]),
+                [
+                    (
+                        "parallel",
+                        function(
+                            vec![Type::List(Box::new(Type::Error))],
+                            Type::Stream(Box::new(Type::Error)),
+                        ),
+                    ),
+                    (
+                        "race",
+                        function(vec![Type::List(Box::new(Type::Error))], Type::Error),
+                    ),
+                    (
+                        "timeout",
+                        named_function(
+                            vec![
+                                ("callback", function(Vec::new(), Type::Error)),
+                                ("duration", Type::Named("std.DURATION".into())),
+                            ],
+                            Type::Error,
+                        ),
+                    ),
+                ],
+                std::iter::empty::<&str>(),
+            ),
+        );
         let action = Type::Named("std.Action".into());
         let rows = Type::Named("std.Rows".into());
         let json = Type::Named("std.JsonValue".into());
@@ -1152,13 +1182,25 @@ impl Catalogue {
             Namespace(vec!["std".into(), "concurrent".into()]),
             fixture_module(
                 Namespace(vec!["std".into(), "concurrent".into()]),
-                [fixture_function(
-                    "parallel",
-                    function(
-                        vec![Type::List(Box::new(Type::Error))],
-                        Type::Stream(Box::new(Type::Error)),
+                [
+                    fixture_function(
+                        "parallel",
+                        function(
+                            vec![Type::List(Box::new(Type::Error))],
+                            Type::Stream(Box::new(Type::Error)),
+                        ),
                     ),
-                )],
+                    fixture_function(
+                        "timeout",
+                        named_function(
+                            vec![
+                                ("callback", function(Vec::new(), Type::Error)),
+                                ("duration", Type::Named("std.DURATION".into())),
+                            ],
+                            Type::Error,
+                        ),
+                    ),
+                ],
                 false,
             ),
         );
@@ -1681,6 +1723,10 @@ fn analyze_retaining_context(
         parsed.push((namespace, parse.value));
     }
     let mut dependency_summaries = BTreeMap::new();
+    let source_payload_enums = parsed
+        .iter()
+        .map(|(namespace, tree)| (namespace.clone(), payload_enum_names(tree)))
+        .collect::<BTreeMap<_, _>>();
     stabilize_function_summaries(
         &parsed,
         &mut result.modules,
@@ -1692,7 +1738,7 @@ fn analyze_retaining_context(
         let Some(header) = result.modules.get(namespace).cloned() else {
             continue;
         };
-        let scope = resolve_imports_with_dependencies(
+        let mut scope = resolve_imports_with_dependencies(
             namespace,
             tree,
             &header,
@@ -1702,6 +1748,13 @@ fn analyze_retaining_context(
             &dependency_summaries,
             &mut result.diagnostics,
         );
+        scope
+            .payload_enum_types
+            .extend(imported_payload_enum_bindings(
+                tree,
+                &source_payload_enums,
+                &result.modules,
+            ));
         let mut symbols = header.symbols.clone();
         for symbol in symbols.values_mut() {
             canonicalize_symbol(symbol, &scope.nominal_identities);
@@ -2570,6 +2623,10 @@ struct Scope {
     /// The nominal owner whose nested implementation body is currently being
     /// checked. Ordinary module code has no private-field owner.
     private_field_owner: Option<String>,
+    /// A same-module nominal constructor used as an argument to a bounded
+    /// generic call may supply that type's private representation. This is
+    /// scoped to argument inference and does not grant ordinary field access.
+    allow_local_private_nominal_construction: bool,
     /// Names whose nominal rows belong to this source module. Imported rows
     /// are selected from the explicitly resolved export instead of by short
     /// name alone.
@@ -2582,6 +2639,9 @@ struct Scope {
     currency_types: BTreeSet<String>,
     /// Local enum payloads retained for closed constructor-pattern checking.
     enum_variants: BTreeMap<String, BTreeMap<String, BTreeMap<String, Type>>>,
+    /// Local or explicitly imported enum types whose variants carry payloads.
+    /// This compact admission metadata is kept separately from public Symbols.
+    payload_enum_types: BTreeSet<String>,
     /// Local transparent aliases. Refined and nominal type declarations are
     /// deliberately excluded so alias resolution cannot erase identity.
     type_aliases: BTreeMap<String, Type>,
@@ -2666,6 +2726,7 @@ fn resolve_imports_with_dependencies(
         nominal_rows: tree.items.iter().filter_map(nominal_row_type).collect(),
         nominal_private_fields: BTreeMap::new(),
         private_field_owner: None,
+        allow_local_private_nominal_construction: false,
         local_nominal_names: tree
             .items
             .iter()
@@ -2697,6 +2758,7 @@ fn resolve_imports_with_dependencies(
             .collect(),
         currency_types: currency_types(tree),
         enum_variants: enum_variant_types(tree, diagnostics),
+        payload_enum_types: payload_enum_names(tree),
         type_aliases: tree
             .items
             .iter()
@@ -3456,9 +3518,15 @@ fn check_item(
                     || matches!(&ty, Type::Applied { base, .. } if base == "Range");
                 let is_float = matches!(&ty, Type::Float)
                     || matches!(&ty, Type::Applied { base, .. } if base == "Float");
-                if is_range || is_float {
+                let is_payload_enum = match &ty {
+                    Type::Named(name) => scope.payload_enum_types.contains(name),
+                    _ => false,
+                };
+                if is_range || is_float || is_payload_enum {
                     let message = if is_range {
                         "Range<T> is not a primary-key type in version 1.0"
+                    } else if is_payload_enum {
+                        "payload-bearing enums cannot be primary-key types"
                     } else {
                         "Float is not a valid primary-key type"
                     };
@@ -5517,13 +5585,17 @@ fn check_function(
             );
             default_effects.join(&inferred.effects);
         }
-        bind_pattern(
-            &parameter.pattern,
-            ty.unwrap_or(Type::Error),
-            scope,
-            &mut local,
-            diagnostics,
-        );
+        let ty = ty.unwrap_or(Type::Error);
+        if ty == Type::Error {
+            // Preserve a simple parameter name after an invalid annotation so
+            // references in the body do not add a misleading unresolved-name
+            // cascade. The annotation diagnostic remains authoritative.
+            if let Pattern::Name(name, _) = &parameter.pattern {
+                insert_local_binding(name, Type::Error, &mut local, diagnostics);
+                continue;
+            }
+        }
+        bind_pattern(&parameter.pattern, ty, scope, &mut local, diagnostics);
     }
     if let Some(expected) = signature
         .result
@@ -5902,6 +5974,11 @@ fn infer_local_generic_call(
         .iter()
         .map(|generic| generic.name.clone())
         .collect::<BTreeSet<_>>();
+    let bounded_generic_names = generic_parameters
+        .iter()
+        .filter(|generic| !generic.bounds.is_empty())
+        .map(|generic| generic.name.clone())
+        .collect::<BTreeSet<_>>();
     let mut substitutions = BTreeMap::new();
     let mut valid_substitution = true;
     if let Some(type_arguments) = explicit_type_arguments {
@@ -5930,11 +6007,24 @@ fn infer_local_generic_call(
         .iter()
         .enumerate()
         .map(|(index, argument)| {
-            let expected =
-                expected_call_parameter(raw_parameters, parameter_names.as_deref(), arguments, index);
+            let expected = expected_call_parameter(
+                raw_parameters,
+                parameter_names.as_deref(),
+                arguments,
+                index,
+            );
+            let local_constructor_scope = expected.is_some_and(|expected| {
+                matches!(expected, Type::Named(name) if bounded_generic_names.contains(name))
+            });
             let inferred = if let Some(expected) = expected {
                 if type_mentions_generic(expected, &generic_names) {
-                    infer(&argument.value, scope, local, diagnostics)
+                    if local_constructor_scope {
+                        let mut argument_scope = scope.clone();
+                        argument_scope.allow_local_private_nominal_construction = true;
+                        infer(&argument.value, &argument_scope, local, diagnostics)
+                    } else {
+                        infer(&argument.value, scope, local, diagnostics)
+                    }
                 } else {
                     infer_contextual(&argument.value, expected, scope, local, diagnostics)
                 }
@@ -7054,7 +7144,18 @@ fn infer(
                             Type::Error
                         }
                     });
-                bind_pattern(&parameter.pattern, ty.clone(), scope, &mut locals, diagnostics);
+                if ty == Type::Error {
+                    // Keep an underconstrained lambda parameter in scope as
+                    // an error-typed local. This lets the annotation
+                    // diagnostic point at the useful site without turning
+                    // every use of that parameter into an unrelated
+                    // unresolved-name diagnostic.
+                    if let Pattern::Name(name, _) = &parameter.pattern {
+                        insert_local_binding(name, Type::Error, &mut locals, diagnostics);
+                    }
+                } else {
+                    bind_pattern(&parameter.pattern, ty.clone(), scope, &mut locals, diagnostics);
+                }
                 types.push(ty);
             }
             let value = if matches!(
@@ -7221,6 +7322,26 @@ fn infer(
             }
             if let Some(inferred) =
                 infer_relation_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
+                infer_parallel_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
+                infer_race_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
+                infer_timeout_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
+                infer_relation_member_call(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
             }
@@ -8651,9 +8772,12 @@ fn infer_case(
                     variants,
                     &mut arm_locals,
                     diagnostics,
-                ) && !covered.insert(variant)
-                {
-                    diagnostics.push(diag(DIAG_TYPE, "case enum variant is duplicated"));
+                ) {
+                    // Guards can fail at runtime, so only an unguarded arm
+                    // establishes coverage for a closed enum.
+                    if arm.guard.is_none() && !covered.insert(variant) {
+                        diagnostics.push(diag(DIAG_TYPE, "case enum variant is duplicated"));
+                    }
                 }
                 infer_case_arm_body(
                     arm,
@@ -8677,9 +8801,12 @@ fn infer_case(
                 let mut arm_locals = local.clone();
                 if let Some(part) =
                     bind_optional_case_pattern(&arm.pattern, inner, &mut arm_locals, diagnostics)
-                    && !covered.insert(part)
                 {
-                    diagnostics.push(diag(DIAG_TYPE, "case optional arm is duplicated"));
+                    // A guarded Some/null arm is conditional coverage; a
+                    // later unguarded arm may provide the exhaustive fallback.
+                    if arm.guard.is_none() && !covered.insert(part) {
+                        diagnostics.push(diag(DIAG_TYPE, "case optional arm is duplicated"));
+                    }
                 }
                 infer_case_arm_body(
                     arm,
@@ -8694,6 +8821,64 @@ fn infer_case(
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     "case expression must cover Some and null exactly once",
+                ));
+            }
+        }
+        Type::Bool => {
+            let mut covered = BTreeSet::new();
+            for arm in arms {
+                let mut arm_locals = local.clone();
+                let (literal, catch_all) = match &arm.pattern {
+                    Pattern::Literal {
+                        text,
+                        kind: LiteralKind::Boolean,
+                        ..
+                    } if text == "true" => (Some(true), false),
+                    Pattern::Literal {
+                        text,
+                        kind: LiteralKind::Boolean,
+                        ..
+                    } if text == "false" => (Some(false), false),
+                    Pattern::Wildcard(_) => (None, true),
+                    Pattern::Name(name, _) => {
+                        insert_case_binding(name, Type::Bool, &mut arm_locals, diagnostics);
+                        (None, true)
+                    }
+                    _ => {
+                        diagnostics.push(diag(
+                            DIAG_TYPE,
+                            "boolean case arm must match true, false, or bind the whole value",
+                        ));
+                        (None, false)
+                    }
+                };
+                if arm.guard.is_none() {
+                    if let Some(value) = literal {
+                        if !covered.insert(value) {
+                            diagnostics.push(diag(DIAG_TYPE, "boolean case arm is duplicated"));
+                        }
+                    } else if catch_all {
+                        for value in [false, true] {
+                            if !covered.insert(value) {
+                                diagnostics
+                                    .push(diag(DIAG_TYPE, "boolean case arm is duplicated"));
+                            }
+                        }
+                    }
+                }
+                infer_case_arm_body(
+                    arm,
+                    &arm_locals,
+                    scope,
+                    diagnostics,
+                    &mut effects,
+                    &mut result,
+                );
+            }
+            if covered != BTreeSet::from([false, true]) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "case expression does not cover true and false",
                 ));
             }
         }
@@ -8877,10 +9062,6 @@ fn infer_case_arm_body(
         let guard = infer(guard, scope, local, diagnostics);
         effects.join(&guard.effects);
         require_same(&Type::Bool, &guard.ty, diagnostics);
-        diagnostics.push(diag(
-            DIAG_UNSUPPORTED,
-            "guarded case arms are outside this semantic slice",
-        ));
     }
     let body = infer(&arm.body, scope, local, diagnostics);
     effects.join(&body.effects);
@@ -9001,8 +9182,18 @@ fn infer_nominal(
     let schema = symbol.table_schema.as_ref();
     let admission = schema.and_then(|schema| schema.admission.as_ref());
     let public_fields = schema.map(|schema| &schema.fields);
-    let owning_private = match &constructor_type {
-        Type::Named(identity) => scope.private_field_owner.as_deref() == Some(identity),
+    let owning_private = match (&constructor_type, path) {
+        (Type::Named(identity), [name]) => {
+            scope.private_field_owner.as_deref() == Some(identity)
+                || (scope.allow_local_private_nominal_construction
+                    && (scope.private_field_owner.is_none()
+                        || scope.private_field_owner.as_deref() == Some(identity))
+                    && scope.local_nominal_names.contains(&name.text)
+                    && scope
+                        .nominal_identities
+                        .get(&name.text)
+                        .is_some_and(|local_identity| local_identity == identity))
+        }
         _ => false,
     };
     let private_field_supplied = match &constructor_type {
@@ -12310,6 +12501,59 @@ fn infer_finite_list_callback(
     }
 }
 
+/// Resolves the genuine `Relation<T>` instance members from ORNA-MEMBER-005.
+/// Table-owned operations stay on their existing path so their schema and
+/// operation checks continue to use the table symbol directly.
+fn infer_relation_member_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let Expr::Field { base, name, .. } = callee else {
+        return None;
+    };
+    if !matches!(name.as_str(), "count" | "first")
+        || table_symbol(base, scope, local).is_some()
+    {
+        return None;
+    }
+
+    let diagnostic_count = diagnostics.len();
+    let receiver = infer(base, scope, local, diagnostics);
+    let Type::Relation(element) = receiver.ty else {
+        diagnostics.truncate(diagnostic_count);
+        return None;
+    };
+
+    let values = arguments
+        .iter()
+        .map(|argument| infer(&argument.value, scope, local, diagnostics).ty)
+        .collect::<Vec<_>>();
+    check_call_arguments(
+        &[],
+        Some(&[]),
+        &BTreeSet::new(),
+        arguments,
+        &values,
+        None,
+        diagnostics,
+    );
+
+    let mut effects = receiver.effects;
+    effects.effects.insert("database read".into());
+    effects.may_fail = true;
+    Some(Inferred {
+        ty: match name.as_str() {
+            "count" => Type::Int,
+            "first" => Type::Optional(element),
+            _ => unreachable!("relation member name was checked above"),
+        },
+        effects,
+    })
+}
+
 /// Resolves the small, intrinsic associated-operation surface of a table.
 ///
 /// This deliberately runs only for call expressions: a table is still a
@@ -12841,6 +13085,194 @@ fn intrinsic_value_type(name: &str) -> Option<Type> {
         "CWD" | "HEAD" => Some(Type::Named("sys.SnapshotRef".into())),
         _ => None,
     }
+}
+
+fn infer_parallel_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let is_parallel = qualified_path(callee)
+        .as_deref()
+        .is_some_and(|path| path == ["std", "concurrent", "parallel"])
+        || matches!(callee, Expr::Name { text, .. }
+            if text == "parallel"
+                && local.get(text).or_else(|| scope.names.get(text)).is_none());
+    if !is_parallel || arguments.len() != 1 || arguments[0].name.is_some() {
+        return None;
+    }
+    let Expr::List { elements, .. } = &arguments[0].value else {
+        return None;
+    };
+
+    let mut effects = EffectSummary::default();
+    let mut result_type: Option<Type> = None;
+    for callback in elements {
+        let inferred = infer(callback, scope, local, diagnostics);
+        effects.join(&inferred.effects);
+        let Type::Function { result, .. } = inferred.ty else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "parallel entries must be callback functions",
+            ));
+            continue;
+        };
+        if let Some(expected) = &result_type {
+            if !types_match(expected, &result) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "parallel callbacks must have compatible result types",
+                ));
+            }
+        } else {
+            result_type = Some(*result);
+        }
+    }
+    Some(Inferred {
+        ty: Type::Stream(Box::new(result_type.unwrap_or(Type::Error))),
+        effects,
+    })
+}
+
+fn infer_race_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let is_race = qualified_path(callee)
+        .as_deref()
+        .is_some_and(|path| path == ["std", "concurrent", "race"])
+        || matches!(callee, Expr::Name { text, .. }
+            if text == "race"
+                && local.get(text).or_else(|| scope.names.get(text)).is_none());
+    if !is_race || arguments.len() != 1 || arguments[0].name.is_some() {
+        return None;
+    }
+    let Expr::List { elements, .. } = &arguments[0].value else {
+        return None;
+    };
+
+    let mut effects = EffectSummary::default();
+    let mut result_type: Option<Type> = None;
+    for callback in elements {
+        let inferred = infer(callback, scope, local, diagnostics);
+        effects.join(&inferred.effects);
+        let Type::Function { result, .. } = inferred.ty else {
+            diagnostics.push(diag(DIAG_TYPE, "race entries must be callback functions"));
+            continue;
+        };
+        if let Some(expected) = &result_type {
+            if !types_match(expected, &result) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "race callbacks must have compatible result types",
+                ));
+            }
+        } else {
+            result_type = Some(*result);
+        }
+    }
+    Some(Inferred {
+        ty: result_type.unwrap_or(Type::Error),
+        effects,
+    })
+}
+
+fn infer_timeout_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let is_timeout = qualified_path(callee)
+        .as_deref()
+        .is_some_and(|path| path == ["std", "concurrent", "timeout"])
+        || matches!(callee, Expr::Name { text, .. }
+            if text == "timeout"
+                && local.get(text).or_else(|| scope.names.get(text)).is_none());
+    if !is_timeout {
+        return None;
+    }
+
+    let mut callback = None;
+    let mut duration = None;
+    let mut positional = 0;
+    for argument in arguments {
+        match argument.name.as_deref() {
+            Some("callback") if callback.is_none() => callback = Some(&argument.value),
+            Some("duration") if duration.is_none() => duration = Some(&argument.value),
+            Some(_) => {
+                diagnostics.push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
+                return Some(Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                });
+            }
+            None => {
+                let slot = match positional {
+                    0 => &mut callback,
+                    1 => &mut duration,
+                    _ => {
+                        diagnostics.push(diag(
+                            DIAG_TYPE,
+                            "timeout expects a callback and a duration",
+                        ));
+                        return Some(Inferred {
+                            ty: Type::Error,
+                            effects: EffectSummary::default(),
+                        });
+                    }
+                };
+                if slot.is_some() {
+                    diagnostics.push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
+                    return Some(Inferred {
+                        ty: Type::Error,
+                        effects: EffectSummary::default(),
+                    });
+                }
+                *slot = Some(&argument.value);
+                positional += 1;
+            }
+        }
+    }
+    let (Some(callback), Some(duration)) = (callback, duration) else {
+        diagnostics.push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        });
+    };
+
+    let callback = infer(callback, scope, local, diagnostics);
+    let duration = infer(duration, scope, local, diagnostics);
+    let mut effects = callback.effects.clone();
+    effects.join(&duration.effects);
+    let Type::Function {
+        parameters, result, ..
+    } = callback.ty
+    else {
+        diagnostics.push(diag(DIAG_TYPE, "timeout callback must be a function"));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects,
+        });
+    };
+    if !parameters.is_empty() {
+        diagnostics.push(diag(DIAG_TYPE, "timeout callback must not take parameters"));
+    }
+    let expected_duration = Type::Named("std.DURATION".into());
+    if !types_match(&expected_duration, &duration.ty) {
+        diagnostics.push(diag(DIAG_TYPE, "timeout duration must be a Duration"));
+    }
+    Some(Inferred {
+        ty: *result,
+        effects,
+    })
 }
 
 enum DescriptorPathInference {
@@ -15445,6 +15877,123 @@ fn enum_variant_types(
     enums
 }
 
+fn payload_enum_names(tree: &SyntaxTree) -> BTreeSet<String> {
+    tree.items
+        .iter()
+        .filter_map(|item| match &item.declaration {
+            Declaration::Enum { name, variants, .. }
+                if variants.iter().any(|variant| !variant.fields.is_empty()) =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn imported_payload_enum_bindings(
+    tree: &SyntaxTree,
+    payload_enums: &BTreeMap<Namespace, BTreeSet<String>>,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+) -> BTreeSet<String> {
+    let mut bindings = BTreeSet::new();
+    for item in &tree.items {
+        let Declaration::Use { path, tail } = &item.declaration else {
+            continue;
+        };
+        let target = Namespace(path.iter().map(|segment| segment.name.clone()).collect());
+        let Some(module) = modules.get(&target) else {
+            continue;
+        };
+        match tail {
+            UseTail::None => {
+                if let Some(binding) = target.0.last() {
+                    add_qualified_payload_enum_bindings(
+                        &mut bindings,
+                        binding,
+                        &target,
+                        payload_enums,
+                        modules,
+                    );
+                }
+            }
+            UseTail::Alias { name, .. } if name != "_" => {
+                add_qualified_payload_enum_bindings(
+                    &mut bindings,
+                    name,
+                    &target,
+                    payload_enums,
+                    modules,
+                );
+            }
+            UseTail::Alias { .. } => {
+                if let Some(names) = payload_enums.get(&target) {
+                    for name in names {
+                        if module.prelude_exports.contains(name) && is_exported_enum(module, name) {
+                            bindings.insert(name.clone());
+                        }
+                    }
+                }
+            }
+            UseTail::Glob { .. } => {
+                if let Some(names) = payload_enums.get(&target) {
+                    bindings.extend(
+                        names
+                            .iter()
+                            .filter(|name| is_exported_enum(module, name))
+                            .cloned(),
+                    );
+                }
+            }
+            UseTail::Names(imports) => {
+                if let Some(names) = payload_enums.get(&target) {
+                    bindings.extend(
+                        imports
+                            .iter()
+                            .map(|import| &import.name)
+                            .filter(|name| names.contains(*name) && is_exported_enum(module, name))
+                            .cloned(),
+                    );
+                }
+            }
+        }
+    }
+    bindings
+}
+
+fn add_qualified_payload_enum_bindings(
+    bindings: &mut BTreeSet<String>,
+    binding: &str,
+    target: &Namespace,
+    payload_enums: &BTreeMap<Namespace, BTreeSet<String>>,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+) {
+    for (namespace, names) in payload_enums {
+        if namespace.0.len() < target.0.len() || namespace.0[..target.0.len()] != target.0[..] {
+            continue;
+        }
+        let Some(module) = modules.get(namespace) else {
+            continue;
+        };
+        let mut prefix = vec![binding.to_owned()];
+        prefix.extend(namespace.0[target.0.len()..].iter().cloned());
+        for name in names {
+            if is_exported_enum(module, name) {
+                let mut qualified = prefix.clone();
+                qualified.push(name.clone());
+                bindings.insert(qualified.join("."));
+            }
+        }
+    }
+}
+
+fn is_exported_enum(module: &ModuleHeader, name: &str) -> bool {
+    module
+        .exports
+        .get(name)
+        .is_some_and(|symbol| symbol.kind == SymbolKind::Enum)
+}
+
 fn pattern_binding_names(pattern: &Pattern) -> Vec<String> {
     fn collect(pattern: &Pattern, names: &mut Vec<String>) {
         match pattern {
@@ -15884,6 +16433,109 @@ mod tests {
     fn has(analysis: &Analysis, code: &str) -> bool {
         analysis.diagnostics.iter().any(|d| d.code() == code)
     }
+    #[test]
+    fn boolean_case_is_exhaustive_only_with_unguarded_coverage() {
+        let source = include_str!("../tests/fixtures/boolean_case_exhaustiveness.orna");
+        let analysis = checked(&[ModuleInput::new("boolean-case.orna", source)]);
+
+        assert!(
+            !has(&analysis, DIAG_UNSUPPORTED),
+            "Bool is a closed case scrutinee: {:?}",
+            analysis.diagnostics
+        );
+        assert_eq!(analysis.diagnostics.len(), 1, "diagnostics: {:?}", analysis.diagnostics);
+        assert_eq!(
+            analysis.diagnostics[0].message(),
+            "case expression does not cover true and false"
+        );
+        let module = analysis
+            .modules
+            .values()
+            .find(|module| module.symbols.contains_key("choose"))
+            .expect("fixture module is analyzed");
+        assert_eq!(
+            module.symbols["choose"].ty,
+            Type::Function {
+                parameters: vec![Type::Bool],
+                parameter_names: Some(vec!["flag".into()]),
+                default_parameters: BTreeSet::new(),
+                result: Box::new(Type::Int),
+            }
+        );
+        assert_eq!(
+            module.symbols["capture"].ty,
+            Type::Function {
+                parameters: vec![Type::Bool],
+                parameter_names: Some(vec!["flag".into()]),
+                default_parameters: BTreeSet::new(),
+                result: Box::new(Type::Bool),
+            }
+        );
+    }
+
+    #[test]
+    fn case_guards_do_not_establish_exhaustive_coverage() {
+        let source = include_str!("../tests/fixtures/guarded_case_exhaustiveness.orna");
+        let analysis = checked(&[ModuleInput::new("guarded-case.orna", source)]);
+
+        assert!(
+            !has(&analysis, DIAG_UNSUPPORTED),
+            "guards are supported and type-checked: {:?}",
+            analysis.diagnostics
+        );
+        assert_eq!(
+            analysis
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.message()
+                    == "case expression must cover Some and null exactly once")
+                .count(),
+            1,
+            "the guarded-only Some arm must not count as exhaustive: {:?}",
+            analysis.diagnostics
+        );
+        assert_eq!(
+            analysis
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.message()
+                    == "case expression does not cover every enum variant")
+                .count(),
+            1,
+            "guarded enum variants must not establish coverage: {:?}",
+            analysis.diagnostics
+        );
+        assert_eq!(
+            analysis.diagnostics.len(),
+            2,
+            "unguarded optional and enum fallbacks must remain exhaustive: {:?}",
+            analysis.diagnostics
+        );
+        let module = analysis
+            .modules
+            .values()
+            .find(|module| module.symbols.contains_key("positive_or_zero"))
+            .expect("fixture module is analyzed");
+        assert_eq!(
+            module.symbols["positive_or_zero"].ty,
+            Type::Function {
+                parameters: vec![Type::Optional(Box::new(Type::Int))],
+                parameter_names: Some(vec!["value".into()]),
+                default_parameters: BTreeSet::new(),
+                result: Box::new(Type::Int),
+            }
+        );
+        assert_eq!(
+            module.symbols["classify"].ty,
+            Type::Function {
+                parameters: vec![Type::Named("State".into())],
+                parameter_names: Some(vec!["value".into()]),
+                default_parameters: BTreeSet::new(),
+                result: Box::new(Type::Int),
+            }
+        );
+    }
+
     #[test]
     fn maps_main_and_leaf_paths() {
         let a = checked(&[

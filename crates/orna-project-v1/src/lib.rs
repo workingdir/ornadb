@@ -14,7 +14,8 @@ use std::{
 };
 
 use orna_repository_v1::{
-    CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef, Repository, RepositoryError,
+    CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef, PrivateCommit, Repository,
+    RepositoryError,
 };
 use orna_semantic_v1::{Catalogue, ModuleInput, StandardCatalogueError, StandardDependencyProfile};
 use orna_syntax_v1::{Declaration, parse_module};
@@ -245,6 +246,53 @@ impl ProjectLoader {
                 discover_committed_rows(
                     repository,
                     commit,
+                    &source_paths,
+                    tables,
+                    total_bytes,
+                    self.limits,
+                )
+            },
+        )
+    }
+
+    /// Loads the root module and reachable imports from the immutable tree of
+    /// a private publication candidate. The candidate capability, rather than
+    /// a ref name or worktree path, is the source authority.
+    pub fn load_private_candidate(
+        &self,
+        repository: &Repository,
+        candidate: &PrivateCommit,
+    ) -> Result<LoadedProject, ProjectLoadError> {
+        self.load_private_candidate_with_standard_profile(repository, candidate, None)
+    }
+
+    /// Private-candidate variant of
+    /// [`Self::load_committed_snapshot_with_standard_profile`].
+    pub fn load_private_candidate_with_standard_profile(
+        &self,
+        repository: &Repository,
+        candidate: &PrivateCommit,
+        standard_profile: Option<StandardDependencyProfile>,
+    ) -> Result<LoadedProject, ProjectLoadError> {
+        let source_paths = validate_private_candidate_tree(repository, candidate, self.limits)?;
+        load_reachable_project(
+            self.limits,
+            standard_profile,
+            |logical_path, total_bytes| {
+                read_private_candidate_module(
+                    repository,
+                    candidate,
+                    &source_paths,
+                    logical_path,
+                    total_bytes,
+                    self.limits,
+                )
+            },
+            |segments| resolve_committed_import(&source_paths, segments),
+            |tables, total_bytes| {
+                discover_private_candidate_rows(
+                    repository,
+                    candidate,
                     &source_paths,
                     tables,
                     total_bytes,
@@ -495,6 +543,24 @@ fn validate_committed_tree(
     let entries = repository
         .list_committed_tree(commit, limits.max_repository_entries.saturating_add(1))
         .map_err(ProjectLoadError::Repository)?;
+    validate_snapshot_tree(entries, limits)
+}
+
+fn validate_private_candidate_tree(
+    repository: &Repository,
+    candidate: &PrivateCommit,
+    limits: ProjectLimits,
+) -> Result<BTreeSet<String>, ProjectLoadError> {
+    let entries = repository
+        .list_private_candidate_tree(candidate, limits.max_repository_entries.saturating_add(1))
+        .map_err(ProjectLoadError::Repository)?;
+    validate_snapshot_tree(entries, limits)
+}
+
+fn validate_snapshot_tree(
+    entries: Vec<CommittedTreeEntry>,
+    limits: ProjectLimits,
+) -> Result<BTreeSet<String>, ProjectLoadError> {
     if entries.len() > limits.max_repository_entries {
         return Err(ProjectLoadError::RepositoryLimit);
     }
@@ -652,6 +718,11 @@ fn discover_worktree_rows(
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             let path = entry.path();
+            if directory == root
+                && path.file_name().and_then(|name| name.to_str()) == Some(".git")
+            {
+                continue;
+            }
             let metadata =
                 fs::symlink_metadata(&path).map_err(|_| ProjectLoadError::SourceUnavailable)?;
             if metadata.is_dir() {
@@ -706,6 +777,41 @@ fn discover_committed_rows(
             let maximum = limits.max_source_bytes.saturating_sub(*total_bytes);
             let bytes = repository
                 .read_committed_file(commit, logical_path, maximum)
+                .map_err(ProjectLoadError::Repository)?;
+            let source =
+                String::from_utf8(bytes).map_err(|_| ProjectLoadError::SourceUnavailable)?;
+            if source.len() > maximum {
+                return Err(ProjectLoadError::SourceTooLarge);
+            }
+            *total_bytes += source.len();
+            Ok(LooseRowCandidate {
+                logical_path: logical_path.clone(),
+                table_path,
+                key_path,
+                source,
+            })
+        })
+        .collect()
+}
+
+fn discover_private_candidate_rows(
+    repository: &Repository,
+    candidate: &PrivateCommit,
+    source_paths: &BTreeSet<String>,
+    table_paths: &BTreeSet<String>,
+    total_bytes: &mut usize,
+    limits: ProjectLimits,
+) -> Result<Vec<LooseRowCandidate>, ProjectLoadError> {
+    source_paths
+        .iter()
+        .filter_map(|logical_path| {
+            table_owner_and_key(logical_path, table_paths)
+                .map(|(table_path, key_path)| (logical_path, table_path, key_path))
+        })
+        .map(|(logical_path, table_path, key_path)| {
+            let maximum = limits.max_source_bytes.saturating_sub(*total_bytes);
+            let bytes = repository
+                .read_private_candidate_file(candidate, logical_path, maximum)
                 .map_err(ProjectLoadError::Repository)?;
             let source =
                 String::from_utf8(bytes).map_err(|_| ProjectLoadError::SourceUnavailable)?;
@@ -812,6 +918,29 @@ fn read_committed_module(
     let maximum = limits.max_source_bytes.saturating_sub(*total_bytes);
     let bytes = repository
         .read_committed_file(commit, logical_path, maximum)
+        .map_err(ProjectLoadError::Repository)?;
+    let source = String::from_utf8(bytes).map_err(|_| ProjectLoadError::SourceUnavailable)?;
+    if source.len() > maximum {
+        return Err(ProjectLoadError::SourceTooLarge);
+    }
+    *total_bytes += source.len();
+    Ok(source)
+}
+
+fn read_private_candidate_module(
+    repository: &Repository,
+    candidate: &PrivateCommit,
+    source_paths: &BTreeSet<String>,
+    logical_path: &str,
+    total_bytes: &mut usize,
+    limits: ProjectLimits,
+) -> Result<String, ProjectLoadError> {
+    if !source_paths.contains(logical_path) {
+        return Err(ProjectLoadError::SourceUnavailable);
+    }
+    let maximum = limits.max_source_bytes.saturating_sub(*total_bytes);
+    let bytes = repository
+        .read_private_candidate_file(candidate, logical_path, maximum)
         .map_err(ProjectLoadError::Repository)?;
     let source = String::from_utf8(bytes).map_err(|_| ProjectLoadError::SourceUnavailable)?;
     if source.len() > maximum {

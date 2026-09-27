@@ -1,0 +1,15 @@
+fn parity(value: Int) = value % 2;
+fn ones(value: Int) = 1;
+fn array_key(value: Int) = [value];
+fn mixed_key(value: Int) = if value == 1 { 1 } else { "two" };
+fn fails_for_zero(value: Int) = 10 / value;
+
+fn function_callback() = std.collection.group_by([3, 2, 1, 4], parity);
+fn sorted_keys_and_stable_rows() = std.collection.group_by([12, 1, 7, 4, 2, 5], value => value % 3);
+fn empty_skips_callback() = std.collection.group_by([], fails_for_zero);
+fn array_key_is_rejected() = std.collection.group_by([1], array_key);
+fn mixed_key_is_rejected() = std.collection.group_by([1, 2], mixed_key);
+fn callback_failure_propagates() = std.collection.group_by([1, 0, 2], fails_for_zero);
+fn invalid_collection() = std.collection.group_by(1, value => value);
+fn non_callback() = std.collection.group_by([1], 1);
+fn extra_argument() = std.collection.group_by([1], value => value, extra: value => value);

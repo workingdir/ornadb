@@ -8,8 +8,8 @@
 //! arbitrary default equivalence. The three former ignored probes are active
 //! regressions.
 //!
-//! Inputs are in-memory modules with logical paths: no files, temp directories,
-//! environment changes, fixture catalogues, or runtime evaluation are needed.
+//! Inputs use in-memory modules where compact setup helps and checked-in `.orna`
+//! fixtures for source programs whose exact text is under review.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -82,7 +82,7 @@ fn compatible_local_annotated_initializers_are_accepted() {
 // from an unconstrained lambda body cannot export an internal Type::Error.
 #[test]
 fn underconstrained_lambda_field_inference_requires_annotation() {
-    let underconstrained = analyze_main("pub fn getter() = x => x.value;");
+    let underconstrained = analyze_main(include_str!("fixtures/underconstrained-lambda-field.orna"));
     expect_diagnostics(&underconstrained, &[DIAG_ANNOTATION]);
     assert_eq!(
         underconstrained
@@ -101,12 +101,10 @@ fn underconstrained_lambda_field_inference_requires_annotation() {
             .contains_key("getter")
     );
 
-    let constrained = analyze_main("pub fn increment() = x => x + 1;");
+    let constrained = analyze_main(include_str!("fixtures/constrained-lambda.orna"));
     expect_accepted(&constrained);
 
-    let known_row = analyze_main(
-        "pub table Reading(id: Int) { value: Int, } pub fn values() = Reading | map(row => row.value);",
-    );
+    let known_row = analyze_main(include_str!("fixtures/known-row-lambda.orna"));
     expect_accepted(&known_row);
 }
 
@@ -115,12 +113,7 @@ fn underconstrained_lambda_field_inference_requires_annotation() {
 // incompatible function bodies or calls.
 #[test]
 fn unsupported_product_annotation_requires_type_diagnostic() {
-    let result = analyze_main(
-        r#"
-            pub fn bad(value: Int * Int): Bool = value;
-            pub fn caller(): Bool = bad("wrong");
-        "#,
-    );
+    let result = analyze_main(include_str!("fixtures/unsupported-product-annotation.orna"));
     expect_diagnostics(&result, &[DIAG_TYPE]);
     assert!(result
         .diagnostics
@@ -131,7 +124,7 @@ fn unsupported_product_annotation_requires_type_diagnostic() {
 // Diagnostic control for the same Int/Str conflict at a checked boundary.
 #[test]
 fn incompatible_function_return_reports_type_diagnostic() {
-    let result = analyze_main(r#"pub fn bad(): Int = "wrong";"#);
+    let result = analyze_main(include_str!("fixtures/incompatible-function-return.orna"));
     expect_diagnostics(&result, &[DIAG_TYPE]);
 }
 
@@ -2011,45 +2004,21 @@ fn imported_nested_from_metadata_resolves_qualified_targets_and_effects() {
     let result = analyze(&[
         ModuleInput::new(
             "main.orna",
-            r#"
-                use first;
-                use target;
-                pub fn convert(): target.Final =
-                    target.Final.from(first.Mid.from("raw"));
-            "#,
+            include_str!("fixtures/imported_nested_conversion/main.orna"),
         ),
         ModuleInput::new(
             "target.orna",
-            r#"
-                use first;
-                pub type Final {
-                    value: Str,
-                    impl From<first.Mid> {
-                        fn from(value) = Final { value: "final" };
-                    }
-                }
-            "#,
+            include_str!("fixtures/imported_nested_conversion/target.orna"),
         ),
         ModuleInput::new(
             "first.orna",
-            r#"
-                pub table Audit { value: Str, }
-                pub type Mid {
-                    value: Str,
-                    impl From<Str> {
-                        fn from(value) {
-                            Audit.insert({ value: value });
-                            Mid { value: value }
-                        }
-                    }
-                }
-            "#,
+            include_str!("fixtures/imported_nested_conversion/first.orna"),
         ),
     ]);
     expect_accepted(&result);
     let main = result
         .modules
-        .get(&Namespace(vec!["main".into()]))
+        .get(&Namespace(vec![]))
         .expect("main module");
     let convert = main.symbols.get("convert").expect("conversion function");
     assert!(convert.effects.effects.contains("database write"));
