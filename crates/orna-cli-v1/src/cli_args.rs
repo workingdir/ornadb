@@ -41,6 +41,7 @@ pub(super) enum Command {
     Init(Option<PathBuf>),
     Status { format: StatusFormat },
     Fetch { remote: String, branch: String },
+    Diff(Vec<String>),
     Check,
     Explain(String),
     Invoke(String),
@@ -223,6 +224,13 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             remote: words.next().unwrap_or("origin").to_owned(),
             branch: words.next().unwrap_or("main").to_owned(),
         },
+        Some("diff") => {
+            let mut arguments = Vec::new();
+            while let Some(argument) = words.next() {
+                arguments.push(argument.to_owned());
+            }
+            Command::Diff(arguments)
+        }
         Some("explain") => Command::Explain(
             words
                 .next()
@@ -364,6 +372,27 @@ mod tests {
                 "unsupported value for `status --format`",
                 "choose `human`, `short`, or `json` after `status --format`"
             )
+        );
+    }
+
+    #[test]
+    fn parser_preserves_git_diff_argument_boundaries_and_options() {
+        let parsed = parse_cli(&args(&[
+            "diff",
+            "--no-color",
+            "--exit-code",
+            "--",
+            "changed path.orna",
+        ]))
+        .expect("diff arguments parse");
+        assert_eq!(
+            parsed.command,
+            Command::Diff(vec![
+                "--no-color".into(),
+                "--exit-code".into(),
+                "--".into(),
+                "changed path.orna".into(),
+            ])
         );
     }
 
