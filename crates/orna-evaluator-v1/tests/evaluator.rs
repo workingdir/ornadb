@@ -5112,7 +5112,7 @@ fn std_collection_map_preserves_order_for_direct_pipeline_named_and_function_cal
     }
     assert_eq!(
         call_module(
-            "fn scale(value: Int) = value * 10; fn run() = std.collection.map([3, 1, 2], scale);",
+            include_str!("fixtures/collection_map_named_callback.orna"),
             "run()",
             Limits::default(),
         )
@@ -5148,7 +5148,7 @@ fn std_collection_flat_map_preserves_outer_and_inner_order_for_all_call_forms() 
     }
     assert_eq!(
         call_module(
-            "fn expand(value: Int) = [value, value + 10]; fn run() = std.collection.flat_map([3, 1, 2], expand);",
+            include_str!("fixtures/collection_flat_map_named_callback.orna"),
             "run()",
             Limits::default(),
         )
