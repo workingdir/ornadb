@@ -2398,7 +2398,7 @@ fn bounded_evaluator_invokes_retained_functions_with_named_arguments_and_default
         fixture_id: "test-module".into(),
         source_id: "logical/pure.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub fn increment(number, label) = std.math.increment(number); pub fn add_one(value, increment = 1) = value + increment;".into(),
+        source: include_str!("fixtures/bounded-evaluator-retained-functions.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&pure_module), StageOutcome::Passed);
@@ -2422,7 +2422,8 @@ fn bounded_evaluator_invokes_retained_functions_with_named_arguments_and_default
 
 #[test]
 fn bounded_evaluator_executes_only_profile_verified_pure_standard_sources() {
-    let source = "pub fn increment(value: Int): Int = value + 1;";
+    let source = include_str!("fixtures/bounded-evaluator-standard-math.orna");
+    let unverified_source = include_str!("fixtures/bounded-evaluator-standard-math-unverified.orna");
     let profile = orna_semantic_v1::StandardDependencyProfile::from_sources(
         "std-snapshot-1",
         [("std/math.orna".into(), source.into())],
@@ -2443,10 +2444,7 @@ fn bounded_evaluator_executes_only_profile_verified_pure_standard_sources() {
     assert!(matches!(
         evaluator.load_standard_sources(
             &profile,
-            [(
-                "std/math.orna".into(),
-                "pub fn increment(value: Int): Int = value;".into()
-            )],
+            [("std/math.orna".into(), unverified_source.into())],
         ),
         StageOutcome::Failed(_)
     ));
