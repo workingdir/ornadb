@@ -1544,7 +1544,7 @@ impl EffectHandler for BudgetedEffects {
 
 #[test]
 fn effect_budget_hook_shares_activation_steps_and_exhausts() {
-    let functions = functions_from_source("fn entry() = Note.insert(1);");
+    let functions = functions_from_source(include_str!("fixtures/effect_budget_entry.orna"));
     let mut effects = BudgetedEffects;
 
     assert_eq!(
@@ -1564,7 +1564,7 @@ fn effect_budget_hook_shares_activation_steps_and_exhausts() {
 
 #[test]
 fn legacy_effect_handler_keeps_existing_budget_behavior() {
-    let functions = functions_from_source("fn entry() = Note.insert(1);");
+    let functions = functions_from_source(include_str!("fixtures/effect_entry.orna"));
     let mut effects = NoteEffects::default();
 
     assert_eq!(
@@ -1605,7 +1605,7 @@ fn fail_from_a_recovery_handler_reaches_the_next_recovery_boundary() {
 
 #[test]
 fn effect_handler_can_return_unit_values() {
-    let functions = functions_from_source("fn entry() = Note.delete(1);");
+    let functions = functions_from_source(include_str!("fixtures/effect_unit_entry.orna"));
     let mut effects = UnitEffects;
 
     assert_eq!(
@@ -1692,9 +1692,8 @@ fn source_namespace_entry_checks_values_and_limits_before_parsing() {
 
 #[test]
 fn host_invocation_uses_the_same_named_function_namespace() {
-    let functions = functions_from_source(
-        "fn helper(value: Int) = value + 1; fn entry(value = helper(40)) = helper(value);",
-    );
+    let functions =
+        functions_from_source(include_str!("fixtures/host_invocation_same_namespace.orna"));
     assert_eq!(
         orna_evaluator_v1::invoke_named(
             "entry",
@@ -1730,9 +1729,8 @@ fn host_invocation_uses_the_same_named_function_namespace() {
 
 #[test]
 fn effect_handler_runs_for_a_nested_non_pure_field_call_with_once_evaluated_arguments() {
-    let functions = functions_from_source(
-        "fn child(value: Int) = Note.insert(value); fn entry() { let counter = 0; child(if true { counter += 1; counter } else { 0 }); counter }",
-    );
+    let functions =
+        functions_from_source(include_str!("fixtures/effect_nested_field_call.orna"));
     let mut effects = NoteEffects::default();
 
     assert_eq!(
@@ -1751,9 +1749,8 @@ fn effect_handler_runs_for_a_nested_non_pure_field_call_with_once_evaluated_argu
 
 #[test]
 fn dynamic_field_calls_evaluate_callee_before_effectful_arguments() {
-    let functions = functions_from_source(
-        "fn make() = Note.insert(1); fn run() = make().field(Note.insert(2));",
-    );
+    let functions =
+        functions_from_source(include_str!("fixtures/effect_dynamic_field_call.orna"));
     let mut effects = NoteEffects::default();
 
     assert_eq!(
@@ -1772,7 +1769,7 @@ fn dynamic_field_calls_evaluate_callee_before_effectful_arguments() {
 #[test]
 fn effect_handler_none_falls_through_without_intercepting_pure_calls() {
     let functions =
-        functions_from_source("fn helper(value: Int) = value + 1; fn entry() = helper(41);");
+        functions_from_source(include_str!("fixtures/effect_pure_call.orna"));
     let mut effects = NoteEffects::default();
 
     assert_eq!(
@@ -1791,7 +1788,7 @@ fn effect_handler_none_falls_through_without_intercepting_pure_calls() {
 
 #[test]
 fn invoke_named_remains_effect_free_for_non_pure_field_calls() {
-    let functions = functions_from_source("fn entry() = Note.insert(1);");
+    let functions = functions_from_source(include_str!("fixtures/effect_entry.orna"));
 
     assert_eq!(
         code(invoke_named(
