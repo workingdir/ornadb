@@ -22,17 +22,6 @@ fn fixture_source(source: &str) -> SourceUnit {
     }
 }
 
-fn decimal_body_table_assertion_source(assertion: &str, parent_body: &str) -> SourceUnit {
-    SourceUnit {
-        fixture_id: "txn-decimal-table-assertion".into(),
-        source_id: "txn-decimal-table-assertion.orna".into(),
-        parse_as: "module_unit".into(),
-        source: format!(
-            "pub table Reading(id: Int) {{ value: Decimal, label: Str, assert {assertion}; }} fn parent() {{ {parent_body} }}"
-        ),
-    }
-}
-
 fn decimal_key_table_assertion_source(assertion: &str, parent_body: &str) -> SourceUnit {
     SourceUnit {
         fixture_id: "txn-decimal-key-table-assertion".into(),
@@ -718,13 +707,9 @@ fn table_all_unique_assertion_permits_atomic_publication() {
 #[test]
 fn table_all_unique_decimal_body_rejects_scale_alias_and_rolls_back_candidates() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&decimal_body_table_assertion_source(
-        "all_unique(reading => reading.value)",
-        r#"
-            Reading.insert({ id: 1, value: 18.25, label: "canonical" });
-            Reading.insert({ id: 2, value: 18.2500, label: "scale-alias" });
-        "#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-decimal-body-rejects-scale-alias.orna"
+    )));
 
     assert!(
         matches!(
@@ -746,13 +731,9 @@ fn table_all_unique_decimal_body_rejects_scale_alias_and_rolls_back_candidates()
 #[test]
 fn table_all_unique_decimal_body_permits_distinct_values() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&decimal_body_table_assertion_source(
-        "all_unique(reading => reading.value)",
-        r#"
-            Reading.insert({ id: 1, value: 18.25, label: "first" });
-            Reading.insert({ id: 2, value: 18.26, label: "second" });
-        "#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-decimal-body-allows-distinct-values.orna"
+    )));
 
     assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
     for id in [1, 2] {
