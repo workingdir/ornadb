@@ -145,16 +145,7 @@ fn imported_helper_shadowed_by_record_pattern_shorthand_does_not_expand_imported
         ModuleInput::new("checks.orna", TABLE_HELPER),
         ModuleInput::new(
             "consumer.orna",
-            r#"
-                use checks.{related};
-
-                pub fn dispatch(value: { related: fn(): Bool }): Bool =
-                    case value {
-                        { related }: related(),
-                    };
-
-                assert dispatch({ related: () => true });
-            "#,
+            include_str!("fixtures/imported-helper-shadowing/record-pattern-shorthand-consumer.orna"),
         ),
     ]);
 
