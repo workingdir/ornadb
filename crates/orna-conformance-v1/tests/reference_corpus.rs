@@ -958,10 +958,7 @@ fn typed_sys_start_report_maps_orna_sys_132_to_semantic_pass_evidence() {
             None,
             None,
         ),
-        r#"
-            pub fn start(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.start<Int>(function, arguments, as: Int);
-        "#,
+        include_str!("fixtures/typed-start-valid.orna"),
     );
     let fixture = &report.fixtures[0];
     let parse = fixture
