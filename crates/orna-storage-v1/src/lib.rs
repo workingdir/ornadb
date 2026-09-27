@@ -1055,7 +1055,7 @@ fn map_compact_runtime_error(error: RuntimeError) -> Error {
         | RuntimeError::InvalidCompactReceipt
         | RuntimeError::RecoveryInvalid
         | RuntimeError::CheckpointNotReplayable => Error::InvalidTransition,
-        RuntimeError::RecoveryPending => Error::RuntimeUnavailable,
+        RuntimeError::RecoveryPending | RuntimeError::AdminBusy => Error::RuntimeUnavailable,
         RuntimeError::StreamIdentityMismatch
         | RuntimeError::StreamCheckpointStale
         | RuntimeError::LeaseHeld
@@ -1421,6 +1421,14 @@ mod tests {
     fn recovery_pending_maps_to_temporary_storage_unavailability() {
         assert_eq!(
             map_compact_runtime_error(RuntimeError::RecoveryPending),
+            Error::RuntimeUnavailable
+        );
+    }
+
+    #[test]
+    fn admin_busy_maps_to_temporary_storage_unavailability() {
+        assert_eq!(
+            map_compact_runtime_error(RuntimeError::AdminBusy),
             Error::RuntimeUnavailable
         );
     }
