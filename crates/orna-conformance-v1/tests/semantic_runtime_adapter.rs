@@ -1465,7 +1465,7 @@ fn bounded_pure_function_admission_retains_a_digest_bound_executable_namespace()
         fixture_id: "pure-function-witness".into(),
         source_id: "main.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub fn add_one(value: Int): Int = value + 1;".into(),
+        source: include_str!("fixtures/row-admission/pure-function.orna").into(),
     };
     let arguments = BTreeMap::from([(
         "value".into(),
@@ -1504,13 +1504,13 @@ fn project_row_admission_resolves_declared_owner_path_key_and_evaluated_body() {
             fixture_id: "project-rows".into(),
             source_id: "logical/project/inventory.orna".into(),
             parse_as: "module_unit".into(),
-            source: "pub table Item(id: Int) { name: Str, available: Bool, price: Decimal, description: Str = \"default\", }".into(),
+            source: include_str!("fixtures/row-admission/inventory.orna").into(),
         }],
         loose_rows: vec![SourceUnit {
             fixture_id: "project-rows".into(),
             source_id: "logical/project/inventory/Item/42.orna".into(),
             parse_as: "row_unit".into(),
-            source: "{ name: \"Pencil\", available: true, price: 1.00 + 0.25 }".into(),
+            source: include_str!("fixtures/row-admission/item-42.orna").into(),
         }],
         expectations: ProjectExpectations {
             environment: ProjectEnvironment {
@@ -1554,13 +1554,13 @@ fn project_row_admission_rejects_unsupported_key_types_without_string_fallback()
             fixture_id: "project-rows-unsupported".into(),
             source_id: "logical/project/calendar.orna".into(),
             parse_as: "module_unit".into(),
-            source: "pub table Event(id: Date) { name: Str, }".into(),
+            source: include_str!("fixtures/row-admission/calendar.orna").into(),
         }],
         loose_rows: vec![SourceUnit {
             fixture_id: "project-rows-unsupported".into(),
             source_id: "logical/project/calendar/Event/2026-09-05.orna".into(),
             parse_as: "row_unit".into(),
-            source: "{ name: \"Review\" }".into(),
+            source: include_str!("fixtures/row-admission/event-unsupported-key.orna").into(),
         }],
         expectations: ProjectExpectations {
             environment: ProjectEnvironment {
