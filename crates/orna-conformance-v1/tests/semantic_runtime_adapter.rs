@@ -2599,7 +2599,7 @@ fn retained_functions_execute_closures_without_mutating_captures() {
         fixture_id: "closure-capture".into(),
         source_id: "logical/closure-capture.orna".into(),
         parse_as: "module_unit".into(),
-        source: "fn verify() { let seed = 2; let compute = value => value + seed; seed = 9; if (10 | compute) == 12 { 1 } else { 1 / 0 } } fn reject() { let seed = 1; let mutate = () => { seed += 1; seed }; mutate() }".into(),
+        source: include_str!("fixtures/retained-closure-capture.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
@@ -2617,7 +2617,7 @@ fn retained_function_pipeline_executes_and_checks_its_result() {
         fixture_id: "function-pipeline".into(),
         source_id: "logical/function-pipeline.orna".into(),
         parse_as: "module_unit".into(),
-        source: "fn add(value: Int, extra = 6) = value + extra; fn verify() = if (10 | add(extra: 6)) == 16 { 1 } else { 1 / 0 }; fn reject() = 10 | add(value: 3);".into(),
+        source: include_str!("fixtures/retained-function-pipeline.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
