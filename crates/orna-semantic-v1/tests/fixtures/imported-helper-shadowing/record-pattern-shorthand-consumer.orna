@@ -1,0 +1,8 @@
+use checks.{related};
+
+pub fn dispatch(value: { related: fn(): Bool }): Bool =
+    case value {
+        { related }: related(),
+    };
+
+assert dispatch({ related: () => true });
