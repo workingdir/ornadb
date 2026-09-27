@@ -1,5 +1,14 @@
 use orna_syntax_v1::{Expr, parse_expression};
 
+const EXPRESSIONS: &str = include_str!("fixtures/unary-postfix-precedence.orna");
+
+fn expression(index: usize) -> &'static str {
+    EXPRESSIONS
+        .lines()
+        .nth(index)
+        .expect("unary/postfix expression fixture line")
+}
+
 fn parse(source: &str) -> Expr {
     let parsed = parse_expression(source);
     assert!(parsed.is_ok(), "{source:?}: {:?}", parsed.diagnostics);
@@ -8,7 +17,7 @@ fn parse(source: &str) -> Expr {
 
 #[test]
 fn unary_consumes_the_complete_postfix_spine() {
-    let field = parse("-note.id");
+    let field = parse(expression(0));
     assert!(matches!(
         field,
         Expr::Unary { rhs, .. }
@@ -16,7 +25,7 @@ fn unary_consumes_the_complete_postfix_spine() {
                 if name == "id" && matches!(&**base, Expr::Name { text, .. } if text == "note"))
     ));
 
-    let call = parse("-note.render()");
+    let call = parse(expression(1));
     assert!(matches!(
         call,
         Expr::Unary { rhs, .. }
@@ -24,7 +33,7 @@ fn unary_consumes_the_complete_postfix_spine() {
                 if matches!(&**callee, Expr::Field { name, .. } if name == "render"))
     ));
 
-    let index = parse("-note.items[0]");
+    let index = parse(expression(2));
     assert!(matches!(
         index,
         Expr::Unary { rhs, .. }
@@ -35,7 +44,7 @@ fn unary_consumes_the_complete_postfix_spine() {
 
 #[test]
 fn nested_prefixes_still_bind_outside_the_postfix_spine() {
-    let parsed = parse("--note.id");
+    let parsed = parse(expression(3));
     assert!(matches!(
         parsed,
         Expr::Unary { op, rhs, .. }
@@ -46,7 +55,7 @@ fn nested_prefixes_still_bind_outside_the_postfix_spine() {
 
 #[test]
 fn unary_postfix_operand_stops_before_power_and_multiplication() {
-    for source in ["-note.id ^ 2", "-note.id * 2"] {
+    for source in [expression(4), expression(5)] {
         let parsed = parse(source);
         assert!(
             matches!(
@@ -62,7 +71,7 @@ fn unary_postfix_operand_stops_before_power_and_multiplication() {
 
 #[test]
 fn every_prefix_operator_consumes_a_following_field() {
-    for source in ["!note.ready", "+note.value"] {
+    for source in [expression(6), expression(7)] {
         let parsed = parse(source);
         assert!(
             matches!(
@@ -77,7 +86,7 @@ fn every_prefix_operator_consumes_a_following_field() {
 
 #[test]
 fn parentheses_continue_to_override_unary_postfix_precedence() {
-    let parsed = parse("(-note).id");
+    let parsed = parse(expression(8));
     assert!(matches!(
         parsed,
         Expr::Field { base, name, .. }
