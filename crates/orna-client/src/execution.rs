@@ -32,8 +32,6 @@ use inspect::{
     evaluate_external_contract, evaluate_inspect_expression, inspect_carrier_value_matches,
     inspect_render_ui_value_matches, validate_inspect_render_contract,
 };
-#[cfg(test)]
-use ui::decode_ui_constructor_body;
 use ui::{evaluate_standard_ui_constructor, standard_ui_constructor_spec};
 #[cfg(test)]
 use validation::is_expression_reference_allowed;
