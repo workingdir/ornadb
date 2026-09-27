@@ -72,7 +72,6 @@ use snapshot_builders::{
     retained_standard_library_v7_snapshot_from_source,
     retained_standard_library_v8_snapshot_from_source,
     retained_standard_library_v9_snapshot_from_source,
-    retained_standard_library_v10_snapshot_from_source,
 };
 
 pub use orna_compiler::StandardUpgradeIdentity;
@@ -675,22 +674,9 @@ pub const STD_CLI_REPL_FUNCTION_ID: FunctionId = FunctionId::from_bytes(reserved
 pub const STD_CLI_REPL_FUNCTION_REVISION_ID: FunctionRevisionId =
     FunctionRevisionId::from_bytes(reserved_id(0x1C));
 pub const STD_CLI_REPL_REVISION_NUMBER: u64 = 1;
-const RETAINED_STANDARD_CLI_SOURCE: &str = include_str!("../../../stdlib/std/cli.orna");
 const ACCEPTED_V10_CLI_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x1e, 0x99, 0xf3, 0x2f, 0xf7, 0xc2, 0xf0, 0x65, 0x4d, 0x67, 0x61, 0xa6, 0xa9, 0xce, 0xd8, 0x26,
     0x95, 0x6c, 0x09, 0x5d, 0xdf, 0xd1, 0x2e, 0xbb, 0xdc, 0xc1, 0x8e, 0xc4, 0xe9, 0xab, 0x19, 0xc4,
-]);
-const ACCEPTED_V10_CLI_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xb4, 0xa2, 0xd8, 0xcb, 0x75, 0x7e, 0x49, 0x17, 0xcc, 0x1e, 0xe5, 0x1e, 0x92, 0xc4, 0x5f, 0x0a,
-    0x68, 0xd6, 0x90, 0xbd, 0x04, 0x68, 0xd2, 0x3c, 0x0e, 0xba, 0x50, 0x35, 0xfd, 0x44, 0x74, 0x47,
-]);
-const ACCEPTED_V10_CLI_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x20, 0xf8, 0xae, 0xd5, 0x7b, 0x6b, 0xa6, 0x57, 0xbd, 0x29, 0xc1, 0xe9, 0x94, 0x9b, 0x5a, 0xce,
-    0x81, 0x31, 0x4d, 0xe7, 0xb0, 0xda, 0x06, 0x28, 0x59, 0xb9, 0x26, 0x34, 0xa6, 0x89, 0x91, 0xf3,
-]);
-const ACCEPTED_V10_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xb1, 0xf0, 0xdb, 0x01, 0xe1, 0xce, 0x87, 0xd2, 0x2a, 0x2c, 0x60, 0x9d, 0x93, 0xbf, 0xa7, 0x4a,
-    0xa4, 0xd8, 0x52, 0xc3, 0x68, 0x8e, 0x35, 0xc2, 0xb1, 0x61, 0x37, 0xd2, 0x83, 0x3c, 0x0b, 0x1c,
 ]);
 const ACCEPTED_V10_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0xe9, 0x35, 0x47, 0x5a, 0x86, 0x4d, 0xaa, 0x61, 0x66, 0x01, 0x9a, 0xda, 0xf1, 0x59, 0x86, 0xc4,
@@ -2828,24 +2814,6 @@ pub fn prepare_standard_upgrade_v8_to_v9(
     )
 }
 
-/// Prepares the append-only `orna.std/9` to `orna.std/10` standard upgrade.
-pub fn prepare_standard_upgrade_v9_to_v10(
-    active: &ActiveDatabaseRevision,
-) -> Result<StandardUpgrade, StandardUpgradeError> {
-    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V9_REVISION_ID)?;
-    let version_nine = retained_standard_library_v9_snapshot()
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    verify_standard_library_v9_snapshot(version_nine)
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    prepare_standard_upgrade_with(
-        active,
-        retained_standard_library_v10_snapshot,
-        verify_standard_library_v10_snapshot,
-        check_standard_library_source,
-        prepare_checked_standard_upgrade,
-    )
-}
-
 fn require_standard_upgrade_parent(
     active: &ActiveDatabaseRevision,
     expected: StandardLibraryRevisionId,
@@ -3360,13 +3328,17 @@ pub fn standard_library_v10_manifest()
     Ok(StandardLibraryV10Manifest { catalogue })
 }
 
-/// Retains the source-authored V10 CLI session unit.
+/// The pre-1.0 V10 CLI source is no longer bundled or selected as a product
+/// standard. Historical V10 snapshots can still be verified when explicitly
+/// supplied by their stored revision; no replacement source is synthesized.
 pub fn retained_standard_library_v10_snapshot()
 -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    retained_standard_library_v10_snapshot_from_source(RETAINED_STANDARD_CLI_SOURCE)
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V10_REVISION_ID,
+    })
 }
 
-/// Verifies the retained source-authored V10 CLI session snapshot.
+/// Verifies an explicitly supplied historical V10 CLI session snapshot.
 pub fn verify_standard_library_v10_snapshot(
     snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
@@ -3427,9 +3399,6 @@ pub fn select_verified_standard_library(
         }
         STANDARD_LIBRARY_V9_REVISION_ID => {
             verify_standard_library_v9_snapshot(retained_standard_library_v9_snapshot()?)
-        }
-        STANDARD_LIBRARY_V10_REVISION_ID => {
-            verify_standard_library_v10_snapshot(retained_standard_library_v10_snapshot()?)
         }
         _ => Err(StandardLibraryError::UnsupportedRevision { revision }),
     }
