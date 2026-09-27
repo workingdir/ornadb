@@ -506,7 +506,7 @@ fn semantic_project_adapter_admits_sys_resolve_string_as_object_ref_read() {
 
 #[test]
 fn semantic_project_adapter_rejects_non_string_sys_resolve_argument_at_typecheck() {
-    let source = "pub fn invalid() = sys.resolve(1);";
+    let source = include_str!("fixtures/sys-resolve-non-string-argument.orna");
     let project = resolve_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -611,7 +611,7 @@ fn semantic_project_adapter_rejects_non_string_sys_snapshot_argument_at_typechec
 
 #[test]
 fn semantic_project_adapter_admits_sys_database_cwd_as_snapshot_ref_read() {
-    let source = "pub fn cwd() = sys.snapshot(sys.database.cwd);";
+    let source = include_str!("fixtures/sys-database-cwd.orna");
     let project = database_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -641,7 +641,7 @@ fn semantic_project_adapter_admits_sys_database_cwd_as_snapshot_ref_read() {
 }
 #[test]
 fn semantic_project_adapter_admits_sys_database_writable_as_bool_read() {
-    let source = "pub fn writable() { let _snapshot = sys.snapshot(sys.database.cwd); sys.database.writable }";
+    let source = include_str!("fixtures/sys-database-writable.orna");
     let project = database_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -672,7 +672,7 @@ fn semantic_project_adapter_admits_sys_database_writable_as_bool_read() {
 
 #[test]
 fn semantic_project_adapter_rejects_unsupported_sys_database_member_at_typecheck() {
-    let source = "pub fn invalid() = sys.database.legacy_member;";
+    let source = include_str!("fixtures/sys-database-unsupported-member.orna");
     let project = database_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -686,7 +686,7 @@ fn semantic_project_adapter_rejects_unsupported_sys_database_member_at_typecheck
 
 #[test]
 fn semantic_project_adapter_admits_sys_runtime_info_with_read_effect() {
-    let source = "pub fn runtime_info() = sys.rt.info();";
+    let source = include_str!("fixtures/sys-rt-info.orna");
     let project = runtime_info_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -717,7 +717,7 @@ fn semantic_project_adapter_admits_sys_runtime_info_with_read_effect() {
 
 #[test]
 fn semantic_project_adapter_rejects_removed_sys_runtime_with_native_diagnostic() {
-    let source = "pub fn runtime_info() = sys.runtime;";
+    let source = include_str!("fixtures/sys-runtime-removed.orna");
     let project = runtime_info_project(source);
     let mut adapter = SemanticAdapter::default();
 
