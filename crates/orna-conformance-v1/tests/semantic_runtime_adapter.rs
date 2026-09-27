@@ -2042,7 +2042,7 @@ fn bounded_evaluator_executes_expression_units_and_redacts_failures() {
         fixture_id: "test-valid".into(),
         source_id: "logical/test.orna".into(),
         parse_as: "row_unit".into(),
-        source: "{ total: std.math.increment(1) }".into(),
+        source: include_str!("fixtures/bounded-expression-valid-row.orna").into(),
     };
     assert_eq!(evaluator.evaluate(&valid), StageOutcome::Passed);
 
@@ -2050,7 +2050,7 @@ fn bounded_evaluator_executes_expression_units_and_redacts_failures() {
         fixture_id: "test-invalid".into(),
         source_id: "logical/test.orna".into(),
         parse_as: "row_unit".into(),
-        source: "{ total: missing }".into(),
+        source: include_str!("fixtures/bounded-expression-unresolved-row.orna").into(),
     };
     let StageOutcome::Failed(diagnostic) = evaluator.evaluate(&invalid) else {
         panic!("unknown name must fail");
