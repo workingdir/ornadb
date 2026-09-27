@@ -2456,7 +2456,7 @@ fn module_admission_checks_source_and_zero_limits_before_parsing() {
         fixture_id: "module-admission".into(),
         source_id: "logical/module-admission.orna".into(),
         parse_as: "module_unit".into(),
-        source: "invalid(".into(),
+        source: include_str!("fixtures/module-admission-invalid.orna").into(),
     };
     for limits in [
         orna_evaluator_v1::Limits {
@@ -2489,7 +2489,7 @@ fn rejected_project_capacity_does_not_publish_partial_function_updates() {
         fixture_id: "retained-limit".into(),
         source_id: "logical/retained-limit.orna".into(),
         parse_as: "module_unit".into(),
-        source: "fn stable() = 1;".into(),
+        source: include_str!("fixtures/capacity-stable-initial.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::new(orna_evaluator_v1::Limits {
         max_collection_items: 2,
@@ -2497,11 +2497,11 @@ fn rejected_project_capacity_does_not_publish_partial_function_updates() {
     });
     assert_eq!(evaluator.evaluate(&original), StageOutcome::Passed);
     let replacement = SourceUnit {
-        source: "fn stable() = 99; fn added() = 2;".into(),
+        source: include_str!("fixtures/capacity-stable-replacement.orna").into(),
         ..original.clone()
     };
     let overflow = SourceUnit {
-        source: "fn excess() = 3;".into(),
+        source: include_str!("fixtures/capacity-excess.orna").into(),
         ..original.clone()
     };
     let StageOutcome::Failed(diagnostic) =
@@ -2516,13 +2516,13 @@ fn rejected_project_capacity_does_not_publish_partial_function_updates() {
     ));
     let probe = SourceUnit {
         parse_as: "expression_unit".into(),
-        source: "if stable() == 1 { 1 } else { 1 / 0 }".into(),
+        source: include_str!("fixtures/capacity-stable-probe.orna").into(),
         ..original.clone()
     };
     assert_eq!(evaluator.evaluate(&probe), StageOutcome::Passed);
     // Replacing an existing definition does not consume another retained slot.
     let replacement = SourceUnit {
-        source: "fn stable() = 1; fn added() = 2;".into(),
+        source: include_str!("fixtures/capacity-stable-and-added.orna").into(),
         ..original
     };
     assert_eq!(evaluator.evaluate(&replacement), StageOutcome::Passed);
