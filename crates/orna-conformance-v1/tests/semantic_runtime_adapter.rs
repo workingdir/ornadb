@@ -2634,7 +2634,7 @@ fn retained_module_functions_call_helpers_in_defaults_and_bodies() {
         fixture_id: "nested-functions".into(),
         source_id: "logical/nested-functions.orna".into(),
         parse_as: "module_unit".into(),
-        source: "fn entry(value = helper(40)) = helper(value); fn helper(value: Int) = value + 1; fn recurse() = recurse();".into(),
+        source: include_str!("fixtures/retained-module-helper-defaults.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
@@ -2652,7 +2652,7 @@ fn retained_function_defaults_cannot_reset_the_invocation_budget() {
         fixture_id: "default-budget".into(),
         source_id: "logical/default-budget.orna".into(),
         parse_as: "module_unit".into(),
-        source: "fn compute(first = 1 + 2, second = 3 + 4) = first + second;".into(),
+        source: include_str!("fixtures/retained-function-default-budget.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::new(orna_evaluator_v1::Limits {
         max_steps: 6,
