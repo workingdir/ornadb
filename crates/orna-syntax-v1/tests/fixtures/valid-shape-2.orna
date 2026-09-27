@@ -1,0 +1,2 @@
+pub enum Outcome<T> { Ok { value: T }, Err { message: Text }, }
+pub type Point { x: Int, y: Int, }
