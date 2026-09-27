@@ -13,7 +13,7 @@ use std::{
 
 use orna_compiler::{check_new_application, check_standard_library_source};
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{retained_standard_library_v10_snapshot, verify_standard_library_v10_snapshot};
+use orna_standard::{retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot};
 use serde_json::{Value, json};
 
 /// The valid application source used for positive tests.
@@ -604,9 +604,9 @@ fn canonical_source_check_diagnostics(
     logical_path: &str,
 ) -> Vec<DiagnosticProjection> {
     let snapshot =
-        retained_standard_library_v10_snapshot().expect("retained V10 standard snapshot");
+        retained_standard_library_v9_snapshot().expect("retained V9 standard snapshot");
     let verified =
-        verify_standard_library_v10_snapshot(snapshot).expect("verified V10 standard snapshot");
+        verify_standard_library_v9_snapshot(snapshot).expect("verified V9 standard snapshot");
     let standard = check_standard_library_source(&verified).expect("checked standard source");
     let bundle = SourceBundle::new([SourceUnit::new(logical_path, source)])
         .expect("one nonempty logical source unit");
