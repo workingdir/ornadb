@@ -22,17 +22,6 @@ fn fixture_source(source: &str) -> SourceUnit {
     }
 }
 
-fn source_with_count_function(count_body: &str, parent_body: &str) -> SourceUnit {
-    SourceUnit {
-        fixture_id: "txn-source".into(),
-        source_id: "txn-source.orna".into(),
-        parse_as: "module_unit".into(),
-        source: format!(
-            "pub table Note(id: Int) {{ text: Str, }} fn count_notes() = {count_body}; fn parent() {{ {parent_body} }}"
-        ),
-    }
-}
-
 fn source_with_table_assertion(assertion: &str, parent_body: &str) -> SourceUnit {
     SourceUnit {
         fixture_id: "txn-source".into(),
@@ -353,10 +342,9 @@ fn parsed_relation_one_rejects_multiple_candidate_matches_and_rolls_back() {
 #[test]
 fn parsed_pipeline_count_in_a_direct_function_body_observes_activation_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source_with_count_function(
-        "Note | count",
-        r#"Note.insert({ id: 7, text: "first" }); assert count_notes() == 1;"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/transactional-direct-pipeline-count.orna"
+    )));
 
     assert!(matches!(outcome, StageOutcome::Passed));
     assert!(
@@ -451,10 +439,9 @@ fn parsed_relation_windows_reject_dynamic_negative_parameters_without_publish() 
 #[test]
 fn parsed_pipeline_count_call_in_a_direct_function_body_observes_activation_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source_with_count_function(
-        "Note | count()",
-        r#"Note.insert({ id: 7, text: "first" }); assert count_notes() == 1;"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/transactional-direct-pipeline-count-call.orna"
+    )));
 
     assert!(matches!(outcome, StageOutcome::Passed));
     assert!(
