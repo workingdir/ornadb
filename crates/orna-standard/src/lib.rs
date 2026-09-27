@@ -54,13 +54,13 @@ pub use codecs::{
 };
 use executables::{
     retained_json_executable, retained_terminal_table_executable,
-    retained_ui_constructor_executables, retained_v2_executable, retained_window_executable,
+    retained_v2_executable, retained_window_executable,
 };
 use retained::{
     reconcile_retained_action_source, reconcile_retained_data_source,
     reconcile_retained_invoke_source, reconcile_retained_json_source,
     reconcile_retained_output_source, reconcile_retained_source_with_unit,
-    reconcile_retained_ui_constructors_source, reconcile_retained_ui_source,
+    reconcile_retained_ui_source,
     reconcile_retained_window_source, retained_standard_library_snapshot_from_source,
     retained_standard_library_v2_snapshot_from_source,
     retained_standard_library_v3_snapshot_from_source,
@@ -71,12 +71,11 @@ use snapshot_builders::{
     retained_standard_library_v6_snapshot_from_source,
     retained_standard_library_v7_snapshot_from_source,
     retained_standard_library_v8_snapshot_from_source,
-    retained_standard_library_v9_snapshot_from_source,
 };
 
 pub use orna_compiler::StandardUpgradeIdentity;
 pub use orna_compiler::{
-    CheckedStandardUiConstructor, CheckedStandardUiWindow, STD_DATA_ROWS_TYPE_BINDING_ID,
+    CheckedStandardUiWindow, STD_DATA_ROWS_TYPE_BINDING_ID,
     STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_DATA_SOURCE_UNIT_ID, STD_INTEGER_TYPE_ID,
     STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
     STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
@@ -88,7 +87,7 @@ pub use orna_compiler::{
     STD_UI_BUTTON_FUNCTION_REVISION_ID, STD_UI_BUTTON_LABEL_PARAMETER_ID,
     STD_UI_BUTTON_RUNTIME_CONTRACT, STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
     STD_UI_COLUMN_FUNCTION_REVISION_ID, STD_UI_COLUMN_RUNTIME_CONTRACT,
-    STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID, STD_UI_PANEL_CONTENT_PARAMETER_ID,
+    STD_UI_PANEL_CONTENT_PARAMETER_ID,
     STD_UI_PANEL_FUNCTION_ID, STD_UI_PANEL_FUNCTION_REVISION_ID, STD_UI_PANEL_RUNTIME_CONTRACT,
     STD_UI_ROW_CONTENT_PARAMETER_ID, STD_UI_ROW_FUNCTION_ID, STD_UI_ROW_FUNCTION_REVISION_ID,
     STD_UI_ROW_RUNTIME_CONTRACT, STD_UI_TABS_CONTENT_PARAMETER_ID, STD_UI_TABS_FUNCTION_ID,
@@ -100,7 +99,7 @@ pub use orna_compiler::{
     STD_UI_WINDOW_CONTENT_PARAMETER_ID, STD_UI_WINDOW_FUNCTION_ID,
     STD_UI_WINDOW_FUNCTION_REVISION_ID, STD_UI_WINDOW_REVISION_NUMBER,
     STD_UI_WINDOW_RUNTIME_CONTRACT, STD_UI_WINDOW_TITLE_PARAMETER_ID, STD_WINDOW_SOURCE_UNIT_ID,
-    check_standard_terminal_present_table, check_standard_ui_constructor, check_standard_ui_window,
+    check_standard_terminal_present_table, check_standard_ui_window,
 };
 pub use orna_core::inspect::INSPECT_RENDER_CONTRACT;
 
@@ -653,10 +652,7 @@ pub const STANDARD_CATALOGUE_V9_REVISION_ID: CatalogueRevisionId =
 pub const STANDARD_SOURCE_V9_BUNDLE_ID: SourceBundleId = SourceBundleId::from_bytes(reserved_id(9));
 pub const STANDARD_SOURCE_V9_REVISION_ID: SourceRevisionId =
     SourceRevisionId::from_bytes(reserved_id(9));
-pub const STD_UI_CONSTRUCTORS_SOURCE_LOGICAL_PATH: &str = "std/ui_constructors.orna";
 
-const RETAINED_STANDARD_UI_CONSTRUCTORS_SOURCE: &str =
-    include_str!("../../../stdlib/std/ui_constructors.orna");
 /// The standard-library version represented by the V10 manifest.
 pub const STANDARD_LIBRARY_V10_VERSION_IDENTITY: &str = "orna.std/10";
 pub const STANDARD_LIBRARY_V10_REVISION_ID: StandardLibraryRevisionId =
@@ -685,90 +681,6 @@ const ACCEPTED_V10_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_byt
 const ACCEPTED_V10_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x9b, 0x72, 0xf3, 0x38, 0x8b, 0x46, 0xe5, 0x28, 0x42, 0x5a, 0x84, 0x1c, 0x5b, 0x90, 0x61, 0x65,
     0xf7, 0x31, 0x61, 0xe9, 0x2c, 0x9f, 0x93, 0xe6, 0x01, 0x99, 0x81, 0x76, 0x10, 0x6d, 0xdb, 0xbd,
-]);
-const ACCEPTED_V9_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_TYPES_CONTENT_DIGEST;
-const ACCEPTED_V9_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_INVOKE_CONTENT_DIGEST;
-const ACCEPTED_V9_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_OUTPUT_CONTENT_DIGEST;
-const ACCEPTED_V9_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_UI_CONTENT_DIGEST;
-const ACCEPTED_V9_JSON_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_JSON_CONTENT_DIGEST;
-const ACCEPTED_V9_ACTION_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V6_ACTION_CONTENT_DIGEST;
-const ACCEPTED_V9_WINDOW_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_WINDOW_CONTENT_DIGEST;
-const ACCEPTED_V9_DATA_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_DATA_CONTENT_DIGEST;
-const ACCEPTED_V9_UI_CONSTRUCTORS_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xdd, 0x5d, 0xc7, 0x93, 0xb0, 0xf8, 0x61, 0x45, 0xdd, 0x3e, 0xd2, 0x05, 0x5a, 0x55, 0x89, 0x82,
-    0xc3, 0x42, 0x52, 0xc9, 0xb7, 0xfb, 0x47, 0xe7, 0xb3, 0x72, 0xb8, 0x21, 0x81, 0x73, 0x56, 0x87,
-]);
-const ACCEPTED_V9_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V8_ARTIFACT_DIGEST;
-const ACCEPTED_V9_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V8_SEMANTIC_DIGEST;
-const ACCEPTED_V9_TABLE_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V8_TABLE_ARTIFACT_DIGEST;
-const ACCEPTED_V9_TABLE_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V8_TABLE_SEMANTIC_DIGEST;
-const ACCEPTED_V9_UI_TEXT_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xde, 0x76, 0xc9, 0xf8, 0x46, 0x9e, 0x49, 0xdf, 0x37, 0xee, 0x4e, 0x89, 0x8d, 0x56, 0x67, 0x40,
-    0x8d, 0xb2, 0x7e, 0xba, 0xfe, 0x37, 0x2e, 0xe1, 0xdf, 0xab, 0x34, 0x41, 0x0c, 0xd0, 0x73, 0x51,
-]);
-const ACCEPTED_V9_UI_TEXT_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xfe, 0x59, 0x16, 0x6c, 0xba, 0xce, 0x28, 0xb8, 0x11, 0x9f, 0xbb, 0x27, 0x6f, 0xdb, 0xa0, 0x8c,
-    0x1e, 0xcf, 0xc9, 0xb3, 0x92, 0xd5, 0x72, 0xbc, 0x82, 0xac, 0xbc, 0xea, 0xf7, 0x0c, 0x4f, 0x51,
-]);
-const ACCEPTED_V9_UI_BUTTON_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x37, 0x70, 0x17, 0x0a, 0xfd, 0xcb, 0x13, 0x74, 0x0c, 0x19, 0xde, 0xe8, 0x32, 0x7d, 0x87, 0xea,
-    0x51, 0x01, 0x8b, 0x41, 0xfd, 0xae, 0x61, 0x18, 0xe3, 0x7b, 0x15, 0xbf, 0x2e, 0x17, 0x64, 0x5e,
-]);
-const ACCEPTED_V9_UI_BUTTON_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x70, 0x56, 0x57, 0x99, 0xc0, 0xed, 0x55, 0xcd, 0xdf, 0x59, 0xf2, 0x51, 0x0f, 0x78, 0xd9, 0x68,
-    0x26, 0xd8, 0x9b, 0xe4, 0xb6, 0xaf, 0x24, 0x56, 0x22, 0x12, 0x7e, 0x3c, 0x1f, 0xb4, 0xf4, 0x3f,
-]);
-const ACCEPTED_V9_UI_PANEL_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xcf, 0xe4, 0x8f, 0x3d, 0x05, 0xc1, 0x28, 0x38, 0x28, 0x78, 0x40, 0x2f, 0xa2, 0x35, 0xf0, 0xcc,
-    0x42, 0x97, 0x32, 0x6a, 0x89, 0xff, 0x1a, 0x36, 0x40, 0xbc, 0x10, 0xd2, 0xa9, 0x0d, 0x85, 0x09,
-]);
-const ACCEPTED_V9_UI_PANEL_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x09, 0x6a, 0xcf, 0x62, 0x31, 0x09, 0x5e, 0xca, 0x7b, 0x21, 0x50, 0x51, 0x03, 0x42, 0x0b, 0x55,
-    0xda, 0xcd, 0xfd, 0xb6, 0x52, 0xde, 0x1a, 0x47, 0xcd, 0x06, 0x9a, 0x59, 0x6f, 0x54, 0xe8, 0x14,
-]);
-const ACCEPTED_V9_UI_ROW_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xfe, 0x9f, 0x16, 0xac, 0x45, 0xd0, 0x99, 0x23, 0x42, 0xf7, 0x8c, 0xf5, 0xb2, 0x7b, 0x69, 0xa9,
-    0x17, 0x17, 0x72, 0x7c, 0xa2, 0x64, 0x4a, 0x16, 0x23, 0x34, 0xa1, 0x7a, 0x74, 0x7a, 0xd6, 0x9b,
-]);
-const ACCEPTED_V9_UI_ROW_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xf5, 0x8e, 0x0b, 0x07, 0x56, 0xa2, 0xa3, 0x10, 0x63, 0xcc, 0xb7, 0x32, 0xb4, 0xe1, 0x1d, 0x32,
-    0xfa, 0x69, 0x74, 0x95, 0x12, 0xe4, 0xf7, 0x91, 0x97, 0x56, 0xbf, 0x00, 0x86, 0x7f, 0x58, 0x1d,
-]);
-const ACCEPTED_V9_UI_COLUMN_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x46, 0x04, 0x29, 0x19, 0xab, 0x2a, 0x30, 0xf9, 0x03, 0x18, 0xf4, 0x81, 0x6e, 0x13, 0x51, 0x42,
-    0xe3, 0x4c, 0xe7, 0x61, 0x95, 0xf6, 0x69, 0x7a, 0xe3, 0xaa, 0xd4, 0x5f, 0xf7, 0x2f, 0xb6, 0x20,
-]);
-const ACCEPTED_V9_UI_COLUMN_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x2f, 0x66, 0x24, 0xec, 0x28, 0x19, 0x31, 0xcc, 0xe8, 0xd5, 0x81, 0x10, 0x28, 0x75, 0xfb, 0xe1,
-    0xda, 0x67, 0x20, 0xe3, 0x88, 0x59, 0x68, 0xd3, 0x10, 0x43, 0x48, 0x9d, 0x97, 0xc6, 0xe0, 0x7b,
-]);
-const ACCEPTED_V9_UI_TEXT_INPUT_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xb4, 0xb8, 0xeb, 0x44, 0x1e, 0x04, 0x38, 0xac, 0x2e, 0xd7, 0x43, 0x14, 0x05, 0x23, 0x1a, 0x18,
-    0xa4, 0x68, 0x0c, 0xed, 0x92, 0x3f, 0x47, 0xb3, 0xc2, 0x7d, 0xff, 0x03, 0xed, 0x08, 0x34, 0x87,
-]);
-const ACCEPTED_V9_UI_TEXT_INPUT_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xe0, 0x71, 0x71, 0x0e, 0x94, 0x94, 0x1c, 0x48, 0x22, 0x89, 0xa9, 0x3f, 0x2a, 0xa7, 0x78, 0x09,
-    0xd6, 0xe5, 0xeb, 0x5b, 0xf6, 0xaa, 0xef, 0x0c, 0x90, 0xd0, 0x12, 0x25, 0x48, 0x3c, 0x4a, 0x70,
-]);
-const ACCEPTED_V9_UI_TABS_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x12, 0x40, 0x90, 0xf3, 0x7c, 0x20, 0xd9, 0x3a, 0x92, 0xef, 0xf5, 0x91, 0x4e, 0x70, 0x17, 0x25,
-    0x04, 0xbc, 0x2b, 0x34, 0xbd, 0xdc, 0xf0, 0xe4, 0x77, 0xe0, 0x6d, 0xfd, 0x8f, 0x0c, 0x48, 0x32,
-]);
-const ACCEPTED_V9_UI_TABS_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x37, 0xaa, 0x1a, 0x41, 0xce, 0x04, 0x6d, 0xd0, 0x18, 0x33, 0x41, 0x98, 0x9d, 0x39, 0x28, 0x19,
-    0x8d, 0x0c, 0x01, 0x79, 0x70, 0xbf, 0xb2, 0x42, 0x8d, 0x5e, 0xa2, 0xc5, 0xbb, 0x4b, 0x21, 0x76,
-]);
-const ACCEPTED_V9_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x9f, 0x0a, 0xd9, 0xbd, 0x40, 0xc3, 0x6c, 0x8f, 0x20, 0x43, 0x83, 0x04, 0xbd, 0x81, 0xee, 0xfe,
-    0x50, 0xec, 0xe4, 0xfd, 0x03, 0x98, 0x62, 0x08, 0xf3, 0x76, 0x77, 0xc6, 0x21, 0x78, 0x48, 0x2e,
-]);
-const ACCEPTED_V9_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x1b, 0xde, 0x03, 0x54, 0xa9, 0x87, 0x22, 0x4f, 0xf8, 0x0c, 0x01, 0xab, 0xcc, 0xfd, 0xc7, 0x3f,
-    0xc8, 0xf3, 0xec, 0x4d, 0xbb, 0x8a, 0xe6, 0x6b, 0x2d, 0x74, 0xdf, 0x2d, 0x69, 0x26, 0x23, 0xa5,
-]);
-const ACCEPTED_V9_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xe2, 0xf7, 0xb7, 0x73, 0x89, 0x77, 0x04, 0x69, 0xbf, 0xbe, 0x6d, 0x94, 0x84, 0x3c, 0x43, 0x1a,
-    0x3d, 0xc4, 0x00, 0x8a, 0x50, 0x52, 0x15, 0xc6, 0xaf, 0xd5, 0x6d, 0x26, 0x07, 0xa5, 0xb7, 0x56,
 ]);
 #[derive(Clone, Copy)]
 struct ValueTypeFact {
@@ -2035,10 +1947,6 @@ impl StandardLibraryV9Manifest {
         STD_DATA_SOURCE_UNIT_ID
     }
 
-    pub const fn ui_constructors_source_unit(&self) -> SourceUnitId {
-        STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID
-    }
-
     pub const fn types_source_logical_path(&self) -> &'static str {
         SOURCE_LOGICAL_PATH
     }
@@ -2071,9 +1979,6 @@ impl StandardLibraryV9Manifest {
         STD_DATA_SOURCE_LOGICAL_PATH
     }
 
-    pub const fn ui_constructors_source_logical_path(&self) -> &'static str {
-        STD_UI_CONSTRUCTORS_SOURCE_LOGICAL_PATH
-    }
     pub const fn catalogue(&self) -> &CatalogueSnapshot {
         &self.catalogue
     }
@@ -2084,152 +1989,6 @@ pub fn standard_library_v9_manifest()
 -> Result<StandardLibraryV9Manifest, StandardLibraryManifestError> {
     let version_eight = standard_library_v8_manifest()?;
     let mut functions = version_eight.catalogue().functions().to_vec();
-    functions.extend([
-        FunctionDefinition::new(
-            STD_UI_TEXT_FUNCTION_ID,
-            semantic_name("std.ui.text", ["std", "ui", "text"])?,
-            FunctionDomain::Client,
-            vec![ParameterDefinition::new(
-                STD_UI_TEXT_PARAMETER_ID,
-                "text",
-                0,
-                ResolvedType::value(CHARACTER_LARGE_OBJECT_TYPE_ID),
-                None,
-            )],
-            FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-            STD_UI_TEXT_FUNCTION_REVISION_ID,
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Immutable,
-        ),
-        FunctionDefinition::new(
-            STD_UI_BUTTON_FUNCTION_ID,
-            semantic_name("std.ui.button", ["std", "ui", "button"])?,
-            FunctionDomain::Client,
-            vec![
-                ParameterDefinition::new(
-                    STD_UI_BUTTON_LABEL_PARAMETER_ID,
-                    "label",
-                    0,
-                    ResolvedType::value(CHARACTER_LARGE_OBJECT_TYPE_ID),
-                    None,
-                ),
-                ParameterDefinition::new(
-                    STD_UI_BUTTON_ENABLED_PARAMETER_ID,
-                    "enabled",
-                    1,
-                    ResolvedType::value(BOOLEAN_TYPE_ID),
-                    None,
-                ),
-            ],
-            FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-            STD_UI_BUTTON_FUNCTION_REVISION_ID,
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Immutable,
-        ),
-        FunctionDefinition::new(
-            STD_UI_PANEL_FUNCTION_ID,
-            semantic_name("std.ui.panel", ["std", "ui", "panel"])?,
-            FunctionDomain::Client,
-            vec![ParameterDefinition::new(
-                STD_UI_PANEL_CONTENT_PARAMETER_ID,
-                "content",
-                0,
-                ResolvedType::value(STD_UI_TYPE_ID),
-                None,
-            )],
-            FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-            STD_UI_PANEL_FUNCTION_REVISION_ID,
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Immutable,
-        ),
-        FunctionDefinition::new(
-            STD_UI_ROW_FUNCTION_ID,
-            semantic_name("std.ui.row", ["std", "ui", "row"])?,
-            FunctionDomain::Client,
-            vec![ParameterDefinition::new(
-                STD_UI_ROW_CONTENT_PARAMETER_ID,
-                "content",
-                0,
-                ResolvedType::value(STD_UI_TYPE_ID),
-                None,
-            )],
-            FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-            STD_UI_ROW_FUNCTION_REVISION_ID,
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Immutable,
-        ),
-        FunctionDefinition::new(
-            STD_UI_COLUMN_FUNCTION_ID,
-            semantic_name("std.ui.column", ["std", "ui", "column"])?,
-            FunctionDomain::Client,
-            vec![ParameterDefinition::new(
-                STD_UI_COLUMN_CONTENT_PARAMETER_ID,
-                "content",
-                0,
-                ResolvedType::value(STD_UI_TYPE_ID),
-                None,
-            )],
-            FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-            STD_UI_COLUMN_FUNCTION_REVISION_ID,
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Immutable,
-        ),
-        FunctionDefinition::new(
-            STD_UI_TEXT_INPUT_FUNCTION_ID,
-            semantic_name("std.ui.text_input", ["std", "ui", "text_input"])?,
-            FunctionDomain::Client,
-            vec![
-                ParameterDefinition::new(
-                    STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID,
-                    "text",
-                    0,
-                    ResolvedType::value(CHARACTER_LARGE_OBJECT_TYPE_ID),
-                    None,
-                ),
-                ParameterDefinition::new(
-                    STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID,
-                    "placeholder",
-                    1,
-                    ResolvedType::value(CHARACTER_LARGE_OBJECT_TYPE_ID),
-                    None,
-                ),
-                ParameterDefinition::new(
-                    STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID,
-                    "enabled",
-                    2,
-                    ResolvedType::value(BOOLEAN_TYPE_ID),
-                    None,
-                ),
-            ],
-            FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-            STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID,
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Immutable,
-        ),
-        FunctionDefinition::new(
-            STD_UI_TABS_FUNCTION_ID,
-            semantic_name("std.ui.tabs", ["std", "ui", "tabs"])?,
-            FunctionDomain::Client,
-            vec![ParameterDefinition::new(
-                STD_UI_TABS_CONTENT_PARAMETER_ID,
-                "content",
-                0,
-                ResolvedType::value(STD_UI_TYPE_ID),
-                None,
-            )],
-            FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-            STD_UI_TABS_FUNCTION_REVISION_ID,
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Immutable,
-        ),
-    ]);
     functions.sort_by_key(|function| function.id());
     let catalogue = CatalogueSnapshot::new_with_functions_and_types(
         STANDARD_CATALOGUE_V9_REVISION_ID,
@@ -3180,44 +2939,21 @@ pub fn verify_standard_library_v8_snapshot(
         .map_err(|source| StandardLibraryError::CanonicalHash { source })
 }
 
-/// Retains the canonical V9 structural UI constructor source as an
-/// unverified snapshot.
+/// V9 predates the pinned Orna 1.0 standard and is no longer retained.
 pub fn retained_standard_library_v9_snapshot()
 -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    retained_standard_library_v9_snapshot_from_source(
-        RETAINED_STANDARD_SOURCE,
-        RETAINED_STANDARD_INVOKE_SOURCE,
-        RETAINED_STANDARD_OUTPUT_SOURCE,
-        RETAINED_STANDARD_UI_SOURCE,
-        RETAINED_STANDARD_JSON_SOURCE,
-        RETAINED_STANDARD_ACTION_SOURCE,
-        RETAINED_STANDARD_WINDOW_SOURCE,
-        RETAINED_STANDARD_DATA_SOURCE,
-        RETAINED_STANDARD_UI_CONSTRUCTORS_SOURCE,
-    )
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V9_REVISION_ID,
+    })
 }
 
-/// Verifies a retained V9 structural UI constructor snapshot and returns
-/// authority.
+/// Historical V9 verification fails closed after its source bundle retired.
 pub fn verify_standard_library_v9_snapshot(
-    snapshot: StandardLibrarySnapshot,
+    _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    let actual_catalogue = snapshot.catalogue().revision();
-    if actual_catalogue != STANDARD_CATALOGUE_V9_REVISION_ID {
-        return Err(StandardLibraryError::CatalogueIdentityMismatch {
-            expected: STANDARD_CATALOGUE_V9_REVISION_ID,
-            actual: actual_catalogue,
-        });
-    }
-    let actual_digest = snapshot.digest();
-    if actual_digest != ACCEPTED_V9_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V9_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-    verify_canonical_standard_library_v2_snapshot(snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V9_REVISION_ID,
+    })
 }
 
 /// Source-independent facts required to recognise `orna.std/10`.
@@ -3276,10 +3012,6 @@ impl StandardLibraryV10Manifest {
 
     pub const fn data_source_unit(&self) -> SourceUnitId {
         STD_DATA_SOURCE_UNIT_ID
-    }
-
-    pub const fn ui_constructors_source_unit(&self) -> SourceUnitId {
-        STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID
     }
 
     pub const fn cli_source_unit(&self) -> SourceUnitId {
@@ -3398,7 +3130,7 @@ pub fn select_verified_standard_library(
             verify_standard_library_v8_snapshot(retained_standard_library_v8_snapshot()?)
         }
         STANDARD_LIBRARY_V9_REVISION_ID => {
-            verify_standard_library_v9_snapshot(retained_standard_library_v9_snapshot()?)
+            Err(StandardLibraryError::UnsupportedRevision { revision })
         }
         _ => Err(StandardLibraryError::UnsupportedRevision { revision }),
     }
