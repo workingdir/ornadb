@@ -9241,7 +9241,7 @@ fn relation_aggregate_calls_reject_invalid_arguments_and_values() {
 fn root_sum_and_min_remain_shadowable_by_admitted_functions() {
     assert_eq!(
         call_module(
-            "fn sum(value: Int) = value + 100; fn run() = sum(1);",
+            include_str!("fixtures/root_sum_shadow_function.orna"),
             "run()",
             Limits::default(),
         )
@@ -9250,7 +9250,7 @@ fn root_sum_and_min_remain_shadowable_by_admitted_functions() {
     );
     assert_eq!(
         call_module(
-            "fn min(value: Int) = value + 100; fn run() = min(1);",
+            include_str!("fixtures/root_min_shadow_function.orna"),
             "run()",
             Limits::default(),
         )
