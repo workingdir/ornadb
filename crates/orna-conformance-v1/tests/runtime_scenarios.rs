@@ -429,18 +429,7 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
 async fn durable_function_value_table_assertion_commits_and_rolls_back_candidate_rows() {
     let valid_source = durable_source(
         "ASSERT-FUNCTION-VALUE-VALID",
-        r#"
-            pub table Note(id: Int) {
-                value: Int,
-                assert valid_notes;
-            }
-            fn valid_notes(rows: Relation<Note>): Bool =
-                rows | filter(note => note.value > 0) | count == 2;
-            fn parent() {
-                Note.insert({ id: 1, value: 10 });
-                Note.insert({ id: 2, value: 20 });
-            }
-        "#,
+        include_str!("fixtures/durable-function-value-valid.orna"),
     );
     let (_temp, repository) = durable_repository();
     let identity = RuntimeIdentity {
@@ -484,18 +473,7 @@ async fn durable_function_value_table_assertion_commits_and_rolls_back_candidate
 
     let invalid_source = durable_source(
         "ASSERT-FUNCTION-VALUE-INVALID",
-        r#"
-            pub table Note(id: Int) {
-                value: Int,
-                assert valid_notes;
-            }
-            fn valid_notes(rows: Relation<Note>): Bool =
-                rows | filter(note => note.value > 0) | count == 2;
-            fn parent() {
-                Note.insert({ id: 3, value: 30 });
-                Note.insert({ id: 4, value: -40 });
-            }
-        "#,
+        include_str!("fixtures/durable-function-value-invalid.orna"),
     );
     let invalid_outcome = evaluator
         .execute_source(

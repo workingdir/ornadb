@@ -1,0 +1,10 @@
+pub table Note(id: Int) {
+    value: Int,
+    assert valid_notes;
+}
+fn valid_notes(rows: Relation<Note>): Bool =
+    rows | filter(note => note.value > 0) | count == 2;
+fn parent() {
+    Note.insert({ id: 1, value: 10 });
+    Note.insert({ id: 2, value: 20 });
+}
