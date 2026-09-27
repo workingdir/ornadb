@@ -723,6 +723,7 @@ impl RuntimePublicationCoordinator {
             .map_err(|_| Error::InvalidTransition)?;
         base.consume_writer_input(&writer_input)
             .map_err(|_| Error::InvalidTransition)?;
+        validate_manifest_generation_binding(plan.manifest(), &writer_input)?;
         Self::publish_compact_and_complete(repository, runtime, freeze, plan).await
     }
 
@@ -1034,6 +1035,16 @@ fn map_publication_repository_error(error: RepositoryError) -> Error {
         RepositoryError::RuntimeCompletionRequired => Error::InvalidTransition,
         _ => Error::RepositoryUnavailable,
     }
+}
+
+fn validate_manifest_generation_binding(
+    manifest: &CompactManifest,
+    writer_input: &CompactWriterInput,
+) -> Result<(), Error> {
+    if manifest.next_generation() != writer_input.candidate_generation {
+        return Err(Error::InvalidTransition);
+    }
+    Ok(())
 }
 
 /// Translates only the runtime outcomes reachable from the compact receipt
@@ -1744,6 +1755,35 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, [78; 16]);
         assert_eq!(repository.read_publication_journal().unwrap(), None);
+    }
+
+    #[test]
+    fn validated_compact_publication_rejects_manifest_generation_mismatch() {
+        let manifest = CompactManifest::empty(Uuid::from_u128(1), [0x41; 32]);
+        let writer_input = CompactWriterInput {
+            table_id: *Uuid::from_u128(1).as_bytes(),
+            schema_fingerprint: [0x41; 32],
+            candidate_generation: manifest.next_generation(),
+            row_encoding_identity: orna_runtime_v1::PublicationRowEncoding::CompactOvb1,
+            value_encoding_identity: orna_runtime_v1::PublicationValueEncoding::Ovb1,
+            mutations: Vec::new(),
+            candidate_digest: [0x42; 32],
+        };
+
+        assert_eq!(
+            validate_manifest_generation_binding(&manifest, &writer_input),
+            Ok(())
+        );
+        assert_eq!(
+            validate_manifest_generation_binding(
+                &manifest,
+                &CompactWriterInput {
+                    candidate_generation: manifest.next_generation() + 1,
+                    ..writer_input
+                },
+            ),
+            Err(Error::InvalidTransition)
+        );
     }
 
     #[tokio::test]
