@@ -1158,6 +1158,26 @@ pub trait LiveApplication {
 /// must validate the portable reference against the current writer owner and
 /// the activation's pinned capture before changing runtime state.
 pub trait LiveAdminEffectDispatcher: Send + Sync {
+    /// Returns the durable snapshot projected into the two publication
+    /// metadata system relations. The host owns the runtime read authority;
+    /// the application consumes only canonical rows through its normal
+    /// relation-page effect boundary.
+    fn publication_metadata_rows<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = std::result::Result<
+                        Option<orna_runtime_v1::RuntimePublicationMetadataRows>,
+                        String,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
     fn pause_stream<'a>(
         &'a self,
         stream: CanonicalValue,
@@ -1172,6 +1192,28 @@ struct RuntimeAdminEffectDispatcher {
 }
 
 impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
+    fn publication_metadata_rows<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = std::result::Result<
+                        Option<orna_runtime_v1::RuntimePublicationMetadataRows>,
+                        String,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.runtime
+                .publication_metadata_rows()
+                .await
+                .map(Some)
+                .map_err(|_| "sys.storage.metadata_unavailable".to_owned())
+        })
+    }
+
     fn pause_stream<'a>(
         &'a self,
         stream: CanonicalValue,
@@ -8989,6 +9031,69 @@ mod tests {
                 .get(&([1; 16], request))
                 .is_some_and(|record| record.terminal.is_some())
         );
+    }
+
+    #[test]
+    fn admitted_eval_ticket_carries_runtime_publication_rows() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+            || std::path::PathBuf::from("target"),
+            std::path::PathBuf::from,
+        );
+        fs::create_dir_all(&target).unwrap();
+        let root = target.join(format!("orna-live-publication-read-{nonce}"));
+        fs::create_dir(&root).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(&root).unwrap();
+        let runtime = futures::executor::block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [31; 16],
+                repository_id: [32; 16],
+            },
+            [33; 32],
+        ))
+        .unwrap();
+        let mut host = subscribed_host(Some(runtime));
+        let ticket = match futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            2,
+            Frame::Binary(eval_frame([34; 16])),
+        ))
+        .unwrap()
+        {
+            ApplicationPreparation::Work(ticket) => ticket,
+            ApplicationPreparation::Completed(_) => panic!("Eval must admit application work"),
+        };
+        let runtime_rows = futures::executor::block_on(
+            host.runtime
+                .as_ref()
+                .expect("the durable host retains its runtime")
+                .publication_metadata_rows(),
+        )
+        .unwrap();
+        let dispatched_rows = futures::executor::block_on(
+            ticket
+                .admin_effects
+                .as_ref()
+                .expect("durable Eval installs the runtime admin dispatcher")
+                .publication_metadata_rows(),
+        )
+        .unwrap()
+        .expect("runtime dispatcher supplies publication rows");
+        assert_eq!(dispatched_rows, runtime_rows);
+        drop(ticket);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
