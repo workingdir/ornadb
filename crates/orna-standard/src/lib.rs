@@ -511,9 +511,6 @@ pub const STANDARD_CATALOGUE_V6_REVISION_ID: CatalogueRevisionId =
 pub const STANDARD_SOURCE_V6_BUNDLE_ID: SourceBundleId = SourceBundleId::from_bytes(reserved_id(6));
 pub const STANDARD_SOURCE_V6_REVISION_ID: SourceRevisionId =
     SourceRevisionId::from_bytes(reserved_id(6));
-pub const STD_ACTION_SCHEMA_ID: SchemaId = SchemaId::from_bytes(reserved_id(9));
-pub const STD_ACTION_TYPE_ID: TypeId = TypeId::from_bytes(reserved_id(20));
-pub const STD_ACTION_CONTRACT: &str = "orna.std.value.action@1";
 pub const ACTION_MAGIC: &str = "ORNA-ACTION/1 ";
 
 /// The standard-library version represented by the V7 manifest (ADR 0019).

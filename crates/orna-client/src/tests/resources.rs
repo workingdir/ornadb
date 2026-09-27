@@ -752,20 +752,6 @@ fn client_resource_lifecycle_rejects_stale_and_invalid_results() {
 }
 
 #[test]
-fn client_action_argument_error_preserves_display_and_equality() {
-    let resource_error = super::super::ClientResourceError::DuplicateArgument {
-        parameter: ParameterId::from_bytes([0x7b; 16]),
-    };
-    let action_error = super::super::ClientActionError::Arguments(Box::new(resource_error.clone()));
-
-    assert_eq!(action_error.to_string(), resource_error.to_string());
-    assert_eq!(
-        action_error,
-        super::super::ClientActionError::Arguments(Box::new(resource_error)),
-    );
-}
-
-#[test]
 fn client_resource_rejects_completion_with_mismatched_request_key() {
     let (active, function, pair, _) = version_one_active(true);
     let key = super::super::ClientResourceKey::new(

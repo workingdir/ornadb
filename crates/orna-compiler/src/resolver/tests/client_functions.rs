@@ -476,12 +476,12 @@ fn checks_client_state_slots_and_rejects_state_shape_type_errors() {
 #[test]
 fn rejects_opaque_values_in_client_state() {
     let standard =
-        check_standard_library_source(&verified_standard_library_with_action_for_test()).unwrap();
+        check_standard_library_source(&crate::tests::verified_canonical_standard_source_fixture()).unwrap();
     let base = empty_catalogue();
     let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
     let source = "CREATE SCHEMA examples; \
             CREATE CLIENT FUNCTION examples.state() RETURNS INTEGER IS \
-            STATE action std.Action; \
+            STATE action std.ui.UI; \
             BEGIN RETURN 1; END;";
     let report = check_standard_application(&bundle([("state.orna", source)]), &context);
 
