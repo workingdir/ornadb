@@ -1,0 +1,9 @@
+CREATE SCHEMA std.ui;
+
+CREATE TYPE std.ui.UI AS VALUE
+    OPAQUE
+    KERNEL CONTRACT 'orna.std.value.ui@1'
+    IMMUTABLE
+    TRANSIENT;
+
+EXPORT TYPE std.ui.UI AS std.UI;
