@@ -1827,7 +1827,7 @@ fn semantic_adapter_keeps_type_errors_in_the_typecheck_phase() {
         fixture_id: "type-error".into(),
         source_id: "logical/type-error.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub table Bad(value: Float) { text: Str, }".into(),
+        source: include_str!("fixtures/semantic-validation/type-error-bad-table.orna").into(),
     };
     let mut adapter = SemanticAdapter::default();
     assert!(matches!(adapter.resolve(&unit), StageOutcome::Passed));
@@ -1843,7 +1843,7 @@ fn calendar_zone_rejection_preserves_published_diagnostic_identity() {
         fixture_id: "calendar-zone".into(),
         source_id: "calendar-zone.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub fn bad() = energy.Reading | bucket_by(1.day);".into(),
+        source: include_str!("fixtures/semantic-validation/calendar-zone-no-zone.orna").into(),
     };
     let mut adapter = SemanticAdapter::default();
     let StageOutcome::Failed(diagnostic) = adapter.typecheck(&unit) else {
