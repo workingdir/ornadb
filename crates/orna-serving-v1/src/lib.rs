@@ -385,6 +385,9 @@ impl Serving {
     pub fn open_watch(&mut self, session_id: Id, watch_id: Id, revision: u64) -> Result<()> {
         let max_watches = self.limits.max_watches_per_session;
         let session = self.session_mut(session_id)?;
+        if !session.connected {
+            return Err(Error::SessionClosed);
+        }
         if session.watches.contains_key(&watch_id) || session.watches.len() == max_watches {
             return Err(Error::WatchLimit);
         }
@@ -961,6 +964,19 @@ mod tests {
         assert_eq!(state.action(id(1), id(5), 1, 0), Err(Error::SessionClosed));
 
         state.reconnect(id(1), &credential()).unwrap();
+        state.action(id(1), id(5), 1, 0).unwrap();
+    }
+
+    #[test]
+    fn disconnected_session_rejects_watch_admission_until_reconnect() {
+        let mut state = admitted();
+        state.apply_patch(id(1), 0, 1, &[], pin(1)).unwrap();
+        state.disconnect(id(1)).unwrap();
+
+        assert_eq!(state.open_watch(id(1), id(5), 1), Err(Error::SessionClosed));
+
+        state.reconnect(id(1), &credential()).unwrap();
+        state.open_watch(id(1), id(5), 1).unwrap();
         state.action(id(1), id(5), 1, 0).unwrap();
     }
 
