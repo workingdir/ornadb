@@ -1214,12 +1214,7 @@ fn typed_sys_cancel_report_maps_orna_sys_083_to_semantic_pass_evidence() {
             None,
             None,
         ),
-        r#"
-            pub fn inferred_cancel(job: sys.InvocationHandle<Int>) =
-                sys.cancel(job);
-            pub fn explicit_cancel(job: sys.InvocationHandle<Int>) =
-                sys.cancel<Int>(job, reason: "stop");
-        "#,
+        include_str!("fixtures/typed-cancel-valid.orna"),
     );
     let fixture = &report.fixtures[0];
     let typecheck = fixture
