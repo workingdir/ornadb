@@ -1,0 +1,6 @@
+pub table Note(id: Int) { text: Str, }
+fn count_notes() = Note | count();
+fn parent() {
+    Note.insert({ id: 7, text: "first" });
+    assert count_notes() == 1;
+}
