@@ -5903,7 +5903,7 @@ fn recursive_calls_terminate_or_hit_shared_limits() {
             "ORNA-EVAL-LIMIT"
         );
     }
-    let source = "fn small() = 1 + 2; fn combined() = small() + small();";
+    let source = include_str!("fixtures/small_combined_function_step_budget.orna");
     assert_eq!(
         code(call_module(
             source,
