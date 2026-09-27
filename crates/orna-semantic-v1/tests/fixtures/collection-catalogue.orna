@@ -1,0 +1,10 @@
+pub fn first(rows: [Int]): Int? = null;
+pub fn one(rows: [Int]): Int = 0;
+pub fn every(rows: [Int], predicate: fn(Int): Bool): Bool = true;
+pub fn exists(rows: [Int], predicate: fn(Int): Bool): Bool = false;
+pub fn sum(rows: [Int]): Int = 0;
+pub fn min(rows: [Int]): Int? = null;
+pub fn max(rows: [Int]): Int? = null;
+pub fn map(rows: [Int], transform: fn(Int): Int): [Int] = rows;
+pub fn flat_map(rows: [Int], transform: fn(Int): [Int]): [Int] = rows;
+pub fn sort_by(rows: [Int], key: fn(Int): Int): [Int] = rows;
