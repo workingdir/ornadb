@@ -1863,9 +1863,6 @@ pub const STD_CHARACTER_LARGE_OBJECT_TYPE_ID: TypeId =
 /// The fixed ADR 0062 `std/ui.orna` source-unit identity: `...05`.
 pub const STD_UI_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05]);
-/// The fixed ADR 0079 `std/action.orna` source-unit identity: `...07`.
-pub const STD_ACTION_SOURCE_UNIT_ID: SourceUnitId =
-    SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x07]);
 /// The fixed ADR 0079 `std.action` schema identity: `...09`.
 pub const STD_ACTION_SCHEMA_ID: SchemaId =
     SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x09]);

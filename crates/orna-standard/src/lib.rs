@@ -55,7 +55,6 @@ use executables::{
     retained_v2_executable,
 };
 use retained::{
-    reconcile_retained_action_source,
     reconcile_retained_invoke_source, reconcile_retained_json_source,
     reconcile_retained_output_source, reconcile_retained_source_with_unit,
     reconcile_retained_ui_source,
@@ -66,7 +65,6 @@ use retained::{
 use snapshot_builders::{
     retained_standard_library_v4_snapshot_from_source,
     retained_standard_library_v5_snapshot_from_source,
-    retained_standard_library_v6_snapshot_from_source,
 };
 
 pub use orna_compiler::StandardUpgradeIdentity;
@@ -513,37 +511,11 @@ pub const STANDARD_CATALOGUE_V6_REVISION_ID: CatalogueRevisionId =
 pub const STANDARD_SOURCE_V6_BUNDLE_ID: SourceBundleId = SourceBundleId::from_bytes(reserved_id(6));
 pub const STANDARD_SOURCE_V6_REVISION_ID: SourceRevisionId =
     SourceRevisionId::from_bytes(reserved_id(6));
-pub const STD_ACTION_SOURCE_LOGICAL_PATH: &str = "std/action.orna";
-pub const STD_ACTION_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes(reserved_id(7));
 pub const STD_ACTION_SCHEMA_ID: SchemaId = SchemaId::from_bytes(reserved_id(9));
 pub const STD_ACTION_TYPE_ID: TypeId = TypeId::from_bytes(reserved_id(20));
 pub const STD_ACTION_CONTRACT: &str = "orna.std.value.action@1";
 pub const ACTION_MAGIC: &str = "ORNA-ACTION/1 ";
 
-const RETAINED_STANDARD_ACTION_SOURCE: &str = include_str!("../../../stdlib/std/action.orna");
-const ACCEPTED_V6_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_TYPES_CONTENT_DIGEST;
-const ACCEPTED_V6_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_INVOKE_CONTENT_DIGEST;
-const ACCEPTED_V6_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_OUTPUT_CONTENT_DIGEST;
-const ACCEPTED_V6_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_UI_CONTENT_DIGEST;
-const ACCEPTED_V6_JSON_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_JSON_CONTENT_DIGEST;
-const ACCEPTED_V6_ACTION_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x67, 0x6c, 0xf6, 0x55, 0x53, 0x5c, 0x72, 0xad, 0x0a, 0x2d, 0x1c, 0x51, 0x00, 0x92, 0x31, 0x3c,
-    0x2a, 0x9e, 0x1a, 0x8c, 0xe8, 0xaf, 0x04, 0x56, 0xfe, 0xca, 0x28, 0x95, 0xc7, 0x72, 0xef, 0x7a,
-]);
-const ACCEPTED_V6_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x0d, 0x3e, 0xe1, 0x9e, 0xf8, 0x51, 0xec, 0xbd, 0x9b, 0x8a, 0xe6, 0x6f, 0x49, 0x86, 0xf1, 0x70,
-    0x71, 0xb6, 0x3e, 0x6b, 0xf8, 0xff, 0xb4, 0x40, 0xeb, 0x06, 0x88, 0xc3, 0x76, 0xb2, 0xf7, 0x40,
-]);
-const ACCEPTED_V6_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xba, 0xd0, 0x13, 0x10, 0x53, 0x02, 0xa0, 0x48, 0x04, 0x4e, 0xce, 0xa7, 0x35, 0x1f, 0xde, 0x97,
-    0x72, 0x11, 0x9c, 0x3c, 0x95, 0x4c, 0x69, 0x70, 0xcd, 0x03, 0xf2, 0x0e, 0x0f, 0x9e, 0x87, 0xe2,
-]);
-const ACCEPTED_V6_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V5_ARTIFACT_DIGEST;
-const ACCEPTED_V6_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V5_SEMANTIC_DIGEST;
-const ACCEPTED_V6_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x79, 0x5c, 0xa1, 0xd8, 0xbb, 0x5b, 0x8a, 0x9c, 0x8e, 0x42, 0xc4, 0x7f, 0x79, 0x0a, 0xc5, 0x47,
-    0x27, 0xd9, 0x3f, 0xc3, 0xe8, 0xd5, 0x3e, 0x05, 0xc1, 0x08, 0xbc, 0x4a, 0x53, 0x4f, 0xe0, 0xbd,
-]);
 /// The standard-library version represented by the V7 manifest (ADR 0019).
 pub const STANDARD_LIBRARY_V7_VERSION_IDENTITY: &str = "orna.std/7";
 pub const STANDARD_LIBRARY_V7_REVISION_ID: StandardLibraryRevisionId =
@@ -1470,9 +1442,6 @@ impl StandardLibraryV6Manifest {
     pub const fn json_source_unit(&self) -> SourceUnitId {
         STD_JSON_SOURCE_UNIT_ID
     }
-    pub const fn action_source_unit(&self) -> SourceUnitId {
-        STD_ACTION_SOURCE_UNIT_ID
-    }
     pub const fn types_source_logical_path(&self) -> &'static str {
         SOURCE_LOGICAL_PATH
     }
@@ -1488,46 +1457,23 @@ impl StandardLibraryV6Manifest {
     pub const fn json_source_logical_path(&self) -> &'static str {
         STD_JSON_SOURCE_LOGICAL_PATH
     }
-    pub const fn action_source_logical_path(&self) -> &'static str {
-        STD_ACTION_SOURCE_LOGICAL_PATH
-    }
     pub const fn catalogue(&self) -> &CatalogueSnapshot {
         &self.catalogue
     }
 }
 
-/// Builds and validates the append-only V6 catalogue over V5.
+/// Returns the retired V6 catalogue identity over the V5 catalogue surface.
+///
+/// The historical `std.Action` declaration is no longer reconstructed.
 pub fn standard_library_v6_manifest()
 -> Result<StandardLibraryV6Manifest, StandardLibraryManifestError> {
     let version_five = standard_library_v5_manifest()?;
-    let mut schemas = version_five.catalogue().schemas().to_vec();
-    schemas.push(SchemaDefinition::new(
-        STD_ACTION_SCHEMA_ID,
-        semantic_name("std.action", ["std", "action"])?,
-    ));
-    let mut value_types = version_five.catalogue().value_types().to_vec();
-    value_types.push(ValueTypeDefinition::opaque(
-        STD_ACTION_TYPE_ID,
-        semantic_name("std.action.action", ["std", "action", "action"])?,
-        STD_ACTION_CONTRACT,
-    ));
-    let mut type_bindings = version_five.catalogue().type_bindings().to_vec();
-    let action_name = semantic_name("std.action", ["std", "action"])?;
-    let action_lookup = TypeLookupName::qualified(action_name.clone());
-    let action_binding =
-        TypeBinding::qualified(action_name, STD_ACTION_TYPE_ID).map_err(|source| {
-            StandardLibraryManifestError::TypeBinding {
-                name: action_lookup,
-                source,
-            }
-        })?;
-    type_bindings.push(action_binding);
     let catalogue = CatalogueSnapshot::new_with_functions_and_types(
         STANDARD_CATALOGUE_V6_REVISION_ID,
-        schemas,
+        version_five.catalogue().schemas().to_vec(),
         Vec::new(),
-        value_types,
-        type_bindings,
+        version_five.catalogue().value_types().to_vec(),
+        version_five.catalogue().type_bindings().to_vec(),
         version_five.catalogue().functions().to_vec(),
     )
     .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
@@ -1645,10 +1591,6 @@ impl StandardLibraryV8Manifest {
         STD_JSON_SOURCE_UNIT_ID
     }
 
-    pub const fn action_source_unit(&self) -> SourceUnitId {
-        STD_ACTION_SOURCE_UNIT_ID
-    }
-
     pub const fn data_source_unit(&self) -> SourceUnitId {
         STD_DATA_SOURCE_UNIT_ID
     }
@@ -1671,10 +1613,6 @@ impl StandardLibraryV8Manifest {
 
     pub const fn json_source_logical_path(&self) -> &'static str {
         STD_JSON_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn action_source_logical_path(&self) -> &'static str {
-        STD_ACTION_SOURCE_LOGICAL_PATH
     }
 
     pub const fn data_source_logical_path(&self) -> &'static str {
@@ -1801,10 +1739,6 @@ impl StandardLibraryV9Manifest {
         STD_JSON_SOURCE_UNIT_ID
     }
 
-    pub const fn action_source_unit(&self) -> SourceUnitId {
-        STD_ACTION_SOURCE_UNIT_ID
-    }
-
     pub const fn data_source_unit(&self) -> SourceUnitId {
         STD_DATA_SOURCE_UNIT_ID
     }
@@ -1827,10 +1761,6 @@ impl StandardLibraryV9Manifest {
 
     pub const fn json_source_logical_path(&self) -> &'static str {
         STD_JSON_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn action_source_logical_path(&self) -> &'static str {
-        STD_ACTION_SOURCE_LOGICAL_PATH
     }
 
     pub const fn data_source_logical_path(&self) -> &'static str {
@@ -2355,19 +2285,11 @@ pub fn prepare_standard_upgrade_v4_to_v5(
 pub fn prepare_standard_upgrade_v5_to_v6(
     active: &ActiveDatabaseRevision,
 ) -> Result<StandardUpgrade, StandardUpgradeError> {
-    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V5_REVISION_ID)?;
-
-    let version_five = retained_standard_library_v5_snapshot()
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    verify_standard_library_v5_snapshot(version_five)
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    prepare_standard_upgrade_with(
-        active,
-        retained_standard_library_v6_snapshot,
-        verify_standard_library_v6_snapshot,
-        check_standard_library_source,
-        prepare_checked_standard_upgrade,
-    )
+    let _ = active;
+    Err(StandardUpgradeError::UnsupportedStandardUpgrade {
+        from: STANDARD_LIBRARY_V5_REVISION_ID,
+        to: STANDARD_LIBRARY_V6_REVISION_ID,
+    })
 }
 /// Retired `orna.std/8` to `orna.std/9` upgrade entrypoint. Verification of
 /// the V8 parent fails closed before a V9 child can be prepared.
@@ -2652,36 +2574,18 @@ pub fn verify_standard_library_v5_snapshot(
 /// Retains the canonical V6 action standard source as an unverified snapshot.
 pub fn retained_standard_library_v6_snapshot()
 -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    retained_standard_library_v6_snapshot_from_source(
-        RETAINED_STANDARD_SOURCE,
-        RETAINED_STANDARD_INVOKE_SOURCE,
-        RETAINED_STANDARD_OUTPUT_SOURCE,
-        RETAINED_STANDARD_UI_SOURCE,
-        RETAINED_STANDARD_JSON_SOURCE,
-        RETAINED_STANDARD_ACTION_SOURCE,
-    )
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V6_REVISION_ID,
+    })
 }
 
 /// Verifies a retained V6 action standard snapshot and returns authority.
 pub fn verify_standard_library_v6_snapshot(
-    snapshot: StandardLibrarySnapshot,
+    _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    let actual_catalogue = snapshot.catalogue().revision();
-    if actual_catalogue != STANDARD_CATALOGUE_V6_REVISION_ID {
-        return Err(StandardLibraryError::CatalogueIdentityMismatch {
-            expected: STANDARD_CATALOGUE_V6_REVISION_ID,
-            actual: actual_catalogue,
-        });
-    }
-    let actual_digest = snapshot.digest();
-    if actual_digest != ACCEPTED_V6_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V6_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-    verify_canonical_standard_library_v2_snapshot(snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V6_REVISION_ID,
+    })
 }
 /// Rejects caller-supplied historical V7 snapshots after source retirement.
 pub fn verify_standard_library_v7_snapshot(
@@ -2770,10 +2674,6 @@ impl StandardLibraryV10Manifest {
 
     pub const fn json_source_unit(&self) -> SourceUnitId {
         STD_JSON_SOURCE_UNIT_ID
-    }
-
-    pub const fn action_source_unit(&self) -> SourceUnitId {
-        STD_ACTION_SOURCE_UNIT_ID
     }
 
     pub const fn data_source_unit(&self) -> SourceUnitId {
@@ -2886,9 +2786,7 @@ pub fn select_verified_standard_library(
         STANDARD_LIBRARY_V5_REVISION_ID => {
             verify_standard_library_v5_snapshot(retained_standard_library_v5_snapshot()?)
         }
-        STANDARD_LIBRARY_V6_REVISION_ID => {
-            verify_standard_library_v6_snapshot(retained_standard_library_v6_snapshot()?)
-        }
+        STANDARD_LIBRARY_V6_REVISION_ID => Err(StandardLibraryError::UnsupportedRevision { revision }),
         STANDARD_LIBRARY_V7_REVISION_ID => {
             Err(StandardLibraryError::UnsupportedRevision { revision })
         }
