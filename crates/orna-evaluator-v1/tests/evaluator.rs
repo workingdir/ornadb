@@ -5501,7 +5501,7 @@ fn std_collection_sort_by_evaluates_callbacks_before_sorting_and_fails_closed() 
 fn root_map_names_remain_shadowable_by_admitted_functions_and_locals() {
     assert_eq!(
         call_module(
-            "fn map(value: Int) = value + 100; fn run() = map(1);",
+            include_str!("fixtures/root_map_shadow_function.orna"),
             "run()",
             Limits::default(),
         )
