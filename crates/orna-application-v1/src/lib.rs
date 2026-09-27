@@ -373,13 +373,17 @@ pub struct StagedActivation {
 
 /// A runtime operation requested by admitted application source.
 ///
-/// The portable stream reference is data only. A trusted dispatcher must
-/// resolve it under the current owner and pinned activation context before
+/// Portable runtime handles are data only. A trusted dispatcher must resolve
+/// each handle under the current owner and pinned activation context before
 /// invoking a runtime transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ApplicationEffectRequest {
     PauseStream {
         stream: CanonicalValue,
+        reason: Option<String>,
+    },
+    CancelInvocation {
+        invocation: CanonicalValue,
         reason: Option<String>,
     },
 }
@@ -422,6 +426,9 @@ impl AsyncApplicationEffectDispatcher for LiveEffectAdapter<'_> {
         match effect {
             ApplicationEffectRequest::PauseStream { stream, reason } => {
                 self.0.pause_stream(stream, reason, context)
+            }
+            ApplicationEffectRequest::CancelInvocation { .. } => {
+                Box::pin(async { Err("sys.invoke.effect_unavailable".to_owned()) })
             }
         }
     }
@@ -711,6 +718,38 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
                 .map(Some)
                 .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"));
         }
+        if source_function_path(callee).as_deref() == Some("sys.cancel") {
+            let request = match arguments {
+                [invocation] => ApplicationEffectRequest::CancelInvocation {
+                    invocation: invocation.clone(),
+                    reason: None,
+                },
+                [invocation, reason] => {
+                    let reason = match reason.raw() {
+                        OvbRaw::Null => None,
+                        OvbRaw::Text(reason) => Some(reason.clone()),
+                        _ => {
+                            return Err(SourceMutationEffectHandler::effect_error(
+                                "ORNA-EVAL-TYPE",
+                            ));
+                        }
+                    };
+                    ApplicationEffectRequest::CancelInvocation {
+                        invocation: invocation.clone(),
+                        reason,
+                    }
+                }
+                _ => {
+                    return Err(SourceMutationEffectHandler::effect_error(
+                        "ORNA-EVAL-ARGUMENT",
+                    ));
+                }
+            };
+            self.effects.push(request);
+            return CanonicalValue::new(OvbRaw::Bool(false))
+                .map(Some)
+                .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"));
+        }
         self.mutations.handle(callee, arguments)
     }
 
@@ -776,9 +815,9 @@ fn validate_terminal_runtime_effect(
     application: &AdmittedApplication,
 ) -> Result<(), ApplicationError> {
     for (name, function) in &application.functions {
-        let count = runtime_pause_call_count(&function.body);
+        let count = runtime_effect_call_count(&function.body);
         if name == &application.entry {
-            if count > 0 && (count != 1 || !is_terminal_pause_call(&function.body)) {
+            if count > 0 && (count != 1 || !is_terminal_runtime_effect_call(&function.body)) {
                 return Err(ApplicationError::UnsupportedSourceEffectPlacement);
             }
         } else if count > 0 {
@@ -790,29 +829,33 @@ fn validate_terminal_runtime_effect(
     Ok(())
 }
 
-fn is_terminal_pause_call(expression: &Expr) -> bool {
+fn is_runtime_source_effect_path(path: &str) -> bool {
+    matches!(path, "sys.admin.pause_stream" | "sys.cancel")
+}
+
+fn is_terminal_runtime_effect_call(expression: &Expr) -> bool {
     match expression {
-        Expr::Group { inner, .. } => is_terminal_pause_call(inner),
-        Expr::Call { callee, .. } => {
-            source_function_path(callee).as_deref() == Some("sys.admin.pause_stream")
-        }
+        Expr::Group { inner, .. } => is_terminal_runtime_effect_call(inner),
+        Expr::Call { callee, .. } => source_function_path(callee)
+            .as_deref()
+            .is_some_and(is_runtime_source_effect_path),
         Expr::Block {
             statements, tail, ..
         } => {
             !statements
                 .iter()
-                .any(|statement| runtime_pause_statement_count(statement) != 0)
-                && tail.as_deref().is_some_and(is_terminal_pause_call)
+                .any(|statement| runtime_effect_statement_count(statement) != 0)
+                && tail.as_deref().is_some_and(is_terminal_runtime_effect_call)
         }
         _ => false,
     }
 }
 
-fn runtime_pause_call_count(expression: &Expr) -> usize {
+fn runtime_effect_call_count(expression: &Expr) -> usize {
     let own = usize::from(matches!(
         expression,
         Expr::Call { callee, .. }
-            if source_function_path(callee).as_deref() == Some("sys.admin.pause_stream")
+            if source_function_path(callee).as_deref().is_some_and(is_runtime_source_effect_path)
     ));
     own + match expression {
         Expr::Name { .. } | Expr::Literal { .. } | Expr::ReplBinding { .. } => 0,
@@ -820,17 +863,17 @@ fn runtime_pause_call_count(expression: &Expr) -> usize {
             .iter()
             .map(|segment| match segment {
                 StringSegment::Text { .. } => 0,
-                StringSegment::Expression { value, .. } => runtime_pause_call_count(value),
+                StringSegment::Expression { value, .. } => runtime_effect_call_count(value),
             })
             .sum(),
-        Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => runtime_pause_call_count(rhs),
+        Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => runtime_effect_call_count(rhs),
         Expr::Binary { lhs, rhs, .. } => {
-            runtime_pause_call_count(lhs) + runtime_pause_call_count(rhs)
+            runtime_effect_call_count(lhs) + runtime_effect_call_count(rhs)
         }
         Expr::Range { lower, upper, .. } => lower
             .iter()
             .chain(upper.iter())
-            .map(|bound| runtime_pause_call_count(bound))
+            .map(|bound| runtime_effect_call_count(bound))
             .sum(),
         Expr::Call {
             callee, arguments, ..
@@ -838,34 +881,34 @@ fn runtime_pause_call_count(expression: &Expr) -> usize {
         | Expr::GenericCall {
             callee, arguments, ..
         } => {
-            runtime_pause_call_count(callee)
+            runtime_effect_call_count(callee)
                 + arguments
                     .iter()
-                    .map(|argument| runtime_pause_call_count(&argument.value))
+                    .map(|argument| runtime_effect_call_count(&argument.value))
                     .sum::<usize>()
         }
         Expr::Index { base, index, .. } => {
-            runtime_pause_call_count(base) + runtime_pause_call_count(index)
+            runtime_effect_call_count(base) + runtime_effect_call_count(index)
         }
-        Expr::Field { base, .. } => runtime_pause_call_count(base),
+        Expr::Field { base, .. } => runtime_effect_call_count(base),
         Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
-            elements.iter().map(runtime_pause_call_count).sum()
+            elements.iter().map(runtime_effect_call_count).sum()
         }
         Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => fields
             .iter()
-            .map(|field| runtime_pause_call_count(&field.value))
+            .map(|field| runtime_effect_call_count(&field.value))
             .sum(),
-        Expr::Lambda { body, .. } => runtime_pause_call_count(body),
+        Expr::Lambda { body, .. } => runtime_effect_call_count(body),
         Expr::Block {
             statements, tail, ..
         } => {
             statements
                 .iter()
-                .map(runtime_pause_statement_count)
+                .map(runtime_effect_statement_count)
                 .sum::<usize>()
                 + tail
                     .as_deref()
-                    .map(runtime_pause_call_count)
+                    .map(runtime_effect_call_count)
                     .unwrap_or_default()
         }
         Expr::Control {
@@ -877,39 +920,39 @@ fn runtime_pause_call_count(expression: &Expr) -> usize {
         } => {
             condition
                 .as_deref()
-                .map(runtime_pause_call_count)
+                .map(runtime_effect_call_count)
                 .unwrap_or_default()
                 + body
                     .as_deref()
-                    .map(runtime_pause_call_count)
+                    .map(runtime_effect_call_count)
                     .unwrap_or_default()
-                + arms.iter().map(runtime_pause_arm_count).sum::<usize>()
+                + arms.iter().map(runtime_effect_arm_count).sum::<usize>()
                 + alternate
                     .as_deref()
-                    .map(runtime_pause_call_count)
+                    .map(runtime_effect_call_count)
                     .unwrap_or_default()
         }
     }
 }
 
-fn runtime_pause_arm_count(arm: &CaseArm) -> usize {
+fn runtime_effect_arm_count(arm: &CaseArm) -> usize {
     arm.guard
         .as_ref()
-        .map(runtime_pause_call_count)
+        .map(runtime_effect_call_count)
         .unwrap_or_default()
-        + runtime_pause_call_count(&arm.body)
+        + runtime_effect_call_count(&arm.body)
 }
 
-fn runtime_pause_statement_count(statement: &Statement) -> usize {
+fn runtime_effect_statement_count(statement: &Statement) -> usize {
     match statement {
         Statement::Let { value, .. }
         | Statement::Assert { value, .. }
         | Statement::Expression { value, .. }
         | Statement::Control { value, .. }
-        | Statement::Assignment { value, .. } => runtime_pause_call_count(value),
+        | Statement::Assignment { value, .. } => runtime_effect_call_count(value),
         Statement::Return { value, .. } | Statement::Break { value, .. } => value
             .as_ref()
-            .map(runtime_pause_call_count)
+            .map(runtime_effect_call_count)
             .unwrap_or_default(),
         Statement::Continue { .. } => 0,
     }
@@ -1680,8 +1723,14 @@ mod tests {
             _context: &'a RuntimeActivationContext,
         ) -> ApplicationEffectFuture<'a> {
             Box::pin(async move {
-                assert!(matches!(effect, ApplicationEffectRequest::PauseStream { .. }));
-                Ok(CanonicalValue::new(OvbRaw::Bool(true)).expect("canonical bool"))
+                match effect {
+                    ApplicationEffectRequest::PauseStream { .. } => {
+                        Ok(CanonicalValue::new(OvbRaw::Bool(true)).expect("canonical bool"))
+                    }
+                    ApplicationEffectRequest::CancelInvocation { .. } => {
+                        Err("unexpected cancellation".to_owned())
+                    }
+                }
             })
         }
     }

@@ -25,6 +25,7 @@ use std::{
 };
 
 const SOURCE: &str = include_str!("fixtures/admin-pause-stream.orna");
+const CANCEL_SOURCE: &str = include_str!("fixtures/typed-sys-cancel.orna");
 static NEXT_REPOSITORY: AtomicU64 = AtomicU64::new(0);
 
 struct SourcePauseDispatcher(bool);
@@ -156,6 +157,16 @@ fn source_stream_argument() -> Environment {
     )])
 }
 
+fn source_cancel_arguments(invocation: CanonicalValue, reason: &str) -> Environment {
+    Environment::from([
+        ("job".to_owned(), invocation),
+        (
+            "reason".to_owned(),
+            CanonicalValue::new(OvbRaw::Text(reason.to_owned())).unwrap(),
+        ),
+    ])
+}
+
 struct RuntimePauseDispatcher<'a> {
     state: &'a RuntimeState,
     lease: WriterLease,
@@ -192,9 +203,62 @@ impl AsyncApplicationEffectDispatcher for RuntimePauseDispatcher<'_> {
                     );
                     Ok(CanonicalValue::new(OvbRaw::Bool(accepted)).unwrap())
                 }
+                ApplicationEffectRequest::CancelInvocation { .. } => {
+                    Err("unexpected cancellation".to_owned())
+                }
             }
         })
     }
+}
+
+struct SourceCancelDispatcher {
+    seen: std::sync::Arc<std::sync::Mutex<Option<(CanonicalValue, Option<String>)>>>,
+}
+
+impl AsyncApplicationEffectDispatcher for SourceCancelDispatcher {
+    fn dispatch<'a>(
+        &'a self,
+        effect: ApplicationEffectRequest,
+        _context: &'a orna_runtime_v1::RuntimeActivationContext,
+    ) -> ApplicationEffectFuture<'a> {
+        Box::pin(async move {
+            let ApplicationEffectRequest::CancelInvocation { invocation, reason } = effect else {
+                return Err("unexpected pause".to_owned());
+            };
+            *self.seen.lock().unwrap() = Some((invocation, reason));
+            Ok(CanonicalValue::new(OvbRaw::Bool(true)).unwrap())
+        })
+    }
+}
+
+#[test]
+fn typed_sys_cancel_fixture_reaches_the_trusted_source_effect_dispatcher() {
+    let runtime = runtime_context();
+    let authority = ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+    let application = authority
+        .admit_module("typed-sys-cancel.orna", CANCEL_SOURCE, "main")
+        .expect("typed cancellation fixture is admitted");
+    let invocation = CanonicalValue::new(OvbRaw::Text("opaque-invocation".to_owned())).unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let dispatcher = SourceCancelDispatcher {
+        seen: std::sync::Arc::clone(&seen),
+    };
+
+    let staged = block_on(authority.evaluate_staged_with_async_effects(
+        &application,
+        &source_cancel_arguments(invocation.clone(), "requested by operator"),
+        &runtime.context,
+        &dispatcher,
+    ))
+    .expect("typed sys.cancel reaches the trusted dispatcher");
+
+    assert!(staged.mutations().is_empty());
+    assert_eq!(staged.value().raw(), &OvbRaw::Bool(true));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        Some((invocation, Some("requested by operator".to_owned())))
+    );
+    runtime.cleanup();
 }
 
 #[test]
