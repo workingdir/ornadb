@@ -31,3 +31,28 @@ Exit status is `0` for a valid ratio at or below 1.5, `1` when the ratio is
 over the limit, and `2` when the evidence file is malformed or does not
 identify the same corpus. This gate checks submitted measurements; it does not
 collect benchmark results or establish a production qualification by itself.
+
+## Compact row-integrity evidence
+
+`verify_compact_integrity.py` checks the ORNA-COMPACT-013 evidence criterion
+that each acknowledged logical row appears exactly once in compact output.
+Supply the logical row IDs from the submitted evidence in both arrays:
+
+```json
+{
+  "acknowledged_rows": ["row-001", "row-002"],
+  "compact_rows": ["row-002", "row-001"]
+}
+```
+
+Run it with:
+
+```sh
+python3 crates/orna-storage-v1/qualification/verify_compact_integrity.py profile.json
+```
+
+Each array must contain at least one ID. Exit status is `0` when the ID sets
+match and both arrays contain unique IDs,
+`2` when the submitted evidence is malformed or fails the criterion. The gate
+validates submitted IDs; it does not collect rows, establish evidence
+provenance, or claim that a 24-hour production profile was run.
