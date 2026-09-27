@@ -55,7 +55,7 @@ fn relation_values_expose_count_and_first_members() {
 fn non_relation_field_access_keeps_the_record_error() {
     let result = analyze(&[ModuleInput::new(
         "non-relation-field.orna",
-        "pub table Note(id: Int) { text: Str, } pub fn invalid(value: Note) = value.count();",
+        include_str!("fixtures/non-relation-field.orna"),
     )]);
 
     assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
