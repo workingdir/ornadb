@@ -22,17 +22,6 @@ fn fixture_source(source: &str) -> SourceUnit {
     }
 }
 
-fn composite_source(parent_body: &str) -> SourceUnit {
-    SourceUnit {
-        fixture_id: "txn-source".into(),
-        source_id: "txn-source.orna".into(),
-        parse_as: "module_unit".into(),
-        source: format!(
-            "pub table Stock(location: Str, sku: Str) {{ quantity: Int, }} fn parent() {{ Stock.insert({{ location: \"north\", sku: \"pencil\", quantity: 12 }}); {parent_body} }}"
-        ),
-    }
-}
-
 fn source_with_count_function(count_body: &str, parent_body: &str) -> SourceUnit {
     SourceUnit {
         fixture_id: "txn-source".into(),
@@ -649,9 +638,12 @@ fn parsed_rekey_moves_the_row_atomically() {
 #[test]
 fn parsed_composite_rekey_moves_every_key_component_in_declaration_order() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&composite_source(
-        r#"Stock.rekey(("north", "pencil"), ("south", "pencil"));"#,
-    ));
+    let outcome = runtime.execute_source(&SourceUnit {
+        fixture_id: "txn-composite-rekey-moves".into(),
+        source_id: "txn-composite-rekey-moves.orna".into(),
+        parse_as: "module_unit".into(),
+        source: include_str!("fixtures/txn-composite-rekey-moves.orna").into(),
+    });
     assert!(matches!(outcome, StageOutcome::Passed));
 
     let north = Value::new(orna_foundation_v1::OvbRaw::Array(vec![
@@ -683,9 +675,12 @@ fn parsed_composite_rekey_moves_every_key_component_in_declaration_order() {
 #[test]
 fn parsed_composite_rekey_rejects_a_non_tuple_target_key_without_publication() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&composite_source(
-        r#"Stock.rekey(("north", "pencil"), "south");"#,
-    ));
+    let outcome = runtime.execute_source(&SourceUnit {
+        fixture_id: "txn-composite-rekey-non-tuple-target".into(),
+        source_id: "txn-composite-rekey-non-tuple-target.orna".into(),
+        parse_as: "module_unit".into(),
+        source: include_str!("fixtures/txn-composite-rekey-non-tuple-target.orna").into(),
+    });
 
     assert!(matches!(
         outcome,
