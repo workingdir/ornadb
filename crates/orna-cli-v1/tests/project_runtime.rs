@@ -390,7 +390,7 @@ fn binary_repl_recovers_from_malformed_terminal_input() {
 
     assert!(output.status.success());
     assert_eq!(
-        output.stdout, b"> 2 : Int\n> error[ORNA-REPL-INPUT-UTF8]\n> 2 : Int\n> ",
+        output.stdout, b"> 2 : Int\n> error[ORNA-REPL-INPUT-UTF8]: submission is not valid UTF-8 text\nhelp: re-enter the submission using valid UTF-8\n> 2 : Int\n> ",
         "malformed terminal input must not consume the retained last result"
     );
     assert!(output.stderr.is_empty());
@@ -552,7 +552,7 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
         .wait_with_output()
         .expect("unlisted REPL process output");
     assert!(unlisted_repl.status.success());
-    assert_eq!(unlisted_repl.stdout, b"> error[ORNA-S010-IMPORT]\n> ");
+    assert_eq!(unlisted_repl.stdout, b"> error[ORNA-S010-IMPORT]: imported module is unavailable\nhelp: use a captured standard dependency or remove the import\n> ");
     assert!(unlisted_repl.stderr.is_empty());
 }
 
