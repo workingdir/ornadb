@@ -1,0 +1,8 @@
+pub table Reading(value: Decimal) { label: Str, }
+
+fn main() {
+    Reading.insert({ value: 2.0, label: "two" });
+    Reading.insert({ value: 0.1, label: "one-tenth" });
+    Reading.insert({ value: 1.0, label: "one" });
+    Reading.insert({ value: 0.01, label: "one-hundredth" });
+}

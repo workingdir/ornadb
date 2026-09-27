@@ -1,0 +1,9 @@
+pub table Reading(value: Decimal) { label: Str, }
+
+fn main() {
+    assert (Reading | count) == 4;
+    assert (Reading | take(1) | count) == 1;
+    assert (Reading | take(3) | count) == 3;
+    assert (Reading | drop(3) | count) == 1;
+    assert (Reading | drop(4) | count) == 0;
+}
