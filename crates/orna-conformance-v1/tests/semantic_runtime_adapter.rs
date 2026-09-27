@@ -1678,20 +1678,20 @@ fn project_row_admission_admits_automatic_and_composite_keys() {
             fixture_id: "project-rows-key-shapes".into(),
             source_id: "logical/project/inventory.orna".into(),
             parse_as: "module_unit".into(),
-            source: "pub table Note { text: Str, } pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }".into(),
+            source: include_str!("fixtures/row-admission/key-shapes-inventory.orna").into(),
         }],
         loose_rows: vec![
             SourceUnit {
                 fixture_id: "project-rows-key-shapes".into(),
                 source_id: "logical/project/inventory/Note/7.orna".into(),
                 parse_as: "row_unit".into(),
-                source: "{ text: \"memo\" }".into(),
+                source: include_str!("fixtures/row-admission/key-shapes-note-7.orna").into(),
             },
             SourceUnit {
                 fixture_id: "project-rows-key-shapes".into(),
                 source_id: "logical/project/inventory/Reading/greenhouse/2.orna".into(),
                 parse_as: "row_unit".into(),
-                source: "{ value: 18.50 }".into(),
+                source: include_str!("fixtures/row-admission/key-shapes-reading-greenhouse-2.orna").into(),
             },
         ],
         expectations: ProjectExpectations {
