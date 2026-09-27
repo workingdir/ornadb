@@ -115,7 +115,7 @@ async fn real_source_candidate_projects_and_admits_at_runtime_capture() {
     .await
     .unwrap();
     let active = empty_active();
-    let source = "CREATE SCHEMA app; CREATE TYPE app.item AS OBJECT (value INTEGER);";
+    let source = include_str!("fixtures/source-candidate-app-item.orna");
     let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
     let report = check(&bundle, active.catalogue());
     assert!(
