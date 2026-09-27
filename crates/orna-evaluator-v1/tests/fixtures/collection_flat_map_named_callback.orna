@@ -1,0 +1,2 @@
+fn expand(value: Int) = [value, value + 10];
+fn run() = std.collection.flat_map([3, 1, 2], expand);
