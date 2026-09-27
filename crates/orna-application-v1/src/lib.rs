@@ -21,7 +21,9 @@ use orna_runtime_v1::{
     NoFault, RuntimeActivationContext, RuntimeError, StagedTableActivation, TableMutation,
 };
 use orna_semantic_v1::{Catalogue, ModuleInput, SymbolKind, TableSchema, analyze_with_catalogue};
-use orna_syntax_v1::{Declaration, Expr, parse_module_with_file};
+use orna_syntax_v1::{
+    CaseArm, Declaration, Expr, Statement, StringSegment, parse_module_with_file,
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -55,6 +57,11 @@ pub enum ApplicationError {
     UnadmittedTable(String),
     /// The evaluator rejected an admitted effect outside the table boundary.
     EffectRejected(String),
+    /// The source requested an effect that could not be authorized or run.
+    SourceEffectFailed(String),
+    /// Async runtime effects are supported only as the activation's terminal
+    /// result, so their real result is available before the activation commits.
+    UnsupportedSourceEffectPlacement,
 }
 
 impl fmt::Display for ApplicationError {
@@ -80,6 +87,10 @@ impl fmt::Display for ApplicationError {
             Self::EffectRejected(code) => {
                 write!(formatter, "admitted effect was rejected: {code}")
             }
+            Self::SourceEffectFailed(code) => write!(formatter, "source effect failed: {code}"),
+            Self::UnsupportedSourceEffectPlacement => formatter.write_str(
+                "runtime-backed source effects must be the activation's terminal result",
+            ),
         }
     }
 }
@@ -217,6 +228,45 @@ impl ApplicationAuthority {
         Ok(StagedActivation { value, mutations })
     }
 
+    /// Evaluates admitted source while dispatching its terminal runtime effect
+    /// through an explicit trusted host capability before returning staged
+    /// writes to the runtime for commit.
+    ///
+    /// Ordinary [`Self::evaluate_staged`] and the live application adapter do
+    /// not receive this capability and continue to reject administrative
+    /// effects. The async effect must be the entry's final expression: this
+    /// keeps the evaluator's source order intact and makes the actual host
+    /// result available to the caller before any staged writes are committed.
+    pub async fn evaluate_staged_with_async_effects(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        context: &RuntimeActivationContext,
+        dispatcher: &dyn AsyncApplicationEffectDispatcher,
+    ) -> Result<StagedActivation, ApplicationError> {
+        validate_terminal_runtime_effect(application)?;
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler = AsyncSourceMutationEffectHandler::new(tables);
+        let mut value = invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            arguments,
+            application.limits,
+            &mut handler,
+        )
+        .map_err(|error: EvaluationError| {
+            ApplicationError::EffectRejected(error.code().to_owned())
+        })?;
+        let (mutations, effects) = handler.into_parts()?;
+        for effect in effects {
+            value = dispatcher
+                .dispatch(effect, context)
+                .await
+                .map_err(ApplicationError::SourceEffectFailed)?;
+        }
+        Ok(StagedActivation { value, mutations })
+    }
+
     /// Computes the canonical digest for staged table work in one captured
     /// runtime activation. The context pin and ordered mutation bytes are both
     /// included, so a digest cannot be reused across CWD generations.
@@ -285,6 +335,35 @@ pub struct StagedActivation {
     mutations: Vec<TableMutation>,
 }
 
+/// A runtime operation requested by admitted application source.
+///
+/// The portable stream reference is data only. A trusted dispatcher must
+/// resolve it under the current owner and pinned activation context before
+/// invoking a runtime transition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ApplicationEffectRequest {
+    PauseStream {
+        stream: CanonicalValue,
+        reason: Option<String>,
+    },
+}
+
+/// Async result returned by one explicitly authorized source-effect dispatch.
+pub type ApplicationEffectFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<CanonicalValue, String>> + 'a>>;
+
+/// Capability supplied only by a trusted local runtime coordinator.
+///
+/// Implementations must resolve portable references against the authenticated
+/// writer and `context`; references themselves never grant authority.
+pub trait AsyncApplicationEffectDispatcher {
+    fn dispatch<'a>(
+        &'a self,
+        effect: ApplicationEffectRequest,
+        context: &'a RuntimeActivationContext,
+    ) -> ApplicationEffectFuture<'a>;
+}
+
 impl StagedActivation {
     #[must_use]
     pub fn value(&self) -> &CanonicalValue {
@@ -333,6 +412,10 @@ impl SourceMutationEffectHandler {
 
     /// Consumes the handler after validating every recorded mutation.
     pub fn into_mutations(self) -> Result<Vec<TableMutation>, ApplicationError> {
+        self.into_validated_mutations()
+    }
+
+    fn into_validated_mutations(self) -> Result<Vec<TableMutation>, ApplicationError> {
         for mutation in &self.mutations {
             TableMutation::new(
                 mutation.id(),
@@ -454,6 +537,237 @@ impl SourceMutationEffectHandler {
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct AsyncSourceMutationEffectHandler {
+    mutations: SourceMutationEffectHandler,
+    effects: Vec<ApplicationEffectRequest>,
+}
+
+impl AsyncSourceMutationEffectHandler {
+    fn new(tables: BTreeMap<String, TableSchema>) -> Self {
+        Self {
+            mutations: SourceMutationEffectHandler::new(tables),
+            effects: Vec::new(),
+        }
+    }
+
+    fn into_parts(
+        self,
+    ) -> Result<(Vec<TableMutation>, Vec<ApplicationEffectRequest>), ApplicationError> {
+        Ok((self.mutations.into_validated_mutations()?, self.effects))
+    }
+}
+
+impl EffectHandler for AsyncSourceMutationEffectHandler {
+    fn handle(
+        &mut self,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        if source_function_path(callee).as_deref() == Some("sys.admin.pause_stream") {
+            let request = match arguments {
+                [stream] => ApplicationEffectRequest::PauseStream {
+                    stream: stream.clone(),
+                    reason: None,
+                },
+                [stream, reason] => {
+                    let reason = match reason.raw() {
+                        OvbRaw::Null => None,
+                        OvbRaw::Text(reason) => Some(reason.clone()),
+                        _ => {
+                            return Err(SourceMutationEffectHandler::effect_error(
+                                "ORNA-EVAL-TYPE",
+                            ));
+                        }
+                    };
+                    ApplicationEffectRequest::PauseStream {
+                        stream: stream.clone(),
+                        reason,
+                    }
+                }
+                _ => {
+                    return Err(SourceMutationEffectHandler::effect_error(
+                        "ORNA-EVAL-ARGUMENT",
+                    ));
+                }
+            };
+            self.effects.push(request);
+            // The async host result replaces this placeholder before the
+            // staged activation is returned to its owner for publication.
+            return CanonicalValue::new(OvbRaw::Bool(false))
+                .map(Some)
+                .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"));
+        }
+        self.mutations.handle(callee, arguments)
+    }
+
+    fn handle_with_budget(
+        &mut self,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+        budget: &mut StepBudget,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.handle(callee, arguments).map(|result| {
+            // The existing synchronous table handler does not debit
+            // additional work; runtime dispatch remains bounded by its
+            // own operation budget.
+            let _ = budget;
+            result
+        })
+    }
+}
+
+fn source_function_path(expression: &Expr) -> Option<String> {
+    match expression {
+        Expr::Name { text, .. } => Some(text.clone()),
+        Expr::Field { base, name, .. } => Some(format!("{}.{}", source_function_path(base)?, name)),
+        _ => None,
+    }
+}
+
+fn validate_terminal_runtime_effect(
+    application: &AdmittedApplication,
+) -> Result<(), ApplicationError> {
+    for (name, function) in &application.functions {
+        let count = runtime_pause_call_count(&function.body);
+        if name == &application.entry {
+            if count > 0 && (count != 1 || !is_terminal_pause_call(&function.body)) {
+                return Err(ApplicationError::UnsupportedSourceEffectPlacement);
+            }
+        } else if count > 0 {
+            // A helper call could consume the placeholder before the async
+            // dispatcher supplies the actual operation result.
+            return Err(ApplicationError::UnsupportedSourceEffectPlacement);
+        }
+    }
+    Ok(())
+}
+
+fn is_terminal_pause_call(expression: &Expr) -> bool {
+    match expression {
+        Expr::Group { inner, .. } => is_terminal_pause_call(inner),
+        Expr::Call { callee, .. } => {
+            source_function_path(callee).as_deref() == Some("sys.admin.pause_stream")
+        }
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            !statements
+                .iter()
+                .any(|statement| runtime_pause_statement_count(statement) != 0)
+                && tail.as_deref().is_some_and(is_terminal_pause_call)
+        }
+        _ => false,
+    }
+}
+
+fn runtime_pause_call_count(expression: &Expr) -> usize {
+    let own = usize::from(matches!(
+        expression,
+        Expr::Call { callee, .. }
+            if source_function_path(callee).as_deref() == Some("sys.admin.pause_stream")
+    ));
+    own + match expression {
+        Expr::Name { .. } | Expr::Literal { .. } | Expr::ReplBinding { .. } => 0,
+        Expr::InterpolatedString { segments, .. } => segments
+            .iter()
+            .map(|segment| match segment {
+                StringSegment::Text { .. } => 0,
+                StringSegment::Expression { value, .. } => runtime_pause_call_count(value),
+            })
+            .sum(),
+        Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => runtime_pause_call_count(rhs),
+        Expr::Binary { lhs, rhs, .. } => {
+            runtime_pause_call_count(lhs) + runtime_pause_call_count(rhs)
+        }
+        Expr::Range { lower, upper, .. } => lower
+            .iter()
+            .chain(upper.iter())
+            .map(|bound| runtime_pause_call_count(bound))
+            .sum(),
+        Expr::Call {
+            callee, arguments, ..
+        }
+        | Expr::GenericCall {
+            callee, arguments, ..
+        } => {
+            runtime_pause_call_count(callee)
+                + arguments
+                    .iter()
+                    .map(|argument| runtime_pause_call_count(&argument.value))
+                    .sum::<usize>()
+        }
+        Expr::Index { base, index, .. } => {
+            runtime_pause_call_count(base) + runtime_pause_call_count(index)
+        }
+        Expr::Field { base, .. } => runtime_pause_call_count(base),
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+            elements.iter().map(runtime_pause_call_count).sum()
+        }
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => fields
+            .iter()
+            .map(|field| runtime_pause_call_count(&field.value))
+            .sum(),
+        Expr::Lambda { body, .. } => runtime_pause_call_count(body),
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            statements
+                .iter()
+                .map(runtime_pause_statement_count)
+                .sum::<usize>()
+                + tail
+                    .as_deref()
+                    .map(runtime_pause_call_count)
+                    .unwrap_or_default()
+        }
+        Expr::Control {
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => {
+            condition
+                .as_deref()
+                .map(runtime_pause_call_count)
+                .unwrap_or_default()
+                + body
+                    .as_deref()
+                    .map(runtime_pause_call_count)
+                    .unwrap_or_default()
+                + arms.iter().map(runtime_pause_arm_count).sum::<usize>()
+                + alternate
+                    .as_deref()
+                    .map(runtime_pause_call_count)
+                    .unwrap_or_default()
+        }
+    }
+}
+
+fn runtime_pause_arm_count(arm: &CaseArm) -> usize {
+    arm.guard
+        .as_ref()
+        .map(runtime_pause_call_count)
+        .unwrap_or_default()
+        + runtime_pause_call_count(&arm.body)
+}
+
+fn runtime_pause_statement_count(statement: &Statement) -> usize {
+    match statement {
+        Statement::Let { value, .. }
+        | Statement::Assert { value, .. }
+        | Statement::Expression { value, .. }
+        | Statement::Control { value, .. }
+        | Statement::Assignment { value, .. } => runtime_pause_call_count(value),
+        Statement::Return { value, .. } | Statement::Break { value, .. } => value
+            .as_ref()
+            .map(runtime_pause_call_count)
+            .unwrap_or_default(),
+        Statement::Continue { .. } => 0,
     }
 }
 
@@ -1025,7 +1339,9 @@ mod tests {
         )
         .expect("admitted catalogue should initialize a session");
         session
-            .submit(include_str!("../tests/fixtures/remote-repl-contact-key.orna"))
+            .submit(include_str!(
+                "../tests/fixtures/remote-repl-contact-key.orna"
+            ))
             .expect("session binding should be retained");
         session
             .submit(include_str!(
