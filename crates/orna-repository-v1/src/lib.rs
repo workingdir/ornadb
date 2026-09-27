@@ -4992,7 +4992,24 @@ impl Repository {
             valid_branch_name(selector) && self.ref_exists(&format!("refs/heads/{selector}"))?;
         let tag =
             valid_branch_name(selector) && self.ref_exists(&format!("refs/tags/{selector}"))?;
-        if branch && tag {
+        let other_ref = if branch {
+            [
+                format!("refs/{selector}"),
+                format!("refs/remotes/{selector}"),
+                format!("refs/remotes/{selector}/HEAD"),
+            ]
+            .into_iter()
+            .try_fold(false, |found, reference| {
+                if found || reference == format!("refs/heads/{selector}") {
+                    Ok(found)
+                } else {
+                    self.ref_exists(&reference)
+                }
+            })?
+        } else {
+            false
+        };
+        if branch && (tag || other_ref) {
             return Err(RepositoryError::InvalidSelector);
         }
         // A full object ID and a local branch name are both valid selectors,
