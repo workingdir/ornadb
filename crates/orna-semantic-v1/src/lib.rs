@@ -7077,7 +7077,18 @@ fn infer(
                             Type::Error
                         }
                     });
-                bind_pattern(&parameter.pattern, ty.clone(), scope, &mut locals, diagnostics);
+                if ty == Type::Error {
+                    // Keep an underconstrained lambda parameter in scope as
+                    // an error-typed local. This lets the annotation
+                    // diagnostic point at the useful site without turning
+                    // every use of that parameter into an unrelated
+                    // unresolved-name diagnostic.
+                    if let Pattern::Name(name, _) = &parameter.pattern {
+                        insert_local_binding(name, Type::Error, &mut locals, diagnostics);
+                    }
+                } else {
+                    bind_pattern(&parameter.pattern, ty.clone(), scope, &mut locals, diagnostics);
+                }
                 types.push(ty);
             }
             let value = if matches!(

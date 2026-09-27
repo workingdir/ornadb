@@ -1,0 +1,1 @@
+pub fn increment() = x => x + 1;
