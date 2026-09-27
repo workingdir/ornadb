@@ -1008,10 +1008,7 @@ fn typed_sys_start_report_retains_mismatched_witness_diagnostic() {
             Some("ORNA-S021-TYPE"),
             Some("sys.start explicit type argument must match the as: witness"),
         ),
-        r#"
-            pub fn start_wrong(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.start<Str>(function, arguments, as: Int);
-        "#,
+        include_str!("fixtures/typed-start-mismatch.orna"),
     );
     let fixture = &report.fixtures[0];
     let parse = fixture
