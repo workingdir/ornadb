@@ -1723,6 +1723,10 @@ fn analyze_retaining_context(
         parsed.push((namespace, parse.value));
     }
     let mut dependency_summaries = BTreeMap::new();
+    let source_payload_enums = parsed
+        .iter()
+        .map(|(namespace, tree)| (namespace.clone(), payload_enum_names(tree)))
+        .collect::<BTreeMap<_, _>>();
     stabilize_function_summaries(
         &parsed,
         &mut result.modules,
@@ -1734,7 +1738,7 @@ fn analyze_retaining_context(
         let Some(header) = result.modules.get(namespace).cloned() else {
             continue;
         };
-        let scope = resolve_imports_with_dependencies(
+        let mut scope = resolve_imports_with_dependencies(
             namespace,
             tree,
             &header,
@@ -1744,6 +1748,13 @@ fn analyze_retaining_context(
             &dependency_summaries,
             &mut result.diagnostics,
         );
+        scope
+            .payload_enum_types
+            .extend(imported_payload_enum_bindings(
+                tree,
+                &source_payload_enums,
+                &result.modules,
+            ));
         let mut symbols = header.symbols.clone();
         for symbol in symbols.values_mut() {
             canonicalize_symbol(symbol, &scope.nominal_identities);
@@ -2628,6 +2639,9 @@ struct Scope {
     currency_types: BTreeSet<String>,
     /// Local enum payloads retained for closed constructor-pattern checking.
     enum_variants: BTreeMap<String, BTreeMap<String, BTreeMap<String, Type>>>,
+    /// Local or explicitly imported enum types whose variants carry payloads.
+    /// This compact admission metadata is kept separately from public Symbols.
+    payload_enum_types: BTreeSet<String>,
     /// Local transparent aliases. Refined and nominal type declarations are
     /// deliberately excluded so alias resolution cannot erase identity.
     type_aliases: BTreeMap<String, Type>,
@@ -2744,6 +2758,7 @@ fn resolve_imports_with_dependencies(
             .collect(),
         currency_types: currency_types(tree),
         enum_variants: enum_variant_types(tree, diagnostics),
+        payload_enum_types: payload_enum_names(tree),
         type_aliases: tree
             .items
             .iter()
@@ -3504,10 +3519,7 @@ fn check_item(
                 let is_float = matches!(&ty, Type::Float)
                     || matches!(&ty, Type::Applied { base, .. } if base == "Float");
                 let is_payload_enum = match &ty {
-                    Type::Named(name) => scope
-                        .enum_variants
-                        .get(name)
-                        .is_some_and(|variants| variants.values().any(|fields| !fields.is_empty())),
+                    Type::Named(name) => scope.payload_enum_types.contains(name),
                     _ => false,
                 };
                 if is_range || is_float || is_payload_enum {
@@ -15863,6 +15875,123 @@ fn enum_variant_types(
         enums.insert(name.clone(), typed_variants);
     }
     enums
+}
+
+fn payload_enum_names(tree: &SyntaxTree) -> BTreeSet<String> {
+    tree.items
+        .iter()
+        .filter_map(|item| match &item.declaration {
+            Declaration::Enum { name, variants, .. }
+                if variants.iter().any(|variant| !variant.fields.is_empty()) =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn imported_payload_enum_bindings(
+    tree: &SyntaxTree,
+    payload_enums: &BTreeMap<Namespace, BTreeSet<String>>,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+) -> BTreeSet<String> {
+    let mut bindings = BTreeSet::new();
+    for item in &tree.items {
+        let Declaration::Use { path, tail } = &item.declaration else {
+            continue;
+        };
+        let target = Namespace(path.iter().map(|segment| segment.name.clone()).collect());
+        let Some(module) = modules.get(&target) else {
+            continue;
+        };
+        match tail {
+            UseTail::None => {
+                if let Some(binding) = target.0.last() {
+                    add_qualified_payload_enum_bindings(
+                        &mut bindings,
+                        binding,
+                        &target,
+                        payload_enums,
+                        modules,
+                    );
+                }
+            }
+            UseTail::Alias { name, .. } if name != "_" => {
+                add_qualified_payload_enum_bindings(
+                    &mut bindings,
+                    name,
+                    &target,
+                    payload_enums,
+                    modules,
+                );
+            }
+            UseTail::Alias { .. } => {
+                if let Some(names) = payload_enums.get(&target) {
+                    for name in names {
+                        if module.prelude_exports.contains(name) && is_exported_enum(module, name) {
+                            bindings.insert(name.clone());
+                        }
+                    }
+                }
+            }
+            UseTail::Glob { .. } => {
+                if let Some(names) = payload_enums.get(&target) {
+                    bindings.extend(
+                        names
+                            .iter()
+                            .filter(|name| is_exported_enum(module, name))
+                            .cloned(),
+                    );
+                }
+            }
+            UseTail::Names(imports) => {
+                if let Some(names) = payload_enums.get(&target) {
+                    bindings.extend(
+                        imports
+                            .iter()
+                            .map(|import| &import.name)
+                            .filter(|name| names.contains(*name) && is_exported_enum(module, name))
+                            .cloned(),
+                    );
+                }
+            }
+        }
+    }
+    bindings
+}
+
+fn add_qualified_payload_enum_bindings(
+    bindings: &mut BTreeSet<String>,
+    binding: &str,
+    target: &Namespace,
+    payload_enums: &BTreeMap<Namespace, BTreeSet<String>>,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+) {
+    for (namespace, names) in payload_enums {
+        if namespace.0.len() < target.0.len() || namespace.0[..target.0.len()] != target.0[..] {
+            continue;
+        }
+        let Some(module) = modules.get(namespace) else {
+            continue;
+        };
+        let mut prefix = vec![binding.to_owned()];
+        prefix.extend(namespace.0[target.0.len()..].iter().cloned());
+        for name in names {
+            if is_exported_enum(module, name) {
+                let mut qualified = prefix.clone();
+                qualified.push(name.clone());
+                bindings.insert(qualified.join("."));
+            }
+        }
+    }
+}
+
+fn is_exported_enum(module: &ModuleHeader, name: &str) -> bool {
+    module
+        .exports
+        .get(name)
+        .is_some_and(|symbol| symbol.kind == SymbolKind::Enum)
 }
 
 fn pattern_binding_names(pattern: &Pattern) -> Vec<String> {

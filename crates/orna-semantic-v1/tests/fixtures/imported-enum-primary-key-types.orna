@@ -1,0 +1,9 @@
+pub enum Status {
+    queued,
+    completed,
+}
+
+pub enum Outcome {
+    success,
+    failure { code: Int },
+}
