@@ -3133,7 +3133,7 @@ fn harness_maps_database_writable_and_serializes_unsupported_member_diagnostic()
             None,
             None,
         ),
-        "pub fn writable() = sys.database.writable;",
+        include_str!("fixtures/sys-database-writable-direct.orna"),
         "ORNA-SYS-023",
     );
     let valid_fixture = &valid.fixtures[0];
@@ -3207,7 +3207,7 @@ fn harness_maps_database_writable_and_serializes_unsupported_member_diagnostic()
             Some("ORNA-S022-UNSUPPORTED"),
             None,
         ),
-        "pub fn legacy() = sys.database.legacy_member;",
+        include_str!("fixtures/sys-database-unsupported-member.orna"),
         "ORNA-SYS-022",
     );
     let invalid_fixture = &invalid.fixtures[0];
