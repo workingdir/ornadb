@@ -1,0 +1,2 @@
+use contacts as addressbook;
+fn name(contact: contacts.Contact): Str = addressbook.Contact.name(contact);
