@@ -537,20 +537,20 @@ impl ActivationCoordinator {
             .iter()
             .filter_map(|(child, joined)| (!*joined).then_some(*child))
             .collect::<Vec<_>>();
-        let mut cancellation_error = None;
+        let mut termination_error = None;
         for child in &pending {
             if let Err(error) = children.request_cancellation(*child) {
-                cancellation_error.get_or_insert(error);
+                termination_error.get_or_insert(error);
             }
         }
-        if let Some(error) = cancellation_error {
-            return Err(error);
-        }
         for child in pending {
-            children.join(child)?;
-            *self.children.get_mut(&child).expect("recorded child") = true;
+            if let Err(error) = children.join(child) {
+                termination_error.get_or_insert(error);
+            } else {
+                *self.children.get_mut(&child).expect("recorded child") = true;
+            }
         }
-        Ok(())
+        termination_error.map_or(Ok(()), Err)
     }
     fn require_current(&self, owner: OwnerLease) -> Result<(), CoordinationError> {
         if self.owner == Some(owner) {
@@ -752,6 +752,31 @@ mod tests {
         (c, o)
     }
 
+    struct JoinSupervisor {
+        cancellations: Vec<ChildId>,
+        joins: Vec<ChildId>,
+        fail_join_once: Option<ChildId>,
+    }
+    impl ChildSupervisor for JoinSupervisor {
+        fn request_cancellation(
+            &mut self,
+            child: ChildId,
+        ) -> Result<(), ChildTerminationError> {
+            self.cancellations.push(child);
+            Ok(())
+        }
+
+        fn join(&mut self, child: ChildId) -> Result<(), ChildTerminationError> {
+            self.joins.push(child);
+            if self.fail_join_once == Some(child) {
+                self.fail_join_once = None;
+                Err(ChildTerminationError::Incomplete)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
     #[test]
     fn no_partial_visibility_when_atomic_commit_faults() {
         let (mut c, owner) = active();
@@ -922,4 +947,54 @@ mod tests {
         assert_eq!(c.phase(), TransactionPhase::ChildrenJoining);
         assert!(store.visible().is_empty());
     }
+
+    #[test]
+    fn failed_join_does_not_skip_later_children_or_publish() {
+        let (mut coordinator, owner) = active();
+        let first = coordinator.spawn_child(owner).unwrap();
+        let second = coordinator.spawn_child(owner).unwrap();
+        let mut children = JoinSupervisor {
+            cancellations: Vec::new(),
+            joins: Vec::new(),
+            fail_join_once: Some(first),
+        };
+        let mut store = InMemoryAtomicStore::default();
+        let mut provider = Provider(Ok(Value(11)));
+        let mut faults = NoFault;
+
+        assert_eq!(
+            coordinator.execute_with_children(
+                owner,
+                &mut provider,
+                &mut store,
+                checkpoint(),
+                &mut faults,
+                &mut children,
+            ),
+            Outcome::ChildrenJoining {
+                reason: RollbackReason::ChildOutstanding
+            }
+        );
+        assert_eq!(children.cancellations, vec![first, second]);
+        assert_eq!(children.joins, vec![first, second]);
+        assert_eq!(coordinator.phase(), TransactionPhase::ChildrenJoining);
+        assert_eq!(coordinator.children.get(&first), Some(&false));
+        assert_eq!(coordinator.children.get(&second), Some(&true));
+        assert!(store.visible().is_empty());
+
+        assert!(matches!(
+            coordinator.execute_with_children(
+                owner,
+                &mut provider,
+                &mut store,
+                checkpoint(),
+                &mut faults,
+                &mut children,
+            ),
+            Outcome::Committed { .. }
+        ));
+        assert_eq!(children.joins, vec![first, second, first]);
+        assert_eq!(store.visible().len(), 1);
+    }
+
 }
