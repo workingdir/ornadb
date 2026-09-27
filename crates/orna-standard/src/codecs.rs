@@ -70,7 +70,7 @@ pub fn registered_opaque_codecs(
         )
         .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
         vec![opaque_token, document, byte_stream, ui, json, action]
-    } else if is_accepted_v7_standard(standard) || is_accepted_v6_standard(standard) {
+    } else if is_accepted_v6_standard(standard) {
         let document = OpaqueCodecRegistration::length_prefixed_utf8(
             STD_TERMINAL_DOCUMENT_TYPE_ID,
             semantic_name("std.terminal.document", ["std", "terminal", "document"])
@@ -271,16 +271,6 @@ fn is_accepted_v10_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool 
         && standard.source().units()[9].content_hash() == ACCEPTED_V10_CLI_CONTENT_DIGEST
         && standard.source().revision_hash() == ACCEPTED_V10_SOURCE_REVISION_DIGEST
         && standard.digest() == ACCEPTED_V10_STANDARD_LIBRARY_DIGEST
-}
-
-fn is_accepted_v7_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
-    standard.revision() == STANDARD_LIBRARY_V7_REVISION_ID
-        && standard.catalogue().revision() == STANDARD_CATALOGUE_V7_REVISION_ID
-        && standard.source().bundle() == STANDARD_SOURCE_V7_BUNDLE_ID
-        && standard.source().id() == STANDARD_SOURCE_V7_REVISION_ID
-        && standard.source().parent() == Some(STANDARD_SOURCE_V6_REVISION_ID)
-        && standard.source().revision_hash() == ACCEPTED_V7_SOURCE_REVISION_DIGEST
-        && standard.digest() == ACCEPTED_V7_STANDARD_LIBRARY_DIGEST
 }
 
 fn is_accepted_v6_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {

@@ -4,7 +4,6 @@ mod presenters;
 
 pub use presenters::{
     check_standard_json_encode, check_standard_terminal_present_table,
-    check_standard_ui_window,
 };
 
 /// Checks retained standard source against its verified catalogue and origins.
@@ -41,7 +40,6 @@ pub fn check_standard_library_source(
                 Err(StandardLibraryCheckError::SourceMismatch)
             }
             STANDARD_LIBRARY_V8_REVISION_ID => Err(StandardLibraryCheckError::SourceMismatch),
-            STANDARD_LIBRARY_V7_REVISION_ID => check_standard_library_source_v7(snapshot),
             STANDARD_LIBRARY_V6_REVISION_ID => check_standard_library_source_v6(snapshot),
             STANDARD_LIBRARY_V5_REVISION_ID => check_standard_library_source_v5(snapshot),
             STANDARD_LIBRARY_V4_REVISION_ID => check_standard_library_source_v4(snapshot),
@@ -530,183 +528,6 @@ fn check_standard_library_source_v6(
     })
 }
 
-/// Checks one retained V7 standard source bundle.
-fn check_standard_library_source_v7(
-    snapshot: &VerifiedStandardLibrarySnapshot,
-) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
-    let (families, checked_executables) = check_standard_library_source_v7_parts(
-        snapshot.source().units(),
-        snapshot.catalogue(),
-        snapshot.origins(),
-        snapshot.executables(),
-    )?;
-    Ok(CheckedStandardLibrary {
-        verified_snapshot: snapshot.clone(),
-        schemas: families.schemas,
-        value_types: families.value_types,
-        type_bindings: families.type_bindings,
-        checked_executables,
-    })
-}
-
-fn check_standard_library_source_v7_parts(
-    source_units: &[StoredSourceUnit],
-    catalogue: &CatalogueSnapshot,
-    origins: &[DefinitionOrigin],
-    executables: &[StandardExecutable],
-) -> Result<(StandardSourceFamilies, Vec<CheckedStandardExecutable>), StandardLibraryCheckError> {
-    let [
-        types_unit,
-        invoke_unit,
-        output_unit,
-        ui_unit,
-        json_unit,
-        action_unit,
-        window_unit,
-    ] = source_units
-    else {
-        return Err(StandardLibraryCheckError::SourceUnitCount {
-            actual: source_units.len(),
-        });
-    };
-    check_standard_source_units(
-        source_units,
-        &[
-            (STD_TYPES_SOURCE_UNIT_ID, "std/types.orna", 0),
-            (STD_INVOKE_SOURCE_UNIT_ID, "std/invoke.orna", 1),
-            (STD_OUTPUT_SOURCE_UNIT_ID, "std/output.orna", 2),
-            (STD_UI_SOURCE_UNIT_ID, "std/ui.orna", 3),
-            (STD_JSON_SOURCE_UNIT_ID, "std/json.orna", 4),
-            (STD_ACTION_SOURCE_UNIT_ID, "std/action.orna", 5),
-            (STD_WINDOW_SOURCE_UNIT_ID, "std/window.orna", 6),
-        ],
-    )?;
-    if executables.len() != 3 {
-        return Err(StandardLibraryCheckError::ExecutableCount {
-            actual: executables.len(),
-        });
-    }
-    let echo_executable = executables
-        .iter()
-        .find(|executable| executable.function() == STD_INVOKE_ECHO_FUNCTION_ID)
-        .ok_or(StandardLibraryCheckError::ExecutableMismatch)?;
-    let json_executable = executables
-        .iter()
-        .find(|executable| executable.function() == STD_JSON_ENCODE_FUNCTION_ID)
-        .ok_or(StandardLibraryCheckError::ExecutableMismatch)?;
-    let window_executable = executables
-        .iter()
-        .find(|executable| executable.function() == STD_UI_WINDOW_FUNCTION_ID)
-        .ok_or(StandardLibraryCheckError::ExecutableMismatch)?;
-    if [
-        echo_executable.function(),
-        json_executable.function(),
-        window_executable.function(),
-    ]
-    .into_iter()
-    .enumerate()
-    .any(|(index, function)| {
-        [
-            STD_INVOKE_ECHO_FUNCTION_ID,
-            STD_JSON_ENCODE_FUNCTION_ID,
-            STD_UI_WINDOW_FUNCTION_ID,
-        ]
-        .into_iter()
-        .position(|expected| expected == function)
-            != Some(index)
-    }) {
-        return Err(StandardLibraryCheckError::ExecutableMismatch);
-    }
-
-    let mut v6_origins = Vec::with_capacity(origins.len());
-    let mut window_origins = Vec::new();
-    for origin in origins {
-        if origin.source().source_unit() == STD_WINDOW_SOURCE_UNIT_ID {
-            window_origins.push(origin.clone());
-        } else {
-            v6_origins.push(origin.clone());
-        }
-    }
-    let v6_executables = vec![echo_executable.clone(), json_executable.clone()];
-    let (families, checked_echo) = check_standard_library_source_v6_parts(
-        &[
-            types_unit.clone(),
-            invoke_unit.clone(),
-            output_unit.clone(),
-            ui_unit.clone(),
-            json_unit.clone(),
-            action_unit.clone(),
-        ],
-        catalogue,
-        &v6_origins,
-        &v6_executables,
-    )?;
-
-    let json_bundle = SourceBundle::new([SourceUnit::new(
-        json_unit.logical_path(),
-        json_unit.content(),
-    )])
-    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
-    let json_report = parse_bundle(&json_bundle);
-    if !json_report.diagnostics().is_empty() {
-        return Err(StandardLibraryCheckError::Diagnostics {
-            diagnostics: json_report.diagnostics().to_vec(),
-        });
-    }
-    let [parsed_json] = json_report.units() else {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    };
-    let [json_function] = parsed_json.parsed().server_functions() else {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    };
-    let json_origins = v6_origins
-        .iter()
-        .filter(|origin| origin.source().source_unit() == STD_JSON_SOURCE_UNIT_ID)
-        .cloned()
-        .collect::<Vec<_>>();
-    let json_record =
-        expected_standard_json_executable(json_function, catalogue, &json_origins, json_unit)?;
-    let json_schema_origin = json_origins
-        .iter()
-        .find(|origin| origin.identity() == DefinitionIdentity::Schema(STD_JSON_SCHEMA_ID))
-        .map(DefinitionOrigin::source)
-        .ok_or(StandardLibraryCheckError::MissingSchemaOrigin)?;
-    let checked_json = checked_standard_executable_from_record(
-        &json_record,
-        catalogue,
-        &json_origins,
-        json_schema_origin,
-    )?;
-
-    let window_bundle = SourceBundle::new([SourceUnit::new(
-        window_unit.logical_path(),
-        window_unit.content(),
-    )])
-    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
-    let window_report = parse_bundle(&window_bundle);
-    if !window_report.diagnostics().is_empty() {
-        return Err(StandardLibraryCheckError::Diagnostics {
-            diagnostics: window_report.diagnostics().to_vec(),
-        });
-    }
-    let [parsed_window] = window_report.units() else {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    };
-    let ui_schema_origin = origins
-        .iter()
-        .find(|origin| origin.identity() == DefinitionIdentity::Schema(STD_UI_SCHEMA_ID))
-        .map(DefinitionOrigin::source)
-        .ok_or(StandardLibraryCheckError::MissingSchemaOrigin)?;
-    let checked_window = reconcile_standard_window_executable(
-        catalogue,
-        &window_origins,
-        window_executable,
-        window_unit,
-        parsed_window,
-        ui_schema_origin,
-    )?;
-    Ok((families, vec![checked_echo, checked_json, checked_window]))
-}
 pub(super) fn check_standard_library_source_v6_parts(
     source_units: &[StoredSourceUnit],
     catalogue: &CatalogueSnapshot,
@@ -1012,136 +833,6 @@ fn checked_standard_executable_from_record(
         schema_origin,
         function_origin,
     })
-}
-
-fn reconcile_standard_window_executable(
-    catalogue: &CatalogueSnapshot,
-    origins: &[DefinitionOrigin],
-    stored: &StandardExecutable,
-    stored_unit: &StoredSourceUnit,
-    parsed_unit: &ParsedSourceUnit,
-    schema_origin: SourceOrigin,
-) -> Result<CheckedStandardExecutable, StandardLibraryCheckError> {
-    if parsed_unit.source_text() != stored_unit.content()
-        || parsed_unit.source_text() != parsed_unit.syntax_text()
-        || !parsed_unit.parsed().schemas().is_empty()
-        || !parsed_unit.parsed().object_types().is_empty()
-        || !parsed_unit.parsed().enum_types().is_empty()
-        || !parsed_unit.parsed().primitive_value_types().is_empty()
-        || !parsed_unit.parsed().opaque_value_types().is_empty()
-        || !parsed_unit.parsed().record_value_types().is_empty()
-        || !parsed_unit.parsed().field_renames().is_empty()
-        || !parsed_unit.parsed().server_functions().is_empty()
-        || parsed_unit.parsed().client_functions().len() != 1
-        || !parsed_unit.parsed().type_exports().is_empty()
-    {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    }
-    let [declaration] = parsed_unit.parsed().client_functions() else {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    };
-    let checked = check_standard_ui_window(declaration, catalogue, origins)?;
-    let function_origin = origins
-        .iter()
-        .find(|origin| origin.identity() == DefinitionIdentity::Function(STD_UI_WINDOW_FUNCTION_ID))
-        .ok_or(StandardLibraryCheckError::MissingFunctionOrigin)?
-        .source();
-    let source_origin = |span: &SourceSpan| -> Result<SourceOrigin, StandardLibraryCheckError> {
-        let start =
-            u32::try_from(span.start).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
-        let end = u32::try_from(span.end).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
-        SourceOrigin::new(stored_unit.id(), start, end)
-            .map_err(|_| StandardLibraryCheckError::SourceMismatch)
-    };
-    let title_type_origin = source_origin(declaration.parameters[0].type_specification.span())?;
-    let content_type_origin = source_origin(declaration.parameters[1].type_specification.span())?;
-    let result_type = match &declaration.return_type {
-        FunctionReturnType::Single(result) => result,
-        FunctionReturnType::Rows { .. } | FunctionReturnType::Stream { .. } => {
-            return Err(StandardLibraryCheckError::SourceMismatch);
-        }
-    };
-    let result_type_origin = source_origin(result_type.span())?;
-    let references = vec![
-        DefinitionReference::new(
-            checked.function_id(),
-            checked.revision_id(),
-            0,
-            DefinitionReferenceTarget::ValueType(STD_CHARACTER_LARGE_OBJECT_TYPE_ID),
-            DefinitionReferenceKind::NamedType,
-            title_type_origin,
-        ),
-        DefinitionReference::new(
-            checked.function_id(),
-            checked.revision_id(),
-            1,
-            DefinitionReferenceTarget::ValueType(STD_UI_TYPE_ID),
-            DefinitionReferenceKind::NamedType,
-            content_type_origin,
-        ),
-        DefinitionReference::new(
-            checked.function_id(),
-            checked.revision_id(),
-            2,
-            DefinitionReferenceTarget::ValueType(STD_UI_TYPE_ID),
-            DefinitionReferenceKind::NamedType,
-            result_type_origin,
-        ),
-    ];
-    let plan = ExpressionClientPlan::new(ClientExpressionNode::ExternalContract {
-        identity: STD_UI_WINDOW_RUNTIME_CONTRACT.to_owned(),
-    });
-    let payload = plan
-        .encode()
-        .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
-    let artifact_hash = artifact_payload_digest(&payload)
-        .map_err(|source| StandardLibraryCheckError::Digest { source })?;
-    let artifact = ExecutableArtifact::new(
-        ExecutableArtifactKind::Client,
-        CLIENT_PLAN_FORMAT,
-        plan.format_version(),
-        payload,
-        artifact_hash,
-    )
-    .map_err(|source| StandardLibraryCheckError::Revision { source })?;
-    let function = catalogue
-        .function_by_id(STD_UI_WINDOW_FUNCTION_ID)
-        .ok_or(StandardLibraryCheckError::MissingFunction)?;
-    let semantic_hash = function_semantic_digest_with_version(
-        FunctionSemanticHashVersion::Version2,
-        function,
-        orna_artifact::client_plan::LANGUAGE_VERSION_IDENTITY,
-        &artifact,
-        &[],
-        &references,
-    )
-    .map_err(|source| StandardLibraryCheckError::Digest { source })?;
-    let declaration_bytes = &stored_unit.content().as_bytes()
-        [function_origin.byte_start() as usize..function_origin.byte_end() as usize];
-    let declaration_content_hash = function_declaration_digest(declaration_bytes)
-        .map_err(|source| StandardLibraryCheckError::Digest { source })?;
-    let revision = FunctionRevisionRecord::new(
-        checked.function_id(),
-        checked.revision_id(),
-        STD_UI_WINDOW_REVISION_NUMBER,
-        function_origin,
-        declaration_content_hash,
-        semantic_hash,
-        orna_artifact::client_plan::LANGUAGE_VERSION_IDENTITY,
-        artifact,
-    )
-    .map_err(|source| StandardLibraryCheckError::Revision { source })?
-    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
-    let expected = StandardExecutable::new(checked.function_id(), revision, references)
-        .map_err(|source| StandardLibraryCheckError::Revision { source })?;
-    if stored != &expected {
-        return Err(StandardLibraryCheckError::ExecutableMismatch);
-    }
-    let mut checked_executable =
-        checked_standard_executable_from_record(&expected, catalogue, origins, schema_origin)?;
-    checked_executable.parameter_ids =
-        vec![checked.title_parameter_id(), checked.content_parameter_id()];
-    Ok(checked_executable)
 }
 
 /// Scopes one standard catalogue to the declarations retained in one source
@@ -2766,11 +2457,7 @@ pub(super) fn unquoted_semantic_name(
     QualifiedSemanticName::new(name.parts.iter().map(semantic_part))
         .map_err(|_| StandardLibraryCheckError::SourceMismatch)
 }
-fn matches_qualified_name(name: &QualifiedName, expected: &QualifiedSemanticName) -> bool {
-    unquoted_semantic_name(name)
-        .ok()
-        .is_some_and(|actual| actual == *expected)
-}
+
 
 pub(super) fn unquoted_prelude_name(
     words: &[orna_syntax::NamePart],
