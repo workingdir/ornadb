@@ -1,0 +1,5 @@
+pub table Note(id: Int) { text: Str, }
+
+fn main() {
+    Note.insert({ id: 8, text: "twice" });
+}

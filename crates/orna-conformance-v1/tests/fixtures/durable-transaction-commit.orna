@@ -1,0 +1,12 @@
+pub table Order(id: Int) { text: Str, }
+pub table Payment(id: Int) { text: Str, }
+pub table Audit(id: Int) { text: Str, }
+
+fn main() {
+    Order.insert({ id: 1, text: "order" });
+    Payment.insert({ id: 1, text: "payment" });
+    Audit.insert({ id: 1, text: "audit" });
+    assert Order.count() == 1;
+    assert Payment.count() == 1;
+    assert Audit.count() == 1;
+}
