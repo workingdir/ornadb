@@ -1,0 +1,4 @@
+fn change() {
+    let patch = { label: "override" };
+    Person.update("a", patch);
+}
