@@ -906,11 +906,17 @@ fn unicode_nfkc_casefold_sibling_collision_is_rejected() {
 #[test]
 fn graph_resolution_keeps_explicit_imports_over_globs_and_rejects_module_assertion_execution() {
     let result = analyze(&[
-        ModuleInput::new("left.orna", "pub fn pick(): Int = 1;"),
-        ModuleInput::new("right.orna", "pub fn pick(): Int = 2;"),
+        ModuleInput::new(
+            "left.orna",
+            include_str!("fixtures/semantic-graph/explicit-left.orna"),
+        ),
+        ModuleInput::new(
+            "right.orna",
+            include_str!("fixtures/semantic-graph/explicit-right.orna"),
+        ),
         ModuleInput::new(
             "consumer.orna",
-            "use sys as system; use left.{pick}; use right.*; fn chosen() = pick(); assert true;",
+            include_str!("fixtures/semantic-graph/explicit-over-glob-consumer.orna"),
         ),
     ]);
 
