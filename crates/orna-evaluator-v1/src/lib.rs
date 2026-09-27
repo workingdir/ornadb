@@ -5067,9 +5067,11 @@ impl Context<'_, '_> {
                 };
                 self.exact_decimal_result(value, preserve_decimal)
             }
-            Err(failure) if failure.code() == "ORNA-EVAL-VALUE" => {
+            Err(failure)
+                if matches!(failure.code(), "InexactDivision" | "ORNA-EVAL-VALUE") =>
+            {
                 let Some((scale, _)) = options else {
-                    return Err(failure);
+                    return Err(error("ORNA-EVAL-VALUE"));
                 };
                 self.exact_decimal_result(left.divide_rounded(right, scale)?, preserve_decimal)
             }
