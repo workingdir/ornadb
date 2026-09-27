@@ -731,10 +731,7 @@ fn erased_sys_invoke_report_serializes_missing_witness_diagnostic() {
             Some("ORNA-S021-TYPE"),
             Some("typed sys.invoke requires an explicit as: T witness"),
         ),
-        r#"
-            pub fn missing(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.invoke<Int>(function, arguments);
-        "#,
+        include_str!("fixtures/erased-invoke-missing-witness.orna"),
     );
     let serialized = serde_json::to_value(&report).expect("erased invoke report serializes");
     let serialized_typecheck = serialized["fixtures"][0]["stages"]
