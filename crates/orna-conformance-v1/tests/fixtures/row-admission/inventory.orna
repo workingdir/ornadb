@@ -1,0 +1,1 @@
+pub table Item(id: Int) { name: Str, available: Bool, price: Decimal, description: Str = "default", }
