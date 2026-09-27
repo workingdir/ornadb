@@ -4370,7 +4370,7 @@ fn std_collection_every_and_exists_accept_all_call_forms_and_function_callbacks(
         false_value
     );
 
-    let source = "fn positive(value: Int) = value > 0; fn all(rows: [Int]) = every(rows, positive); fn any(rows: [Int]) = std.collection.exists(predicate: positive, rows: rows);";
+    let source = include_str!("fixtures/every_exists_named_callbacks.orna");
     assert_eq!(
         call_module(source, "all([1, 2, 3])", Limits::default()).unwrap(),
         true_value
