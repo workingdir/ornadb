@@ -5610,9 +5610,9 @@ fn std_collection_map_and_flat_map_enforce_collection_limits() {
 
 #[test]
 fn std_collection_split_when_accepts_functions_and_enforces_limits() {
-    let source = "fn boundary(value: Int) = value % 2 == 0; fn run() = std.collection.split_when([1, 2, 3, 4], boundary);";
+    let source = include_str!("fixtures/split_when_callbacks.orna");
     assert_eq!(
-        call_module(source, "run()", Limits::default()).unwrap(),
+        call_module(source, "function_callback()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![Raw::Int(1.into())]),
             Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
@@ -5622,15 +5622,15 @@ fn std_collection_split_when_accepts_functions_and_enforces_limits() {
     );
     assert_eq!(
         code(call_module(
-            "fn bad(value: Int, other: Int) = true; fn run() = std.collection.split_when([1], bad);",
-            "run()",
+            source,
+            "callback_arity_is_checked()",
             Limits::default(),
         )),
         "ORNA-EVAL-ARGUMENT"
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.split_when([1, 2, 3], value => true)",
+            include_str!("fixtures/split_when_collection_limit.orna").trim(),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -5640,10 +5640,25 @@ fn std_collection_split_when_accepts_functions_and_enforces_limits() {
         "ORNA-EVAL-LIMIT"
     );
 }
+
+#[test]
+fn std_collection_split_when_rejects_invalid_callback_calls() {
+    let source = include_str!("fixtures/split_when_callbacks.orna");
+    for (function, expected) in [
+        ("invalid_collection()", "ORNA-EVAL-TYPE"),
+        ("non_callback()", "ORNA-EVAL-TYPE"),
+        ("callback_result_must_be_bool()", "ORNA-EVAL-TYPE"),
+        ("callback_arity_is_checked()", "ORNA-EVAL-ARGUMENT"),
+        ("extra_argument()", "ORNA-EVAL-UNSUPPORTED"),
+    ] {
+        assert_eq!(code(call_module(source, function, Limits::default())), expected);
+    }
+}
 #[test]
 fn std_collection_split_when_preserves_order_and_omits_empty_groups() {
+    let source = include_str!("fixtures/split_when_callbacks.orna");
     assert_eq!(
-        evaluate("std.collection.split_when([3, 1, 2, 4], value => value % 2 == 0)"),
+        call_module(source, "odd_runs()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())]),
             Raw::Array(vec![Raw::Int(2.into())]),
@@ -5652,7 +5667,7 @@ fn std_collection_split_when_preserves_order_and_omits_empty_groups() {
         .unwrap()
     );
     assert_eq!(
-        evaluate("std.collection.split_when([2, 4, 5], value => value % 2 == 0)"),
+        call_module(source, "begins_with_boundary()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![Raw::Int(2.into())]),
             Raw::Array(vec![Raw::Int(4.into()), Raw::Int(5.into())]),
@@ -5660,15 +5675,16 @@ fn std_collection_split_when_preserves_order_and_omits_empty_groups() {
         .unwrap()
     );
     assert_eq!(
-        evaluate("std.collection.split_when([], value => 1 / 0 == 0)"),
+        call_module(source, "empty_skips_callback()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![])).unwrap()
     );
 }
 
 #[test]
 fn std_collection_split_when_requires_bool_and_propagates_callback_failures() {
+    let source = include_str!("fixtures/split_when_callbacks.orna");
     assert_eq!(
-        evaluate("std.collection.split_when([1, 2, 3], value => value == 2)"),
+        call_module(source, "splits_at_two()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![Raw::Int(1.into())]),
             Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
@@ -5676,17 +5692,17 @@ fn std_collection_split_when_requires_bool_and_propagates_callback_failures() {
         .unwrap()
     );
     assert_eq!(
-        code(evaluate_expression(
-            "std.collection.split_when([1], value => value)",
-            &Environment::new(),
+        code(call_module(
+            source,
+            "callback_result_must_be_bool()",
             Limits::default(),
         )),
         "ORNA-EVAL-TYPE"
     );
     assert_eq!(
-        code(evaluate_expression(
-            "std.collection.split_when([1, 0, 2], value => 10 / value > 0)",
-            &Environment::new(),
+        code(call_module(
+            source,
+            "callback_failure_propagates()",
             Limits::default(),
         )),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
@@ -5695,7 +5711,7 @@ fn std_collection_split_when_requires_bool_and_propagates_callback_failures() {
 
 #[test]
 fn std_collection_split_when_debits_one_step_per_scanned_value_without_duplicate_traversal_charging() {
-    let expression = "std.collection.split_when([1, 2], value => true)";
+    let expression = include_str!("fixtures/split_when_step_budget.orna").trim();
     assert_eq!(
         code(evaluate_expression(
             expression,
@@ -5733,9 +5749,9 @@ fn std_collection_split_when_debits_one_step_per_scanned_value_without_duplicate
 
 #[test]
 fn std_collection_group_by_accepts_functions_and_enforces_limits() {
-    let source = "fn parity(value: Int) = value % 2; fn run() = std.collection.group_by([3, 2, 1, 4], parity);";
+    let source = include_str!("fixtures/group_by_callbacks.orna");
     assert_eq!(
-        call_module(source, "run()", Limits::default()).unwrap(),
+        call_module(source, "function_callback()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![
                 Raw::Int(0.into()),
@@ -5750,7 +5766,7 @@ fn std_collection_group_by_accepts_functions_and_enforces_limits() {
     );
     assert_eq!(
         code(evaluate_expression(
-            "std.collection.group_by([1, 2, 3], value => value)",
+            include_str!("fixtures/group_by_collection_limit.orna").trim(),
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
@@ -5760,10 +5776,24 @@ fn std_collection_group_by_accepts_functions_and_enforces_limits() {
         "ORNA-EVAL-LIMIT"
     );
 }
+
+#[test]
+fn std_collection_group_by_rejects_invalid_callback_calls() {
+    let source = include_str!("fixtures/group_by_callbacks.orna");
+    for (function, expected) in [
+        ("invalid_collection()", "ORNA-EVAL-TYPE"),
+        ("non_callback()", "ORNA-EVAL-TYPE"),
+        ("array_key_is_rejected()", "ORNA-EVAL-TYPE"),
+        ("extra_argument()", "ORNA-EVAL-UNSUPPORTED"),
+    ] {
+        assert_eq!(code(call_module(source, function, Limits::default())), expected);
+    }
+}
 #[test]
 fn std_collection_group_by_sorts_keys_and_preserves_input_row_order() {
+    let source = include_str!("fixtures/group_by_callbacks.orna");
     assert_eq!(
-        evaluate("std.collection.group_by([12, 1, 7, 4, 2, 5], value => value % 3)"),
+        call_module(source, "sorted_keys_and_stable_rows()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![
             Raw::Array(vec![
                 Raw::Int(0.into()),
@@ -5789,40 +5819,38 @@ fn std_collection_group_by_sorts_keys_and_preserves_input_row_order() {
 #[test]
 fn std_collection_group_by_empty_input_does_not_invoke_key_callback() {
     assert_eq!(
-        evaluate("std.collection.group_by([], value => 1 / 0)"),
+        call_module(
+            include_str!("fixtures/group_by_callbacks.orna"),
+            "empty_skips_callback()",
+            Limits::default(),
+        )
+        .unwrap(),
         Value::new(Raw::Array(vec![])).unwrap()
     );
 }
 
 #[test]
 fn std_collection_group_by_requires_lawful_keys_and_propagates_callback_failures() {
+    let source = include_str!("fixtures/group_by_callbacks.orna");
     for expression in [
-        "std.collection.group_by([1], value => [value])",
-        "std.collection.group_by([1, 2], value => if value == 1 { 1 } else { \"two\" })",
+        "array_key_is_rejected()",
+        "mixed_key_is_rejected()",
     ] {
         assert_eq!(
-            code(evaluate_expression(
-                expression,
-                &Environment::new(),
-                Limits::default(),
-            )),
+            code(call_module(source, expression, Limits::default())),
             "ORNA-EVAL-TYPE",
             "{expression} must reject keys without a lawful total comparison",
         );
     }
     assert_eq!(
-        code(evaluate_expression(
-            "std.collection.group_by([1, 0, 2], value => 10 / value)",
-            &Environment::new(),
-            Limits::default(),
-        )),
+        code(call_module(source, "callback_failure_propagates()", Limits::default())),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
     );
 }
 
 #[test]
 fn std_collection_group_by_debits_one_step_per_scanned_value_without_duplicate_traversal_charging() {
-    let expression = "std.collection.group_by([1, 2], value => value)";
+    let expression = include_str!("fixtures/group_by_step_budget.orna").trim();
     assert_eq!(
         code(evaluate_expression(
             expression,
