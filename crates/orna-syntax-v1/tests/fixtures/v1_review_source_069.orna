@@ -1,0 +1,1 @@
+fn f() { assert match status { Status.ready => true }; }

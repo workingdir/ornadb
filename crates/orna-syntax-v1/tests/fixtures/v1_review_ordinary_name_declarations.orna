@@ -1,0 +1,13 @@
+type fixture_name { fixture_name: fixture_name, }
+table fixture_name(fixture_name: fixture_name) { fixture_name: fixture_name, }
+protocol fixture_name { static fixture_name: fixture_name; fn fixture_name(fixture_name: fixture_name): fixture_name; }
+enum fixture_name { fixture_name { fixture_name: fixture_name }, }
+fn fixture_name(fixture_name: fixture_name): fixture_name {
+    let fixture_name: fixture_name = fixture_name;
+    fixture_name = replacement;
+    { fixture_name: fixture_name };
+    fixture_name.member;
+    namespace.fixture_name;
+    call(fixture_name: fixture_name);
+    fixture_name
+}

@@ -1,0 +1,1 @@
+enum E { v { x: Int } } fn f() = E.v { x: 1 };
