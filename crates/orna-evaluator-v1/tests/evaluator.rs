@@ -5890,7 +5890,7 @@ fn std_collection_group_by_debits_one_step_per_scanned_value_without_duplicate_t
 
 #[test]
 fn recursive_calls_terminate_or_hit_shared_limits() {
-    let source = "fn factorial(n: Int) = if n == 0 { 1 } else { n * factorial(n - 1) };";
+    let source = include_str!("fixtures/recursive_calls_limits.orna");
     assert_eq!(
         call_module(source, "factorial(5)", Limits::default()).unwrap(),
         Value::int(120.into())
@@ -5906,7 +5906,7 @@ fn recursive_calls_terminate_or_hit_shared_limits() {
         },
     ] {
         assert_eq!(
-            code(call_module("fn recur() = recur();", "recur()", limits)),
+            code(call_module(source, "recur()", limits)),
             "ORNA-EVAL-LIMIT"
         );
     }
@@ -5926,8 +5926,7 @@ fn recursive_calls_terminate_or_hit_shared_limits() {
 
 #[test]
 fn function_defaults_return_values_and_see_earlier_parameters() {
-    let source =
-        "fn compute(first: Int, second = first + 1, third = second + 1) = first + second + third;";
+    let source = include_str!("fixtures/function_defaults_values.orna");
     let arguments = Environment::from([("first".into(), Value::int(10.into()))]);
     assert_eq!(
         invoke(source, &arguments, Limits::default()).unwrap(),
@@ -5949,7 +5948,7 @@ fn function_defaults_return_values_and_see_earlier_parameters() {
 
 #[test]
 fn supplied_arguments_do_not_evaluate_their_defaults() {
-    let source = "fn choose(value: Int = 1 / 0) = value;";
+    let source = include_str!("fixtures/function_defaults_supplied_argument.orna");
     let arguments = Environment::from([("value".into(), Value::int(7.into()))]);
     assert_eq!(
         invoke(source, &arguments, Limits::default()).unwrap(),
@@ -5963,7 +5962,7 @@ fn supplied_arguments_do_not_evaluate_their_defaults() {
 
 #[test]
 fn function_defaults_and_body_share_a_single_step_budget() {
-    let source = "fn compute(first = 1 + 2, second = 3 + 4) = first + second;";
+    let source = include_str!("fixtures/function_defaults_step_budget.orna");
     let limits = Limits {
         max_steps: 6,
         ..Limits::default()
