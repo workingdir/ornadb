@@ -149,27 +149,15 @@ adapter implementation detail and does not alter the source language.
 
 ## Standard-library compatibility (managed-product evidence)
 
-Standard-library snapshots are content-addressed and immutable. The code in
-this checkout defines retained revisions from `orna.std/1` through
-`orna.std/10` and contains sequential upgrade preparation through V10. The
-pre-1.0 V11 SQL-shaped math addition is retired; pure math comes from the
-pinned Orna 1.0 source. Each upgrade step requires the exact expected parent
-revision and verifies the
-parent before constructing the child; an already-installed or mismatched base
-fails closed.
-
-There is an unresolved release-evidence discrepancy: the current maintainer
-runbook still describes the accepted chain as V1 through V9, while the decision
-index has no complete tracked work decision for the V10 addition. Consequently:
-
-- Treat V10 as implementation evidence only, not as a 1.0 compatibility
-  promise.
-- Do not overwrite or rename a historical standard snapshot to make revisions
-  appear compatible.
-- Before publishing 1.0, reconcile the runbook, decision index, standard
-  acceptance record, and product baseline. Until then, preserve the exact
-  source/catalogue identities and report an unavailable compatibility result
-  rather than claiming conformance.
+Standard-library snapshots are content-addressed and immutable. Product
+selection retains revisions `orna.std/1` through `orna.std/9`. The pre-1.0 V10
+`std/cli.orna` source and V9-to-V10 upgrade constructor have been retired; the
+V10 revision identity remains reserved, and a stored V10 snapshot can only be
+verified when explicitly supplied. V10 is never reconstructed or replaced with
+different source. V11's SQL-shaped math source is retired as well; pure math
+comes from the pinned Orna 1.0 source. Each supported upgrade requires the
+exact expected parent revision and verifies the parent before constructing the
+child; an already-installed or mismatched base fails closed.
 
 ### Source-level pinned pure-module boundary
 
