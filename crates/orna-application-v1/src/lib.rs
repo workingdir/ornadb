@@ -174,6 +174,8 @@ impl ApplicationAuthority {
         Ok(AdmittedApplication {
             logical_path,
             source_digest: Sha256::digest(source.as_bytes()).into(),
+            requires_publication_metadata: source.contains("sys.Storage")
+                || source.contains("sys.MaintenanceJob"),
             entry,
             functions,
             limits: self.limits,
@@ -215,6 +217,35 @@ impl ApplicationAuthority {
     ) -> Result<StagedActivation, ApplicationError> {
         let tables = admitted_table_schemas(&application.module_header);
         let mut handler = SourceMutationEffectHandler::new(tables);
+        let value = invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            arguments,
+            application.limits,
+            &mut handler,
+        )
+        .map_err(|error: EvaluationError| {
+            ApplicationError::EffectRejected(error.code().to_owned())
+        })?;
+        let mutations = handler.into_mutations()?;
+        Ok(StagedActivation { value, mutations })
+    }
+
+    /// Evaluates admitted source with a preloaded durable publication snapshot
+    /// available to the evaluator's `sys.Storage` and `sys.MaintenanceJob`
+    /// relation scans. Snapshot loading remains asynchronous at the caller;
+    /// evaluation and relation paging stay bounded and synchronous here.
+    pub fn evaluate_staged_with_publication_rows(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        publication_rows: RuntimePublicationMetadataRows,
+    ) -> Result<StagedActivation, ApplicationError> {
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler = SourceMutationEffectHandler::with_publication_rows(
+            tables,
+            publication_rows,
+        );
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -430,6 +461,7 @@ pub struct SourceMutationEffectHandler {
     tables: BTreeMap<String, TableSchema>,
     mutations: Vec<TableMutation>,
     next_ordinal: u64,
+    publication_rows: Option<RuntimePublicationMetadataRows>,
 }
 
 impl SourceMutationEffectHandler {
@@ -439,6 +471,19 @@ impl SourceMutationEffectHandler {
             tables,
             mutations: Vec::new(),
             next_ordinal: 0,
+            publication_rows: None,
+        }
+    }
+
+    fn with_publication_rows(
+        tables: BTreeMap<String, TableSchema>,
+        publication_rows: RuntimePublicationMetadataRows,
+    ) -> Self {
+        Self {
+            tables,
+            mutations: Vec::new(),
+            next_ordinal: 0,
+            publication_rows: Some(publication_rows),
         }
     }
 
@@ -891,6 +936,40 @@ impl EffectHandler for SourceMutationEffectHandler {
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         self.handle(callee, arguments)
     }
+
+    fn scan_relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        if limit == 0 {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        let Some(publication_rows) = self.publication_rows.as_ref() else {
+            return Ok(None);
+        };
+        let row = match source {
+            "sys.Storage" => &publication_rows.sys_storage,
+            "sys.MaintenanceJob" => &publication_rows.maintenance_job,
+            _ => return Ok(None),
+        };
+        if after.is_some() {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        budget.debit(1)?;
+        Ok(Some(RelationPage {
+            rows: vec![row.clone()],
+            next: None,
+        }))
+    }
 }
 
 fn encoded_key(key: &CanonicalValue) -> Result<Vec<u8>, EvaluationError> {
@@ -1281,6 +1360,7 @@ fn eval_fingerprint(message: &Message) -> std::result::Result<[u8; 32], LiveErro
 pub struct AdmittedApplication {
     logical_path: String,
     source_digest: [u8; 32],
+    requires_publication_metadata: bool,
     entry: String,
     functions: Functions,
     limits: Limits,
@@ -1288,6 +1368,13 @@ pub struct AdmittedApplication {
 }
 
 impl AdmittedApplication {
+    /// Returns whether the admitted source names either runtime publication
+    /// relation and needs a durable publication snapshot at evaluation.
+    #[must_use]
+    pub const fn requires_publication_metadata(&self) -> bool {
+        self.requires_publication_metadata
+    }
+
     #[must_use]
     pub fn logical_path(&self) -> &str {
         &self.logical_path
