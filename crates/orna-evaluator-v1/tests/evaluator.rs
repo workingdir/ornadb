@@ -1866,13 +1866,13 @@ fn source_call_arguments_evaluate_in_source_order() {
 #[test]
 fn wildcard_and_structured_lambda_parameters_bind_by_position() {
     for (expression, expected) in [
-        ("(_ => 7)(123)", 7),
-        ("((_, _) => 7)(1, 2)", 7),
-        ("10 | (_ => 7)", 7),
-        ("(((a, b)) => a + b)((1, 2))", 3),
-        ("(([a, b]) => a + b)([1, 2])", 3),
-        ("(({a, b}) => a + b)({a: 1, b: 2})", 3),
-        ("(1, 2) | (((a, b)) => a + b)", 3),
+        (include_str!("fixtures/wildcard_structured_lambda/wildcard-single-argument.orna").trim(), 7),
+        (include_str!("fixtures/wildcard_structured_lambda/wildcard-two-arguments.orna").trim(), 7),
+        (include_str!("fixtures/wildcard_structured_lambda/wildcard-pipeline.orna").trim(), 7),
+        (include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-call.orna").trim(), 3),
+        (include_str!("fixtures/wildcard_structured_lambda/array-destructure-call.orna").trim(), 3),
+        (include_str!("fixtures/wildcard_structured_lambda/record-destructure-call.orna").trim(), 3),
+        (include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-pipeline.orna").trim(), 3),
     ] {
         assert_eq!(
             evaluate(expression),
@@ -1882,13 +1882,16 @@ fn wildcard_and_structured_lambda_parameters_bind_by_position() {
     }
     assert_eq!(
         code(evaluate_expression(
-            "(_ => 7)(1 / 0)",
+            include_str!("fixtures/wildcard_structured_lambda/wildcard-divide-by-zero.orna").trim(),
             &Environment::new(),
             Limits::default()
         )),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
     );
-    for expression in ["(((a, b)) => a + b)(1)", "(([a, b]) => a + b)([1])"] {
+    for expression in [
+        include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-wrong-arity.orna").trim(),
+        include_str!("fixtures/wildcard_structured_lambda/array-destructure-wrong-arity.orna").trim(),
+    ] {
         assert_eq!(
             code(evaluate_expression(
                 expression,
@@ -1899,9 +1902,9 @@ fn wildcard_and_structured_lambda_parameters_bind_by_position() {
         );
     }
     for expression in [
-        "((_, _) => 7)(1)",
-        "(((a, b)) => a + b)(a: 1, b: 2)",
-        "(({a}, a) => a)({a: 1}, 2)",
+        include_str!("fixtures/wildcard_structured_lambda/wildcard-wrong-arity.orna").trim(),
+        include_str!("fixtures/wildcard_structured_lambda/tuple-destructure-named-arguments.orna").trim(),
+        include_str!("fixtures/wildcard_structured_lambda/record-destructure-duplicate-binding.orna").trim(),
     ] {
         assert_eq!(
             code(evaluate_expression(
