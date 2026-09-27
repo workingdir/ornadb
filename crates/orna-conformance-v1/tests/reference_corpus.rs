@@ -1252,10 +1252,7 @@ fn typed_sys_cancel_report_retains_mismatched_witness_diagnostic() {
             Some("ORNA-S021-TYPE"),
             Some("sys.cancel explicit type argument must match the invocation handle result type"),
         ),
-        r#"
-            pub fn cancel_wrong(job: sys.InvocationHandle<Int>) =
-                sys.cancel<Str>(job);
-        "#,
+        include_str!("fixtures/typed-cancel-mismatch.orna"),
     );
     let typecheck = report.fixtures[0]
         .stages
