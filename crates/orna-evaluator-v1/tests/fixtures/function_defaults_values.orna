@@ -1,0 +1,1 @@
+fn compute(first: Int, second = first + 1, third = second + 1) = first + second + third;
