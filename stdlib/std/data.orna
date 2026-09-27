@@ -1,0 +1,19 @@
+CREATE SCHEMA std.data;
+
+CREATE TYPE std.data.Rows AS VALUE
+    OPAQUE
+    KERNEL CONTRACT 'orna.std.value.rows@1'
+    IMMUTABLE
+    TRANSIENT;
+
+EXPORT TYPE std.data.Rows AS std.Rows;
+
+CREATE SERVER FUNCTION std.terminal.present_table(
+    p_rows std.data.Rows
+)
+RETURNS std.terminal.Document
+SECURITY INVOKER
+TRANSACTION READ ONLY
+VOLATILITY STABLE
+AS
+    SELECT p_rows;
