@@ -1,0 +1,2 @@
+pub fn invoke(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+    sys.invoke<Str>(function, arguments, as: Int);
