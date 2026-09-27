@@ -17,6 +17,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  status [--porcelain|--short|--format human|short|json]",
     "  --format human|short|json status",
     "  fetch [REMOTE] [BRANCH]",
+    "  diff [GIT_DIFF_ARGS...]",
     "Options: --color auto|always|never, --db ENDPOINT",
 ];
 
@@ -36,6 +37,7 @@ mod tests {
         assert_eq!(HELP_LINES[0], "Orna commands:");
         assert!(HELP_LINES.contains(&"Repository and maintenance commands:"));
         assert!(HELP_LINES.contains(&"  fetch [REMOTE] [BRANCH]"));
+        assert!(HELP_LINES.contains(&"  diff [GIT_DIFF_ARGS...]"));
         assert!(HELP_LINES.contains(&"  status [--porcelain|--short|--format human|short|json]"));
     }
 }
