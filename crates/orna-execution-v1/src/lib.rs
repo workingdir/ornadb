@@ -502,19 +502,26 @@ impl ActivationCoordinator {
         if self.require_committable(owner).is_err() {
             return self.rollback_for(owner);
         }
-        match store.commit(
-            CommitRequest {
-                owner,
-                write,
-                checkpoint,
-            },
-            self,
-        ) {
-            Ok(receipt) => {
+        let commit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.commit(
+                CommitRequest {
+                    owner,
+                    write,
+                    checkpoint,
+                },
+                self,
+            )
+        }));
+        match commit {
+            Err(payload) => {
+                self.rollback(RollbackReason::StoreRejected);
+                std::panic::resume_unwind(payload);
+            }
+            Ok(Ok(receipt)) => {
                 self.phase = TransactionPhase::Committed;
                 Outcome::Committed { receipt }
             }
-            Err(_) => self.rollback(RollbackReason::StoreRejected),
+            Ok(Err(_)) => self.rollback(RollbackReason::StoreRejected),
         }
     }
     fn join_unfinished_children<C: ChildSupervisor>(
