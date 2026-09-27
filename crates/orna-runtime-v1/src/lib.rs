@@ -33,7 +33,10 @@ use orna_foundation_v1::{
 };
 #[cfg(test)]
 use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
-use orna_repository_v1::{CompactPublicationPending, CompactRuntimeReceipt, Repository};
+use orna_repository_v1::{
+    CommittedTreeEntryKind, CompactPublicationPending, CompactRuntimeReceipt, GitCommitRef,
+    Repository,
+};
 use orna_stream_v1::{
     AssertionDiagnosticCode, AssertionDiagnosticDetail, AssertionOwnerKind,
     AsyncFailurePayloadBackend, CancellationClassification, CheckpointPrecondition, CommitIntent,
@@ -1978,6 +1981,78 @@ pub fn decode_checkpoint_snapshot_watermark(
         },
         transition,
     })
+}
+
+const CHECKPOINT_SNAPSHOT_MAX_TREE_ENTRIES: usize = 4_096;
+const CHECKPOINT_SNAPSHOT_MAX_RECORD_BYTES: usize = 64 * 1024;
+const CHECKPOINT_SNAPSHOT_DIRECTORY: &str = ".orna/checkpoints";
+
+/// Reads the unique portable checkpoint watermark for `key` from the selected
+/// immutable commit. It never consults HEAD, the index, the worktree, or
+/// runtime state.
+pub fn read_checkpoint_snapshot_watermark(
+    repository: &Repository,
+    selected_commit: &GitCommitRef,
+    key: &CheckpointKey,
+) -> Result<Option<PortableStreamCheckpointWatermark>, RuntimeError> {
+    read_checkpoint_snapshot_watermark_bounded(
+        repository,
+        selected_commit,
+        key,
+        CHECKPOINT_SNAPSHOT_MAX_TREE_ENTRIES,
+        CHECKPOINT_SNAPSHOT_MAX_RECORD_BYTES,
+    )
+}
+
+fn read_checkpoint_snapshot_watermark_bounded(
+    repository: &Repository,
+    selected_commit: &GitCommitRef,
+    key: &CheckpointKey,
+    max_tree_entries: usize,
+    max_record_bytes: usize,
+) -> Result<Option<PortableStreamCheckpointWatermark>, RuntimeError> {
+    if max_tree_entries == 0 || max_record_bytes == 0 {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+
+    let entries = repository
+        .list_committed_tree(selected_commit, max_tree_entries)
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if entries.len() > max_tree_entries {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+
+    let checkpoint_directory = Path::new(CHECKPOINT_SNAPSHOT_DIRECTORY);
+    let mut matching = None;
+    for entry in entries {
+        let path = entry.path().as_path();
+        let Ok(relative_path) = path.strip_prefix(checkpoint_directory) else {
+            continue;
+        };
+        if relative_path.as_os_str().is_empty() {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        match entry.kind() {
+            CommittedTreeEntryKind::File { .. } => {}
+            CommittedTreeEntryKind::Symlink | CommittedTreeEntryKind::Submodule => {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+        }
+
+        let bytes = repository
+            .read_committed_file(selected_commit, path, max_record_bytes)
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let watermark =
+            decode_checkpoint_snapshot_watermark(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if watermark.checkpoint.key == *key {
+            if matching.is_some() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            matching = Some(watermark);
+        }
+    }
+
+    Ok(matching)
 }
 
 fn append_component(
@@ -14938,6 +15013,189 @@ mod tests {
             encode_checkpoint_snapshot_watermark(&zero_checkpoint_version),
             Err(CheckpointSnapshotCodecError::ZeroCheckpointVersion)
         );
+    }
+
+    fn write_checkpoint_snapshot_file(repo: &Repository, name: &str, bytes: &[u8]) {
+        let directory = repo.worktree().join(".orna/checkpoints");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(name), bytes).unwrap();
+    }
+
+    fn commit_checkpoint_snapshot(repo: &Repository, message: &str) -> GitCommitRef {
+        git(repo.worktree(), &["add", "--", ".orna/checkpoints"]);
+        git(repo.worktree(), &["commit", "-m", message]);
+        repo.head().unwrap().unwrap()
+    }
+
+    #[test]
+    fn checkpoint_snapshot_reader_uses_selected_commit_and_full_nullable_key() {
+        let (_temp, repo) = repository();
+        let fixture = include_bytes!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        let fixture_watermark = decode_checkpoint_snapshot_watermark(fixture).unwrap();
+        write_checkpoint_snapshot_file(&repo, "fixture.orna", fixture);
+
+        let nullable_record = encode_checkpoint_snapshot_watermark(&checkpoint_snapshot_watermark(
+            None,
+            9,
+            "opaque:nullable",
+            StreamCheckpointTransition::Skip,
+        ))
+        .unwrap();
+        let nullable_watermark = decode_checkpoint_snapshot_watermark(&nullable_record).unwrap();
+        write_checkpoint_snapshot_file(&repo, "nullable.orna", &nullable_record);
+        let selected_commit = commit_checkpoint_snapshot(&repo, "checkpoint snapshot");
+
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &selected_commit,
+                &checkpoint_snapshot_key(Some("tenant:west/17")),
+            )
+            .unwrap(),
+            Some(fixture_watermark.clone())
+        );
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &selected_commit,
+                &checkpoint_snapshot_key(None),
+            )
+            .unwrap(),
+            Some(nullable_watermark)
+        );
+
+        let mut different_source = checkpoint_snapshot_key(Some("tenant:west/17"));
+        different_source.source = checkpoint_snapshot_component("orders/other");
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(&repo, &selected_commit, &different_source).unwrap(),
+            None
+        );
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &selected_commit,
+                &checkpoint_snapshot_key(Some("tenant:east/99")),
+            )
+            .unwrap(),
+            None
+        );
+
+        let newer_record = encode_checkpoint_snapshot_watermark(&checkpoint_snapshot_watermark(
+            Some("tenant:west/17"),
+            99,
+            "opaque:newer-head",
+            StreamCheckpointTransition::Complete,
+        ))
+        .unwrap();
+        write_checkpoint_snapshot_file(&repo, "fixture.orna", &newer_record);
+        let newer_head = commit_checkpoint_snapshot(&repo, "newer checkpoint snapshot");
+        assert_ne!(newer_head, selected_commit);
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &selected_commit,
+                &checkpoint_snapshot_key(Some("tenant:west/17")),
+            )
+            .unwrap(),
+            Some(fixture_watermark)
+        );
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &newer_head,
+                &checkpoint_snapshot_key(Some("tenant:west/17")),
+            )
+            .unwrap()
+            .unwrap()
+            .checkpoint
+            .version,
+            99
+        );
+    }
+
+    #[test]
+    fn checkpoint_snapshot_reader_fails_closed_for_duplicate_and_malformed_records() {
+        let (_temp, repo) = repository();
+        let fixture = include_bytes!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        write_checkpoint_snapshot_file(&repo, "first.orna", fixture);
+        write_checkpoint_snapshot_file(&repo, "second.orna", fixture);
+        let duplicate_commit = commit_checkpoint_snapshot(&repo, "duplicate checkpoint records");
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &duplicate_commit,
+                &checkpoint_snapshot_key(Some("tenant:west/17")),
+            ),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+
+        let (_malformed_temp, malformed_repo) = repository();
+        write_checkpoint_snapshot_file(&malformed_repo, "valid.orna", fixture);
+        write_checkpoint_snapshot_file(&malformed_repo, "malformed.orna", b"not a checkpoint");
+        let malformed_commit =
+            commit_checkpoint_snapshot(&malformed_repo, "malformed checkpoint record");
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark(
+                &malformed_repo,
+                &malformed_commit,
+                &checkpoint_snapshot_key(Some("tenant:west/17")),
+            ),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_snapshot_reader_rejects_unsafe_entries_and_invalid_bounds() {
+        let (_temp, repo) = repository();
+        let fixture = include_bytes!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        write_checkpoint_snapshot_file(&repo, "fixture.orna", fixture);
+        let first_commit = commit_checkpoint_snapshot(&repo, "checkpoint snapshot base");
+        let key = checkpoint_snapshot_key(Some("tenant:west/17"));
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark_bounded(&repo, &first_commit, &key, 0, 64),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark_bounded(&repo, &first_commit, &key, 8, 0),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark_bounded(&repo, &first_commit, &key, 8, 1),
+            Err(RuntimeError::StorageUnavailable)
+        ));
+
+        std::os::unix::fs::symlink(
+            "fixture.orna",
+            repo.worktree().join(".orna/checkpoints/symlink.orna"),
+        )
+        .unwrap();
+        let symlink_commit = commit_checkpoint_snapshot(&repo, "checkpoint symlink");
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark(&repo, &symlink_commit, &key),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+
+        let (_submodule_temp, submodule_repo) = repository();
+        write_checkpoint_snapshot_file(&submodule_repo, "fixture.orna", fixture);
+        let base_commit = commit_checkpoint_snapshot(&submodule_repo, "checkpoint snapshot base");
+        let gitlink = format!(
+            "160000,{},.orna/checkpoints/submodule",
+            base_commit.as_str()
+        );
+        git(
+            submodule_repo.worktree(),
+            &["update-index", "--add", "--cacheinfo", &gitlink],
+        );
+        git(
+            submodule_repo.worktree(),
+            &["commit", "-m", "checkpoint submodule"],
+        );
+        let submodule_commit = submodule_repo.head().unwrap().unwrap();
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark(&submodule_repo, &submodule_commit, &key),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
     }
 
     struct Fail(FaultPoint);
