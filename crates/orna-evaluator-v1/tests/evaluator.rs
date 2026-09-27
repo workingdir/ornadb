@@ -5537,7 +5537,7 @@ fn std_collection_map_and_flat_map_propagate_callback_errors() {
     }
     assert_eq!(
         code(call_module(
-            "fn bad(value: Int, other: Int) = value; fn run() = std.collection.map([1], bad);",
+            include_str!("fixtures/map_invalid_callback.orna"),
             "run()",
             Limits::default(),
         )),
