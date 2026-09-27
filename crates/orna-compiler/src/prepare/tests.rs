@@ -961,7 +961,7 @@ fn prepares_source_authored_math_with_seeded_identities() {
     let standard = check_standard_library_source(&verified).unwrap();
     let active = empty_standard_application_active(&verified);
     let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
-    let source = include_str!("../../../../stdlib/std/math.orna");
+    let source = include_str!("../../tests/fixtures/standard/math.orna");
     let bundle = SourceBundle::new([SourceUnit::new("std/math.orna", source)]).unwrap();
     let report = check_standard_application(&bundle, &context);
     assert!(
@@ -1056,7 +1056,7 @@ fn standard_source_revision_seed_must_match_checked_functions() {
     let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
     let bundle = SourceBundle::new([SourceUnit::new(
         "std/math.orna",
-        include_str!("../../../../stdlib/std/math.orna"),
+        include_str!("../../tests/fixtures/standard/math.orna"),
     )])
     .unwrap();
     let report = check_standard_application(&bundle, &context);
