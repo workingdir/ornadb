@@ -121,17 +121,7 @@ fn imported_helper_shadowed_by_parameter_does_not_expand_imported_tables() {
 fn same_module_helper_call_keeps_exact_transitive_table_dependencies() {
     let analysis = analyze(&[ModuleInput::new(
         "consumer.orna",
-        r#"
-            pub table User(id: Uuid) { name: Str, }
-            pub table Account(id: Uuid) { user_id: Uuid, }
-
-            pub fn related(): Bool =
-                every(User, user =>
-                    exists(Account, account => account.user_id == user.id)
-                );
-
-            assert related();
-        "#,
+        include_str!("fixtures/same-module-helper-transitive-dependencies.orna"),
     )]);
 
     assert_eq!(
