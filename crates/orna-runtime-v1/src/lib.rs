@@ -24,12 +24,12 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use libsql::{Builder, Connection, Transaction, TransactionBehavior, params};
 use num_bigint::{BigInt, Sign};
 use orna_foundation_v1::{
-    AssertionRef, CanonicalSnapshot, CheckpointRef, CwdCapture, ExpressionRef, FailureRef,
-    InvocationRef, ObjectRef, OvbRaw, RowRef, RunRef, SYS_RUN_TABLE_ID, SYS_STREAM_TABLE_ID,
-    SafeText, Snapshot, SnapshotRef, SourceSpan, StreamRef, Value, checkpoint_reference,
-    failure_reference, invocation_reference, snapshot_reference, validate_checkpoint_reference,
-    validate_failure_reference, validate_invocation_reference, validate_run_reference,
-    validate_stream_reference,
+    AssertionRef, CanonicalSnapshot, CanonicalValue, CheckpointRef, CwdCapture, ExpressionRef,
+    FailureRef, InvocationRef, ObjectRef, OvbRaw, RowRef, RunRef, SYS_RUN_TABLE_ID,
+    SYS_STREAM_TABLE_ID, SafeText, Snapshot, SnapshotRef, SourceSpan, StreamRef, Value,
+    checkpoint_reference, failure_reference, invocation_reference, snapshot_reference,
+    validate_checkpoint_reference, validate_failure_reference, validate_invocation_reference,
+    validate_run_reference, validate_stream_reference,
 };
 #[cfg(test)]
 use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
@@ -128,6 +128,13 @@ CREATE TABLE IF NOT EXISTS publication_commit (
     commit_id BLOB NOT NULL CHECK (length(commit_id) IN (40, 64)),
     compact_receipt BLOB
 );
+CREATE TABLE IF NOT EXISTS publication_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    published_mutations INTEGER NOT NULL DEFAULT 0 CHECK (published_mutations >= 0),
+    published_payload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (published_payload_bytes >= 0),
+    last_publication_ms INTEGER
+);
+INSERT OR IGNORE INTO publication_metadata (singleton) VALUES (1);
 CREATE TABLE IF NOT EXISTS request_ledger (
     session_id BLOB NOT NULL CHECK (length(session_id) = 16),
     request_id BLOB NOT NULL CHECK (length(request_id) = 16),
@@ -447,6 +454,111 @@ pub struct Mutation {
     pub id: [u8; 16],
     pub payload: Vec<u8>,
     pub digest: [u8; 32],
+}
+
+/// Effective publication policy used by the runtime's compact publisher.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimePublicationPolicy {
+    /// Target compressed bytes per publication batch.
+    pub compressed_target_bytes: u64,
+    /// Maximum encoded file size for the active compact profile.
+    pub max_file_bytes: u64,
+    /// Maximum age, in seconds, for a pending batch before publication.
+    pub max_pending_age_seconds: u64,
+}
+
+impl Default for RuntimePublicationPolicy {
+    fn default() -> Self {
+        Self {
+            compressed_target_bytes: 16 * 1024 * 1024,
+            max_file_bytes: 64 * 1024 * 1024,
+            max_pending_age_seconds: 60,
+        }
+    }
+}
+
+/// One coherent read of effective policy and durable publication state.
+///
+/// Published counters and `last_publication_ms` cover completions recorded
+/// since this metadata ledger was installed. Publications completed before
+/// installation cannot be reconstructed because their pending payloads have
+/// already been removed; a zero count after upgrading an older runtime means
+/// "not recorded by this ledger," not necessarily "never published."
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimePublicationMetadata {
+    pub publication_policy: RuntimePublicationPolicy,
+    /// Durable mutations waiting for publication.
+    pub pending_rows: u64,
+    /// Encoded payload bytes waiting for publication.
+    pub pending_bytes: u64,
+    /// Durable mutations consumed by completed publications.
+    pub published_rows: u64,
+    /// Encoded payload bytes consumed by completed publications.
+    pub published_bytes: u64,
+    /// Unix epoch milliseconds for the most recently completed publication.
+    pub last_publication_ms: Option<i64>,
+}
+
+/// Canonical publication field records corresponding to both system views.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimePublicationMetadataRows {
+    pub sys_storage: CanonicalValue,
+    pub maintenance_job: CanonicalValue,
+}
+
+fn publication_metadata_record(
+    metadata: &RuntimePublicationMetadata,
+) -> Result<CanonicalValue, RuntimeError> {
+    let policy = publication_text_map(vec![
+        (
+            "compressed_target_bytes",
+            OvbRaw::Int(metadata.publication_policy.compressed_target_bytes.into()),
+        ),
+        (
+            "max_file_bytes",
+            OvbRaw::Int(metadata.publication_policy.max_file_bytes.into()),
+        ),
+        (
+            "max_pending_age_seconds",
+            OvbRaw::Int(metadata.publication_policy.max_pending_age_seconds.into()),
+        ),
+    ]);
+    let last_publication = match metadata.last_publication_ms {
+        Some(milliseconds) => {
+            let seconds = milliseconds.div_euclid(1_000);
+            let nanoseconds = milliseconds.rem_euclid(1_000) * 1_000_000;
+            OvbRaw::Tag(
+                60002,
+                Box::new(OvbRaw::Array(vec![
+                    OvbRaw::Int(seconds.into()),
+                    OvbRaw::Int(nanoseconds.into()),
+                ])),
+            )
+        }
+        None => OvbRaw::Null,
+    };
+    CanonicalValue::new(publication_text_map(vec![
+        ("publication_policy", policy),
+        ("pending_rows", OvbRaw::Int(metadata.pending_rows.into())),
+        ("pending_bytes", OvbRaw::Int(metadata.pending_bytes.into())),
+        ("published_rows", OvbRaw::Int(metadata.published_rows.into())),
+        ("published_bytes", OvbRaw::Int(metadata.published_bytes.into())),
+        ("last_publication", last_publication),
+    ]))
+    .map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn publication_text_map(fields: Vec<(&str, OvbRaw)>) -> OvbRaw {
+    let mut fields = fields;
+    fields.sort_by(|(left, _), (right, _)| {
+        left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+    });
+    OvbRaw::Map(
+        fields
+            .into_iter()
+            .map(|(key, value)| (OvbRaw::Text(key.into()), value))
+            .collect(),
+    )
 }
 
 const MAX_TABLE_MUTATION_BYTES: usize = 16 * 1024 * 1024;
@@ -7716,6 +7828,59 @@ impl RuntimeState {
         usize::try_from(count).map_err(|_| RuntimeError::RecoveryInvalid)
     }
 
+    /// Reads effective publication policy and pending/published state from one
+    /// SQLite statement so maintenance and storage projections share a
+    /// coherent snapshot. Row and byte counts describe durable runtime
+    /// mutation payloads, not physical compact-file layout.
+    pub async fn publication_metadata(&self) -> Result<RuntimePublicationMetadata, RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT (SELECT COUNT(*) FROM pending_mutation), \
+                 (SELECT COALESCE(SUM(length(payload)), 0) FROM pending_mutation), \
+                 published_mutations, published_payload_bytes, last_publication_ms \
+                 FROM publication_metadata WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let pending_rows: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let pending_bytes: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let published_rows: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let published_bytes: i64 = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        Ok(RuntimePublicationMetadata {
+            publication_policy: RuntimePublicationPolicy::default(),
+            pending_rows: u64::try_from(pending_rows).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            pending_bytes: u64::try_from(pending_bytes)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            published_rows: u64::try_from(published_rows)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            published_bytes: u64::try_from(published_bytes)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            last_publication_ms: row
+                .get(4)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        })
+    }
+
+    /// Reads one durable snapshot and projects its publication fields into
+    /// records corresponding to the declared `sys.Storage` and
+    /// `sys.MaintenanceJob` views.
+    pub async fn publication_metadata_rows(
+        &self,
+    ) -> Result<RuntimePublicationMetadataRows, RuntimeError> {
+        let row = publication_metadata_record(&self.publication_metadata().await?)?;
+        Ok(RuntimePublicationMetadataRows {
+            sys_storage: row.clone(),
+            maintenance_job: row,
+        })
+    }
+
     /// Returns only the pending mutation prefix covered by a persisted freeze.
     /// Mutations appended after the freeze are intentionally excluded.
     pub async fn pending_through(
@@ -8120,6 +8285,30 @@ impl RuntimeState {
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
             return Ok(existing);
         }
+        let mut batch_rows = tx
+            .query(
+                "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) \
+                 FROM pending_mutation WHERE sequence <= ?1",
+                params![upper],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let batch = batch_rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let published_rows: i64 = batch.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let published_bytes: i64 = batch.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        tx.execute(
+            "UPDATE publication_metadata SET \
+             published_mutations = published_mutations + ?1, \
+             published_payload_bytes = published_payload_bytes + ?2, \
+             last_publication_ms = ?3 WHERE singleton = 1",
+            params![published_rows, published_bytes, now_ms()?],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
         tx.execute(
             "INSERT INTO publication_commit (intent_id, commit_id, compact_receipt)
              VALUES (?1, ?2, ?3)",
@@ -8214,6 +8403,30 @@ impl RuntimeState {
             tx.execute(
                 "INSERT INTO publication_commit (intent_id, commit_id) VALUES (?1, ?2)",
                 params![freeze.intent_id.to_vec(), commit_id.as_bytes().to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let mut batch_rows = tx
+                .query(
+                    "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) \
+                     FROM pending_mutation WHERE sequence <= ?1",
+                    params![upper],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let batch = batch_rows
+                .next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+                .ok_or(RuntimeError::RecoveryInvalid)?;
+            let published_rows: i64 = batch.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let published_bytes: i64 = batch.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            tx.execute(
+                "UPDATE publication_metadata SET \
+                 published_mutations = published_mutations + ?1, \
+                 published_payload_bytes = published_payload_bytes + ?2, \
+                 last_publication_ms = ?3 WHERE singleton = 1",
+                params![published_rows, published_bytes, now_ms()?],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
