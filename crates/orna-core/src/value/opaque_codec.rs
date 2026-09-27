@@ -323,7 +323,7 @@ fn validate_codec_magic(opaque_type: TypeId, magic: &str) -> Result<(), OpaqueCo
 /// An immutable set of checked-in codecs bound to one verified standard snapshot.
 #[derive(Clone, Debug)]
 pub struct OpaqueCodecRegistry {
-    standard: VerifiedStandardLibrarySnapshot,
+    standard: Option<VerifiedStandardLibrarySnapshot>,
     registrations: Vec<OpaqueCodecRegistration>,
 }
 
@@ -376,9 +376,20 @@ impl OpaqueCodecRegistry {
         }
 
         Ok(Self {
-            standard: standard.clone(),
+            standard: Some(standard.clone()),
             registrations,
         })
+    }
+
+    /// Creates a registry for application values that have no standard opaque codecs.
+    ///
+    /// Opaque values remain fail-closed because this registry carries no verified standard
+    /// snapshot or opaque registrations.
+    pub fn application_values_only() -> Self {
+        Self {
+            standard: None,
+            registrations: Vec::new(),
+        }
     }
 
     fn construct(
@@ -391,7 +402,10 @@ impl OpaqueCodecRegistry {
             .catalogue_hash_context()
             .standard()
             .ok_or(OpaqueValueError::ActiveStandardRequired)?;
-        if !same_standard_snapshot(&self.standard, active_standard) {
+        let Some(registered_standard) = self.standard.as_ref() else {
+            return Err(OpaqueValueError::ActiveStandardMismatch);
+        };
+        if !same_standard_snapshot(registered_standard, active_standard) {
             return Err(OpaqueValueError::ActiveStandardMismatch);
         }
         let registration = self
