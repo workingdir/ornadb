@@ -22,7 +22,7 @@ use orna_core::{
     CatalogueRevisionId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
     TypeId,
     canonical_hash::{
-        artifact_payload_digest, calculate_standard_library_digest, catalogue_digest,
+        artifact_payload_digest, catalogue_digest,
         catalogue_digest_with_context, function_semantic_digest_with_version, source_bundle_digest,
         source_revision_record_digest, source_unit_content_digest, standard_library_digest,
     },
@@ -54,7 +54,7 @@ use super::{
     STANDARD_LIBRARY_V4_VERSION_IDENTITY, STANDARD_LIBRARY_V5_REVISION_ID,
     STANDARD_LIBRARY_V5_VERSION_IDENTITY, STANDARD_LIBRARY_V6_REVISION_ID,
     STANDARD_LIBRARY_V6_VERSION_IDENTITY, STANDARD_LIBRARY_V7_REVISION_ID,
-    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID,
+    STANDARD_LIBRARY_V9_REVISION_ID,
     STANDARD_LIBRARY_V10_REVISION_ID, STANDARD_LIBRARY_VERSION_IDENTITY, STANDARD_SOURCE_BUNDLE_ID,
     STANDARD_SOURCE_REVISION_ID, STANDARD_SOURCE_UNIT_ID, STANDARD_SOURCE_V2_BUNDLE_ID,
     STANDARD_SOURCE_V2_REVISION_ID, STANDARD_SOURCE_V3_BUNDLE_ID, STANDARD_SOURCE_V3_REVISION_ID,
@@ -320,7 +320,6 @@ fn retained_standard_selection_is_pinned_and_fail_closed() {
         STANDARD_LIBRARY_V5_REVISION_ID,
         STANDARD_LIBRARY_V6_REVISION_ID,
         STANDARD_LIBRARY_V7_REVISION_ID,
-        STANDARD_LIBRARY_V8_REVISION_ID,
     ] {
         let selected = select_verified_standard_library(revision)
             .expect("registered standard revision is retained and verified");
