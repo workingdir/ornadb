@@ -1004,29 +1004,13 @@ async fn project_stream_ignores_unrelated_false_module_assertion() {
                 fixture_id: "stream-assertion-scope".into(),
                 source_id: "stream-assertion-scope/library.orna".into(),
                 parse_as: "module_unit".into(),
-                source: r#"
-                    pub table Book(id: Str) { title: Str, }
-                    pub table Loan(book_id: Str) { borrower: Str, }
-                    assert every(Loan, loan => exists(Book, book => book.id == loan.book_id));
-                "#
-                .into(),
+                source: include_str!("fixtures/stream-assertion-scope-library.orna").into(),
             },
             SourceUnit {
                 fixture_id: "stream-assertion-scope".into(),
                 source_id: "stream-assertion-scope/sensors.orna".into(),
                 parse_as: "module_unit".into(),
-                source: r#"
-                    pub type Sample { pub sensor: Str, pub sequence: Int, pub value: Decimal, }
-                    pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }
-                    pub fn input() = Stream.from_list([
-                        Sample { sensor: "greenhouse", sequence: 0, value: 18.25 },
-                        Sample { sensor: "greenhouse", sequence: 1, value: 18.50 },
-                    ], source_identity: "example:sensors:v1");
-                    pub fn ingest() { input() | for_each(sample => {
-                        Reading.insert({ sensor: sample.sensor, sequence: sample.sequence, value: sample.value });
-                    }); }
-                "#
-                .into(),
+                source: include_str!("fixtures/stream-assertion-scope-sensors.orna").into(),
             },
         ],
         loose_rows: Vec::new(),
