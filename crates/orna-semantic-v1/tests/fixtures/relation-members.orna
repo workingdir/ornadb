@@ -1,0 +1,6 @@
+pub table Note(id: Int) { text: Str, }
+
+pub fn note_count(rows: Relation<Note>) = rows.count();
+pub fn first_note(rows: Relation<Note>) = rows.first();
+pub fn table_count() = Note.count();
+pub fn table_first() = Note.first();
