@@ -1,0 +1,6 @@
+fn child(value: Int) = Note.insert(value);
+fn entry() {
+    let counter = 0;
+    child(if true { counter += 1; counter } else { 0 });
+    counter
+}
