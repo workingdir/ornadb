@@ -446,6 +446,58 @@ fn incomplete_join_keeps_owner_nonterminal_and_prevents_publication() {
 }
 
 #[test]
+fn normal_completion_fences_child_admission_while_retrying_cleanup() {
+    let (mut coordinator, owner) = active();
+    let child = coordinator.spawn_child(owner).unwrap();
+    let mut supervisor = Supervisor {
+        fail_join_once: Some(child),
+        ..Supervisor::default()
+    };
+    let mut provider = Provider;
+    let mut store = Store::default();
+    let mut faults = NoFault;
+
+    assert_eq!(
+        coordinator.execute_with_children(
+            owner,
+            &mut provider,
+            &mut store,
+            checkpoint(),
+            &mut faults,
+            &mut supervisor,
+        ),
+        Outcome::ChildrenJoining {
+            reason: RollbackReason::ChildOutstanding,
+        }
+    );
+    assert_eq!(coordinator.phase(), TransactionPhase::ChildrenJoining);
+    assert!(coordinator.spawn_child(owner).is_err());
+    assert!(
+        coordinator
+            .try_activate(ActivationId::new(2).unwrap())
+            .is_err()
+    );
+
+    assert!(matches!(
+        coordinator.execute_with_children(
+            owner,
+            &mut provider,
+            &mut store,
+            checkpoint(),
+            &mut faults,
+            &mut supervisor,
+        ),
+        Outcome::Committed { .. }
+    ));
+    assert_eq!(
+        supervisor.events,
+        vec![('c', child), ('j', child), ('c', child), ('j', child)]
+    );
+    assert_eq!(store.commits, 1);
+    assert_eq!(coordinator.phase(), TransactionPhase::Committed);
+}
+
+#[test]
 fn cancelled_owner_retries_child_join_without_regaining_publication() {
     let (mut coordinator, owner) = active();
     let child = coordinator.spawn_child(owner).unwrap();
