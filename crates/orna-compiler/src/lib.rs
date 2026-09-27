@@ -37,7 +37,7 @@ pub use resolver::{
     CheckedServerFunctionReturnColumn, CheckedStandardExecutable, CheckedStandardJsonEncode,
     CheckedStandardLibrary, CheckedStandardParameterEcho, CheckedStandardSchema,
     CheckedStandardTerminalPresentTable, CheckedStandardTypeBinding, CheckedStandardTypeReference,
-    CheckedStandardUiConstructor, CheckedStandardUiWindow, CheckedStandardValueType, CheckedTypeId,
+    CheckedStandardUiWindow, CheckedStandardValueType, CheckedTypeId,
     CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, NewApplicationCheckError,
     ProvisionalExpressionId, ProvisionalFieldId, STANDARD_LIBRARY_V3_REVISION_ID,
     STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
@@ -76,10 +76,10 @@ pub use resolver::{
     STD_UI_WINDOW_RUNTIME_CONTRACT, STD_UI_WINDOW_TITLE_PARAMETER_ID, STD_WINDOW_SOURCE_UNIT_ID,
     SemanticType, StandardApplicationCheckContext, StandardApplicationCheckReport,
     StandardApplicationContextError, StandardLibraryCheckError, check, check_new_application,
-    check_standard_application, check_standard_cli_repl, check_standard_json_encode,
+    check_standard_application, check_standard_json_encode,
     check_standard_library_source, check_standard_parameter_echo, check_standard_source,
     check_standard_terminal_present_table,
-    check_standard_ui_constructor, check_standard_ui_window,
+    check_standard_ui_window,
 };
 
 /// Resolves an identifier component with Orna quoted-name rules.

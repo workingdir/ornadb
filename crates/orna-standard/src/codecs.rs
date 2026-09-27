@@ -29,7 +29,6 @@ pub fn registered_opaque_codecs(
     .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
 
     let registrations = if is_accepted_v10_standard(standard)
-        || is_accepted_v9_standard(standard)
         || is_accepted_v8_standard(standard)
     {
         let document = OpaqueCodecRegistration::length_prefixed_utf8(
@@ -282,16 +281,6 @@ fn is_accepted_v10_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool 
         && standard.source().units()[9].content_hash() == ACCEPTED_V10_CLI_CONTENT_DIGEST
         && standard.source().revision_hash() == ACCEPTED_V10_SOURCE_REVISION_DIGEST
         && standard.digest() == ACCEPTED_V10_STANDARD_LIBRARY_DIGEST
-}
-
-fn is_accepted_v9_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
-    standard.revision() == STANDARD_LIBRARY_V9_REVISION_ID
-        && standard.catalogue().revision() == STANDARD_CATALOGUE_V9_REVISION_ID
-        && standard.source().bundle() == STANDARD_SOURCE_V9_BUNDLE_ID
-        && standard.source().id() == STANDARD_SOURCE_V9_REVISION_ID
-        && standard.source().parent() == Some(STANDARD_SOURCE_V8_REVISION_ID)
-        && standard.source().revision_hash() == ACCEPTED_V9_SOURCE_REVISION_DIGEST
-        && standard.digest() == ACCEPTED_V9_STANDARD_LIBRARY_DIGEST
 }
 
 fn is_accepted_v8_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
