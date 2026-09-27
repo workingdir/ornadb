@@ -26,7 +26,7 @@ mod system_api;
 
 pub use semantic_payload::{
     DeclarationExplicitness, LocalSourceOrigin, NamedSemanticParameter, SEMANTIC_PAYLOAD_DOMAIN,
-    SEMANTIC_PAYLOAD_VERSION, SemanticDeclaration, SemanticDeclarationKind,
+    SEMANTIC_PAYLOAD_VERSION, SemanticDeclaration, SemanticDeclarationKind, SemanticParameter,
     SemanticPayloadAnalysis, SemanticPayloadError, SemanticPayloadErrorKind,
     analyze_semantic_payloads,
 };
