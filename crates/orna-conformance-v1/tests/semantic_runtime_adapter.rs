@@ -1806,12 +1806,12 @@ fn project_row_admission_rejects_wrong_container_members_and_shapes() {
 #[test]
 fn project_row_admission_reports_unsupported_nested_field_types() {
     let project = admission_project(
-        "pub table Item(id: Int) { opaque_ids: [Uuid], }",
+        include_str!("fixtures/row-admission/unsupported-nested-type-inventory.orna"),
         vec![SourceUnit {
             fixture_id: "row-admission-containers".into(),
             source_id: "logical/project/inventory/Item/42.orna".into(),
             parse_as: "row_unit".into(),
-            source: "{ opaque_ids: [\"not-an-admitted-uuid\"] }".into(),
+            source: include_str!("fixtures/row-admission/unsupported-nested-type-row.orna").into(),
         }],
     );
     let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
