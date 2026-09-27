@@ -19,9 +19,9 @@ fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
 #[test]
 fn unresolved_legacy_result_plumbing_uses_the_targeted_diagnostic() {
     for source in [
-        "pub fn legacy(value: Result<Int, Str>) = value;",
-        "pub fn legacy() = Ok(1);",
-        "pub fn legacy() = Err(\"nope\");",
+        include_str!("fixtures/unresolved-result-type.orna"),
+        include_str!("fixtures/unresolved-ok-call.orna"),
+        include_str!("fixtures/unresolved-err-call.orna"),
     ] {
         let analysis = analyze(&[ModuleInput::new("legacy-result.orna", source)]);
         assert!(
@@ -40,8 +40,8 @@ fn unresolved_legacy_result_plumbing_uses_the_targeted_diagnostic() {
 #[test]
 fn declared_result_and_ok_names_remain_ordinary_user_declarations() {
     for source in [
-        "pub fn Ok(value: Int): Int = value; pub fn use_ok(): Int = Ok(1);",
-        "pub type Result { value: Int, } pub fn result(value: Int): Result = Result { value: value };",
+        include_str!("fixtures/ordinary-ok-function.orna"),
+        include_str!("fixtures/ordinary-result-type.orna"),
     ] {
         let analysis = analyze(&[ModuleInput::new("ordinary-result.orna", source)]);
         assert!(analysis.is_ok(), "{source}: {:?}", analysis.diagnostics);
