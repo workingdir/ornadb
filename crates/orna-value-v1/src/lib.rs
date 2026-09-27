@@ -2575,6 +2575,11 @@ fn validate_schema_constructibility(
             pending.extend(dependents[index].iter().copied());
         }
     }
+    // Definitions are value types even when no descriptor field uses them.
+    if constructible.contains(&false) {
+        return Err(Error::InvalidSchema);
+    }
+
     for field in fields {
         if !type_node_constructible(&array(field)?[2], definition_ids, &constructible)? {
             return Err(Error::InvalidSchema);
@@ -3766,6 +3771,41 @@ mod tests {
     }
 
     #[test]
+    fn schema_rejects_unconstructible_unreferenced_nominal_definitions() {
+        let unused_id = [13; 16];
+        let unconstructible = record_definition(
+            13,
+            vec![schema_field(
+                23,
+                "self",
+                nominal_type(unused_id),
+                1,
+            )],
+        );
+        let valid_root_field = schema_type(0, Raw::Text("Int".into()));
+        assert!(
+            SchemaDescriptor::new(schema_for_type(
+                valid_root_field.clone(),
+                vec![unconstructible]
+            ))
+            .is_err()
+        );
+
+        let guarded = record_definition(
+            14,
+            vec![schema_field(
+                24,
+                "next",
+                schema_type(2, nominal_type([14; 16])),
+                1,
+            )],
+        );
+        assert!(
+            SchemaDescriptor::new(schema_for_type(valid_root_field, vec![guarded])).is_ok()
+        );
+    }
+
+    #[test]
     fn schema_rejects_unproductive_nominal_cycles_without_a_base_variant() {
         let direct_id = [10; 16];
         let direct = record_definition(
@@ -3814,6 +3854,7 @@ mod tests {
             vec![
                 schema_field(20, "next", schema_type(2, node_type.clone()), 1),
                 schema_field(21, "children", schema_type(1, node_type.clone()), 1),
+                schema_field(22, "window", schema_type(9, node_type.clone()), 1),
             ],
         );
         assert!(SchemaDescriptor::new(schema_for_type(node_type, vec![node])).is_ok());
@@ -3860,7 +3901,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_checks_required_components_but_allows_empty_lists_options_and_ranges() {
+    fn schema_rejects_unconstructible_nominals_across_type_compositions() {
         let bad_id = [10; 16];
         let bad_type = nominal_type(bad_id);
         let bad_definition = record_definition(
@@ -3935,7 +3976,7 @@ mod tests {
                     guarded,
                     vec![bad_definition.clone()]
                 ))
-                .is_ok()
+                .is_err()
             );
         }
     }
