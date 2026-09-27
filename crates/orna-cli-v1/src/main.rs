@@ -3,25 +3,29 @@
     reason = "The bounded binary exposes planning and session seams for a later integration adapter."
 )]
 
+mod cli_args;
+mod cli_dispatch;
+mod cli_help;
 mod repl;
 
+use cli_args::{Command, Invocation, Parsed, StatusFormat, parse_cli, requested_color_mode};
+use cli_dispatch::execute;
 use repl::{AnsiColor, write_styled, write_styled_display};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{self, BufReader, IsTerminal, Write as _};
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use orna_application_v1::ApplicationAuthority;
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
     ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
 };
-use orna_application_v1::ApplicationAuthority;
 use orna_evaluator_v1::{Environment, Limits};
 use orna_foundation_v1::{OvbRaw, Value};
-use orna_runtime_v1::{RunObservationStatus, RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::RuntimeIdentity;
 
 static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -604,237 +608,6 @@ fn hex_digit(byte: u8) -> Option<u8> {
         _ => None,
     }
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum Invocation {
-    Seed,
-    Exercise,
-    SensorsIngest,
-    LibraryLend { book_id: String, borrower: String },
-    ProjectFunction(String),
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StatusFormat {
-    Human,
-    Porcelain,
-    Short,
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum Command {
-    Repl(Option<String>),
-    Init(Option<PathBuf>),
-    Status { format: StatusFormat },
-    Fetch { remote: String, branch: String },
-    Check,
-    Explain(String),
-    Invoke(String),
-    Run(Invocation),
-    Help,
-    Version,
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Parsed {
-    endpoint: Endpoint,
-    command: Command,
-    color: ColorMode,
-}
-fn requested_color_mode(arguments: &[String]) -> ColorMode {
-    let mut color = ColorMode::Auto;
-    let mut words = arguments.iter().map(String::as_str).peekable();
-    while let Some(option) = words.peek().copied() {
-        match option {
-            "--db" => {
-                words.next();
-                if words.next().is_none() {
-                    break;
-                }
-            }
-            "--color" => {
-                words.next();
-                let Some(value) = words.next() else {
-                    break;
-                };
-                let Some(mode) = ColorMode::parse(value) else {
-                    break;
-                };
-                color = mode;
-            }
-            _ => break,
-        }
-    }
-    color
-}
-
-#[allow(
-    clippy::too_many_lines,
-    reason = "the command grammar deliberately keeps validation precedence in one auditable parser"
-)]
-fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
-    let mut endpoint = Endpoint::ManagedLocal;
-    let mut has_explicit_endpoint = false;
-    let mut color = ColorMode::Auto;
-    let mut words = arguments.iter().map(String::as_str).peekable();
-    while matches!(words.peek(), Some(&"--db") | Some(&"--color")) {
-        match words.next() {
-            Some("--db") => {
-                has_explicit_endpoint = true;
-                endpoint = Endpoint::parse(words.next().ok_or_else(|| {
-                    Diagnostic::usage(
-                        "E1001",
-                        "option `--db` needs a value",
-                        "supply an endpoint after `--db`",
-                    )
-                })?)?;
-            }
-            Some("--color") => {
-                let value = words.next().ok_or_else(|| {
-                    Diagnostic::usage(
-                        "E1001",
-                        "option `--color` needs a value",
-                        "choose `auto`, `always`, or `never` after `--color`",
-                    )
-                })?;
-                color = ColorMode::parse(value).ok_or_else(|| {
-                    Diagnostic::usage(
-                        "E1002",
-                        "unsupported value for `--color`",
-                        "choose `auto`, `always`, or `never`",
-                    )
-                })?;
-            }
-            _ => unreachable!("only global options enter this loop"),
-        }
-    }
-    let command = match words.next() {
-        None => Command::Repl(None),
-        Some("repl") => Command::Repl(words.next().map(str::to_owned)),
-        Some("init") => {
-            let first = words.next();
-            let literal_target = first == Some("--");
-            let target = if literal_target { words.next() } else { first }.map(PathBuf::from);
-            if !literal_target
-                && let Some(target) = target.as_deref()
-                && target.as_os_str().to_string_lossy().starts_with('-')
-            {
-                return Err(Diagnostic::usage(
-                    "E1002",
-                    "`init` option is not supported",
-                    "use `init` or `init DIRECTORY` without Git options",
-                ));
-            }
-            if words.next().is_some() {
-                return Err(Diagnostic::usage(
-                    "E1003",
-                    "`init` accepts at most one directory",
-                    "use `init` or `init DIRECTORY`",
-                ));
-            }
-            if has_explicit_endpoint {
-                return Err(Diagnostic::usage(
-                    "E1002",
-                    "`init` does not accept `--db`",
-                    "use `init` or `init DIRECTORY` to choose a local repository",
-                ));
-            }
-            Command::Init(target)
-        }
-        Some("status") => match words.next() {
-            Some("--porcelain") => Command::Status {
-                format: StatusFormat::Porcelain,
-            },
-            Some("--short") => Command::Status {
-                format: StatusFormat::Short,
-            },
-            Some(_) => {
-                return Err(Diagnostic::usage(
-                    "E1002",
-                    "`status` supports no option, `--porcelain`, or `--short`",
-                    "use `status`, `status --porcelain`, or `status --short`",
-                ));
-            }
-            None => Command::Status {
-                format: StatusFormat::Human,
-            },
-        },
-        Some("fetch") => Command::Fetch {
-            remote: words.next().unwrap_or("origin").to_owned(),
-            branch: words.next().unwrap_or("main").to_owned(),
-        },
-        Some("explain") => Command::Explain(
-            words
-                .next()
-                .ok_or_else(|| {
-                    Diagnostic::usage(
-                        "E1001",
-                        "`explain` needs a diagnostic code",
-                        "supply a diagnostic code after `explain`, such as `ORNA-S010-IMPORT`",
-                    )
-                })?
-                .to_owned(),
-        ),
-        Some("check") => Command::Check,
-        Some("invoke") => Command::Invoke(
-            words
-                .next()
-                .ok_or_else(|| {
-                    Diagnostic::usage(
-                        "E1001",
-                        "`invoke` needs a function target",
-                        "supply a reachable zero-argument pure function name after `invoke`",
-                    )
-                })?
-                .to_owned(),
-        ),
-        Some("--help" | "-h" | "help") => Command::Help,
-        Some("--version" | "-V") => Command::Version,
-        Some("run") => match words.next() {
-            Some("seed") => Command::Run(Invocation::Seed),
-            Some("exercise") => Command::Run(Invocation::Exercise),
-            Some("sensors.ingest") => Command::Run(Invocation::SensorsIngest),
-            Some("library.lend") => {
-                let book_id = words.next().ok_or_else(|| {
-                    Diagnostic::usage(
-                        "E1001",
-                        "`run library.lend` needs a book ID",
-                        "supply the book ID and borrower after `run library.lend`",
-                    )
-                })?;
-                let borrower = words.next().ok_or_else(|| {
-                    Diagnostic::usage(
-                        "E1001",
-                        "`run library.lend` needs a borrower",
-                        "supply the book ID and borrower after `run library.lend`",
-                    )
-                })?;
-                Command::Run(Invocation::LibraryLend {
-                    book_id: book_id.to_owned(),
-                    borrower: borrower.to_owned(),
-                })
-            }
-            Some(target) => Command::Run(Invocation::ProjectFunction(target.to_owned())),
-            None => Command::Run(Invocation::ProjectFunction("main.main".into())),
-        },
-        Some(_) => {
-            return Err(Diagnostic::usage(
-                "E1002",
-                "unknown Orna command",
-                "use `--help` to list supported commands",
-            ));
-        }
-    };
-    if words.next().is_some() {
-        return Err(Diagnostic::usage(
-            "E1003",
-            "command has unexpected arguments",
-            "this bounded slice accepts no extra arguments",
-        ));
-    }
-    Ok(Parsed {
-        endpoint,
-        command,
-        color,
-    })
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionState {
     Open,
@@ -2386,101 +2159,11 @@ fn run_fetch(
 }
 
 
-fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
-    match parsed.command.clone() {
-        Command::Help => {
-            println!(
-                "orna-cli-v1 [--color auto|always|never] [--db ENDPOINT] [repl [EXPRESSION]|status|status --porcelain|status --short|fetch [REMOTE] [BRANCH]|check|explain CODE|invoke TARGET|run [QUALIFIED_FUNCTION]|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
-            );
-            println!("orna-cli-v1 init [DIRECTORY]");
-            Ok(())
-        }
-        Command::Version => {
-            println!("orna-cli-v1 0.1.0");
-            Ok(())
-        }
-        Command::Init(ref target) => {
-            initialize_repository(target.as_deref(), parsed.color.stdout_enabled())
-        }
-        Command::Fetch { ref remote, ref branch } => {
-            run_fetch(&parsed.endpoint, remote, branch, parsed.color.stdout_enabled())
-        }
-        Command::Status {
-            format: StatusFormat::Human,
-        } => run_status_human(&parsed.endpoint, parsed.color.stdout_enabled()),
-        Command::Status {
-            format: StatusFormat::Porcelain,
-        } => run_status(&parsed.endpoint),
-        Command::Status {
-            format: StatusFormat::Short,
-        } => run_status_short(&parsed.endpoint, parsed.color.stdout_enabled()),
-        Command::Check => check_project(&parsed.endpoint, parsed.color.stdout_enabled()),
-        Command::Invoke(ref target) => {
-            run_pure_invocation(&parsed.endpoint, target, parsed.color.stdout_enabled())
-        }
-        Command::Explain(code) => {
-            println!("{}", explain_diagnostic(&code)?);
-            Ok(())
-        }
-        Command::Repl(ref expression) => {
-            run_repl(&parsed.endpoint, expression.as_deref(), parsed.color)
-        }
-        Command::Run(Invocation::Seed) => {
-            run_project_invocation(&parsed.endpoint, "main.seed", parsed.color.stdout_enabled())
-        }
-        Command::Run(Invocation::Exercise) => run_project_invocation(
-            &parsed.endpoint,
-            "main.exercise",
-            parsed.color.stdout_enabled(),
-        ),
-        Command::Run(Invocation::SensorsIngest) => run_project_stream_invocation(
-            &parsed.endpoint,
-            "sensors.ingest",
-            parsed.color.stdout_enabled(),
-        ),
-        Command::Run(Invocation::LibraryLend {
-            ref book_id,
-            ref borrower,
-        }) => {
-            let arguments = Environment::from([
-                (
-                    "book_id".into(),
-                    Value::new(OvbRaw::Text(book_id.clone())).map_err(|_| {
-                        Diagnostic::usage(
-                            "E1002",
-                            "`run library.lend` received an invalid book ID",
-                            "supply a valid Orna string value for the book ID",
-                        )
-                    })?,
-                ),
-                (
-                    "borrower".into(),
-                    Value::new(OvbRaw::Text(borrower.clone())).map_err(|_| {
-                        Diagnostic::usage(
-                            "E1002",
-                            "`run library.lend` received an invalid borrower",
-                            "supply a valid Orna string value for the borrower",
-                        )
-                    })?,
-                ),
-            ]);
-            run_project_invocation_with_arguments(
-                &parsed.endpoint,
-                "library.lend",
-                &arguments,
-                parsed.color.stdout_enabled(),
-            )
-        }
-        Command::Run(Invocation::ProjectFunction(ref target)) => {
-            run_public_project_function(&parsed.endpoint, target, parsed.color.stdout_enabled())
-        }
-    }
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use orna_runtime_v1::{RunObservationStatus, RuntimeState};
     #[test]
     fn color_mode_respects_stream_tty_and_explicit_overrides() {
         assert!(!ColorMode::Auto.enabled(false));
