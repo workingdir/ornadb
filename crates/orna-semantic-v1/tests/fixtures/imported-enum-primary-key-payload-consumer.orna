@@ -1,0 +1,5 @@
+use types;
+
+pub table Job(id: types.Outcome) {
+    description: Str,
+}
