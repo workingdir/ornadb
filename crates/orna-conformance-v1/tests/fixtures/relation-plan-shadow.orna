@@ -1,0 +1,6 @@
+pub table Note(id: Int) { value: Int, }
+fn apply(filter: Int) = Note | filter(note => true) | count;
+fn parent() {
+    Note.insert({ id: 1, value: 1 });
+    apply(1);
+}
