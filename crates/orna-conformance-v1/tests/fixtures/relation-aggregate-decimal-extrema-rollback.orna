@@ -8,5 +8,5 @@ fn parent() {
             assert (minimum() ?? 0.000) == 1.200;
             assert (maximum() ?? 0.000) == 2.0030;
             assert false;
-        
+
 }
