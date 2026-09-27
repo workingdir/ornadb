@@ -13,7 +13,7 @@ mod type_use;
 
 pub(crate) use client::durable_state_slot_id;
 use client::{
-    ClientExpressionResultShape, check_client_functions, client_contract_identity,
+    ClientExpressionResultShape, check_client_functions,
     client_resource_targets, resolve_client_function_headers, resolve_client_function_inputs,
 };
 #[cfg(test)]
@@ -37,7 +37,7 @@ pub use model::{
     CheckedStandardApplicationBundle, CheckedStandardExecutable, CheckedStandardJsonEncode,
     CheckedStandardLibrary, CheckedStandardParameterEcho, CheckedStandardSchema,
     CheckedStandardTerminalPresentTable, CheckedStandardTypeBinding, CheckedStandardTypeReference,
-    CheckedStandardUiWindow, CheckedStandardValueType,
+    CheckedStandardValueType,
     CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, STANDARD_LIBRARY_V3_REVISION_ID,
     STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
     STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V7_REVISION_ID,
@@ -72,7 +72,7 @@ pub use model::{
     STD_UI_TEXT_PARAMETER_ID, STD_UI_TEXT_RUNTIME_CONTRACT, STD_UI_TYPE_ID,
     STD_UI_WINDOW_CONTENT_PARAMETER_ID, STD_UI_WINDOW_FUNCTION_ID,
     STD_UI_WINDOW_FUNCTION_REVISION_ID, STD_UI_WINDOW_REVISION_NUMBER,
-    STD_UI_WINDOW_RUNTIME_CONTRACT, STD_UI_WINDOW_TITLE_PARAMETER_ID, STD_WINDOW_SOURCE_UNIT_ID,
+    STD_UI_WINDOW_RUNTIME_CONTRACT, STD_UI_WINDOW_TITLE_PARAMETER_ID,
     SemanticType, StandardApplicationCheckContext, StandardApplicationCheckReport,
     StandardApplicationContextError, StandardLibraryCheckError,
 };
@@ -102,7 +102,7 @@ use standard_library::{
 pub use standard_library::{
     check_standard_json_encode, check_standard_library_source,
     check_standard_parameter_echo,
-    check_standard_terminal_present_table, check_standard_ui_window,
+    check_standard_terminal_present_table,
 };
 
 use std::{
@@ -112,8 +112,7 @@ use std::{
 };
 
 use orna_artifact::client_plan::{
-    ClientExpressionNode, ControlFlowBinaryOperator, ControlFlowUnaryOperator,
-    ExpressionClientPlan, FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, ResourceKind,
+    ControlFlowBinaryOperator, ControlFlowUnaryOperator, ResourceKind,
 };
 use orna_artifact::server_json_encode::{self, JsonEncodePlan};
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};

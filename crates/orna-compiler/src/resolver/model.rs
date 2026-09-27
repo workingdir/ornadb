@@ -1749,9 +1749,6 @@ pub const STD_DATA_SOURCE_UNIT_ID: SourceUnitId =
 pub const STD_DATA_ROWS_TYPE_BINDING_ID: TypeBindingId = TypeBindingId::from_bytes([
     0x04, 0xe2, 0x43, 0x98, 0x0b, 0x43, 0xc2, 0xaa, 0xa0, 0x0e, 0x0e, 0x79, 0xc4, 0xce, 0xea, 0x10,
 ]);
-/// The fixed ADR 0019 `std/window.orna` source-unit identity: `...08`.
-pub const STD_WINDOW_SOURCE_UNIT_ID: SourceUnitId =
-    SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08]);
 /// The fixed ADR 0019 `std.ui.window` function identity: `...14`.
 pub const STD_UI_WINDOW_FUNCTION_ID: FunctionId =
     FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x14]);
@@ -2051,38 +2048,6 @@ impl CheckedStandardJsonEncode {
         self.revision_id
     }
 }
-/// The checked declaration facts for the accepted ADR 0019 external
-/// `std.ui.window` CLIENT function.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CheckedStandardUiWindow {
-    pub(super) function_id: FunctionId,
-    pub(super) title_parameter_id: ParameterId,
-    pub(super) content_parameter_id: ParameterId,
-    pub(super) revision_id: FunctionRevisionId,
-}
-
-impl CheckedStandardUiWindow {
-    /// Returns the fixed `std.ui.window` function identity.
-    pub const fn function_id(&self) -> FunctionId {
-        self.function_id
-    }
-
-    /// Returns the fixed `std.ui.window.title` parameter identity.
-    pub const fn title_parameter_id(&self) -> ParameterId {
-        self.title_parameter_id
-    }
-
-    /// Returns the fixed `std.ui.window.content` parameter identity.
-    pub const fn content_parameter_id(&self) -> ParameterId {
-        self.content_parameter_id
-    }
-
-    /// Returns the fixed version-1 function-revision identity.
-    pub const fn revision_id(&self) -> FunctionRevisionId {
-        self.revision_id
-    }
-}
-
 /// The checked declaration facts for the one accepted ADR 0057 terminal
 /// table presenter function (`std.terminal.present_table`).
 ///
