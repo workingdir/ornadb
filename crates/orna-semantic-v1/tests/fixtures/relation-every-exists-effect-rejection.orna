@@ -1,0 +1,13 @@
+pub table Note(id: Int) { value: Int, }
+pub fn pure_every(rows: Relation<Note>) = rows | every(note => note.value > 0);
+pub fn pure_exists(rows: Relation<Note>) = rows | exists(predicate: note => note.value > 0);
+pub fn piped_every(rows: Relation<Note>) = rows | every(note => {
+    Note.insert({ id: note.id, value: note.value });
+    true
+});
+pub fn piped_exists(rows: Relation<Note>) = rows | exists(predicate: note => std.net.http.get("https://example.com") == "ok");
+pub fn direct_every(rows: Relation<Note>) = every(rows: rows, predicate: note => {
+    Note.insert({ id: note.id, value: note.value });
+    true
+});
+pub fn direct_exists(rows: Relation<Note>) = exists(predicate: note => std.net.http.get("https://example.com") == "ok", rows: rows);

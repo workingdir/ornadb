@@ -1,0 +1,5 @@
+pub table Note(id: Int) { value: Int, }
+
+fn invalid_positional_extra(rows: Relation<Note>) = one(rows, unexpected: 1);
+fn invalid_too_many(rows: Relation<Note>) = one(rows, 1, 2);
+fn invalid_duplicate_rows(rows: Relation<Note>) = one(rows: rows, rows: rows);
