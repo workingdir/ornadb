@@ -7701,6 +7701,25 @@ impl RuntimeState {
         Ok(out)
     }
 
+    /// Returns the number of durable mutations still in the unpublished CWD tail.
+    ///
+    /// This summary query avoids loading mutation payloads when a caller only
+    /// needs to report whether and how much local state remains unpublished.
+    pub async fn pending_count(&self) -> Result<usize, RuntimeError> {
+        let mut rows = self
+            .connection
+            .query("SELECT COUNT(*) FROM pending_mutation", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let count: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        usize::try_from(count).map_err(|_| RuntimeError::RecoveryInvalid)
+    }
+
     /// Returns only the pending mutation prefix covered by a persisted freeze.
     /// Mutations appended after the freeze are intentionally excluded.
     pub async fn pending_through(
