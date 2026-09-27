@@ -8,8 +8,8 @@
 
 use orna_evaluator_v1::{
     AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
-    PureFunction, StepBudget, invoke_named, invoke_named_with_effects, reference_standard_profile,
-    reference_standard_sources,
+    PureFunction, RelationPage, StepBudget, invoke_named, invoke_named_with_effects,
+    reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SafeText};
 use orna_live_v1::{
@@ -18,7 +18,8 @@ use orna_live_v1::{
 };
 use orna_protocol_v1::{Envelope, Message, ResultStatus};
 use orna_runtime_v1::{
-    NoFault, RuntimeActivationContext, RuntimeError, StagedTableActivation, TableMutation,
+    NoFault, RuntimeActivationContext, RuntimeError, RuntimePublicationMetadataRows,
+    StagedTableActivation, TableMutation,
 };
 use orna_semantic_v1::{Catalogue, ModuleInput, SymbolKind, TableSchema, analyze_with_catalogue};
 use orna_syntax_v1::{
@@ -173,6 +174,8 @@ impl ApplicationAuthority {
         Ok(AdmittedApplication {
             logical_path,
             source_digest: Sha256::digest(source.as_bytes()).into(),
+            requires_publication_metadata: source.contains("sys.Storage")
+                || source.contains("sys.MaintenanceJob"),
             entry,
             functions,
             limits: self.limits,
@@ -228,6 +231,35 @@ impl ApplicationAuthority {
         Ok(StagedActivation { value, mutations })
     }
 
+    /// Evaluates admitted source with a preloaded durable publication snapshot
+    /// available to the evaluator's `sys.Storage` and `sys.MaintenanceJob`
+    /// relation scans. Snapshot loading remains asynchronous at the caller;
+    /// evaluation and relation paging stay bounded and synchronous here.
+    pub fn evaluate_staged_with_publication_rows(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        publication_rows: RuntimePublicationMetadataRows,
+    ) -> Result<StagedActivation, ApplicationError> {
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler = SourceMutationEffectHandler::with_publication_rows(
+            tables,
+            publication_rows,
+        );
+        let value = invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            arguments,
+            application.limits,
+            &mut handler,
+        )
+        .map_err(|error: EvaluationError| {
+            ApplicationError::EffectRejected(error.code().to_owned())
+        })?;
+        let mutations = handler.into_mutations()?;
+        Ok(StagedActivation { value, mutations })
+    }
+
     /// Evaluates admitted source while dispatching its terminal runtime effect
     /// through an explicit trusted host capability before returning staged
     /// writes to the runtime for commit.
@@ -246,7 +278,11 @@ impl ApplicationAuthority {
     ) -> Result<StagedActivation, ApplicationError> {
         validate_terminal_runtime_effect(application)?;
         let tables = admitted_table_schemas(&application.module_header);
-        let mut handler = AsyncSourceMutationEffectHandler::new(tables);
+        let publication_rows = dispatcher
+            .publication_metadata_rows()
+            .await
+            .map_err(ApplicationError::SourceEffectFailed)?;
+        let mut handler = AsyncSourceMutationEffectHandler::new(tables, publication_rows);
         let mut value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -352,11 +388,18 @@ pub enum ApplicationEffectRequest {
 pub type ApplicationEffectFuture<'a> =
     Pin<Box<dyn Future<Output = Result<CanonicalValue, String>> + 'a>>;
 
+pub type ApplicationPublicationRowsFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<RuntimePublicationMetadataRows>, String>> + 'a>>;
+
 /// Capability supplied only by a trusted local runtime coordinator.
 ///
 /// Implementations must resolve portable references against the authenticated
 /// writer and `context`; references themselves never grant authority.
 pub trait AsyncApplicationEffectDispatcher {
+    fn publication_metadata_rows(&self) -> ApplicationPublicationRowsFuture<'_> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn dispatch<'a>(
         &'a self,
         effect: ApplicationEffectRequest,
@@ -367,6 +410,10 @@ pub trait AsyncApplicationEffectDispatcher {
 struct LiveEffectAdapter<'a>(&'a dyn LiveAdminEffectDispatcher);
 
 impl AsyncApplicationEffectDispatcher for LiveEffectAdapter<'_> {
+    fn publication_metadata_rows(&self) -> ApplicationPublicationRowsFuture<'_> {
+        Box::pin(async move { self.0.publication_metadata_rows().await })
+    }
+
     fn dispatch<'a>(
         &'a self,
         effect: ApplicationEffectRequest,
@@ -414,6 +461,7 @@ pub struct SourceMutationEffectHandler {
     tables: BTreeMap<String, TableSchema>,
     mutations: Vec<TableMutation>,
     next_ordinal: u64,
+    publication_rows: Option<RuntimePublicationMetadataRows>,
 }
 
 impl SourceMutationEffectHandler {
@@ -423,6 +471,19 @@ impl SourceMutationEffectHandler {
             tables,
             mutations: Vec::new(),
             next_ordinal: 0,
+            publication_rows: None,
+        }
+    }
+
+    fn with_publication_rows(
+        tables: BTreeMap<String, TableSchema>,
+        publication_rows: RuntimePublicationMetadataRows,
+    ) -> Self {
+        Self {
+            tables,
+            mutations: Vec::new(),
+            next_ordinal: 0,
+            publication_rows: Some(publication_rows),
         }
     }
 
@@ -560,13 +621,18 @@ impl SourceMutationEffectHandler {
 struct AsyncSourceMutationEffectHandler {
     mutations: SourceMutationEffectHandler,
     effects: Vec<ApplicationEffectRequest>,
+    publication_rows: Option<RuntimePublicationMetadataRows>,
 }
 
 impl AsyncSourceMutationEffectHandler {
-    fn new(tables: BTreeMap<String, TableSchema>) -> Self {
+    fn new(
+        tables: BTreeMap<String, TableSchema>,
+        publication_rows: Option<RuntimePublicationMetadataRows>,
+    ) -> Self {
         Self {
             mutations: SourceMutationEffectHandler::new(tables),
             effects: Vec::new(),
+            publication_rows,
         }
     }
 
@@ -633,6 +699,40 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
             let _ = budget;
             result
         })
+    }
+
+    fn scan_relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        if limit == 0 {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        let Some(publication_rows) = self.publication_rows.as_ref() else {
+            return Ok(None);
+        };
+        let row = match source {
+            "sys.Storage" => &publication_rows.sys_storage,
+            "sys.MaintenanceJob" => &publication_rows.maintenance_job,
+            _ => return Ok(None),
+        };
+        if after.is_some() {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        budget.debit(1)?;
+        Ok(Some(RelationPage {
+            rows: vec![row.clone()],
+            next: None,
+        }))
     }
 }
 
@@ -835,6 +935,40 @@ impl EffectHandler for SourceMutationEffectHandler {
         _budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         self.handle(callee, arguments)
+    }
+
+    fn scan_relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        if limit == 0 {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        let Some(publication_rows) = self.publication_rows.as_ref() else {
+            return Ok(None);
+        };
+        let row = match source {
+            "sys.Storage" => &publication_rows.sys_storage,
+            "sys.MaintenanceJob" => &publication_rows.maintenance_job,
+            _ => return Ok(None),
+        };
+        if after.is_some() {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        budget.debit(1)?;
+        Ok(Some(RelationPage {
+            rows: vec![row.clone()],
+            next: None,
+        }))
     }
 }
 
@@ -1226,6 +1360,7 @@ fn eval_fingerprint(message: &Message) -> std::result::Result<[u8; 32], LiveErro
 pub struct AdmittedApplication {
     logical_path: String,
     source_digest: [u8; 32],
+    requires_publication_metadata: bool,
     entry: String,
     functions: Functions,
     limits: Limits,
@@ -1233,6 +1368,13 @@ pub struct AdmittedApplication {
 }
 
 impl AdmittedApplication {
+    /// Returns whether the admitted source names either runtime publication
+    /// relation and needs a durable publication snapshot at evaluation.
+    #[must_use]
+    pub const fn requires_publication_metadata(&self) -> bool {
+        self.requires_publication_metadata
+    }
+
     #[must_use]
     pub fn logical_path(&self) -> &str {
         &self.logical_path
