@@ -1387,7 +1387,7 @@ fn reference_root_loader_isolated_by_principal_revision_and_unknown_field() {
 }
 
 fn assert_reordered_client_plan_rejects_before_executor(source: &str, function_name: &str) {
-    let prepared = prepared_client_source_v6(source);
+    let prepared = prepared_client_source_v5(source);
     let (active, function) = active_with_reordered_client_call_references(&prepared, function_name);
     let mut executor = RecordingActionExecutor::new(Some(RuntimeValue::Integer(1)));
     let error = super::super::evaluate_client_function_with_executor(
@@ -1438,7 +1438,7 @@ RETURN value;
 
 #[test]
 fn programmable_client_control_flow_executes_compiled_source() {
-    let prepared = prepared_client_source_v6(
+    let prepared = prepared_client_source_v5(
         r#"CREATE SCHEMA app;
 CREATE CLIENT FUNCTION app.counter() RETURNS INTEGER IS
   LET total INTEGER := 0;
@@ -1471,7 +1471,7 @@ END IF;
 
 #[test]
 fn recursive_client_control_flow_uses_shared_execution_fuel() {
-    let prepared = prepared_client_source_v6(
+    let prepared = prepared_client_source_v5(
         r#"CREATE SCHEMA app;
 CREATE CLIENT FUNCTION app.factorial(p_n INTEGER) RETURNS INTEGER IS
   BEGIN
@@ -1548,7 +1548,7 @@ END IF;
 }
 #[test]
 fn recursive_client_control_flow_stops_at_depth_limit() {
-    let prepared = prepared_client_source_v6(
+    let prepared = prepared_client_source_v5(
         r#"CREATE SCHEMA app;
 CREATE CLIENT FUNCTION app.loop(p_n INTEGER) RETURNS INTEGER IS
   BEGIN
@@ -1615,7 +1615,7 @@ fn rejects_non_boolean_short_circuit_operands_before_execution() {
             .encode()
             .expect("malformed Boolean plan encodes structurally");
         let (active, function, pair, _) = version_two_active_with_artifact(
-            standard_v6(),
+            standard_v5(),
             orna_standard::BOOLEAN_TYPE_ID,
             DefinitionReferenceTarget::Function(FunctionId::from_bytes([6; 16])),
             DefinitionReferenceKind::FunctionCall,
@@ -1633,52 +1633,6 @@ fn rejects_non_boolean_short_circuit_operands_before_execution() {
             } if context.pair() == pair && context.function() == function
         ));
     }
-}
-
-#[test]
-fn action_plan_preflights_arguments_before_operation_target() {
-    assert_reordered_client_plan_rejects_before_executor(
-        r#"CREATE SCHEMA app;
-CREATE CLIENT FUNCTION app.first() RETURNS INTEGER RETURN 1;
-CREATE CLIENT FUNCTION app.owner() RETURNS std.Action AS
-  std.action.call(
-target => std.invoke.echo,
-arguments => std.call.args(p_value => app.first())
-  );"#,
-        "app.owner",
-    );
-}
-
-#[test]
-fn action_plan_accepts_untampered_call_reference_order_and_builds_action() {
-    let prepared = prepared_client_source_v6(
-        r#"CREATE SCHEMA app;
-CREATE CLIENT FUNCTION app.first() RETURNS INTEGER RETURN 1;
-CREATE CLIENT FUNCTION app.owner() RETURNS std.Action AS
-  std.action.call(
-target => std.invoke.echo,
-arguments => std.call.args(p_value => app.first())
-  );"#,
-    );
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|candidate| candidate.name().to_string() == "app.owner")
-        .expect("the action owner is present")
-        .id();
-    let mut executor = RecordingActionExecutor::new(Some(RuntimeValue::Integer(7)));
-
-    let result = super::super::evaluate_client_function_with_executor(
-        &active,
-        &authorise(active.pair(), function),
-        &mut executor,
-    )
-    .expect("an untampered action plan evaluates successfully");
-
-    assert!(matches!(result.value(), RuntimeValue::Opaque(_)));
-    assert!(executor.executed.is_empty());
 }
 
 #[test]
@@ -2172,7 +2126,7 @@ fn capability_expression_calls_reject_reference_sequence_mismatch() {
     .encode()
     .expect("the capability expression plan encodes");
     let (active, function, pair, _) = version_two_active_with_artifact(
-        standard_v6(),
+        standard_v5(),
         orna_standard::BOOLEAN_TYPE_ID,
         DefinitionReferenceTarget::Function(function),
         DefinitionReferenceKind::FunctionCall,
@@ -3011,7 +2965,7 @@ fn stream_expression_rejects_scalar_literal_plan() {
     .encode()
     .unwrap();
     let (active, function, _, _) = version_two_client_stream_active_with_artifact(
-        standard_v6(),
+        standard_v5(),
         orna_standard::BOOLEAN_TYPE_ID,
         DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
         DefinitionReferenceKind::NamedType,
@@ -3078,7 +3032,7 @@ fn stream_artifact_versions_reject_scalar_roots() {
         ),
     ] {
         let (active, function, _, _) = version_two_client_stream_active_with_artifact(
-            standard_v6(),
+            standard_v5(),
             orna_standard::BOOLEAN_TYPE_ID,
             DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
             DefinitionReferenceKind::NamedType,
@@ -3317,7 +3271,7 @@ fn evaluates_a_registered_opaque_ui_client_result() {
     .encode()
     .expect("opaque UI plan encodes");
     let (active, function, _, _) = version_two_active_with_artifact(
-        standard_v6(),
+        standard_v5(),
         orna_standard::STD_UI_TYPE_ID,
         DefinitionReferenceTarget::ValueType(orna_standard::STD_UI_TYPE_ID),
         DefinitionReferenceKind::NamedType,
@@ -3676,7 +3630,7 @@ fn expression_like_reference_validation_accepts_declared_ref_parameter_object_re
             ResolvedType::reference(object_type),
             None,
         )],
-        FunctionReturn::Single(ResolvedType::Value(orna_standard::STD_ACTION_TYPE_ID)),
+        FunctionReturn::Single(ResolvedType::Value(TypeId::from_bytes([0x14; 16]))),
         function_revision,
         FunctionSecurity::Invoker,
         None,

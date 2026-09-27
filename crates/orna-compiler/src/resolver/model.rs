@@ -4,7 +4,7 @@ use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
 use orna_artifact::{
     client_plan::{
-        ActionTargetDomain, ControlFlowBinaryOperator, ControlFlowUnaryOperator, ResourceKind,
+        ControlFlowBinaryOperator, ControlFlowUnaryOperator, ResourceKind,
     },
     server_parameter_echo::ServerParameterEchoError,
 };
@@ -634,11 +634,6 @@ pub(crate) enum CheckedClientExpression {
         /// The resolved resource operation metadata and bound arguments.
         operation: CheckedResourceOperation,
     },
-    /// A checked CLIENT action operation value.
-    Action {
-        /// The resolved action operation metadata and bound arguments.
-        operation: CheckedActionOperation,
-    },
     /// A sealed `sys.inspect` operation over an immutable inspection carrier.
     Inspect {
         /// The checked sealed operation and its nested target expression.
@@ -828,42 +823,6 @@ impl CheckedResourceOperation {
         self.standard_result_type
     }
     /// Returns the source location of the constructor expression.
-    pub(crate) fn location(&self) -> &SourceLocation {
-        &self.location
-    }
-}
-
-/// One checked CLIENT action operation (ADR 0079).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CheckedActionOperation {
-    pub(super) target_domain: ActionTargetDomain,
-    pub(super) target: CheckedFunctionId,
-    pub(super) call_site: CallSiteId,
-    pub(super) arguments: Vec<(CheckedParameterId, CheckedClientExpression)>,
-    pub(super) result_type: SemanticType<CheckedTypeId>,
-    pub(super) standard_result_type: Option<TypeId>,
-    pub(super) location: SourceLocation,
-}
-
-impl CheckedActionOperation {
-    pub(crate) const fn target_domain(&self) -> ActionTargetDomain {
-        self.target_domain
-    }
-    pub(crate) const fn target(&self) -> CheckedFunctionId {
-        self.target
-    }
-    pub(crate) const fn call_site(&self) -> CallSiteId {
-        self.call_site
-    }
-    pub(crate) fn arguments(&self) -> &[(CheckedParameterId, CheckedClientExpression)] {
-        &self.arguments
-    }
-    pub(crate) const fn result_type(&self) -> SemanticType<CheckedTypeId> {
-        self.result_type
-    }
-    pub(crate) const fn standard_result_type(&self) -> Option<TypeId> {
-        self.standard_result_type
-    }
     pub(crate) fn location(&self) -> &SourceLocation {
         &self.location
     }
@@ -1863,12 +1822,6 @@ pub const STD_CHARACTER_LARGE_OBJECT_TYPE_ID: TypeId =
 /// The fixed ADR 0062 `std/ui.orna` source-unit identity: `...05`.
 pub const STD_UI_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05]);
-/// The fixed ADR 0079 `std/action.orna` source-unit identity: `...07`.
-pub const STD_ACTION_SOURCE_UNIT_ID: SourceUnitId =
-    SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x07]);
-/// The fixed ADR 0079 `std.action` schema identity: `...09`.
-pub const STD_ACTION_SCHEMA_ID: SchemaId =
-    SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x09]);
 /// The fixed ADR 0075 `std/json.orna` source-unit identity: `...06`.
 pub const STD_JSON_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06]);
@@ -1882,11 +1835,6 @@ pub const STD_UI_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13]);
 /// The fixed ADR 0062 `std.ui.UI` kernel representation contract.
 pub const STD_UI_CONTRACT: &str = "orna.std.value.ui@1";
-/// The fixed ADR 0079 `std.action.Action` value-type identity: `reserved_id(20)`.
-pub const STD_ACTION_TYPE_ID: TypeId =
-    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x14]);
-/// The fixed ADR 0079 `std.action.Action` kernel representation contract.
-pub const STD_ACTION_CONTRACT: &str = "orna.std.value.action@1";
 /// The fixed ADR 0055 `std.invoke` schema identity: 15 zero bytes then `0x03`.
 pub const STD_INVOKE_SCHEMA_ID: SchemaId =
     SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
