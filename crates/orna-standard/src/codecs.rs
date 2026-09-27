@@ -28,8 +28,7 @@ pub fn registered_opaque_codecs(
     )
     .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
 
-    let registrations = if is_accepted_v11_standard(standard)
-        || is_accepted_v10_standard(standard)
+    let registrations = if is_accepted_v10_standard(standard)
         || is_accepted_v9_standard(standard)
         || is_accepted_v8_standard(standard)
     {
@@ -273,26 +272,6 @@ fn is_accepted_v4_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
         && standard.source().revision_hash() == ACCEPTED_V4_SOURCE_REVISION_DIGEST
         && standard.digest() == ACCEPTED_V4_STANDARD_LIBRARY_DIGEST
 }
-fn is_accepted_v11_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
-    let Some(math_unit) = standard
-        .source()
-        .units()
-        .iter()
-        .find(|unit| unit.logical_path() == STD_MATH_SOURCE_LOGICAL_PATH)
-    else {
-        return false;
-    };
-    standard.revision() == STANDARD_LIBRARY_V11_REVISION_ID
-        && standard.catalogue().revision() == STANDARD_CATALOGUE_V11_REVISION_ID
-        && standard.source().bundle() == STANDARD_SOURCE_V11_BUNDLE_ID
-        && standard.source().id() == STANDARD_SOURCE_V11_REVISION_ID
-        && standard.source().parent() == Some(STANDARD_SOURCE_V10_REVISION_ID)
-        && standard.source().units().len() == 11
-        && math_unit.content_hash() == super::ACCEPTED_V11_MATH_CONTENT_DIGEST
-        && standard.source().revision_hash() == super::ACCEPTED_V11_SOURCE_REVISION_DIGEST
-        && standard.digest() == super::ACCEPTED_V11_STANDARD_LIBRARY_DIGEST
-}
-
 fn is_accepted_v10_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
     standard.revision() == STANDARD_LIBRARY_V10_REVISION_ID
         && standard.catalogue().revision() == STANDARD_CATALOGUE_V10_REVISION_ID
