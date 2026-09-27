@@ -1,0 +1,1 @@
+pub table User(id: Uuid) { username: Str unique, }
