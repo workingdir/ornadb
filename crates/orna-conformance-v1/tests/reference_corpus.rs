@@ -1138,10 +1138,7 @@ fn typed_sys_await_report_retains_mismatched_witness_diagnostic() {
             Some("ORNA-S021-TYPE"),
             Some("sys.await explicit type argument must match the invocation handle result type"),
         ),
-        r#"
-            pub fn await_wrong(job: sys.InvocationHandle<Int>) =
-                sys.await<Str>(job, timeout: 1.s);
-        "#,
+        include_str!("fixtures/typed-await-mismatch.orna"),
     );
     let typecheck = report.fixtures[0]
         .stages
