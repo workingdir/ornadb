@@ -1,0 +1,6 @@
+pub table Stock(location: Str, sku: Str) { quantity: Int, }
+
+fn parent() {
+    Stock.insert({ location: "north", sku: "pencil", quantity: 12 });
+    Stock.rekey(("north", "pencil"), ("south", "pencil"));
+}
