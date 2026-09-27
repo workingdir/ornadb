@@ -125,7 +125,8 @@ fn standard_dependency_revision_is_canonical_and_captures_provenance() {
 
 #[test]
 fn standard_catalogue_retains_verified_dependency_provenance() {
-    let source = "pub fn a() = 1;";
+    let source = include_str!("fixtures/standard-dependency-a.orna");
+    let mismatched_source = include_str!("fixtures/standard-dependency-a-digest-mismatch.orna");
     let profile = StandardDependencyProfile::from_sources(
         "orna.std/snapshot-1",
         [("std/a.orna".to_owned(), source.to_owned())],
@@ -145,7 +146,7 @@ fn standard_catalogue_retains_verified_dependency_provenance() {
     assert!(matches!(
         Catalogue::from_standard_sources(
             &profile,
-            [("std/a.orna".to_owned(), "pub fn a() = 2;".to_owned())],
+            [("std/a.orna".to_owned(), mismatched_source.to_owned())],
         ),
         Err(StandardCatalogueError::Profile(
             StandardProfileError::DigestMismatch
