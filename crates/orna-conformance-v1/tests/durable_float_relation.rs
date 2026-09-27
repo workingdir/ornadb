@@ -23,46 +23,27 @@ fn durable_repository() -> (TempDir, Repository) {
     git(temp.path(), &["init", "--quiet"]);
     git(
         temp.path(),
-        &["config", "user.email", "test@example.invalid"],
+        &["config", "user.email", "kieran@drewett.dev"],
     );
-    git(temp.path(), &["config", "user.name", "conformance test"]);
+    git(temp.path(), &["config", "user.name", "kierandrewett"]);
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
-    fs::write(temp.path().join("main.orna"), "module main;\n").expect("source");
+    fs::write(
+        temp.path().join("main.orna"),
+        include_str!("fixtures/durable-float-repository-main.orna"),
+    )
+    .expect("source");
     git(temp.path(), &["add", "main.orna"]);
     git(temp.path(), &["commit", "--quiet", "-m", "initial"]);
     let repository = Repository::discover(temp.path()).expect("repository");
     (temp, repository)
 }
 
-fn source(fixture_id: &str, body: &str) -> SourceUnit {
+fn source(fixture_id: &str, source: &str) -> SourceUnit {
     SourceUnit {
         fixture_id: fixture_id.into(),
         source_id: format!("{fixture_id}.orna"),
         parse_as: "module_unit".into(),
-        source: format!(
-            r#"
-                pub table Reading(id: Int) {{ value: Float, }}
-                fn total(): Float = Reading | map(reading => reading.value) | sum;
-                fn parent() {{ {body} }}
-            "#
-        ),
-    }
-}
-
-fn unsupported_min_source() -> SourceUnit {
-    SourceUnit {
-        fixture_id: "durable-float-min-rollback".into(),
-        source_id: "durable-float-min-rollback.orna".into(),
-        parse_as: "module_unit".into(),
-        source: r#"
-            pub table Reading(id: Int) { value: Float, }
-            fn minimum() = Reading | map(reading => reading.value) | min();
-            fn parent() {
-                Reading.insert({ id: 1, value: 1.5f });
-                minimum();
-            }
-        "#
-        .into(),
+        source: source.into(),
     }
 }
 
@@ -77,12 +58,7 @@ async fn durable_float_sum_reopens_persisted_rows_in_canonical_order() {
 
     let write = source(
         "durable-float-sum-reopen",
-        r#"
-            Reading.insert({ id: 3, value: 1.0f });
-            Reading.insert({ id: 2, value: -10000000000000000.0f });
-            Reading.insert({ id: 1, value: 10000000000000000.0f });
-            assert total() == 1.0f;
-        "#,
+        include_str!("fixtures/durable-float-sum-reopen.orna"),
     );
     assert!(matches!(
         evaluator
@@ -104,7 +80,10 @@ async fn durable_float_sum_reopens_persisted_rows_in_canonical_order() {
     );
     drop(state);
 
-    let reopened_read = source("durable-float-sum-reopen-read", "assert total() == 1.0f;");
+    let reopened_read = source(
+        "durable-float-sum-reopen-read",
+        include_str!("fixtures/durable-float-sum-reopen-read.orna"),
+    );
     let reopened_outcome = evaluator
         .execute_source(&repository, identity, [73; 16], [74; 32], &reopened_read)
         .await;
@@ -129,7 +108,10 @@ async fn durable_unsupported_float_aggregate_rolls_back_staged_rows() {
             identity,
             [78; 16],
             [79; 32],
-            &unsupported_min_source(),
+            &source(
+                "durable-float-min-rollback",
+                include_str!("fixtures/durable-float-min-rollback.orna"),
+            ),
         )
         .await
         .expect("durable unsupported aggregate execution");
@@ -160,7 +142,7 @@ async fn durable_failed_float_sum_rolls_back_only_tentative_rows() {
     let control_evaluator = DurableTransactionalEvaluator::new("parent", control_limits);
     let control_write = source(
         "durable-float-sum-limit-control",
-        "Reading.insert({ id: 99, value: 99.0f });",
+        include_str!("fixtures/durable-float-sum-limit-control.orna"),
     );
     assert!(matches!(
         control_evaluator
@@ -203,13 +185,7 @@ async fn durable_failed_float_sum_rolls_back_only_tentative_rows() {
     };
     let seed = source(
         "durable-float-sum-limit-seed",
-        r#"
-            Reading.insert({ id: 1, value: 1.0f });
-            Reading.insert({ id: 2, value: 2.0f });
-            Reading.insert({ id: 3, value: 3.0f });
-            Reading.insert({ id: 4, value: 4.0f });
-            assert total() == 10.0f;
-        "#,
+        include_str!("fixtures/durable-float-sum-limit-seed.orna"),
     );
     let default_evaluator = DurableTransactionalEvaluator::new("parent", Limits::default());
     assert!(matches!(
@@ -226,10 +202,7 @@ async fn durable_failed_float_sum_rolls_back_only_tentative_rows() {
     let evaluator = DurableTransactionalEvaluator::new("parent", limits);
     let write = source(
         "durable-float-sum-limit-rollback",
-        r#"
-            Reading.insert({ id: 5, value: 5.0f });
-            assert total() == 15.0f;
-        "#,
+        include_str!("fixtures/durable-float-sum-limit-rollback.orna"),
     );
 
     let outcome = evaluator
