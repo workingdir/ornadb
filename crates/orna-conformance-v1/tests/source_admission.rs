@@ -40,7 +40,11 @@ fn repository() -> (TempDir, Repository) {
         &["config", "user.name", "source admission test"],
     );
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
-    fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
+    fs::write(
+        temp.path().join("main.orna"),
+        include_str!("fixtures/source-admission-bootstrap.orna"),
+    )
+    .unwrap();
     git(temp.path(), &["add", "main.orna"]);
     git(temp.path(), &["commit", "--quiet", "-m", "initial"]);
     let repository = Repository::discover(temp.path()).unwrap();
