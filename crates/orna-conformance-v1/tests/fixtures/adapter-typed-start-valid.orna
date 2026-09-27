@@ -1,0 +1,2 @@
+pub fn start_int(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+    sys.start<Int>(function, arguments, as: Int);
