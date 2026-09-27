@@ -652,6 +652,11 @@ fn discover_worktree_rows(
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             let path = entry.path();
+            if directory == root
+                && path.file_name().and_then(|name| name.to_str()) == Some(".git")
+            {
+                continue;
+            }
             let metadata =
                 fs::symlink_metadata(&path).map_err(|_| ProjectLoadError::SourceUnavailable)?;
             if metadata.is_dir() {
