@@ -3015,7 +3015,7 @@ fn harness_maps_database_cwd_and_serializes_unsupported_member_diagnostic() {
             None,
             None,
         ),
-        "pub fn cwd() = sys.database.cwd;",
+        include_str!("fixtures/sys-database-cwd-direct.orna"),
         "ORNA-SYS-022",
     );
     let valid_fixture = &valid.fixtures[0];
@@ -3062,7 +3062,7 @@ fn harness_maps_database_cwd_and_serializes_unsupported_member_diagnostic() {
             Some("ORNA-S022-UNSUPPORTED"),
             None,
         ),
-        "pub fn legacy() = sys.database.legacy_member;",
+        include_str!("fixtures/sys-database-unsupported-member.orna"),
         "ORNA-SYS-022",
     );
     let invalid_fixture = &invalid.fixtures[0];
