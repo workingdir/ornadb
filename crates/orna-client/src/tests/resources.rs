@@ -1,5 +1,31 @@
 use super::*;
 
+fn application_integer_resource_fixture() -> (
+    ActiveDatabaseRevision,
+    FunctionId,
+    RevisionPair,
+    FunctionArgument,
+) {
+    let parameter_id = ParameterId::from_bytes([0xd3; 16]);
+    let parameter = ParameterDefinition::new(
+        parameter_id,
+        "p_value",
+        0,
+        ResolvedType::Scalar(StandardScalar::Integer),
+        None,
+    );
+    let (active, function, pair, _) = version_one_active_with_shape(
+        FunctionDomain::Server,
+        vec![parameter],
+        FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::Integer)),
+        FunctionSecurity::Invoker,
+        FunctionVolatility::Stable,
+    );
+    let argument = FunctionArgument::new(parameter_id, RuntimeValue::Integer(42))
+        .expect("application integer argument is valid");
+    (active, function, pair, argument)
+}
+
 #[test]
 fn vm_admission_resolves_and_decodes_an_authorised_client_revision() {
     let (active, function, pair, _) = version_one_active(true);
@@ -111,8 +137,19 @@ fn vm_admission_rejects_stale_active_catalogue_before_root_binding() {
     let (base, function, pair, _) = version_one_active(true);
     let stale_origin = SourceOrigin::new(SourceUnitId::from_bytes([1; 16]), 0, 0)
         .expect("valid stale source origin");
-    let active = active_with_replaced_first_origin(&base, stale_origin)
-        .expect("stale active revision should retain structural validity");
+    let mut origins = base.origins().to_vec();
+    let function_origin = origins
+        .iter_mut()
+        .find(|origin| origin.identity() == DefinitionIdentity::Function(function))
+        .expect("the selected function has a source origin");
+    *function_origin = DefinitionOrigin::new(function_origin.identity(), stale_origin);
+    let active = active_with_content(
+        &base,
+        base.source().clone(),
+        origins,
+        base.references().to_vec(),
+    )
+    .expect("stale active revision should retain structural validity");
     let authorisation = authorise(pair, function);
     let limits =
         super::super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
@@ -133,17 +170,18 @@ fn vm_admission_rejects_stale_active_catalogue_before_root_binding() {
     let mut host = super::super::vm::ClientVmHostContext::new(&registry, runtime_offer, limits)
         .expect("valid VM host");
 
+    let admission = super::super::vm::admit_client_function(
+        &active,
+        &authorisation,
+        &mut host,
+        limits,
+        &[],
+        &[],
+    );
     assert!(matches!(
-        super::super::vm::admit_client_function(
-            &active,
-            &authorisation,
-            &mut host,
-            limits,
-            &[],
-            &[],
-        ),
+        &admission,
         Err(super::super::vm::ClientVmAdmissionError::SemanticRejected)
-    ));
+    ), "unexpected stale-catalogue admission result: {admission:?}");
     assert!(!host.has_root_binding());
 }
 
@@ -2205,22 +2243,8 @@ fn client_resource_cache_keeps_key_and_transitions() {
 
 #[test]
 fn resource_invalidation_cancels_owned_request_and_rejects_late_completion() {
-    let (active, _, pair, _) = version_two_client_call_active();
-    let standard = active
-        .catalogue_hash_context()
-        .standard()
-        .expect("version-two fixture pins the verified standard snapshot");
-    let target = InvocationTarget::verified_standard(
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
-        pair,
-        standard.revision(),
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    );
-    let argument = FunctionArgument::new(
-        orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
-        RuntimeValue::Integer(42),
-    )
-    .unwrap();
+    let (active, function, pair, argument) = application_integer_resource_fixture();
+    let target = InvocationTarget::new(function, pair);
     let digest =
         ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
             .unwrap();
@@ -2349,22 +2373,8 @@ fn resource_stream_invalidation_keeps_state_when_abandon_fails() {
 
 #[test]
 fn resource_invalidation_keeps_terminal_ready_completion() {
-    let (active, _, pair, _) = version_two_client_call_active();
-    let standard = active
-        .catalogue_hash_context()
-        .standard()
-        .expect("version-two fixture pins the verified standard snapshot");
-    let target = InvocationTarget::verified_standard(
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
-        pair,
-        standard.revision(),
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    );
-    let argument = FunctionArgument::new(
-        orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
-        RuntimeValue::Integer(42),
-    )
-    .unwrap();
+    let (active, function, pair, argument) = application_integer_resource_fixture();
+    let target = InvocationTarget::new(function, pair);
     let digest =
         ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
             .unwrap();
@@ -2401,22 +2411,8 @@ fn resource_invalidation_keeps_terminal_ready_completion() {
 
 #[test]
 fn resource_invalidation_rejects_wrong_typed_terminal_cancellation() {
-    let (active, _, pair, _) = version_two_client_call_active();
-    let standard = active
-        .catalogue_hash_context()
-        .standard()
-        .expect("version-two fixture pins the verified standard snapshot");
-    let target = InvocationTarget::verified_standard(
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
-        pair,
-        standard.revision(),
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    );
-    let argument = FunctionArgument::new(
-        orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
-        RuntimeValue::Integer(42),
-    )
-    .unwrap();
+    let (active, function, pair, argument) = application_integer_resource_fixture();
+    let target = InvocationTarget::new(function, pair);
     let digest =
         ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
             .unwrap();
@@ -2459,22 +2455,8 @@ fn resource_invalidation_rejects_wrong_typed_terminal_cancellation() {
 
 #[test]
 fn resource_invalidation_rejects_mismatched_terminal_cancellation_without_losing_owner() {
-    let (active, _, pair, _) = version_two_client_call_active();
-    let standard = active
-        .catalogue_hash_context()
-        .standard()
-        .expect("version-two fixture pins the verified standard snapshot");
-    let target = InvocationTarget::verified_standard(
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
-        pair,
-        standard.revision(),
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    );
-    let argument = FunctionArgument::new(
-        orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
-        RuntimeValue::Integer(42),
-    )
-    .unwrap();
+    let (active, function, pair, argument) = application_integer_resource_fixture();
+    let target = InvocationTarget::new(function, pair);
     let digest =
         ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
             .unwrap();
@@ -2877,22 +2859,8 @@ fn stale_replacement_accepts_typed_null_for_primitive_value_type() {
 
 #[test]
 fn resource_invalidation_preflights_generation_before_releasing_request() {
-    let (active, _, pair, _) = version_two_client_call_active();
-    let standard = active
-        .catalogue_hash_context()
-        .standard()
-        .expect("version-two fixture pins the verified standard snapshot");
-    let target = InvocationTarget::verified_standard(
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
-        pair,
-        standard.revision(),
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    );
-    let argument = FunctionArgument::new(
-        orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
-        RuntimeValue::Integer(42),
-    )
-    .unwrap();
+    let (active, function, pair, argument) = application_integer_resource_fixture();
+    let target = InvocationTarget::new(function, pair);
     let digest =
         ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
             .unwrap();
@@ -2935,22 +2903,8 @@ fn resource_invalidation_preflights_generation_before_releasing_request() {
 
 #[test]
 fn resource_invalidation_retains_owned_request_when_abandon_fails() {
-    let (active, _, pair, _) = version_two_client_call_active();
-    let standard = active
-        .catalogue_hash_context()
-        .standard()
-        .expect("version-two fixture pins the verified standard snapshot");
-    let target = InvocationTarget::verified_standard(
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
-        pair,
-        standard.revision(),
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    );
-    let argument = FunctionArgument::new(
-        orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
-        RuntimeValue::Integer(42),
-    )
-    .unwrap();
+    let (active, function, pair, argument) = application_integer_resource_fixture();
+    let target = InvocationTarget::new(function, pair);
     let digest =
         ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
             .unwrap();
@@ -2997,22 +2951,8 @@ fn resource_invalidation_retains_owned_request_when_abandon_fails() {
 
 #[test]
 fn replacing_complete_resource_key_cancels_previous_generation() {
-    let (active, _, pair, _) = version_two_client_call_active();
-    let standard = active
-        .catalogue_hash_context()
-        .standard()
-        .expect("version-two fixture pins the verified standard snapshot");
-    let target = InvocationTarget::verified_standard(
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
-        pair,
-        standard.revision(),
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    );
-    let argument = FunctionArgument::new(
-        orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
-        RuntimeValue::Integer(42),
-    )
-    .unwrap();
+    let (active, function, pair, argument) = application_integer_resource_fixture();
+    let target = InvocationTarget::new(function, pair);
     let digest =
         ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
             .unwrap();
@@ -3068,22 +3008,8 @@ fn replacing_complete_resource_key_cancels_previous_generation() {
 
 #[test]
 fn replacing_same_revision_keeps_terminal_executor_completion() {
-    let (active, _, pair, _) = version_two_client_call_active();
-    let standard = active
-        .catalogue_hash_context()
-        .standard()
-        .expect("version-two fixture pins the verified standard snapshot");
-    let target = InvocationTarget::verified_standard(
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
-        pair,
-        standard.revision(),
-        orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    );
-    let argument = FunctionArgument::new(
-        orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
-        RuntimeValue::Integer(42),
-    )
-    .unwrap();
+    let (active, function, pair, argument) = application_integer_resource_fixture();
+    let target = InvocationTarget::new(function, pair);
     let digest =
         ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
             .unwrap();
