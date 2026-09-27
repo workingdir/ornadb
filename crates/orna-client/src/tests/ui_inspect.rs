@@ -9,7 +9,7 @@ fn inspect_epoch(high: u8, low: u8) -> super::super::InspectEpochId {
 
 #[test]
 fn standard_ui_constructor_rejects_a_non_v10_standard_snapshot() {
-    let standard = standard_v7();
+    let standard = standard_v6();
     let active = empty_version_two_active(&standard);
     let context = super::super::ClientExecutionContext {
         pair: active.pair(),
