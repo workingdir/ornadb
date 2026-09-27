@@ -7111,6 +7111,7 @@ mod tests {
             BTreeSet::new(),
             BTreeSet::new(),
             NominalDefinitions::from([("Thing".into(), definition)]),
+            BTreeSet::new(),
         );
         let fields = vec![
             (object_id_raw([2; 16]), Value::Int(1.into())),
@@ -7600,6 +7601,7 @@ mod tests {
             BTreeSet::new(),
             BTreeSet::new(),
             NominalDefinitions::new(),
+            BTreeSet::new(),
         );
         scope.0.insert("failure".into(), Value::Error(failure));
         context.evaluate(&parsed.value, &mut scope, 0)
@@ -7672,6 +7674,7 @@ mod tests {
             BTreeSet::new(),
             BTreeSet::new(),
             NominalDefinitions::new(),
+            BTreeSet::new(),
         );
         context.evaluate(&parsed.value, &mut scope, 0)
     }
@@ -7820,6 +7823,7 @@ mod tests {
             BTreeSet::new(),
             BTreeSet::new(),
             NominalDefinitions::new(),
+            BTreeSet::new(),
         );
         context.evaluate(&parsed.value, &mut scope, 0)
     }
@@ -7963,6 +7967,7 @@ mod tests {
             BTreeSet::new(),
             BTreeSet::new(),
             NominalDefinitions::new(),
+            BTreeSet::new(),
         );
 
         assert_eq!(
