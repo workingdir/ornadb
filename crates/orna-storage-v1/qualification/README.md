@@ -56,3 +56,29 @@ match and both arrays contain unique IDs,
 `2` when the submitted evidence is malformed or fails the criterion. The gate
 validates submitted IDs; it does not collect rows, establish evidence
 provenance, or claim that a 24-hour production profile was run.
+
+## Compact bounded-memory evidence
+
+`verify_compact_memory.py` checks the ORNA-COMPACT-013 bounded-memory
+criterion against a budget declared for the same profile run. Provide positive
+integer byte counts for the run's declared memory budget and measured peak RSS:
+
+```json
+{
+  "memory_budget_bytes": 1073741824,
+  "peak_rss_bytes": 734003200
+}
+```
+
+Run it with:
+
+```sh
+python3 crates/orna-storage-v1/qualification/verify_compact_memory.py profile.json
+```
+
+Exit status is `0` when peak RSS is at or below the declared budget, `1` when
+valid evidence shows that peak RSS exceeds the budget, and `2` when the
+evidence is malformed. The specification sets no universal byte limit, so the
+budget is supplied per run. This gate checks submitted measurements; it does
+not collect memory usage, establish evidence provenance, or claim that a
+24-hour production profile was run.
