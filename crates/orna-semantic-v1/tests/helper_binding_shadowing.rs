@@ -5,15 +5,7 @@ use orna_semantic_v1::{
     DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE,
 };
 
-const TABLE_HELPER: &str = r#"
-    pub table User(id: Uuid) { name: Str, }
-    pub table Account(id: Uuid) { user_id: Uuid, }
-
-    pub fn related(): Bool =
-        every(User, user =>
-            exists(Account, account => account.user_id == user.id)
-        );
-"#;
+const TABLE_HELPER: &str = include_str!("fixtures/imported_helper_dependencies/checks.orna");
 
 fn module<'a>(analysis: &'a Analysis, name: &str) -> &'a ModuleHeader {
     analysis
@@ -54,18 +46,7 @@ fn imported_helper_shadowed_by_callback_local_does_not_expand_imported_tables() 
         ModuleInput::new("checks.orna", TABLE_HELPER),
         ModuleInput::new(
             "consumer.orna",
-            r#"
-                use checks.{related};
-                pub table User(id: Uuid) { name: Str, }
-                pub table Account(id: Uuid) { user_id: Uuid, }
-
-                pub fn callback(): Bool = every(User, user => {
-                    let related = () => true;
-                    related()
-                });
-
-                assert callback();
-            "#,
+            include_str!("fixtures/imported-helper-shadowing/callback-local.orna"),
         ),
     ]);
 
@@ -78,18 +59,7 @@ fn imported_helper_shadowed_by_local_binding_does_not_expand_imported_tables() {
         ModuleInput::new("checks.orna", TABLE_HELPER),
         ModuleInput::new(
             "consumer.orna",
-            r#"
-                use checks.{related};
-                pub table User(id: Uuid) { name: Str, }
-                pub table Account(id: Uuid) { user_id: Uuid, }
-
-                pub fn local(): Bool {
-                    let related = () => true;
-                    return related();
-                }
-
-                assert local();
-            "#,
+            include_str!("fixtures/imported-helper-shadowing/local-binding.orna"),
         ),
     ]);
 
@@ -102,15 +72,7 @@ fn imported_helper_shadowed_by_parameter_does_not_expand_imported_tables() {
         ModuleInput::new("checks.orna", TABLE_HELPER),
         ModuleInput::new(
             "consumer.orna",
-            r#"
-                use checks.{related};
-                pub table User(id: Uuid) { name: Str, }
-                pub table Account(id: Uuid) { user_id: Uuid, }
-
-                pub fn parameter(related: fn(Int): Bool): Bool = related(0);
-
-                assert parameter(_ => true);
-            "#,
+            include_str!("fixtures/imported-helper-shadowing/parameter.orna"),
         ),
     ]);
 
