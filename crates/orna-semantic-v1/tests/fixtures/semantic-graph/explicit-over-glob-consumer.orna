@@ -1,0 +1,6 @@
+use sys as system;
+use left.{pick};
+use right.*;
+
+fn chosen() = pick();
+assert true;
