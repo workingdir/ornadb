@@ -84,7 +84,7 @@ fn accepts_client_action_call_with_canonical_target_and_argument_identities() {
 }
 
 #[test]
-fn sorts_resource_and_action_arguments_by_checked_parameter_id() {
+fn preserves_resource_and_action_argument_source_order() {
     let integer = ResolvedType::Scalar(StandardScalar::Integer);
     let resource_target_id = FunctionId::from_bytes([0x71; 16]);
     let resource_high_parameter_id = ParameterId::from_bytes([0x72; 16]);
@@ -112,7 +112,7 @@ fn sorts_resource_and_action_arguments_by_checked_parameter_id() {
         )],
     )
     .unwrap();
-    let resource_source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run() RETURNS INTEGER IS BEGIN RETURN AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(p_low => 7, p_high => 8)); END;";
+    let resource_source = include_str!("fixtures/resource-argument-order.orna");
     let resource_report = check(
         &bundle([("resource-argument-order.orna", resource_source)]),
         &resource_base,
@@ -145,10 +145,18 @@ fn sorts_resource_and_action_arguments_by_checked_parameter_id() {
             .map(|(parameter, _)| *parameter)
             .collect::<Vec<_>>(),
         vec![
-            super::super::CheckedParameterId::Existing(resource_low_parameter_id),
             super::super::CheckedParameterId::Existing(resource_high_parameter_id),
+            super::super::CheckedParameterId::Existing(resource_low_parameter_id),
         ]
     );
+    assert!(matches!(
+        &operation.arguments()[0].1,
+        CheckedClientExpression::Integer { value: 8, .. }
+    ));
+    assert!(matches!(
+        &operation.arguments()[1].1,
+        CheckedClientExpression::Integer { value: 7, .. }
+    ));
 
     let action_target_id = FunctionId::from_bytes([0x76; 16]);
     let action_high_parameter_id = ParameterId::from_bytes([0x78; 16]);
@@ -179,7 +187,7 @@ fn sorts_resource_and_action_arguments_by_checked_parameter_id() {
     let standard =
         check_standard_library_source(&verified_standard_library_with_action_for_test()).unwrap();
     let action_context = StandardApplicationCheckContext::try_new(&action_base, &standard).unwrap();
-    let action_source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run() RETURNS std.Action AS std.action.call(target => tasks.run, arguments => std.call.args(p_low => 7, p_high => 8));";
+    let action_source = include_str!("fixtures/action-argument-order.orna");
     let action_report = check_standard_application(
         &bundle([("action-argument-order.orna", action_source)]),
         &action_context,
@@ -210,10 +218,18 @@ fn sorts_resource_and_action_arguments_by_checked_parameter_id() {
             .map(|(parameter, _)| *parameter)
             .collect::<Vec<_>>(),
         vec![
-            super::super::CheckedParameterId::Existing(action_low_parameter_id),
             super::super::CheckedParameterId::Existing(action_high_parameter_id),
+            super::super::CheckedParameterId::Existing(action_low_parameter_id),
         ]
     );
+    assert!(matches!(
+        &operation.arguments()[0].1,
+        CheckedClientExpression::Integer { value: 8, .. }
+    ));
+    assert!(matches!(
+        &operation.arguments()[1].1,
+        CheckedClientExpression::Integer { value: 7, .. }
+    ));
 }
 
 #[test]
