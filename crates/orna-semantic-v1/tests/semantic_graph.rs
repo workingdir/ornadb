@@ -304,21 +304,21 @@ fn table_selectors_are_callable_and_reject_rows_from_other_tables() {
 fn attached_table_results_preserve_nominal_identity_and_row_selectors() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
-        "pub fn create(customer: Customer): Order = Order.insert({ customer: customer, created: now() });",
-        "pub fn created(): Instant = Order.one().created;",
-        "use contacts as addressbook; pub fn read(): contacts.Contact = addressbook.Contact.one();",
-        "use contacts as addressbook; pub fn name(): Str = addressbook.Contact.one().name;",
-        "pub fn pay(order: Order) = Payment.insert({ order: order, amount: 10.GBP });",
+        include_str!("fixtures/attached-table-create-order.orna"),
+        include_str!("fixtures/attached-table-read-created.orna"),
+        include_str!("fixtures/attached-table-read-contact.orna"),
+        include_str!("fixtures/attached-table-read-contact-name.orna"),
+        include_str!("fixtures/attached-table-insert-payment.orna"),
     ] {
         let result =
             analyze_with_catalogue(&[ModuleInput::new("consumer.orna", source)], &catalogue);
         assert!(result.is_ok(), "{source}: {:?}", result.diagnostics);
     }
     for source in [
-        "pub fn bad(customer: Customer) = Payment.insert({ order: customer, amount: 10.GBP });",
-        "pub fn bad(customer: Customer) = Payment.insert({ order: { customer: customer, created: now() }, amount: 10.GBP });",
-        "pub fn bad(): Order = Contact.one();",
-        "pub fn bad(): Contact = contacts.Contact.one();",
+        include_str!("fixtures/attached-table-reject-customer-payment.orna"),
+        include_str!("fixtures/attached-table-reject-struct-payment.orna"),
+        include_str!("fixtures/attached-table-reject-contact-order.orna"),
+        include_str!("fixtures/attached-table-reject-nominal-contact.orna"),
     ] {
         let result =
             analyze_with_catalogue(&[ModuleInput::new("consumer.orna", source)], &catalogue);
@@ -335,19 +335,19 @@ fn stored_email_provider_is_typed_without_changing_connector_messages() {
     let catalogue = Catalogue::authoritative_fixture();
     for (source, expected) in [
         (
-            "pub fn store() = mail.Email.insert({ provider: \"google\", id: \"message-1\" });",
+            include_str!("fixtures/stored-email-provider-valid.orna"),
             None,
         ),
         (
-            "pub fn store() = mail.Email.insert({ provider: 42 });",
+            include_str!("fixtures/stored-email-provider-wrong-type.orna"),
             Some(DIAG_TYPE),
         ),
         (
-            "pub fn store() = mail.Email.insert({ unknown: \"google\" });",
+            include_str!("fixtures/stored-email-provider-unknown-field.orna"),
             Some(DIAG_TYPE),
         ),
         (
-            "pub fn read() = google.mail(credential: std.secret.ref(\"google.personal\")) | for_each(message => message.provider);",
+            include_str!("fixtures/stored-email-provider-connector-message.orna"),
             Some(DIAG_UNRESOLVED),
         ),
     ] {
