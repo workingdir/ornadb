@@ -153,18 +153,7 @@ fn standard_catalogue_retains_verified_dependency_provenance() {
 }
 
 fn collection_catalogue() -> Catalogue {
-    let source = r#"
-        pub fn first(rows: [Int]): Int? = null;
-        pub fn one(rows: [Int]): Int = 0;
-        pub fn every(rows: [Int], predicate: fn(Int): Bool): Bool = true;
-        pub fn exists(rows: [Int], predicate: fn(Int): Bool): Bool = false;
-        pub fn sum(rows: [Int]): Int = 0;
-        pub fn min(rows: [Int]): Int? = null;
-        pub fn max(rows: [Int]): Int? = null;
-        pub fn map(rows: [Int], transform: fn(Int): Int): [Int] = rows;
-        pub fn flat_map(rows: [Int], transform: fn(Int): [Int]): [Int] = rows;
-        pub fn sort_by(rows: [Int], key: fn(Int): Int): [Int] = rows;
-    "#;
+    let source = include_str!("fixtures/collection-catalogue.orna");
     let profile = StandardDependencyProfile::from_sources(
         "orna.std/v1-collection",
         [("std/collection.orna".into(), source.into())],
@@ -176,11 +165,7 @@ fn collection_catalogue() -> Catalogue {
 }
 
 fn float_collection_catalogue() -> Catalogue {
-    let source = r#"
-        pub fn sum(rows: [Float]): Float = 0.0f;
-        pub fn min(rows: [Float]): Float? = null;
-        pub fn max(rows: [Float]): Float? = null;
-    "#;
+    let source = include_str!("fixtures/float-collection-catalogue.orna");
     let profile = StandardDependencyProfile::from_sources(
         "orna.std/v1-float-collection",
         [("std/collection.orna".into(), source.into())],
