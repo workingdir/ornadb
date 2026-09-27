@@ -2925,7 +2925,7 @@ fn harness_maps_sys_resolve_type_error_and_serializes_diagnostic_evidence() {
             Some("ORNA-S021-TYPE"),
             None,
         ),
-        "pub fn resolve() = sys.resolve(1);",
+        include_str!("fixtures/sys-resolve-type-error.orna"),
         "ORNA-SYS-076",
     );
     let fixture = &report.fixtures[0];
