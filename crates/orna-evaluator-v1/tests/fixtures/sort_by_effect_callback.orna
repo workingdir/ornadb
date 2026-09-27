@@ -1,0 +1,2 @@
+fn key(value: Int) = Note.insert(value);
+fn run() = sort_by([3, 1], key);
