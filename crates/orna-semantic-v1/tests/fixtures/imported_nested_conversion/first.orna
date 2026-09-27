@@ -1,0 +1,10 @@
+pub table Audit { value: Str, }
+pub type Mid {
+    value: Str,
+    impl From<Str> {
+        fn from(value) {
+            Audit.insert({ value: value });
+            Mid { value: value }
+        }
+    }
+}

@@ -2011,39 +2011,15 @@ fn imported_nested_from_metadata_resolves_qualified_targets_and_effects() {
     let result = analyze(&[
         ModuleInput::new(
             "main.orna",
-            r#"
-                use first;
-                use target;
-                pub fn convert(): target.Final =
-                    target.Final.from(first.Mid.from("raw"));
-            "#,
+            include_str!("fixtures/imported_nested_conversion/main.orna"),
         ),
         ModuleInput::new(
             "target.orna",
-            r#"
-                use first;
-                pub type Final {
-                    value: Str,
-                    impl From<first.Mid> {
-                        fn from(value) = Final { value: "final" };
-                    }
-                }
-            "#,
+            include_str!("fixtures/imported_nested_conversion/target.orna"),
         ),
         ModuleInput::new(
             "first.orna",
-            r#"
-                pub table Audit { value: Str, }
-                pub type Mid {
-                    value: Str,
-                    impl From<Str> {
-                        fn from(value) {
-                            Audit.insert({ value: value });
-                            Mid { value: value }
-                        }
-                    }
-                }
-            "#,
+            include_str!("fixtures/imported_nested_conversion/first.orna"),
         ),
     ]);
     expect_accepted(&result);

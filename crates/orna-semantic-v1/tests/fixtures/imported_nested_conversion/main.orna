@@ -1,0 +1,4 @@
+use first;
+use target;
+pub fn convert(): target.Final =
+    target.Final.from(first.Mid.from("raw"));
