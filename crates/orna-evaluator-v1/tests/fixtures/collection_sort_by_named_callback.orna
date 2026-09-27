@@ -1,0 +1,2 @@
+fn key(value: Int) = value % 10;
+fn run() = std.collection.sort_by(rows: [12, 3, 1], key: key);
