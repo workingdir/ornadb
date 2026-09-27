@@ -251,15 +251,7 @@ fn parsed_keyed_relation_one_observes_candidate_rows_and_absence_rolls_back() {
         fixture_id: "relation-one".into(),
         source_id: "relation-one.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Note(id: Int) { text: Str, }
-            fn find_note(id: Int) = Note | filter(note => note.id == id) | one();
-            fn parent() {
-                Note.insert({ id: 7, text: "candidate" });
-                assert find_note(7).text == "candidate";
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-one-candidate-row.orna").into(),
     };
     let mut committed = TransactionalEvaluator::new("parent", Limits::default());
     assert!(matches!(
@@ -276,15 +268,7 @@ fn parsed_keyed_relation_one_observes_candidate_rows_and_absence_rolls_back() {
         fixture_id: "relation-one-missing".into(),
         source_id: "relation-one-missing.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Note(id: Int) { text: Str, }
-            fn find_note(id: Int) = Note | filter(note => note.id == id) | one();
-            fn parent() {
-                Note.insert({ id: 7, text: "candidate" });
-                find_note(99);
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-one-absence-rollback.orna").into(),
     };
     let mut rolled_back = TransactionalEvaluator::new("parent", Limits::default());
     assert!(matches!(
@@ -303,16 +287,7 @@ fn parsed_relation_one_rejects_multiple_candidate_matches_and_rolls_back() {
         fixture_id: "relation-one-multiple".into(),
         source_id: "relation-one-multiple.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Note(id: Int) { text: Str, }
-            fn find_note(text: Str) = Note | filter(note => note.text == text) | one();
-            fn parent() {
-                Note.insert({ id: 1, text: "duplicate" });
-                Note.insert({ id: 2, text: "duplicate" });
-                find_note("duplicate");
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-one-multiple-candidates.orna").into(),
     };
     let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
 
