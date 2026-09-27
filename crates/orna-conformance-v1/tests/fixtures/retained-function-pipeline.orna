@@ -1,0 +1,5 @@
+fn add(value: Int, extra = 6) = value + extra;
+
+fn verify() = if (10 | add(extra: 6)) == 16 { 1 } else { 1 / 0 };
+
+fn reject() = 10 | add(value: 3);
