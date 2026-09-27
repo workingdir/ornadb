@@ -74,6 +74,22 @@ impl AtomicCommitStore for Store {
 }
 
 #[derive(Default)]
+struct PanickingStore {
+    commits: usize,
+}
+
+impl AtomicCommitStore for PanickingStore {
+    fn commit(
+        &mut self,
+        _: CommitRequest,
+        _: &dyn OwnerFence,
+    ) -> Result<CommitReceipt, StoreError> {
+        // Deliberately panic before changing the store's visible state.
+        panic!("store panicked before publication")
+    }
+}
+
+#[derive(Default)]
 struct Supervisor {
     events: Vec<(char, ChildId)>,
     fail_cancellation_once: Option<ChildId>,
@@ -394,6 +410,29 @@ fn provider_panic_revokes_owner_before_unwind_escapes() {
         store.commit(stale_commit(owner), &coordinator),
         Err(StoreError::OwnerFenceRejected)
     );
+    assert_eq!(store.commits, 0);
+}
+
+#[test]
+fn store_panic_revokes_owner_before_unwind_escapes() {
+    let (mut coordinator, owner) = active();
+    let mut provider = Provider;
+    let mut store = PanickingStore::default();
+    let mut faults = NoFault;
+
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        coordinator.execute(
+            owner,
+            &mut provider,
+            &mut store,
+            checkpoint(),
+            &mut faults,
+        )
+    }));
+
+    assert!(unwind.is_err());
+    assert_eq!(coordinator.phase(), TransactionPhase::RolledBack);
+    assert!(!coordinator.permits(owner));
     assert_eq!(store.commits, 0);
 }
 
