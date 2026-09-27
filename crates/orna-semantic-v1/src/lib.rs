@@ -690,6 +690,16 @@ impl Catalogue {
                         "race",
                         function(vec![Type::List(Box::new(Type::Error))], Type::Error),
                     ),
+                    (
+                        "timeout",
+                        named_function(
+                            vec![
+                                ("callback", function(Vec::new(), Type::Error)),
+                                ("duration", Type::Named("std.DURATION".into())),
+                            ],
+                            Type::Error,
+                        ),
+                    ),
                 ],
                 std::iter::empty::<&str>(),
             ),
@@ -1172,13 +1182,25 @@ impl Catalogue {
             Namespace(vec!["std".into(), "concurrent".into()]),
             fixture_module(
                 Namespace(vec!["std".into(), "concurrent".into()]),
-                [fixture_function(
-                    "parallel",
-                    function(
-                        vec![Type::List(Box::new(Type::Error))],
-                        Type::Stream(Box::new(Type::Error)),
+                [
+                    fixture_function(
+                        "parallel",
+                        function(
+                            vec![Type::List(Box::new(Type::Error))],
+                            Type::Stream(Box::new(Type::Error)),
+                        ),
                     ),
-                )],
+                    fixture_function(
+                        "timeout",
+                        named_function(
+                            vec![
+                                ("callback", function(Vec::new(), Type::Error)),
+                                ("duration", Type::Named("std.DURATION".into())),
+                            ],
+                            Type::Error,
+                        ),
+                    ),
+                ],
                 false,
             ),
         );
@@ -7293,6 +7315,11 @@ fn infer(
                 return inferred;
             }
             if let Some(inferred) =
+                infer_timeout_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
                 infer_relation_member_call(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
@@ -13130,6 +13157,99 @@ fn infer_race_call(
     }
     Some(Inferred {
         ty: result_type.unwrap_or(Type::Error),
+        effects,
+    })
+}
+
+fn infer_timeout_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let is_timeout = qualified_path(callee)
+        .as_deref()
+        .is_some_and(|path| path == ["std", "concurrent", "timeout"])
+        || matches!(callee, Expr::Name { text, .. }
+            if text == "timeout"
+                && local.get(text).or_else(|| scope.names.get(text)).is_none());
+    if !is_timeout {
+        return None;
+    }
+
+    let mut callback = None;
+    let mut duration = None;
+    let mut positional = 0;
+    for argument in arguments {
+        match argument.name.as_deref() {
+            Some("callback") if callback.is_none() => callback = Some(&argument.value),
+            Some("duration") if duration.is_none() => duration = Some(&argument.value),
+            Some(_) => {
+                diagnostics.push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
+                return Some(Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                });
+            }
+            None => {
+                let slot = match positional {
+                    0 => &mut callback,
+                    1 => &mut duration,
+                    _ => {
+                        diagnostics.push(diag(
+                            DIAG_TYPE,
+                            "timeout expects a callback and a duration",
+                        ));
+                        return Some(Inferred {
+                            ty: Type::Error,
+                            effects: EffectSummary::default(),
+                        });
+                    }
+                };
+                if slot.is_some() {
+                    diagnostics.push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
+                    return Some(Inferred {
+                        ty: Type::Error,
+                        effects: EffectSummary::default(),
+                    });
+                }
+                *slot = Some(&argument.value);
+                positional += 1;
+            }
+        }
+    }
+    let (Some(callback), Some(duration)) = (callback, duration) else {
+        diagnostics.push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        });
+    };
+
+    let callback = infer(callback, scope, local, diagnostics);
+    let duration = infer(duration, scope, local, diagnostics);
+    let mut effects = callback.effects.clone();
+    effects.join(&duration.effects);
+    let Type::Function {
+        parameters, result, ..
+    } = callback.ty
+    else {
+        diagnostics.push(diag(DIAG_TYPE, "timeout callback must be a function"));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects,
+        });
+    };
+    if !parameters.is_empty() {
+        diagnostics.push(diag(DIAG_TYPE, "timeout callback must not take parameters"));
+    }
+    let expected_duration = Type::Named("std.DURATION".into());
+    if !types_match(&expected_duration, &duration.ty) {
+        diagnostics.push(diag(DIAG_TYPE, "timeout duration must be a Duration"));
+    }
+    Some(Inferred {
+        ty: *result,
         effects,
     })
 }
