@@ -479,9 +479,18 @@ impl ActivationCoordinator {
         if faults.check(FaultPoint::BeforeProvider).is_err() {
             return self.rollback(RollbackReason::FaultInjected);
         }
-        let write = match provider.execute(owner.activation) {
-            Ok(value) => TypedWrite::new(value).into_record(),
-            Err(_) => return self.rollback(RollbackReason::ProviderFailed),
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            provider
+                .execute(owner.activation)
+                .map(|value| TypedWrite::new(value).into_record())
+        }));
+        let write = match result {
+            Ok(Ok(write)) => write,
+            Ok(Err(_)) => return self.rollback(RollbackReason::ProviderFailed),
+            Err(payload) => {
+                self.rollback(RollbackReason::ProviderFailed);
+                std::panic::resume_unwind(payload);
+            }
         };
         if self.require_committable(owner).is_err() {
             return self.rollback_for(owner);
