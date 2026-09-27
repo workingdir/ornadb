@@ -176,7 +176,57 @@ struct WatchBinding<'a, S: ?Sized> {
     state: &'a mut WatchCommandState,
 }
 
+fn repl_error_documentation(code: &str) -> (&'static str, &'static str) {
+    match code {
+        "ORNA-REPL-INPUT-LIMIT" => (
+            "submission is longer than the REPL input limit",
+            "shorten the submission and enter it again",
+        ),
+        "ORNA-REPL-INPUT-UTF8" => (
+            "submission is not valid UTF-8 text",
+            "re-enter the submission using valid UTF-8",
+        ),
+        "ORNA-REPL-COMMAND" => (
+            "command is unknown or unavailable in this REPL",
+            "enter `:help` to see the supported commands",
+        ),
+        "ORNA-REPL-AT" => (
+            "requested project snapshot could not be loaded",
+            "choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`",
+        ),
+        "ORNA-REPL-EFFECT" => (
+            "REPL preview cannot perform an effect",
+            "evaluate a pure expression or invoke the operation through its admitted runtime entry point",
+        ),
+        "ORNA-REPL-WATCH-FRAME" => (
+            "live update could not be read",
+            "start the watch again with `:watch expression`",
+        ),
+        "ORNA-REPL-WATCH-SOURCE" => (
+            "live update source is unavailable",
+            "start the watch again with `:watch expression`",
+        ),
+        "ORNA-S010-IMPORT" => (
+            "imported module is unavailable",
+            "use a captured standard dependency or remove the import",
+        ),
+        "ORNA-S012-UNRESOLVED" => (
+            "name could not be resolved",
+            "declare the name or add the matching `use` import before using it",
+        ),
+        "ORNA-S021-TYPE" => (
+            "expression has the wrong type",
+            "change the expression or its declared type so the value and requirement agree",
+        ),
+        _ => (
+            "expression could not be evaluated",
+            "review the expression and try again",
+        ),
+    }
+}
+
 fn write_repl_error<W: Write>(writer: &mut W, code: &str, color_enabled: bool) -> io::Result<()> {
+    let (title, help) = repl_error_documentation(code);
     write_styled(writer, AnsiColor::Red, b"error", color_enabled)?;
     writer.write_all(b"[")?;
     write_styled(
@@ -185,7 +235,11 @@ fn write_repl_error<W: Write>(writer: &mut W, code: &str, color_enabled: bool) -
         code.as_bytes(),
         color_enabled,
     )?;
-    writer.write_all(b"]\n")
+    writer.write_all(b"]: ")?;
+    writer.write_all(title.as_bytes())?;
+    writer.write_all(b"\nhelp: ")?;
+    writer.write_all(help.as_bytes())?;
+    writer.write_all(b"\n")
 }
 
 fn write_repl_value<W: Write>(
@@ -781,7 +835,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            format!("> {REPL_HELP}\n> :at CWD|HEAD|ref\n> error[ORNA-REPL-COMMAND]\n> 2 : Int\n> ")
+            format!("> {REPL_HELP}\n> :at CWD|HEAD|ref\n> error[ORNA-REPL-COMMAND]: command is unknown or unavailable in this REPL\nhelp: enter `:help` to see the supported commands\n> 2 : Int\n> ")
         );
     }
 
@@ -841,7 +895,7 @@ mod tests {
         assert_eq!(loader.calls.get(), 0);
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-REPL-AT]\n> error[ORNA-REPL-AT]\n> error[ORNA-REPL-AT]\n> "
+            "> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> "
         );
     }
 
@@ -859,7 +913,7 @@ mod tests {
         .expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> > error[ORNA-REPL-AT]\n> 42 : Int\n> "
+            "> > error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> 42 : Int\n> "
         );
     }
 
@@ -891,7 +945,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL recovers");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-REPL-INPUT-LIMIT]\n> 1 : Int\n> "
+            "> error[ORNA-REPL-INPUT-LIMIT]: submission is longer than the REPL input limit\nhelp: shorten the submission and enter it again\n> 1 : Int\n> "
         );
     }
 
@@ -915,7 +969,7 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         let output = String::from_utf8(output).expect("UTF-8");
-        assert!(output.starts_with("> 2 : Int\n> error[ORNA-S021-TYPE]"));
+        assert!(output.starts_with("> 2 : Int\n> error[ORNA-S021-TYPE]: expression has the wrong type\nhelp: change the expression or its declared type so the value and requirement agree\n"));
         assert!(output.ends_with("> 2 : Int\n> "));
     }
 
@@ -927,7 +981,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-S021-TYPE]\n> {\"code\": \"ORNA-S021-TYPE\", \"message\": \"<redacted>\", \"redacted\": true, \"severity\": \"error\"} : Map\n> 42 : Int\n> null : Null\n> "
+            "> error[ORNA-S021-TYPE]: expression has the wrong type\nhelp: change the expression or its declared type so the value and requirement agree\n> {\"code\": \"ORNA-S021-TYPE\", \"message\": \"<redacted>\", \"redacted\": true, \"severity\": \"error\"} : Map\n> 42 : Int\n> null : Null\n> "
         );
     }
 
@@ -941,7 +995,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> > 2 : Int\n> error[ORNA-REPL-EFFECT]\n> 2 : Int\n> "
+            "> > 2 : Int\n> error[ORNA-REPL-EFFECT]: REPL preview cannot perform an effect\nhelp: evaluate a pure expression or invoke the operation through its admitted runtime entry point\n> 2 : Int\n> "
         );
     }
 
@@ -953,7 +1007,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL recovers");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> 2 : Int\n> error[ORNA-REPL-INPUT-UTF8]\n> 2 : Int\n> "
+            "> 2 : Int\n> error[ORNA-REPL-INPUT-UTF8]: submission is not valid UTF-8 text\nhelp: re-enter the submission using valid UTF-8\n> 2 : Int\n> "
         );
     }
 
