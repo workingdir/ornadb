@@ -2049,7 +2049,7 @@ fn imported_nested_from_metadata_resolves_qualified_targets_and_effects() {
     expect_accepted(&result);
     let main = result
         .modules
-        .get(&Namespace(vec!["main".into()]))
+        .get(&Namespace(vec![]))
         .expect("main module");
     let convert = main.symbols.get("convert").expect("conversion function");
     assert!(convert.effects.effects.contains("database write"));
