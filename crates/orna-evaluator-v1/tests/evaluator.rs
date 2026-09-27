@@ -9286,7 +9286,7 @@ fn uuid7_is_root_effect_intrinsic_and_tag37_round_trips() {
         0xab, 0xcd,
     ];
     let expected = Value::uuid(bytes);
-    let functions = functions_from_source("fn main() = uuid7();");
+    let functions = functions_from_source(include_str!("fixtures/uuid7_main_effect.orna"));
     let mut effects = Uuid7Effects {
         calls: 0,
         arguments: Vec::new(),
@@ -9315,7 +9315,7 @@ fn uuid7_direct_evaluation_fails_closed_without_an_effect_handler() {
     assert_eq!(
         code(invoke_named(
             "main",
-            &functions_from_source("fn main() = uuid7();"),
+            &functions_from_source(include_str!("fixtures/uuid7_main_effect.orna")),
             &Environment::new(),
             Limits::default(),
         )),
@@ -9326,7 +9326,7 @@ fn uuid7_direct_evaluation_fails_closed_without_an_effect_handler() {
 #[test]
 fn uuid7_rejects_arguments_and_preserves_function_shadowing() {
     let expected = Value::uuid([0x42; 16]);
-    let functions = functions_from_source("fn main() = uuid7(1);");
+    let functions = functions_from_source(include_str!("fixtures/uuid7_with_argument.orna"));
     let mut effects = Uuid7Effects {
         calls: 0,
         arguments: Vec::new(),
@@ -9344,7 +9344,7 @@ fn uuid7_rejects_arguments_and_preserves_function_shadowing() {
     );
     assert_eq!(effects.calls, 0);
 
-    let functions = functions_from_source("fn uuid7() = 7; fn main() = uuid7();");
+    let functions = functions_from_source(include_str!("fixtures/uuid7_shadowed_by_function.orna"));
     let mut effects = Uuid7Effects {
         calls: 0,
         arguments: Vec::new(),
