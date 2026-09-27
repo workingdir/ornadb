@@ -1,0 +1,1 @@
+fn earliest(rows: [Instant]) = min(rows); fn latest(rows: [Instant]) = max(rows);
