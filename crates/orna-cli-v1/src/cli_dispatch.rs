@@ -33,6 +33,9 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         Command::Status {
             format: StatusFormat::Short,
         } => run_status_short(&parsed.endpoint, parsed.color.stdout_enabled()),
+        Command::Status {
+            format: StatusFormat::Json,
+        } => run_status_json(&parsed.endpoint),
         Command::Check => check_project(&parsed.endpoint, parsed.color.stdout_enabled()),
         Command::Invoke(ref target) => {
             run_pure_invocation(&parsed.endpoint, target, parsed.color.stdout_enabled())

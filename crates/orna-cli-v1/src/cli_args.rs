@@ -21,6 +21,18 @@ pub(super) enum StatusFormat {
     Human,
     Porcelain,
     Short,
+    Json,
+}
+
+impl StatusFormat {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "human" => Self::Human,
+            "short" => Self::Short,
+            "json" => Self::Json,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,6 +77,12 @@ pub(super) fn requested_color_mode(arguments: &[String]) -> ColorMode {
                 };
                 color = mode;
             }
+            "--format" => {
+                words.next();
+                if words.next().is_none() {
+                    break;
+                }
+            }
             _ => break,
         }
     }
@@ -79,8 +97,9 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     let mut endpoint = Endpoint::ManagedLocal;
     let mut has_explicit_endpoint = false;
     let mut color = ColorMode::Auto;
+    let mut output_format = None;
     let mut words = arguments.iter().map(String::as_str).peekable();
-    while matches!(words.peek(), Some(&"--db") | Some(&"--color")) {
+    while matches!(words.peek(), Some(&"--db") | Some(&"--color") | Some(&"--format")) {
         match words.next() {
             Some("--db") => {
                 has_explicit_endpoint = true;
@@ -107,6 +126,22 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                         "choose `auto`, `always`, or `never`",
                     )
                 })?;
+            }
+            Some("--format") => {
+                let value = words.next().ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1001",
+                        "option `--format` needs a value",
+                        "choose `human`, `short`, or `json` after `--format`",
+                    )
+                })?;
+                output_format = Some(StatusFormat::parse(value).ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1002",
+                        "unsupported value for `--format`",
+                        "choose `human`, `short`, or `json`",
+                    )
+                })?);
             }
             _ => unreachable!("only global options enter this loop"),
         }
@@ -144,24 +179,46 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             }
             Command::Init(target)
         }
-        Some("status") => match words.next() {
-            Some("--porcelain") => Command::Status {
-                format: StatusFormat::Porcelain,
-            },
-            Some("--short") => Command::Status {
-                format: StatusFormat::Short,
-            },
-            Some(_) => {
+        Some("status") => {
+            let local_format = match words.next() {
+                Some("--porcelain") => Some(StatusFormat::Porcelain),
+                Some("--short") => Some(StatusFormat::Short),
+                Some("--format") => {
+                    let value = words.next().ok_or_else(|| {
+                        Diagnostic::usage(
+                            "E1001",
+                            "`status --format` needs a value",
+                            "use `status --format human`, `status --format short`, or `status --format json`",
+                        )
+                    })?;
+                    Some(StatusFormat::parse(value).ok_or_else(|| {
+                        Diagnostic::usage(
+                            "E1002",
+                            "unsupported value for `status --format`",
+                            "choose `human`, `short`, or `json` after `status --format`",
+                        )
+                    })?)
+                }
+                Some(_) => {
+                    return Err(Diagnostic::usage(
+                        "E1002",
+                        "unsupported `status` option or option placement",
+                        "use `status`, `status --porcelain`, `status --short`, `status --format human|short|json`, or `--format human|short|json status`",
+                    ));
+                }
+                None => None,
+            };
+            if output_format.is_some() && local_format.is_some() {
                 return Err(Diagnostic::usage(
                     "E1002",
-                    "`status` supports no option, `--porcelain`, or `--short`",
-                    "use `status`, `status --porcelain`, or `status --short`",
+                    "status output format was specified twice",
+                    "choose either `--format VALUE status` or `status --format VALUE`",
                 ));
             }
-            None => Command::Status {
-                format: StatusFormat::Human,
-            },
-        },
+            Command::Status {
+                format: local_format.or(output_format).unwrap_or(StatusFormat::Human),
+            }
+        }
         Some("fetch") => Command::Fetch {
             remote: words.next().unwrap_or("origin").to_owned(),
             branch: words.next().unwrap_or("main").to_owned(),
@@ -228,6 +285,13 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             ));
         }
     };
+    if output_format.is_some() && !matches!(&command, Command::Status { .. }) {
+        return Err(Diagnostic::usage(
+            "E1002",
+            "`--format` is supported only by `status`",
+            "use `--format human|short|json status` or `status --format human|short|json`",
+        ));
+    }
     if words.next().is_some() {
         return Err(Diagnostic::usage(
             "E1003",
@@ -275,6 +339,31 @@ mod tests {
             Command::Status {
                 format: StatusFormat::Porcelain,
             }
+        );
+        for invocation in [
+            args(&["status", "--format", "json"]),
+            args(&["--format", "json", "status"]),
+        ] {
+            assert_eq!(
+                parse_cli(&invocation).expect("JSON status parses").command,
+                Command::Status {
+                    format: StatusFormat::Json,
+                }
+            );
+        }
+        let misplaced = parse_cli(&args(&["--format", "json", "check"]))
+            .expect_err("format is limited to status");
+        assert_eq!(misplaced.code, "E1002");
+
+        let invalid_format = parse_cli(&args(&["status", "--format", "xml"]))
+            .expect_err("unsupported output format is rejected");
+        assert_eq!(
+            (invalid_format.code, invalid_format.title, invalid_format.help),
+            (
+                "E1002",
+                "unsupported value for `status --format`",
+                "choose `human`, `short`, or `json` after `status --format`"
+            )
         );
     }
 
