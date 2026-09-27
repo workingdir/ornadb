@@ -7488,8 +7488,7 @@ fn matches_qualified_enum_patterns_from_retained_definitions_without_scope_senti
         ]),
     )]);
     let mut environment = Environment::from([("value".into(), waiting)]);
-    let source =
-        "case value { Availability.ready: \"ready\", Availability.waiting { reason }: \"waiting: {reason}\" }";
+    let source = include_str!("fixtures/qualified_enum_retained_definition.orna").trim();
     assert_eq!(
         evaluate_parsed_with_nominals(
             &parsed_expression(source),
@@ -7520,7 +7519,7 @@ fn matches_tagged_optional_some_and_null() {
         "value".into(),
         Value::option(Some(Value::new(Raw::Text("Kieran".into())).unwrap())).unwrap(),
     )]);
-    let source = "case value { Some(name): name, null: \"anonymous\" }";
+    let source = include_str!("fixtures/optional_some_null_case.orna").trim();
     assert_eq!(
         evaluate_expression(source, &environment, Limits::default()).unwrap(),
         Value::new(Raw::Text("Kieran".into())).unwrap()
