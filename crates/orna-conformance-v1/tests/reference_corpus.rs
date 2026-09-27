@@ -2754,7 +2754,7 @@ fn harness_maps_snapshot_selection_and_serializes_snapshot_type_diagnostic() {
             Some("ORNA-S021-TYPE"),
             None,
         ),
-        r#"pub fn before_change() = sys.snapshot(42);"#,
+        include_str!("fixtures/snapshot-non-string.orna"),
         "ORNA-SYS-011",
     );
     let invalid_fixture = &invalid.fixtures[0];
