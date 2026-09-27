@@ -243,7 +243,7 @@ fn requests_all_child_cancellations_before_joining_any_child() {
 }
 
 #[test]
-fn cancellation_request_failure_fans_out_before_retrying_joins() {
+fn cancellation_errors_still_fan_out_joins() {
     let (mut coordinator, owner) = active();
     let first = coordinator.spawn_child(owner).unwrap();
     let second = coordinator.spawn_child(owner).unwrap();
@@ -258,7 +258,10 @@ fn cancellation_request_failure_fans_out_before_retrying_joins() {
         Err(orna_execution_v1::CoordinationError::ChildOutstanding)
     );
     assert_eq!(coordinator.phase(), TransactionPhase::ChildrenJoining);
-    assert_eq!(supervisor.events, vec![('c', first), ('c', second)]);
+    assert_eq!(
+        supervisor.events,
+        vec![('c', first), ('c', second), ('j', first), ('j', second)]
+    );
     assert_eq!(store.commits, 0);
 
     coordinator
@@ -267,14 +270,7 @@ fn cancellation_request_failure_fans_out_before_retrying_joins() {
     assert_eq!(coordinator.phase(), TransactionPhase::RolledBack);
     assert_eq!(
         supervisor.events,
-        vec![
-            ('c', first),
-            ('c', second),
-            ('c', first),
-            ('c', second),
-            ('j', first),
-            ('j', second),
-        ]
+        vec![('c', first), ('c', second), ('j', first), ('j', second)]
     );
 
     let mut provider = Provider;
