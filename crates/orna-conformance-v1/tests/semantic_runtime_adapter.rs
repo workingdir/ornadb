@@ -1723,13 +1723,13 @@ fn project_row_admission_rejects_computed_fields() {
             fixture_id: "project-rows-computed".into(),
             source_id: "logical/project/inventory.orna".into(),
             parse_as: "module_unit".into(),
-            source: "pub table Item(id: Int) { name: Str, label: Str => name, }".into(),
+            source: include_str!("fixtures/row-admission/computed-field-inventory.orna").into(),
         }],
         loose_rows: vec![SourceUnit {
             fixture_id: "project-rows-computed".into(),
             source_id: "logical/project/inventory/Item/42.orna".into(),
             parse_as: "row_unit".into(),
-            source: "{ name: \"Pencil\", label: \"Pencil\" }".into(),
+            source: include_str!("fixtures/row-admission/computed-field-row.orna").into(),
         }],
         expectations: ProjectExpectations {
             environment: ProjectEnvironment {
