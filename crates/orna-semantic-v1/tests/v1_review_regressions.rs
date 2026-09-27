@@ -82,7 +82,7 @@ fn compatible_local_annotated_initializers_are_accepted() {
 // from an unconstrained lambda body cannot export an internal Type::Error.
 #[test]
 fn underconstrained_lambda_field_inference_requires_annotation() {
-    let underconstrained = analyze_main("pub fn getter() = x => x.value;");
+    let underconstrained = analyze_main(include_str!("fixtures/underconstrained-lambda-field.orna"));
     expect_diagnostics(&underconstrained, &[DIAG_ANNOTATION]);
     assert_eq!(
         underconstrained
@@ -101,12 +101,10 @@ fn underconstrained_lambda_field_inference_requires_annotation() {
             .contains_key("getter")
     );
 
-    let constrained = analyze_main("pub fn increment() = x => x + 1;");
+    let constrained = analyze_main(include_str!("fixtures/constrained-lambda.orna"));
     expect_accepted(&constrained);
 
-    let known_row = analyze_main(
-        "pub table Reading(id: Int) { value: Int, } pub fn values() = Reading | map(row => row.value);",
-    );
+    let known_row = analyze_main(include_str!("fixtures/known-row-lambda.orna"));
     expect_accepted(&known_row);
 }
 
