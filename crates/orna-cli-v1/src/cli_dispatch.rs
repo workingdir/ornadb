@@ -33,7 +33,10 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         } => run_status(&parsed.endpoint),
         Command::Status {
             format: StatusFormat::Short,
-        } => run_status_short(&parsed.endpoint, parsed.color.stdout_enabled()),
+        } => run_status_short_with_runtime_summary(
+            &parsed.endpoint,
+            parsed.color.stdout_enabled(),
+        ),
         Command::Status {
             format: StatusFormat::Json,
         } => run_status_json(&parsed.endpoint),
@@ -97,6 +100,51 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         Command::Run(Invocation::ProjectFunction(ref target)) => {
             run_public_project_function(&parsed.endpoint, target, parsed.color.stdout_enabled())
         }
+    }
+}
+
+fn run_status_short_with_runtime_summary(
+    endpoint: &Endpoint,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
+    let path = local_project_path(endpoint)?;
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree could not be discovered",
+            "run the command inside a Git worktree or provide a local project path",
+        )
+    })?;
+    let unpublished_count = unpublished_mutation_count(&repository)?;
+    run_status_short(endpoint, color_enabled)?;
+    writeln!(io::stdout().lock(), "{}", short_runtime_summary(unpublished_count)).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be written",
+            "retry `status --short`",
+        )
+    })?;
+    Ok(())
+}
+
+fn short_runtime_summary(count: usize) -> String {
+    let noun = if count == 1 {
+        "mutation"
+    } else {
+        "mutations"
+    };
+    format!("RM {count} runtime {noun}")
+}
+
+#[cfg(test)]
+mod short_runtime_summary_tests {
+    use super::short_runtime_summary;
+
+    #[test]
+    fn stable_count_format_includes_zero_singular_and_plural() {
+        assert_eq!(short_runtime_summary(0), "RM 0 runtime mutations");
+        assert_eq!(short_runtime_summary(1), "RM 1 runtime mutation");
+        assert_eq!(short_runtime_summary(2), "RM 2 runtime mutations");
     }
 }
 
