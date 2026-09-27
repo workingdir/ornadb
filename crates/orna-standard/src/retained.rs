@@ -1,69 +1,6 @@
 //! Retained standard-source reconciliation and snapshot construction.
 
 use super::*;
-pub(super) fn reconcile_retained_window_source(
-    source: &str,
-    catalogue: &CatalogueSnapshot,
-) -> Result<Vec<DefinitionOrigin>, StandardLibraryError> {
-    let parsed = orna_syntax::parse(source);
-    if !parsed.diagnostics().is_empty()
-        || parsed.syntax().text() != source
-        || !parsed.schemas().is_empty()
-        || !parsed.object_types().is_empty()
-        || !parsed.field_renames().is_empty()
-        || !parsed.server_functions().is_empty()
-        || parsed.client_functions().len() != 1
-        || !parsed.primitive_value_types().is_empty()
-        || !parsed.opaque_value_types().is_empty()
-        || !parsed.record_value_types().is_empty()
-        || !parsed.enum_types().is_empty()
-        || !parsed.type_exports().is_empty()
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let [function] = parsed.client_functions() else {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    };
-    let origin = |span: &orna_syntax::SourceSpan, identity| {
-        let start =
-            u32::try_from(span.start).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
-        let end =
-            u32::try_from(span.end).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
-        Ok(DefinitionOrigin::new(
-            identity,
-            SourceOrigin::new(STD_WINDOW_SOURCE_UNIT_ID, start, end)
-                .map_err(|source| StandardLibraryError::Revision { source })?,
-        ))
-    };
-    let [title, content] = function.parameters.as_slice() else {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    };
-    let mut origins = vec![
-        origin(
-            &function.span,
-            DefinitionIdentity::Function(STD_UI_WINDOW_FUNCTION_ID),
-        )?,
-        origin(
-            &title.span,
-            DefinitionIdentity::Parameter {
-                owner: STD_UI_WINDOW_FUNCTION_ID,
-                parameter: STD_UI_WINDOW_TITLE_PARAMETER_ID,
-            },
-        )?,
-        origin(
-            &content.span,
-            DefinitionIdentity::Parameter {
-                owner: STD_UI_WINDOW_FUNCTION_ID,
-                parameter: STD_UI_WINDOW_CONTENT_PARAMETER_ID,
-            },
-        )?,
-    ];
-    origins.sort_by_key(|origin| (origin.source().byte_start(), origin.source().byte_end()));
-    orna_compiler::check_standard_ui_window(function, catalogue, &origins)
-        .map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
-    Ok(origins)
-}
-
 pub(super) fn reconcile_retained_action_source(
     source: &str,
     catalogue: &CatalogueSnapshot,
