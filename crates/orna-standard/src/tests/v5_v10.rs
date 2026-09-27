@@ -2210,34 +2210,21 @@ fn v9_ui_constructors_snapshot_retains_source_digests_and_codecs() {
 }
 
 #[test]
-fn v10_cli_snapshot_retains_source_and_recomputes_digests() {
-    let snapshot = super::super::retained_standard_library_v10_snapshot()
-        .expect("the retained V10 source is valid");
-    assert_eq!(snapshot.source().units().len(), 10);
-    assert_eq!(
-        snapshot.source().parent(),
-        Some(super::super::STANDARD_SOURCE_V9_REVISION_ID)
-    );
-    assert_eq!(
-        snapshot.source().units()[9].logical_path(),
-        super::super::STD_CLI_SOURCE_LOGICAL_PATH
-    );
-    assert_eq!(
-        source_unit_content_digest(super::super::RETAINED_STANDARD_CLI_SOURCE)
-            .expect("the CLI source digest is valid"),
-        snapshot.source().units()[9].content_hash()
-    );
-    assert_eq!(
-        source_bundle_digest(snapshot.source().units()).expect("the V10 bundle digest is valid"),
-        snapshot.source().bundle_hash()
-    );
-    assert_eq!(
-        calculate_standard_library_digest(&snapshot).expect("the V10 digest recomputes"),
-        snapshot.digest()
-    );
-    let verified = super::super::verify_standard_library_v10_snapshot(snapshot)
-        .expect("the V10 snapshot verifies");
-    let checked =
-        orna_compiler::check_standard_library_source(&verified).expect("the V10 source checks");
-    assert_eq!(checked.checked_executables().len(), 12);
+fn v10_cli_source_is_not_retained_or_selected() {
+    let retained = super::super::retained_standard_library_v10_snapshot()
+        .expect_err("V10 source must not be reconstructed or substituted");
+    assert!(matches!(
+        retained,
+        super::super::StandardLibraryError::UnsupportedRevision { revision }
+            if revision == super::super::STANDARD_LIBRARY_V10_REVISION_ID
+    ));
+    let selected = super::super::select_verified_standard_library(
+        super::super::STANDARD_LIBRARY_V10_REVISION_ID,
+    )
+    .expect_err("V10 selection must fail closed");
+    assert!(matches!(
+        selected,
+        super::super::StandardLibraryError::UnsupportedRevision { revision }
+            if revision == super::super::STANDARD_LIBRARY_V10_REVISION_ID
+    ));
 }
