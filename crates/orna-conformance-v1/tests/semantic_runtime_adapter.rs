@@ -153,29 +153,19 @@ fn semantic_adapter_executes_the_v1_analyzer_with_logical_fixture_names() {
 
 #[test]
 fn admitted_source_relation_pages_traverse_decimal_keys() {
-    fn source(body: &str) -> SourceUnit {
+    fn source(source: &str) -> SourceUnit {
         SourceUnit {
             fixture_id: "decimal-cursor-source".into(),
             source_id: "decimal-cursor-source.orna".into(),
             parse_as: "module_unit".into(),
-            source: format!(
-                r#"
-                    pub table Reading(value: Decimal) {{ label: Str, }}
-                    fn main() {{ {body} }}
-                "#
-            ),
+            source: source.into(),
         }
     }
 
     let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
-    let inserted = evaluator.execute_source(&source(
-        r#"
-            Reading.insert({ value: 2.0, label: "two" });
-            Reading.insert({ value: 0.1, label: "one-tenth" });
-            Reading.insert({ value: 1.0, label: "one" });
-            Reading.insert({ value: 0.01, label: "one-hundredth" });
-        "#
-    ));
+    let inserted = evaluator.execute_source(&source(include_str!(
+        "fixtures/decimal-cursor-insert.orna"
+    )));
     assert!(
         matches!(inserted, StageOutcome::Passed),
         "source insertion failed: {inserted:?}"
@@ -184,15 +174,9 @@ fn admitted_source_relation_pages_traverse_decimal_keys() {
     // Relation evaluation is admitted source execution. Decimal-key pages
     // must resume at the canonical numeric successor without replaying or
     // skipping a row.
-    let paged = evaluator.execute_source(&source(
-        r#"
-            assert (Reading | count) == 4;
-            assert (Reading | take(1) | count) == 1;
-            assert (Reading | take(3) | count) == 3;
-            assert (Reading | drop(3) | count) == 1;
-            assert (Reading | drop(4) | count) == 0;
-        "#
-    ));
+    let paged = evaluator.execute_source(&source(include_str!(
+        "fixtures/decimal-cursor-pages.orna"
+    )));
     assert!(
         matches!(paged, StageOutcome::Passed),
         "Decimal page assertions failed: {paged:?}"
