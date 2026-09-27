@@ -942,14 +942,8 @@ fn semantic_project_adapter_rejects_typed_sys_start_mismatched_witness() {
 
 #[test]
 fn semantic_project_adapter_admits_inferred_and_explicit_typed_sys_await() {
-    let project = typed_invoke_project(
-        r#"
-            pub fn inferred_await(job: sys.InvocationHandle<Int>) =
-                sys.await(job, timeout: 1.s);
-            pub fn explicit_await(job: sys.InvocationHandle<Int>) =
-                sys.await<Int>(invocation: job, timeout: null);
-        "#,
-    );
+    let source = include_str!("fixtures/adapter-typed-sys-await-valid.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
@@ -959,14 +953,8 @@ fn semantic_project_adapter_admits_inferred_and_explicit_typed_sys_await() {
 
 #[test]
 fn semantic_project_adapter_admits_inferred_and_explicit_typed_sys_cancel() {
-    let project = typed_invoke_project(
-        r#"
-            pub fn inferred_cancel(job: sys.InvocationHandle<Int>) =
-                sys.cancel(job);
-            pub fn explicit_cancel(job: sys.InvocationHandle<Int>) =
-                sys.cancel<Int>(job, reason: "stop");
-        "#,
-    );
+    let source = include_str!("fixtures/adapter-typed-sys-cancel-valid.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
@@ -976,9 +964,8 @@ fn semantic_project_adapter_admits_inferred_and_explicit_typed_sys_cancel() {
 
 #[test]
 fn semantic_project_adapter_rejects_mismatched_explicit_sys_await_type() {
-    let project = typed_invoke_project(
-        "pub fn mismatched(job: sys.InvocationHandle<Int>) = sys.await<Str>(job);",
-    );
+    let source = include_str!("fixtures/adapter-typed-sys-await-mismatch.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
