@@ -1,0 +1,11 @@
+pub table Note(id: Int) { value: Int, }
+
+fn invalid_take_positional() = take(Note, -1);
+fn invalid_take_named() = take(rows: Note, count: -1);
+fn invalid_drop_positional() = drop(Note, -1);
+fn invalid_drop_named() = drop(rows: Note, count: -1);
+fn invalid_window_zero_positional() = window(Note, 0);
+fn invalid_window_zero_named() = window(rows: Note, size: 0);
+fn invalid_window_negative() = window(Note, -1);
+fn invalid_window_zero_step_positional() = window(Note, 2, step: 0);
+fn invalid_window_negative_step_named() = window(rows: Note, size: 2, step: -1);

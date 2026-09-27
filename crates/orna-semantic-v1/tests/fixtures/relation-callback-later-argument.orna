@@ -1,0 +1,2 @@
+pub table Note(id: Int) { value: Int, }
+pub fn invalid(rows: Relation<Note>) = every(rows, value => value, unexpected: later_missing);
