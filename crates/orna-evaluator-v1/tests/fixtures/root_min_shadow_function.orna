@@ -1,0 +1,2 @@
+fn min(value: Int) = value + 100;
+fn run() = min(1);

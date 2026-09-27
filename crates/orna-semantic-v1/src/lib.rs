@@ -3503,9 +3503,18 @@ fn check_item(
                     || matches!(&ty, Type::Applied { base, .. } if base == "Range");
                 let is_float = matches!(&ty, Type::Float)
                     || matches!(&ty, Type::Applied { base, .. } if base == "Float");
-                if is_range || is_float {
+                let is_payload_enum = match &ty {
+                    Type::Named(name) => scope
+                        .enum_variants
+                        .get(name)
+                        .is_some_and(|variants| variants.values().any(|fields| !fields.is_empty())),
+                    _ => false,
+                };
+                if is_range || is_float || is_payload_enum {
                     let message = if is_range {
                         "Range<T> is not a primary-key type in version 1.0"
+                    } else if is_payload_enum {
+                        "payload-bearing enums cannot be primary-key types"
                     } else {
                         "Float is not a valid primary-key type"
                     };
