@@ -36,6 +36,14 @@ impl ProviderExecutor<Value> for NeverProvider {
     }
 }
 
+struct PanickingProvider;
+
+impl ProviderExecutor<Value> for PanickingProvider {
+    fn execute(&mut self, _: ActivationId) -> Result<Value, ProviderError> {
+        panic!("provider execution panicked")
+    }
+}
+
 struct RejectedProvider;
 
 impl ProviderExecutor<Value> for RejectedProvider {
@@ -360,6 +368,33 @@ fn rolled_back_owner_cannot_execute_publish_or_pass_its_fence() {
     );
     assert_eq!(store.commits, 0);
     assert_eq!(coordinator.phase(), TransactionPhase::RolledBack);
+}
+
+#[test]
+fn provider_panic_revokes_owner_before_unwind_escapes() {
+    let (mut coordinator, owner) = active();
+    let mut provider = PanickingProvider;
+    let mut store = Store::default();
+    let mut faults = NoFault;
+
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        coordinator.execute(
+            owner,
+            &mut provider,
+            &mut store,
+            checkpoint(),
+            &mut faults,
+        )
+    }));
+
+    assert!(unwind.is_err());
+    assert_eq!(coordinator.phase(), TransactionPhase::RolledBack);
+    assert!(!coordinator.permits(owner));
+    assert_eq!(
+        store.commit(stale_commit(owner), &coordinator),
+        Err(StoreError::OwnerFenceRejected)
+    );
+    assert_eq!(store.commits, 0);
 }
 
 #[test]
