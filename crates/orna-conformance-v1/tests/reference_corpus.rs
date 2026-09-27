@@ -565,10 +565,7 @@ fn typed_sys_invoke_report_maps_orna_sys_132_to_semantic_pass_evidence() {
             None,
             None,
         ),
-        r#"
-            pub fn invoke(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.invoke<Int>(function, arguments, as: Int);
-        "#,
+        include_str!("fixtures/typed-invoke-valid.orna"),
     );
     let fixture = &report.fixtures[0];
     let typecheck = fixture
