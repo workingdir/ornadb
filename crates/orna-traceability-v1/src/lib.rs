@@ -810,6 +810,16 @@ fn validate(
                     fixture.id
                 )));
             }
+            "valid"
+                if fixture.expect.get("parse").map(String::as_str) != Some("pass")
+                    || fixture.expect.get("resolve").map(String::as_str) != Some("pass")
+                    || fixture.expect.get("typecheck").map(String::as_str) != Some("pass") =>
+            {
+                return Err(err(format!(
+                    "valid fixture lacks required pass expectations: {}",
+                    fixture.id
+                )));
+            }
             "invalid"
                 if fixture.failing_phase.is_none()
                     || fixture.diagnostic.is_none()
@@ -1138,7 +1148,13 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
     fn corpus() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../reference/Orna-1.0.0")
+        let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let checkout_bundle = crate_dir.join("../../../reference/Orna-1.0.0");
+        if checkout_bundle.is_dir() {
+            checkout_bundle
+        } else {
+            crate_dir.join("../../../../reference/Orna-1.0.0")
+        }
     }
     fn copy_corpus() -> std::path::PathBuf {
         let target = std::env::temp_dir().join(format!(
@@ -1342,6 +1358,61 @@ mod tests {
         assert!(!json.contains("\"text\""));
         assert!(!json.contains("\"statement\""));
     }
+    #[test]
+    fn rejects_valid_fixture_without_successful_phase_expectations() {
+        const FIXTURE_PATH: &str = "examples/valid/minimal-root.orna";
+        const REQUIRED_PHASES: [&str; 3] = ["parse", "resolve", "typecheck"];
+        let authoritative = corpus();
+        assert!(authoritative.join(FIXTURE_PATH).is_file());
+        generate(&authoritative).expect("authoritative unmodified reference bundle");
+
+        let root = copy_corpus();
+        let authoritative_fixture = fs::read(authoritative.join(FIXTURE_PATH)).expect("fixture");
+        assert_eq!(
+            fs::read(root.join(FIXTURE_PATH)).expect("copied fixture"),
+            authoritative_fixture
+        );
+        generate(&root).expect("unmodified copied reference bundle");
+
+        let manifest = root.join("tests/conformance-manifest.json");
+        let original_manifest = fs::read_to_string(&manifest).expect("copied manifest");
+        for phase in REQUIRED_PHASES {
+            for failing_expectation in [false, true] {
+                let mut value: Value =
+                    serde_json::from_str(&original_manifest).expect("manifest JSON");
+                let fixture = value["fixtures"]
+                    .as_array_mut()
+                    .expect("fixture list")
+                    .iter_mut()
+                    .find(|fixture| fixture["path"].as_str() == Some(FIXTURE_PATH))
+                    .expect("valid fixture");
+                assert_eq!(fixture["kind"].as_str(), Some("valid"));
+                let fixture_id = fixture["id"].as_str().expect("fixture id").to_owned();
+                let expectations = fixture["expect"].as_object_mut().expect("expectations");
+                if failing_expectation {
+                    expectations.insert(phase.to_owned(), Value::from("fail"));
+                } else {
+                    assert_eq!(
+                        expectations.remove(phase).as_ref().and_then(Value::as_str),
+                        Some("pass")
+                    );
+                }
+                fs::write(&manifest, serde_json::to_vec(&value).expect("serialize manifest"))
+                    .expect("write copied manifest");
+                let error = generate(&root).expect_err("invalid valid-fixture expectation");
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!(
+                            "valid fixture lacks required pass expectations: {fixture_id}"
+                        )),
+                    "{phase} rejection should come from expectation validation, got: {error}"
+                );
+            }
+        }
+        fs::remove_dir_all(root).expect("remove copied bundle");
+    }
+
     #[test]
     fn rejects_broken_links_and_counts() {
         let root = copy_corpus();
