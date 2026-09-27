@@ -1,0 +1,97 @@
+//! Translation from parsed commands to the existing runtime and repository handlers.
+
+use super::*;
+
+pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
+    match parsed.command.clone() {
+        Command::Help => {
+            cli_help::print_help();
+            Ok(())
+        }
+        Command::Version => {
+            println!("orna-cli-v1 0.1.0");
+            Ok(())
+        }
+        Command::Init(ref target) => {
+            initialize_repository(target.as_deref(), parsed.color.stdout_enabled())
+        }
+        Command::Fetch {
+            ref remote,
+            ref branch,
+        } => run_fetch(
+            &parsed.endpoint,
+            remote,
+            branch,
+            parsed.color.stdout_enabled(),
+        ),
+        Command::Status {
+            format: StatusFormat::Human,
+        } => run_status_human(&parsed.endpoint, parsed.color.stdout_enabled()),
+        Command::Status {
+            format: StatusFormat::Porcelain,
+        } => run_status(&parsed.endpoint),
+        Command::Status {
+            format: StatusFormat::Short,
+        } => run_status_short(&parsed.endpoint, parsed.color.stdout_enabled()),
+        Command::Check => check_project(&parsed.endpoint, parsed.color.stdout_enabled()),
+        Command::Invoke(ref target) => {
+            run_pure_invocation(&parsed.endpoint, target, parsed.color.stdout_enabled())
+        }
+        Command::Explain(code) => {
+            println!("{}", explain_diagnostic(&code)?);
+            Ok(())
+        }
+        Command::Repl(ref expression) => {
+            run_repl(&parsed.endpoint, expression.as_deref(), parsed.color)
+        }
+        Command::Run(Invocation::Seed) => {
+            run_project_invocation(&parsed.endpoint, "main.seed", parsed.color.stdout_enabled())
+        }
+        Command::Run(Invocation::Exercise) => run_project_invocation(
+            &parsed.endpoint,
+            "main.exercise",
+            parsed.color.stdout_enabled(),
+        ),
+        Command::Run(Invocation::SensorsIngest) => run_project_stream_invocation(
+            &parsed.endpoint,
+            "sensors.ingest",
+            parsed.color.stdout_enabled(),
+        ),
+        Command::Run(Invocation::LibraryLend {
+            ref book_id,
+            ref borrower,
+        }) => {
+            let arguments = Environment::from([
+                (
+                    "book_id".into(),
+                    Value::new(OvbRaw::Text(book_id.clone())).map_err(|_| {
+                        Diagnostic::usage(
+                            "E1002",
+                            "`run library.lend` received an invalid book ID",
+                            "supply a valid Orna string value for the book ID",
+                        )
+                    })?,
+                ),
+                (
+                    "borrower".into(),
+                    Value::new(OvbRaw::Text(borrower.clone())).map_err(|_| {
+                        Diagnostic::usage(
+                            "E1002",
+                            "`run library.lend` received an invalid borrower",
+                            "supply a valid Orna string value for the borrower",
+                        )
+                    })?,
+                ),
+            ]);
+            run_project_invocation_with_arguments(
+                &parsed.endpoint,
+                "library.lend",
+                &arguments,
+                parsed.color.stdout_enabled(),
+            )
+        }
+        Command::Run(Invocation::ProjectFunction(ref target)) => {
+            run_public_project_function(&parsed.endpoint, target, parsed.color.stdout_enabled())
+        }
+    }
+}
