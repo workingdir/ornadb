@@ -1,0 +1,9 @@
+pub table User(id: Uuid) { name: Str, }
+pub table Account(id: Uuid) { user_id: Uuid, }
+
+pub fn helper(): Bool {
+    return true;
+    every(User, user => true);
+}
+
+assert helper();
