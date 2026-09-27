@@ -5476,9 +5476,7 @@ fn std_collection_sort_by_evaluates_callbacks_before_sorting_and_fails_closed() 
         "ORNA-EVAL-LIMIT"
     );
 
-    let functions = functions_from_source(
-        "fn key(value: Int) = Note.insert(value); fn run() = sort_by([3, 1], key);",
-    );
+    let functions = functions_from_source(include_str!("fixtures/sort_by_effect_callback.orna"));
     let mut effects = NoteEffects::default();
     assert_eq!(
         invoke_named_with_effects(
