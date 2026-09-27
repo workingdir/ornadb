@@ -684,7 +684,9 @@ fn nominal_admission_rejects_malformed_host_arguments_even_when_unselected() {
         (field_id_raw("value"), Raw::Int(7.into())),
     ]);
     let arguments = Environment::from([("value".into(), malformed)]);
-    let functions = functions_from_source("fn ignore(value: Int) = 1;");
+    let functions = functions_from_source(include_str!(
+        "fixtures/nominal_admission_unselected_argument.orna"
+    ));
 
     assert_eq!(
         code(invoke_named_with_nominals(
@@ -1655,11 +1657,11 @@ fn admission_limits_reject_zero_configuration_and_count_source_bytes() {
 
 #[test]
 fn source_namespace_entry_checks_values_and_limits_before_parsing() {
-    let functions = functions_from_source("fn increment(value: Int) = value + 1;");
+    let functions = functions_from_source(include_str!("fixtures/source_namespace_increment.orna"));
     let environment = Environment::from([("input".into(), Value::int(41.into()))]);
     assert_eq!(
         orna_evaluator_v1::evaluate_expression_with_functions(
-            "input | increment",
+            include_str!("fixtures/source_namespace_pipeline.orna"),
             &environment,
             &functions,
             Limits::default()
@@ -1668,7 +1670,7 @@ fn source_namespace_entry_checks_values_and_limits_before_parsing() {
         Value::int(42.into())
     );
     let failure = orna_evaluator_v1::evaluate_expression_with_functions(
-        "invalid(",
+        include_str!("fixtures/source_namespace_invalid_expression.orna"),
         &environment,
         &functions,
         Limits {
@@ -1681,7 +1683,7 @@ fn source_namespace_entry_checks_values_and_limits_before_parsing() {
     assert_eq!(failure.diagnostic().message(), "<redacted>");
     assert_eq!(
         code(orna_evaluator_v1::evaluate_expression_with_functions(
-            "invalid(",
+            include_str!("fixtures/source_namespace_invalid_expression.orna"),
             &environment,
             &functions,
             Limits::default()
