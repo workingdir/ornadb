@@ -14,9 +14,10 @@ use std::{cell::Cell, collections::HashMap, rc::Rc, time::SystemTime};
 use orna_core::{
     CallSiteId, CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, InvocationId,
     LocalId, ObjectId, ParameterId, PrincipalId, SchemaId, SourceBundleId, SourceRevisionId,
-    SourceUnitId, StateSlotId, TypeId,
+    SourceUnitId, StandardLibraryRevisionId, StateSlotId, TypeId,
     canonical_hash::{
-        artifact_payload_digest, catalogue_digest, catalogue_digest_with_context,
+        artifact_payload_digest, calculate_standard_library_digest, catalogue_digest,
+        catalogue_digest_with_context,
         function_declaration_digest, function_semantic_digest,
         function_semantic_digest_with_version, source_bundle_digest, source_revision_record_digest,
         source_unit_content_digest,
@@ -25,15 +26,16 @@ use orna_core::{
         CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
         FunctionReturnColumnDefinition, FunctionSecurity, FunctionVolatility, ObjectTypeDefinition,
         ParameterDefinition, QualifiedSemanticName, RecordValueFieldDefinition,
-        RecordValueTypeDefinition, SchemaDefinition, ValueTypeDefinition,
+        RecordValueTypeDefinition, SchemaDefinition, ValueTypeDefinition, ValueTypeMutability,
+        ValueTypePersistence,
     },
     revision::{
         ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
         DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
         DefinitionReferenceTarget, DeployableRevision, ExecutableArtifact, ExecutableArtifactKind,
         FunctionRevisionRecord, FunctionSemanticHashVersion, RevisionInvariantError, RevisionPair,
-        Sha256Digest, SourceOrigin, StoredSourceRevision, StoredSourceUnit,
-        VerifiedStandardLibrarySnapshot,
+        Sha256Digest, SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+        StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
     security::{
         AuthorisedInvocation, ExecuteDecision, ExecuteGrant, InvocationTarget, Principal,
@@ -458,6 +460,9 @@ fn reference_field_path_fixture() -> (
     let hash_context = base.catalogue_hash_context().clone();
     let origin = base.function_revisions()[0].declaration_origin();
     let mut origins = base.origins().to_vec();
+    origins.retain(|origin| {
+        origin.identity() != DefinitionIdentity::ObjectType(TypeId::from_bytes([0xf0; 16]))
+    });
     origins.extend([
         DefinitionOrigin::new(DefinitionIdentity::ObjectType(outer_object), origin),
         DefinitionOrigin::new(
@@ -728,27 +733,6 @@ fn replace_reference(
     references[index] = replacement(&references[index]);
 }
 
-fn prepared_client_constant(literal: &str) -> DeployableRevision {
-    prepared_client_source(&format!(
-        "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN {literal};"
-    ))
-}
-
-fn prepared_client_source_v5(source: &str) -> DeployableRevision {
-    let snapshot = orna_standard::retained_standard_library_v5_snapshot().unwrap();
-    let verified = orna_standard::verify_standard_library_v5_snapshot(snapshot).unwrap();
-    let standard = orna_compiler::check_standard_library_source(&verified).unwrap();
-    let active = empty_version_two_active(&verified);
-    let context =
-        orna_compiler::StandardApplicationCheckContext::try_new(active.catalogue(), &standard)
-            .unwrap();
-    let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
-    let report = orna_compiler::check_standard_application(&bundle, &context);
-    assert_eq!(report.diagnostics(), &[]);
-
-    orna_compiler::prepare_standard_application(&report, active.pair(), &active).unwrap()
-}
-
 fn active_with_reordered_client_call_references(
     prepared: &DeployableRevision,
     function_name: &str,
@@ -797,73 +781,6 @@ fn active_with_reordered_client_call_references(
         active_from_prepared_with_references(prepared, references),
         function,
     )
-}
-
-fn prepared_client_source(source: &str) -> DeployableRevision {
-    let snapshot = orna_standard::retained_standard_library_snapshot().unwrap();
-    let verified = orna_standard::verify_standard_library_snapshot(snapshot).unwrap();
-    let standard = orna_compiler::check_standard_library_source(&verified).unwrap();
-    let active = empty_version_two_active(&verified);
-    let context =
-        orna_compiler::StandardApplicationCheckContext::try_new(active.catalogue(), &standard)
-            .unwrap();
-    let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
-    let report = orna_compiler::check_standard_application(&bundle, &context);
-    assert_eq!(report.diagnostics(), &[]);
-
-    orna_compiler::prepare_standard_application(&report, active.pair(), &active).unwrap()
-}
-
-fn prepared_client_call_chain_with_state_root(
-    call_edges: usize,
-) -> (DeployableRevision, FunctionId) {
-    assert!(call_edges > 0);
-
-    let mut source = String::from("CREATE SCHEMA app; ");
-    source.push_str(
-        "CREATE CLIENT FUNCTION app.f0() RETURNS BOOLEAN IS STATE value BOOLEAN DEFAULT TRUE; BEGIN RETURN app.f1(); END; ",
-    );
-    for index in 1..call_edges {
-        source.push_str(&format!(
-            "CREATE CLIENT FUNCTION app.f{index}() RETURNS BOOLEAN RETURN app.f{}(); ",
-            index + 1
-        ));
-    }
-    source.push_str(&format!(
-        "CREATE CLIENT FUNCTION app.f{call_edges}() RETURNS BOOLEAN RETURN TRUE;"
-    ));
-
-    let prepared = prepared_client_source_v5(&source);
-    let function = prepared
-        .candidate()
-        .functions()
-        .iter()
-        .find(|candidate| candidate.name().to_string() == "app.f0")
-        .expect("the root CLIENT function is present")
-        .id();
-    (prepared, function)
-}
-
-fn prepared_client_functions() -> DeployableRevision {
-    let snapshot = orna_standard::retained_standard_library_snapshot().unwrap();
-    let verified = orna_standard::verify_standard_library_snapshot(snapshot).unwrap();
-    let standard = orna_compiler::check_standard_library_source(&verified).unwrap();
-    let active = empty_version_two_active(&verified);
-    let context =
-        orna_compiler::StandardApplicationCheckContext::try_new(active.catalogue(), &standard)
-            .unwrap();
-    let bundle = SourceBundle::new([SourceUnit::new(
-        "application.orna",
-        "CREATE SCHEMA app; \
-         CREATE TYPE app.item AS OBJECT (); \
-         CREATE CLIENT FUNCTION app.first() RETURNS BOOLEAN RETURN TRUE; \
-         CREATE CLIENT FUNCTION app.second() RETURNS BOOLEAN RETURN TRUE;",
-    )])
-    .unwrap();
-    let report = orna_compiler::check_standard_application(&bundle, &context);
-    assert_eq!(report.diagnostics(), &[]);
-
-    orna_compiler::prepare_standard_application(&report, active.pair(), &active).unwrap()
 }
 
 fn empty_version_two_active(
@@ -1243,18 +1160,107 @@ const fn semantic_hash_version_for(
 ) -> FunctionSemanticHashVersion {
     semantic_hash_version
 }
-fn standard_v1() -> VerifiedStandardLibrarySnapshot {
-    orna_standard::verify_standard_library_snapshot(
-        orna_standard::retained_standard_library_snapshot().unwrap(),
+fn synthetic_verified_standard() -> VerifiedStandardLibrarySnapshot {
+    let source_unit_id = SourceUnitId::from_bytes([0xc1; 16]);
+    let source_content = include_str!("tests/fixtures/synthetic-standard.orna");
+    let source_unit = StoredSourceUnit::new(
+        source_unit_id,
+        0,
+        "synthetic-standard.orna",
+        source_content,
+        source_unit_content_digest(source_content).unwrap(),
+    )
+    .unwrap();
+    let source_bundle_id = SourceBundleId::from_bytes([0xc2; 16]);
+    let source_revision_id = SourceRevisionId::from_bytes([0xc3; 16]);
+    let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
+    let source = StoredSourceRevision::new(
+        source_bundle_id,
+        source_revision_id,
+        None,
+        vec![source_unit],
+        bundle_hash,
+        source_revision_record_digest(source_bundle_id, None, bundle_hash).unwrap(),
+    )
+    .unwrap();
+    let mut catalogue = orna_standard::standard_library_manifest()
+        .unwrap()
+        .catalogue()
+        .clone();
+    let catalogue = CatalogueSnapshot::new_with_functions_and_enum_types(
+        CatalogueRevisionId::from_bytes([0xc4; 16]),
+        catalogue
+            .schemas()
+            .iter()
+            .cloned()
+            .chain([SchemaDefinition::new(
+                SchemaId::from_bytes([0xc7; 16]),
+                QualifiedSemanticName::new(["sys", "source"]).unwrap(),
+            )])
+            .collect(),
+        catalogue.object_types().to_vec(),
+        catalogue
+            .value_types()
+            .iter()
+            .cloned()
+            .chain([ValueTypeDefinition::opaque(
+                orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID,
+                QualifiedSemanticName::new(["sys", "source", "function"]).unwrap(),
+                orna_core::system::SYS_SOURCE_FUNCTION_REPRESENTATION_CONTRACT,
+            )])
+            .collect(),
+        catalogue.enum_types().to_vec(),
+        catalogue.type_bindings().to_vec(),
+        catalogue.functions().to_vec(),
+    )
+    .unwrap();
+    let source_origin = SourceOrigin::new(source_unit_id, 0, 1).unwrap();
+    let origins = catalogue
+        .schemas()
+        .iter()
+        .map(|schema| {
+            DefinitionOrigin::new(DefinitionIdentity::Schema(schema.id()), source_origin)
+        })
+        .chain(catalogue.value_types().iter().map(|value_type| {
+            DefinitionOrigin::new(DefinitionIdentity::ValueType(value_type.id()), source_origin)
+        }))
+        .chain(catalogue.type_bindings().iter().map(|binding| {
+            DefinitionOrigin::new(DefinitionIdentity::TypeBinding(binding.id()), source_origin)
+        }))
+        .collect::<Vec<_>>();
+    let revision = StandardLibraryRevisionId::from_bytes([0xc6; 16]);
+    let provisional = StandardLibrarySnapshot::new(
+        revision,
+        StandardLibraryDigestVersion::Version1,
+        source.clone(),
+        "orna.language/1",
+        catalogue.clone(),
+        origins.clone(),
+        Sha256Digest::from_bytes([0; 32]),
+    )
+    .unwrap();
+    let digest = calculate_standard_library_digest(&provisional).unwrap();
+    orna_core::canonical_hash::verify_standard_library_snapshot(
+        StandardLibrarySnapshot::new(
+            revision,
+            StandardLibraryDigestVersion::Version1,
+            source,
+            "orna.language/1",
+            catalogue,
+            origins,
+            digest,
+        )
+        .unwrap(),
     )
     .unwrap()
 }
 
+fn standard_v1() -> VerifiedStandardLibrarySnapshot {
+    synthetic_verified_standard()
+}
+
 fn standard_v5() -> VerifiedStandardLibrarySnapshot {
-    orna_standard::verify_standard_library_v5_snapshot(
-        orna_standard::retained_standard_library_v5_snapshot().unwrap(),
-    )
-    .unwrap()
+    synthetic_verified_standard()
 }
 
 fn version_two_value_active(
@@ -1324,14 +1330,18 @@ fn version_two_client_call_active() -> (
     RevisionPair,
     FunctionRevisionId,
 ) {
+    let function = FunctionId::from_bytes([6; 16]);
     version_two_active_with_artifact(
         standard_v5(),
         orna_standard::BOOLEAN_TYPE_ID,
-        DefinitionReferenceTarget::Function(FunctionId::from_bytes([6; 16])),
+        DefinitionReferenceTarget::Function(function),
         DefinitionReferenceKind::FunctionCall,
         orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
         orna_artifact::client_plan::ExpressionClientPlan::new(
-            orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+            orna_artifact::client_plan::ClientExpressionNode::Call {
+                function,
+                arguments: Vec::new(),
+            },
         )
         .encode()
         .unwrap(),
@@ -1475,10 +1485,7 @@ fn version_two_local_action_active() -> (
         target_origin,
     ));
     let revisions = vec![parent_revision, target_revision];
-    let standard = orna_standard::verify_standard_library_v5_snapshot(
-        orna_standard::retained_standard_library_v5_snapshot().unwrap(),
-    )
-    .unwrap();
+    let standard = standard_v5();
     let context = orna_core::revision::CatalogueHashContext::version_two(standard);
     let catalogue_hash = catalogue_digest_with_context(
         &context,
@@ -1531,6 +1538,151 @@ fn version_two_active_with_artifact(
     )
 }
 
+fn two_function_active_with_call_plan(
+    payload: Vec<u8>,
+    artifact_version: u32,
+) -> (ActiveDatabaseRevision, FunctionId, FunctionId) {
+    let callee_id = FunctionId::from_bytes([0xd1; 16]);
+    let (initial, caller_id, pair, _) = version_two_active_with_artifact(
+        standard_v1(),
+        orna_standard::BOOLEAN_TYPE_ID,
+        DefinitionReferenceTarget::Function(callee_id),
+        DefinitionReferenceKind::FunctionCall,
+        artifact_version,
+        payload,
+    );
+    let caller = initial.catalogue().function_by_id(caller_id).unwrap().clone();
+    let prior_revision = initial
+        .function_revisions()
+        .iter()
+        .find(|revision| revision.function() == caller_id)
+        .unwrap();
+    let callee_revision_id = FunctionRevisionId::from_bytes([0xd2; 16]);
+    let callee = FunctionDefinition::new(
+        callee_id,
+        QualifiedSemanticName::new(["app", "callee"]).unwrap(),
+        FunctionDomain::Client,
+        Vec::new(),
+        FunctionReturn::Single(ResolvedType::value(orna_standard::BOOLEAN_TYPE_ID)),
+        callee_revision_id,
+        FunctionSecurity::Invoker,
+        None,
+        FunctionVolatility::Immutable,
+    );
+    let callee_payload = orna_artifact::client_plan::ExpressionClientPlan::new(
+        ClientExpressionNode::Boolean { value: true },
+    )
+    .encode()
+    .unwrap();
+    let callee_artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Client,
+        "orna.client-plan",
+        orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+        callee_payload.clone(),
+        artifact_payload_digest(&callee_payload).unwrap(),
+    )
+    .unwrap();
+    let callee_hash = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        &callee,
+        prior_revision.language_version(),
+        &callee_artifact,
+        initial.expressions(),
+        &[],
+    )
+    .unwrap();
+    let callee_revision = FunctionRevisionRecord::new(
+        callee_id,
+        callee_revision_id,
+        1,
+        prior_revision.declaration_origin(),
+        function_declaration_digest(b"synthetic callee declaration").unwrap(),
+        callee_hash,
+        prior_revision.language_version(),
+        callee_artifact,
+    )
+    .unwrap()
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    let mut functions = initial.catalogue().functions().to_vec();
+    functions.push(callee.clone());
+    let catalogue = CatalogueSnapshot::new_with_functions_and_enum_types(
+        initial.catalogue().revision(),
+        initial.catalogue().schemas().to_vec(),
+        initial.catalogue().object_types().to_vec(),
+        initial.catalogue().value_types().to_vec(),
+        initial.catalogue().enum_types().to_vec(),
+        initial.catalogue().type_bindings().to_vec(),
+        functions,
+    )
+    .unwrap();
+    let mut origins = initial.origins().to_vec();
+    origins.push(DefinitionOrigin::new(
+        DefinitionIdentity::Function(callee_id),
+        prior_revision.declaration_origin(),
+    ));
+    let mut revisions = initial.function_revisions().to_vec();
+    revisions.push(callee_revision);
+    let context = initial.catalogue_hash_context().clone();
+    let catalogue_hash = catalogue_digest_with_context(
+        &context,
+        &catalogue,
+        &revisions,
+        initial.expressions(),
+        &origins,
+        initial.references(),
+    )
+    .unwrap();
+    let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            pair,
+            initial.source().clone(),
+            catalogue,
+            catalogue_hash,
+            ActiveRevisionContent::new(
+                initial.expressions().to_vec(),
+                revisions,
+                origins,
+                initial.references().to_vec(),
+            ),
+        ),
+        context,
+    )
+    .unwrap();
+    (active, caller.id(), callee.id())
+}
+
+fn active_with_references(
+    active: &ActiveDatabaseRevision,
+    references: Vec<DefinitionReference>,
+) -> ActiveDatabaseRevision {
+    let context = active.catalogue_hash_context().clone();
+    let catalogue_hash = catalogue_digest_with_context(
+        &context,
+        active.catalogue(),
+        active.function_revisions(),
+        active.expressions(),
+        active.origins(),
+        &references,
+    )
+    .unwrap();
+    ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            active.pair(),
+            active.source().clone(),
+            active.catalogue().clone(),
+            catalogue_hash,
+            ActiveRevisionContent::new(
+                active.expressions().to_vec(),
+                active.function_revisions().to_vec(),
+                active.origins().to_vec(),
+                references,
+            ),
+        ),
+        context,
+    )
+    .unwrap()
+}
+
 fn version_two_client_stream_active_with_artifact(
     standard: VerifiedStandardLibrarySnapshot,
     item_type: TypeId,
@@ -1569,6 +1721,7 @@ fn version_two_active_with_function_return(
 ) {
     let (version_one, function_id, pair, function_revision_id) = version_one_active(true);
     let prior_function = version_one.catalogue().function_by_id(function_id).unwrap();
+    let source_origin = version_one.function_revisions()[0].declaration_origin();
     let function = FunctionDefinition::new(
         function_id,
         prior_function.name().clone(),
@@ -1596,21 +1749,86 @@ fn version_two_active_with_function_return(
         artifact_payload_digest(&payload).unwrap(),
     )
     .unwrap();
-    let reference = DefinitionReference::new(
+    let caller_reference = DefinitionReference::new(
         function_id,
         function_revision_id,
         0,
         reference_target,
         reference_kind,
-        prior_revision.declaration_origin(),
+        source_origin,
     );
+    let (target_function, target_revision, target_id, target_reference) =
+        match reference_target {
+            DefinitionReferenceTarget::Function(target) if target != function_id => {
+                let revision_id = FunctionRevisionId::from_bytes([0xd2; 16]);
+                let definition = FunctionDefinition::new(
+                    target,
+                    QualifiedSemanticName::new(["app", "reference_target"]).unwrap(),
+                    FunctionDomain::Client,
+                    Vec::new(),
+                    FunctionReturn::Single(ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID)),
+                    revision_id,
+                    FunctionSecurity::Invoker,
+                    None,
+                    FunctionVolatility::Immutable,
+                );
+                let payload = orna_artifact::client_plan::ExpressionClientPlan::new(
+                    ClientExpressionNode::Boolean { value: true },
+                )
+                .encode()
+                .unwrap();
+                let target_artifact = ExecutableArtifact::new(
+                    ExecutableArtifactKind::Client,
+                    "orna.client-plan",
+                    orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+                    payload.clone(),
+                    artifact_payload_digest(&payload).unwrap(),
+                )
+                .unwrap();
+                let type_reference = DefinitionReference::new(
+                    target,
+                    revision_id,
+                    0,
+                    DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
+                    DefinitionReferenceKind::NamedType,
+                    source_origin,
+                );
+                let target_hash = function_semantic_digest_with_version(
+                    FunctionSemanticHashVersion::Version2,
+                    &definition,
+                    prior_revision.language_version(),
+                    &target_artifact,
+                    version_one.expressions(),
+                    std::slice::from_ref(&type_reference),
+                )
+                .unwrap();
+                let revision = FunctionRevisionRecord::new(
+                    target,
+                    revision_id,
+                    1,
+                    source_origin,
+                    function_declaration_digest(b"application target fixture").unwrap(),
+                    target_hash,
+                    prior_revision.language_version(),
+                    target_artifact,
+                )
+                .unwrap()
+                .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+                (Some(definition), Some(revision), Some(target), Some(type_reference))
+            }
+            _ => (None, None, None, None),
+        };
+    let mut references = vec![caller_reference.clone()];
+    if let Some(target_reference) = target_reference {
+        references.push(target_reference);
+    }
     let semantic_hash = function_semantic_digest_with_version(
         FunctionSemanticHashVersion::Version2,
         &function,
         prior_revision.language_version(),
         &artifact,
         version_one.expressions(),
-        std::slice::from_ref(&reference),
+        std::slice::from_ref(&caller_reference),
     )
     .unwrap();
     let revision = FunctionRevisionRecord::new(
@@ -1625,14 +1843,49 @@ fn version_two_active_with_function_return(
     )
     .unwrap()
     .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    let mut functions = vec![function.clone()];
+    if let Some(target_function) = target_function {
+        functions.push(target_function);
+    }
+    let fixture_object = ObjectTypeDefinition::new(
+        TypeId::from_bytes([0xf0; 16]),
+        QualifiedSemanticName::new(["app", "fixture_object"]).unwrap(),
+        Vec::new(),
+    );
+    let catalogue = CatalogueSnapshot::new_with_functions_and_enum_types(
+        CatalogueRevisionId::from_bytes([0xc8; 16]),
+        version_one.catalogue().schemas().to_vec(),
+        vec![fixture_object],
+        version_one.catalogue().value_types().to_vec(),
+        version_one.catalogue().enum_types().to_vec(),
+        version_one.catalogue().type_bindings().to_vec(),
+        functions,
+    )
+    .unwrap();
+    let pair = RevisionPair::new(pair.source(), catalogue.revision());
     let context = orna_core::revision::CatalogueHashContext::version_two(standard);
+    let mut revisions = vec![revision];
+    if let Some(target_revision) = target_revision {
+        revisions.push(target_revision);
+    }
+    let mut origins = version_one.origins().to_vec();
+    origins.push(DefinitionOrigin::new(
+        DefinitionIdentity::ObjectType(TypeId::from_bytes([0xf0; 16])),
+        source_origin,
+    ));
+    if let Some(target_id) = target_id {
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Function(target_id),
+            source_origin,
+        ));
+    }
     let catalogue_hash = catalogue_digest_with_context(
         &context,
         &catalogue,
-        std::slice::from_ref(&revision),
+        &revisions,
         version_one.expressions(),
-        version_one.origins(),
-        std::slice::from_ref(&reference),
+        &origins,
+        &references,
     )
     .unwrap();
     let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
@@ -1643,9 +1896,9 @@ fn version_two_active_with_function_return(
             catalogue_hash,
             ActiveRevisionContent::new(
                 version_one.expressions().to_vec(),
-                vec![revision],
-                version_one.origins().to_vec(),
-                vec![reference],
+                revisions,
+                origins,
+                references,
             ),
         ),
         context,
@@ -1973,10 +2226,19 @@ fn version_four_state_active(
     RevisionPair,
     FunctionRevisionId,
 ) {
-    let standard = orna_standard::verify_standard_library_snapshot(
-        orna_standard::retained_standard_library_snapshot().unwrap(),
-    )
-    .unwrap();
+    version_four_state_active_with_return(ResolvedType::Value(return_type), payload)
+}
+
+fn version_four_state_active_with_return(
+    return_type: ResolvedType,
+    payload: Vec<u8>,
+) -> (
+    ActiveDatabaseRevision,
+    FunctionId,
+    RevisionPair,
+    FunctionRevisionId,
+) {
+    let standard = standard_v1();
     let (version_one, function_id, pair, function_revision_id) = version_one_active(true);
     let prior_function = version_one.catalogue().function_by_id(function_id).unwrap();
     let function = FunctionDefinition::new(
@@ -1984,7 +2246,7 @@ fn version_four_state_active(
         prior_function.name().clone(),
         FunctionDomain::Client,
         Vec::new(),
-        FunctionReturn::Single(ResolvedType::Value(return_type)),
+        FunctionReturn::Single(return_type),
         function_revision_id,
         FunctionSecurity::Invoker,
         None,
@@ -2066,14 +2328,10 @@ fn version_one_active(
     FunctionRevisionId,
 ) {
     let source = match value {
-        true => {
-            "CREATE SCHEMA app;\nCREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;"
-        }
-        false => {
-            "CREATE SCHEMA app;\nCREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN FALSE;"
-        }
+        true => include_str!("tests/fixtures/synthetic-client-true.orna"),
+        false => include_str!("tests/fixtures/synthetic-client-false.orna"),
     };
-    let function_start = "CREATE SCHEMA app;\n".len();
+    let function_start = 0;
     let source_unit_id = SourceUnitId::from_bytes([1; 16]);
     let source_bundle_id = SourceBundleId::from_bytes([2; 16]);
     let source_revision_id = SourceRevisionId::from_bytes([3; 16]);
@@ -2154,12 +2412,7 @@ fn version_one_active(
     let origins = vec![
         DefinitionOrigin::new(
             DefinitionIdentity::Schema(schema_id),
-            SourceOrigin::new(
-                source_unit_id,
-                0,
-                u32::try_from(function_start - 1).unwrap(),
-            )
-            .unwrap(),
+            SourceOrigin::new(source_unit_id, 0, 0).unwrap(),
         ),
         DefinitionOrigin::new(DefinitionIdentity::Function(function_id), function_origin),
     ];
@@ -2453,10 +2706,7 @@ fn version_five_expression_active_with_parameter(
     FunctionRevisionId,
     ParameterId,
 ) {
-    let standard = orna_standard::verify_standard_library_snapshot(
-        orna_standard::retained_standard_library_snapshot().unwrap(),
-    )
-    .unwrap();
+    let standard = standard_v1();
     let (version_one, function_id, pair, function_revision_id) = version_one_active(true);
     let prior_function = version_one.catalogue().function_by_id(function_id).unwrap();
     let parameter = ParameterDefinition::new(
