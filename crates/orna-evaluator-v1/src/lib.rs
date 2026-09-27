@@ -2737,7 +2737,10 @@ impl Context<'_, '_> {
                 self.range_contains(value, range)
             }
             "|" => {
-                let input = self.evaluate(lhs, scope, depth + 1)?;
+                let input = match system_relation_source(lhs) {
+                    Some(source) => Value::Relation(RelationPlan::new(source.to_owned())),
+                    None => self.evaluate(lhs, scope, depth + 1)?,
+                };
                 if self.transfer.is_some() {
                     return Ok(Value::Null);
                 }
@@ -6535,6 +6538,14 @@ fn function_name(expression: &Expr) -> Option<String> {
     match expression {
         Expr::Name { text, .. } => Some(text.clone()),
         Expr::Field { base, name, .. } => Some(format!("{}.{}", function_name(base)?, name)),
+        _ => None,
+    }
+}
+
+fn system_relation_source(expression: &Expr) -> Option<&'static str> {
+    match function_name(expression)?.as_str() {
+        "sys.Storage" => Some("sys.Storage"),
+        "sys.MaintenanceJob" => Some("sys.MaintenanceJob"),
         _ => None,
     }
 }
