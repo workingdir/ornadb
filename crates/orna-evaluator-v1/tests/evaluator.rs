@@ -1091,9 +1091,7 @@ fn named_collection_callback_preserves_public_nominal_selection() {
         None,
         vec![nominal_field("value", true, None)],
     );
-    let functions = functions_from_source(
-        "fn select(value: Int) = value.value; fn run() = std.collection.map([Thing { value: 7 }], select);",
-    );
+    let functions = functions_from_source(include_str!("fixtures/nominal_map_callback.orna"));
 
     let result = invoke_named_with_nominals(
         "run",
@@ -5476,9 +5474,7 @@ fn std_collection_sort_by_evaluates_callbacks_before_sorting_and_fails_closed() 
         "ORNA-EVAL-LIMIT"
     );
 
-    let functions = functions_from_source(
-        "fn key(value: Int) = Note.insert(value); fn run() = sort_by([3, 1], key);",
-    );
+    let functions = functions_from_source(include_str!("fixtures/sort_by_effect_callback.orna"));
     let mut effects = NoteEffects::default();
     assert_eq!(
         invoke_named_with_effects(
@@ -9245,7 +9241,7 @@ fn relation_aggregate_calls_reject_invalid_arguments_and_values() {
 fn root_sum_and_min_remain_shadowable_by_admitted_functions() {
     assert_eq!(
         call_module(
-            "fn sum(value: Int) = value + 100; fn run() = sum(1);",
+            include_str!("fixtures/root_sum_shadow_function.orna"),
             "run()",
             Limits::default(),
         )
@@ -9254,7 +9250,7 @@ fn root_sum_and_min_remain_shadowable_by_admitted_functions() {
     );
     assert_eq!(
         call_module(
-            "fn min(value: Int) = value + 100; fn run() = min(1);",
+            include_str!("fixtures/root_min_shadow_function.orna"),
             "run()",
             Limits::default(),
         )
