@@ -9,4 +9,5 @@ license.workspace = true
 orna-artifact = { path = "../orna-artifact" }
 orna-compiler = { path = "../orna-compiler" }
 orna-core = { path = "../orna-core" }
+orna-semantic-v1 = { path = "../orna-semantic-v1" }
 orna-syntax = { path = "../orna-syntax" }
