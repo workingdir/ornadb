@@ -433,10 +433,7 @@ fn version_five_recursive_calls_enforce_the_callee_capability() {
     ));
     let revisions = vec![caller_revision, callee_revision];
     let references = vec![caller_reference];
-    let standard = orna_standard::verify_standard_library_snapshot(
-        orna_standard::retained_standard_library_snapshot().unwrap(),
-    )
-    .unwrap();
+    let standard = standard_v1();
     let context = orna_core::revision::CatalogueHashContext::version_two(standard);
     let catalogue_hash = catalogue_digest_with_context(
         &context,
@@ -504,115 +501,7 @@ fn version_five_recursive_calls_enforce_the_callee_capability() {
 
 #[test]
 fn nested_call_preserves_caller_bound_capability_parameter() {
-    let prepared = prepared_client_source(
-        "CREATE SCHEMA app; \
-         CREATE CLIENT FUNCTION app.first(p_path TEXT) RETURNS TEXT RETURN app.second(); \
-         CREATE CLIENT FUNCTION app.second() RETURNS TEXT RETURN 'ok';",
-    );
-    let initial = active_from_prepared_candidate(&prepared);
-    let caller = initial
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|function| function.name().to_string() == "app.first")
-        .expect("caller is present")
-        .clone();
-    let callee = initial
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|function| function.name().to_string() == "app.second")
-        .expect("callee is present")
-        .clone();
-    let parameter = caller
-        .parameters()
-        .first()
-        .expect("caller path parameter is present")
-        .id();
-    let payload = orna_artifact::client_plan::ExpressionClientPlan::new(
-        orna_artifact::client_plan::ClientExpressionNode::Call {
-            function: callee.id(),
-            arguments: Vec::new(),
-        },
-    )
-    .encode()
-    .expect("caller expression plan encodes");
-    let artifact = ExecutableArtifact::new(
-        ExecutableArtifactKind::Client,
-        "orna.client-plan",
-        orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
-        payload.clone(),
-        artifact_payload_digest(&payload).unwrap(),
-    )
-    .unwrap();
-    let current = initial
-        .function_revisions()
-        .iter()
-        .find(|revision| revision.function() == caller.id())
-        .expect("caller revision is present");
-    let caller_references = initial
-        .references()
-        .iter()
-        .filter(|reference| reference.source_function() == caller.id())
-        .cloned()
-        .collect::<Vec<_>>();
-    let semantic_hash = function_semantic_digest_with_version(
-        current.semantic_hash_version(),
-        &caller,
-        current.language_version(),
-        &artifact,
-        initial.expressions(),
-        &caller_references,
-    )
-    .unwrap();
-    let replacement = FunctionRevisionRecord::new(
-        caller.id(),
-        current.id(),
-        current.revision_number(),
-        current.declaration_origin(),
-        current.declaration_content_hash(),
-        semantic_hash,
-        current.language_version(),
-        artifact,
-    )
-    .unwrap()
-    .with_semantic_hash_version(current.semantic_hash_version());
-    let revisions = initial
-        .function_revisions()
-        .iter()
-        .map(|revision| {
-            if revision.function() == caller.id() {
-                replacement.clone()
-            } else {
-                revision.clone()
-            }
-        })
-        .collect::<Vec<_>>();
-    let catalogue_hash = catalogue_digest_with_context(
-        initial.catalogue_hash_context(),
-        initial.catalogue(),
-        &revisions,
-        initial.expressions(),
-        initial.origins(),
-        initial.references(),
-    )
-    .unwrap();
-    let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
-        ActiveDatabaseRevisionInput::new(
-            initial.pair(),
-            initial.source().clone(),
-            initial.catalogue().clone(),
-            catalogue_hash,
-            ActiveRevisionContent::new(
-                initial.expressions().to_vec(),
-                revisions,
-                initial.origins().to_vec(),
-                initial.references().to_vec(),
-            ),
-        ),
-        initial.catalogue_hash_context().clone(),
-    )
-    .unwrap();
+    let (active, caller, parameter) = nested_text_call_with_path_parameter();
     let declaration = capability::LocalCapabilityDeclaration::new(
         capability::LocalCapabilityName::StdFsRead,
         capability::LocalCapabilityArgumentSource::Parameter("p_path".to_owned()),
@@ -631,7 +520,7 @@ fn nested_call_preserves_caller_bound_capability_parameter() {
 
     let result = super::super::evaluate_client_function_with_grants_and_arguments(
         &active,
-        &authorise(active.pair(), caller.id()),
+        &authorise(active.pair(), caller),
         std::slice::from_ref(&argument),
         std::slice::from_ref(&declaration),
         &grants,
@@ -648,7 +537,7 @@ fn nested_call_preserves_caller_bound_capability_parameter() {
         capability::LocalCapabilityGrantSet::from_grants([mismatched_grant]).unwrap();
     let error = super::super::evaluate_client_function_with_grants_and_arguments(
         &active,
-        &authorise(active.pair(), caller.id()),
+        &authorise(active.pair(), caller),
         &[argument],
         &[declaration],
         &mismatched_grants,
@@ -657,58 +546,903 @@ fn nested_call_preserves_caller_bound_capability_parameter() {
     assert!(matches!(
         error,
         super::super::ClientExecutionError::CapabilityDenied { context, capability }
-            if context.function() == caller.id() && capability == "std.fs.read"
+            if context.function() == caller && capability == "std.fs.read"
     ));
+}
+
+fn two_function_active_with_call_plan(
+    payload: Vec<u8>,
+    artifact_version: u32,
+) -> (ActiveDatabaseRevision, FunctionId, FunctionId) {
+    let callee_id = FunctionId::from_bytes([0xd1; 16]);
+    let (initial, caller, pair, _) = version_two_active_with_artifact(
+        standard_v1(),
+        orna_standard::BOOLEAN_TYPE_ID,
+        DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
+        DefinitionReferenceKind::NamedType,
+        artifact_version,
+        payload,
+    );
+    let prior = &initial.function_revisions()[0];
+    let callee_revision_id = FunctionRevisionId::from_bytes([0xd2; 16]);
+    let callee_definition = FunctionDefinition::new(
+        callee_id,
+        QualifiedSemanticName::new(["app", "callee"]).unwrap(),
+        FunctionDomain::Client,
+        Vec::new(),
+        FunctionReturn::Single(ResolvedType::value(orna_standard::BOOLEAN_TYPE_ID)),
+        callee_revision_id,
+        FunctionSecurity::Invoker,
+        None,
+        FunctionVolatility::Immutable,
+    );
+    let callee_payload = orna_artifact::client_plan::ExpressionClientPlan::new(
+        orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+    )
+    .encode()
+    .unwrap();
+    let callee_artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Client,
+        "orna.client-plan",
+        orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+        callee_payload.clone(),
+        artifact_payload_digest(&callee_payload).unwrap(),
+    )
+    .unwrap();
+    let callee_hash = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        &callee_definition,
+        prior.language_version(),
+        &callee_artifact,
+        initial.expressions(),
+        &[],
+    )
+    .unwrap();
+    let callee_revision = FunctionRevisionRecord::new(
+        callee_id,
+        callee_revision_id,
+        1,
+        prior.declaration_origin(),
+        function_declaration_digest(b"synthetic direct callee").unwrap(),
+        callee_hash,
+        prior.language_version(),
+        callee_artifact,
+    )
+    .unwrap()
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    let mut functions = initial.catalogue().functions().to_vec();
+    functions.push(callee_definition);
+    let catalogue = CatalogueSnapshot::new_with_functions_and_enum_types(
+        initial.catalogue().revision(),
+        initial.catalogue().schemas().to_vec(),
+        initial.catalogue().object_types().to_vec(),
+        initial.catalogue().value_types().to_vec(),
+        initial.catalogue().enum_types().to_vec(),
+        initial.catalogue().type_bindings().to_vec(),
+        functions,
+    )
+    .unwrap();
+    let mut origins = initial.origins().to_vec();
+    origins.push(DefinitionOrigin::new(
+        DefinitionIdentity::Function(callee_id),
+        prior.declaration_origin(),
+    ));
+    let caller_reference = DefinitionReference::new(
+        caller,
+        prior.id(),
+        0,
+        DefinitionReferenceTarget::Function(callee_id),
+        DefinitionReferenceKind::FunctionCall,
+        prior.declaration_origin(),
+    );
+    let caller_definition = catalogue.function_by_id(caller).unwrap();
+    let caller_hash = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        caller_definition,
+        prior.language_version(),
+        prior.artifact(),
+        initial.expressions(),
+        std::slice::from_ref(&caller_reference),
+    )
+    .unwrap();
+    let caller_revision = FunctionRevisionRecord::new(
+        caller,
+        prior.id(),
+        prior.revision_number(),
+        prior.declaration_origin(),
+        prior.declaration_content_hash(),
+        caller_hash,
+        prior.language_version(),
+        prior.artifact().clone(),
+    )
+    .unwrap()
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    let mut revisions = initial
+        .function_revisions()
+        .iter()
+        .map(|revision| {
+            if revision.function() == caller {
+                caller_revision.clone()
+            } else {
+                revision.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    revisions.push(callee_revision);
+    let references = vec![caller_reference];
+    let context = initial.catalogue_hash_context().clone();
+    let catalogue_hash = catalogue_digest_with_context(
+        &context,
+        &catalogue,
+        &revisions,
+        initial.expressions(),
+        &origins,
+        &references,
+    )
+    .unwrap();
+    let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            pair,
+            initial.source().clone(),
+            catalogue,
+            catalogue_hash,
+            ActiveRevisionContent::new(
+                initial.expressions().to_vec(),
+                revisions,
+                origins,
+                references,
+            ),
+        ),
+        context,
+    )
+    .unwrap();
+    (active, caller, callee_id)
+}
+
+fn active_with_references(
+    active: &ActiveDatabaseRevision,
+    references: Vec<DefinitionReference>,
+) -> ActiveDatabaseRevision {
+    active_with_references_result(active, references).unwrap()
+}
+
+fn active_with_references_result(
+    active: &ActiveDatabaseRevision,
+    references: Vec<DefinitionReference>,
+) -> Result<ActiveDatabaseRevision, RevisionInvariantError> {
+    let context = active.catalogue_hash_context().clone();
+    let revisions = active
+        .function_revisions()
+        .iter()
+        .map(|revision| {
+            let function = active
+                .catalogue()
+                .function_by_id(revision.function())
+                .unwrap();
+            let function_references = references
+                .iter()
+                .filter(|reference| reference.source_function() == revision.function())
+                .cloned()
+                .collect::<Vec<_>>();
+            let semantic_hash = function_semantic_digest_with_version(
+                revision.semantic_hash_version(),
+                function,
+                revision.language_version(),
+                revision.artifact(),
+                active.expressions(),
+                &function_references,
+            )
+            .unwrap();
+            FunctionRevisionRecord::new(
+                revision.function(),
+                revision.id(),
+                revision.revision_number(),
+                revision.declaration_origin(),
+                revision.declaration_content_hash(),
+                semantic_hash,
+                revision.language_version(),
+                revision.artifact().clone(),
+            )
+            .unwrap()
+            .with_semantic_hash_version(revision.semantic_hash_version())
+        })
+        .collect::<Vec<_>>();
+    let catalogue_hash = catalogue_digest_with_context(
+        &context,
+        active.catalogue(),
+        &revisions,
+        active.expressions(),
+        active.origins(),
+        &references,
+    )
+    .unwrap();
+    ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            active.pair(),
+            active.source().clone(),
+            active.catalogue().clone(),
+            catalogue_hash,
+            ActiveRevisionContent::new(
+                active.expressions().to_vec(),
+                revisions,
+                active.origins().to_vec(),
+                references,
+            ),
+        ),
+        context,
+    )
+}
+
+fn direct_client_call_chain(
+    edges: usize,
+    state_root: bool,
+) -> (ActiveDatabaseRevision, FunctionId) {
+    let (base, _, _, _) = version_one_active(true);
+    let function_ids = (0..=edges)
+        .map(|index| FunctionId::from_bytes([(index as u8).wrapping_add(0x20); 16]))
+        .collect::<Vec<_>>();
+    let revision_ids = (0..=edges)
+        .map(|index| FunctionRevisionId::from_bytes([(index as u8).wrapping_add(0x40); 16]))
+        .collect::<Vec<_>>();
+    let source_origin = base.function_revisions()[0].declaration_origin();
+    let definitions = function_ids
+        .iter()
+        .enumerate()
+        .map(|(index, function)| {
+            FunctionDefinition::new(
+                *function,
+                QualifiedSemanticName::new(["app", &format!("chain_{index}")]).unwrap(),
+                FunctionDomain::Client,
+                Vec::new(),
+                FunctionReturn::Single(ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID)),
+                revision_ids[index],
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Immutable,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut references = Vec::new();
+    let mut revisions = Vec::with_capacity(edges + 1);
+    for index in 0..=edges {
+        let function_id = function_ids[index];
+        let mut function_references = Vec::new();
+        let (artifact_version, payload) = if index == edges {
+            (
+                orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+                orna_artifact::client_plan::ExpressionClientPlan::new(
+                    ClientExpressionNode::Boolean { value: true },
+                )
+                .encode()
+                .unwrap(),
+            )
+        } else {
+            let target = function_ids[index + 1];
+            let reference = DefinitionReference::new(
+                function_id,
+                revision_ids[index],
+                0,
+                DefinitionReferenceTarget::Function(target),
+                DefinitionReferenceKind::FunctionCall,
+                source_origin,
+            );
+            function_references.push(reference.clone());
+            references.push(reference);
+            let call = ClientExpressionNode::Call {
+                function: target,
+                arguments: Vec::new(),
+            };
+            if index == 0 && state_root {
+                let state_plan = orna_artifact::client_plan::StateClientPlan::new(
+                    call,
+                    vec![orna_artifact::client_plan::StateSlot::new(
+                        StateSlotId::from_bytes([0xf4; 16]),
+                        orna_standard::BOOLEAN_TYPE_ID,
+                        orna_artifact::client_plan::StateScope::Local,
+                        orna_artifact::client_plan::StateDefault::Expression(
+                            ClientExpressionNode::Boolean { value: true },
+                        ),
+                    )],
+                );
+                (
+                    orna_artifact::client_plan::STATE_FORMAT_VERSION,
+                    state_plan.encode().unwrap(),
+                )
+            } else {
+                (
+                    orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+                    orna_artifact::client_plan::ExpressionClientPlan::new(call)
+                        .encode()
+                        .unwrap(),
+                )
+            }
+        };
+        let artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            "orna.client-plan",
+            artifact_version,
+            payload.clone(),
+            artifact_payload_digest(&payload).unwrap(),
+        )
+        .unwrap();
+        let semantic_hash = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            &definitions[index],
+            base.function_revisions()[0].language_version(),
+            &artifact,
+            base.expressions(),
+            &function_references,
+        )
+        .unwrap();
+        revisions.push(
+            FunctionRevisionRecord::new(
+                function_id,
+                revision_ids[index],
+                1,
+                source_origin,
+                function_declaration_digest(format!("direct call chain {index}").as_bytes())
+                    .unwrap(),
+                semantic_hash,
+                base.function_revisions()[0].language_version(),
+                artifact,
+            )
+            .unwrap()
+            .with_semantic_hash_version(FunctionSemanticHashVersion::Version2),
+        );
+    }
+    let catalogue = CatalogueSnapshot::new_with_functions(
+        base.catalogue().revision(),
+        base.catalogue().schemas().to_vec(),
+        base.catalogue().object_types().to_vec(),
+        definitions,
+    )
+    .unwrap();
+    let origins = base
+        .origins()
+        .iter()
+        .filter(|origin| origin.identity() != DefinitionIdentity::Function(base.catalogue().functions()[0].id()))
+        .cloned()
+        .chain(function_ids.iter().map(|function| {
+            DefinitionOrigin::new(DefinitionIdentity::Function(*function), source_origin)
+        }))
+        .collect::<Vec<_>>();
+    let context = orna_core::revision::CatalogueHashContext::version_two(standard_v1());
+    let catalogue_hash = catalogue_digest_with_context(
+        &context,
+        &catalogue,
+        &revisions,
+        base.expressions(),
+        &origins,
+        &references,
+    )
+    .unwrap();
+    let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            base.pair(),
+            base.source().clone(),
+            catalogue,
+            catalogue_hash,
+            ActiveRevisionContent::new(
+                base.expressions().to_vec(),
+                revisions,
+                origins,
+                references,
+            ),
+        ),
+        context,
+    )
+    .unwrap();
+    (active, function_ids[0])
+}
+
+fn nested_text_call_with_path_parameter() -> (ActiveDatabaseRevision, FunctionId, ParameterId) {
+    let (base, caller_id, pair, caller_revision_id) = version_one_active(true);
+    let source_origin = base.function_revisions()[0].declaration_origin();
+    let callee_id = FunctionId::from_bytes([0xe1; 16]);
+    let callee_revision_id = FunctionRevisionId::from_bytes([0xe2; 16]);
+    let parameter_id = ParameterId::from_bytes([0xe3; 16]);
+    let text = ResolvedType::Value(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID);
+    let caller = FunctionDefinition::new(
+        caller_id,
+        QualifiedSemanticName::new(["app", "first"]).unwrap(),
+        FunctionDomain::Client,
+        vec![ParameterDefinition::new(
+            parameter_id,
+            "p_path",
+            0,
+            text,
+            None,
+        )],
+        FunctionReturn::Single(text),
+        caller_revision_id,
+        FunctionSecurity::Invoker,
+        None,
+        FunctionVolatility::Immutable,
+    );
+    let callee = FunctionDefinition::new(
+        callee_id,
+        QualifiedSemanticName::new(["app", "second"]).unwrap(),
+        FunctionDomain::Client,
+        Vec::new(),
+        FunctionReturn::Single(text),
+        callee_revision_id,
+        FunctionSecurity::Invoker,
+        None,
+        FunctionVolatility::Immutable,
+    );
+    let caller_payload = orna_artifact::client_plan::ExpressionClientPlan::new(
+        orna_artifact::client_plan::ClientExpressionNode::Call {
+            function: callee_id,
+            arguments: Vec::new(),
+        },
+    )
+    .encode()
+    .unwrap();
+    let callee_payload = orna_artifact::client_plan::ExpressionClientPlan::new(
+        orna_artifact::client_plan::ClientExpressionNode::String {
+            value: "ok".to_owned(),
+        },
+    )
+    .encode()
+    .unwrap();
+    let caller_artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Client,
+        "orna.client-plan",
+        orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+        caller_payload.clone(),
+        artifact_payload_digest(&caller_payload).unwrap(),
+    )
+    .unwrap();
+    let callee_artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Client,
+        "orna.client-plan",
+        orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+        callee_payload.clone(),
+        artifact_payload_digest(&callee_payload).unwrap(),
+    )
+    .unwrap();
+    let references = vec![
+        DefinitionReference::new(
+            caller_id,
+            caller_revision_id,
+            0,
+            DefinitionReferenceTarget::Function(callee_id),
+            DefinitionReferenceKind::FunctionCall,
+            source_origin,
+        ),
+        DefinitionReference::new(
+            caller_id,
+            caller_revision_id,
+            1,
+            DefinitionReferenceTarget::ValueType(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            source_origin,
+        ),
+        DefinitionReference::new(
+            callee_id,
+            callee_revision_id,
+            0,
+            DefinitionReferenceTarget::ValueType(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            source_origin,
+        ),
+    ];
+    let previous = &base.function_revisions()[0];
+    let caller_hash = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        &caller,
+        previous.language_version(),
+        &caller_artifact,
+        base.expressions(),
+        &references[..2],
+    )
+    .unwrap();
+    let callee_hash = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        &callee,
+        previous.language_version(),
+        &callee_artifact,
+        base.expressions(),
+        &references[2..],
+    )
+    .unwrap();
+    let caller_revision = FunctionRevisionRecord::new(
+        caller_id,
+        caller_revision_id,
+        1,
+        source_origin,
+        function_declaration_digest(b"direct caller").unwrap(),
+        caller_hash,
+        previous.language_version(),
+        caller_artifact,
+    )
+    .unwrap()
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    let callee_revision = FunctionRevisionRecord::new(
+        callee_id,
+        callee_revision_id,
+        1,
+        source_origin,
+        function_declaration_digest(b"direct callee").unwrap(),
+        callee_hash,
+        previous.language_version(),
+        callee_artifact,
+    )
+    .unwrap()
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    let catalogue = CatalogueSnapshot::new_with_functions(
+        base.catalogue().revision(),
+        base.catalogue().schemas().to_vec(),
+        base.catalogue().object_types().to_vec(),
+        vec![caller, callee],
+    )
+    .unwrap();
+    let origins = base
+        .origins()
+        .iter()
+        .filter(|origin| origin.identity() != DefinitionIdentity::Function(caller_id))
+        .cloned()
+        .chain([
+            DefinitionOrigin::new(DefinitionIdentity::Function(caller_id), source_origin),
+            DefinitionOrigin::new(DefinitionIdentity::Function(callee_id), source_origin),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Parameter {
+                    owner: caller_id,
+                    parameter: parameter_id,
+                },
+                source_origin,
+            ),
+        ])
+        .collect::<Vec<_>>();
+    let revisions = vec![caller_revision, callee_revision];
+    let context = orna_core::revision::CatalogueHashContext::version_two(standard_v1());
+    let catalogue_hash = catalogue_digest_with_context(
+        &context,
+        &catalogue,
+        &revisions,
+        base.expressions(),
+        &origins,
+        &references,
+    )
+    .unwrap();
+    let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            pair,
+            base.source().clone(),
+            catalogue,
+            catalogue_hash,
+            ActiveRevisionContent::new(base.expressions().to_vec(), revisions, origins, references),
+        ),
+        context,
+    )
+    .unwrap();
+    (active, caller_id, parameter_id)
+}
+
+fn source_introspection_active() -> (ActiveDatabaseRevision, FunctionId) {
+    let payload = orna_artifact::client_plan::ExpressionClientPlan::new(
+        ClientExpressionNode::SourceIntrospection,
+    )
+    .encode()
+    .unwrap();
+    let (active, function, _, _) = version_two_active_with_artifact(
+        standard_v1(),
+        orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID,
+        DefinitionReferenceTarget::ValueType(orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID),
+        DefinitionReferenceKind::NamedType,
+        orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+        payload,
+    );
+    (active, function)
+}
+
+fn procedural_source_introspection_active() -> (ActiveDatabaseRevision, FunctionId) {
+    let plan = orna_artifact::client_plan::ProceduralClientPlan::new(
+        vec![orna_artifact::client_plan::ClientLocal::new(
+            LocalId::from_bytes([0xf1; 16]),
+            orna_standard::INTEGER_TYPE_ID,
+            orna_artifact::client_plan::ClientLocalKind::Value,
+        )],
+        vec![orna_artifact::client_plan::ClientStatement::let_(
+            LocalId::from_bytes([0xf1; 16]),
+            ClientExpressionNode::Integer { value: 1 },
+        )],
+        ClientExpressionNode::SourceIntrospection,
+    );
+    let (active, function, _, _) = version_two_active_with_artifact(
+        standard_v1(),
+        orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID,
+        DefinitionReferenceTarget::ValueType(orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID),
+        DefinitionReferenceKind::NamedType,
+        orna_artifact::client_plan::PROCEDURAL_FORMAT_VERSION,
+        plan.encode().unwrap(),
+    );
+    (active, function)
+}
+
+fn parameterized_control_flow_introspection_active(
+    return_type: TypeId,
+    payload: Vec<u8>,
+) -> (ActiveDatabaseRevision, FunctionId, ParameterId) {
+    let (base, function_id, pair, function_revision_id) = version_one_active(true);
+    let parameter_id = ParameterId::from_bytes([0xf3; 16]);
+    let source_origin = base.function_revisions()[0].declaration_origin();
+    let function = FunctionDefinition::new(
+        function_id,
+        QualifiedSemanticName::new(["app", "describe"]).unwrap(),
+        FunctionDomain::Client,
+        vec![ParameterDefinition::new(
+            parameter_id,
+            "p_value",
+            0,
+            ResolvedType::Value(orna_standard::INTEGER_TYPE_ID),
+            None,
+        )],
+        FunctionReturn::Single(ResolvedType::Value(return_type)),
+        function_revision_id,
+        FunctionSecurity::Invoker,
+        None,
+        FunctionVolatility::Immutable,
+    );
+    let artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Client,
+        "orna.client-plan",
+        orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION,
+        payload.clone(),
+        artifact_payload_digest(&payload).unwrap(),
+    )
+    .unwrap();
+    let previous = &base.function_revisions()[0];
+    let references = vec![
+        DefinitionReference::new(
+            function_id,
+            function_revision_id,
+            0,
+            DefinitionReferenceTarget::ValueType(orna_standard::INTEGER_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            source_origin,
+        ),
+        DefinitionReference::new(
+            function_id,
+            function_revision_id,
+            1,
+            DefinitionReferenceTarget::ValueType(return_type),
+            DefinitionReferenceKind::NamedType,
+            source_origin,
+        ),
+    ];
+    let semantic_hash = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        &function,
+        previous.language_version(),
+        &artifact,
+        base.expressions(),
+        &references,
+    )
+    .unwrap();
+    let revision = FunctionRevisionRecord::new(
+        function_id,
+        function_revision_id,
+        1,
+        source_origin,
+        function_declaration_digest(b"direct parameterized control flow").unwrap(),
+        semantic_hash,
+        previous.language_version(),
+        artifact,
+    )
+    .unwrap()
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    let catalogue = CatalogueSnapshot::new_with_functions(
+        base.catalogue().revision(),
+        base.catalogue().schemas().to_vec(),
+        base.catalogue().object_types().to_vec(),
+        vec![function],
+    )
+    .unwrap();
+    let origins = base
+        .origins()
+        .iter()
+        .cloned()
+        .chain([DefinitionOrigin::new(
+            DefinitionIdentity::Parameter {
+                owner: function_id,
+                parameter: parameter_id,
+            },
+            source_origin,
+        )])
+        .collect::<Vec<_>>();
+    let context = orna_core::revision::CatalogueHashContext::version_two(standard_v1());
+    let catalogue_hash = catalogue_digest_with_context(
+        &context,
+        &catalogue,
+        std::slice::from_ref(&revision),
+        base.expressions(),
+        &origins,
+        &references,
+    )
+    .unwrap();
+    let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            pair,
+            base.source().clone(),
+            catalogue,
+            catalogue_hash,
+            ActiveRevisionContent::new(
+                base.expressions().to_vec(),
+                vec![revision],
+                origins,
+                references,
+            ),
+        ),
+        context,
+    )
+    .unwrap();
+    (active, function_id, parameter_id)
+}
+
+fn recursive_factorial_active() -> (ActiveDatabaseRevision, FunctionId, ParameterId) {
+    use orna_artifact::client_plan::{
+        ControlFlowBinaryOperator as Bin, ControlFlowClientPlan, ControlFlowIfBranch,
+        ControlFlowIfStatement, ControlFlowStatement as Statement,
+    };
+    let (base, function_id, pair, revision_id) = version_one_active(true);
+    let parameter_id = ParameterId::from_bytes([0xf5; 16]);
+    let parameter = ClientExpressionNode::ParameterRead {
+        parameter: parameter_id,
+    };
+    let plan = ControlFlowClientPlan::new(
+        Vec::new(),
+        vec![Statement::if_(ControlFlowIfStatement::new(
+            vec![ControlFlowIfBranch::new(
+                ClientExpressionNode::Binary {
+                    operator: Bin::LessThanOrEqual,
+                    left: Box::new(parameter.clone()),
+                    right: Box::new(ClientExpressionNode::Integer { value: 1 }),
+                },
+                vec![Statement::return_value(ClientExpressionNode::Integer { value: 1 })],
+            )],
+            Some(vec![Statement::return_value(ClientExpressionNode::Binary {
+                operator: Bin::Multiply,
+                left: Box::new(parameter.clone()),
+                right: Box::new(ClientExpressionNode::Call {
+                    function: function_id,
+                    arguments: vec![(
+                        parameter_id,
+                        ClientExpressionNode::Binary {
+                            operator: Bin::Subtract,
+                            left: Box::new(parameter),
+                            right: Box::new(ClientExpressionNode::Integer { value: 1 }),
+                        },
+                    )],
+                }),
+            })]),
+        ))],
+    );
+    let payload = plan.encode().expect("factorial plan encodes");
+    let artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Client,
+        "orna.client-plan",
+        orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION,
+        payload.clone(),
+        artifact_payload_digest(&payload).unwrap(),
+    )
+    .unwrap();
+    let source_origin = base.function_revisions()[0].declaration_origin();
+    let function = FunctionDefinition::new(
+        function_id,
+        QualifiedSemanticName::new(["app", "factorial"]).unwrap(),
+        FunctionDomain::Client,
+        vec![ParameterDefinition::new(
+            parameter_id,
+            "p_n",
+            0,
+            ResolvedType::Value(orna_standard::INTEGER_TYPE_ID),
+            None,
+        )],
+        FunctionReturn::Single(ResolvedType::Value(orna_standard::INTEGER_TYPE_ID)),
+        revision_id,
+        FunctionSecurity::Invoker,
+        None,
+        FunctionVolatility::Immutable,
+    );
+    let references = vec![
+        DefinitionReference::new(
+            function_id,
+            revision_id,
+            0,
+            DefinitionReferenceTarget::Function(function_id),
+            DefinitionReferenceKind::FunctionCall,
+            source_origin,
+        ),
+        DefinitionReference::new(
+            function_id,
+            revision_id,
+            1,
+            DefinitionReferenceTarget::ValueType(orna_standard::INTEGER_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            source_origin,
+        ),
+    ];
+    let semantic_hash = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        &function,
+        base.function_revisions()[0].language_version(),
+        &artifact,
+        base.expressions(),
+        &references,
+    )
+    .unwrap();
+    let revision = FunctionRevisionRecord::new(
+        function_id,
+        revision_id,
+        1,
+        source_origin,
+        function_declaration_digest(b"direct factorial function").unwrap(),
+        semantic_hash,
+        base.function_revisions()[0].language_version(),
+        artifact,
+    )
+    .unwrap()
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    let catalogue = CatalogueSnapshot::new_with_functions(
+        base.catalogue().revision(),
+        base.catalogue().schemas().to_vec(),
+        base.catalogue().object_types().to_vec(),
+        vec![function],
+    )
+    .unwrap();
+    let origins = base
+        .origins()
+        .iter()
+        .cloned()
+        .chain([DefinitionOrigin::new(
+            DefinitionIdentity::Parameter {
+                owner: function_id,
+                parameter: parameter_id,
+            },
+            source_origin,
+        )])
+        .collect::<Vec<_>>();
+    let context = orna_core::revision::CatalogueHashContext::version_two(standard_v1());
+    let catalogue_hash = catalogue_digest_with_context(
+        &context,
+        &catalogue,
+        std::slice::from_ref(&revision),
+        base.expressions(),
+        &origins,
+        &references,
+    )
+    .unwrap();
+    let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            pair,
+            base.source().clone(),
+            catalogue,
+            catalogue_hash,
+            ActiveRevisionContent::new(
+                base.expressions().to_vec(),
+                vec![revision],
+                origins,
+                references,
+            ),
+        ),
+        context,
+    )
+    .unwrap();
+    (active, function_id, parameter_id)
 }
 
 #[test]
 fn expression_calls_reject_targets_absent_from_the_active_reference_set() {
-    let prepared = prepared_client_source(
-        "CREATE SCHEMA app; \
-         CREATE CLIENT FUNCTION app.first() RETURNS BOOLEAN RETURN app.second(); \
-         CREATE CLIENT FUNCTION app.second() RETURNS BOOLEAN RETURN TRUE;",
-    );
-    let first = prepared
-        .candidate()
-        .functions()
-        .iter()
-        .find(|function| function.name().to_string() == "app.first")
-        .expect("first function is present");
-    let second = prepared
-        .candidate()
-        .functions()
-        .iter()
-        .find(|function| function.name().to_string() == "app.second")
-        .expect("second function is present");
-    let mut references = prepared.references().to_vec();
-    let index = references
-        .iter()
-        .position(|reference| {
-            reference.source_function() == first.id()
-                && reference.target() == DefinitionReferenceTarget::Function(second.id())
-        })
-        .expect("first call reference is present");
-    let original = references[index].clone();
-    references[index] = DefinitionReference::new(
-        original.source_function(),
-        original.source_revision(),
-        original.ordinal(),
-        DefinitionReferenceTarget::Function(first.id()),
-        original.kind(),
-        original.source_origin(),
-    );
-    let active = active_from_prepared_with_references(&prepared, references);
-
-    let error = evaluate_client_function(&active, first.id()).unwrap_err();
-
-    assert!(matches!(
-        error,
+    let (initial, function, _, _) = version_two_client_call_active();
+    let active = active_with_references(&initial, Vec::new());
+    let error = evaluate_client_function(&active, function).unwrap_err();
+    assert!(matches!(error,
         super::super::ClientExecutionError::ExpressionEvaluation {
-            context,
-            source: super::super::ClientExpressionError::InvalidCall,
-        } if context.function() == first.id()
-    ));
+            context, source: super::super::ClientExpressionError::InvalidCall,
+        } if context.function() == function));
 }
+
 #[test]
 fn expression_preflight_rejects_unresolved_calls_nested_in_evaluate() {
     let (active, function, pair, function_revision) = version_one_active(true);
@@ -809,9 +1543,8 @@ fn client_expression_call_depth_accepts_boundary_and_rejects_next_edge() {
         .stack_size(32 * 1024 * 1024)
         .spawn(|| {
             let boundary_edges = orna_artifact::client_plan::MAX_EXPRESSION_DEPTH + 1;
-            let (boundary_prepared, boundary_function) =
-                prepared_client_call_chain_with_state_root(boundary_edges);
-            let boundary_active = active_from_prepared_candidate(&boundary_prepared);
+            let (boundary_active, boundary_function) =
+                direct_client_call_chain(boundary_edges, true);
             let mut boundary_state = ClientStateStore::new();
 
             let boundary_result = super::super::evaluate_client_function_with_state(
@@ -823,9 +1556,8 @@ fn client_expression_call_depth_accepts_boundary_and_rejects_next_edge() {
             assert_eq!(boundary_result.value(), &RuntimeValue::Boolean(true));
             assert_eq!(boundary_state.local().len(), 1);
 
-            let (overflow_prepared, overflow_function) =
-                prepared_client_call_chain_with_state_root(boundary_edges + 1);
-            let overflow_active = active_from_prepared_candidate(&overflow_prepared);
+            let (overflow_active, overflow_function) =
+                direct_client_call_chain(boundary_edges + 1, true);
             let mut overflow_state = ClientStateStore::new();
             let state_before_overflow = overflow_state.clone();
 
@@ -1386,82 +2118,63 @@ fn reference_root_loader_isolated_by_principal_revision_and_unknown_field() {
     ));
 }
 
-fn assert_reordered_client_plan_rejects_before_executor(source: &str, function_name: &str) {
-    let prepared = prepared_client_source_v5(source);
-    let (active, function) = active_with_reordered_client_call_references(&prepared, function_name);
-    let mut executor = RecordingActionExecutor::new(Some(RuntimeValue::Integer(1)));
-    let error = super::super::evaluate_client_function_with_executor(
-        &active,
-        &authorise(active.pair(), function),
-        &mut executor,
-    )
-    .expect_err("the durable call sequence must be checked before execution");
-
-    assert!(matches!(
-        error,
-        super::super::ClientExecutionError::ExpressionEvaluation {
-            context,
-            source: super::super::ClientExpressionError::InvalidCall,
-        } if context.function() == function
-    ));
-    assert!(executor.executed.is_empty());
-}
-
-#[test]
-fn state_plan_preflights_defaults_before_return_expression() {
-    assert_reordered_client_plan_rejects_before_executor(
-        r#"CREATE SCHEMA app;
-CREATE CLIENT FUNCTION app.first() RETURNS INTEGER RETURN 1;
-CREATE CLIENT FUNCTION app.second() RETURNS INTEGER RETURN 2;
-CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
-  STATE value INTEGER DEFAULT app.first();
-  BEGIN RETURN app.second(); END;"#,
-        "app.owner",
-    );
-}
-
-#[test]
-fn procedural_plan_preflights_statements_before_return_expression() {
-    assert_reordered_client_plan_rejects_before_executor(
-        r#"CREATE SCHEMA app;
-CREATE CLIENT FUNCTION app.first() RETURNS INTEGER RETURN 1;
-CREATE CLIENT FUNCTION app.second() RETURNS INTEGER RETURN 2;
-CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
-  BEGIN
-LET value INTEGER := app.first();
-value := app.second();
-RETURN value;
-  END;"#,
-        "app.owner",
-    );
-}
-
 #[test]
 fn programmable_client_control_flow_executes_compiled_source() {
-    let prepared = prepared_client_source_v5(
-        r#"CREATE SCHEMA app;
-CREATE CLIENT FUNCTION app.counter() RETURNS INTEGER IS
-  LET total INTEGER := 0;
-  BEGIN
-WHILE total < 5 LOOP
-  LET next INTEGER := total + 1;
-  total := next;
-END LOOP;
-IF total = 5 THEN
-  RETURN total;
-ELSE
-  RETURN 0;
-END IF;
-  END;"#,
+    use orna_artifact::client_plan::{
+        ClientLocal, ClientLocalKind, ControlFlowBinaryOperator as Bin,
+        ControlFlowClientPlan, ControlFlowIfBranch, ControlFlowIfStatement,
+        ControlFlowStatement as Statement, ControlFlowWhileStatement,
+    };
+    let total = LocalId::from_bytes([0xa1; 16]);
+    let next = LocalId::from_bytes([0xa2; 16]);
+    let local = |id| ClientExpressionNode::LocalRead { local: id };
+    let integer = |value| ClientExpressionNode::Integer { value };
+    let plan = ControlFlowClientPlan::new(
+        vec![
+            ClientLocal::new(total, orna_standard::INTEGER_TYPE_ID, ClientLocalKind::Value),
+            ClientLocal::new(next, orna_standard::INTEGER_TYPE_ID, ClientLocalKind::Value),
+        ],
+        vec![
+            Statement::let_(total, integer(0)),
+            Statement::while_(ControlFlowWhileStatement::new(
+                ClientExpressionNode::Binary {
+                    operator: Bin::LessThan,
+                    left: Box::new(local(total)),
+                    right: Box::new(integer(5)),
+                },
+                vec![
+                    Statement::let_(
+                        next,
+                        ClientExpressionNode::Binary {
+                            operator: Bin::Add,
+                            left: Box::new(local(total)),
+                            right: Box::new(integer(1)),
+                        },
+                    ),
+                    Statement::assignment(total, local(next)),
+                ],
+            )),
+            Statement::if_(ControlFlowIfStatement::new(
+                vec![ControlFlowIfBranch::new(
+                    ClientExpressionNode::Binary {
+                        operator: Bin::Equal,
+                        left: Box::new(local(total)),
+                        right: Box::new(integer(5)),
+                    },
+                    vec![Statement::return_value(local(total))],
+                )],
+                Some(vec![Statement::return_value(integer(0))]),
+            )),
+        ],
     );
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|candidate| candidate.name().to_string() == "app.counter")
-        .expect("the control-flow function is present")
-        .id();
+    let (active, function, _, _) = version_two_active_with_artifact(
+        standard_v1(),
+        orna_standard::INTEGER_TYPE_ID,
+        DefinitionReferenceTarget::ValueType(orna_standard::INTEGER_TYPE_ID),
+        DefinitionReferenceKind::NamedType,
+        orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION,
+        plan.encode().expect("control-flow plan encodes"),
+    );
 
     let result = evaluate_client_function(&active, function)
         .expect("the compiled control-flow function evaluates successfully");
@@ -1471,33 +2184,9 @@ END IF;
 
 #[test]
 fn recursive_client_control_flow_uses_shared_execution_fuel() {
-    let prepared = prepared_client_source_v5(
-        r#"CREATE SCHEMA app;
-CREATE CLIENT FUNCTION app.factorial(p_n INTEGER) RETURNS INTEGER IS
-  BEGIN
-IF p_n <= 1 THEN
-  RETURN 1;
-ELSE
-  RETURN p_n * app.factorial(p_n - 1);
-END IF;
-  END;"#,
-    );
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|candidate| candidate.name().to_string() == "app.factorial")
-        .expect("the recursive function is present")
-        .id();
-    let parameter = active
-        .catalogue()
-        .function_by_id(function)
-        .expect("the recursive function definition is present")
-        .parameters()[0]
-        .id();
-    let argument =
-        FunctionArgument::new(parameter, RuntimeValue::Integer(3)).expect("integer argument");
+    let (active, function, parameter) = recursive_factorial_active();
+    let argument = FunctionArgument::new(parameter, RuntimeValue::Integer(3))
+        .expect("integer argument");
 
     let result = super::super::evaluate_client_function_with_arguments(
         &active,
@@ -1548,35 +2237,26 @@ END IF;
 }
 #[test]
 fn recursive_client_control_flow_stops_at_depth_limit() {
-    let prepared = prepared_client_source_v5(
-        r#"CREATE SCHEMA app;
-CREATE CLIENT FUNCTION app.loop(p_n INTEGER) RETURNS INTEGER IS
-  BEGIN
-RETURN app.loop(p_n);
-  END;"#,
+    let function = FunctionId::from_bytes([6; 16]);
+    let plan = orna_artifact::client_plan::ControlFlowClientPlan::new(
+        Vec::new(),
+        vec![orna_artifact::client_plan::ControlFlowStatement::return_value(
+            ClientExpressionNode::Call {
+                function,
+                arguments: Vec::new(),
+            },
+        )],
     );
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|candidate| candidate.name().to_string() == "app.loop")
-        .expect("the recursive function is present")
-        .id();
-    let parameter = active
-        .catalogue()
-        .function_by_id(function)
-        .expect("the recursive function definition is present")
-        .parameters()[0]
-        .id();
-    let argument =
-        FunctionArgument::new(parameter, RuntimeValue::Integer(0)).expect("integer argument");
+    let (active, function, _, _) = version_two_active_with_artifact(
+        standard_v1(),
+        orna_standard::INTEGER_TYPE_ID,
+        DefinitionReferenceTarget::Function(function),
+        DefinitionReferenceKind::FunctionCall,
+        orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION,
+        plan.encode().expect("recursive control-flow plan encodes"),
+    );
 
-    let error = super::super::evaluate_client_function_with_arguments(
-        &active,
-        &authorise(active.pair(), function),
-        &[argument],
-    )
+    let error = evaluate_client_function(&active, function)
     .expect_err("recursive control flow must stop at the depth limit");
 
     assert!(matches!(
@@ -1637,13 +2317,21 @@ fn rejects_non_boolean_short_circuit_operands_before_execution() {
 
 #[test]
 fn source_metadata_body_kind_categories_follow_runtime_return_contract() {
-    let state = prepared_client_source(
-        "CREATE SCHEMA app; \
-         CREATE CLIENT FUNCTION app.state() RETURNS INTEGER \
-         IS STATE value INTEGER DEFAULT 1; BEGIN RETURN 1; END;",
+    let state_plan = orna_artifact::client_plan::StateClientPlan::new(
+        ClientExpressionNode::Integer { value: 1 },
+        vec![orna_artifact::client_plan::StateSlot::new(
+            StateSlotId::from_bytes([0xb1; 16]),
+            orna_standard::INTEGER_TYPE_ID,
+            orna_artifact::client_plan::StateScope::Local,
+            orna_artifact::client_plan::StateDefault::Expression(ClientExpressionNode::Integer {
+                value: 1,
+            }),
+        )],
     );
-    let state_active = active_from_prepared_candidate(&state);
-    let state_function = state_active.catalogue().functions()[0].id();
+    let (state_active, state_function, _, _) = version_four_state_active(
+        orna_standard::INTEGER_TYPE_ID,
+        state_plan.encode().expect("state plan encodes"),
+    );
     let state_result = evaluate_client_function(&state_active, state_function)
         .expect("state function must execute");
     assert_eq!(state_result.value(), &RuntimeValue::Integer(1));
@@ -1656,13 +2344,19 @@ fn source_metadata_body_kind_categories_follow_runtime_return_contract() {
         orna_core::source_metadata::SourceBodyKind::State
     );
 
-    let external = prepared_client_source(
-        "CREATE SCHEMA app; \
-         CREATE EXTERNAL CLIENT FUNCTION app.external() RETURNS INTEGER \
-         RUNTIME CONTRACT 'app.external@1';",
+    let external_payload = orna_artifact::client_plan::ExpressionClientPlan::new(
+        ClientExpressionNode::ExternalContract {
+            identity: "app.external@1".to_owned(),
+        },
     );
-    let external_active = active_from_prepared_candidate(&external);
-    let external_function = external_active.catalogue().functions()[0].id();
+    let (external_active, external_function, _, _) = version_two_active_with_artifact(
+        standard_v1(),
+        orna_standard::INTEGER_TYPE_ID,
+        DefinitionReferenceTarget::ValueType(orna_standard::INTEGER_TYPE_ID),
+        DefinitionReferenceKind::NamedType,
+        orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+        external_payload.encode().expect("external plan encodes"),
+    );
     let external_result = evaluate_client_function(&external_active, external_function)
         .expect_err("external contract execution requires a host executor");
     assert!(matches!(
@@ -1686,20 +2380,7 @@ fn source_metadata_body_kind_categories_follow_runtime_return_contract() {
 }
 #[test]
 fn source_introspection_exposes_complete_generic_function_metadata() {
-    let prepared = prepared_client_source(
-        "CREATE SCHEMA app; \
-         CREATE CLIENT FUNCTION app.target(p_value INTEGER) RETURNS INTEGER RETURN p_value; \
-         CREATE CLIENT FUNCTION app.describe() RETURNS sys.source.function \
-         RETURN sys.source.current();",
-    );
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|candidate| candidate.name().to_string() == "app.describe")
-        .expect("the source-authored function is present")
-        .id();
+    let (active, function) = source_introspection_active();
 
     let result = evaluate_client_function(&active, function)
         .expect("source introspection must execute through the public entry point");
@@ -1710,7 +2391,7 @@ fn source_introspection_exposes_complete_generic_function_metadata() {
         orna_core::source_metadata::SourceFunctionMetadata::decode(value.canonical_payload())
             .expect("the returned payload must decode as source metadata");
     assert_eq!(metadata.function(), function);
-    assert_eq!(metadata.function_name(), "app.describe");
+    assert_eq!(metadata.function_name(), "app.enabled");
     assert_eq!(
         metadata.body_kind(),
         orna_core::source_metadata::SourceBodyKind::Expression
@@ -1726,8 +2407,7 @@ fn source_introspection_exposes_complete_generic_function_metadata() {
         .catalogue_hash_context()
         .standard()
         .expect("the active revision has a verified standard library");
-    let registry = orna_standard::registered_opaque_codecs(standard)
-        .expect("the standard opaque codec registry is valid");
+    let registry = orna_core::value::OpaqueCodecRegistry::application_values_only();
     let encoded = orna_protocol::encode_registered_value(&active, &registry, result.value())
         .expect("source metadata must encode through the generic protocol carrier");
     let decoded = orna_protocol::decode_registered_value(&active, &registry, &encoded)
@@ -1743,19 +2423,7 @@ fn source_introspection_exposes_complete_generic_function_metadata() {
 
 #[test]
 fn procedural_source_introspection_reports_procedural_body_kind() {
-    let prepared = prepared_client_source(
-        "CREATE SCHEMA app; \
-         CREATE CLIENT FUNCTION app.describe() RETURNS sys.source.function IS \
-         BEGIN LET value INTEGER := 1; RETURN sys.source.current(); END;",
-    );
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|candidate| candidate.name().to_string() == "app.describe")
-        .expect("the procedural source function is present")
-        .id();
+    let (active, function) = procedural_source_introspection_active();
 
     let result = evaluate_client_function(&active, function)
         .expect("procedural source introspection must execute");
@@ -1773,41 +2441,35 @@ fn procedural_source_introspection_reports_procedural_body_kind() {
 
 #[test]
 fn state_source_introspection_is_rejected_by_runtime_return_contract() {
-    let prepared = prepared_client_source(
-        "CREATE SCHEMA app; \
-         CREATE CLIENT FUNCTION app.describe() RETURNS sys.source.function IS \
-         STATE value INTEGER DEFAULT 1; \
-         BEGIN RETURN sys.source.current(); END;",
+    let plan = orna_artifact::client_plan::StateClientPlan::new(
+        ClientExpressionNode::SourceIntrospection,
+        vec![orna_artifact::client_plan::StateSlot::new(
+            StateSlotId::from_bytes([0xf2; 16]),
+            orna_standard::INTEGER_TYPE_ID,
+            orna_artifact::client_plan::StateScope::Local,
+            orna_artifact::client_plan::StateDefault::Expression(ClientExpressionNode::Integer {
+                value: 1,
+            }),
+        )],
     );
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active.catalogue().functions()[0].id();
-    let Err(error) = evaluate_client_function(&active, function) else {
-        panic!("state source introspection must be rejected by the runtime return contract");
-    };
+    let (active, function, _, _) = version_four_state_active_with_return(
+        ResolvedType::Named(orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID),
+        plan.encode().unwrap(),
+    );
+    let error = evaluate_client_function(&active, function)
+        .expect_err("state artifacts cannot return source-function metadata");
     assert!(matches!(
-        error,
+        &error,
         super::super::ClientExecutionError::InvalidFunction {
             rule: super::super::ClientExecutionRule::ReturnType,
             ..
         }
-    ));
+    ), "unexpected state return-contract error: {error:?}");
 }
 
 #[test]
 fn source_metadata_protocol_carrier_rejects_stale_revision() {
-    let prepared = prepared_client_source(
-        "CREATE SCHEMA app; \
-         CREATE CLIENT FUNCTION app.describe() RETURNS sys.source.function \
-         RETURN sys.source.current();",
-    );
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|candidate| candidate.name().to_string() == "app.describe")
-        .expect("the source-authored function is present")
-        .id();
+    let (active, function) = source_introspection_active();
     let result =
         evaluate_client_function(&active, function).expect("source introspection succeeds");
     let RuntimeValue::Opaque(value) = result.value() else {
@@ -1839,8 +2501,7 @@ fn source_metadata_protocol_carrier_rejects_stale_revision() {
         encoded.extend_from_slice(&payload);
         encoded
     };
-    let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = orna_standard::registered_opaque_codecs(standard).unwrap();
+    let registry = orna_core::value::OpaqueCodecRegistry::application_values_only();
     let error = orna_protocol::decode_registered_value(&active, &registry, &encoded)
         .expect_err("stale source metadata must fail closed");
     assert!(matches!(
@@ -1853,24 +2514,11 @@ fn source_metadata_protocol_carrier_rejects_stale_revision() {
 
 #[test]
 fn source_metadata_protocol_carrier_round_trips_nested_orv5_and_orv6_values() {
-    let prepared = prepared_client_source(
-        "CREATE SCHEMA app; \
-         CREATE CLIENT FUNCTION app.describe() RETURNS sys.source.function \
-         RETURN sys.source.current();",
-    );
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|candidate| candidate.name().to_string() == "app.describe")
-        .expect("the source-authored function is present")
-        .id();
+    let (active, function) = source_introspection_active();
     let result =
         evaluate_client_function(&active, function).expect("source introspection succeeds");
     let metadata_value = result.value().clone();
-    let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = orna_standard::registered_opaque_codecs(standard).unwrap();
+    let registry = orna_core::value::OpaqueCodecRegistry::application_values_only();
     let source_type =
         orna_core::types::TypeDescriptor::named(orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID);
     let option_descriptor = orna_core::types::TypeDescriptor::option(source_type.clone()).unwrap();
@@ -1968,24 +2616,22 @@ fn source_metadata_protocol_carrier_round_trips_nested_orv5_and_orv6_values() {
 
 #[test]
 fn source_preparation_exposes_parameter_and_control_flow_metadata() {
-    let prepared = prepared_client_source(
-        "CREATE SCHEMA app; \
-         CREATE CLIENT FUNCTION app.describe(p_value INTEGER) RETURNS INTEGER IS \
-         BEGIN IF p_value > 0 THEN RETURN p_value; ELSE RETURN 0; END IF; END;",
+    let plan = orna_artifact::client_plan::ControlFlowClientPlan::new(
+        Vec::new(),
+        vec![orna_artifact::client_plan::ControlFlowStatement::return_value(
+            ClientExpressionNode::ParameterRead {
+                parameter: ParameterId::from_bytes([0xf3; 16]),
+            },
+        )],
     );
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|candidate| candidate.name().to_string() == "app.describe")
-        .expect("the control-flow function is present")
-        .id();
+    let (active, function, parameter) = parameterized_control_flow_introspection_active(
+        orna_standard::INTEGER_TYPE_ID,
+        plan.encode().expect("control-flow plan encodes"),
+    );
     let definition = active
         .catalogue()
         .function_by_id(function)
         .expect("the function definition is present");
-    let parameter = definition.parameters()[0].id();
     let revision = active
         .function_revisions()
         .iter()
@@ -2004,13 +2650,7 @@ fn source_preparation_exposes_parameter_and_control_flow_metadata() {
     );
     assert_eq!(
         revision.declaration_origin().source_unit(),
-        prepared
-            .source()
-            .units()
-            .iter()
-            .find(|unit| unit.logical_path() == "application.orna")
-            .expect("application source unit is present")
-            .id()
+        active.source().units()[0].id()
     );
     assert_ne!(
         revision.declaration_content_hash(),
@@ -2028,25 +2668,16 @@ fn source_preparation_exposes_parameter_and_control_flow_metadata() {
 }
 #[test]
 fn control_flow_source_introspection_evaluates_without_function_specific_dispatch() {
-    let prepared = prepared_client_source(
-        "CREATE SCHEMA app; \
-         CREATE CLIENT FUNCTION app.describe(p_value INTEGER) RETURNS sys.source.function IS \
-         BEGIN IF p_value > 0 THEN RETURN sys.source.current(); ELSE RETURN sys.source.current(); END IF; END;",
+    let plan = orna_artifact::client_plan::ControlFlowClientPlan::new(
+        Vec::new(),
+        vec![orna_artifact::client_plan::ControlFlowStatement::return_value(
+            ClientExpressionNode::SourceIntrospection,
+        )],
     );
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|candidate| candidate.name().to_string() == "app.describe")
-        .expect("the control-flow function is present")
-        .id();
-    let parameter = active
-        .catalogue()
-        .function_by_id(function)
-        .expect("function definition")
-        .parameters()[0]
-        .id();
+    let (active, function, parameter) = parameterized_control_flow_introspection_active(
+        orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID,
+        plan.encode().expect("control-flow plan encodes"),
+    );
     let result = super::super::evaluate_client_function_with_arguments(
         &active,
         &authorise(active.pair(), function),
@@ -2087,22 +2718,6 @@ fn control_flow_source_introspection_evaluates_without_function_specific_dispatc
         ["std.types.integer", "sys.source.function"]
     );
 }
-#[test]
-fn resource_plan_preflights_arguments_before_operation_target() {
-    assert_reordered_client_plan_rejects_before_executor(
-        r#"CREATE SCHEMA app;
-CREATE CLIENT FUNCTION app.first() RETURNS INTEGER RETURN 1;
-CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
-  BEGIN
-RETURN AWAIT std.data.resource(
-  target => std.invoke.echo,
-  arguments => std.call.args(p_value => app.first())
-);
-  END;"#,
-        "app.owner",
-    );
-}
-
 #[test]
 fn capability_expression_calls_reject_reference_sequence_mismatch() {
     let function = FunctionId::from_bytes([6; 16]);
@@ -2161,109 +2776,24 @@ fn capability_direct_callee_denies_ungranted_declaration<F>(make_plan: F)
 where
     F: FnOnce(FunctionId) -> orna_artifact::client_plan::InnerClientPlan,
 {
-    let prepared = prepared_client_source(
-        "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.first() RETURNS TEXT RETURN app.second(); CREATE CLIENT FUNCTION app.second() RETURNS TEXT RETURN 'ok';",
-    );
-    let initial = active_from_prepared_candidate(&prepared);
-    let caller = initial
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|function| function.name().to_string() == "app.first")
-        .expect("caller is present")
-        .clone();
-    let callee = initial
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|function| function.name().to_string() == "app.second")
-        .expect("callee is present")
-        .clone();
-    let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
-        make_plan(callee.id()),
-        vec![orna_artifact::client_plan::CapabilityRequirement::new(
+    use orna_artifact::client_plan::{
+        CapabilityArgumentSource, CapabilityClientPlan, CapabilityRequirement,
+    };
+
+    let callee = FunctionId::from_bytes([0xd1; 16]);
+    let payload = CapabilityClientPlan::new(
+        make_plan(callee),
+        vec![CapabilityRequirement::new(
             "std.fs.write",
-            orna_artifact::client_plan::CapabilityArgumentSource::Text("/tmp".to_owned()),
+            CapabilityArgumentSource::Text("/tmp".to_owned()),
         )],
     )
     .encode()
     .expect("the capability plan encodes");
-    let artifact = ExecutableArtifact::new(
-        ExecutableArtifactKind::Client,
-        "orna.client-plan",
+    let (active, caller, callee) = two_function_active_with_call_plan(
+        payload,
         orna_artifact::client_plan::CAPABILITY_FORMAT_VERSION,
-        payload.clone(),
-        artifact_payload_digest(&payload).unwrap(),
-    )
-    .unwrap();
-    let current = initial
-        .function_revisions()
-        .iter()
-        .find(|revision| revision.function() == caller.id())
-        .expect("caller revision is present");
-    let caller_references = initial
-        .references()
-        .iter()
-        .filter(|reference| reference.source_function() == caller.id())
-        .cloned()
-        .collect::<Vec<_>>();
-    let semantic_hash = function_semantic_digest_with_version(
-        current.semantic_hash_version(),
-        &caller,
-        current.language_version(),
-        &artifact,
-        initial.expressions(),
-        &caller_references,
-    )
-    .unwrap();
-    let replacement = FunctionRevisionRecord::new(
-        caller.id(),
-        current.id(),
-        current.revision_number(),
-        current.declaration_origin(),
-        current.declaration_content_hash(),
-        semantic_hash,
-        current.language_version(),
-        artifact,
-    )
-    .unwrap()
-    .with_semantic_hash_version(current.semantic_hash_version());
-    let revisions = initial
-        .function_revisions()
-        .iter()
-        .map(|revision| {
-            if revision.function() == caller.id() {
-                replacement.clone()
-            } else {
-                revision.clone()
-            }
-        })
-        .collect::<Vec<_>>();
-    let catalogue_hash = catalogue_digest_with_context(
-        initial.catalogue_hash_context(),
-        initial.catalogue(),
-        &revisions,
-        initial.expressions(),
-        initial.origins(),
-        initial.references(),
-    )
-    .unwrap();
-    let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
-        ActiveDatabaseRevisionInput::new(
-            initial.pair(),
-            initial.source().clone(),
-            initial.catalogue().clone(),
-            catalogue_hash,
-            ActiveRevisionContent::new(
-                initial.expressions().to_vec(),
-                revisions,
-                initial.origins().to_vec(),
-                initial.references().to_vec(),
-            ),
-        ),
-        initial.catalogue_hash_context().clone(),
-    )
-    .unwrap();
+    );
     let declaration = capability::LocalCapabilityDeclaration::new(
         capability::LocalCapabilityName::StdFsRead,
         capability::LocalCapabilityArgumentSource::Text("/tmp".to_owned()),
@@ -2276,7 +2806,7 @@ where
     let grants = capability::LocalCapabilityGrantSet::from_grants([write_grant]).unwrap();
     let error = super::super::evaluate_client_function_with_grants(
         &active,
-        &authorise(active.pair(), caller.id()),
+        &authorise(active.pair(), caller),
         &[declaration],
         &grants,
     )
@@ -2284,7 +2814,7 @@ where
     assert!(matches!(
         error,
         super::super::ClientExecutionError::CapabilityDenied { context, capability }
-            if context.function() == callee.id() && capability == "std.fs.read"
+            if context.function() == callee && capability == "std.fs.read"
     ));
 }
 
@@ -2644,9 +3174,10 @@ fn public_active_revision_construction_preserves_client_evaluator_boundaries() {
     );
     assert!(std::error::Error::source(&error).is_none());
 
-    let prepared = prepared_client_functions();
-    let active = active_from_prepared_candidate(&prepared);
-    let prepared_function = active.catalogue().functions()[0].id();
+    let (active, prepared_function, _, _) = version_two_value_active(
+        orna_standard::BOOLEAN_TYPE_ID,
+        orna_standard::BOOLEAN_TYPE_ID,
+    );
     let current_revision = active.catalogue().functions()[0].current_revision();
     let selected = active
         .references()
@@ -2877,9 +3408,10 @@ fn public_active_revision_construction_preserves_client_evaluator_boundaries() {
 
 #[test]
 fn public_active_revision_construction_rejects_invalid_reference_source_origins() {
-    let prepared = prepared_client_functions();
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active.catalogue().functions()[0].id();
+    let (active, function, _, _) = version_two_value_active(
+        orna_standard::BOOLEAN_TYPE_ID,
+        orna_standard::BOOLEAN_TYPE_ID,
+    );
     let source_unit = active.source().units()[0].id();
 
     let error = active_with_replaced_reference_origin(
@@ -3061,38 +3593,51 @@ fn stream_artifact_versions_reject_scalar_roots() {
 }
 
 #[test]
-fn prepared_client_stream_shape_reaches_runtime_contract_boundary() {
-    let prepared = prepared_client_source(
-        "CREATE SCHEMA app; \
-         CREATE EXTERNAL CLIENT FUNCTION app.events() \
-         RETURNS STREAM<BOOLEAN> RUNTIME CONTRACT 'app.events@1';",
-    );
-    let active = active_from_prepared_candidate(&prepared);
+fn client_stream_shape_reaches_runtime_contract_boundary() {
+    let payload = orna_artifact::client_plan::ExpressionClientPlan::new(
+        orna_artifact::client_plan::ClientExpressionNode::ExternalContract {
+            identity: "app.events@1".to_owned(),
+        },
+    ).encode().unwrap();
+    let (active, function, _, _) = version_two_client_stream_active_with_artifact(
+        standard_v1(), orna_standard::BOOLEAN_TYPE_ID,
+        DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
+        DefinitionReferenceKind::NamedType,
+        orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION, payload);
     let definition = &active.catalogue().functions()[0];
-    assert!(matches!(
-        definition.return_type(),
-        FunctionReturn::Stream(ResolvedType::Value(type_id))
-            if *type_id == orna_standard::BOOLEAN_TYPE_ID
-    ));
-    let function = definition.id();
+    assert!(matches!(definition.return_type(),
+        FunctionReturn::Stream(ResolvedType::Value(type_id)) if *type_id == orna_standard::BOOLEAN_TYPE_ID));
     let error = evaluate_client_function(&active, function).unwrap_err();
-    assert!(matches!(
-        error,
-        super::super::ClientExecutionError::ExternalContract { identity, .. }
-            if identity == "app.events@1"
-    ));
+    assert!(matches!(error,
+        super::super::ClientExecutionError::ExternalContract { identity, .. } if identity == "app.events@1"));
 }
-
 #[test]
 fn compiler_emitted_v5_capability_gate_fails_closed_before_runtime() {
-    let prepared = prepared_client_source(
-        "CREATE SCHEMA app; \
-         CREATE EXTERNAL CLIENT FUNCTION app.read() \
-         RETURNS BOOLEAN RUNTIME CONTRACT 'std.fs.read@1' \
-         REQUIRES CAPABILITY std.fs.read('/tmp/input');",
+    let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
+        orna_artifact::client_plan::InnerClientPlan::Expression(
+            orna_artifact::client_plan::ExpressionClientPlan::new(
+                orna_artifact::client_plan::ClientExpressionNode::ExternalContract {
+                    identity: "std.fs.read@1".to_owned(),
+                },
+            ),
+        ),
+        vec![orna_artifact::client_plan::CapabilityRequirement::new(
+            "std.fs.read",
+            orna_artifact::client_plan::CapabilityArgumentSource::Text(
+                "/tmp/input".to_owned(),
+            ),
+        )],
+    )
+    .encode()
+    .unwrap();
+    let (active, function, _, _) = version_two_active_with_artifact(
+        standard_v1(),
+        orna_standard::BOOLEAN_TYPE_ID,
+        DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
+        DefinitionReferenceKind::NamedType,
+        orna_artifact::client_plan::CAPABILITY_FORMAT_VERSION,
+        payload,
     );
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active.catalogue().functions()[0].id();
     let authorisation = authorise(active.pair(), function);
 
     let missing = super::super::evaluate_client_function_with_grants(
@@ -3174,11 +3719,19 @@ fn evaluates_a_version_five_expression_parameter_read() {
 
 #[test]
 fn evaluates_native_session_input_expression() {
-    let prepared = prepared_client_source(
-        "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.prompt() RETURNS TEXT RETURN std.cli.input();",
+    let payload = orna_artifact::client_plan::ExpressionClientPlan::new(
+        ClientExpressionNode::Input,
+    )
+    .encode()
+    .unwrap();
+    let (active, function, _, _) = version_two_active_with_artifact(
+        standard_v1(),
+        orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        DefinitionReferenceTarget::ValueType(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID),
+        DefinitionReferenceKind::NamedType,
+        orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+        payload,
     );
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active.catalogue().functions()[0].id();
     let authorisation = authorise(active.pair(), function);
     let mut executor = RecordingActionExecutor::new(Some(RuntimeValue::Boolean(true)));
 
@@ -3191,12 +3744,21 @@ fn evaluates_native_session_input_expression() {
     );
 }
 #[test]
-fn evaluates_prepared_version_two_client_constants() {
-    for (literal, expected) in [("TRUE", true), ("FALSE", false)] {
-        let prepared = prepared_client_constant(literal);
-        let active = active_from_prepared_candidate(&prepared);
-        let function = active.catalogue().functions()[0].id();
-
+fn evaluates_version_two_client_constants_from_artifacts() {
+    for expected in [true, false] {
+        let payload = orna_artifact::client_plan::ExpressionClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Boolean { value: expected },
+        )
+        .encode()
+        .unwrap();
+        let (active, function, _, _) = version_two_active_with_artifact(
+            standard_v1(),
+            orna_standard::BOOLEAN_TYPE_ID,
+            DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+            payload,
+        );
         let result = evaluate_client_function(&active, function).unwrap();
 
         assert_eq!(result.context().pair(), active.pair());
@@ -3211,10 +3773,7 @@ fn evaluates_prepared_version_two_client_constants() {
 
 #[test]
 fn evaluates_a_hand_built_version_two_value_return() {
-    let standard = orna_standard::verify_standard_library_snapshot(
-        orna_standard::retained_standard_library_snapshot().unwrap(),
-    )
-    .unwrap();
+    let standard = standard_v1();
     let boolean_type = standard
         .catalogue()
         .value_types()
@@ -3238,7 +3797,7 @@ fn evaluates_a_hand_built_version_two_value_return() {
 }
 
 #[test]
-fn evaluates_a_registered_opaque_client_result() {
+fn retired_standard_opaque_client_result_fails_closed() {
     let payload = [
         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
         0xff,
@@ -3246,49 +3805,36 @@ fn evaluates_a_registered_opaque_client_result() {
     let (active, function, pair, function_revision) =
         version_two_opaque_active(orna_standard::OPAQUE_TOKEN_TYPE_ID, payload);
 
-    let result = evaluate_client_function(&active, function).unwrap();
-
-    assert_eq!(result.context().pair(), pair);
-    assert_eq!(result.context().function(), function);
-    assert_eq!(result.context().function_revision(), function_revision);
-    let RuntimeValue::Opaque(value) = result.value() else {
-        panic!("opaque plan must produce one opaque value");
-    };
-    assert_eq!(value.opaque_type(), orna_standard::OPAQUE_TOKEN_TYPE_ID);
-    assert_eq!(value.canonical_payload(), payload);
-}
-
-#[test]
-fn evaluates_a_registered_opaque_ui_client_result() {
-    let body = br#"{"kind":"empty"}"#;
-    let mut payload = Vec::from(b"ORNA-UI/1 ".as_slice());
-    payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    payload.extend_from_slice(body);
-    let plan = orna_artifact::client_plan::OpaqueClientPlan::return_opaque(
-        orna_standard::STD_UI_TYPE_ID,
-        payload.clone(),
-    )
-    .encode()
-    .expect("opaque UI plan encodes");
-    let (active, function, _, _) = version_two_active_with_artifact(
-        standard_v5(),
-        orna_standard::STD_UI_TYPE_ID,
-        DefinitionReferenceTarget::ValueType(orna_standard::STD_UI_TYPE_ID),
-        DefinitionReferenceKind::NamedType,
-        orna_artifact::client_plan::OPAQUE_FORMAT_VERSION,
-        plan,
+    let error = evaluate_client_function(&active, function).unwrap_err();
+    assert_eq!(error.pair(), pair);
+    assert_eq!(error.function(), function);
+    assert_eq!(
+        error.context().map(|context| context.function_revision()),
+        Some(function_revision)
     );
+    assert!(matches!(
+        error,
+        super::super::ClientExecutionError::InvalidOpaqueValue {
+            source: super::super::ClientOpaqueValueError::Registry(_),
+            ..
+        }
+    ));
+    assert_eq!(
+        std::error::Error::source(&error).unwrap().to_string(),
+        "opaque codecs require the accepted standard snapshot"
+    );
+}
 
-    let result = evaluate_client_function(&active, function).unwrap();
-
-    let RuntimeValue::Opaque(value) = result.value() else {
-        panic!("opaque UI plan must produce one opaque value");
-    };
-    assert_eq!(value.opaque_type(), orna_standard::STD_UI_TYPE_ID);
-    assert_eq!(value.canonical_payload(), payload);
+#[test]
+fn retired_standard_ui_type_is_not_in_the_active_standard_catalogue() {
+    let standard = standard_v1();
+    assert!(standard
+        .catalogue()
+        .value_type_by_id(orna_standard::STD_UI_TYPE_ID)
+        .is_none());
 }
 #[test]
-fn opaque_client_result_rejects_plan_type_and_structure_before_value_creation() {
+fn opaque_client_result_rejects_plan_type_and_retired_codec_before_value_creation() {
     let payload = [0x5a; 16];
     let wrong_type = TypeId::from_bytes([0xa7; 16]);
     let (active, function, pair, function_revision) =
@@ -3340,25 +3886,19 @@ fn opaque_client_result_rejects_plan_type_and_structure_before_value_creation() 
     assert!(matches!(
         error,
         super::super::ClientExecutionError::InvalidOpaqueValue {
-            source:
-                super::super::ClientOpaqueValueError::Value(
-                    super::super::OpaqueValueError::WrongPayloadLength {
-                        opaque_type,
-                        expected: 16,
-                        actual: 15,
-                    },
-                ),
+            source: super::super::ClientOpaqueValueError::Registry(_),
             ..
-        } if opaque_type == orna_standard::OPAQUE_TOKEN_TYPE_ID
+        }
     ));
+    assert_eq!(
+        std::error::Error::source(&error).unwrap().to_string(),
+        "opaque codecs require the accepted standard snapshot"
+    );
 }
 
 #[test]
 fn rejects_a_value_return_that_disagrees_with_its_selected_reference() {
-    let standard = orna_standard::verify_standard_library_snapshot(
-        orna_standard::retained_standard_library_snapshot().unwrap(),
-    )
-    .unwrap();
+    let standard = standard_v1();
     let boolean_type = standard
         .catalogue()
         .value_types()
@@ -3400,11 +3940,7 @@ fn rejects_a_value_return_that_disagrees_with_its_selected_reference() {
 
 #[test]
 fn version_two_reference_validation_uses_only_the_selected_current_function() {
-    let prepared = prepared_client_functions();
-    let active = active_from_prepared_candidate(&prepared);
-    let functions = active.catalogue().functions();
-    let first = functions[0].id();
-    let second = functions[1].id();
+    let (active, first, second, _, _) = version_two_local_action_active();
 
     let result = evaluate_client_function(&active, first).unwrap();
     assert_eq!(result.value(), &RuntimeValue::Boolean(true));
@@ -3415,9 +3951,17 @@ fn version_two_reference_validation_uses_only_the_selected_current_function() {
         .filter(|reference| reference.source_function() == second)
         .cloned()
         .collect::<Vec<_>>();
-    let b_only = active_from_prepared_with_references(&prepared, references);
+    let b_only = active_with_references(&active, references);
 
-    assert_references_rule(evaluate_client_function(&b_only, first), first);
+    let error = evaluate_client_function(&b_only, first)
+        .expect_err("the selected function's omitted call reference must fail closed");
+    assert!(matches!(
+        error,
+        super::super::ClientExecutionError::ExpressionEvaluation {
+            context,
+            source: super::super::ClientExpressionError::InvalidCall,
+        } if context.pair() == b_only.pair() && context.function() == first
+    ));
     assert_eq!(
         evaluate_client_function(&b_only, second).unwrap().value(),
         &RuntimeValue::Boolean(true)
@@ -3426,18 +3970,11 @@ fn version_two_reference_validation_uses_only_the_selected_current_function() {
 
 #[test]
 fn accepts_a_rehashed_self_consistent_selected_reference_origin() {
-    let prepared = prepared_client_functions();
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active.catalogue().functions()[0].id();
-    let revision = active.catalogue().functions()[0].current_revision();
-    let source = active.source().units()[0].content();
-    let body_start = source.find("TRUE").unwrap();
-    let replacement_origin = SourceOrigin::new(
-        active.source().units()[0].id(),
-        u32::try_from(body_start).unwrap(),
-        u32::try_from(body_start + "TRUE".len()).unwrap(),
-    )
-    .unwrap();
+    let (active, function, _, revision) = version_two_value_active(
+        orna_standard::BOOLEAN_TYPE_ID,
+        orna_standard::BOOLEAN_TYPE_ID,
+    );
+    let replacement_origin = SourceOrigin::new(active.source().units()[0].id(), 0, 1).unwrap();
     let mut references = active.references().to_vec();
     replace_reference(&mut references, function, |reference| {
         DefinitionReference::new(
@@ -3480,7 +4017,7 @@ fn accepts_a_rehashed_self_consistent_selected_reference_origin() {
     assert_eq!(error.to_string(), "the active revision cannot be trusted");
     assert!(std::error::Error::source(&error).is_some());
 
-    let repaired = active_from_prepared_with_references(&prepared, references);
+    let repaired = active_with_references(&active, references);
     let result = evaluate_client_function(&repaired, function).unwrap();
     assert_eq!(result.context().pair(), repaired.pair());
     assert_eq!(result.context().function(), function);
@@ -3490,9 +4027,10 @@ fn accepts_a_rehashed_self_consistent_selected_reference_origin() {
 
 #[test]
 fn version_two_rejects_each_publicly_constructible_selected_reference_mismatch() {
-    let prepared = prepared_client_functions();
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active.catalogue().functions()[0].id();
+    let (active, function, _, _) = version_two_value_active(
+        orna_standard::BOOLEAN_TYPE_ID,
+        orna_standard::BOOLEAN_TYPE_ID,
+    );
     let reference = active
         .references()
         .iter()
@@ -3520,7 +4058,7 @@ fn version_two_rejects_each_publicly_constructible_selected_reference_mismatch()
         .collect::<Vec<_>>();
     assert_references_rule(
         evaluate_client_function(
-            &active_from_prepared_with_references(&prepared, missing),
+            &active_with_references(&active, missing),
             function,
         ),
         function,
@@ -3537,7 +4075,7 @@ fn version_two_rejects_each_publicly_constructible_selected_reference_mismatch()
     ));
     assert_references_rule(
         evaluate_client_function(
-            &active_from_prepared_with_references(&prepared, extra),
+            &active_with_references(&active, extra),
             function,
         ),
         function,
@@ -3554,14 +4092,14 @@ fn version_two_rejects_each_publicly_constructible_selected_reference_mismatch()
             candidate.source_origin(),
         )
     });
-    let error = active_from_prepared_with_references_result(&prepared, wrong_ordinal).unwrap_err();
+    let error = active_with_references_result(&active, wrong_ordinal).unwrap_err();
     assert!(matches!(
-        error.downcast_ref::<RevisionInvariantError>(),
-        Some(RevisionInvariantError::ReferenceOrdinalOutOfSequence {
+        error,
+        RevisionInvariantError::ReferenceOrdinalOutOfSequence {
             expected: 0,
             actual: 1,
             ..
-        })
+        }
     ));
 
     let mut wrong_target = active.references().to_vec();
@@ -3577,7 +4115,7 @@ fn version_two_rejects_each_publicly_constructible_selected_reference_mismatch()
     });
     assert_references_rule(
         evaluate_client_function(
-            &active_from_prepared_with_references(&prepared, wrong_target),
+            &active_with_references(&active, wrong_target),
             function,
         ),
         function,
@@ -3596,17 +4134,60 @@ fn version_two_rejects_each_publicly_constructible_selected_reference_mismatch()
     });
     assert_references_rule(
         evaluate_client_function(
-            &active_from_prepared_with_references(&prepared, wrong_kind_and_target),
+            &active_with_references(&active, wrong_kind_and_target),
             function,
         ),
         function,
     );
 
-    let semantic_version_one = active_from_prepared_with_semantic_versions(
-        &prepared,
+    let current = &active.function_revisions()[0];
+    let function_definition = active.catalogue().function_by_id(function).unwrap();
+    let version_one_semantic_hash = function_semantic_digest_with_version(
         FunctionSemanticHashVersion::Version1,
-        Vec::new(),
-    );
+        function_definition,
+        current.language_version(),
+        current.artifact(),
+        active.expressions(),
+        &[],
+    )
+    .unwrap();
+    let version_one_revision = FunctionRevisionRecord::new(
+        current.function(),
+        current.id(),
+        current.revision_number(),
+        current.declaration_origin(),
+        current.declaration_content_hash(),
+        version_one_semantic_hash,
+        current.language_version(),
+        current.artifact().clone(),
+    )
+    .unwrap()
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version1);
+    let version_one_hash = catalogue_digest_with_context(
+        active.catalogue_hash_context(),
+        active.catalogue(),
+        std::slice::from_ref(&version_one_revision),
+        active.expressions(),
+        active.origins(),
+        &[],
+    )
+    .unwrap();
+    let semantic_version_one = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            active.pair(),
+            active.source().clone(),
+            active.catalogue().clone(),
+            version_one_hash,
+            ActiveRevisionContent::new(
+                active.expressions().to_vec(),
+                vec![version_one_revision],
+                active.origins().to_vec(),
+                Vec::new(),
+            ),
+        ),
+        active.catalogue_hash_context().clone(),
+    )
+    .unwrap();
     assert_references_rule(
         evaluate_client_function(&semantic_version_one, function),
         function,
