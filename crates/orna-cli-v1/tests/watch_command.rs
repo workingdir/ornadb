@@ -97,7 +97,9 @@ fn run(input: &str, source: &mut FrameSource, state: &mut WatchCommandState) -> 
 
 #[test]
 fn unwired_watch_reports_command_error_and_retains_expression_execution() {
-    let mut input = b":watch 1 + 1\n1 + 1\n:quit\n".as_slice();
+    let expression = include_str!("fixtures/unwired-watch-expression.orna").trim();
+    let input = format!(":watch {expression}\n{expression}\n:quit\n");
+    let mut input = input.as_bytes();
     let mut output = Vec::new();
     let mut session = AdmittedReplSession::new(Limits::default());
     repl::run(&mut input, &mut output, &mut session).expect("REPL remains interactive");
