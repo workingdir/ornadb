@@ -97,7 +97,7 @@ fn calendar_range_body(
 // ORNA-LAMBDA-004 and ORNA-OP-001 admit infix OR, but not a pipe closure.
 #[test]
 fn logical_or_is_accepted() {
-    let body = accepted_body(include_str!("fixtures/v1_review_source_000.orna"));
+    let body = accepted_body(include_str!("fixtures/v1-logical-or.orna"));
     assert!(matches!(body, Expr::Binary { op, .. } if op == "||"));
 }
 
