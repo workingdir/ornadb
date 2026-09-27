@@ -380,7 +380,7 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
             [44; 32],
             &durable_source(
                 "TXN-001",
-                "pub table Note(id: Int) { text: Str, } fn child() { Note.insert({ id: 7, text: \"nested\" }); } fn parent() { child(); assert false; }",
+                include_str!("fixtures/durable-transaction-rollback.orna"),
             ),
         )
         .await
@@ -403,7 +403,7 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
     };
     let project = durable_project(
         "TXN-002",
-        "pub table Order(id: Int) { text: Str, } pub table Payment(id: Int) { text: Str, } pub table Audit(id: Int) { text: Str, } fn main() { Order.insert({ id: 1, text: \"order\" }); Payment.insert({ id: 1, text: \"payment\" }); Audit.insert({ id: 1, text: \"audit\" }); assert Order.count() == 1; assert Payment.count() == 1; assert Audit.count() == 1; }",
+        include_str!("fixtures/durable-transaction-commit.orna"),
     );
     let outcome = evaluator
         .execute_project(
@@ -592,11 +592,11 @@ async fn eval_003_replays_the_terminal_outcome_without_a_second_row() {
     };
     let source = durable_source(
         "EVAL-003",
-        "pub table Note(id: Int) { text: Str, } fn main() { Note.insert({ id: 7, text: \"once\" }); }",
+        include_str!("fixtures/durable-eval-replay-original.orna"),
     );
     let changed_source = durable_source(
         "EVAL-003",
-        "pub table Note(id: Int) { text: Str, } fn main() { Note.insert({ id: 8, text: \"twice\" }); }",
+        include_str!("fixtures/durable-eval-replay-changed.orna"),
     );
     let fingerprint = canonical_eval_fingerprint(&source, request, [71; 16]);
     let changed_fingerprint = canonical_eval_fingerprint(&changed_source, request, [71; 16]);
@@ -672,7 +672,7 @@ async fn durable_source_publication_projects_the_frozen_prefix_into_git() {
     };
     let source = durable_source(
         "PUB-001",
-        "pub table Note(id: Int) { text: Str, } fn main() { Note.insert({ id: 7, text: \"published\" }); }",
+        include_str!("fixtures/durable-publication.orna"),
     );
     assert!(matches!(
         evaluator
