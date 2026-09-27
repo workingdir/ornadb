@@ -4869,10 +4869,7 @@ fn std_collection_partition_preserves_order_empty_and_invokes_predicate_once_per
             .unwrap()
     );
 
-    let functions = functions_from_source(
-        "fn seen(value: Int) = Note.insert(value) == 1 && value % 2 == 0; \
-         fn run(values: [Int]) = std.collection.partition(values, seen);",
-    );
+    let functions = functions_from_source(include_str!("fixtures/partition_effect_callback.orna"));
     let arguments = Environment::from([(
         "values".into(),
         Value::new(Raw::Array(vec![

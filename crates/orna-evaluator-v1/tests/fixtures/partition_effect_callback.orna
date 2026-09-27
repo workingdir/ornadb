@@ -1,0 +1,2 @@
+fn seen(value: Int) = Note.insert(value) == 1 && value % 2 == 0;
+fn run(values: [Int]) = std.collection.partition(values, seen);
