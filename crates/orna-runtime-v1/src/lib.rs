@@ -5328,19 +5328,15 @@ impl RuntimeState {
                     return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
                 }
             };
-            if control.cancelled() {
-                self.release_stream_lease(writer, lease.clone()).await?;
-                return Ok(StreamStep::Cancelled { checkpoint });
-            }
+            // Delivery admission is the inter-item cancellation boundary.
+            // Once admitted, start this activation and let the bounded
+            // execution check below roll it back if cancellation interrupts
+            // its open work.
             let failure_payload = source.failure_payload(&item);
             if matches!(&failure_payload, StreamFailurePayload::Unavailable) {
                 self.release_stream_lease_best_effort(writer, lease.clone())
                     .await;
                 return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
-            }
-            if control.cancelled() {
-                self.release_stream_lease(writer, lease.clone()).await?;
-                return Ok(StreamStep::Cancelled { checkpoint });
             }
             (lease, failure_payload)
         };
