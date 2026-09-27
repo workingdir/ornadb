@@ -3630,7 +3630,7 @@ fn expression_like_reference_validation_accepts_declared_ref_parameter_object_re
             ResolvedType::reference(object_type),
             None,
         )],
-        FunctionReturn::Single(ResolvedType::Value(orna_standard::STD_ACTION_TYPE_ID)),
+        FunctionReturn::Single(ResolvedType::Value(TypeId::from_bytes([0x14; 16]))),
         function_revision,
         FunctionSecurity::Invoker,
         None,

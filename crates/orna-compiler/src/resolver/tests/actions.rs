@@ -2,11 +2,11 @@ use super::*;
 
 #[test]
 fn legacy_action_call_fails_closed() {
-    let standard = check_standard_library_source(&verified_standard_library_with_action_for_test())
+    let standard = check_standard_library_source(&crate::tests::verified_canonical_standard_source_fixture())
         .unwrap();
     let base = empty_catalogue();
     let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
-    let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run() RETURNS std.Action AS std.action.call(target => tasks.run, arguments => std.call.args());";
+    let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run() RETURNS std.BOOLEAN AS std.action.call(target => tasks.run, arguments => std.call.args());";
     let report = check_standard_application(&bundle([("action.orna", source)]), &context);
     assert!(report.diagnostics().iter().any(|diagnostic| {
         diagnostic.code() == DiagnosticCode::UnknownQualifiedName
@@ -14,52 +14,6 @@ fn legacy_action_call_fails_closed() {
     }));
     assert!(report.preparation_view().is_none());
 }
-
-#[test]
-fn rejects_actions_in_client_state_returns_before_preparation() {
-    let target_id = FunctionId::from_bytes([0x51; 16]);
-    let argument_type = ResolvedType::Scalar(StandardScalar::Integer);
-    let base = CatalogueSnapshot::new_with_functions(
-        CatalogueRevisionId::from_bytes([0x53; 16]),
-        vec![SchemaDefinition::new(
-            SchemaId::from_bytes([0x54; 16]),
-            QualifiedSemanticName::new(["tasks"]).unwrap(),
-        )],
-        Vec::new(),
-        vec![FunctionDefinition::new(
-            target_id,
-            QualifiedSemanticName::new(["tasks", "run"]).unwrap(),
-            FunctionDomain::Client,
-            Vec::new(),
-            FunctionReturn::Single(argument_type),
-            FunctionRevisionId::from_bytes([0x55; 16]),
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Immutable,
-        )],
-    )
-    .unwrap();
-    let standard =
-        check_standard_library_source(&verified_standard_library_with_action_for_test()).unwrap();
-    let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
-    let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run() RETURNS std.Action IS \
-            STATE ready INTEGER; \
-            BEGIN RETURN std.action.call(target => tasks.run, arguments => std.call.args()); END;";
-    let report = check_standard_application(&bundle([("state-action.orna", source)]), &context);
-    assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
-    assert_eq!(
-        report.diagnostics()[0].code(),
-        DiagnosticCode::DomainIncompatible,
-        "{:?}",
-        report.diagnostics()
-    );
-    assert_eq!(
-        report.diagnostics()[0].message(),
-        "CLIENT state blocks do not support action expressions"
-    );
-    assert!(report.preparation_view().is_none());
-}
-
 
 #[test]
 fn checked_opaque_standard_remains_definition_only_for_applications() {
