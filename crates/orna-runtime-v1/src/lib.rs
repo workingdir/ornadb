@@ -3707,7 +3707,37 @@ impl RuntimeState {
         expected_capture: &CwdCapture,
     ) -> Result<StreamAdministrationOutcome, RuntimeError> {
         if activation::runtime_activation_active(self) {
-            return Err(RuntimeError::AdminBusy);
+            let reason_redacted = reason
+                .as_deref()
+                .map(admin_argument_redacted)
+                .unwrap_or(false);
+            let reason_digest = reason
+                .as_deref()
+                .map(|value| admin_digest(value.as_bytes()))
+                .unwrap_or_else(|| "none".into());
+            let reason_marker = match reason.as_deref() {
+                None => "<none>",
+                Some(_) if reason_redacted => "<redacted>",
+                Some(_) => "<safe>",
+            };
+            let reference_digest = reference
+                .encode()
+                .ok()
+                .map(|encoded| admin_digest(&encoded))
+                .unwrap_or_else(|| "unavailable".into());
+            let descriptor = AdminInvocationDescriptor {
+                invocation_id: Uuid::new_v4().into_bytes(),
+                function: if reason.is_some() {
+                    "sys.admin.pause_stream_with_reason"
+                } else {
+                    "sys.admin.pause_stream"
+                },
+                safe_arguments: format!(
+                    "stream_ref_digest={reference_digest};reason_digest={reason_digest};reason={reason_marker}"
+                ),
+                redacted: reason_redacted,
+            };
+            return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
         }
         let row = decode_row_ref(
             reference
@@ -3922,14 +3952,7 @@ impl RuntimeState {
     ) -> Result<AdminOperationResult, RuntimeError> {
         let descriptor = admin_invocation_descriptor(&operation);
         if activation::runtime_activation_active(self) {
-            let error = RuntimeError::AdminBusy;
-            return match self
-                .record_failed_admin_descriptor(&descriptor, lease, &error)
-                .await
-            {
-                Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
-                Err(audit_error) => Err(audit_error),
-            };
+            return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
         }
         let transaction = self
             .connection
@@ -3991,6 +4014,21 @@ impl RuntimeState {
         let descriptor = admin_invocation_descriptor(operation);
         self.record_failed_admin_descriptor(&descriptor, lease, error)
             .await
+    }
+
+    async fn reentrant_admin_busy_error(
+        &self,
+        descriptor: &AdminInvocationDescriptor,
+        lease: WriterLease,
+    ) -> RuntimeError {
+        let error = RuntimeError::AdminBusy;
+        match self
+            .record_failed_admin_descriptor(descriptor, lease, &error)
+            .await
+        {
+            Ok(()) | Err(RuntimeError::OwnerLost) => error,
+            Err(audit_error) => audit_error,
+        }
     }
 
     async fn record_failed_admin_descriptor(
@@ -20220,6 +20258,83 @@ mod tests {
             reopened.stream_pause_reason(&key).await,
             Ok(Some("maintenance boundary".into())),
         );
+    }
+
+    #[tokio::test]
+    async fn reentrant_stream_reference_pause_retains_failed_invocation_audit() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("busy-audit", "busy-audit-next").checkpoint_key();
+        let request = request(41, 42);
+        state.reserve_request(request, digest(42)).await.unwrap();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: key.consumer.clone(),
+                function: "pkg.consume".into(),
+                source_identity: None,
+                invocation_id: id(43),
+            })
+            .await
+            .unwrap();
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: Some("pkg.consume".into()),
+                checkpoint: key,
+            })
+            .await
+            .unwrap();
+        let stream_reference = stream.reference(&run).unwrap();
+        let capture_before = state.capture().await.unwrap();
+        let table_before = state.committed_table_row("books", &[1]).await.unwrap();
+        let fence = state.runtime_observation_fence(writer).await.unwrap();
+        let streams_before = state
+            .current_runtime_observations(&fence)
+            .await
+            .unwrap()
+            .streams;
+        let reference = Value::new(row_reference_raw(stream_reference.as_row_ref())).unwrap();
+
+        let callback_result = with_activation_scope(&state, writer, || async {
+            state
+                .pause_stream_reference_at_capture(
+                    writer,
+                    reference,
+                    Some("maintenance boundary".into()),
+                    &capture_before,
+                )
+                .await
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(callback_result, Err(RuntimeError::AdminBusy));
+        assert_eq!(state.capture().await.unwrap(), capture_before);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            table_before
+        );
+        let fence = state.runtime_observation_fence(writer).await.unwrap();
+        assert_eq!(
+            state
+                .current_runtime_observations(&fence)
+                .await
+                .unwrap()
+                .streams,
+            streams_before
+        );
+        drop(state);
+        let reopened = open_state(&repo).await;
+        let audits = reopened.admin_invocation_audits().await.unwrap();
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].function, "sys.admin.pause_stream_with_reason");
+        assert!(audits[0].safe_arguments.contains("stream_ref_digest="));
+        assert!(audits[0].safe_arguments.contains("reason_digest="));
+        assert!(!audits[0].succeeded);
+        assert!(audits[0].terminal_outcome.starts_with("failure:"));
     }
 
     #[tokio::test]
