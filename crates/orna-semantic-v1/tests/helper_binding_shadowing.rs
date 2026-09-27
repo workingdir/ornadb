@@ -156,17 +156,7 @@ fn imported_helper_shadowed_by_record_pattern_shorthand_does_not_expand_imported
 fn direct_return_stops_dependency_walk_before_later_every_expression() {
     let analysis = analyze(&[ModuleInput::new(
         "consumer.orna",
-        r#"
-            pub table User(id: Uuid) { name: Str, }
-            pub table Account(id: Uuid) { user_id: Uuid, }
-
-            pub fn helper(): Bool {
-                return true;
-                every(User, user => true);
-            }
-
-            assert helper();
-        "#,
+        include_str!("fixtures/direct-return-stops-dependency-walk.orna"),
     )]);
 
     assert_eq!(
