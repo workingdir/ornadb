@@ -5182,7 +5182,7 @@ fn std_collection_sort_by_accepts_all_call_forms_and_preserves_stable_ties() {
     }
     assert_eq!(
         call_module(
-            "fn key(value: Int) = value % 10; fn run() = std.collection.sort_by(rows: [12, 3, 1], key: key);",
+            include_str!("fixtures/collection_sort_by_named_callback.orna"),
             "run()",
             Limits::default(),
         )
