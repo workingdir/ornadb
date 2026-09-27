@@ -40,7 +40,7 @@ pub fn check_standard_library_source(
                 Err(StandardLibraryCheckError::SourceMismatch)
             }
             STANDARD_LIBRARY_V8_REVISION_ID => Err(StandardLibraryCheckError::SourceMismatch),
-            STANDARD_LIBRARY_V6_REVISION_ID => check_standard_library_source_v6(snapshot),
+            STANDARD_LIBRARY_V6_REVISION_ID => Err(StandardLibraryCheckError::SourceMismatch),
             STANDARD_LIBRARY_V5_REVISION_ID => check_standard_library_source_v5(snapshot),
             STANDARD_LIBRARY_V4_REVISION_ID => check_standard_library_source_v4(snapshot),
             STANDARD_LIBRARY_V3_REVISION_ID => check_standard_library_source_v3(snapshot),
@@ -508,101 +508,6 @@ fn check_standard_library_source_v5(
     })
 }
 
-/// Checks one retained V6 action standard source bundle.
-fn check_standard_library_source_v6(
-    snapshot: &VerifiedStandardLibrarySnapshot,
-) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
-    let (families, checked_executable) = check_standard_library_source_v6_parts(
-        snapshot.source().units(),
-        snapshot.catalogue(),
-        snapshot.origins(),
-        snapshot.executables(),
-    )?;
-    let checked_json = checked_standard_json_executable_for_snapshot(snapshot)?;
-    Ok(CheckedStandardLibrary {
-        verified_snapshot: snapshot.clone(),
-        schemas: families.schemas,
-        value_types: families.value_types,
-        type_bindings: families.type_bindings,
-        checked_executables: vec![checked_executable, checked_json],
-    })
-}
-
-pub(super) fn check_standard_library_source_v6_parts(
-    source_units: &[StoredSourceUnit],
-    catalogue: &CatalogueSnapshot,
-    origins: &[DefinitionOrigin],
-    executables: &[StandardExecutable],
-) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError> {
-    let [
-        types_unit,
-        invoke_unit,
-        output_unit,
-        ui_unit,
-        json_unit,
-        action_unit,
-    ] = source_units
-    else {
-        return Err(StandardLibraryCheckError::SourceUnitCount {
-            actual: source_units.len(),
-        });
-    };
-    check_standard_source_units(
-        source_units,
-        &[
-            (STD_TYPES_SOURCE_UNIT_ID, "std/types.orna", 0),
-            (STD_INVOKE_SOURCE_UNIT_ID, "std/invoke.orna", 1),
-            (STD_OUTPUT_SOURCE_UNIT_ID, "std/output.orna", 2),
-            (STD_UI_SOURCE_UNIT_ID, "std/ui.orna", 3),
-            (STD_JSON_SOURCE_UNIT_ID, "std/json.orna", 4),
-            (STD_ACTION_SOURCE_UNIT_ID, "std/action.orna", 5),
-        ],
-    )?;
-
-    let mut v5_origins = Vec::with_capacity(origins.len());
-    let mut action_origins = Vec::new();
-    for origin in origins {
-        if origin.source().source_unit() == STD_ACTION_SOURCE_UNIT_ID {
-            action_origins.push(origin.clone());
-        } else {
-            v5_origins.push(origin.clone());
-        }
-    }
-    let (mut families, checked_executable) = check_standard_library_source_v5_parts(
-        &[
-            types_unit.clone(),
-            invoke_unit.clone(),
-            output_unit.clone(),
-            ui_unit.clone(),
-            json_unit.clone(),
-        ],
-        catalogue,
-        &v5_origins,
-        executables,
-    )?;
-    let bundle = SourceBundle::new([SourceUnit::new(
-        action_unit.logical_path(),
-        action_unit.content(),
-    )])
-    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
-    let report = parse_bundle(&bundle);
-    if !report.diagnostics().is_empty() {
-        return Err(StandardLibraryCheckError::Diagnostics {
-            diagnostics: report.diagnostics().to_vec(),
-        });
-    }
-    let [parsed_action] = report.units() else {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    };
-    let action_families =
-        reconcile_standard_action_unit(action_unit, parsed_action, catalogue, &action_origins)?;
-    families.schemas.extend(action_families.schemas);
-    families.value_types.extend(action_families.value_types);
-    families.type_bindings.extend(action_families.type_bindings);
-
-    Ok((families, checked_executable))
-}
-
 pub(super) fn check_standard_library_source_v5_parts(
     source_units: &[StoredSourceUnit],
     catalogue: &CatalogueSnapshot,
@@ -934,8 +839,8 @@ fn standard_v4_types_catalogue(
     )
 }
 
-/// Scopes the V5 and V6 catalogues to declarations retained in `std/types.orna`.
-/// The JSON and action schemas and value types are reconciled in their own units.
+/// Scopes the V5 catalogue to declarations retained in `std/types.orna`.
+/// The JSON schema and value type are reconciled in their own unit.
 fn standard_v5_types_catalogue(
     catalogue: &CatalogueSnapshot,
 ) -> Result<CatalogueSnapshot, StandardLibraryCheckError> {
@@ -947,14 +852,12 @@ fn standard_v5_types_catalogue(
             STD_IO_SCHEMA_ID,
             STD_UI_SCHEMA_ID,
             STD_JSON_SCHEMA_ID,
-            STD_ACTION_SCHEMA_ID,
         ],
         &[
             STD_TERMINAL_DOCUMENT_TYPE_ID,
             STD_IO_BYTE_STREAM_TYPE_ID,
             STD_UI_TYPE_ID,
             STD_JSON_VALUE_TYPE_ID,
-            STD_ACTION_TYPE_ID,
         ],
     )
 }
@@ -1401,131 +1304,6 @@ fn reconcile_standard_json_unit(
     }
 
     Ok(())
-}
-
-/// Reconciles the retained `std/action.orna` unit against the V6 catalogue.
-fn reconcile_standard_action_unit(
-    stored_unit: &StoredSourceUnit,
-    parsed_unit: &ParsedSourceUnit,
-    catalogue: &CatalogueSnapshot,
-    origins: &[DefinitionOrigin],
-) -> Result<StandardSourceFamilies, StandardLibraryCheckError> {
-    if parsed_unit.source_text() != stored_unit.content()
-        || parsed_unit.source_text() != parsed_unit.syntax_text()
-        || !parsed_unit.parsed().object_types().is_empty()
-        || !parsed_unit.parsed().enum_types().is_empty()
-        || !parsed_unit.parsed().primitive_value_types().is_empty()
-        || !parsed_unit.parsed().record_value_types().is_empty()
-        || !parsed_unit.parsed().field_renames().is_empty()
-        || !parsed_unit.parsed().server_functions().is_empty()
-        || !parsed_unit.parsed().client_functions().is_empty()
-    {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    }
-    let [action_schema_declaration] = parsed_unit.parsed().schemas() else {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    };
-    let [action_type_declaration] = parsed_unit.parsed().opaque_value_types() else {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    };
-    let [action_export] = parsed_unit.parsed().type_exports() else {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    };
-
-    let expected_schema_name =
-        QualifiedSemanticName::new(["std", "action"]).expect("the fixed action schema is valid");
-    let schema_name = unquoted_semantic_name(&action_schema_declaration.name)?;
-    if schema_name != expected_schema_name
-        || catalogue
-            .schema_by_id(STD_ACTION_SCHEMA_ID)
-            .ok_or(StandardLibraryCheckError::MissingSchema)?
-            .name()
-            != &schema_name
-    {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    }
-
-    let expected_type_name = QualifiedSemanticName::new(["std", "action", "action"])
-        .expect("the fixed action value type is valid");
-    let type_name = unquoted_semantic_name(&action_type_declaration.name)?;
-    let contract = decode_string_literal(&action_type_declaration.kernel_contract)
-        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
-    let action_type = catalogue
-        .value_type_by_id(STD_ACTION_TYPE_ID)
-        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
-    if type_name != expected_type_name
-        || action_type.name() != &type_name
-        || action_type.kind() != ValueTypeKind::Opaque
-        || action_type.mutability() != ValueTypeMutability::Immutable
-        || action_type.persistence() != ValueTypePersistence::Transient
-        || contract != STD_ACTION_CONTRACT
-        || action_type.representation_contract() != contract
-    {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    }
-
-    let expected_binding_name =
-        QualifiedSemanticName::new(["std", "action"]).expect("the fixed action export is valid");
-    let binding = catalogue
-        .type_binding_by_name(&TypeLookupName::qualified(expected_binding_name.clone()))
-        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
-    let TypeExportTarget::Qualified { name: target_name } = &action_export.target else {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    };
-    if unquoted_semantic_name(&action_export.source_type)? != type_name
-        || unquoted_semantic_name(target_name)? != expected_binding_name
-        || !matches!(binding.kind(), TypeBindingKind::Qualified)
-        || binding.name() != &TypeLookupName::qualified(expected_binding_name)
-        || binding.target() != STD_ACTION_TYPE_ID
-    {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    }
-    let mut origins_by_identity = origin_map(origins)?;
-
-    let schema_origin = take_origin(
-        &mut origins_by_identity,
-        DefinitionIdentity::Schema(STD_ACTION_SCHEMA_ID),
-        stored_unit.id(),
-        &action_schema_declaration.span,
-    )?;
-    let value_type_origin = take_origin(
-        &mut origins_by_identity,
-        DefinitionIdentity::ValueType(STD_ACTION_TYPE_ID),
-        stored_unit.id(),
-        &action_type_declaration.span,
-    )?;
-    let binding_origin = take_origin(
-        &mut origins_by_identity,
-        DefinitionIdentity::TypeBinding(binding.id()),
-        stored_unit.id(),
-        &action_export.span,
-    )?;
-    if !origins_by_identity.is_empty() {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    }
-    Ok(StandardSourceFamilies {
-        schemas: vec![CheckedStandardSchema {
-            id: STD_ACTION_SCHEMA_ID,
-            name: schema_name,
-            origin: schema_origin,
-        }],
-        value_types: vec![CheckedStandardValueType {
-            id: STD_ACTION_TYPE_ID,
-            name: type_name,
-            kind: action_type.kind(),
-            mutability: action_type.mutability(),
-            persistence: action_type.persistence(),
-            representation_contract: action_type.representation_contract().to_owned(),
-            origin: value_type_origin,
-        }],
-        type_bindings: vec![CheckedStandardTypeBinding {
-            id: binding.id(),
-            kind: binding.kind(),
-            name: binding.name().clone(),
-            target: binding.target(),
-            origin: binding_origin,
-        }],
-    })
 }
 
 /// Splits the snapshot origins into the `std/types.orna` origins (schemas,

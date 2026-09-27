@@ -42,8 +42,7 @@ pub use model::{
     STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
     STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V7_REVISION_ID,
     STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID,
-    STANDARD_LIBRARY_V10_REVISION_ID, STD_ACTION_SCHEMA_ID,
-    STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID, STD_BOOLEAN_TYPE_ID,
+    STANDARD_LIBRARY_V10_REVISION_ID, STD_BOOLEAN_TYPE_ID,
     STD_CHARACTER_LARGE_OBJECT_TYPE_ID, STD_CLI_REPL_FUNCTION_ID,
     STD_CLI_REPL_FUNCTION_REVISION_ID, STD_CLI_REPL_REVISION_NUMBER, STD_CLI_SCHEMA_ID,
     STD_CLI_SOURCE_UNIT_ID, STD_CSV_ENCODE_FUNCTION_ID, STD_DATA_ROWS_TYPE_BINDING_ID,
@@ -77,13 +76,13 @@ pub use model::{
     StandardApplicationContextError, StandardLibraryCheckError,
 };
 pub(crate) use model::{
-    CheckedActionOperation, CheckedClientControlFlowBranch, CheckedClientControlFlowStatement,
+    CheckedClientControlFlowBranch, CheckedClientControlFlowStatement,
     CheckedClientExpression, CheckedClientFunctionBody, CheckedClientLocal, CheckedClientLocalKind,
     CheckedClientReturnShape, CheckedClientStateSlot, CheckedClientStatement, CheckedFieldRename,
     CheckedInspectOperation, CheckedInspectProjection, CheckedResourceOperation,
     CheckedServerFunctionBody, CheckedServerFunctionReturn, CheckedStateDefault, CheckedStateScope,
     CheckedStateSlotId, QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue,
-    STD_ACTION_CONTRACT, STD_JSON_CONTRACT, STD_UI_CONTRACT,
+    STD_JSON_CONTRACT, STD_UI_CONTRACT,
 };
 use model::{CheckedEnumType, CheckedRecordValueField, CheckedRecordValueType};
 use server_functions::check_server_functions;
@@ -94,8 +93,8 @@ use standard_library::{
     StandardSourceFamilies, check_standard_library_source_v1_identity,
     check_standard_library_source_v2_parts, check_standard_library_source_v3_parts,
     check_standard_library_source_v4_parts, check_standard_library_source_v5_parts,
-    check_standard_library_source_v6_parts, expected_standard_json_executable,
-    match_standard_source_facts, reconcile_standard_executable, reconcile_standard_json_executable,
+    expected_standard_json_executable, match_standard_source_facts, reconcile_standard_executable,
+    reconcile_standard_json_executable,
     reconcile_standard_source, unquoted_prelude_name, unquoted_semantic_name,
     validate_standard_source_origins,
 };
@@ -1147,7 +1146,6 @@ fn check_application_parsed(
             .collect::<Vec<_>>();
         check_client_functions(
             &client_inputs,
-            &function_inputs,
             &submitted_ids,
             &query_catalogue,
             &server_names,

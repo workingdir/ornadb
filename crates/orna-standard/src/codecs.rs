@@ -11,8 +11,7 @@ use std::error::Error;
 /// codecs for `std.terminal.Document` and `std.io.ByteStream` (work ADR
 /// 0058); the accepted `orna.std/4` snapshot additionally binds the
 /// `ORNA-UI/1 ` length-prefixed canonical UI-value codec for `std.ui.UI` (work ADR 0062);
-/// the accepted V6 snapshot additionally binds the structurally checked
-/// `ORNA-ACTION/1 ` action descriptor codec (ADR 0079).
+/// retired V6 snapshots do not have a registered codec surface.
 pub fn registered_opaque_codecs(
     standard: &VerifiedStandardLibrarySnapshot,
 ) -> Result<OpaqueCodecRegistry, RegisteredOpaqueCodecsError> {
@@ -61,57 +60,7 @@ pub fn registered_opaque_codecs(
             JSON_MAGIC,
         )
         .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
-        let action = OpaqueCodecRegistration::length_prefixed_action(
-            STD_ACTION_TYPE_ID,
-            semantic_name("std.action.action", ["std", "action", "action"])
-                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
-            STD_ACTION_CONTRACT,
-            ACTION_MAGIC,
-        )
-        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
-        vec![opaque_token, document, byte_stream, ui, json, action]
-    } else if is_accepted_v6_standard(standard) {
-        let document = OpaqueCodecRegistration::length_prefixed_utf8(
-            STD_TERMINAL_DOCUMENT_TYPE_ID,
-            semantic_name("std.terminal.document", ["std", "terminal", "document"])
-                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
-            STD_TERMINAL_DOCUMENT_CONTRACT,
-            TERMINAL_DOCUMENT_MAGIC,
-        )
-        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
-        let byte_stream = OpaqueCodecRegistration::media_type_framed(
-            STD_IO_BYTE_STREAM_TYPE_ID,
-            semantic_name("std.io.bytestream", ["std", "io", "bytestream"])
-                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
-            STD_IO_BYTE_STREAM_CONTRACT,
-            BYTE_STREAM_MAGIC,
-        )
-        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
-        let ui = OpaqueCodecRegistration::length_prefixed_canonical_json(
-            STD_UI_TYPE_ID,
-            semantic_name("std.ui.ui", ["std", "ui", "ui"])
-                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
-            STD_UI_CONTRACT,
-            UI_MAGIC,
-        )
-        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
-        let json = OpaqueCodecRegistration::length_prefixed_canonical_json(
-            STD_JSON_VALUE_TYPE_ID,
-            semantic_name("std.json.value", ["std", "json", "value"])
-                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
-            STD_JSON_CONTRACT,
-            JSON_MAGIC,
-        )
-        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
-        let action = OpaqueCodecRegistration::length_prefixed_action(
-            STD_ACTION_TYPE_ID,
-            semantic_name("std.action.action", ["std", "action", "action"])
-                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
-            STD_ACTION_CONTRACT,
-            ACTION_MAGIC,
-        )
-        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
-        vec![opaque_token, document, byte_stream, ui, json, action]
+        vec![opaque_token, document, byte_stream, ui, json]
     } else if is_accepted_v5_standard(standard) {
         let document = OpaqueCodecRegistration::length_prefixed_utf8(
             STD_TERMINAL_DOCUMENT_TYPE_ID,
@@ -271,16 +220,6 @@ fn is_accepted_v10_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool 
         && standard.source().units()[9].content_hash() == ACCEPTED_V10_CLI_CONTENT_DIGEST
         && standard.source().revision_hash() == ACCEPTED_V10_SOURCE_REVISION_DIGEST
         && standard.digest() == ACCEPTED_V10_STANDARD_LIBRARY_DIGEST
-}
-
-fn is_accepted_v6_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
-    standard.revision() == STANDARD_LIBRARY_V6_REVISION_ID
-        && standard.catalogue().revision() == STANDARD_CATALOGUE_V6_REVISION_ID
-        && standard.source().bundle() == STANDARD_SOURCE_V6_BUNDLE_ID
-        && standard.source().id() == STANDARD_SOURCE_V6_REVISION_ID
-        && standard.source().parent() == Some(STANDARD_SOURCE_V5_REVISION_ID)
-        && standard.source().revision_hash() == ACCEPTED_V6_SOURCE_REVISION_DIGEST
-        && standard.digest() == ACCEPTED_V6_STANDARD_LIBRARY_DIGEST
 }
 
 fn is_accepted_v5_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
