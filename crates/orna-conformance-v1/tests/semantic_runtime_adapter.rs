@@ -2535,18 +2535,18 @@ fn expression_units_use_retained_functions_and_rejected_modules_preserve_them() 
         fixture_id: "retained-functions".into(),
         source_id: "logical/retained-functions.orna".into(),
         parse_as: "module_unit".into(),
-        source: "fn increment(value: Int) = value + 1;".into(),
+        source: include_str!("fixtures/retained-functions-module.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
     let expression = SourceUnit {
         parse_as: "expression_unit".into(),
-        source: "if increment(41) == 42 { 1 } else { 1 / 0 }".into(),
+        source: include_str!("fixtures/retained-functions-expression.orna").into(),
         ..module.clone()
     };
     assert_eq!(evaluator.evaluate(&expression), StageOutcome::Passed);
     let failed_module = SourceUnit {
-        source: "fn increment(value: Int) = value + 100; let answer = increment(1);".into(),
+        source: include_str!("fixtures/retained-functions-rejected-module.orna").into(),
         ..module
     };
     let StageOutcome::Failed(diagnostic) = evaluator.evaluate(&failed_module) else {
