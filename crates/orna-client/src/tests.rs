@@ -1,7 +1,7 @@
 use super::{
     ACTION_FAILURE_CODE, ClientActionDescriptor, ClientActionError, ClientActionOutcome,
     ClientActionState, ClientExecutionContext, ClientExecutionError, ClientExpressionError,
-    ClientExternalContractRequest, ClientReferenceLoader, ClientReferenceLoaderError,
+    ClientReferenceLoader, ClientReferenceLoaderError,
     ClientReferenceLoaderFixture, ClientReferenceObject, ClientResource, ClientResourceCompletion,
     ClientResourceExecutor, ClientResourceKey, ClientResourceRequest, ClientResourceStatus,
     ClientStateStore, ControlFlowBinaryOperator, DeterministicClientResourceExecutor, ResourceKind,
@@ -1255,12 +1255,6 @@ fn standard_v5() -> VerifiedStandardLibrarySnapshot {
 fn standard_v6() -> VerifiedStandardLibrarySnapshot {
     orna_standard::verify_standard_library_v6_snapshot(
         orna_standard::retained_standard_library_v6_snapshot().unwrap(),
-    )
-    .unwrap()
-}
-fn standard_v7() -> VerifiedStandardLibrarySnapshot {
-    orna_standard::verify_standard_library_v7_snapshot(
-        orna_standard::retained_standard_library_v7_snapshot().unwrap(),
     )
     .unwrap()
 }

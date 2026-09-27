@@ -2,7 +2,6 @@
 
 use std::{error::Error, fmt};
 
-use orna_artifact::client_plan::{ClientExpressionNode, ExpressionClientPlan};
 use orna_compiler::{
     CheckedStandardLibrary, PrepareStandardUpgradeError, PreparedStandardUpgrade,
     StandardLibraryCheckError, check_standard_library_source, prepare_checked_standard_upgrade,
@@ -53,14 +52,14 @@ pub use codecs::{
 };
 use executables::{
     retained_json_executable,
-    retained_v2_executable, retained_window_executable,
+    retained_v2_executable,
 };
 use retained::{
     reconcile_retained_action_source,
     reconcile_retained_invoke_source, reconcile_retained_json_source,
     reconcile_retained_output_source, reconcile_retained_source_with_unit,
     reconcile_retained_ui_source,
-    reconcile_retained_window_source, retained_standard_library_snapshot_from_source,
+    retained_standard_library_snapshot_from_source,
     retained_standard_library_v2_snapshot_from_source,
     retained_standard_library_v3_snapshot_from_source,
 };
@@ -68,12 +67,11 @@ use snapshot_builders::{
     retained_standard_library_v4_snapshot_from_source,
     retained_standard_library_v5_snapshot_from_source,
     retained_standard_library_v6_snapshot_from_source,
-    retained_standard_library_v7_snapshot_from_source,
 };
 
 pub use orna_compiler::StandardUpgradeIdentity;
 pub use orna_compiler::{
-    CheckedStandardUiWindow, STD_DATA_ROWS_TYPE_BINDING_ID,
+    STD_DATA_ROWS_TYPE_BINDING_ID,
     STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_DATA_SOURCE_UNIT_ID, STD_INTEGER_TYPE_ID,
     STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
     STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
@@ -96,8 +94,8 @@ pub use orna_compiler::{
     STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID, STD_UI_TEXT_PARAMETER_ID, STD_UI_TEXT_RUNTIME_CONTRACT,
     STD_UI_WINDOW_CONTENT_PARAMETER_ID, STD_UI_WINDOW_FUNCTION_ID,
     STD_UI_WINDOW_FUNCTION_REVISION_ID, STD_UI_WINDOW_REVISION_NUMBER,
-    STD_UI_WINDOW_RUNTIME_CONTRACT, STD_UI_WINDOW_TITLE_PARAMETER_ID, STD_WINDOW_SOURCE_UNIT_ID,
-    check_standard_terminal_present_table, check_standard_ui_window,
+    STD_UI_WINDOW_RUNTIME_CONTRACT, STD_UI_WINDOW_TITLE_PARAMETER_ID,
+    check_standard_terminal_present_table,
 };
 pub use orna_core::inspect::INSPECT_RENDER_CONTRACT;
 
@@ -552,45 +550,7 @@ pub const STANDARD_LIBRARY_V7_REVISION_ID: StandardLibraryRevisionId =
     StandardLibraryRevisionId::from_bytes(reserved_id(7));
 pub const STANDARD_CATALOGUE_V7_REVISION_ID: CatalogueRevisionId =
     CatalogueRevisionId::from_bytes(reserved_id(7));
-pub const STANDARD_SOURCE_V7_BUNDLE_ID: SourceBundleId = SourceBundleId::from_bytes(reserved_id(7));
-pub const STANDARD_SOURCE_V7_REVISION_ID: SourceRevisionId =
-    SourceRevisionId::from_bytes(reserved_id(7));
-pub const STD_WINDOW_SOURCE_LOGICAL_PATH: &str = "std/window.orna";
-pub const STD_UI_WINDOW_CONTRACT: &str = STD_UI_WINDOW_RUNTIME_CONTRACT;
 
-const RETAINED_STANDARD_WINDOW_SOURCE: &str = include_str!("../../../stdlib/std/window.orna");
-const ACCEPTED_V7_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V6_TYPES_CONTENT_DIGEST;
-const ACCEPTED_V7_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V6_INVOKE_CONTENT_DIGEST;
-const ACCEPTED_V7_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V6_OUTPUT_CONTENT_DIGEST;
-const ACCEPTED_V7_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V6_UI_CONTENT_DIGEST;
-const ACCEPTED_V7_JSON_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V6_JSON_CONTENT_DIGEST;
-const ACCEPTED_V7_ACTION_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V6_ACTION_CONTENT_DIGEST;
-const ACCEPTED_V7_WINDOW_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xcd, 0x58, 0x17, 0xf9, 0x3c, 0x4f, 0x42, 0xb7, 0x27, 0xb1, 0xea, 0xb4, 0x82, 0x8c, 0x1c, 0xf0,
-    0xb8, 0xc7, 0xa9, 0x69, 0x42, 0x98, 0x3a, 0xc0, 0x8f, 0xe1, 0x1b, 0xc0, 0xf4, 0x30, 0x78, 0x18,
-]);
-const ACCEPTED_V7_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x5d, 0x9b, 0x80, 0x91, 0x08, 0x2f, 0xc3, 0xf7, 0xf2, 0xde, 0x47, 0xbe, 0x02, 0xcf, 0x66, 0xa6,
-    0xe2, 0x15, 0x35, 0xf8, 0xe7, 0x07, 0x91, 0x8c, 0xfc, 0x5a, 0x2b, 0xb1, 0x2c, 0x03, 0x47, 0x36,
-]);
-const ACCEPTED_V7_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x74, 0xd7, 0xb9, 0x6e, 0xe3, 0x62, 0x18, 0x8e, 0x35, 0x77, 0x72, 0x68, 0xf2, 0xc5, 0x30, 0x53,
-    0xcf, 0x41, 0x5b, 0xcc, 0x5b, 0x7f, 0x36, 0xa9, 0xc4, 0x17, 0x4b, 0xf8, 0xaf, 0x14, 0xad, 0x68,
-]);
-const ACCEPTED_V7_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V6_ARTIFACT_DIGEST;
-const ACCEPTED_V7_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V6_SEMANTIC_DIGEST;
-const ACCEPTED_V7_WINDOW_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x34, 0xaf, 0xe2, 0x8b, 0x87, 0x01, 0xbe, 0x44, 0x1e, 0xb7, 0xe8, 0x71, 0x57, 0x95, 0x50, 0x82,
-    0xbd, 0x31, 0xce, 0x8d, 0x13, 0xba, 0xdd, 0x2b, 0x70, 0xbf, 0xe6, 0x06, 0x46, 0x54, 0x75, 0x86,
-]);
-const ACCEPTED_V7_WINDOW_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xd3, 0xa1, 0x28, 0xa4, 0x25, 0x13, 0x1a, 0x15, 0xe6, 0xfd, 0xa3, 0xcf, 0x0f, 0x09, 0x00, 0x36,
-    0x2a, 0x6e, 0xb9, 0xc5, 0x30, 0x34, 0x29, 0xa6, 0x57, 0xc1, 0xf2, 0x6b, 0x80, 0xbd, 0x84, 0x13,
-]);
-const ACCEPTED_V7_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x44, 0xc7, 0x01, 0x00, 0xd2, 0x40, 0xc8, 0xc5, 0x49, 0x40, 0xf4, 0xae, 0x29, 0x13, 0x32, 0x62,
-    0x3b, 0x02, 0x36, 0xc2, 0x81, 0x83, 0x6c, 0x21, 0x7b, 0x43, 0x2f, 0xd6, 0xe5, 0x2e, 0x30, 0x8e,
-]);
 /// The standard-library version represented by the V8 manifest (Work ADR 0087).
 pub const STANDARD_LIBRARY_V8_VERSION_IDENTITY: &str = "orna.std/8";
 pub const STANDARD_LIBRARY_V8_REVISION_ID: StandardLibraryRevisionId =
@@ -1590,54 +1550,6 @@ impl StandardLibraryV7Manifest {
     pub const fn language_version(&self) -> &'static str {
         LANGUAGE_VERSION_IDENTITY
     }
-    pub const fn source_bundle(&self) -> SourceBundleId {
-        STANDARD_SOURCE_V7_BUNDLE_ID
-    }
-    pub const fn source_revision(&self) -> SourceRevisionId {
-        STANDARD_SOURCE_V7_REVISION_ID
-    }
-    pub const fn types_source_unit(&self) -> SourceUnitId {
-        STD_TYPES_SOURCE_UNIT_ID
-    }
-    pub const fn invoke_source_unit(&self) -> SourceUnitId {
-        STD_INVOKE_SOURCE_UNIT_ID
-    }
-    pub const fn output_source_unit(&self) -> SourceUnitId {
-        STD_OUTPUT_SOURCE_UNIT_ID
-    }
-    pub const fn ui_source_unit(&self) -> SourceUnitId {
-        STD_UI_SOURCE_UNIT_ID
-    }
-    pub const fn json_source_unit(&self) -> SourceUnitId {
-        STD_JSON_SOURCE_UNIT_ID
-    }
-    pub const fn action_source_unit(&self) -> SourceUnitId {
-        STD_ACTION_SOURCE_UNIT_ID
-    }
-    pub const fn window_source_unit(&self) -> SourceUnitId {
-        STD_WINDOW_SOURCE_UNIT_ID
-    }
-    pub const fn types_source_logical_path(&self) -> &'static str {
-        SOURCE_LOGICAL_PATH
-    }
-    pub const fn invoke_source_logical_path(&self) -> &'static str {
-        STD_INVOKE_SOURCE_LOGICAL_PATH
-    }
-    pub const fn output_source_logical_path(&self) -> &'static str {
-        STD_OUTPUT_SOURCE_LOGICAL_PATH
-    }
-    pub const fn ui_source_logical_path(&self) -> &'static str {
-        STD_UI_SOURCE_LOGICAL_PATH
-    }
-    pub const fn json_source_logical_path(&self) -> &'static str {
-        STD_JSON_SOURCE_LOGICAL_PATH
-    }
-    pub const fn action_source_logical_path(&self) -> &'static str {
-        STD_ACTION_SOURCE_LOGICAL_PATH
-    }
-    pub const fn window_source_logical_path(&self) -> &'static str {
-        STD_WINDOW_SOURCE_LOGICAL_PATH
-    }
     pub const fn catalogue(&self) -> &CatalogueSnapshot {
         &self.catalogue
     }
@@ -1737,10 +1649,6 @@ impl StandardLibraryV8Manifest {
         STD_ACTION_SOURCE_UNIT_ID
     }
 
-    pub const fn window_source_unit(&self) -> SourceUnitId {
-        STD_WINDOW_SOURCE_UNIT_ID
-    }
-
     pub const fn data_source_unit(&self) -> SourceUnitId {
         STD_DATA_SOURCE_UNIT_ID
     }
@@ -1767,10 +1675,6 @@ impl StandardLibraryV8Manifest {
 
     pub const fn action_source_logical_path(&self) -> &'static str {
         STD_ACTION_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn window_source_logical_path(&self) -> &'static str {
-        STD_WINDOW_SOURCE_LOGICAL_PATH
     }
 
     pub const fn data_source_logical_path(&self) -> &'static str {
@@ -1901,10 +1805,6 @@ impl StandardLibraryV9Manifest {
         STD_ACTION_SOURCE_UNIT_ID
     }
 
-    pub const fn window_source_unit(&self) -> SourceUnitId {
-        STD_WINDOW_SOURCE_UNIT_ID
-    }
-
     pub const fn data_source_unit(&self) -> SourceUnitId {
         STD_DATA_SOURCE_UNIT_ID
     }
@@ -1931,10 +1831,6 @@ impl StandardLibraryV9Manifest {
 
     pub const fn action_source_logical_path(&self) -> &'static str {
         STD_ACTION_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn window_source_logical_path(&self) -> &'static str {
-        STD_WINDOW_SOURCE_LOGICAL_PATH
     }
 
     pub const fn data_source_logical_path(&self) -> &'static str {
@@ -2473,46 +2369,6 @@ pub fn prepare_standard_upgrade_v5_to_v6(
         prepare_checked_standard_upgrade,
     )
 }
-/// Prepares the append-only `orna.std/6` to `orna.std/7` standard upgrade
-/// (ADR 0019). It fails closed unless `orna.std/6` is the installed parent;
-/// the retained V6 parent is verified before the V7 child.
-pub fn prepare_standard_upgrade_v6_to_v7(
-    active: &ActiveDatabaseRevision,
-) -> Result<StandardUpgrade, StandardUpgradeError> {
-    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V6_REVISION_ID)?;
-
-    let version_six = retained_standard_library_v6_snapshot()
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    verify_standard_library_v6_snapshot(version_six)
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    prepare_standard_upgrade_with(
-        active,
-        retained_standard_library_v7_snapshot,
-        verify_standard_library_v7_snapshot,
-        check_standard_library_source,
-        prepare_checked_standard_upgrade,
-    )
-}
-/// Retired `orna.std/7` to `orna.std/8` upgrade entrypoint. It fails closed
-/// unless `orna.std/7` is installed, then reports V8 as unsupported.
-pub fn prepare_standard_upgrade_v7_to_v8(
-    active: &ActiveDatabaseRevision,
-) -> Result<StandardUpgrade, StandardUpgradeError> {
-    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V7_REVISION_ID)?;
-
-    let version_seven = retained_standard_library_v7_snapshot()
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    verify_standard_library_v7_snapshot(version_seven)
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    prepare_standard_upgrade_with(
-        active,
-        retained_standard_library_v8_snapshot,
-        verify_standard_library_v8_snapshot,
-        check_standard_library_source,
-        prepare_checked_standard_upgrade,
-    )
-}
-
 /// Retired `orna.std/8` to `orna.std/9` upgrade entrypoint. Verification of
 /// the V8 parent fails closed before a V9 child can be prepared.
 pub fn prepare_standard_upgrade_v8_to_v9(
@@ -2827,41 +2683,15 @@ pub fn verify_standard_library_v6_snapshot(
     verify_canonical_standard_library_v2_snapshot(snapshot)
         .map_err(|source| StandardLibraryError::CanonicalHash { source })
 }
-/// Retains the canonical V7 window standard source as an unverified snapshot.
-pub fn retained_standard_library_v7_snapshot()
--> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    retained_standard_library_v7_snapshot_from_source(
-        RETAINED_STANDARD_SOURCE,
-        RETAINED_STANDARD_INVOKE_SOURCE,
-        RETAINED_STANDARD_OUTPUT_SOURCE,
-        RETAINED_STANDARD_UI_SOURCE,
-        RETAINED_STANDARD_JSON_SOURCE,
-        RETAINED_STANDARD_ACTION_SOURCE,
-        RETAINED_STANDARD_WINDOW_SOURCE,
-    )
+/// Rejects caller-supplied historical V7 snapshots after source retirement.
+pub fn verify_standard_library_v7_snapshot(
+    _snapshot: StandardLibrarySnapshot,
+) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V7_REVISION_ID,
+    })
 }
 
-/// Verifies a retained V7 window standard snapshot and returns authority.
-pub fn verify_standard_library_v7_snapshot(
-    snapshot: StandardLibrarySnapshot,
-) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    let actual_catalogue = snapshot.catalogue().revision();
-    if actual_catalogue != STANDARD_CATALOGUE_V7_REVISION_ID {
-        return Err(StandardLibraryError::CatalogueIdentityMismatch {
-            expected: STANDARD_CATALOGUE_V7_REVISION_ID,
-            actual: actual_catalogue,
-        });
-    }
-    let actual_digest = snapshot.digest();
-    if actual_digest != ACCEPTED_V7_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V7_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-    verify_canonical_standard_library_v2_snapshot(snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })
-}
 /// V8 Rows source is retired; requesting its historical snapshot fails closed.
 pub fn retained_standard_library_v8_snapshot()
 -> Result<StandardLibrarySnapshot, StandardLibraryError> {
@@ -2944,10 +2774,6 @@ impl StandardLibraryV10Manifest {
 
     pub const fn action_source_unit(&self) -> SourceUnitId {
         STD_ACTION_SOURCE_UNIT_ID
-    }
-
-    pub const fn window_source_unit(&self) -> SourceUnitId {
-        STD_WINDOW_SOURCE_UNIT_ID
     }
 
     pub const fn data_source_unit(&self) -> SourceUnitId {
@@ -3064,7 +2890,7 @@ pub fn select_verified_standard_library(
             verify_standard_library_v6_snapshot(retained_standard_library_v6_snapshot()?)
         }
         STANDARD_LIBRARY_V7_REVISION_ID => {
-            verify_standard_library_v7_snapshot(retained_standard_library_v7_snapshot()?)
+            Err(StandardLibraryError::UnsupportedRevision { revision })
         }
         STANDARD_LIBRARY_V8_REVISION_ID => {
             verify_standard_library_v8_snapshot(retained_standard_library_v8_snapshot()?)
