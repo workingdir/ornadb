@@ -2444,11 +2444,11 @@ fn harness_maps_runtime_info_semantics_and_serializes_runtime_rejection() {
     for (path, source) in [
         (
             valid_path,
-            "pub fn info() = sys.rt.info();",
+            include_str!("fixtures/sys-rt-info.orna"),
         ),
         (
             invalid_path,
-            "fn active_streams() {\n    sys.runtime.streams\n}",
+            include_str!("fixtures/sys-runtime-streams-removed.orna"),
         ),
     ] {
         let path = root.path().join(path);
