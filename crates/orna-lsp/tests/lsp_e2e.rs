@@ -13,7 +13,7 @@ use std::{
 
 use orna_compiler::{check_new_application, check_standard_library_source};
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{retained_standard_library_v11_snapshot, verify_standard_library_v11_snapshot};
+use orna_standard::{retained_standard_library_v10_snapshot, verify_standard_library_v10_snapshot};
 use serde_json::{Value, json};
 
 /// The valid application source used for positive tests.
@@ -604,9 +604,9 @@ fn canonical_source_check_diagnostics(
     logical_path: &str,
 ) -> Vec<DiagnosticProjection> {
     let snapshot =
-        retained_standard_library_v11_snapshot().expect("retained V11 standard snapshot");
+        retained_standard_library_v10_snapshot().expect("retained V10 standard snapshot");
     let verified =
-        verify_standard_library_v11_snapshot(snapshot).expect("verified V11 standard snapshot");
+        verify_standard_library_v10_snapshot(snapshot).expect("verified V10 standard snapshot");
     let standard = check_standard_library_source(&verified).expect("checked standard source");
     let bundle = SourceBundle::new([SourceUnit::new(logical_path, source)])
         .expect("one nonempty logical source unit");
@@ -939,7 +939,6 @@ fn serves_accepted_corpus_manifest_diagnostics_with_valid_utf16_ranges() {
     client.shutdown();
 }
 
-
 fn assert_hover_contains(client: &mut Client, uri: &str, position: Value, expected: &str) {
     let hover = client.request(
         "textDocument/hover",
@@ -976,7 +975,6 @@ fn assert_definition_starts_on(
         "definition line: {definition}"
     );
 }
-
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DecodedSemanticToken {
