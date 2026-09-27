@@ -674,6 +674,26 @@ impl Catalogue {
                 std::iter::empty::<&str>(),
             ),
         );
+        modules.insert(
+            Namespace(vec!["std".into(), "concurrent".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "concurrent".into()]),
+                [
+                    (
+                        "parallel",
+                        function(
+                            vec![Type::List(Box::new(Type::Error))],
+                            Type::Stream(Box::new(Type::Error)),
+                        ),
+                    ),
+                    (
+                        "race",
+                        function(vec![Type::List(Box::new(Type::Error))], Type::Error),
+                    ),
+                ],
+                std::iter::empty::<&str>(),
+            ),
+        );
         let action = Type::Named("std.Action".into());
         let rows = Type::Named("std.Rows".into());
         let json = Type::Named("std.JsonValue".into());
@@ -7268,6 +7288,11 @@ fn infer(
                 return inferred;
             }
             if let Some(inferred) =
+                infer_race_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
                 infer_relation_member_call(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
@@ -13059,6 +13084,52 @@ fn infer_parallel_call(
     }
     Some(Inferred {
         ty: Type::Stream(Box::new(result_type.unwrap_or(Type::Error))),
+        effects,
+    })
+}
+
+fn infer_race_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let is_race = qualified_path(callee)
+        .as_deref()
+        .is_some_and(|path| path == ["std", "concurrent", "race"])
+        || matches!(callee, Expr::Name { text, .. }
+            if text == "race"
+                && local.get(text).or_else(|| scope.names.get(text)).is_none());
+    if !is_race || arguments.len() != 1 || arguments[0].name.is_some() {
+        return None;
+    }
+    let Expr::List { elements, .. } = &arguments[0].value else {
+        return None;
+    };
+
+    let mut effects = EffectSummary::default();
+    let mut result_type: Option<Type> = None;
+    for callback in elements {
+        let inferred = infer(callback, scope, local, diagnostics);
+        effects.join(&inferred.effects);
+        let Type::Function { result, .. } = inferred.ty else {
+            diagnostics.push(diag(DIAG_TYPE, "race entries must be callback functions"));
+            continue;
+        };
+        if let Some(expected) = &result_type {
+            if !types_match(expected, &result) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "race callbacks must have compatible result types",
+                ));
+            }
+        } else {
+            result_type = Some(*result);
+        }
+    }
+    Some(Inferred {
+        ty: result_type.unwrap_or(Type::Error),
         effects,
     })
 }
