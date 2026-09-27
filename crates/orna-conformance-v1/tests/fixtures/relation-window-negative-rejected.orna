@@ -1,0 +1,6 @@
+pub table Note(id: Int) { text: Str, }
+fn count_windows(size: Int, step: Int) = window(Note, size, step) | count;
+fn parent() {
+    Note.insert({ id: 1, text: "one" });
+    assert count_windows(0 - 1, 1) == 0;
+}
