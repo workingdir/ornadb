@@ -307,7 +307,6 @@ pub(super) fn check_resource_constructor(
         ));
         return None;
     }
-    checked_arguments.sort_by_key(|(parameter, _)| *parameter);
     let operation_location = location(input.logical_path, span);
     let call_site = client_resource_call_site_id(&operation_location, &input.name);
     references.push(CheckedDefinitionReference {
@@ -637,7 +636,6 @@ pub(super) fn check_action_constructor(
         ));
         return None;
     }
-    checked_arguments.sort_by_key(|(parameter, _)| *parameter);
     let operation_location = location(input.logical_path, span);
     references.push(CheckedDefinitionReference {
         target: CheckedDefinitionReferenceTarget::Function(target.id),
