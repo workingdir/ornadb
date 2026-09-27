@@ -1,0 +1,6 @@
+pub table Note(id: Int) { value: Int, }
+pub fn direct_mutating(rows: Relation<Note>) = flat_map(rows, note => {
+    Note.insert({ id: note.id, value: note.value });
+    [note.value]
+});
+pub fn piped_external(rows: Relation<Note>) = rows | flat_map(note => [std.net.http.get("https://example.com")]);
