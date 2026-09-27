@@ -2351,7 +2351,7 @@ fn bounded_evaluator_invokes_a_function_with_its_earlier_immutable_binding() {
         fixture_id: "test-module".into(),
         source_id: "logical/pure.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub fn incremented() = if true { let answer = 41; std.math.increment(answer) } else { 0 };".into(),
+        source: include_str!("fixtures/bounded-earlier-immutable-binding.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&pure_module), StageOutcome::Passed);
