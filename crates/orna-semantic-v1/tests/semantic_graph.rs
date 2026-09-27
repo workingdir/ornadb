@@ -2584,9 +2584,7 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
 
 #[test]
 fn frozen_historical_program_resolves_through_authoritative_projection() {
-    let source = include_str!(
-        "../../../../reference/Orna-1.0.0/examples/valid/historical-program.orna"
-    );
+    let source = include_str!(env!("ORNA_HISTORICAL_PROGRAM_FIXTURE"));
     let result = analyze_with_catalogue(
         &[ModuleInput::new("historical-program.orna", source)],
         &Catalogue::authoritative_fixture(),
