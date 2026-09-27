@@ -33,7 +33,11 @@ fn repository() -> TempDir {
         &["config", "user.name", "Foundation adapter test"],
     );
     git(temporary.path(), &["config", "commit.gpgsign", "false"]);
-    fs::write(temporary.path().join("main.orna"), "module main;\n").unwrap();
+    fs::write(
+        temporary.path().join("main.orna"),
+        include_str!("fixtures/foundation-adapter-main.orna"),
+    )
+    .unwrap();
     git(temporary.path(), &["add", "."]);
     git(temporary.path(), &["commit", "-m", "initial"]);
     temporary
@@ -199,7 +203,11 @@ fn adapter_preserves_a_sha256_head_as_a_committed_snapshot() {
         &["config", "user.name", "Foundation adapter test"],
     );
     git(root.path(), &["config", "commit.gpgsign", "false"]);
-    fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+    fs::write(
+        root.path().join("main.orna"),
+        include_str!("fixtures/foundation-adapter-main.orna"),
+    )
+    .unwrap();
     git(root.path(), &["add", "."]);
     git(root.path(), &["commit", "-m", "initial"]);
     let adapter = OrnaRepositoryAdapter::new(
