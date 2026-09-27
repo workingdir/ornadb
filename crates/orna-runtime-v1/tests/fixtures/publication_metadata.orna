@@ -1,0 +1,11 @@
+pub fn storage_pending_rows(storage: sys.Storage): Int = storage.pending_rows;
+pub fn storage_pending_bytes(storage: sys.Storage): Int = storage.pending_bytes;
+pub fn storage_published_rows(storage: sys.Storage): Int = storage.published_rows;
+pub fn storage_published_bytes(storage: sys.Storage): Int = storage.published_bytes;
+pub fn storage_policy_target(storage: sys.Storage): Int = storage.publication_policy.compressed_target_bytes;
+
+pub fn maintenance_pending_rows(job: sys.MaintenanceJob): Int = job.pending_rows;
+pub fn maintenance_pending_bytes(job: sys.MaintenanceJob): Int = job.pending_bytes;
+pub fn maintenance_published_rows(job: sys.MaintenanceJob): Int = job.published_rows;
+pub fn maintenance_published_bytes(job: sys.MaintenanceJob): Int = job.published_bytes;
+pub fn maintenance_policy_target(job: sys.MaintenanceJob): Int = job.publication_policy.compressed_target_bytes;
