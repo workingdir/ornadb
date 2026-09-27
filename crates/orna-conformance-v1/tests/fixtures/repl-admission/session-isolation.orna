@@ -1,0 +1,6 @@
+let seed: Int = 21;
+fn twice(value: Int): Int = value + value;
+twice(seed)
+seed
+twice(21)
+$_
