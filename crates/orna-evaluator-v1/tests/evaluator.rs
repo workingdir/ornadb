@@ -5000,7 +5000,7 @@ fn std_collection_filter_accepts_direct_pipeline_and_named_calls() {
     );
     assert_eq!(
         call_module(
-            "fn keep_even(value: Int) = value % 2 == 0; fn run() = std.collection.filter([1, 2, 3, 4], keep_even);",
+            include_str!("fixtures/collection_filter_named_callback.orna"),
             "run()",
             Limits::default(),
         )
