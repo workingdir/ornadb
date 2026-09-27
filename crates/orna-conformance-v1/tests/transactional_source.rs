@@ -146,7 +146,7 @@ fn parsed_repeated_primary_key_declaration_is_rejected_before_transaction_admiss
         fixture_id: "transaction-key-schema".into(),
         source_id: "transaction-key-schema.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub table Reading(sensor: Str, sensor: Str) { value: Int, } fn write() { Reading.insert({ sensor: \"north\", value: 1 }); }".into(),
+        source: include_str!("fixtures/transaction-key-schema.orna").into(),
     };
 
     let outcome = runtime.execute_source(&unit);
