@@ -446,7 +446,35 @@ impl StagedActivation {
         authority: &ApplicationAuthority,
         context: &RuntimeActivationContext,
     ) -> Result<StagedTableActivation, ApplicationError> {
-        authority.stage_mutations(context.clone(), self.mutations.clone())
+        // Mutation IDs are unique in the runtime's durable ledger. The source
+        // handler's IDs identify an ordered write within a source batch, so
+        // bind them to this captured activation before crossing that boundary.
+        // Replaying the same staged activation against the same context keeps
+        // the IDs stable, while a later activation can repeat the same write.
+        let activation_digest = ApplicationAuthority::canonical_digest(context, &self.mutations)?;
+        let mutations = self
+            .mutations
+            .iter()
+            .enumerate()
+            .map(|(ordinal, mutation)| {
+                let mut digest = Sha256::new();
+                digest.update(b"ORNA-SOURCE-ACTIVATION-MUTATION\0");
+                digest.update(activation_digest);
+                digest.update((ordinal as u64).to_be_bytes());
+                digest.update(mutation.id());
+                let id: [u8; 16] = digest.finalize()[..16]
+                    .try_into()
+                    .map_err(|_| ApplicationError::DigestEncoding)?;
+                TableMutation::new(
+                    id,
+                    mutation.table(),
+                    mutation.key().to_vec(),
+                    mutation.value().map(<[u8]>::to_vec),
+                )
+                .map_err(|error: RuntimeError| ApplicationError::Runtime(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        authority.stage_mutations(context.clone(), mutations)
     }
 }
 
@@ -1641,6 +1669,124 @@ mod tests {
         ))
         .expect("canonical integer");
         assert_eq!(key, expected_key);
+    }
+
+    struct SuccessfulSourceEffectDispatcher;
+
+    impl AsyncApplicationEffectDispatcher for SuccessfulSourceEffectDispatcher {
+        fn dispatch<'a>(
+            &'a self,
+            effect: ApplicationEffectRequest,
+            _context: &'a RuntimeActivationContext,
+        ) -> ApplicationEffectFuture<'a> {
+            Box::pin(async move {
+                assert!(matches!(effect, ApplicationEffectRequest::PauseStream { .. }));
+                Ok(CanonicalValue::new(OvbRaw::Bool(true)).expect("canonical bool"))
+            })
+        }
+    }
+
+    #[test]
+    fn checked_in_source_effect_stages_and_commits_with_activation_scoped_id() {
+        use futures::executor::block_on;
+        use orna_repository_v1::Repository;
+        use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "orna-source-activation-{}-{timestamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("temporary repository directory");
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&root)
+            .status()
+            .expect("git init starts");
+        assert!(status.success(), "git init creates the runtime repository");
+        let repository = Repository::discover(&root).expect("temporary Git repository");
+        let state = block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [41; 16],
+                repository_id: [42; 16],
+            },
+            [43; 32],
+        ))
+        .expect("runtime state opens");
+        let lease = block_on(state.acquire_lease([44; 16])).expect("writer lease acquired");
+        let context = block_on(state.begin_activation()).expect("activation context captured");
+
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "admin-pause.orna",
+                include_str!("../tests/fixtures/admin-pause-stream.orna"),
+                "main",
+            )
+            .expect("checked-in source fixture is admitted");
+        let dispatcher = SuccessfulSourceEffectDispatcher;
+        let staged = block_on(authority.evaluate_staged_with_async_effects(
+            &application,
+            &Environment::from([(
+                "stream".to_owned(),
+                CanonicalValue::new(OvbRaw::Text("fixture-stream".to_owned()))
+                    .expect("canonical stream argument"),
+            )]),
+            &context,
+            &dispatcher,
+        ))
+        .expect("source table write and terminal runtime effect evaluate");
+        assert_eq!(staged.value().raw(), &OvbRaw::Bool(true));
+        assert_eq!(staged.mutations().len(), 1);
+
+        let source_id = staged.mutations()[0].id();
+        let activation = staged
+            .stage(&authority, &context)
+            .expect("source mutations cross the captured transaction bridge");
+        assert_ne!(activation.mutations()[0].id(), source_id);
+        let retry = staged
+            .stage(&authority, &context)
+            .expect("same captured source activation can be staged again");
+        assert_eq!(activation.mutations()[0].id(), retry.mutations()[0].id());
+        let key = activation.mutations()[0].key().to_vec();
+
+        block_on(state.commit_table_activation(
+            lease,
+            &context,
+            activation.mutations(),
+            activation.next_digest(),
+            &NoFault,
+        ))
+        .expect("owner-fenced table activation commits");
+        let fresh_context = block_on(state.begin_activation())
+            .expect("later activation captures the committed generation");
+        let later_activation = staged
+            .stage(&authority, &fresh_context)
+            .expect("same source write stages in a later activation");
+        assert_ne!(
+            later_activation.mutations()[0].id(),
+            activation.mutations()[0].id(),
+            "later activation must receive a distinct durable mutation ID"
+        );
+        let committed = block_on(state.committed_table_row("Note", &key))
+            .expect("committed row can be read")
+            .expect("source insert is durable");
+        let row = CanonicalValue::decode(&committed).expect("committed row is canonical");
+        let OvbRaw::Map(fields) = row.raw() else {
+            panic!("committed row is a record");
+        };
+        assert!(fields.iter().any(|(field, value)| {
+            matches!(field, OvbRaw::Text(name) if name == "text")
+                && matches!(value, OvbRaw::Text(text) if text == "staged before pause")
+        }));
+
+        drop(state);
+        std::fs::remove_dir_all(root).expect("temporary runtime repository removed");
     }
 
     #[test]
