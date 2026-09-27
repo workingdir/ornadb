@@ -1100,10 +1100,7 @@ fn typed_sys_await_report_maps_orna_sys_082_to_semantic_pass_evidence() {
             None,
             None,
         ),
-        r#"
-            pub fn await_timeout(job: sys.InvocationHandle<Int>) =
-                sys.await<Int>(job, timeout: 1.s);
-        "#,
+        include_str!("fixtures/typed-await-valid.orna"),
     );
     let fixture = &report.fixtures[0];
     let typecheck = fixture
