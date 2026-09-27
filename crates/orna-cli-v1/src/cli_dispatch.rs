@@ -24,6 +24,7 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             branch,
             parsed.color.stdout_enabled(),
         ),
+        Command::Diff(ref arguments) => run_git_diff(arguments),
         Command::Status {
             format: StatusFormat::Human,
         } => run_status_human(&parsed.endpoint, parsed.color.stdout_enabled()),
@@ -97,4 +98,23 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             run_public_project_function(&parsed.endpoint, target, parsed.color.stdout_enabled())
         }
     }
+}
+
+fn run_git_diff(arguments: &[String]) -> Result<(), Diagnostic> {
+    let status = std::process::Command::new("git")
+        .arg("diff")
+        .args(arguments)
+        .status()
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2000",
+                "Git diff could not be started",
+                "check that Git is installed and available on PATH",
+                error.to_string(),
+            )
+        })?;
+    if let Some(code) = status.code() {
+        std::process::exit(code);
+    }
+    std::process::exit(128)
 }
