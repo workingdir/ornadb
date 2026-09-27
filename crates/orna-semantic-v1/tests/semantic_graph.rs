@@ -2492,6 +2492,44 @@ fn race_callbacks_share_result_type_and_return_that_type() {
 }
 
 #[test]
+fn timeout_callback_and_duration_are_admitted_and_checked() {
+    let source = include_str!("fixtures/timeout-callback-results.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("timeout-callback-results.orna", source)],
+        &Catalogue::authoritative_core(),
+    );
+    for expected in [
+        "timeout callback must be a function",
+        "timeout callback must not take parameters",
+        "timeout duration must be a Duration",
+        "timeout expects a callback and a duration",
+    ] {
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message() == expected),
+            "missing `{expected}` diagnostic: {:?}",
+            result.diagnostics
+        );
+    }
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("completed"))
+        .expect("fixture module is analyzed");
+    assert_eq!(
+        module.symbols["completed"].ty,
+        Type::Function {
+            parameters: vec![],
+            parameter_names: Some(vec![]),
+            default_parameters: Default::default(),
+            result: Box::new(Type::Int),
+        }
+    );
+}
+
+#[test]
 fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
     let sources = [
         (
