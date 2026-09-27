@@ -1,0 +1,2 @@
+pub table Reading(id: Int) { value: Int, }
+pub fn values() = Reading | map(row => row.value);
