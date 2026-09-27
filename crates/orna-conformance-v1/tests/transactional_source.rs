@@ -387,9 +387,9 @@ fn parsed_pipeline_count_call_in_a_direct_function_body_observes_activation_writ
 #[test]
 fn parsed_filter_count_pipeline_observes_candidate_rows_and_read_your_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source(
-        r#"Note.insert({ id: 8, text: "second" }); assert Note | filter(note => note.text == "nested") | count == 1; assert Note | filter(note => note.text == "second") | count() == 1;"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/filter-count-read-your-writes.orna"
+    )));
 
     assert!(matches!(outcome, StageOutcome::Passed));
     assert!(
@@ -407,9 +407,9 @@ fn parsed_filter_count_pipeline_observes_candidate_rows_and_read_your_writes() {
 #[test]
 fn parsed_filter_count_failure_rolls_back_candidate_rows() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source(
-        r#"Note.insert({ id: 8, text: "second" }); assert Note | filter(note => note.text == "second") | count == 1; assert false;"#,
-    ));
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/filter-count-rollback.orna"
+    )));
 
     assert!(matches!(
         outcome,
