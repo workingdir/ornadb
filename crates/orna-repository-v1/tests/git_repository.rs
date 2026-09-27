@@ -3207,6 +3207,64 @@ fn explicit_snapshot_branch_and_remote_preserve_cwd() {
 }
 
 #[test]
+fn create_branch_at_unborn_head_fails_without_mutating_repository_state() {
+    let root = TempDir::new().unwrap();
+    git(root.path(), &["init", "-b", "main"]);
+
+    fs::create_dir_all(root.path().join(".orna")).unwrap();
+    fs::write(root.path().join(".orna/format.orna"), "format 1\n").unwrap();
+    fs::write(root.path().join("ordinary.txt"), "untracked\n").unwrap();
+    git(root.path(), &["add", ".orna/format.orna"]);
+
+    let repo = Repository::discover(root.path()).unwrap();
+    let head_before = git(root.path(), &["symbolic-ref", "HEAD"]);
+    let refs_before = git(
+        root.path(),
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
+    let index_before = fs::read(root.path().join(".git/index")).unwrap();
+    let status_before = git(
+        root.path(),
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    );
+    let staged_source_before = fs::read(root.path().join(".orna/format.orna")).unwrap();
+    let untracked_file_before = fs::read(root.path().join("ordinary.txt")).unwrap();
+
+    assert!(matches!(
+        repo.create_branch_at_head("experiment"),
+        Err(orna_repository_v1::RepositoryError::UnbornHead)
+    ));
+
+    assert_eq!(git(root.path(), &["symbolic-ref", "HEAD"]), head_before);
+    assert_eq!(
+        git(
+            root.path(),
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+        ),
+        refs_before
+    );
+    assert_eq!(
+        fs::read(root.path().join(".git/index")).unwrap(),
+        index_before
+    );
+    assert_eq!(
+        git(
+            root.path(),
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        ),
+        status_before
+    );
+    assert_eq!(
+        fs::read(root.path().join(".orna/format.orna")).unwrap(),
+        staged_source_before
+    );
+    assert_eq!(
+        fs::read(root.path().join("ordinary.txt")).unwrap(),
+        untracked_file_before
+    );
+}
+
+#[test]
 fn observes_an_ordinary_repository_and_materialized_head_without_mutation() {
     let root = repository();
     with_remote(root.path());
