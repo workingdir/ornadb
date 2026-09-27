@@ -1,0 +1,1 @@
+pub table User(id: Uuid) { age: Int check(age >= 0), }

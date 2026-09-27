@@ -1,0 +1,3 @@
+type fixture_name { fixture_name: fixture_name, }
+table fixture_name(fixture_name: fixture_name) { fixture_name: fixture_name, }
+fn fixture_name(fixture_name: fixture_name) = fixture_name;
