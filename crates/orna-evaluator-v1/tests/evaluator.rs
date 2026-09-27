@@ -4828,7 +4828,7 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
 
 #[test]
 fn std_collection_partition_accepts_lawful_predicates_and_enforces_limits() {
-    let source = "fn keep_even(value: Int) = value % 2 == 0; fn run() = std.collection.partition([1, 2, 3, 4], keep_even);";
+    let source = include_str!("fixtures/partition_callbacks.orna");
     assert_eq!(
         call_module(source, "run()", Limits::default()).unwrap(),
         Value::new(Raw::Array(vec![
@@ -4838,11 +4838,7 @@ fn std_collection_partition_accepts_lawful_predicates_and_enforces_limits() {
         .unwrap()
     );
     assert_eq!(
-        code(call_module(
-            "fn bad(value: Int, other: Int) = true; fn run() = std.collection.partition([1], bad);",
-            "run()",
-            Limits::default(),
-        )),
+        code(call_module(source, "bad_arity()", Limits::default())),
         "ORNA-EVAL-ARGUMENT"
     );
     assert_eq!(
