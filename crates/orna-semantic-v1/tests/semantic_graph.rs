@@ -2440,6 +2440,32 @@ fn authoritative_core_types_locale_aware_money_pipeline() {
 }
 
 #[test]
+fn parallel_callbacks_share_result_type_and_return_ordered_stream() {
+    let source = include_str!("fixtures/parallel-callback-results.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("parallel-callback-results.orna", source)],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "parallel callbacks must have compatible result types"
+    }), "incompatible callback result must be diagnosed: {:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("ordered"))
+        .expect("fixture module is analyzed");
+    assert_eq!(
+        module.symbols["ordered"].ty,
+        Type::Function {
+            parameters: vec![],
+            parameter_names: Some(vec![]),
+            default_parameters: Default::default(),
+            result: Box::new(Type::Stream(Box::new(Type::Int))),
+        }
+    );
+}
+
+#[test]
 fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
     let sources = [
         (
