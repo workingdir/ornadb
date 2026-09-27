@@ -689,10 +689,7 @@ fn erased_sys_invoke_report_maps_orna_sys_077_to_semantic_pass_evidence() {
             None,
             None,
         ),
-        r#"
-            pub fn erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.invoke(function, arguments);
-        "#,
+        include_str!("fixtures/erased-invoke-valid.orna"),
     );
     let typecheck = report.fixtures[0]
         .stages
