@@ -1587,52 +1587,52 @@ fn project_row_admission_rejects_path_key_and_schema_failures() {
         fixture_id: "project-rows-negative".into(),
         source_id: "logical/project/inventory.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub table Item(id: Int) { name: Str, }".into(),
+        source: include_str!("fixtures/row-admission/path-key-schema-inventory.orna").into(),
     };
     for (source_id, source, code) in [
         (
             "logical/project/inventory/Item/not-an-int.orna",
-            "{ name: \"Pencil\" }",
+            include_str!("fixtures/row-admission/path-key-schema-valid-row.orna"),
             "ORNA-CONFORMANCE-ROW-PATH",
         ),
         (
             "logical/project/inventory/Item/042.orna",
-            "{ name: \"Pencil\" }",
+            include_str!("fixtures/row-admission/path-key-schema-valid-row.orna"),
             "ORNA-CONFORMANCE-ROW-PATH",
         ),
         (
             "logical/project/inventory/Item/+42.orna",
-            "{ name: \"Pencil\" }",
+            include_str!("fixtures/row-admission/path-key-schema-valid-row.orna"),
             "ORNA-CONFORMANCE-ROW-PATH",
         ),
         (
             "logical/project/inventory/Item/-0.orna",
-            "{ name: \"Pencil\" }",
+            include_str!("fixtures/row-admission/path-key-schema-valid-row.orna"),
             "ORNA-CONFORMANCE-ROW-PATH",
         ),
         (
             "logical/project/inventory/Item/42/extra.orna",
-            "{ name: \"Pencil\" }",
+            include_str!("fixtures/row-admission/path-key-schema-valid-row.orna"),
             "ORNA-CONFORMANCE-ROW-PATH",
         ),
         (
             "logical/project/inventory/Item/42.orna",
-            "{ id: 42, name: \"Pencil\" }",
+            include_str!("fixtures/row-admission/path-key-schema-explicit-key.orna"),
             "E3004",
         ),
         (
             "logical/project/inventory/Item/42.orna",
-            "{}",
+            include_str!("fixtures/row-admission/path-key-schema-missing-field.orna"),
             "ORNA-CONFORMANCE-ROW-MISSING",
         ),
         (
             "logical/project/inventory/Item/42.orna",
-            "{ name: true }",
+            include_str!("fixtures/row-admission/path-key-schema-wrong-type.orna"),
             "ORNA-CONFORMANCE-ROW-TYPE",
         ),
         (
             "logical/project/inventory/Item/42.orna",
-            "{ unknown: \"Pencil\" }",
+            include_str!("fixtures/row-admission/path-key-schema-unknown-field.orna"),
             "ORNA-CONFORMANCE-ROW-UNKNOWN",
         ),
     ] {
