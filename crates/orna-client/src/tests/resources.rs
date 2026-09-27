@@ -2038,26 +2038,19 @@ fn client_resource_requires_the_full_verified_standard_target_pin() {
 }
 
 #[test]
-fn client_resource_resolves_compiled_verified_standard_server_target() {
+fn client_resource_rejects_retired_standard_server_target() {
     let (active, _, pair, _) = version_two_client_call_active();
-    let argument = FunctionArgument::new(
-        orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
-        RuntimeValue::Integer(42),
-    )
-    .unwrap();
     let standard = active
         .catalogue_hash_context()
         .standard()
-        .expect("version-two fixture pins the verified standard snapshot");
+        .expect("version-two fixture pins its test hash context");
     let target = InvocationTarget::verified_standard(
         orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
         pair,
         standard.revision(),
         orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
     );
-    let digest =
-        ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
-            .unwrap();
+    let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
     let key = ClientResourceKey::new(
         target,
         PrincipalId::from_bytes([0x7a; 16]),
@@ -2066,14 +2059,12 @@ fn client_resource_resolves_compiled_verified_standard_server_target() {
     );
     let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Integer));
 
-    let request = resource
-        .begin_request(&active, vec![argument])
-        .expect("the pinned standard resource target should validate");
-
-    assert_eq!(request.target(), target);
+    let error = resource
+        .begin_request(&active, Vec::new())
+        .expect_err("the retired standard invoke target must fail closed");
     assert_eq!(
-        request.expected_type(),
-        ResolvedType::Scalar(StandardScalar::Integer)
+        error,
+        super::super::ClientResourceError::TargetMismatch { expected: target }
     );
 }
 
