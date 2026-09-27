@@ -760,7 +760,7 @@ fn typed_invoke_project(source: &str) -> ProjectUnit {
 
 #[test]
 fn semantic_project_adapter_admits_typed_sys_invoke_with_explicit_witness() {
-    let source = include_str!("fixtures/typed-invoke-valid.orna");
+    let source = include_str!("fixtures/adapter-typed-invoke-valid.orna");
     let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -771,7 +771,7 @@ fn semantic_project_adapter_admits_typed_sys_invoke_with_explicit_witness() {
 
 #[test]
 fn semantic_project_adapter_rejects_typed_sys_invoke_mismatched_witness() {
-    let source = include_str!("fixtures/typed-invoke-mismatch.orna");
+    let source = include_str!("fixtures/adapter-typed-invoke-mismatch.orna");
     let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -837,7 +837,7 @@ fn semantic_project_adapter_rejects_typed_sys_invoke_without_explicit_witness() 
 
 #[test]
 fn semantic_project_adapter_admits_typed_sys_start_with_explicit_witness() {
-    let source = include_str!("fixtures/typed-start-valid.orna");
+    let source = include_str!("fixtures/adapter-typed-start-valid.orna");
     let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -853,7 +853,7 @@ fn semantic_project_adapter_admits_typed_sys_start_with_explicit_witness() {
         &Catalogue::authoritative_fixture(),
     );
     assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
-    let start_int = &analysis.modules.values().next().unwrap().exports["start"];
+    let start_int = &analysis.modules.values().next().unwrap().exports["start_int"];
     assert!(matches!(
         &start_int.ty,
         Type::Function { result, .. }
@@ -870,7 +870,7 @@ fn semantic_project_adapter_admits_typed_sys_start_with_explicit_witness() {
 }
 #[test]
 fn semantic_project_adapter_admits_erased_sys_start_with_value_handle_and_invoke_effect() {
-    let source = include_str!("fixtures/erased-start-valid.orna");
+    let source = include_str!("fixtures/adapter-erased-start-valid.orna");
     let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -886,7 +886,7 @@ fn semantic_project_adapter_admits_erased_sys_start_with_value_handle_and_invoke
         &Catalogue::authoritative_fixture(),
     );
     assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
-    let start_erased = &analysis.modules.values().next().unwrap().exports["start"];
+    let start_erased = &analysis.modules.values().next().unwrap().exports["start_erased"];
     assert!(matches!(
         &start_erased.ty,
         Type::Function { result, .. }
@@ -904,7 +904,7 @@ fn semantic_project_adapter_admits_erased_sys_start_with_value_handle_and_invoke
 
 #[test]
 fn semantic_project_adapter_rejects_typed_sys_start_without_explicit_witness() {
-    let source = include_str!("fixtures/erased-start-missing-witness.orna");
+    let source = include_str!("fixtures/adapter-typed-start-missing-witness.orna");
     let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
