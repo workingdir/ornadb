@@ -42,29 +42,10 @@ use orna_semantic_v1::{
 use orna_syntax::{NamePart, PrimitiveValueTypePersistence, QualifiedName, TypeExportTarget};
 
 mod codecs;
-mod executables;
-mod retained;
-mod snapshot_builders;
 
 pub use codecs::{
     RegisteredOpaqueCodecsError, is_registered_inspect_carrier_type,
     registered_inspect_carrier_codecs, registered_opaque_codecs,
-};
-use executables::{
-    retained_json_executable,
-    retained_v2_executable,
-};
-use retained::{
-    reconcile_retained_invoke_source, reconcile_retained_json_source,
-    reconcile_retained_output_source, reconcile_retained_source_with_unit,
-    reconcile_retained_ui_source,
-    retained_standard_library_snapshot_from_source,
-    retained_standard_library_v2_snapshot_from_source,
-    retained_standard_library_v3_snapshot_from_source,
-};
-use snapshot_builders::{
-    retained_standard_library_v4_snapshot_from_source,
-    retained_standard_library_v5_snapshot_from_source,
 };
 
 pub use orna_compiler::StandardUpgradeIdentity;
@@ -253,7 +234,6 @@ const fn reserved_id(final_byte: u8) -> [u8; 16] {
     bytes
 }
 
-const RETAINED_STANDARD_SOURCE: &str = include_str!("../../../stdlib/std/types.orna");
 const ACCEPTED_SOURCE_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x5d, 0x53, 0x60, 0x01, 0xab, 0xc7, 0x54, 0xcf, 0x2c, 0xde, 0x9f, 0xf4, 0xed, 0x50, 0xb2, 0x2d,
     0xe8, 0xbb, 0x70, 0x04, 0x0a, 0x69, 0x1b, 0xc2, 0xec, 0x50, 0xbd, 0x6c, 0x65, 0xe5, 0x25, 0xf4,
@@ -271,7 +251,6 @@ const ACCEPTED_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes(
     0xe4, 0x9b, 0xc8, 0xdf, 0xe0, 0x3c, 0xd6, 0xd9, 0x64, 0x70, 0x5b, 0x30, 0x23, 0x5b, 0x08, 0x1d,
 ]);
 
-const RETAINED_STANDARD_INVOKE_SOURCE: &str = include_str!("../../../stdlib/std/invoke.orna");
 
 // The V2 digest goldens below are computed by the canonical encoders from the
 // retained source and canonical records (never copied from a handwritten
@@ -362,7 +341,6 @@ pub const TERMINAL_DOCUMENT_MAGIC: &str = "ORNA-TERMINAL-DOCUMENT/1 ";
 /// body length, and the body bytes.
 pub const BYTE_STREAM_MAGIC: &str = "ORNA-BYTE-STREAM/1 ";
 
-const RETAINED_STANDARD_OUTPUT_SOURCE: &str = include_str!("../../../stdlib/std/output.orna");
 
 // The V3 digest goldens below are computed by the canonical encoders from the
 // retained source and canonical records (never copied from a handwritten
@@ -431,7 +409,6 @@ pub const STD_UI_CONTRACT: &str = "orna.std.value.ui@1";
 /// `u32` body length and the body bytes (work ADR 0062 provisional frame).
 pub const UI_MAGIC: &str = "ORNA-UI/1 ";
 
-const RETAINED_STANDARD_UI_SOURCE: &str = include_str!("../../../stdlib/std/ui.orna");
 
 // The V4 digest goldens below are computed by the canonical encoders from the
 // retained source and canonical records (never copied from a handwritten
@@ -478,7 +455,6 @@ pub const STD_JSON_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes(reser
 pub const STD_JSON_CONTRACT: &str = "orna.std.value.json@1";
 pub const JSON_MAGIC: &str = "ORNA-JSON-VALUE/1 ";
 
-const RETAINED_STANDARD_JSON_SOURCE: &str = include_str!("../../../stdlib/std/json.orna");
 const ACCEPTED_V5_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_TYPES_CONTENT_DIGEST;
 const ACCEPTED_V5_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_INVOKE_CONTENT_DIGEST;
 const ACCEPTED_V5_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_OUTPUT_CONTENT_DIGEST;
@@ -2362,9 +2338,8 @@ where
 /// reconciles every declaration with the source-independent manifest, and
 /// verifies the accepted source and standard-library hash goldens. It does not
 /// invoke the compiler and does not grant standard-library authority.
-pub fn retained_standard_library_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError>
-{
-    retained_standard_library_snapshot_from_source(RETAINED_STANDARD_SOURCE)
+pub fn retained_standard_library_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_REVISION_ID })
 }
 
 /// Verifies a retained standard snapshot and returns the authority capability.
@@ -2372,26 +2347,9 @@ pub fn retained_standard_library_snapshot() -> Result<StandardLibrarySnapshot, S
 /// The wrapper first checks the reserved catalogue identity, then the accepted
 /// standard digest, and only then invokes the core canonical verifier.
 pub fn verify_standard_library_snapshot(
-    snapshot: StandardLibrarySnapshot,
+    _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    let actual_catalogue = snapshot.catalogue().revision();
-    if actual_catalogue != STANDARD_CATALOGUE_REVISION_ID {
-        return Err(StandardLibraryError::CatalogueIdentityMismatch {
-            expected: STANDARD_CATALOGUE_REVISION_ID,
-            actual: actual_catalogue,
-        });
-    }
-
-    let actual_digest = snapshot.digest();
-    if actual_digest != ACCEPTED_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-
-    verify_canonical_standard_library_snapshot(snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_REVISION_ID })
 }
 
 /// Retains the canonical executable standard source as an unverified snapshot.
@@ -2402,12 +2360,8 @@ pub fn verify_standard_library_snapshot(
 /// the one retained `StandardExecutable` through the canonical compiler
 /// checker and canonical digest encoders. It does not run the compiler
 /// pipeline and does not grant standard-library authority.
-pub fn retained_standard_library_v2_snapshot()
--> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    retained_standard_library_v2_snapshot_from_source(
-        RETAINED_STANDARD_SOURCE,
-        RETAINED_STANDARD_INVOKE_SOURCE,
-    )
+pub fn retained_standard_library_v2_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V2_REVISION_ID })
 }
 
 /// Verifies a retained executable standard snapshot and returns the authority capability.
@@ -2416,26 +2370,9 @@ pub fn retained_standard_library_v2_snapshot()
 /// accepted V2 standard digest, and only then invokes the core canonical V2
 /// verifier.
 pub fn verify_standard_library_v2_snapshot(
-    snapshot: StandardLibrarySnapshot,
+    _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    let actual_catalogue = snapshot.catalogue().revision();
-    if actual_catalogue != STANDARD_CATALOGUE_V2_REVISION_ID {
-        return Err(StandardLibraryError::CatalogueIdentityMismatch {
-            expected: STANDARD_CATALOGUE_V2_REVISION_ID,
-            actual: actual_catalogue,
-        });
-    }
-
-    let actual_digest = snapshot.digest();
-    if actual_digest != ACCEPTED_V2_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V2_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-
-    verify_canonical_standard_library_v2_snapshot(snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V2_REVISION_ID })
 }
 
 /// Retains the canonical output standard source as an unverified snapshot.
@@ -2446,13 +2383,8 @@ pub fn verify_standard_library_v2_snapshot(
 /// the V2 `std.invoke.echo` executable unchanged through the canonical
 /// compiler checker and canonical digest encoders. It does not run the
 /// compiler pipeline and does not grant standard-library authority.
-pub fn retained_standard_library_v3_snapshot()
--> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    retained_standard_library_v3_snapshot_from_source(
-        RETAINED_STANDARD_SOURCE,
-        RETAINED_STANDARD_INVOKE_SOURCE,
-        RETAINED_STANDARD_OUTPUT_SOURCE,
-    )
+pub fn retained_standard_library_v3_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V3_REVISION_ID })
 }
 
 /// Verifies a retained output standard snapshot and returns the authority
@@ -2463,26 +2395,9 @@ pub fn retained_standard_library_v3_snapshot()
 /// verifier. `orna.std/3` reuses the V2 digest contract (work ADR 0058); the
 /// V3 catalogue, revision, source, and goldens are all new.
 pub fn verify_standard_library_v3_snapshot(
-    snapshot: StandardLibrarySnapshot,
+    _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    let actual_catalogue = snapshot.catalogue().revision();
-    if actual_catalogue != STANDARD_CATALOGUE_V3_REVISION_ID {
-        return Err(StandardLibraryError::CatalogueIdentityMismatch {
-            expected: STANDARD_CATALOGUE_V3_REVISION_ID,
-            actual: actual_catalogue,
-        });
-    }
-
-    let actual_digest = snapshot.digest();
-    if actual_digest != ACCEPTED_V3_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V3_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-
-    verify_canonical_standard_library_v2_snapshot(snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V3_REVISION_ID })
 }
 
 /// Retains the canonical UI standard source as an unverified snapshot.
@@ -2494,14 +2409,8 @@ pub fn verify_standard_library_v3_snapshot(
 /// compiler checker and canonical digest encoders (work ADR 0062). It does
 /// not run the compiler pipeline and does not grant standard-library
 /// authority.
-pub fn retained_standard_library_v4_snapshot()
--> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    retained_standard_library_v4_snapshot_from_source(
-        RETAINED_STANDARD_SOURCE,
-        RETAINED_STANDARD_INVOKE_SOURCE,
-        RETAINED_STANDARD_OUTPUT_SOURCE,
-        RETAINED_STANDARD_UI_SOURCE,
-    )
+pub fn retained_standard_library_v4_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V4_REVISION_ID })
 }
 
 /// Verifies a retained UI standard snapshot and returns the authority
@@ -2512,119 +2421,63 @@ pub fn retained_standard_library_v4_snapshot()
 /// verifier. `orna.std/4` reuses the V2 digest contract (work ADR 0062); the
 /// V4 catalogue, revision, source, and goldens are all new.
 pub fn verify_standard_library_v4_snapshot(
-    snapshot: StandardLibrarySnapshot,
+    _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    let actual_catalogue = snapshot.catalogue().revision();
-    if actual_catalogue != STANDARD_CATALOGUE_V4_REVISION_ID {
-        return Err(StandardLibraryError::CatalogueIdentityMismatch {
-            expected: STANDARD_CATALOGUE_V4_REVISION_ID,
-            actual: actual_catalogue,
-        });
-    }
-
-    let actual_digest = snapshot.digest();
-    if actual_digest != ACCEPTED_V4_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V4_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-
-    verify_canonical_standard_library_v2_snapshot(snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V4_REVISION_ID })
 }
 
-/// Retains the canonical V5 JSON standard source as an unverified snapshot.
-pub fn retained_standard_library_v5_snapshot()
--> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    retained_standard_library_v5_snapshot_from_source(
-        RETAINED_STANDARD_SOURCE,
-        RETAINED_STANDARD_INVOKE_SOURCE,
-        RETAINED_STANDARD_OUTPUT_SOURCE,
-        RETAINED_STANDARD_UI_SOURCE,
-        RETAINED_STANDARD_JSON_SOURCE,
-    )
+/// V5 predates the pinned Orna 1.0 profile and is no longer selectable.
+pub fn retained_standard_library_v5_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V5_REVISION_ID })
 }
 
-/// Verifies a retained V5 JSON standard snapshot and returns authority.
+/// Rejects explicitly supplied V5 snapshots after source retirement.
 pub fn verify_standard_library_v5_snapshot(
-    snapshot: StandardLibrarySnapshot,
+    _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    let actual_catalogue = snapshot.catalogue().revision();
-    if actual_catalogue != STANDARD_CATALOGUE_V5_REVISION_ID {
-        return Err(StandardLibraryError::CatalogueIdentityMismatch {
-            expected: STANDARD_CATALOGUE_V5_REVISION_ID,
-            actual: actual_catalogue,
-        });
-    }
-    let actual_digest = snapshot.digest();
-    if actual_digest != ACCEPTED_V5_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V5_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-    verify_canonical_standard_library_v2_snapshot(snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V5_REVISION_ID })
 }
 
 /// Retains the canonical V6 action standard source as an unverified snapshot.
-pub fn retained_standard_library_v6_snapshot()
--> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision {
-        revision: STANDARD_LIBRARY_V6_REVISION_ID,
-    })
+pub fn retained_standard_library_v6_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V6_REVISION_ID })
 }
 
 /// Verifies a retained V6 action standard snapshot and returns authority.
 pub fn verify_standard_library_v6_snapshot(
     _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision {
-        revision: STANDARD_LIBRARY_V6_REVISION_ID,
-    })
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V6_REVISION_ID })
 }
 /// Rejects caller-supplied historical V7 snapshots after source retirement.
 pub fn verify_standard_library_v7_snapshot(
     _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision {
-        revision: STANDARD_LIBRARY_V7_REVISION_ID,
-    })
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V7_REVISION_ID })
 }
 
 /// V8 Rows source is retired; requesting its historical snapshot fails closed.
-pub fn retained_standard_library_v8_snapshot()
--> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision {
-        revision: STANDARD_LIBRARY_V8_REVISION_ID,
-    })
+pub fn retained_standard_library_v8_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V8_REVISION_ID })
 }
 
 /// Rejects supplied V8 Rows snapshots after source retirement.
 pub fn verify_standard_library_v8_snapshot(
     _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision {
-        revision: STANDARD_LIBRARY_V8_REVISION_ID,
-    })
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V8_REVISION_ID })
 }
 
 /// V9 predates the pinned Orna 1.0 standard and is no longer retained.
-pub fn retained_standard_library_v9_snapshot()
--> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision {
-        revision: STANDARD_LIBRARY_V9_REVISION_ID,
-    })
+pub fn retained_standard_library_v9_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V9_REVISION_ID })
 }
 
 /// Historical V9 verification fails closed after its source bundle retired.
 pub fn verify_standard_library_v9_snapshot(
     _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision {
-        revision: STANDARD_LIBRARY_V9_REVISION_ID,
-    })
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V9_REVISION_ID })
 }
 
 /// Source-independent facts required to recognise `orna.std/10`.
@@ -2726,37 +2579,15 @@ pub fn standard_library_v10_manifest()
 /// The pre-1.0 V10 CLI source is no longer bundled or selected as a product
 /// standard. Historical V10 snapshots can still be verified when explicitly
 /// supplied by their stored revision; no replacement source is synthesized.
-pub fn retained_standard_library_v10_snapshot()
--> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision {
-        revision: STANDARD_LIBRARY_V10_REVISION_ID,
-    })
+pub fn retained_standard_library_v10_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V10_REVISION_ID })
 }
 
 /// Verifies an explicitly supplied historical V10 CLI session snapshot.
 pub fn verify_standard_library_v10_snapshot(
-    snapshot: StandardLibrarySnapshot,
+    _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    if snapshot.catalogue().revision() != STANDARD_CATALOGUE_V10_REVISION_ID {
-        return Err(StandardLibraryError::CatalogueIdentityMismatch {
-            expected: STANDARD_CATALOGUE_V10_REVISION_ID,
-            actual: snapshot.catalogue().revision(),
-        });
-    }
-    if snapshot.source().bundle() != STANDARD_SOURCE_V10_BUNDLE_ID
-        || snapshot.source().id() != STANDARD_SOURCE_V10_REVISION_ID
-        || snapshot.source().parent() != Some(STANDARD_SOURCE_V9_REVISION_ID)
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    if snapshot.digest() != ACCEPTED_V10_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V10_STANDARD_LIBRARY_DIGEST,
-            actual: snapshot.digest(),
-        });
-    }
-    verify_canonical_standard_library_v2_snapshot(snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V10_REVISION_ID })
 }
 
 /// Selects and verifies one of the retained standard-library snapshots.
@@ -2767,34 +2598,7 @@ pub fn verify_standard_library_v10_snapshot(
 pub fn select_verified_standard_library(
     revision: StandardLibraryRevisionId,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    match revision {
-        STANDARD_LIBRARY_REVISION_ID => {
-            verify_standard_library_snapshot(retained_standard_library_snapshot()?)
-        }
-        STANDARD_LIBRARY_V2_REVISION_ID => {
-            verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot()?)
-        }
-        STANDARD_LIBRARY_V3_REVISION_ID => {
-            verify_standard_library_v3_snapshot(retained_standard_library_v3_snapshot()?)
-        }
-        STANDARD_LIBRARY_V4_REVISION_ID => {
-            verify_standard_library_v4_snapshot(retained_standard_library_v4_snapshot()?)
-        }
-        STANDARD_LIBRARY_V5_REVISION_ID => {
-            verify_standard_library_v5_snapshot(retained_standard_library_v5_snapshot()?)
-        }
-        STANDARD_LIBRARY_V6_REVISION_ID => Err(StandardLibraryError::UnsupportedRevision { revision }),
-        STANDARD_LIBRARY_V7_REVISION_ID => {
-            Err(StandardLibraryError::UnsupportedRevision { revision })
-        }
-        STANDARD_LIBRARY_V8_REVISION_ID => {
-            verify_standard_library_v8_snapshot(retained_standard_library_v8_snapshot()?)
-        }
-        STANDARD_LIBRARY_V9_REVISION_ID => {
-            Err(StandardLibraryError::UnsupportedRevision { revision })
-        }
-        _ => Err(StandardLibraryError::UnsupportedRevision { revision }),
-    }
+    Err(StandardLibraryError::UnsupportedRevision { revision })
 }
 
 fn matches_qualified_export(
