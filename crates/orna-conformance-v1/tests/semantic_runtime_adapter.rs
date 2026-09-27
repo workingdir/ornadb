@@ -760,10 +760,8 @@ fn typed_invoke_project(source: &str) -> ProjectUnit {
 
 #[test]
 fn semantic_project_adapter_admits_typed_sys_invoke_with_explicit_witness() {
-    let project = typed_invoke_project(
-        "pub fn invoke_int(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.invoke<Int>(function, arguments, as: Int);",
-    );
+    let source = include_str!("fixtures/adapter-typed-invoke-valid.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
@@ -773,10 +771,8 @@ fn semantic_project_adapter_admits_typed_sys_invoke_with_explicit_witness() {
 
 #[test]
 fn semantic_project_adapter_rejects_typed_sys_invoke_mismatched_witness() {
-    let project = typed_invoke_project(
-        "pub fn invoke_wrong(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.invoke<Str>(function, arguments, as: Int);",
-    );
+    let source = include_str!("fixtures/adapter-typed-invoke-mismatch.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
@@ -792,9 +788,7 @@ fn semantic_project_adapter_rejects_typed_sys_invoke_mismatched_witness() {
 }
 #[test]
 fn semantic_project_adapter_admits_erased_sys_invoke_with_value_result_and_invoke_effect() {
-    let source =
-        "pub fn erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.invoke(function, arguments);";
+    let source = include_str!("fixtures/erased-invoke-valid.orna");
     let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -825,10 +819,8 @@ fn semantic_project_adapter_admits_erased_sys_invoke_with_value_result_and_invok
 
 #[test]
 fn semantic_project_adapter_rejects_typed_sys_invoke_without_explicit_witness() {
-    let project = typed_invoke_project(
-        "pub fn missing(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.invoke<Int>(function, arguments);",
-    );
+    let source = include_str!("fixtures/erased-invoke-missing-witness.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
@@ -845,8 +837,7 @@ fn semantic_project_adapter_rejects_typed_sys_invoke_without_explicit_witness() 
 
 #[test]
 fn semantic_project_adapter_admits_typed_sys_start_with_explicit_witness() {
-    let source = "pub fn start_int(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.start<Int>(function, arguments, as: Int);";
+    let source = include_str!("fixtures/adapter-typed-start-valid.orna");
     let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -879,9 +870,7 @@ fn semantic_project_adapter_admits_typed_sys_start_with_explicit_witness() {
 }
 #[test]
 fn semantic_project_adapter_admits_erased_sys_start_with_value_handle_and_invoke_effect() {
-    let source =
-        "pub fn start_erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.start(function, arguments);";
+    let source = include_str!("fixtures/adapter-erased-start-valid.orna");
     let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
@@ -915,10 +904,8 @@ fn semantic_project_adapter_admits_erased_sys_start_with_value_handle_and_invoke
 
 #[test]
 fn semantic_project_adapter_rejects_typed_sys_start_without_explicit_witness() {
-    let project = typed_invoke_project(
-        "pub fn start_missing(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.start<Int>(function, arguments);",
-    );
+    let source = include_str!("fixtures/adapter-typed-start-missing-witness.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
@@ -936,10 +923,8 @@ fn semantic_project_adapter_rejects_typed_sys_start_without_explicit_witness() {
 
 #[test]
 fn semantic_project_adapter_rejects_typed_sys_start_mismatched_witness() {
-    let project = typed_invoke_project(
-        "pub fn start_wrong(function: sys.FunctionRef, arguments: sys.ArgumentMap) = \
-         sys.start<Str>(function, arguments, as: Int);",
-    );
+    let source = include_str!("fixtures/typed-start-mismatch.orna");
+    let project = typed_invoke_project(source);
     let mut adapter = SemanticAdapter::default();
 
     assert_eq!(adapter.parse_project(&project), StageOutcome::Passed);
