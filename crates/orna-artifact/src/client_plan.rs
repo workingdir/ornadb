@@ -2996,22 +2996,12 @@ fn decode_action_plan(bytes: &[u8]) -> Result<ActionClientPlan, ClientPlanError>
         });
     }
     let mut arguments = Vec::with_capacity(argument_count);
-    let mut previous = None;
     let mut expression_count = 0;
     for _ in 0..argument_count {
         let parameter = ParameterId::from_bytes(read_action_identity(&mut reader)?);
-        if let Some(previous) = previous {
-            match parameter.cmp(&previous) {
-                std::cmp::Ordering::Less => {
-                    return Err(ClientPlanError::NonCanonicalActionArgumentOrder);
-                }
-                std::cmp::Ordering::Equal => {
-                    return Err(ClientPlanError::DuplicateActionArgument(parameter));
-                }
-                std::cmp::Ordering::Greater => {}
-            }
+        if arguments.iter().any(|(existing, _)| *existing == parameter) {
+            return Err(ClientPlanError::DuplicateActionArgument(parameter));
         }
-        previous = Some(parameter);
         let value = decode_expression_node(&mut reader, 0, &mut expression_count)?;
         validate_external_contract_placement(&value, false)?;
         arguments.push((parameter, value));
@@ -3043,25 +3033,16 @@ fn validate_action_arguments(
             limit: MAX_ACTION_ARGUMENTS,
         });
     }
-    for (parameter, _) in arguments {
+    for (index, (parameter, _)) in arguments.iter().enumerate() {
         if parameter.to_bytes() == [0; 16] {
             return Err(ClientPlanError::InvalidActionIdentity);
         }
-    }
-    let mut previous = None;
-    for (parameter, _) in arguments {
-        if let Some(previous) = previous {
-            match parameter.cmp(&previous) {
-                std::cmp::Ordering::Less => {
-                    return Err(ClientPlanError::NonCanonicalActionArgumentOrder);
-                }
-                std::cmp::Ordering::Equal => {
-                    return Err(ClientPlanError::DuplicateActionArgument(*parameter));
-                }
-                std::cmp::Ordering::Greater => {}
-            }
+        if arguments[..index]
+            .iter()
+            .any(|(existing, _)| existing == parameter)
+        {
+            return Err(ClientPlanError::DuplicateActionArgument(*parameter));
         }
-        previous = Some(*parameter);
     }
     for (_, value) in arguments {
         validate_external_contract_placement(value, false)?;
@@ -3077,21 +3058,14 @@ fn validate_resource_arguments(
             limit: MAX_RESOURCE_ARGUMENTS,
         });
     }
-    let mut previous = None;
-    for (parameter, _) in arguments {
+    for (index, (parameter, _)) in arguments.iter().enumerate() {
         validate_resource_identity(parameter.to_bytes())?;
-        if let Some(previous) = previous {
-            match parameter.cmp(&previous) {
-                std::cmp::Ordering::Less => {
-                    return Err(ClientPlanError::NonCanonicalResourceArgumentOrder);
-                }
-                std::cmp::Ordering::Equal => {
-                    return Err(ClientPlanError::DuplicateResourceArgument(*parameter));
-                }
-                std::cmp::Ordering::Greater => {}
-            }
+        if arguments[..index]
+            .iter()
+            .any(|(existing, _)| existing == parameter)
+        {
+            return Err(ClientPlanError::DuplicateResourceArgument(*parameter));
         }
-        previous = Some(*parameter);
     }
     Ok(())
 }
@@ -3759,21 +3733,11 @@ fn decode_resource_operation(
         });
     }
     let mut arguments = Vec::with_capacity(argument_count);
-    let mut previous = None;
     for _ in 0..argument_count {
         let parameter = ParameterId::from_bytes(read_resource_identity(reader)?);
-        if let Some(previous) = previous {
-            match parameter.cmp(&previous) {
-                std::cmp::Ordering::Less => {
-                    return Err(ClientPlanError::NonCanonicalResourceArgumentOrder);
-                }
-                std::cmp::Ordering::Equal => {
-                    return Err(ClientPlanError::DuplicateResourceArgument(parameter));
-                }
-                std::cmp::Ordering::Greater => {}
-            }
+        if arguments.iter().any(|(existing, _)| *existing == parameter) {
+            return Err(ClientPlanError::DuplicateResourceArgument(parameter));
         }
-        previous = Some(parameter);
         let value = decode_expression_node_with_resources(
             reader,
             depth + 1,

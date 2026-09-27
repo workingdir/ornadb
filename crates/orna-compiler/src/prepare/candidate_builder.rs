@@ -1728,7 +1728,7 @@ impl<'a> CandidateBuilder<'a> {
                 }
             },
         };
-        let mut arguments = operation
+        let arguments = operation
             .arguments()
             .iter()
             .map(|(parameter, value)| {
@@ -1738,7 +1738,6 @@ impl<'a> CandidateBuilder<'a> {
                 ))
             })
             .collect::<Result<Vec<_>, PrepareError>>()?;
-        arguments.sort_by_key(|(parameter, _)| *parameter);
         let target = self.identities.function(operation.target())?;
         let target_revision = self.action_target_revision(operation.target(), target)?;
         Ok(ActionOperationNode::new(
@@ -1768,7 +1767,7 @@ impl<'a> CandidateBuilder<'a> {
                 }
             },
         };
-        let mut arguments = operation
+        let arguments = operation
             .arguments()
             .iter()
             .map(|(parameter, value)| {
@@ -1778,10 +1777,6 @@ impl<'a> CandidateBuilder<'a> {
                 ))
             })
             .collect::<Result<Vec<_>, PrepareError>>()?;
-        // The artifact contract is ordered by durable ParameterId. Resolver
-        // identities may be provisional and declaration order is not a valid
-        // substitute once the identity map allocates durable IDs.
-        arguments.sort_by_key(|(parameter, _)| *parameter);
         let target = self.identities.function(operation.target())?;
         let target_is_server = self
             .checked
@@ -1882,11 +1877,10 @@ impl<'a> CandidateBuilder<'a> {
         arguments: &[(CheckedParameterId, CheckedClientExpression)],
         calls: &mut Vec<(CheckedFunctionId, SourceLocation)>,
     ) -> Result<(), PrepareError> {
-        let mut ordered = arguments
+        let ordered = arguments
             .iter()
             .map(|(parameter, expression)| Ok((self.identities.parameter(*parameter)?, expression)))
             .collect::<Result<Vec<_>, PrepareError>>()?;
-        ordered.sort_by_key(|(parameter, _)| *parameter);
         for (_, expression) in ordered {
             self.append_client_expression_call_references(expression, calls)?;
         }

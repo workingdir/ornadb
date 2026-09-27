@@ -2300,7 +2300,7 @@ fn resource_plan_rejects_invalid_await_placement() {
 }
 
 #[test]
-fn resource_plan_rejects_noncanonical_and_duplicate_arguments() {
+fn resource_plan_preserves_argument_order_and_rejects_duplicates() {
     let operation = |arguments| {
         ResourceOperationNode::new(
             ResourceKind::Scalar,
@@ -2328,9 +2328,20 @@ fn resource_plan_rejects_noncanonical_and_duplicate_arguments() {
             ]),
         }),
     });
+    let encoded = unsorted.encode().expect("source-ordered arguments encode");
+    let decoded = ResourceClientPlan::decode(&encoded).expect("source-ordered arguments decode");
+    let ClientExpressionNode::Await { expression, .. } = decoded.expression() else {
+        panic!("resource plan keeps its await expression");
+    };
+    let ClientExpressionNode::Resource {
+        operation: resource_operation,
+    } = expression.as_ref()
+    else {
+        panic!("resource plan keeps its operation");
+    };
     assert_eq!(
-        unsorted.encode(),
-        Err(ClientPlanError::NonCanonicalResourceArgumentOrder)
+        resource_operation.arguments()[0].0,
+        ParameterId::from_bytes([0x32; 16])
     );
     let duplicate = ResourceClientPlan::new(ClientExpressionNode::Await {
         expression: Box::new(ClientExpressionNode::Resource {
@@ -2366,9 +2377,20 @@ fn resource_plan_rejects_malformed_kind_and_limits() {
     let mut noncanonical = resource_plan().encode().expect("resource plan encodes");
     noncanonical[second_parameter_offset..second_parameter_offset + 16]
         .copy_from_slice(&[0x30; 16]);
+    let decoded = ResourceClientPlan::decode(&noncanonical)
+        .expect("resource argument order is independent of parameter IDs");
+    let ClientExpressionNode::Await { expression, .. } = decoded.expression() else {
+        panic!("resource plan keeps its await expression");
+    };
+    let ClientExpressionNode::Resource {
+        operation: resource_operation,
+    } = expression.as_ref()
+    else {
+        panic!("resource plan keeps its operation");
+    };
     assert_eq!(
-        ResourceClientPlan::decode(&noncanonical),
-        Err(ClientPlanError::NonCanonicalResourceArgumentOrder)
+        resource_operation.arguments()[0].0,
+        ParameterId::from_bytes([0x31; 16])
     );
     let mut duplicate = resource_plan().encode().expect("resource plan encodes");
     duplicate[second_parameter_offset..second_parameter_offset + 16].copy_from_slice(&[0x31; 16]);
@@ -3227,7 +3249,7 @@ fn action_plan_round_trips_canonical_descriptor_and_accessors() {
 }
 
 #[test]
-fn action_plan_decode_rejects_noncanonical_and_duplicate_argument_parameter_ids() {
+fn action_plan_decode_preserves_argument_order_and_rejects_duplicate_parameter_ids() {
     let source_plan = action_plan();
     let operation = source_plan.operation();
     let first = ParameterId::from_bytes([0x31; 16]);
@@ -3249,9 +3271,11 @@ fn action_plan_decode_rejects_noncanonical_and_duplicate_argument_parameter_ids(
 
     let mut unsorted = encoded.clone();
     unsorted[second_parameter_offset..second_parameter_offset + 16].fill(0x30);
+    let decoded = ActionClientPlan::decode(&unsorted)
+        .expect("action argument order is independent of parameter IDs");
     assert_eq!(
-        ActionClientPlan::decode(&unsorted),
-        Err(ClientPlanError::NonCanonicalActionArgumentOrder)
+        decoded.operation().arguments()[0].0,
+        ParameterId::from_bytes([0x31; 16])
     );
 
     let mut duplicate = encoded;
@@ -3435,10 +3459,9 @@ fn action_plan_rejects_duplicate_unsorted_and_oversized_arguments() {
         vec![(second, value.clone()), (first, value.clone())],
         TypeId::from_bytes([0x65; 16]),
     ));
-    assert_eq!(
-        unsorted.encode(),
-        Err(ClientPlanError::NonCanonicalActionArgumentOrder)
-    );
+    let encoded = unsorted.encode().expect("source-ordered arguments encode");
+    let decoded = ActionClientPlan::decode(&encoded).expect("source-ordered arguments decode");
+    assert_eq!(decoded.operation().arguments()[0].0, second);
 
     let duplicate = ActionClientPlan::new(ActionOperationNode::new(
         ActionTargetDomain::Client,

@@ -130,9 +130,10 @@ CREATE CLIENT FUNCTION action_fixture.call_local(p_first TEXT, p_second TEXT)
         .id();
     assert_eq!(operation.result_type(), text_type_id);
 
-    let mut expected_arguments: Vec<_> = target
+    let expected_arguments: Vec<_> = target
         .parameters()
         .iter()
+        .rev()
         .map(|target_parameter| {
             let caller_parameter = caller
                 .parameters()
@@ -147,7 +148,6 @@ CREATE CLIENT FUNCTION action_fixture.call_local(p_first TEXT, p_second TEXT)
             )
         })
         .collect();
-    expected_arguments.sort_by_key(|(parameter, _)| *parameter);
     assert_eq!(operation.arguments(), expected_arguments.as_slice());
 }
 
@@ -370,7 +370,7 @@ END;"#;
             .unwrap()
             .id()
     };
-    let mut expected_arguments = vec![
+    let expected_arguments = vec![
         (
             target_second_parameter_id,
             ClientExpressionNode::ParameterRead {
@@ -384,7 +384,6 @@ END;"#;
             },
         ),
     ];
-    expected_arguments.sort_by_key(|(parameter, _)| *parameter);
     assert_eq!(operation.arguments(), expected_arguments.as_slice());
 }
 
