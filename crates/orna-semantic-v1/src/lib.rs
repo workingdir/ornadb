@@ -7263,6 +7263,11 @@ fn infer(
                 return inferred;
             }
             if let Some(inferred) =
+                infer_parallel_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
                 infer_relation_member_call(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
@@ -13007,6 +13012,55 @@ fn intrinsic_value_type(name: &str) -> Option<Type> {
         "CWD" | "HEAD" => Some(Type::Named("sys.SnapshotRef".into())),
         _ => None,
     }
+}
+
+fn infer_parallel_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let is_parallel = qualified_path(callee)
+        .as_deref()
+        .is_some_and(|path| path == ["std", "concurrent", "parallel"])
+        || matches!(callee, Expr::Name { text, .. }
+            if text == "parallel"
+                && local.get(text).or_else(|| scope.names.get(text)).is_none());
+    if !is_parallel || arguments.len() != 1 || arguments[0].name.is_some() {
+        return None;
+    }
+    let Expr::List { elements, .. } = &arguments[0].value else {
+        return None;
+    };
+
+    let mut effects = EffectSummary::default();
+    let mut result_type: Option<Type> = None;
+    for callback in elements {
+        let inferred = infer(callback, scope, local, diagnostics);
+        effects.join(&inferred.effects);
+        let Type::Function { result, .. } = inferred.ty else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "parallel entries must be callback functions",
+            ));
+            continue;
+        };
+        if let Some(expected) = &result_type {
+            if !types_match(expected, &result) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "parallel callbacks must have compatible result types",
+                ));
+            }
+        } else {
+            result_type = Some(*result);
+        }
+    }
+    Some(Inferred {
+        ty: Type::Stream(Box::new(result_type.unwrap_or(Type::Error))),
+        effects,
+    })
 }
 
 enum DescriptorPathInference {
