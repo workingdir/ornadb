@@ -60,8 +60,8 @@ use super::{
     STANDARD_SOURCE_V2_REVISION_ID, STANDARD_SOURCE_V3_BUNDLE_ID, STANDARD_SOURCE_V3_REVISION_ID,
     STANDARD_SOURCE_V4_BUNDLE_ID, STANDARD_SOURCE_V4_REVISION_ID, STANDARD_SOURCE_V5_BUNDLE_ID,
     STANDARD_SOURCE_V5_REVISION_ID, STANDARD_SOURCE_V6_BUNDLE_ID, STANDARD_SOURCE_V6_REVISION_ID,
-    STANDARD_TYPE_IDS, STD_ACTION_CONTRACT, STD_ACTION_SCHEMA_ID, STD_ACTION_SOURCE_LOGICAL_PATH,
-    STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID, STD_INTEGER_TYPE_ID,
+    STANDARD_TYPE_IDS, STD_ACTION_CONTRACT, STD_ACTION_SCHEMA_ID, STD_ACTION_TYPE_ID,
+    STD_INTEGER_TYPE_ID,
     STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
     STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
     STD_INVOKE_SOURCE_LOGICAL_PATH, STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_CONTRACT,
@@ -318,12 +318,17 @@ fn retained_standard_selection_is_pinned_and_fail_closed() {
         STANDARD_LIBRARY_V3_REVISION_ID,
         STANDARD_LIBRARY_V4_REVISION_ID,
         STANDARD_LIBRARY_V5_REVISION_ID,
-        STANDARD_LIBRARY_V6_REVISION_ID,
     ] {
         let selected = select_verified_standard_library(revision)
             .expect("registered standard revision is retained and verified");
         assert_eq!(selected.revision(), revision);
     }
+
+    assert!(matches!(
+        select_verified_standard_library(STANDARD_LIBRARY_V6_REVISION_ID),
+        Err(StandardLibraryError::UnsupportedRevision { revision })
+            if revision == STANDARD_LIBRARY_V6_REVISION_ID
+    ));
 
     assert!(matches!(
         select_verified_standard_library(STANDARD_LIBRARY_V9_REVISION_ID),
@@ -345,4 +350,3 @@ fn retained_standard_selection_is_pinned_and_fail_closed() {
 }
 
 use v1::EXPECTED_RETAINED_INVOKE_SOURCE;
-use v2_v4::EXPECTED_RETAINED_ACTION_SOURCE;
