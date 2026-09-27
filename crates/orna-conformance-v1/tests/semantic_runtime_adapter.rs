@@ -218,13 +218,13 @@ fn semantic_project_resolution_uses_project_relative_module_names() {
                 fixture_id: "project".into(),
                 source_id: "examples/reference/main.orna".into(),
                 parse_as: "module_unit".into(),
-                source: "use library;".into(),
+                source: include_str!("fixtures/project-resolution-main.orna").into(),
             },
             SourceUnit {
                 fixture_id: "project".into(),
                 source_id: "examples/reference/library.orna".into(),
                 parse_as: "module_unit".into(),
-                source: "pub fn pick(value: Int): Int = value;".into(),
+                source: include_str!("fixtures/project-resolution-library.orna").into(),
             },
         ],
         loose_rows: Vec::new(),
@@ -261,14 +261,13 @@ fn semantic_adapter_typechecks_imported_generic_sys_meta_with_declared_metadata(
                 fixture_id: "imported-generic-sys-meta".into(),
                 source_id: "logical/project/library.orna".into(),
                 parse_as: "module_unit".into(),
-                source: "pub fn lookup<T>(value: T) = sys.meta<T>(value);".into(),
+                source: include_str!("fixtures/imported-generic-sys-meta-library.orna").into(),
             },
             SourceUnit {
                 fixture_id: "imported-generic-sys-meta".into(),
                 source_id: "logical/project/main.orna".into(),
                 parse_as: "module_unit".into(),
-                source: "use library; pub fn read(value: Int) = library.lookup<Int>(value);"
-                    .into(),
+                source: include_str!("fixtures/imported-generic-sys-meta-main.orna").into(),
             },
         ],
         loose_rows: Vec::new(),
@@ -297,11 +296,11 @@ fn semantic_adapter_typechecks_imported_generic_sys_meta_with_declared_metadata(
         &[
             ModuleInput::new(
                 "library.orna",
-                "pub fn lookup<T>(value: T) = sys.meta<T>(value);",
+                include_str!("fixtures/imported-generic-sys-meta-library.orna"),
             ),
             ModuleInput::new(
                 "main.orna",
-                "use library; pub fn read(value: Int) = library.lookup<Int>(value);",
+                include_str!("fixtures/imported-generic-sys-meta-main.orna"),
             ),
         ],
         &Catalogue::authoritative_fixture(),
@@ -340,14 +339,13 @@ fn semantic_adapter_rejects_invalid_imported_generic_sys_meta_argument() {
                 fixture_id: "invalid-imported-generic-sys-meta".into(),
                 source_id: "logical/project/library.orna".into(),
                 parse_as: "module_unit".into(),
-                source: "pub fn lookup<T>(value: T) = sys.meta<T>(value);".into(),
+                source: include_str!("fixtures/imported-generic-sys-meta-library.orna").into(),
             },
             SourceUnit {
                 fixture_id: "invalid-imported-generic-sys-meta".into(),
                 source_id: "logical/project/main.orna".into(),
                 parse_as: "module_unit".into(),
-                source: "use library; pub fn invalid(value: Int) = library.lookup<Str>(value);"
-                    .into(),
+                source: include_str!("fixtures/imported-generic-sys-meta-invalid-main.orna").into(),
             },
         ],
         loose_rows: Vec::new(),
