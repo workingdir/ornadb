@@ -1,0 +1,10 @@
+pub enum Choice {
+    pair { left: Int, right: Int },
+    empty,
+}
+
+pub fn tuple_sum((left, (right, _)): (Int, (Int, Int)) = (1, (2, 3))): Int = left + right;
+pub fn list_head([head, _]: [Int]): Int = head;
+pub fn record_x({x}: {x: Int, y: Int}): Int = x;
+pub fn choice_left(Choice.pair { left, right: _ }: Choice): Int = left;
+pub fn named(value: Int): Int = value;
