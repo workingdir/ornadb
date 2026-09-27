@@ -363,12 +363,7 @@ fn stored_email_provider_is_typed_without_changing_connector_messages() {
 
 #[test]
 fn table_mutations_validate_patch_fields_and_ordered_keys_across_imports() {
-    let declaration = r#"pub table Person(id: Str) {
-        name: Str,
-        label: Str => name,
-    }
-    pub table Reading(sensor: Str, sequence: Int) { value: Int, }
-    pub table Note { text: Str, }"#;
+    let declaration = include_str!("fixtures/table-mutations-declaration.orna");
     for imported in [false, true] {
         let prefix = if imported { "data." } else { "" };
         for (operation, expected) in [
