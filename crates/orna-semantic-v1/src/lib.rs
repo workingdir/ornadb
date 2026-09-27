@@ -7248,6 +7248,11 @@ fn infer(
                 return inferred;
             }
             if let Some(inferred) =
+                infer_relation_member_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
                 infer_table_operation(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
@@ -12401,6 +12406,59 @@ fn infer_finite_list_callback(
         ty: *callback_result,
         effects: callback.effects,
     }
+}
+
+/// Resolves the genuine `Relation<T>` instance members from ORNA-MEMBER-005.
+/// Table-owned operations stay on their existing path so their schema and
+/// operation checks continue to use the table symbol directly.
+fn infer_relation_member_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let Expr::Field { base, name, .. } = callee else {
+        return None;
+    };
+    if !matches!(name.as_str(), "count" | "first")
+        || table_symbol(base, scope, local).is_some()
+    {
+        return None;
+    }
+
+    let diagnostic_count = diagnostics.len();
+    let receiver = infer(base, scope, local, diagnostics);
+    let Type::Relation(element) = receiver.ty else {
+        diagnostics.truncate(diagnostic_count);
+        return None;
+    };
+
+    let values = arguments
+        .iter()
+        .map(|argument| infer(&argument.value, scope, local, diagnostics).ty)
+        .collect::<Vec<_>>();
+    check_call_arguments(
+        &[],
+        Some(&[]),
+        &BTreeSet::new(),
+        arguments,
+        &values,
+        None,
+        diagnostics,
+    );
+
+    let mut effects = receiver.effects;
+    effects.effects.insert("database read".into());
+    effects.may_fail = true;
+    Some(Inferred {
+        ty: match name.as_str() {
+            "count" => Type::Int,
+            "first" => Type::Optional(element),
+            _ => unreachable!("relation member name was checked above"),
+        },
+        effects,
+    })
 }
 
 /// Resolves the small, intrinsic associated-operation surface of a table.
