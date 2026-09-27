@@ -1,0 +1,5 @@
+fn keep_even(value: Int) = value % 2 == 0;
+fn run() = std.collection.partition([1, 2, 3, 4], keep_even);
+
+fn bad(value: Int, other: Int) = true;
+fn bad_arity() = std.collection.partition([1], bad);
