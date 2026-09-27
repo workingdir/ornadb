@@ -1,0 +1,2 @@
+pub fn invoke_int(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+    sys.invoke<Int>(function, arguments, as: Int);
