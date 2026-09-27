@@ -1,0 +1,1 @@
+pub ingest google = google.mail() | into(Email);

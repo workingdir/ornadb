@@ -1,0 +1,1 @@
+pub fn bad(status: Status): Str = match status { Status.ready => "ready" };

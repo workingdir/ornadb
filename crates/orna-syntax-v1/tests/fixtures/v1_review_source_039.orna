@@ -1,0 +1,1 @@
+table T(id: Int) { check: Str, unique: Str, impl P { fn make() { check(raw); unique(raw); where; } } }
