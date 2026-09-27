@@ -1056,6 +1056,7 @@ fn map_compact_runtime_error(error: RuntimeError) -> Error {
         | RuntimeError::ConflictingPublicationIntent
         | RuntimeError::ConflictingPublicationCommit
         | RuntimeError::InvalidPublicationCommit
+        | RuntimeError::InvalidPublicationPolicy
         | RuntimeError::CompactPublicationRequired
         | RuntimeError::CompactReceiptKeyMismatch
         | RuntimeError::InvalidCompactReceipt
