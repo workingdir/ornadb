@@ -1,0 +1,1 @@
+pub fn version(): Int = 2;
