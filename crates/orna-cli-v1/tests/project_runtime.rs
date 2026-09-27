@@ -6,7 +6,9 @@ use std::{
 
 use orna_foundation_v1::{OvbRaw, Value};
 use orna_repository_v1::{Repository, inspect_metadata};
-use orna_runtime_v1::{CheckpointKey, Component, ConsumerIdentity, RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::{
+    CheckpointKey, Component, ConsumerIdentity, Mutation, NoFault, RuntimeIdentity, RuntimeState,
+};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -641,6 +643,76 @@ fn binary_run_without_a_target_executes_root_main() {
         .expect("CLI process");
 
     assert!(output.status.success(), "run stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn binary_run_reads_both_publication_relations_from_runtime_state() {
+    let directory = tempfile::tempdir().expect("project directory");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../orna-runtime-v1/tests/fixtures/publication_metadata.orna");
+    std::fs::copy(fixture, directory.path().join("main.orna"))
+        .expect("publication metadata fixture");
+    initialize_project(directory.path());
+
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let check = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "check",
+        ])
+        .output()
+        .expect("CLI check");
+    assert!(
+        check.status.success(),
+        "check stderr: {}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let (runtime_identity, initial_digest) = identity(directory.path());
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open runtime state");
+    let context = state.begin_activation().await.expect("capture activation");
+    let lease = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .expect("writer lease");
+    let payload = b"fixture".to_vec();
+    let mutation = Mutation {
+        id: [10; 16],
+        digest: Sha256::digest(&payload).into(),
+        payload,
+    };
+    state
+        .commit_activation(
+            lease,
+            &context,
+            &[mutation],
+            Sha256::digest(b"publication metadata CLI proof").into(),
+            &NoFault,
+        )
+        .await
+        .expect("seed durable pending mutation");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+            "main.main",
+        ])
+        .output()
+        .expect("CLI process");
+
+    assert!(
+        output.status.success(),
+        "run stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(output.stdout, b"invocation completed\n");
     assert!(output.stderr.is_empty());
 }

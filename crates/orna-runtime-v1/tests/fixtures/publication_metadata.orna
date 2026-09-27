@@ -1,3 +1,8 @@
+pub table PublicationFixture(id: Str) {
+    payload: Str,
+    assert every(row => row.payload != "");
+}
+
 pub fn storage_pending_rows(storage: sys.Storage): Int = storage.pending_rows;
 pub fn storage_pending_bytes(storage: sys.Storage): Int = storage.pending_bytes;
 pub fn storage_published_rows(storage: sys.Storage): Int = storage.published_rows;
@@ -25,12 +30,17 @@ pub fn read_maintenance_pending_bytes(): Int = sys.MaintenanceJob | map(job => j
 pub fn read_maintenance_published_rows(): Int = sys.MaintenanceJob | map(job => job.published_rows) | first() ?? -1;
 pub fn read_maintenance_policy_target(): Int = sys.MaintenanceJob | map(job => job.publication_policy.compressed_target_bytes) | first() ?? -1;
 
-pub fn main(): Bool =
-    read_storage_pending_rows() == 1 &&
-    read_storage_pending_bytes() == 7 &&
-    read_storage_published_rows() == 0 &&
-    read_storage_policy_target() == 16_777_216 &&
-    read_maintenance_pending_rows() == 1 &&
-    read_maintenance_pending_bytes() == 7 &&
-    read_maintenance_published_rows() == 0 &&
-    read_maintenance_policy_target() == 16_777_216;
+pub fn main(): Bool {
+    let metadata_matches =
+        read_storage_pending_rows() == 1 &&
+        read_storage_pending_bytes() == 7 &&
+        read_storage_published_rows() == 0 &&
+        read_storage_policy_target() == 16_777_216 &&
+        read_maintenance_pending_rows() == 1 &&
+        read_maintenance_pending_bytes() == 7 &&
+        read_maintenance_published_rows() == 0 &&
+        read_maintenance_policy_target() == 16_777_216;
+
+    assert metadata_matches;
+    metadata_matches
+}
