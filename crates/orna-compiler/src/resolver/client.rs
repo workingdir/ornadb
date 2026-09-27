@@ -1954,7 +1954,7 @@ fn check_client_expression(
             used_capabilities.insert(name.clone());
             let mut bound = vec![false; target.parameters.len()];
             let mut positional = 0usize;
-            let mut checked_argument_slots = vec![None; target.parameters.len()];
+            let mut checked_arguments = Vec::with_capacity(arguments.len());
             for argument in arguments {
                 let parameter_index = if let Some(name) = &argument.name {
                     let parameter_name = semantic_part(name);
@@ -2030,7 +2030,7 @@ fn check_client_expression(
                     return None;
                 }
                 bound[parameter_index] = true;
-                checked_argument_slots[parameter_index] = Some((parameter.id, checked));
+                checked_arguments.push((parameter.id, checked));
             }
             if bound.iter().any(|bound| !bound) {
                 diagnostics.push(diagnostic(
@@ -2041,10 +2041,6 @@ fn check_client_expression(
                 ));
                 return None;
             }
-            let checked_arguments = checked_argument_slots
-                .into_iter()
-                .map(|argument| argument.expect("checked CLIENT argument slot is bound"))
-                .collect::<Vec<_>>();
             references.push(CheckedDefinitionReference {
                 target: CheckedDefinitionReferenceTarget::Function(target.id),
                 kind: DefinitionReferenceKind::FunctionCall,
