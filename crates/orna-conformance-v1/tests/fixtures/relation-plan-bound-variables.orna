@@ -1,0 +1,11 @@
+pub table Note(id: Int) { value: Int, }
+fn parent() {
+    Note.insert({ id: 1, value: 1 });
+    Note.insert({ id: 2, value: 2 });
+    let relation = Note | filter(note => note.value > 1);
+    let sorted = sort_by(rows: relation, key: note => -note.id);
+    assert (first(rows: sorted) ?? Note.insert({ id: 99, value: 0 })).id == 2;
+    let named_relation = filter(rows: Note, predicate: note => note.value > 1);
+    let named_sorted = sort_by(rows: named_relation, key: note => -note.id);
+    assert (first(rows: named_sorted) ?? Note.insert({ id: 98, value: 0 })).id == 2;
+}

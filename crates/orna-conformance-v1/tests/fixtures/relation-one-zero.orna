@@ -1,0 +1,5 @@
+pub table Note(id: Int) { value: Int, }
+fn selected() = Note | one();
+fn parent() {
+    selected();
+}
