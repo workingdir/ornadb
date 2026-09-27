@@ -1,0 +1,1 @@
+fn lowest(rows: [Float]) = min(rows); fn highest(rows: [Float]) = std.collection.max(rows);
