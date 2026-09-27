@@ -13,8 +13,8 @@ use orna_evaluator_v1::{
 };
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SafeText};
 use orna_live_v1::{
-    Error as LiveError, LiveApplication, LiveApplicationWorkLease, LiveEvalResponse,
-    LiveEvalTransaction,
+    Error as LiveError, LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkLease,
+    LiveEvalResponse, LiveEvalTransaction,
 };
 use orna_protocol_v1::{Envelope, Message, ResultStatus};
 use orna_runtime_v1::{
@@ -362,6 +362,22 @@ pub trait AsyncApplicationEffectDispatcher {
         effect: ApplicationEffectRequest,
         context: &'a RuntimeActivationContext,
     ) -> ApplicationEffectFuture<'a>;
+}
+
+struct LiveEffectAdapter<'a>(&'a dyn LiveAdminEffectDispatcher);
+
+impl AsyncApplicationEffectDispatcher for LiveEffectAdapter<'_> {
+    fn dispatch<'a>(
+        &'a self,
+        effect: ApplicationEffectRequest,
+        context: &'a RuntimeActivationContext,
+    ) -> ApplicationEffectFuture<'a> {
+        match effect {
+            ApplicationEffectRequest::PauseStream { stream, reason } => {
+                self.0.pause_stream(stream, reason, context)
+            }
+        }
+    }
 }
 
 impl StagedActivation {
@@ -856,8 +872,13 @@ fn admitted_table_schemas(
 }
 
 impl From<ApplicationError> for LiveError {
-    fn from(_: ApplicationError) -> Self {
-        Self::ApplicationRejected
+    fn from(error: ApplicationError) -> Self {
+        match error {
+            ApplicationError::SourceEffectFailed(code) if code == "sys.admin.busy" => {
+                Self::AdminBusy
+            }
+            _ => Self::ApplicationRejected,
+        }
     }
 }
 
@@ -1128,6 +1149,53 @@ impl LiveApplication for ApplicationLiveAdapter {
             let response = self
                 .eval_with_transaction(session, request, message, context, work)
                 .await?;
+            work.complete();
+            work.check_active()?;
+            Ok(response)
+        })
+    }
+
+    fn dispatch_eval_with_effects<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        context: Option<&'a RuntimeActivationContext>,
+        work: &'a mut LiveApplicationWorkLease,
+        effects: Option<&'a dyn LiveAdminEffectDispatcher>,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<LiveEvalResponse, LiveError>> + 'a>> {
+        Box::pin(async move {
+            let (Some(context), Some(effects)) = (context, effects) else {
+                return self
+                    .dispatch_eval_with_work(session, request, message, context, work)
+                    .await;
+            };
+            work.check_active()?;
+            let admitted = self.evaluate_eval_message(message)?;
+            let dispatcher = LiveEffectAdapter(effects);
+            let staged = self
+                .authority
+                .evaluate_staged_with_async_effects(
+                    &admitted,
+                    &Environment::new(),
+                    context,
+                    &dispatcher,
+                )
+                .await
+                .map_err(LiveError::from)?;
+            let envelope =
+                self.success_envelope(request, eval_fingerprint(message)?, staged.value().clone())?;
+            let response = if staged.mutations().is_empty() {
+                LiveEvalResponse::pure(envelope)
+            } else {
+                let activation = staged.stage(&self.authority, context)?;
+                let transaction = LiveEvalTransaction::new(
+                    activation.mutations().to_vec(),
+                    activation.next_digest(),
+                    Arc::new(NoFault),
+                );
+                LiveEvalResponse::transaction(envelope, transaction)
+            };
             work.complete();
             work.check_active()?;
             Ok(response)
