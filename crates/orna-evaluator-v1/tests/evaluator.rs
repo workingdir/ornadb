@@ -1968,14 +1968,19 @@ fn function_values_pass_through_locals_arguments_and_collections() {
 
 #[test]
 fn anonymous_pipeline_stages_share_callable_binding_and_limits() {
-    assert_eq!(evaluate("10 | (value => value + 2)"), Value::int(12.into()));
     assert_eq!(
-        evaluate("(10 | (value => value + 2)) | (value => value * 2)"),
+        evaluate(include_str!("fixtures/anonymous_pipeline_stages/direct_call.orna").trim()),
+        Value::int(12.into())
+    );
+    assert_eq!(
+        evaluate(
+            include_str!("fixtures/anonymous_pipeline_stages/chained_stages.orna").trim()
+        ),
         Value::int(24.into())
     );
     assert_eq!(
         code(evaluate_expression(
-            "((value => value)(1))",
+            include_str!("fixtures/anonymous_pipeline_stages/step_limit.orna").trim(),
             &Environment::new(),
             Limits {
                 max_steps: 2,
@@ -1984,7 +1989,10 @@ fn anonymous_pipeline_stages_share_callable_binding_and_limits() {
         )),
         "ORNA-EVAL-LIMIT"
     );
-    for expression in ["(a => a)(1, 2)", "(() => 1)(2)"] {
+    for expression in [
+        include_str!("fixtures/anonymous_pipeline_stages/too_many_arguments.orna").trim(),
+        include_str!("fixtures/anonymous_pipeline_stages/zero_parameter_argument.orna").trim(),
+    ] {
         assert_eq!(
             code(evaluate_expression(
                 expression,
@@ -1995,10 +2003,10 @@ fn anonymous_pipeline_stages_share_callable_binding_and_limits() {
         );
     }
     for expression in [
-        "value => value",
-        "[value => value]",
-        "{ callback: value => value }",
-        "(value => value) == (value => value)",
+        include_str!("fixtures/anonymous_pipeline_stages/function_value.orna").trim(),
+        include_str!("fixtures/anonymous_pipeline_stages/function_array.orna").trim(),
+        include_str!("fixtures/anonymous_pipeline_stages/function_record.orna").trim(),
+        include_str!("fixtures/anonymous_pipeline_stages/function_equality.orna").trim(),
     ] {
         assert_eq!(
             code(evaluate_expression(
