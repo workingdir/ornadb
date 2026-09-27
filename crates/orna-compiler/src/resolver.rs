@@ -117,7 +117,6 @@ use orna_artifact::client_plan::{
 };
 use orna_artifact::server_json_encode::{self, JsonEncodePlan};
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
-use orna_artifact::server_terminal_table;
 use orna_core::{
     CallSiteId, ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, SourceUnitId,
     StateSlotId, TypeId,

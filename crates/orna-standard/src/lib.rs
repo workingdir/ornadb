@@ -3,7 +3,6 @@
 use std::{error::Error, fmt};
 
 use orna_artifact::client_plan::{ClientExpressionNode, ExpressionClientPlan};
-use orna_artifact::server_terminal_table;
 use orna_compiler::{
     CheckedStandardLibrary, PrepareStandardUpgradeError, PreparedStandardUpgrade,
     StandardLibraryCheckError, check_standard_library_source, prepare_checked_standard_upgrade,
@@ -53,11 +52,11 @@ pub use codecs::{
     registered_inspect_carrier_codecs, registered_opaque_codecs,
 };
 use executables::{
-    retained_json_executable, retained_terminal_table_executable,
+    retained_json_executable,
     retained_v2_executable, retained_window_executable,
 };
 use retained::{
-    reconcile_retained_action_source, reconcile_retained_data_source,
+    reconcile_retained_action_source,
     reconcile_retained_invoke_source, reconcile_retained_json_source,
     reconcile_retained_output_source, reconcile_retained_source_with_unit,
     reconcile_retained_ui_source,
@@ -70,7 +69,6 @@ use snapshot_builders::{
     retained_standard_library_v5_snapshot_from_source,
     retained_standard_library_v6_snapshot_from_source,
     retained_standard_library_v7_snapshot_from_source,
-    retained_standard_library_v8_snapshot_from_source,
 };
 
 pub use orna_compiler::StandardUpgradeIdentity;
@@ -606,42 +604,6 @@ pub const STD_DATA_SOURCE_LOGICAL_PATH: &str = "std/data.orna";
 pub const STD_DATA_ROWS_CONTRACT: &str = "orna.std.value.rows@1";
 pub const STD_DATA_ROWS_SEMANTIC_NAME: &str = "std.data.rows";
 pub const STD_DATA_ROWS_EXPORT_NAME: &str = "std.Rows";
-
-const RETAINED_STANDARD_DATA_SOURCE: &str = include_str!("../../../stdlib/std/data.orna");
-
-const ACCEPTED_V8_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_TYPES_CONTENT_DIGEST;
-const ACCEPTED_V8_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_INVOKE_CONTENT_DIGEST;
-const ACCEPTED_V8_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_OUTPUT_CONTENT_DIGEST;
-const ACCEPTED_V8_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_UI_CONTENT_DIGEST;
-const ACCEPTED_V8_JSON_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_JSON_CONTENT_DIGEST;
-const ACCEPTED_V8_ACTION_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_ACTION_CONTENT_DIGEST;
-const ACCEPTED_V8_WINDOW_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V7_WINDOW_CONTENT_DIGEST;
-const ACCEPTED_V8_DATA_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xd6, 0x8b, 0x4b, 0xae, 0x00, 0xc7, 0xe4, 0xa8, 0xc5, 0x0a, 0x8f, 0x32, 0x35, 0x1b, 0x0c, 0x8c,
-    0xea, 0x41, 0x08, 0x95, 0xa7, 0xda, 0x7c, 0x8c, 0x90, 0xa4, 0xff, 0x8a, 0xf3, 0x26, 0xda, 0xc3,
-]);
-const ACCEPTED_V8_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x1b, 0x64, 0x21, 0xb5, 0xbe, 0xc8, 0xaa, 0xe3, 0xdd, 0xc2, 0x08, 0x38, 0x7a, 0xb3, 0xe1, 0xee,
-    0x8c, 0xe7, 0xc9, 0x2d, 0x92, 0x5c, 0x41, 0xa4, 0xc0, 0x30, 0x44, 0x57, 0xb7, 0xb8, 0xfd, 0xee,
-]);
-const ACCEPTED_V8_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x3f, 0x73, 0xa0, 0xaa, 0x79, 0xa9, 0x1b, 0x20, 0x76, 0x8a, 0xb4, 0xa0, 0x44, 0xf8, 0x7e, 0x84,
-    0x60, 0xc9, 0x58, 0x85, 0xbe, 0x96, 0x72, 0x1c, 0xbe, 0x12, 0x97, 0x9b, 0xe2, 0x38, 0x4f, 0x59,
-]);
-const ACCEPTED_V8_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V7_ARTIFACT_DIGEST;
-const ACCEPTED_V8_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V7_SEMANTIC_DIGEST;
-const ACCEPTED_V8_TABLE_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x33, 0x38, 0x0f, 0x5d, 0x50, 0x5c, 0x31, 0x75, 0x7b, 0xc6, 0x8c, 0x66, 0xf2, 0x0a, 0x4f, 0x13,
-    0x9e, 0x9d, 0x61, 0x30, 0xd4, 0x0a, 0xd8, 0xb3, 0x0d, 0x02, 0xc0, 0xfa, 0x44, 0x01, 0x03, 0x94,
-]);
-const ACCEPTED_V8_TABLE_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x83, 0xa5, 0x6f, 0x9c, 0x3e, 0xc1, 0x2b, 0xb5, 0xa4, 0x08, 0x7f, 0xed, 0x57, 0x09, 0xca, 0xc4,
-    0x51, 0xf4, 0x9b, 0xd8, 0x86, 0xff, 0x76, 0xef, 0x9c, 0x75, 0x52, 0xc7, 0x85, 0xc5, 0x4b, 0x46,
-]);
-const ACCEPTED_V8_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xc8, 0xc1, 0xed, 0x9e, 0xe5, 0x51, 0xe4, 0x52, 0x66, 0xd5, 0x8f, 0x0e, 0xee, 0x38, 0x3d, 0xed,
-    0xee, 0x6e, 0x77, 0xa3, 0xfe, 0x25, 0x70, 0xd1, 0x84, 0x39, 0xe8, 0x77, 0xea, 0x6b, 0xf0, 0x68,
-]);
 
 /// The standard-library version represented by the V9 manifest (Work ADR 0088).
 pub const STANDARD_LIBRARY_V9_VERSION_IDENTITY: &str = "orna.std/9";
@@ -2531,9 +2493,8 @@ pub fn prepare_standard_upgrade_v6_to_v7(
         prepare_checked_standard_upgrade,
     )
 }
-/// Prepares the append-only `orna.std/7` to `orna.std/8` standard upgrade
-/// (Work ADR 0087). It fails closed unless `orna.std/7` is the installed
-/// parent; the retained V7 parent is verified before the V8 child.
+/// Retired `orna.std/7` to `orna.std/8` upgrade entrypoint. It fails closed
+/// unless `orna.std/7` is installed, then reports V8 as unsupported.
 pub fn prepare_standard_upgrade_v7_to_v8(
     active: &ActiveDatabaseRevision,
 ) -> Result<StandardUpgrade, StandardUpgradeError> {
@@ -2552,9 +2513,8 @@ pub fn prepare_standard_upgrade_v7_to_v8(
     )
 }
 
-/// Prepares the append-only `orna.std/8` to `orna.std/9` standard upgrade
-/// (Work ADR 0088). It fails closed unless `orna.std/8` is the installed
-/// parent; the retained V8 Rows snapshot is verified before the V9 child.
+/// Retired `orna.std/8` to `orna.std/9` upgrade entrypoint. Verification of
+/// the V8 parent fails closed before a V9 child can be prepared.
 pub fn prepare_standard_upgrade_v8_to_v9(
     active: &ActiveDatabaseRevision,
 ) -> Result<StandardUpgrade, StandardUpgradeError> {
@@ -2902,41 +2862,21 @@ pub fn verify_standard_library_v7_snapshot(
     verify_canonical_standard_library_v2_snapshot(snapshot)
         .map_err(|source| StandardLibraryError::CanonicalHash { source })
 }
-/// Retains the canonical V8 Rows standard source as an unverified snapshot.
+/// V8 Rows source is retired; requesting its historical snapshot fails closed.
 pub fn retained_standard_library_v8_snapshot()
 -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    retained_standard_library_v8_snapshot_from_source(
-        RETAINED_STANDARD_SOURCE,
-        RETAINED_STANDARD_INVOKE_SOURCE,
-        RETAINED_STANDARD_OUTPUT_SOURCE,
-        RETAINED_STANDARD_UI_SOURCE,
-        RETAINED_STANDARD_JSON_SOURCE,
-        RETAINED_STANDARD_ACTION_SOURCE,
-        RETAINED_STANDARD_WINDOW_SOURCE,
-        RETAINED_STANDARD_DATA_SOURCE,
-    )
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V8_REVISION_ID,
+    })
 }
 
-/// Verifies a retained V8 Rows standard snapshot and returns authority.
+/// Rejects supplied V8 Rows snapshots after source retirement.
 pub fn verify_standard_library_v8_snapshot(
-    snapshot: StandardLibrarySnapshot,
+    _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    let actual_catalogue = snapshot.catalogue().revision();
-    if actual_catalogue != STANDARD_CATALOGUE_V8_REVISION_ID {
-        return Err(StandardLibraryError::CatalogueIdentityMismatch {
-            expected: STANDARD_CATALOGUE_V8_REVISION_ID,
-            actual: actual_catalogue,
-        });
-    }
-    let actual_digest = snapshot.digest();
-    if actual_digest != ACCEPTED_V8_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V8_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-    verify_canonical_standard_library_v2_snapshot(snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V8_REVISION_ID,
+    })
 }
 
 /// V9 predates the pinned Orna 1.0 standard and is no longer retained.
