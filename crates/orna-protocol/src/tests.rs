@@ -1,9 +1,9 @@
 use orna_core::{
     CatalogueRevisionId, FieldId, FunctionId, InvocationId, ObjectId, ParameterId, PrincipalId,
-    SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
+    SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
     canonical_hash::{
-        calculate_standard_library_digest, catalogue_digest_with_context, source_bundle_digest,
-        source_revision_record_digest, source_unit_content_digest,
+        calculate_standard_library_digest, catalogue_digest_with_context,
+        source_bundle_digest, source_revision_record_digest, source_unit_content_digest,
         verify_standard_library_snapshot as verify_core_standard_library_snapshot,
     },
     catalogue::{
@@ -14,17 +14,20 @@ use orna_core::{
     revision::{
         ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
         CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, RevisionPair, Sha256Digest,
-        SourceOrigin, StandardLibrarySnapshot, StoredSourceRevision, StoredSourceUnit,
+        SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot, StoredSourceRevision,
+        StoredSourceUnit,
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor},
-    value::{EnumValue, OpaqueValue, RecordValue, ResultRowsError, RuntimeFloat, RuntimeValue},
+    value::{
+        EnumValue, OpaqueCodecRegistration, OpaqueCodecRegistry, OpaqueValue, RecordValue,
+        ResultRowsError, RuntimeFloat, RuntimeValue,
+    },
 };
 use orna_standard::{
     BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID, CHARACTER_LARGE_OBJECT_TYPE_ID,
     DATE_TYPE_ID, DECIMAL_TYPE_ID, DURATION_TYPE_ID, FLOAT_TYPE_ID, INTEGER_TYPE_ID,
     OPAQUE_TOKEN_TYPE_ID, STANDARD_TYPE_IDS, TIME_TYPE_ID, TIMESTAMP_TYPE_ID, UUID_TYPE_ID,
-    VOID_TYPE_ID, registered_opaque_codecs, retained_standard_library_snapshot,
-    verify_standard_library_snapshot,
+    VOID_TYPE_ID,
 };
 use proptest::prelude::*;
 
@@ -53,6 +56,137 @@ fn enum_catalogue(labels: &[&str]) -> CatalogueSnapshot {
     .unwrap()
 }
 
+pub(crate) fn synthetic_verified_standard_for_protocol() -> orna_core::revision::VerifiedStandardLibrarySnapshot {
+    let source_unit_id = SourceUnitId::from_bytes([0xb1; 16]);
+    let source_content = include_str!("tests/fixtures/synthetic-standard-enum.orna");
+    let source_unit = StoredSourceUnit::new(
+        source_unit_id,
+        0,
+        "synthetic-standard-enum.orna",
+        source_content,
+        source_unit_content_digest(source_content).unwrap(),
+    )
+    .unwrap();
+    let source_bundle_id = SourceBundleId::from_bytes([0xb2; 16]);
+    let source_revision_id = SourceRevisionId::from_bytes([0xb3; 16]);
+    let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
+    let source = StoredSourceRevision::new(
+        source_bundle_id,
+        source_revision_id,
+        None,
+        vec![source_unit],
+        bundle_hash,
+        source_revision_record_digest(source_bundle_id, None, bundle_hash).unwrap(),
+    )
+    .unwrap();
+    let schema = SchemaId::from_bytes([0xb5; 16]);
+    let catalogue_revision = CatalogueRevisionId::from_bytes([0xb6; 16]);
+    let standard_scalar_types = [
+        (BOOLEAN_TYPE_ID, "boolean", "orna.kernel.value.boolean@1"),
+        (INTEGER_TYPE_ID, "integer", "orna.kernel.value.integer@1"),
+        (BIGINT_TYPE_ID, "bigint", "orna.kernel.value.bigint@1"),
+        (FLOAT_TYPE_ID, "float", "orna.kernel.value.float@1"),
+        (
+            CHARACTER_LARGE_OBJECT_TYPE_ID,
+            "character_large_object",
+            "orna.kernel.value.character-large-object@1",
+        ),
+        (
+            BINARY_LARGE_OBJECT_TYPE_ID,
+            "binary_large_object",
+            "orna.kernel.value.binary-large-object@1",
+        ),
+        (UUID_TYPE_ID, "uuid", "orna.kernel.value.uuid@1"),
+    ];
+    let mut standard_value_types = standard_scalar_types
+        .iter()
+        .map(|(id, name, contract)| {
+            ValueTypeDefinition::primitive(
+                *id,
+                QualifiedSemanticName::new(["std", "types", *name]).unwrap(),
+                ValueTypeMutability::Immutable,
+                ValueTypePersistence::Persistable,
+                *contract,
+            )
+        })
+        .collect::<Vec<_>>();
+    standard_value_types.push(ValueTypeDefinition::opaque(
+        OPAQUE_TOKEN_TYPE_ID,
+        QualifiedSemanticName::new(["std", "types", "opaque_token"]).unwrap(),
+        "orna.std.value.opaque-token@1",
+    ));
+    let catalogue = CatalogueSnapshot::new_with_enum_types(
+        catalogue_revision,
+        vec![SchemaDefinition::new(
+            schema,
+            QualifiedSemanticName::new(["std", "types"]).unwrap(),
+        )],
+        Vec::new(),
+        standard_value_types,
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let mut origins = vec![
+        DefinitionOrigin::new(
+            DefinitionIdentity::Schema(schema),
+            SourceOrigin::new(SourceUnitId::from_bytes([0xb1; 16]), 0, 1).unwrap(),
+        ),
+    ];
+    origins.extend(standard_scalar_types.iter().enumerate().map(|(index, (id, _, _))| {
+        DefinitionOrigin::new(
+            DefinitionIdentity::ValueType(*id),
+            SourceOrigin::new(
+                SourceUnitId::from_bytes([0xb1; 16]),
+                index as u32 + 1,
+                index as u32 + 2,
+            )
+            .unwrap(),
+        )
+    }));
+    origins.push(DefinitionOrigin::new(
+        DefinitionIdentity::ValueType(OPAQUE_TOKEN_TYPE_ID),
+        SourceOrigin::new(SourceUnitId::from_bytes([0xb1; 16]), 8, 9).unwrap(),
+    ));
+    let revision = StandardLibraryRevisionId::from_bytes([0xb4; 16]);
+    let provisional = StandardLibrarySnapshot::new(
+        revision,
+        StandardLibraryDigestVersion::Version1,
+        source.clone(),
+        "orna.language/1",
+        catalogue.clone(),
+        origins.clone(),
+        Sha256Digest::from_bytes([0; 32]),
+    )
+    .unwrap();
+    let digest = calculate_standard_library_digest(&provisional).unwrap();
+    verify_core_standard_library_snapshot(
+        StandardLibrarySnapshot::new(
+            revision,
+            StandardLibraryDigestVersion::Version1,
+            source,
+            "orna.language/1",
+            catalogue,
+            origins,
+            digest,
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+pub(crate) fn test_registry() -> OpaqueCodecRegistry {
+    let standard = synthetic_verified_standard_for_protocol();
+    let registration = OpaqueCodecRegistration::fixed_length_identity(
+        OPAQUE_TOKEN_TYPE_ID,
+        QualifiedSemanticName::new(["std", "types", "opaque_token"]).unwrap(),
+        "orna.std.value.opaque-token@1",
+        16,
+    )
+    .unwrap();
+    OpaqueCodecRegistry::new(&standard, [registration]).unwrap()
+}
+
 fn active_record_revision() -> ActiveDatabaseRevision {
     active_record_revision_with_second_type(TypeDescriptor::named(ENUM_TYPE))
 }
@@ -74,8 +208,8 @@ fn active_revision_without_standard() -> ActiveDatabaseRevision {
         source_unit_id,
         0,
         "app/schema.orna",
-        "a",
-        source_unit_content_digest("a").unwrap(),
+        include_str!("tests/fixtures/protocol-source.orna"),
+        source_unit_content_digest(include_str!("tests/fixtures/protocol-source.orna")).unwrap(),
     )
     .unwrap();
     let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
@@ -110,143 +244,6 @@ fn active_revision_without_standard() -> ActiveDatabaseRevision {
     .unwrap()
 }
 
-fn alternate_verified_standard() -> orna_core::revision::VerifiedStandardLibrarySnapshot {
-    let accepted = retained_standard_library_snapshot().unwrap();
-    let alternate = orna_core::revision::StandardLibrarySnapshot::new(
-        accepted.revision(),
-        accepted.digest_version(),
-        accepted.source().clone(),
-        "orna.language/2",
-        accepted.catalogue().clone(),
-        accepted.origins().to_vec(),
-        orna_core::revision::Sha256Digest::from_bytes([
-            0x19, 0x65, 0xe6, 0xcb, 0xeb, 0x68, 0x77, 0xa6, 0xab, 0xea, 0x13, 0x14, 0xe9, 0x12,
-            0xbe, 0xc5, 0xef, 0x12, 0xa9, 0x5b, 0xd3, 0x57, 0xdc, 0xee, 0xc9, 0xef, 0xb4, 0x54,
-            0xf8, 0x4a, 0x98, 0xb2,
-        ]),
-    )
-    .unwrap();
-    verify_core_standard_library_snapshot(alternate).unwrap()
-}
-
-const STANDARD_ENUM_TYPE: TypeId = TypeId::from_bytes([0x90; 16]);
-
-fn verified_standard_with_enum() -> orna_core::revision::VerifiedStandardLibrarySnapshot {
-    let accepted = retained_standard_library_snapshot().unwrap();
-    let accepted_catalogue = accepted.catalogue();
-    let catalogue = CatalogueSnapshot::new_with_enum_types(
-        accepted_catalogue.revision(),
-        accepted_catalogue.schemas().to_vec(),
-        accepted_catalogue.object_types().to_vec(),
-        accepted_catalogue.value_types().to_vec(),
-        vec![EnumTypeDefinition::new(
-            STANDARD_ENUM_TYPE,
-            QualifiedSemanticName::new(["std", "mode"]).unwrap(),
-            ["safe", "unsafe"],
-        )],
-        accepted_catalogue.type_bindings().to_vec(),
-    )
-    .unwrap();
-    let mut origins = accepted.origins().to_vec();
-    origins.push(DefinitionOrigin::new(
-        DefinitionIdentity::ValueType(STANDARD_ENUM_TYPE),
-        SourceOrigin::new(accepted.source().units()[0].id(), 0, 1).unwrap(),
-    ));
-    let provisional = StandardLibrarySnapshot::new(
-        accepted.revision(),
-        accepted.digest_version(),
-        accepted.source().clone(),
-        accepted.language_version(),
-        catalogue.clone(),
-        origins.clone(),
-        Sha256Digest::from_bytes([0x98; 32]),
-    )
-    .unwrap();
-    let digest = calculate_standard_library_digest(&provisional).unwrap();
-    verify_core_standard_library_snapshot(
-        StandardLibrarySnapshot::new(
-            provisional.revision(),
-            provisional.digest_version(),
-            provisional.source().clone(),
-            provisional.language_version(),
-            catalogue,
-            origins,
-            digest,
-        )
-        .unwrap(),
-    )
-    .unwrap()
-}
-
-fn active_revision_with_standard_named_collision() -> ActiveDatabaseRevision {
-    let standard =
-        verify_standard_library_snapshot(retained_standard_library_snapshot().unwrap()).unwrap();
-    let schema = SchemaId::from_bytes([0x7a; 16]);
-    let catalogue_revision = CatalogueRevisionId::from_bytes([0x7b; 16]);
-    let catalogue = CatalogueSnapshot::new_with_types(
-        catalogue_revision,
-        vec![SchemaDefinition::new(
-            schema,
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        Vec::new(),
-        vec![ValueTypeDefinition::primitive(
-            OPAQUE_TOKEN_TYPE_ID,
-            QualifiedSemanticName::new(["crm", "collision"]).unwrap(),
-            ValueTypeMutability::Immutable,
-            ValueTypePersistence::Persistable,
-            "orna.crm.value.collision@1",
-        )],
-        Vec::new(),
-    )
-    .unwrap();
-    let source_unit_id = SourceUnitId::from_bytes([0x7c; 16]);
-    let source_unit = StoredSourceUnit::new(
-        source_unit_id,
-        0,
-        "app/collision.orna",
-        "ab",
-        source_unit_content_digest("ab").unwrap(),
-    )
-    .unwrap();
-    let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
-    let source_revision = SourceRevisionId::from_bytes([0x7d; 16]);
-    let source = StoredSourceRevision::new(
-        SourceBundleId::from_bytes([0x7e; 16]),
-        source_revision,
-        None,
-        vec![source_unit],
-        bundle_hash,
-        source_revision_record_digest(SourceBundleId::from_bytes([0x7e; 16]), None, bundle_hash)
-            .unwrap(),
-    )
-    .unwrap();
-    let origins = vec![
-        DefinitionOrigin::new(
-            DefinitionIdentity::Schema(schema),
-            SourceOrigin::new(source_unit_id, 0, 1).unwrap(),
-        ),
-        DefinitionOrigin::new(
-            DefinitionIdentity::ValueType(OPAQUE_TOKEN_TYPE_ID),
-            SourceOrigin::new(source_unit_id, 1, 2).unwrap(),
-        ),
-    ];
-    let context = CatalogueHashContext::version_two(standard);
-    let catalogue_hash =
-        catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
-    ActiveDatabaseRevision::new_with_catalogue_hash_context(
-        ActiveDatabaseRevisionInput::new(
-            RevisionPair::new(source_revision, catalogue_revision),
-            source,
-            catalogue,
-            catalogue_hash,
-            ActiveRevisionContent::new(Vec::new(), Vec::new(), origins, Vec::new()),
-        ),
-        context,
-    )
-    .unwrap()
-}
-
 fn active_record_revision_with_second_type(
     second_field_type: TypeDescriptor,
 ) -> ActiveDatabaseRevision {
@@ -256,16 +253,6 @@ fn active_record_revision_with_second_type(
 fn active_record_revision_with_types(
     first_field_type: TypeDescriptor,
     second_field_type: TypeDescriptor,
-) -> ActiveDatabaseRevision {
-    let standard =
-        verify_standard_library_snapshot(retained_standard_library_snapshot().unwrap()).unwrap();
-    active_record_revision_with_types_and_standard(first_field_type, second_field_type, standard)
-}
-
-fn active_record_revision_with_types_and_standard(
-    first_field_type: TypeDescriptor,
-    second_field_type: TypeDescriptor,
-    standard: orna_core::revision::VerifiedStandardLibrarySnapshot,
 ) -> ActiveDatabaseRevision {
     let record_type = TypeId::from_bytes([0x47; 16]);
     let record_field = FieldId::from_bytes([0x48; 16]);
@@ -313,8 +300,8 @@ fn active_record_revision_with_types_and_standard(
         source_unit_id,
         0,
         "app/types.orna",
-        "ab",
-        source_unit_content_digest("ab").unwrap(),
+        include_str!("tests/fixtures/protocol-source.orna"),
+        source_unit_content_digest(include_str!("tests/fixtures/protocol-source.orna")).unwrap(),
     )
     .unwrap();
     let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
@@ -357,7 +344,7 @@ fn active_record_revision_with_types_and_standard(
             SourceOrigin::new(source_unit_id, 1, 2).unwrap(),
         ),
     ];
-    let context = CatalogueHashContext::version_two(standard);
+    let context = CatalogueHashContext::version_two(synthetic_verified_standard_for_protocol());
     let catalogue_hash =
         catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
     ActiveDatabaseRevision::new_with_catalogue_hash_context(
@@ -434,8 +421,8 @@ fn active_nested_record_revision_with_fields(
         source_unit_id,
         0,
         "app/types.orna",
-        "abcdef",
-        source_unit_content_digest("abcdef").unwrap(),
+        include_str!("tests/fixtures/protocol-source.orna"),
+        source_unit_content_digest(include_str!("tests/fixtures/protocol-source.orna")).unwrap(),
     )
     .unwrap();
     let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
@@ -477,9 +464,7 @@ fn active_nested_record_revision_with_fields(
             )
         })
         .collect::<Vec<_>>();
-    let standard =
-        verify_standard_library_snapshot(retained_standard_library_snapshot().unwrap()).unwrap();
-    let context = CatalogueHashContext::version_two(standard);
+    let context = CatalogueHashContext::version_two(synthetic_verified_standard_for_protocol());
     let catalogue_hash =
         catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
     ActiveDatabaseRevision::new_with_catalogue_hash_context(
@@ -724,7 +709,7 @@ fn tracer_bullet_active_codec_rejects_stale_inner_field_identity() {
         "the encoder must reject a stale inner field identity"
     );
     let standard = current.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     assert_eq!(
         encode_registered_value(&current, &registry, &value),
         Err(ValueCodecError::RecordValueNotActive {
@@ -767,7 +752,7 @@ fn stale_replaced_field_identity_fails_both_encoders() {
         })
     );
     let standard = current.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     assert_eq!(
         encode_registered_value(&current, &registry, &value),
         Err(ValueCodecError::RecordValueNotActive {
@@ -839,7 +824,7 @@ fn assemble_nested_envelope(
 fn registered_codec_has_exact_nested_record_bytes_and_round_trips() {
     let active = active_nested_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let value = nested_record_value(&active);
     let inner_type = TypeId::from_bytes([0x31; 16]);
     let inner_field = FieldId::from_bytes([0x3a; 16]);
@@ -876,7 +861,7 @@ fn registered_codec_has_exact_nested_record_bytes_and_round_trips() {
 fn nested_codec_rejects_inner_marker_crossing() {
     let active = active_nested_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let value = nested_record_value(&active);
     let inner_type = TypeId::from_bytes([0x31; 16]);
     let inner_field = FieldId::from_bytes([0x3a; 16]);
@@ -1025,7 +1010,7 @@ fn nested_codec_checks_inner_payload_limit_before_truncation() {
 fn nested_record_values_delegate_unchanged_through_frames() {
     let active = active_nested_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let value = nested_record_value(&active);
     let inner_type = TypeId::from_bytes([0x31; 16]);
     let inner_field = FieldId::from_bytes([0x3a; 16]);
@@ -1126,7 +1111,7 @@ fn nested_record_values_delegate_unchanged_through_frames() {
 fn registered_codec_has_exact_opaque_bytes_and_preserves_earlier_closure() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let payload = [0x71; 16];
     let value = RuntimeValue::Opaque(
         OpaqueValue::new(&active, &registry, OPAQUE_TOKEN_TYPE_ID, payload).unwrap(),
@@ -1193,7 +1178,7 @@ fn registered_codec_has_exact_opaque_bytes_and_preserves_earlier_closure() {
 fn registered_codec_retains_version_three_shapes_under_its_marker() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let record = &active.catalogue().record_value_types()[0];
     let value = RuntimeValue::Record(
         RecordValue::new(
@@ -1342,7 +1327,7 @@ fn active_client_frame_has_exact_record_bytes_and_round_trips() {
 fn registered_frame_carries_opaque_results_but_rejects_opaque_arguments() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let payload = [0x73; 16];
     let value = RuntimeValue::Opaque(
         OpaqueValue::new(&active, &registry, OPAQUE_TOKEN_TYPE_ID, payload).unwrap(),
@@ -1738,62 +1723,61 @@ fn active_codec_preserves_earlier_shapes_and_marker_closure() {
 }
 
 #[test]
-fn active_codec_round_trips_verified_standard_enums_with_application_precedence() {
-    let active = active_record_revision_with_types_and_standard(
-        TypeDescriptor::named(BOOLEAN_TYPE_ID),
-        TypeDescriptor::named(ENUM_TYPE),
-        verified_standard_with_enum(),
-    );
-    let standard = active
-        .catalogue_hash_context()
-        .standard()
-        .expect("the fixture pins a verified standard library");
-    let standard_value = RuntimeValue::Enum(
-        EnumValue::new(standard.catalogue(), STANDARD_ENUM_TYPE, "safe")
-            .expect("the verified standard enum declares safe"),
-    );
-    let encoded_standard = encode_active_value(&active, &standard_value).unwrap();
-    assert_eq!(
-        decode_active_value(&active, &encoded_standard),
-        Ok(standard_value)
-    );
-
-    let standard_null = RuntimeValue::null(ResolvedType::named(STANDARD_ENUM_TYPE)).unwrap();
-    let encoded_standard_null = encode_active_value(&active, &standard_null).unwrap();
-    assert_eq!(
-        decode_active_value(&active, &encoded_standard_null),
-        Ok(standard_null)
-    );
-
-    let application_value = RuntimeValue::Enum(
+fn active_codec_round_trips_application_enums_with_synthetic_verified_standard() {
+    let source_bundle_id = SourceBundleId::from_bytes([0xa1; 16]);
+    let source_revision_id = SourceRevisionId::from_bytes([0xa2; 16]);
+    let source_unit_id = SourceUnitId::from_bytes([0xa3; 16]);
+    let source_content = include_str!("tests/fixtures/synthetic-standard-enum.orna");
+    let source_unit = StoredSourceUnit::new(
+        source_unit_id,
+        0,
+        "application-enum.orna",
+        source_content,
+        source_unit_content_digest(source_content).unwrap(),
+    )
+    .unwrap();
+    let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
+    let source = StoredSourceRevision::new(
+        source_bundle_id,
+        source_revision_id,
+        None,
+        vec![source_unit],
+        bundle_hash,
+        source_revision_record_digest(source_bundle_id, None, bundle_hash).unwrap(),
+    )
+    .unwrap();
+    let catalogue = enum_catalogue(&["qualified"]);
+    let origins = vec![
+        DefinitionOrigin::new(
+            DefinitionIdentity::Schema(SchemaId::from_bytes([0x45; 16])),
+            SourceOrigin::new(source_unit_id, 0, 1).unwrap(),
+        ),
+        DefinitionOrigin::new(
+            DefinitionIdentity::ValueType(ENUM_TYPE),
+            SourceOrigin::new(source_unit_id, 1, 2).unwrap(),
+        ),
+    ];
+    let context = CatalogueHashContext::version_two(synthetic_verified_standard_for_protocol());
+    let catalogue_hash = catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[])
+        .unwrap();
+    let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            RevisionPair::new(source_revision_id, catalogue.revision()),
+            source,
+            catalogue,
+            catalogue_hash,
+            ActiveRevisionContent::new(Vec::new(), Vec::new(), origins, Vec::new()),
+        ),
+        context,
+    )
+    .unwrap();
+    let value = RuntimeValue::Enum(
         EnumValue::new(active.catalogue(), ENUM_TYPE, "qualified")
             .expect("the application enum declares qualified"),
     );
-    let encoded_application = encode_active_value(&active, &application_value).unwrap();
-    assert_eq!(
-        decode_active_value(&active, &encoded_application),
-        Ok(application_value)
-    );
-
-    let mut unknown_type = encoded_value(0x0a, TypeId::from_bytes([0x99; 16]), b"safe");
-    unknown_type[..4].copy_from_slice(b"ORV3");
-    assert_eq!(
-        decode_active_value(&active, &unknown_type),
-        Err(ValueCodecError::InactiveEnumType {
-            enum_type: TypeId::from_bytes([0x99; 16]),
-        })
-    );
-    let mut undeclared_label = encoded_value(0x0a, STANDARD_ENUM_TYPE, b"retired");
-    undeclared_label[..4].copy_from_slice(b"ORV3");
-    assert_eq!(
-        decode_active_value(&active, &undeclared_label),
-        Err(ValueCodecError::UndeclaredEnumLabel {
-            enum_type: STANDARD_ENUM_TYPE,
-            label: String::from("retired"),
-        })
-    );
+    let encoded = encode_active_value(&active, &value).unwrap();
+    assert_eq!(decode_active_value(&active, &encoded), Ok(value));
 }
-
 #[test]
 fn active_codec_rejects_record_structure_and_value_corruption() {
     let active = active_record_revision();
@@ -2534,9 +2518,7 @@ proptest! {
         payload in prop::collection::vec(any::<u8>(), 0..=4_096),
     ) {
         let active = active_record_revision();
-        let registry = registered_opaque_codecs(
-            active.catalogue_hash_context().standard().unwrap(),
-        ).unwrap();
+        let registry = test_registry();
         let mut encoded = b"ORV4".to_vec();
         encoded.push(tag);
         encoded.extend_from_slice(&type_bytes);
@@ -2551,9 +2533,7 @@ proptest! {
         body in prop::collection::vec(any::<u8>(), 0..=4_096),
     ) {
         let active = active_record_revision();
-        let registry = registered_opaque_codecs(
-            active.catalogue_hash_context().standard().unwrap(),
-        ).unwrap();
+        let registry = test_registry();
         let mut payload = (descriptor.len() as u16).to_be_bytes().to_vec();
         payload.extend_from_slice(&descriptor);
         payload.extend_from_slice(&body);
@@ -2568,9 +2548,7 @@ proptest! {
         payload in prop::collection::vec(any::<u8>(), 0..=4_096),
     ) {
         let active = active_record_revision();
-        let registry = registered_opaque_codecs(
-            active.catalogue_hash_context().standard().unwrap(),
-        ).unwrap();
+        let registry = test_registry();
         let mut encoded = b"ORV5".to_vec();
         encoded.push(tag);
         encoded.extend_from_slice(&type_bytes);
@@ -2585,9 +2563,7 @@ proptest! {
         payload in prop::collection::vec(any::<u8>(), 0..=4_096),
     ) {
         let active = active_record_revision();
-        let registry = registered_opaque_codecs(
-            active.catalogue_hash_context().standard().unwrap(),
-        ).unwrap();
+        let registry = test_registry();
         let carrier = [
             SYS_INVOKE_VALUE_TYPE_ID,
             SYS_INVOKE_REQUEST_TYPE_ID,
@@ -2609,9 +2585,7 @@ proptest! {
         payload in prop::collection::vec(any::<u8>(), 0..=4_096),
     ) {
         let active = active_record_revision();
-        let registry = registered_opaque_codecs(
-            active.catalogue_hash_context().standard().unwrap(),
-        ).unwrap();
+        let registry = test_registry();
         let mut encoded = b"ORF4".to_vec();
         encoded.push(tag);
         encoded.push(flags);
@@ -2631,9 +2605,7 @@ proptest! {
         payload in prop::collection::vec(any::<u8>(), 0..=4_096),
     ) {
         let active = active_record_revision();
-        let registry = registered_opaque_codecs(
-            active.catalogue_hash_context().standard().unwrap(),
-        ).unwrap();
+        let registry = test_registry();
         let mut encoded = b"ORF5".to_vec();
         encoded.push(tag);
         encoded.push(flags);
@@ -2901,4 +2873,14 @@ fn encoded_catalogue_value(tag: u8, type_id: TypeId, payload: &[u8]) -> Vec<u8> 
     let mut encoded = encoded_value(tag, type_id, payload);
     encoded[..4].copy_from_slice(b"ORV2");
     encoded
+}
+
+#[test]
+fn application_only_opaque_registry_rejects_opaque_values_without_standard_authority() {
+    let active = active_revision_without_standard();
+    let registry = orna_core::value::OpaqueCodecRegistry::application_values_only();
+    assert!(matches!(
+        OpaqueValue::new(&active, &registry, OPAQUE_TOKEN_TYPE_ID, [0x51; 16]),
+        Err(orna_core::value::OpaqueValueError::ActiveStandardRequired)
+    ));
 }
