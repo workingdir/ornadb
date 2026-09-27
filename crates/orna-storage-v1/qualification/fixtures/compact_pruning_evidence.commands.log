@@ -1,0 +1,24 @@
+Focused test command: python3 -m unittest -v test_verify_compact_pruning.py
+test_cli_passes_and_states_scope (test_verify_compact_pruning.CompactPruningEvidenceTests.test_cli_passes_and_states_scope) ... ok
+test_cli_returns_two_for_inconsistent_evidence (test_verify_compact_pruning.CompactPruningEvidenceTests.test_cli_returns_two_for_inconsistent_evidence) ... ok
+test_evidence_row_is_read_from_real_orna_fixture (test_verify_compact_pruning.CompactPruningEvidenceTests.test_evidence_row_is_read_from_real_orna_fixture) ... ok
+test_rejects_boolean_and_negative_unit_counts (test_verify_compact_pruning.CompactPruningEvidenceTests.test_rejects_boolean_and_negative_unit_counts) ... ok
+test_rejects_duplicate_oracle_ids (test_verify_compact_pruning.CompactPruningEvidenceTests.test_rejects_duplicate_oracle_ids) ... ok
+test_rejects_duplicate_query_ids (test_verify_compact_pruning.CompactPruningEvidenceTests.test_rejects_duplicate_query_ids) ... ok
+test_rejects_duplicate_result_ids (test_verify_compact_pruning.CompactPruningEvidenceTests.test_rejects_duplicate_result_ids) ... ok
+test_rejects_extra_result (test_verify_compact_pruning.CompactPruningEvidenceTests.test_rejects_extra_result) ... ok
+test_rejects_missing_oracle_result (test_verify_compact_pruning.CompactPruningEvidenceTests.test_rejects_missing_oracle_result) ... ok
+test_rejects_unit_count_mismatch (test_verify_compact_pruning.CompactPruningEvidenceTests.test_rejects_unit_count_mismatch) ... ok
+test_requires_at_least_one_pruned_unit (test_verify_compact_pruning.CompactPruningEvidenceTests.test_requires_at_least_one_pruned_unit) ... ok
+test_validates_oracle_results_and_reconciles_physical_units (test_verify_compact_pruning.CompactPruningEvidenceTests.test_validates_oracle_results_and_reconciles_physical_units) ... ok
+
+----------------------------------------------------------------------
+Ran 12 tests in 0.197s
+
+OK
+test exit status: 0
+
+Focused CLI command: python3 verify_compact_pruning.py <temporary JSON evidence built using evidence_row_id from fixtures/compact_pruning_evidence.orna>
+compact selective pruning: 2 queries, 1 result rows, 6 eligible physical units = 3 read + 3 pruned: PASS
+Validates submitted evidence only; it does not collect or prove a 24-hour production profile and does not alter runtime query planning.
+CLI exit status: 0
