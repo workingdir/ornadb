@@ -296,6 +296,123 @@ async fn recovery_finishes_receipt_boundary_after_runtime_consumes_only_frozen_p
 }
 
 #[tokio::test]
+async fn recovery_after_ref_advance_before_runtime_receipt() {
+    let (temp, repository) = repository();
+    let identity = RuntimeIdentity {
+        database_id: [91; 16],
+        repository_id: [92; 16],
+    };
+    let runtime = RuntimeState::open(&repository, identity, [93; 32])
+        .await
+        .unwrap();
+    let lease = runtime.acquire_lease([94; 16]).await.unwrap();
+    let context = runtime.begin_activation().await.unwrap();
+    runtime
+        .commit_table_activation(
+            lease,
+            &context,
+            &[TableMutation::new(
+                [95; 16],
+                "Contact",
+                b"compact row".to_vec(),
+                Some(b"compact row".to_vec()),
+            )
+            .unwrap()],
+            [96; 32],
+            &orna_runtime_v1::NoFault,
+        )
+        .await
+        .unwrap();
+    let freeze = runtime
+        .freeze(
+            [97; 16],
+            &Checkpoint {
+                generation: 1,
+                digest: [96; 32],
+                mutation_sequence: 1,
+            },
+        )
+        .await
+        .unwrap();
+    let tail = runtime.begin_activation().await.unwrap();
+    runtime
+        .commit_table_activation(
+            lease,
+            &tail,
+            &[TableMutation::new(
+                [98; 16],
+                "Contact",
+                b"tail row".to_vec(),
+                Some(b"tail row".to_vec()),
+            )
+            .unwrap()],
+            [99; 32],
+            &orna_runtime_v1::NoFault,
+        )
+        .await
+        .unwrap();
+
+    let old_head = repository.head().unwrap().unwrap();
+    repository
+        .publish_compact_repository_boundary(plan(&repository, &freeze))
+        .unwrap();
+    let journal = repository.read_publication_journal().unwrap().unwrap();
+    assert_ne!(journal.old_head(), journal.new_head());
+    assert_eq!(journal.old_head(), &old_head);
+    assert_eq!(repository.head().unwrap().as_ref(), Some(journal.new_head()));
+    assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
+    assert_eq!(runtime.pending().await.unwrap().len(), 2);
+    assert_eq!(
+        RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime)
+            .await
+            .unwrap()
+            .tail(),
+        CompactTailWindow::AllPending,
+    );
+
+    // Process loss at this point leaves the runtime receipt absent while the
+    // repository ref, index, worktree, and publication journal have advanced.
+    drop(runtime);
+    let runtime = RuntimeState::open(&repository, identity, [93; 32])
+        .await
+        .unwrap();
+    RuntimePublicationCoordinator::recover(&repository, &runtime)
+        .await
+        .unwrap();
+
+    assert!(repository.read_publication_journal().unwrap().is_none());
+    let pending = runtime.pending().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, [98; 16]);
+    assert!(runtime.pending_through(&freeze).await.unwrap().is_empty());
+    let visibility = RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime)
+        .await
+        .unwrap();
+    assert_eq!(visibility.snapshot(), &repository.head().unwrap().unwrap());
+    assert_eq!(visibility.tail(), CompactTailWindow::AllPending);
+    let manifest = repository
+        .read_compact_manifest(visibility.snapshot(), Uuid::from_u128(1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(manifest.entries().len(), 1);
+    assert_eq!(manifest.entries()[0].row_count(), 1);
+
+    let index = repository.index_generation().unwrap();
+    assert_eq!(index.head(), Some(visibility.snapshot()));
+    let head_tree = Command::new("git")
+        .current_dir(temp.path())
+        .args(["rev-parse", "HEAD^{tree}"])
+        .output()
+        .unwrap();
+    assert!(head_tree.status.success());
+    assert_eq!(
+        index.tree().unwrap().as_str(),
+        String::from_utf8_lossy(&head_tree.stdout).trim(),
+    );
+    assert!(repository.worktree_state().unwrap().is_clean());
+}
+
+#[tokio::test]
 async fn stale_candidate_before_ref_advance_preserves_frozen_rows_and_new_head() {
     let (temp, repository) = repository();
     let runtime = RuntimeState::open(
