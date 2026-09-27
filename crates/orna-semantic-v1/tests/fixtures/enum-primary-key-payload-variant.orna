@@ -1,0 +1,8 @@
+pub enum Outcome {
+    success,
+    failure { code: Int },
+}
+
+pub table Job(id: Outcome) {
+    description: Str,
+}

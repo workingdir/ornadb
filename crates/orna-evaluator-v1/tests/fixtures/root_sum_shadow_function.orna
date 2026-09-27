@@ -1,0 +1,2 @@
+fn sum(value: Int) = value + 100;
+fn run() = sum(1);
