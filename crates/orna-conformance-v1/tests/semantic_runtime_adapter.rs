@@ -2234,7 +2234,7 @@ fn bounded_evaluator_defers_invalid_function_bodies_until_explicit_invocation() 
         fixture_id: "test-module".into(),
         source_id: "logical/pure.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub fn secret() = missing;".into(),
+        source: include_str!("fixtures/bounded-invalid-function-body.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&pure_module), StageOutcome::Passed);
