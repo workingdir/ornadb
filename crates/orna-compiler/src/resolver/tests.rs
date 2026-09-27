@@ -1057,10 +1057,8 @@ fn lowers_ordinary_client_call_with_canonical_target_identities_and_reference() 
 }
 
 #[test]
-fn orders_reversed_named_arguments_by_application_declaration() {
-    let source = "CREATE SCHEMA app; \
-            CREATE CLIENT FUNCTION app.target(p_first INTEGER, p_second INTEGER) RETURNS INTEGER AS p_first; \
-            CREATE CLIENT FUNCTION app.call() RETURNS INTEGER AS app.target(p_second => 22, p_first => 11);";
+fn client_call_preserves_reversed_named_argument_source_order() {
+    let source = include_str!("tests/fixtures/client-call-argument-order.orna");
     let report = check(
         &bundle([("client-call-reversed.orna", source)]),
         &empty_catalogue(),
@@ -1094,15 +1092,15 @@ fn orders_reversed_named_arguments_by_application_declaration() {
             .iter()
             .map(|(parameter, _)| *parameter)
             .collect::<Vec<_>>(),
-        target_parameter_ids
+        vec![target_parameter_ids[1], target_parameter_ids[0]]
     );
     assert!(matches!(
         &arguments[0].1,
-        CheckedClientExpression::Integer { value: 11, .. }
+        CheckedClientExpression::Integer { value: 22, .. }
     ));
     assert!(matches!(
         &arguments[1].1,
-        CheckedClientExpression::Integer { value: 22, .. }
+        CheckedClientExpression::Integer { value: 11, .. }
     ));
 }
 
