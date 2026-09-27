@@ -2570,6 +2570,10 @@ struct Scope {
     /// The nominal owner whose nested implementation body is currently being
     /// checked. Ordinary module code has no private-field owner.
     private_field_owner: Option<String>,
+    /// A same-module nominal constructor used as an argument to a bounded
+    /// generic call may supply that type's private representation. This is
+    /// scoped to argument inference and does not grant ordinary field access.
+    allow_local_private_nominal_construction: bool,
     /// Names whose nominal rows belong to this source module. Imported rows
     /// are selected from the explicitly resolved export instead of by short
     /// name alone.
@@ -2666,6 +2670,7 @@ fn resolve_imports_with_dependencies(
         nominal_rows: tree.items.iter().filter_map(nominal_row_type).collect(),
         nominal_private_fields: BTreeMap::new(),
         private_field_owner: None,
+        allow_local_private_nominal_construction: false,
         local_nominal_names: tree
             .items
             .iter()
@@ -5902,6 +5907,11 @@ fn infer_local_generic_call(
         .iter()
         .map(|generic| generic.name.clone())
         .collect::<BTreeSet<_>>();
+    let bounded_generic_names = generic_parameters
+        .iter()
+        .filter(|generic| !generic.bounds.is_empty())
+        .map(|generic| generic.name.clone())
+        .collect::<BTreeSet<_>>();
     let mut substitutions = BTreeMap::new();
     let mut valid_substitution = true;
     if let Some(type_arguments) = explicit_type_arguments {
@@ -5930,11 +5940,24 @@ fn infer_local_generic_call(
         .iter()
         .enumerate()
         .map(|(index, argument)| {
-            let expected =
-                expected_call_parameter(raw_parameters, parameter_names.as_deref(), arguments, index);
+            let expected = expected_call_parameter(
+                raw_parameters,
+                parameter_names.as_deref(),
+                arguments,
+                index,
+            );
+            let local_constructor_scope = expected.is_some_and(|expected| {
+                matches!(expected, Type::Named(name) if bounded_generic_names.contains(name))
+            });
             let inferred = if let Some(expected) = expected {
                 if type_mentions_generic(expected, &generic_names) {
-                    infer(&argument.value, scope, local, diagnostics)
+                    if local_constructor_scope {
+                        let mut argument_scope = scope.clone();
+                        argument_scope.allow_local_private_nominal_construction = true;
+                        infer(&argument.value, &argument_scope, local, diagnostics)
+                    } else {
+                        infer(&argument.value, scope, local, diagnostics)
+                    }
                 } else {
                     infer_contextual(&argument.value, expected, scope, local, diagnostics)
                 }
@@ -9061,8 +9084,18 @@ fn infer_nominal(
     let schema = symbol.table_schema.as_ref();
     let admission = schema.and_then(|schema| schema.admission.as_ref());
     let public_fields = schema.map(|schema| &schema.fields);
-    let owning_private = match &constructor_type {
-        Type::Named(identity) => scope.private_field_owner.as_deref() == Some(identity),
+    let owning_private = match (&constructor_type, path) {
+        (Type::Named(identity), [name]) => {
+            scope.private_field_owner.as_deref() == Some(identity)
+                || (scope.allow_local_private_nominal_construction
+                    && (scope.private_field_owner.is_none()
+                        || scope.private_field_owner.as_deref() == Some(identity))
+                    && scope.local_nominal_names.contains(&name.text)
+                    && scope
+                        .nominal_identities
+                        .get(&name.text)
+                        .is_some_and(|local_identity| local_identity == identity))
+        }
         _ => false,
     };
     let private_field_supplied = match &constructor_type {
