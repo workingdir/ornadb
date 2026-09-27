@@ -26,7 +26,7 @@ use orna_conformance_v1::{
 };
 use orna_evaluator_v1::{Environment, Limits};
 use orna_foundation_v1::{OvbRaw, Value};
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::{RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState};
 
 static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -992,12 +992,71 @@ fn unpublished_mutation_count(
             )
         })?;
     runtime
-        .block_on(state.pending_count())
+        .block_on(state.publication_metadata_rows())
+        .and_then(|rows| {
+            if rows.sys_storage != rows.maintenance_job {
+                return Err(orna_runtime_v1::RuntimeError::RecoveryInvalid);
+            }
+            match rows.sys_storage.raw() {
+                OvbRaw::Map(fields) => fields
+                    .iter()
+                    .find_map(|(key, value)| match (key, value) {
+                        (OvbRaw::Text(key), OvbRaw::Int(value)) if key == "pending_rows" => {
+                            usize::try_from(value.clone()).ok()
+                        }
+                        _ => None,
+                    })
+                    .ok_or(orna_runtime_v1::RuntimeError::RecoveryInvalid),
+                _ => Err(orna_runtime_v1::RuntimeError::RecoveryInvalid),
+            }
+        })
         .map_err(|_| {
             Diagnostic::target(
                 "E2200",
                 "local runtime publication status could not be read",
                 "retry `status` after checking the local runtime state",
+            )
+        })
+}
+
+fn runtime_publication_metadata_rows(
+    endpoint: &Endpoint,
+) -> Result<RuntimePublicationMetadataRows, Diagnostic> {
+    let path = local_project_path(endpoint)?;
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2200",
+            "local runtime publication metadata could not be read",
+            "run the command inside an initialized local Orna repository",
+        )
+    })?;
+    let (identity, initial_digest) = runtime_identity(&repository)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication metadata could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    let state = runtime
+        .block_on(RuntimeState::open(&repository, identity, initial_digest))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication metadata could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    runtime
+        .block_on(state.publication_metadata_rows())
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication metadata could not be read",
+                "retry the invocation after checking local runtime state",
             )
         })
 }
@@ -1891,16 +1950,40 @@ fn run_pure_invocation(
                         error.to_string(),
                     )
                 })?;
-            authority
-                .evaluate(&admitted, &Environment::new())
-                .map_err(|error| {
-                    Diagnostic::target_with_detail(
-                        "E2200",
-                        "pure project invocation failed",
-                        "fix the admitted function or retry the invocation",
-                        error.to_string(),
+            if admitted.requires_publication_metadata() {
+                let publication_rows = runtime_publication_metadata_rows(endpoint)?;
+                let activation = authority
+                    .evaluate_staged_with_publication_rows(
+                        &admitted,
+                        &Environment::new(),
+                        publication_rows,
                     )
-                })?;
+                    .map_err(|error| {
+                        Diagnostic::target_with_detail(
+                            "E2200",
+                            "pure project invocation failed",
+                            "fix the admitted function or retry the invocation",
+                            error.to_string(),
+                        )
+                    })?;
+                if !activation.mutations().is_empty() {
+                    return Err(Diagnostic::unavailable(
+                        "one-shot invocation cannot commit table mutations",
+                        "use a supported table transaction; stream roots require the explicit stream runtime",
+                    ));
+                }
+            } else {
+                authority
+                    .evaluate(&admitted, &Environment::new())
+                    .map_err(|error| {
+                        Diagnostic::target_with_detail(
+                            "E2200",
+                            "pure project invocation failed",
+                            "fix the admitted function or retry the invocation",
+                            error.to_string(),
+                        )
+                    })?;
+            }
             write_success_line("invocation completed", color_enabled)?;
             return Ok(());
         }
