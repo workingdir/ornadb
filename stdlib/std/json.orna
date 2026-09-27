@@ -1,0 +1,19 @@
+CREATE SCHEMA std.json;
+
+CREATE TYPE std.json.Value AS VALUE
+    OPAQUE
+    KERNEL CONTRACT 'orna.std.value.json@1'
+    IMMUTABLE
+    TRANSIENT;
+
+EXPORT TYPE std.json.Value AS std.JsonValue;
+
+CREATE SERVER FUNCTION std.json.encode(
+    p_value std.json.Value
+)
+RETURNS std.io.ByteStream
+SECURITY INVOKER
+TRANSACTION READ ONLY
+VOLATILITY STABLE
+AS
+    SELECT p_value;
