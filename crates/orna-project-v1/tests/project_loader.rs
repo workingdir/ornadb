@@ -239,7 +239,10 @@ fn derives_standard_catalogue_only_from_the_pinned_profile_source_bundle() {
 #[test]
 fn unchanged_reference_bundle_loads_and_reaches_v1_semantic_analysis() {
     let reference = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../reference/Orna-1.0.0/examples/reference");
+        .ancestors()
+        .map(|directory| directory.join("reference/Orna-1.0.0/examples/reference"))
+        .find(|candidate| candidate.is_dir())
+        .expect("authoritative OrnaDB reference bundle exists above the crate");
     let directory = tempfile::tempdir().unwrap();
     for name in [
         "main.orna",
