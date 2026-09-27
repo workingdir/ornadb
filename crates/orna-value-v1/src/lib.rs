@@ -526,6 +526,94 @@ impl<T: OvbCodec> OvbCodec for Option<T> {
     }
 }
 
+/// A typed ordered range with inclusive lower and configurable upper bounds.
+///
+/// `None` represents an unbounded endpoint. The endpoint type parameter keeps
+/// both present bounds in the same type; this codec preserves empty ranges
+/// without trying to impose ordering on `T`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RangeValue<T> {
+    lower: Option<T>,
+    upper: Option<T>,
+    upper_inclusive: bool,
+}
+
+impl<T> RangeValue<T> {
+    /// Creates a range with an inclusive lower bound and the supplied upper
+    /// bound semantics.
+    pub const fn new(lower: Option<T>, upper: Option<T>, upper_inclusive: bool) -> Self {
+        Self {
+            lower,
+            upper,
+            upper_inclusive,
+        }
+    }
+
+    /// Returns the inclusive lower bound, or `None` for an unbounded start.
+    pub const fn lower(&self) -> Option<&T> {
+        self.lower.as_ref()
+    }
+
+    /// Returns the upper bound, or `None` for an unbounded end.
+    pub const fn upper(&self) -> Option<&T> {
+        self.upper.as_ref()
+    }
+
+    /// Reports whether a present upper bound is inclusive.
+    pub const fn upper_inclusive(&self) -> bool {
+        self.upper_inclusive
+    }
+}
+
+impl<T: OvbCodec> OvbCodec for RangeValue<T> {
+    fn type_label() -> &'static str {
+        "Range"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        let lower = self.lower.encode_value()?;
+        let upper = self.upper.encode_value()?;
+        Value::new(tag(
+            60019,
+            Raw::Array(vec![lower.0, upper.0, Raw::Bool(self.upper_inclusive)]),
+        ))
+    }
+
+    fn decode_value(
+        value: &Value,
+        path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
+        let Raw::Tag(60019, payload) = value.raw() else {
+            return Err(decode_type_mismatch(path));
+        };
+        let Raw::Array(fields) = payload.as_ref() else {
+            return Err(decode_type_mismatch(path));
+        };
+        let [lower, upper, Raw::Bool(upper_inclusive)] = fields.as_slice() else {
+            return Err(decode_type_mismatch(path));
+        };
+
+        Ok(Self {
+            lower: decode_range_endpoint::<T>(lower, "lower", path)?,
+            upper: decode_range_endpoint::<T>(upper, "upper", path)?,
+            upper_inclusive: *upper_inclusive,
+        })
+    }
+}
+
+fn decode_range_endpoint<T: OvbCodec>(
+    raw: &Raw,
+    endpoint: &str,
+    path: &mut Vec<String>,
+) -> std::result::Result<Option<T>, DecodeError> {
+    path.push(endpoint.to_owned());
+    let result = Value::new(raw.clone())
+        .map_err(|error| DecodeError::new(error, path.clone()))
+        .and_then(|value| <Option<T> as OvbCodec>::decode_value(&value, path));
+    path.pop();
+    result
+}
+
 fn tuple_components<'a>(
     value: &'a Value,
     path: &[String],
