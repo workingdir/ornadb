@@ -98,6 +98,22 @@ async fn publication_metadata_tracks_frozen_prefix_and_matches_both_projections(
     )
     .await
     .expect("open runtime");
+    assert!(
+        state
+            .set_publication_compressed_target_bytes(8 * 1024 * 1024 - 1)
+            .await
+            .is_err()
+    );
+    assert!(
+        state
+            .set_publication_compressed_target_bytes(32 * 1024 * 1024 + 1)
+            .await
+            .is_err()
+    );
+    state
+        .set_publication_compressed_target_bytes(24 * 1024 * 1024)
+        .await
+        .expect("persist an in-range publication target");
     let writer = state.acquire_lease([4; 16]).await.expect("acquire writer");
     // Exercise the checked-in Orna source as the durable mutation itself, so
     // this proof covers a real source payload rather than a Rust-only marker.
@@ -138,7 +154,7 @@ async fn publication_metadata_tracks_frozen_prefix_and_matches_both_projections(
         .expect("read publication metadata");
     assert_eq!(
         pending_metadata.publication_policy.compressed_target_bytes,
-        16 * 1024 * 1024
+        24 * 1024 * 1024
     );
     assert_eq!(
         pending_metadata.publication_policy.max_file_bytes,
@@ -164,7 +180,7 @@ async fn publication_metadata_tracks_frozen_prefix_and_matches_both_projections(
     let maintenance_values = pending_rows.maintenance_job.clone();
     assert_eq!(
         projected_int("storage_policy_target", "storage", storage_values.clone()),
-        16 * 1024 * 1024
+        24 * 1024 * 1024
     );
     assert_eq!(
         projected_int(
@@ -204,7 +220,7 @@ async fn publication_metadata_tracks_frozen_prefix_and_matches_both_projections(
             "job",
             maintenance_values.clone()
         ),
-        16 * 1024 * 1024
+        24 * 1024 * 1024
     );
     assert_eq!(
         projected_int(

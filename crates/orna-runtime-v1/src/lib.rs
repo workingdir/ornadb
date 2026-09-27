@@ -130,6 +130,8 @@ CREATE TABLE IF NOT EXISTS publication_commit (
 );
 CREATE TABLE IF NOT EXISTS publication_metadata (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    compressed_target_bytes INTEGER NOT NULL DEFAULT 16777216
+        CHECK (compressed_target_bytes BETWEEN 8388608 AND 33554432),
     published_mutations INTEGER NOT NULL DEFAULT 0 CHECK (published_mutations >= 0),
     published_payload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (published_payload_bytes >= 0),
     last_publication_ms INTEGER
@@ -1480,6 +1482,7 @@ pub enum RuntimeError {
     ConflictingPublicationIntent,
     ConflictingPublicationCommit,
     InvalidPublicationCommit,
+    InvalidPublicationPolicy,
     CompactPublicationRequired,
     CompactReceiptKeyMismatch,
     InvalidCompactReceipt,
@@ -1531,6 +1534,7 @@ impl fmt::Display for RuntimeError {
             Self::ConflictingPublicationIntent => "conflicting publication intent",
             Self::ConflictingPublicationCommit => "conflicting publication commit",
             Self::InvalidPublicationCommit => "invalid publication commit",
+            Self::InvalidPublicationPolicy => "invalid publication policy",
             Self::CompactPublicationRequired => {
                 "compact-bound publication requires a runtime receipt"
             }
@@ -2918,6 +2922,7 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         Self::initialize_runtime_meta(&connection, identity, initial_digest).await?;
+        migrate_publication_policy_schema(&connection).await?;
         migrate_compact_receipt_schema(&connection).await?;
         let (compact_receipt_signing_key, compact_receipt_public_key) =
             initialize_compact_receipt_key(&connection).await?;
@@ -7832,13 +7837,32 @@ impl RuntimeState {
     /// SQLite statement so maintenance and storage projections share a
     /// coherent snapshot. Row and byte counts describe durable runtime
     /// mutation payloads, not physical compact-file layout.
+    pub async fn set_publication_compressed_target_bytes(
+        &self,
+        compressed_target_bytes: u64,
+    ) -> Result<(), RuntimeError> {
+        if !(8 * 1024 * 1024..=32 * 1024 * 1024).contains(&compressed_target_bytes) {
+            return Err(RuntimeError::InvalidPublicationPolicy);
+        }
+        self.connection
+            .execute(
+                "UPDATE publication_metadata SET compressed_target_bytes = ?1 \
+                 WHERE singleton = 1",
+                [i64::try_from(compressed_target_bytes)
+                    .map_err(|_| RuntimeError::InvalidPublicationPolicy)?],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(())
+    }
+
     pub async fn publication_metadata(&self) -> Result<RuntimePublicationMetadata, RuntimeError> {
         let mut rows = self
             .connection
             .query(
                 "SELECT (SELECT COUNT(*) FROM pending_mutation), \
                  (SELECT COALESCE(SUM(length(payload)), 0) FROM pending_mutation), \
-                 published_mutations, published_payload_bytes, last_publication_ms \
+                 compressed_target_bytes, published_mutations, published_payload_bytes, last_publication_ms \
                  FROM publication_metadata WHERE singleton = 1",
                 (),
             )
@@ -7851,10 +7875,19 @@ impl RuntimeState {
             .ok_or(RuntimeError::RecoveryInvalid)?;
         let pending_rows: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let pending_bytes: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let published_rows: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let published_bytes: i64 = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let compressed_target_bytes: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let compressed_target_bytes = u64::try_from(compressed_target_bytes)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if !(8 * 1024 * 1024..=32 * 1024 * 1024).contains(&compressed_target_bytes) {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let published_rows: i64 = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let published_bytes: i64 = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
         Ok(RuntimePublicationMetadata {
-            publication_policy: RuntimePublicationPolicy::default(),
+            publication_policy: RuntimePublicationPolicy {
+                compressed_target_bytes,
+                ..RuntimePublicationPolicy::default()
+            },
             pending_rows: u64::try_from(pending_rows).map_err(|_| RuntimeError::RecoveryInvalid)?,
             pending_bytes: u64::try_from(pending_bytes)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -7863,7 +7896,7 @@ impl RuntimeState {
             published_bytes: u64::try_from(published_bytes)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
             last_publication_ms: row
-                .get(4)
+                .get(5)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         })
     }
@@ -14800,6 +14833,33 @@ async fn append_mutations_with_catalogue_tx(
         crate::catalogue::persist_capture_for_runtime_tx(connection, &current, &capture).await?;
     }
     Ok(capture)
+}
+
+async fn migrate_publication_policy_schema(connection: &Connection) -> Result<(), RuntimeError> {
+    let mut columns = connection
+        .query("PRAGMA table_info(publication_metadata)", ())
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    while let Some(row) = columns
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let name: String = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if name == "compressed_target_bytes" {
+            return Ok(());
+        }
+    }
+    connection
+        .execute(
+            "ALTER TABLE publication_metadata ADD COLUMN compressed_target_bytes \
+             INTEGER NOT NULL DEFAULT 16777216 \
+             CHECK (compressed_target_bytes BETWEEN 8388608 AND 33554432)",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
 }
 
 async fn migrate_compact_receipt_schema(connection: &Connection) -> Result<(), RuntimeError> {
