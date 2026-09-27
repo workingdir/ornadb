@@ -2672,7 +2672,7 @@ fn bounded_evaluator_redacts_missing_and_unknown_retained_function_arguments() {
         fixture_id: "test-module".into(),
         source_id: "logical/pure.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub fn increment(value) = std.math.increment(value);".into(),
+        source: include_str!("fixtures/bounded-evaluator-retained-argument-redaction.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&pure_module), StageOutcome::Passed);
