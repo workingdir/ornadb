@@ -3589,15 +3589,36 @@ impl Repository {
         path: impl AsRef<Path>,
         max_bytes: usize,
     ) -> Result<Vec<u8>, RepositoryError> {
-        let path = ManagedPath::new(path)?;
         let resolved = self.commit_required(&format!("{}^{{commit}}", commit.as_str()))?;
         if resolved != *commit {
             return Err(RepositoryError::GitOperationFailed);
         }
+        self.read_tree_file(commit.as_str(), path, max_bytes)
+    }
 
+    /// Reads one bounded regular file from the exact immutable tree carried by
+    /// a private candidate. The opaque `PrivateCommit` capability is required:
+    /// raw unreachable commit IDs do not become valid committed snapshots.
+    pub fn read_private_candidate_file(
+        &self,
+        candidate: &PrivateCommit,
+        path: impl AsRef<Path>,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        self.verify_private_candidate(candidate)?;
+        self.read_tree_file(candidate.tree.as_str(), path, max_bytes)
+    }
+
+    fn read_tree_file(
+        &self,
+        treeish: &str,
+        path: impl AsRef<Path>,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        let path = ManagedPath::new(path)?;
         let mut tree = self.command();
         tree.env("GIT_NO_LAZY_FETCH", "1")
-            .args(["ls-tree", "-z", "--full-tree", commit.as_str(), "--"])
+            .args(["ls-tree", "-z", "--full-tree", treeish, "--"])
             .arg(path.as_path());
         let tree_output = self.run(tree)?;
         let entry = tree_output
@@ -3673,17 +3694,60 @@ impl Repository {
         commit: &GitCommitRef,
         max_entries: usize,
     ) -> Result<Vec<CommittedTreeEntry>, RepositoryError> {
-        const MAX_ENTRY_BYTES: usize = 4 * 1024;
-
         let resolved = self.commit_required(&format!("{}^{{commit}}", commit.as_str()))?;
         if resolved != *commit {
             return Err(RepositoryError::GitOperationFailed);
         }
+        self.list_tree_entries(commit.as_str(), max_entries)
+    }
+
+    /// Lists the exact immutable tree carried by a private candidate without
+    /// consulting the worktree, index, or refs. The candidate capability is
+    /// bound to both its unreachable commit and root tree; callers cannot
+    /// authorize arbitrary unreachable objects by selecting an object ID.
+    pub fn list_private_candidate_tree(
+        &self,
+        candidate: &PrivateCommit,
+        max_entries: usize,
+    ) -> Result<Vec<CommittedTreeEntry>, RepositoryError> {
+        self.verify_private_candidate(candidate)?;
+        self.list_tree_entries(candidate.tree.as_str(), max_entries)
+    }
+
+    fn verify_private_candidate(
+        &self,
+        candidate: &PrivateCommit,
+    ) -> Result<(), RepositoryError> {
+        let commit_expression = format!("{}^{{commit}}", candidate.commit.as_str());
+        let resolved = self
+            .commit_optional(&commit_expression)?
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        if resolved != candidate.commit {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+
+        let tree_expression = format!("{}^{{tree}}", candidate.commit.as_str());
+        let mut tree_command = self.command();
+        tree_command.args(["rev-parse", "--verify", &tree_expression]);
+        let resolved_tree =
+            self.index_tree_from_native_oid(trim_output(&self.run(tree_command)?.stdout))?;
+        if resolved_tree != candidate.tree {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        Ok(())
+    }
+
+    fn list_tree_entries(
+        &self,
+        treeish: &str,
+        max_entries: usize,
+    ) -> Result<Vec<CommittedTreeEntry>, RepositoryError> {
+        const MAX_ENTRY_BYTES: usize = 4 * 1024;
 
         let mut command = self.command();
         command
             .env("GIT_NO_LAZY_FETCH", "1")
-            .args(["ls-tree", "-r", "-z", "--full-tree", commit.as_str()])
+            .args(["ls-tree", "-r", "-z", "--full-tree", treeish])
             .stdout(Stdio::piped());
         let mut child = command
             .spawn()
