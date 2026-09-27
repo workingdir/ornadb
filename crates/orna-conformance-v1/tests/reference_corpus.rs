@@ -3269,7 +3269,7 @@ fn harness_maps_current_snapshot_and_serializes_unsupported_member_diagnostic() 
             None,
             None,
         ),
-        "pub fn current_snapshot() = sys.current.snapshot;",
+        include_str!("fixtures/sys-current-snapshot.orna"),
         "ORNA-SYS-024",
     );
     let valid_fixture = &valid.fixtures[0];
@@ -3317,7 +3317,7 @@ fn harness_maps_current_snapshot_and_serializes_unsupported_member_diagnostic() 
             Some("ORNA-S022-UNSUPPORTED"),
             None,
         ),
-        "pub fn legacy() = sys.current.legacy_member;",
+        include_str!("fixtures/sys-current-unsupported-member.orna"),
         "ORNA-SYS-024",
     );
     let invalid_fixture = &invalid.fixtures[0];
