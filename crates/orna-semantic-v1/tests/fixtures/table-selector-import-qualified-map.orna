@@ -1,0 +1,1 @@
+fn names() = contacts.Contact | map(contacts.Contact.name);
