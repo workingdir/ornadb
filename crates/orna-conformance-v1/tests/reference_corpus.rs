@@ -2712,7 +2712,7 @@ fn harness_maps_snapshot_selection_and_serializes_snapshot_type_diagnostic() {
             None,
             None,
         ),
-        r#"pub fn before_change() = sys.snapshot("HEAD~3");"#,
+        include_str!("fixtures/snapshot-valid.orna"),
         "ORNA-SYS-011",
     );
     let valid_fixture = &valid.fixtures[0];
