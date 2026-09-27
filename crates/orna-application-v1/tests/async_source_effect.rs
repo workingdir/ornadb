@@ -1,13 +1,17 @@
 use futures::executor::block_on;
 use orna_application_v1::{
     ApplicationAuthority, ApplicationEffectFuture, ApplicationEffectRequest, ApplicationError,
-    AsyncApplicationEffectDispatcher,
+    ApplicationLiveAdapter, AsyncApplicationEffectDispatcher,
 };
 use orna_evaluator_v1::{Environment, Limits};
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
+use orna_live_v1::{
+    LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkSupervisor, LiveEvalResponse,
+};
+use orna_protocol_v1::{DatabaseContext, Message, PresentationContext, ResultStatus};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    CheckpointKey, Component, ConsumerIdentity, RunObservationRegistration,
+    CheckpointKey, Component, ConsumerIdentity, Mutation, NoFault, RunObservationRegistration,
     StreamAdministrationOutcome, StreamObservationRegistration, WriterLease,
 };
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
@@ -279,4 +283,115 @@ fn ordinary_staged_evaluation_does_not_gain_admin_dispatch_authority() {
 
     assert!(matches!(error, ApplicationError::EffectRejected(_)));
     runtime.cleanup();
+}
+
+#[test]
+fn live_application_reads_publication_relations_from_durable_runtime_rows() {
+    let runtime = runtime_context();
+    let capture = block_on(runtime._state.capture()).unwrap();
+    block_on(runtime._state.commit(
+        runtime.lease,
+        &capture,
+        &Mutation {
+            id: [55; 16],
+            payload: b"fixture".to_vec(),
+            digest: [56; 32],
+        },
+        [57; 32],
+        &NoFault,
+    ))
+    .expect("seed one durable unpublished mutation for relation reads");
+    let activation_context = block_on(runtime._state.begin_activation()).unwrap();
+    let authority = ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+    let source = include_str!("../../orna-runtime-v1/tests/fixtures/publication_metadata.orna");
+    authority
+        .admit_module("publication_metadata.orna", source, "main")
+        .expect("the real relation source fixture must pass application admission");
+    let mut application =
+        ApplicationLiveAdapter::new(authority).with_module("publication_metadata.orna", "main");
+    let dispatcher = PublicationRowsDispatcher {
+        state: &runtime._state,
+    };
+    let supervisor = LiveApplicationWorkSupervisor::new();
+    let session = [51; 16];
+    let request = [52; 16];
+    let mut work = supervisor.admit(session, request).unwrap();
+    let message = Message::Eval {
+        source: source.to_owned(),
+        database: DatabaseContext {
+            database: [53; 16],
+            snapshot: None,
+        },
+        presentation: PresentationContext {
+            locale: "en".to_owned(),
+            timezone: None,
+            width: None,
+            theme: "light".to_owned(),
+            supported_kinds: Vec::new(),
+        },
+        fingerprint: [54; 32],
+    };
+
+    let response = block_on(application.dispatch_eval_with_effects(
+        session,
+        request,
+        &message,
+        Some(&activation_context),
+        &mut work,
+        Some(&dispatcher),
+    ))
+    .expect("live dispatch evaluates the .orna system relation reads");
+    let LiveEvalResponse::Pure(envelope) = response else {
+        panic!("read-only system relation evaluation must not stage a transaction");
+    };
+    let Message::Result {
+        status,
+        value: Some(value),
+        ..
+    } = envelope.message
+    else {
+        panic!("live dispatch must return its evaluated module result");
+    };
+    assert_eq!(status, ResultStatus::Success);
+    assert_eq!(value.raw(), &OvbRaw::Bool(true));
+    runtime.cleanup();
+}
+
+struct PublicationRowsDispatcher<'a> {
+    state: &'a RuntimeState,
+}
+
+impl LiveAdminEffectDispatcher for PublicationRowsDispatcher<'_> {
+    fn publication_metadata_rows<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Option<orna_runtime_v1::RuntimePublicationMetadataRows>,
+                        String,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.state
+                .publication_metadata_rows()
+                .await
+                .map(Some)
+                .map_err(|_| "metadata read failed".to_owned())
+        })
+    }
+
+    fn pause_stream<'a>(
+        &'a self,
+        _stream: CanonicalValue,
+        _reason: Option<String>,
+        _context: &'a orna_runtime_v1::RuntimeActivationContext,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CanonicalValue, String>> + Send + 'a>,
+    > {
+        Box::pin(async { Err("unexpected pause".to_owned()) })
+    }
 }
