@@ -2566,7 +2566,7 @@ fn registry_expression_dispatch_preserves_source_limits() {
         fixture_id: "source-budget".into(),
         source_id: "logical/source-budget.orna".into(),
         parse_as: "expression_unit".into(),
-        source: "invalid(".into(),
+        source: include_str!("fixtures/source-limit-invalid.orna").into(),
     };
     let StageOutcome::Failed(diagnostic) = evaluator.evaluate(&unit) else {
         panic!("source size limits apply before parsing");
@@ -2581,7 +2581,7 @@ fn retained_functions_admit_structured_parameters_and_wildcards() {
         fixture_id: "parameter-patterns".into(),
         source_id: "logical/parameter-patterns.orna".into(),
         parse_as: "module_unit".into(),
-        source: "fn add((a, b) = (1, 2)) = a + b; fn ignore(_, _) = 7; fn verify() = if add((10, 20)) == 30 && ignore(1, 2) == 7 { 1 } else { 1 / 0 }; fn reject() = add(1);".into(),
+        source: include_str!("fixtures/retained-structured-parameters.orna").into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
