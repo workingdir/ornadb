@@ -7,8 +7,9 @@
 //! activation context and is never published by this crate.
 
 use orna_evaluator_v1::{
-    EffectHandler, Environment, EvaluationError, Functions, Limits, PureFunction, StepBudget,
-    invoke_named, invoke_named_with_effects,
+    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
+    PureFunction, StepBudget, invoke_named, invoke_named_with_effects, reference_standard_profile,
+    reference_standard_sources,
 };
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SafeText};
 use orna_live_v1::{
@@ -22,10 +23,18 @@ use orna_runtime_v1::{
 use orna_semantic_v1::{Catalogue, ModuleInput, SymbolKind, TableSchema, analyze_with_catalogue};
 use orna_syntax_v1::{Declaration, Expr, parse_module_with_file};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time::UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::UNIX_EPOCH,
+};
 
 const DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST\0";
 const SOURCE_MUTATION_DOMAIN: &[u8] = b"ORNA-SOURCE-MUTATION\0";
+const MAX_ADMITTED_REPL_SESSIONS: usize = 4096;
 
 /// Errors raised before an application is allowed to execute.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -538,6 +547,12 @@ impl From<ApplicationError> for LiveError {
     }
 }
 
+/// Mutable evaluator and admission state isolated to one remote REPL session.
+#[derive(Clone, Debug)]
+struct ApplicationReplSession {
+    repl: AdmittedReplSession,
+}
+
 /// Source-backed application adapter for the live protocol.
 ///
 /// The host remains responsible for canonical envelope and fingerprint
@@ -549,6 +564,7 @@ pub struct ApplicationLiveAdapter {
     authority: ApplicationAuthority,
     logical_path: String,
     entry: String,
+    sessions: Arc<Mutex<BTreeMap<[u8; 16], ApplicationReplSession>>>,
 }
 
 impl ApplicationLiveAdapter {
@@ -559,6 +575,7 @@ impl ApplicationLiveAdapter {
             authority,
             logical_path: "remote_eval.orna".to_owned(),
             entry: "main".to_owned(),
+            sessions: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -588,6 +605,66 @@ impl ApplicationLiveAdapter {
             .map_err(LiveError::from)
     }
 
+    /// Keeps the existing complete-module entry point for clients that send
+    /// an admitted application module. Ordinary Eval input uses the per-session
+    /// ephemeral REPL below.
+    fn is_module_entry(&self, message: &Message) -> bool {
+        let Message::Eval { source, .. } = message else {
+            return false;
+        };
+        let parsed = parse_module_with_file(source, self.logical_path.clone());
+        parsed.is_ok()
+            && parsed.value.items.iter().any(|item| {
+                matches!(
+                    &item.declaration,
+                    Declaration::Function { signature, .. } if signature.name == self.entry
+                )
+            })
+    }
+
+    fn new_repl_session(&self) -> Result<AdmittedReplSession, LiveError> {
+        let sources = reference_standard_sources().into_iter().collect::<Vec<_>>();
+        let catalogue = self
+            .authority
+            .catalogue
+            .clone()
+            .with_standard_sources(&reference_standard_profile(), sources.clone())
+            .map_err(|_| LiveError::ApplicationRejected)?;
+        AdmittedReplSession::from_catalogue(&[], catalogue, sources, self.authority.limits)
+            .map_err(|_| LiveError::ApplicationRejected)
+    }
+
+    fn repl_candidate(&self, session: [u8; 16]) -> Result<AdmittedReplSession, LiveError> {
+        {
+            let sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(existing) = sessions.get(&session) {
+                return Ok(existing.repl.clone());
+            }
+            if sessions.len() >= MAX_ADMITTED_REPL_SESSIONS {
+                return Err(LiveError::ApplicationRejected);
+            }
+        }
+        self.new_repl_session()
+    }
+
+    fn publish_repl_candidate(&self, session: [u8; 16], repl: AdmittedReplSession) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session, ApplicationReplSession { repl });
+    }
+
+    fn repl_table_schemas(&self) -> BTreeMap<String, TableSchema> {
+        analyze_with_catalogue(&[], &self.authority.catalogue)
+            .modules
+            .values()
+            .flat_map(admitted_table_schemas)
+            .collect()
+    }
+
     /// Builds the success envelope for one evaluated request.
     fn success_envelope(
         &self,
@@ -612,10 +689,24 @@ impl ApplicationLiveAdapter {
 impl LiveApplication for ApplicationLiveAdapter {
     fn eval(
         &mut self,
-        _session: [u8; 16],
+        session: [u8; 16],
         request: [u8; 16],
         message: &Message,
     ) -> std::result::Result<Envelope, LiveError> {
+        if !self.is_module_entry(message) {
+            let Message::Eval { source, .. } = message else {
+                return Err(LiveError::ApplicationRejected);
+            };
+            let mut repl = self.repl_candidate(session)?;
+            let result = repl.submit(source);
+            let value = result
+                .map_err(|error| {
+                    LiveError::from(ApplicationError::Evaluation(error.code().to_owned()))
+                })?
+                .unwrap_or_else(|| CanonicalValue::new(OvbRaw::Null).expect("null is canonical"));
+            self.publish_repl_candidate(session, repl);
+            return self.success_envelope(request, eval_fingerprint(message)?, value);
+        }
         let admitted = self.evaluate_eval_message(message)?;
         let value = self.authority.evaluate(&admitted, &Environment::new())?;
         self.success_envelope(request, eval_fingerprint(message)?, value)
@@ -623,13 +714,69 @@ impl LiveApplication for ApplicationLiveAdapter {
 
     fn eval_with_transaction<'a>(
         &'a mut self,
-        _session: [u8; 16],
+        session: [u8; 16],
         request: [u8; 16],
         message: &'a Message,
         context: Option<&'a RuntimeActivationContext>,
         _work: &'a mut LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<LiveEvalResponse, LiveError>> + 'a>> {
         Box::pin(async move {
+            if !self.is_module_entry(message) {
+                let Message::Eval { source, .. } = message else {
+                    return Err(LiveError::ApplicationRejected);
+                };
+                let mut repl = self.repl_candidate(session)?;
+                let staged = match repl.stage_activation(source) {
+                    Ok(staged) => staged,
+                    Err(error) if error.code() == "ORNA-REPL-EFFECT" => {
+                        let value = repl
+                            .submit(source)
+                            .map_err(|error| {
+                                LiveError::from(ApplicationError::Evaluation(
+                                    error.code().to_owned(),
+                                ))
+                            })?
+                            .unwrap_or_else(|| {
+                                CanonicalValue::new(OvbRaw::Null).expect("null is canonical")
+                            });
+                        self.publish_repl_candidate(session, repl);
+                        let envelope =
+                            self.success_envelope(request, eval_fingerprint(message)?, value)?;
+                        return Ok(LiveEvalResponse::pure(envelope));
+                    }
+                    Err(_) => return Err(LiveError::ApplicationRejected),
+                };
+                let mut handler = SourceMutationEffectHandler::new(self.repl_table_schemas());
+                let (value, successor) = repl
+                    .evaluate_staged_with_effects(staged, &mut handler)
+                    .map_err(|_| LiveError::ApplicationRejected)?;
+                let mutations = handler.into_mutations().map_err(LiveError::from)?;
+                let value = value.unwrap_or_else(|| {
+                    CanonicalValue::new(OvbRaw::Null).expect("null is canonical")
+                });
+                let envelope = self.success_envelope(request, eval_fingerprint(message)?, value)?;
+                if mutations.is_empty() {
+                    self.publish_repl_candidate(session, successor);
+                    return Ok(LiveEvalResponse::pure(envelope));
+                }
+                let Some(context) = context else {
+                    return Err(LiveError::ApplicationRejected);
+                };
+                let activation = self.authority.stage_mutations(context.clone(), mutations)?;
+                let sessions = Arc::clone(&self.sessions);
+                let transaction = LiveEvalTransaction::new(
+                    activation.mutations().to_vec(),
+                    activation.next_digest(),
+                    Arc::new(NoFault),
+                )
+                .after_commit(move || {
+                    sessions
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(session, ApplicationReplSession { repl: successor });
+                });
+                return Ok(LiveEvalResponse::transaction(envelope, transaction));
+            }
             let admitted = self.evaluate_eval_message(message)?;
             let staged = self
                 .authority
@@ -793,6 +940,117 @@ mod tests {
                 .expect("canonical integer"),
             )
         );
+    }
+
+    fn eval_message(source: &str, fingerprint: [u8; 32]) -> Message {
+        Message::Eval {
+            source: source.to_owned(),
+            database: orna_protocol_v1::DatabaseContext {
+                database: [1; 16],
+                snapshot: None,
+            },
+            presentation: orna_protocol_v1::PresentationContext {
+                locale: "en-US".to_owned(),
+                timezone: None,
+                width: None,
+                theme: "terminal/default".to_owned(),
+                supported_kinds: Vec::new(),
+            },
+            fingerprint,
+        }
+    }
+
+    #[test]
+    fn remote_repl_retains_bindings_and_helpers_per_session() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let mut adapter = ApplicationLiveAdapter::new(authority);
+        let session_a = [31; 16];
+        let session_b = [32; 16];
+        let binding = include_str!("../tests/fixtures/remote-repl-binding.orna");
+        let helper = include_str!("../tests/fixtures/remote-repl-helper.orna");
+        let import = include_str!("../tests/fixtures/remote-repl-wildcard-import.orna");
+        let expression = include_str!("../tests/fixtures/remote-repl-use-session-state.orna");
+
+        for (session, source) in [
+            (session_a, import),
+            (session_a, binding),
+            (session_a, helper),
+        ] {
+            LiveApplication::eval(
+                &mut adapter,
+                session,
+                [1; 16],
+                &eval_message(source, [2; 32]),
+            )
+            .expect("REPL declarations should be admitted");
+        }
+        let result = LiveApplication::eval(
+            &mut adapter,
+            session_a,
+            [3; 16],
+            &eval_message(expression, [4; 32]),
+        )
+        .expect("same session should retain its declarations");
+        assert!(matches!(
+            result.message,
+            Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                ..
+            } if value == CanonicalValue::new(OvbRaw::Int(82.into())).expect("expected result")
+        ));
+
+        let isolated = LiveApplication::eval(
+            &mut adapter,
+            session_b,
+            [5; 16],
+            &eval_message(expression, [6; 32]),
+        );
+        assert!(matches!(isolated, Err(LiveError::ApplicationRejected)));
+    }
+
+    #[test]
+    fn effectful_repl_candidate_stages_writes_without_publishing_early() {
+        let standard_sources = reference_standard_sources().into_iter().collect::<Vec<_>>();
+        let catalogue = Catalogue::authoritative_fixture()
+            .with_standard_sources(&reference_standard_profile(), standard_sources.clone())
+            .expect("reference standard modules should be admitted");
+        let mut session = AdmittedReplSession::from_catalogue(
+            &[],
+            catalogue.clone(),
+            standard_sources,
+            Limits::default(),
+        )
+        .expect("admitted catalogue should initialize a session");
+        session
+            .submit("let key: Str = \"person-1\";")
+            .expect("session binding should be retained");
+        session
+            .submit(include_str!(
+                "../tests/fixtures/remote-repl-contact-import.orna"
+            ))
+            .expect("ordinary module wildcard import should be admitted");
+        let source = include_str!("../tests/fixtures/remote-repl-contact-insert.orna");
+        let staged = session
+            .stage_activation(source)
+            .expect("table insert should be admitted");
+        let tables = analyze_with_catalogue(&[], &catalogue)
+            .modules
+            .values()
+            .flat_map(admitted_table_schemas)
+            .collect();
+        let mut effects = SourceMutationEffectHandler::new(tables);
+        let (value, successor) = session
+            .evaluate_staged_with_effects(staged, &mut effects)
+            .expect("effect should evaluate only into a candidate session");
+        let mutations = effects
+            .into_mutations()
+            .expect("candidate mutations should be canonical");
+        assert_eq!(mutations.len(), 1);
+        assert!(value.is_some());
+        assert!(session.preview("key").is_ok());
+        assert!(successor.preview("$_").is_ok());
     }
 
     fn note_source(body: &str) -> String {

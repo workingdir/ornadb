@@ -1838,6 +1838,7 @@ struct Scope(
     BTreeSet<String>,
     BTreeSet<String>,
     NominalDefinitions,
+    BTreeSet<String>,
 );
 impl Scope {
     fn from_environment(
@@ -1869,6 +1870,7 @@ impl Scope {
             BTreeSet::new(),
             BTreeSet::new(),
             nominal_definitions.clone(),
+            BTreeSet::new(),
         ))
     }
 }
@@ -6552,7 +6554,9 @@ fn is_static_effect_path(callee: &Expr, scope: &Scope) -> bool {
     matches!(callee, Expr::Field { base, .. }
         if matches!(base.as_ref(), Expr::ReplBinding { text, .. } if text == "$__orna_relation"))
         || matches!(callee, Expr::Field { .. })
-            && function_root_name(callee).is_some_and(|root| !scope.0.contains_key(root))
+            && function_root_name(callee).is_some_and(|root| {
+                scope.4.contains(root) || !scope.0.contains_key(root)
+            })
 }
 
 fn one_like(value: &Value) -> Result<Value, EvaluationError> {

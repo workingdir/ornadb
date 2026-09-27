@@ -1,0 +1,1 @@
+increment(twice(seed) + 1)
