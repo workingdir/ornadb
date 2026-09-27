@@ -1,0 +1,7 @@
+pub table Reading(sensor: Str, sensor: Str) {
+    value: Int,
+}
+
+fn write() {
+    Reading.insert({ sensor: "north", value: 1 });
+}
