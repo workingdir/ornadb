@@ -472,21 +472,19 @@ fn table_mutations_validate_patch_fields_and_ordered_keys_across_imports() {
             }
         }
     }
-    for (patch, expected) in [
+    for (source, expected) in [
         (
-            r#"{ id: "b" }"#,
+            include_str!("fixtures/table-mutation-patch-primary-key.orna"),
             "table update cannot change a primary key; use rekey",
         ),
         (
-            r#"{ label: "override" }"#,
+            include_str!("fixtures/table-mutation-patch-computed-field.orna"),
             "table update cannot change a computed field",
         ),
     ] {
         let result = analyze(&[ModuleInput::new(
             "rows.orna",
-            format!(
-                "{declaration} fn change() {{ let patch = {patch}; Person.update(\"a\", patch); }}"
-            ),
+            format!("{declaration} {source}"),
         )]);
         assert!(
             result
