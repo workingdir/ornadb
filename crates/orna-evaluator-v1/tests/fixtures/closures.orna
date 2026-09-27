@@ -1,0 +1,33 @@
+fn make(seed: Int) = value => seed + value;
+
+fn read_after_reassignment() {
+    let seed = 1;
+    let read = () => seed;
+    seed = 9;
+    read()
+}
+
+fn parameter_shadow() {
+    let seed = 1;
+    let replace = seed => seed + 1;
+    replace(10)
+}
+
+fn make_nested(a: Int) = b => c => a + b + c;
+
+fn local_block_shadow() {
+    let seed = 1;
+    let local = () => { let seed = 10; seed += 1; seed };
+    local()
+}
+
+fn parameter_block_shadow(seed: Int) {
+    let local = seed => { seed += 1; seed };
+    local(10)
+}
+
+fn mutate_capture() {
+    let seed = 1;
+    let mutate = () => { seed += 1; seed };
+    mutate()
+}
