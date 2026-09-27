@@ -7,7 +7,7 @@ mod resources;
 
 pub(super) use capabilities::validate_client_capability;
 use capabilities::{checked_client_capability, normalise_client_parameter_name};
-use constructors::{check_action_constructor, check_inspect_call, check_resource_constructor};
+use constructors::{check_inspect_call, check_resource_constructor};
 use control_flow::{
     check_client_control_flow_body, is_closed_client_boolean_return,
     is_standard_client_boolean_return,
@@ -342,158 +342,6 @@ struct ClientExpressionTarget {
     return_type: ClientExpressionType,
 }
 
-#[derive(Clone)]
-struct ClientActionTarget {
-    domain: orna_artifact::client_plan::ActionTargetDomain,
-    id: CheckedFunctionId,
-    parameters: Vec<ClientExpressionParameter>,
-    return_type: ClientExpressionType,
-}
-
-fn action_result_type_is_durable(
-    result_type: ClientExpressionType,
-    standard: Option<&CheckedStandardLibrary>,
-) -> bool {
-    matches!(
-        result_type.semantic_type,
-        SemanticType::Scalar(
-            StandardScalar::Boolean
-                | StandardScalar::Integer
-                | StandardScalar::BigInt
-                | StandardScalar::Float
-                | StandardScalar::CharacterLargeObject
-                | StandardScalar::BinaryLargeObject
-                | StandardScalar::Uuid,
-        ) if result_type.standard_value_type.is_some()
-    ) || matches!(result_type.semantic_type, SemanticType::Reference { .. })
-        || matches!(
-        result_type.semantic_type,
-        SemanticType::Named(CheckedTypeId::Existing(type_id))
-            if standard.is_some_and(|standard| {
-                standard
-                    .verified_snapshot()
-                    .catalogue()
-                    .value_type_by_id(type_id)
-                    .is_some_and(|value_type| {
-                        value_type.persistence() == ValueTypePersistence::Persistable
-                            || type_id == STD_ACTION_TYPE_ID
-                    })
-            })
-        )
-}
-
-fn client_action_result_type(
-    result_type: ClientExpressionType,
-    standard: Option<&CheckedStandardLibrary>,
-) -> ClientExpressionType {
-    if result_type.standard_value_type.is_some() {
-        return result_type;
-    }
-    let SemanticType::Named(CheckedTypeId::Existing(type_id)) = result_type.semantic_type else {
-        return result_type;
-    };
-    if standard.is_some_and(|standard| {
-        standard
-            .verified_snapshot()
-            .catalogue()
-            .value_type_by_id(type_id)
-            .is_some()
-    }) {
-        ClientExpressionType {
-            standard_value_type: Some(type_id),
-            ..result_type
-        }
-    } else {
-        result_type
-    }
-}
-
-fn action_argument_type_is_orv3_encodable(
-    expression_type: ClientExpressionType,
-    base: &CatalogueSnapshot,
-    standard: Option<&CheckedStandardLibrary>,
-) -> bool {
-    matches!(
-        expression_type.semantic_type,
-        SemanticType::Scalar(
-            StandardScalar::Boolean
-                | StandardScalar::Integer
-                | StandardScalar::BigInt
-                | StandardScalar::Float
-                | StandardScalar::CharacterLargeObject
-                | StandardScalar::BinaryLargeObject
-                | StandardScalar::Uuid
-        ) if expression_type.standard_value_type.is_some()
-    ) || matches!(
-        expression_type.semantic_type,
-        SemanticType::Reference { .. }
-    ) || matches!(
-        expression_type.semantic_type,
-        SemanticType::Named(type_id)
-            if match type_id {
-                CheckedTypeId::Provisional(_) => true,
-                CheckedTypeId::Existing(type_id) => {
-                    base.enum_type_by_id(type_id).is_some()
-                        || base.record_value_type_by_id(type_id).is_some()
-                        || standard.is_some_and(|standard| {
-                            let catalogue = standard.verified_snapshot().catalogue();
-                            catalogue.enum_type_by_id(type_id).is_some()
-                                || catalogue.record_value_type_by_id(type_id).is_some()
-                        })
-                }
-            }
-    )
-}
-
-fn client_expression_contains_await_or_resource(
-    expression: &CheckedClientExpression,
-    locals: &ClientLocalEnvironment,
-) -> bool {
-    match expression {
-        CheckedClientExpression::Await { .. } | CheckedClientExpression::Resource { .. } => true,
-        CheckedClientExpression::Call { arguments, .. } => arguments
-            .iter()
-            .any(|(_, argument)| client_expression_contains_await_or_resource(argument, locals)),
-        CheckedClientExpression::Action { operation } => operation
-            .arguments()
-            .iter()
-            .any(|(_, argument)| client_expression_contains_await_or_resource(argument, locals)),
-        CheckedClientExpression::Inspect { operation } => match operation {
-            CheckedInspectOperation::Snapshot {
-                target, options, ..
-            } => {
-                client_expression_contains_await_or_resource(target, locals)
-                    || options.as_deref().is_some_and(|options| {
-                        client_expression_contains_await_or_resource(options, locals)
-                    })
-            }
-            CheckedInspectOperation::Projection { snapshot, .. } => {
-                client_expression_contains_await_or_resource(snapshot, locals)
-            }
-        },
-        CheckedClientExpression::Concat { left, right, .. }
-        | CheckedClientExpression::Binary { left, right, .. } => {
-            client_expression_contains_await_or_resource(left, locals)
-                || client_expression_contains_await_or_resource(right, locals)
-        }
-        CheckedClientExpression::Unary { expression, .. }
-        | CheckedClientExpression::Parenthesized { expression, .. } => {
-            client_expression_contains_await_or_resource(expression, locals)
-        }
-        CheckedClientExpression::LocalRead { local, .. } => locals.values().any(|binding| {
-            binding.ordinal == Some(*local)
-                && matches!(binding.kind, CheckedClientLocalKind::Resource(_))
-        }),
-        CheckedClientExpression::SourceIntrospection { .. }
-        | CheckedClientExpression::Input { .. }
-        | CheckedClientExpression::Evaluate { .. }
-        | CheckedClientExpression::String { .. }
-        | CheckedClientExpression::Integer { .. }
-        | CheckedClientExpression::Boolean { .. }
-        | CheckedClientExpression::ParameterRead { .. }
-        | CheckedClientExpression::FieldPath { .. } => false,
-    }
-}
 fn client_expression_contains_inspect(expression: &CheckedClientExpression) -> bool {
     match expression {
         CheckedClientExpression::Inspect { .. } => true,
@@ -507,11 +355,6 @@ fn client_expression_contains_inspect(expression: &CheckedClientExpression) -> b
             .arguments()
             .iter()
             .any(|(_, argument)| client_expression_contains_inspect(argument)),
-        CheckedClientExpression::Action { operation } => operation
-            .arguments()
-            .iter()
-            .any(|(_, argument)| client_expression_contains_inspect(argument)),
-
         CheckedClientExpression::Concat { left, right, .. }
         | CheckedClientExpression::Binary { left, right, .. } => {
             client_expression_contains_inspect(left) || client_expression_contains_inspect(right)
@@ -563,25 +406,6 @@ fn client_expression_contains_action(expression: &ClientExpression) -> bool {
         | ClientExpression::LocalRead { .. }
         | ClientExpression::FieldPath { .. } => false,
     }
-}
-
-fn action_target_parameters(
-    parameters: &[ResolvedServerFunctionParameter],
-) -> Option<Vec<ClientExpressionParameter>> {
-    parameters
-        .iter()
-        .map(|parameter| {
-            Some(ClientExpressionParameter {
-                id: parameter.id,
-                name: parameter.name.clone(),
-                expression_type: ClientExpressionType {
-                    semantic_type: parameter.semantic_type,
-                    standard_value_type: parameter.standard_value_type,
-                    result_shape: ClientExpressionResultShape::Value,
-                },
-            })
-        })
-        .collect()
 }
 
 #[derive(Clone)]
@@ -749,139 +573,6 @@ fn client_expression_targets(
             targets.insert(
                 function.name().clone(),
                 ClientExpressionTarget {
-                    id: CheckedFunctionId::Existing(function.id()),
-                    parameters,
-                    return_type,
-                },
-            );
-        }
-    }
-    targets
-}
-
-fn client_action_targets(
-    client_inputs: &[ResolvedClientFunctionInput<'_>],
-    server_inputs: &[ResolvedServerFunctionInput<'_>],
-    base: &CatalogueSnapshot,
-    standard: Option<&CheckedStandardLibrary>,
-) -> HashMap<QualifiedSemanticName, ClientActionTarget> {
-    let mut targets = HashMap::new();
-    for input in client_inputs {
-        // ADR 0079 defers stream actions. Client stream functions are valid
-        // expression producers, but they are not action targets until the
-        // action protocol has an explicit stream result contract.
-        if input.result_shape != ClientExpressionResultShape::Value {
-            continue;
-        }
-        let return_type = client_action_result_type(
-            ClientExpressionType {
-                semantic_type: input.return_type,
-                standard_value_type: input.standard_value_type,
-                result_shape: input.result_shape,
-            },
-            standard,
-        );
-        if !action_result_type_is_durable(return_type, standard) {
-            continue;
-        }
-        let Some(parameters) = action_target_parameters(&input.parameters) else {
-            continue;
-        };
-        targets.insert(
-            input.name.clone(),
-            ClientActionTarget {
-                domain: orna_artifact::client_plan::ActionTargetDomain::Client,
-                id: input.id,
-                parameters,
-                return_type,
-            },
-        );
-    }
-    for input in server_inputs {
-        let return_type = client_action_result_type(
-            match input.return_type {
-                ResolvedServerFunctionReturn::Single {
-                    semantic_type,
-                    standard_value_type,
-                    ..
-                } => ClientExpressionType {
-                    semantic_type,
-                    standard_value_type,
-                    result_shape: ClientExpressionResultShape::Value,
-                },
-                ResolvedServerFunctionReturn::Rows { .. }
-                | ResolvedServerFunctionReturn::Stream { .. } => continue,
-            },
-            standard,
-        );
-        if !action_result_type_is_durable(return_type, standard) {
-            continue;
-        }
-        let Some(parameters) = action_target_parameters(&input.parameters) else {
-            continue;
-        };
-        targets.insert(
-            input.name.clone(),
-            ClientActionTarget {
-                domain: orna_artifact::client_plan::ActionTargetDomain::Server,
-                id: input.id,
-                parameters,
-                return_type,
-            },
-        );
-    }
-    let standard_functions =
-        standard.map(|standard| standard.verified_snapshot().catalogue().functions());
-    // Keep application precedence so a target name resolves to one catalogue identity.
-    for functions in [Some(base.functions()), standard_functions] {
-        let Some(functions) = functions else {
-            continue;
-        };
-        for function in functions {
-            if targets.contains_key(function.name()) {
-                continue;
-            }
-            let return_type = match function.return_type() {
-                FunctionReturn::Single(resolved) => {
-                    client_expression_type_from_core(*resolved, standard)
-                }
-                // Action execution rejects ROWS and STREAM results (ADR 0079),
-                // including one-column ROWS that could otherwise look scalar.
-                FunctionReturn::Rows(_) | FunctionReturn::Stream(_) => None,
-            };
-            let Some(return_type) = return_type
-                .map(|value| client_action_result_type(value, standard))
-                .filter(|value| action_result_type_is_durable(*value, standard))
-            else {
-                continue;
-            };
-            let Some(parameters) = function
-                .parameters()
-                .iter()
-                .map(|parameter| {
-                    client_expression_type_from_core(parameter.resolved_type(), standard).map(
-                        |expression_type| ClientExpressionParameter {
-                            id: CheckedParameterId::Existing(parameter.id()),
-                            name: parameter.name().to_owned(),
-                            expression_type,
-                        },
-                    )
-                })
-                .collect::<Option<Vec<_>>>()
-            else {
-                continue;
-            };
-            targets.insert(
-                function.name().clone(),
-                ClientActionTarget {
-                    domain: match function.domain() {
-                        FunctionDomain::Client => {
-                            orna_artifact::client_plan::ActionTargetDomain::Client
-                        }
-                        FunctionDomain::Server => {
-                            orna_artifact::client_plan::ActionTargetDomain::Server
-                        }
-                    },
                     id: CheckedFunctionId::Existing(function.id()),
                     parameters,
                     return_type,
@@ -1242,7 +933,6 @@ fn check_client_expression(
     expression: &ClientExpression,
     input: &ResolvedClientFunctionInput<'_>,
     targets: &HashMap<QualifiedSemanticName, ClientExpressionTarget>,
-    action_targets: &HashMap<QualifiedSemanticName, ClientActionTarget>,
     resource_targets: &HashMap<QualifiedSemanticName, ClientResourceTarget>,
     query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
     base: &CatalogueSnapshot,
@@ -1260,7 +950,6 @@ fn check_client_expression(
                 expression,
                 input,
                 targets,
-                action_targets,
                 resource_targets,
                 query_catalogue,
                 base,
@@ -1501,7 +1190,6 @@ fn check_client_expression(
                 &unary.expression,
                 input,
                 targets,
-                action_targets,
                 resource_targets,
                 query_catalogue,
                 base,
@@ -1552,7 +1240,6 @@ fn check_client_expression(
                 &binary.left,
                 input,
                 targets,
-                action_targets,
                 resource_targets,
                 query_catalogue,
                 base,
@@ -1567,7 +1254,6 @@ fn check_client_expression(
                 &binary.right,
                 input,
                 targets,
-                action_targets,
                 resource_targets,
                 query_catalogue,
                 base,
@@ -1672,7 +1358,6 @@ fn check_client_expression(
                 expression,
                 input,
                 targets,
-                action_targets,
                 resource_targets,
                 query_catalogue,
                 base,
@@ -1697,7 +1382,6 @@ fn check_client_expression(
                 left,
                 input,
                 targets,
-                action_targets,
                 resource_targets,
                 query_catalogue,
                 base,
@@ -1712,7 +1396,6 @@ fn check_client_expression(
                 right,
                 input,
                 targets,
-                action_targets,
                 resource_targets,
                 query_catalogue,
                 base,
@@ -1827,7 +1510,6 @@ fn check_client_expression(
                     &arguments[0].value,
                     input,
                     targets,
-                    action_targets,
                     resource_targets,
                     query_catalogue,
                     base,
@@ -1865,7 +1547,6 @@ fn check_client_expression(
                 expression,
                 input,
                 targets,
-                action_targets,
                 resource_targets,
                 query_catalogue,
                 base,
@@ -1877,41 +1558,6 @@ fn check_client_expression(
                 locals,
             ) {
                 return inspect;
-            }
-            if name
-                == QualifiedSemanticName::new(["std", "action", "call"])
-                    .expect("std.action.call is valid")
-            {
-                return check_action_constructor(
-                    expression,
-                    input,
-                    targets,
-                    action_targets,
-                    resource_targets,
-                    query_catalogue,
-                    base,
-                    server_names,
-                    standard,
-                    diagnostics,
-                    references,
-                    used_capabilities,
-                    locals,
-                );
-            }
-            if name
-                == QualifiedSemanticName::new(["std", "action", "sequence"])
-                    .expect("std.action.sequence is valid")
-                || name
-                    == QualifiedSemanticName::new(["std", "action", "parallel"])
-                        .expect("std.action.parallel is valid")
-            {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::UnknownQualifiedName,
-                    format!("unknown CLIENT function {name}"),
-                    input.logical_path,
-                    span,
-                ));
-                return None;
             }
             if resource_constructor_kind(&name).is_some() {
                 diagnostics.push(diagnostic(
@@ -1954,7 +1600,7 @@ fn check_client_expression(
             used_capabilities.insert(name.clone());
             let mut bound = vec![false; target.parameters.len()];
             let mut positional = 0usize;
-            let mut checked_argument_slots = vec![None; target.parameters.len()];
+            let mut checked_arguments = Vec::with_capacity(arguments.len());
             for argument in arguments {
                 let parameter_index = if let Some(name) = &argument.name {
                     let parameter_name = semantic_part(name);
@@ -2005,7 +1651,6 @@ fn check_client_expression(
                     &argument.value,
                     input,
                     targets,
-                    action_targets,
                     resource_targets,
                     query_catalogue,
                     base,
@@ -2030,7 +1675,7 @@ fn check_client_expression(
                     return None;
                 }
                 bound[parameter_index] = true;
-                checked_argument_slots[parameter_index] = Some((parameter.id, checked));
+                checked_arguments.push((parameter.id, checked));
             }
             if bound.iter().any(|bound| !bound) {
                 diagnostics.push(diagnostic(
@@ -2041,10 +1686,6 @@ fn check_client_expression(
                 ));
                 return None;
             }
-            let checked_arguments = checked_argument_slots
-                .into_iter()
-                .map(|argument| argument.expect("checked CLIENT argument slot is bound"))
-                .collect::<Vec<_>>();
             references.push(CheckedDefinitionReference {
                 target: CheckedDefinitionReferenceTarget::Function(target.id),
                 kind: DefinitionReferenceKind::FunctionCall,
@@ -2287,7 +1928,6 @@ fn unsupported_client_state_reference(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_client_functions(
     inputs: &[ResolvedClientFunctionInput<'_>],
-    server_inputs: &[ResolvedServerFunctionInput<'_>],
     submitted_ids: &HashMap<QualifiedSemanticName, SubmittedType>,
     query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
     server_names: &[QualifiedSemanticName],
@@ -2298,7 +1938,6 @@ pub(super) fn check_client_functions(
     uses: &mut Vec<CheckedApplicationTypeUse>,
 ) -> Vec<CheckedClientFunction> {
     let targets = client_expression_targets(inputs, base, standard);
-    let action_targets = client_action_targets(inputs, server_inputs, base, standard);
     inputs
         .iter()
         .filter_map(|input| {
@@ -2320,7 +1959,6 @@ pub(super) fn check_client_functions(
                         input,
                         submitted_ids,
                         &targets,
-                        &action_targets,
                         resource_targets,
                         query_catalogue,
                         base,
@@ -2393,7 +2031,6 @@ pub(super) fn check_client_functions(
                         expression,
                         input,
                         &targets,
-                        &action_targets,
                         resource_targets,
                         query_catalogue,
                         base,
@@ -2508,7 +2145,6 @@ pub(super) fn check_client_functions(
                     &local.expression,
                     input,
                     &targets,
-                    &action_targets,
                     resource_targets,
                     query_catalogue,
                     base,
@@ -2547,7 +2183,7 @@ pub(super) fn check_client_functions(
                 }
                 (checked, expression_type, CheckedClientLocalKind::Resource(kind))
             } else {
-            let (checked, expression_type) = check_client_expression(&local.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
+            let (checked, expression_type) = check_client_expression(&local.expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
             if !client_expression_type_is_evaluable(expression_type, base, standard) {
                 diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "this CLIENT local type is not supported by the local evaluator", input.logical_path, &local.span));
                 return None;
@@ -2591,7 +2227,7 @@ pub(super) fn check_client_functions(
                         diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} resource type requires a resource constructor"), input.logical_path, &statement.span));
                         return None;
                     }
-                    let (checked, expression_type) = check_resource_constructor(&statement.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
+                    let (checked, expression_type) = check_resource_constructor(&statement.expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
                     let actual_kind = match &checked {
                         CheckedClientExpression::Resource { operation } => operation.kind,
                         _ => unreachable!("resource constructor checker returns a resource"),
@@ -2641,7 +2277,7 @@ pub(super) fn check_client_functions(
                     }
                     (checked, expression_type, CheckedClientLocalKind::Resource(actual_kind))
                 } else {
-                    let (checked, expression_type) = check_client_expression(&statement.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
+                    let (checked, expression_type) = check_client_expression(&statement.expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
                     if !client_expression_type_is_evaluable(expression_type, base, standard) {
                         diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "this CLIENT local type is not supported by the local evaluator", input.logical_path, &statement.span));
                         return None;
@@ -2676,9 +2312,9 @@ pub(super) fn check_client_functions(
                 if diagnostics.len() != diagnostics_before { return None; }
                 let direct_resource = matches!(&statement.expression, ClientExpression::Call { callee, .. } if resource_constructor_kind(&semantic_name(callee)).is_some());
                 let (checked, expression_type) = if matches!(binding.kind, CheckedClientLocalKind::Resource(_)) && direct_resource {
-                    check_resource_constructor(&statement.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?
+                    check_resource_constructor(&statement.expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?
                 } else {
-                    check_client_expression(&statement.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?
+                    check_client_expression(&statement.expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?
                 };
                 if !client_expression_types_compatible(expression_type, binding.expression_type) || (matches!(binding.kind, CheckedClientLocalKind::Resource(_)) != matches!(checked, CheckedClientExpression::Resource { .. })) {
                     diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT assignment to local {local_name} does not match its declared type"), input.logical_path, &statement.span));
@@ -2708,7 +2344,7 @@ pub(super) fn check_client_functions(
     let diagnostics_before = diagnostics.len();
     validate_client_await_positions(expression, true, input, diagnostics);
     if diagnostics.len() != diagnostics_before { return None; }
-    let (checked_return, return_type) = check_client_expression(expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
+    let (checked_return, return_type) = check_client_expression(expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
     if !client_expression_types_compatible(return_type, ClientExpressionType { semantic_type: input.return_type, standard_value_type: input.standard_value_type, result_shape: input.result_shape }) {
         diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "this CLIENT function must return the declared value type", input.logical_path, expression.span()));
         return None;
@@ -2840,7 +2476,6 @@ pub(super) fn check_client_functions(
                                     expression,
                                     input,
                                     &targets,
-                                    &action_targets,
                                     resource_targets,
                                     query_catalogue,
                                     base,
@@ -2922,7 +2557,6 @@ pub(super) fn check_client_functions(
                             &local.expression,
                             input,
                             &targets,
-                            &action_targets,
                             resource_targets,
                             query_catalogue,
                             base,
@@ -3035,7 +2669,6 @@ pub(super) fn check_client_functions(
                         expression,
                         input,
                         &targets,
-                        &action_targets,
                         resource_targets,
                         query_catalogue,
                         base,

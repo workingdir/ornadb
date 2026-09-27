@@ -6,6 +6,7 @@
 //! their parent's writes but cannot publish independently. Only the root
 //! [`Activation`] can publish its overlay.
 
+use num_bigint::BigInt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     iter::Peekable,
@@ -229,6 +230,28 @@ pub enum WindowError {
     ZeroStep,
 }
 
+/// Failure to complete a bounded relation count within its item budget.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RelationCountError {
+    ResourceLimitExceeded,
+}
+
+fn count_with_limit<I>(source: I, maximum_items: usize) -> Result<BigInt, RelationCountError>
+where
+    I: IntoIterator,
+{
+    let mut observed = 0usize;
+    let mut count = BigInt::from(0);
+    for _ in source {
+        if observed == maximum_items {
+            return Err(RelationCountError::ResourceLimitExceeded);
+        }
+        observed += 1;
+        count += 1;
+    }
+    Ok(count)
+}
+
 impl<'a, Item: 'a> Relation<'a, Item> {
     fn new<I>(source: I) -> Self
     where
@@ -302,6 +325,20 @@ impl<'a, Item: 'a> Relation<'a, Item> {
         } else {
             Ok(first)
         }
+    }
+
+    /// Counts every finite relation item exactly as an arbitrary-precision integer.
+    pub fn count(self) -> BigInt {
+        self.source.fold(BigInt::from(0), |mut count, _| {
+            count += 1;
+            count
+        })
+    }
+
+    /// Counts exactly when the relation fits within `maximum_items`, otherwise
+    /// reports the resource limit without returning a truncated count.
+    pub fn count_with_limit(self, maximum_items: usize) -> Result<BigInt, RelationCountError> {
+        count_with_limit(self.source, maximum_items)
     }
 
     /// Returns the smallest value, or `None` when the relation is empty.
@@ -1335,7 +1372,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivationError, CardinalityError, DatabaseRuntime, TableError, TableRuntime, WindowError,
+        ActivationError, CardinalityError, DatabaseRuntime, RelationCountError, TableError,
+        TableRuntime, WindowError,
     };
     use std::{cell::Cell, panic::AssertUnwindSafe, rc::Rc};
 
@@ -2264,6 +2302,30 @@ mod tests {
             .zip(super::Relation::new(["unused"].into_iter()))
             .collect::<Vec<_>>();
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn relation_count_is_exact_for_empty_and_finite_inputs() {
+        assert_eq!(
+            super::Relation::new(std::iter::empty::<u8>()).count(),
+            0.into()
+        );
+        assert_eq!(
+            super::Relation::new([4, 5, 6].into_iter()).count(),
+            3.into()
+        );
+    }
+
+    #[test]
+    fn relation_count_reports_resource_limit_without_truncation() {
+        assert_eq!(
+            super::Relation::new([0, 1, 2].into_iter()).count_with_limit(2),
+            Err(RelationCountError::ResourceLimitExceeded)
+        );
+        assert_eq!(
+            super::Relation::new([0, 1, 2].into_iter()).count_with_limit(3),
+            Ok(3.into())
+        );
     }
 
     #[test]

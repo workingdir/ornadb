@@ -3,24 +3,30 @@
     reason = "The bounded binary exposes planning and session seams for a later integration adapter."
 )]
 
+mod cli_args;
+mod cli_dispatch;
+mod cli_help;
+mod cli_status;
 mod repl;
 
+use cli_args::{Command, Invocation, Parsed, StatusFormat, parse_cli, requested_color_mode};
+use cli_dispatch::execute;
+use repl::{AnsiColor, write_styled, write_styled_display};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::io::{self, BufReader, Write as _};
-use std::path::PathBuf;
+use std::io::{self, BufReader, IsTerminal, Write as _};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use orna_application_v1::ApplicationAuthority;
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
     ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
 };
-use orna_application_v1::ApplicationAuthority;
 use orna_evaluator_v1::{Environment, Limits};
 use orna_foundation_v1::{OvbRaw, Value};
-use orna_runtime_v1::{RunObservationStatus, RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::{RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState};
 
 static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -36,6 +42,59 @@ fn cli_request_nonce() -> u128 {
 
 
 const SENSOR_SOURCE_IDENTITY: &str = "example:sensors:v1";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ColorMode {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+impl ColorMode {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "auto" => Self::Auto,
+            "always" => Self::Always,
+            "never" => Self::Never,
+            _ => return None,
+        })
+    }
+
+    fn stdout_enabled(self) -> bool {
+        self.enabled(io::stdout().is_terminal())
+    }
+
+    fn stderr_enabled(self) -> bool {
+        self.enabled(io::stderr().is_terminal())
+    }
+
+    const fn enabled(self, is_terminal: bool) -> bool {
+        match self {
+            Self::Auto => is_terminal,
+            Self::Always => true,
+            Self::Never => false,
+        }
+    }
+}
+
+
+fn write_cli_line(
+    text: &[u8],
+    color: AnsiColor,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
+    let mut stdout = io::stdout().lock();
+    write_styled(&mut stdout, color, text, color_enabled)
+        .and_then(|()| stdout.write_all(b"\n"))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "CLI output could not be written",
+                "check the output stream, then retry the command",
+            )
+        })
+}
 #[allow(
     dead_code,
     reason = "The bounded CLI records the complete specified exit-status space."
@@ -363,6 +422,45 @@ impl fmt::Display for Diagnostic {
     }
 }
 
+fn write_diagnostic<W: io::Write>(
+    writer: &mut W,
+    diagnostic: &Diagnostic,
+    color_enabled: bool,
+) -> io::Result<()> {
+    write_styled(writer, AnsiColor::Red, b"error", color_enabled)?;
+    writer.write_all(b"[")?;
+    write_styled(
+        writer,
+        AnsiColor::Red,
+        diagnostic.code.as_bytes(),
+        color_enabled,
+    )?;
+    writer.write_all(b"]: ")?;
+    write_styled(
+        writer,
+        AnsiColor::Red,
+        diagnostic.title.as_bytes(),
+        color_enabled,
+    )?;
+    if let Some(detail) = &diagnostic.detail {
+        writer.write_all(b"\n  ")?;
+        write_styled(writer, AnsiColor::Dim, detail.as_bytes(), color_enabled)?;
+    }
+    writer.write_all(b"\nhelp: ")?;
+    write_styled(
+        writer,
+        AnsiColor::Dim,
+        diagnostic.help.as_bytes(),
+        color_enabled,
+    )?;
+    writer.write_all(b"\n")
+}
+
+fn write_success_line(message: &str, color_enabled: bool) -> Result<(), Diagnostic> {
+    write_cli_line(message.as_bytes(), AnsiColor::Green, color_enabled)
+}
+
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Endpoint {
     ManagedLocal,
@@ -511,184 +609,6 @@ fn hex_digit(byte: u8) -> Option<u8> {
         _ => None,
     }
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum Invocation {
-    Seed,
-    Exercise,
-    SensorsIngest,
-    LibraryLend { book_id: String, borrower: String },
-    ProjectFunction(String),
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StatusFormat {
-    Human,
-    Porcelain,
-    Short,
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum Command {
-    Repl(Option<String>),
-    Init(Option<PathBuf>),
-    Status { format: StatusFormat },
-    Fetch { remote: String, branch: String },
-    Check,
-    Explain(String),
-    Invoke(String),
-    Run(Invocation),
-    Help,
-    Version,
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Parsed {
-    endpoint: Endpoint,
-    command: Command,
-}
-#[allow(
-    clippy::too_many_lines,
-    reason = "the command grammar deliberately keeps validation precedence in one auditable parser"
-)]
-fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
-    let mut endpoint = Endpoint::ManagedLocal;
-    let mut has_explicit_endpoint = false;
-    let mut words = arguments.iter().map(String::as_str).peekable();
-    while matches!(words.peek(), Some(&"--db")) {
-        words.next();
-        has_explicit_endpoint = true;
-        endpoint = Endpoint::parse(words.next().ok_or_else(|| {
-            Diagnostic::usage(
-                "E1001",
-                "option `--db` needs a value",
-                "supply an endpoint after `--db`",
-            )
-        })?)?;
-    }
-    let command = match words.next() {
-        None => Command::Repl(None),
-        Some("repl") => Command::Repl(words.next().map(str::to_owned)),
-        Some("init") => {
-            let first = words.next();
-            let literal_target = first == Some("--");
-            let target = if literal_target { words.next() } else { first }.map(PathBuf::from);
-            if !literal_target
-                && let Some(target) = target.as_deref()
-                && target.as_os_str().to_string_lossy().starts_with('-')
-            {
-                return Err(Diagnostic::usage(
-                    "E1002",
-                    "`init` option is not supported",
-                    "use `init` or `init DIRECTORY` without Git options",
-                ));
-            }
-            if words.next().is_some() {
-                return Err(Diagnostic::usage(
-                    "E1003",
-                    "`init` accepts at most one directory",
-                    "use `init` or `init DIRECTORY`",
-                ));
-            }
-            if has_explicit_endpoint {
-                return Err(Diagnostic::usage(
-                    "E1002",
-                    "`init` does not accept `--db`",
-                    "use `init` or `init DIRECTORY` to choose a local repository",
-                ));
-            }
-            Command::Init(target)
-        }
-        Some("status") => match words.next() {
-            Some("--porcelain") => Command::Status {
-                format: StatusFormat::Porcelain,
-            },
-            Some("--short") => Command::Status {
-                format: StatusFormat::Short,
-            },
-            Some(_) => {
-                return Err(Diagnostic::usage(
-                    "E1002",
-                    "`status` supports no option, `--porcelain`, or `--short`",
-                    "use `status`, `status --porcelain`, or `status --short`",
-                ));
-            }
-            None => Command::Status {
-                format: StatusFormat::Human,
-            },
-        },
-        Some("fetch") => Command::Fetch {
-            remote: words.next().unwrap_or("origin").to_owned(),
-            branch: words.next().unwrap_or("main").to_owned(),
-        },
-        Some("explain") => Command::Explain(
-            words
-                .next()
-                .ok_or_else(|| {
-                    Diagnostic::usage(
-                        "E1001",
-                        "`explain` needs a diagnostic code",
-                        "supply a diagnostic code after `explain`, such as `ORNA-S010-IMPORT`",
-                    )
-                })?
-                .to_owned(),
-        ),
-        Some("check") => Command::Check,
-        Some("invoke") => Command::Invoke(
-            words
-                .next()
-                .ok_or_else(|| {
-                    Diagnostic::usage(
-                        "E1001",
-                        "`invoke` needs a function target",
-                        "supply a reachable zero-argument pure function name after `invoke`",
-                    )
-                })?
-                .to_owned(),
-        ),
-        Some("--help" | "-h" | "help") => Command::Help,
-        Some("--version" | "-V") => Command::Version,
-        Some("run") => match words.next() {
-            Some("seed") => Command::Run(Invocation::Seed),
-            Some("exercise") => Command::Run(Invocation::Exercise),
-            Some("sensors.ingest") => Command::Run(Invocation::SensorsIngest),
-            Some("library.lend") => {
-                let book_id = words.next().ok_or_else(|| {
-                    Diagnostic::usage(
-                        "E1001",
-                        "`run library.lend` needs a book ID",
-                        "supply the book ID and borrower after `run library.lend`",
-                    )
-                })?;
-                let borrower = words.next().ok_or_else(|| {
-                    Diagnostic::usage(
-                        "E1001",
-                        "`run library.lend` needs a borrower",
-                        "supply the book ID and borrower after `run library.lend`",
-                    )
-                })?;
-                Command::Run(Invocation::LibraryLend {
-                    book_id: book_id.to_owned(),
-                    borrower: borrower.to_owned(),
-                })
-            }
-            Some(target) => Command::Run(Invocation::ProjectFunction(target.to_owned())),
-            None => Command::Run(Invocation::ProjectFunction("main.main".into())),
-        },
-        Some(_) => {
-            return Err(Diagnostic::usage(
-                "E1002",
-                "unknown Orna command",
-                "use `--help` to list supported commands",
-            ));
-        }
-    };
-    if words.next().is_some() {
-        return Err(Diagnostic::usage(
-            "E1003",
-            "command has unexpected arguments",
-            "this bounded slice accepts no extra arguments",
-        ));
-    }
-    Ok(Parsed { endpoint, command })
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionState {
     Open,
@@ -922,15 +842,33 @@ fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
             "run the command inside a Git worktree or provide a local project path",
         )
     })?;
-    let state = repository.worktree_state().map_err(|_| {
-        Diagnostic::target(
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository.worktree())
+        .args(["-c", "color.status=false", "status", "--porcelain"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .output()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "local Git worktree status could not be read",
+                "check that Git can read the local worktree, then retry `status --porcelain`",
+            )
+        })?;
+    if !output.status.success() {
+        return Err(Diagnostic::target(
             "E2100",
             "local Git worktree status could not be read",
             "check that Git can read the local worktree, then retry `status --porcelain`",
-        )
-    })?;
+        ));
+    }
     io::stdout()
-        .write_all(state.as_porcelain_v2_z())
+        .write_all(&output.stdout)
         .map_err(|_| {
             Diagnostic::target(
                 "E2100",
@@ -941,7 +879,7 @@ fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-fn run_status_human(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+fn run_status_json(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
@@ -953,7 +891,513 @@ fn run_status_human(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repository.worktree())
-        .arg("status")
+        .args([
+            "-c",
+            "color.status=false",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+        ])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .output()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "local Git worktree status could not be read",
+                "check that Git can read the local worktree, then retry `status --format json`",
+            )
+        })?;
+    if !output.status.success() {
+        return Err(Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be read",
+            "check that Git can read the local worktree, then retry `status --format json`",
+        ));
+    }
+    let branch_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository.worktree())
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .output()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "local Git worktree branch could not be read",
+                "check that Git can read the local worktree, then retry `status --format json`",
+            )
+        })?;
+    let branch =
+        cli_status::branch_name(branch_output.status.success(), &branch_output.stdout);
+    let json = cli_status::encode_status_json(branch, &output.stdout).ok_or_else(|| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be read",
+            "retry `status --format json`",
+        )
+    })?;
+    let unpublished_count = unpublished_mutation_count(&repository)?;
+    let json = append_unpublished_count_json(json, unpublished_count).ok_or_else(|| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be read",
+            "retry `status --format json`",
+        )
+    })?;
+    io::stdout().lock().write_all(&json).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be written",
+            "retry `status --format json`",
+        )
+    })?;
+    Ok(())
+}
+
+fn unpublished_mutation_count(
+    repository: &orna_repository_v1::Repository,
+) -> Result<usize, Diagnostic> {
+    if !repository.runtime_paths().state_db().exists() {
+        return Ok(0);
+    }
+    let (identity, initial_digest) = runtime_identity(repository)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication status could not be read",
+                "retry `status` after checking the local runtime state",
+            )
+        })?;
+    let state = runtime
+        .block_on(RuntimeState::open(repository, identity, initial_digest))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication status could not be read",
+                "retry `status` after checking the local runtime state",
+            )
+        })?;
+    runtime
+        .block_on(state.publication_metadata_rows())
+        .and_then(|rows| {
+            if rows.sys_storage != rows.maintenance_job {
+                return Err(orna_runtime_v1::RuntimeError::RecoveryInvalid);
+            }
+            match rows.sys_storage.raw() {
+                OvbRaw::Map(fields) => fields
+                    .iter()
+                    .find_map(|(key, value)| match (key, value) {
+                        (OvbRaw::Text(key), OvbRaw::Int(value)) if key == "pending_rows" => {
+                            usize::try_from(value.clone()).ok()
+                        }
+                        _ => None,
+                    })
+                    .ok_or(orna_runtime_v1::RuntimeError::RecoveryInvalid),
+                _ => Err(orna_runtime_v1::RuntimeError::RecoveryInvalid),
+            }
+        })
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication status could not be read",
+                "retry `status` after checking the local runtime state",
+            )
+        })
+}
+
+fn runtime_publication_metadata_rows(
+    endpoint: &Endpoint,
+) -> Result<RuntimePublicationMetadataRows, Diagnostic> {
+    let path = local_project_path(endpoint)?;
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2200",
+            "local runtime publication metadata could not be read",
+            "run the command inside an initialized local Orna repository",
+        )
+    })?;
+    let (identity, initial_digest) = runtime_identity(&repository)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication metadata could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    let state = runtime
+        .block_on(RuntimeState::open(&repository, identity, initial_digest))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication metadata could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    runtime
+        .block_on(state.publication_metadata_rows())
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication metadata could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })
+}
+
+fn write_unpublished_summary<W: io::Write>(writer: &mut W, count: usize) -> io::Result<()> {
+    let noun = if count == 1 { "mutation" } else { "mutations" };
+    writeln!(writer, "Unpublished CWD changes: {count} runtime {noun}")
+}
+
+fn append_unpublished_count_json(mut json: Vec<u8>, count: usize) -> Option<Vec<u8>> {
+    let prefix = json.strip_suffix(b"]}\n")?.len();
+    json.truncate(prefix);
+    json.extend_from_slice(b"],\"unpublished_runtime_mutations\":");
+    json.extend_from_slice(count.to_string().as_bytes());
+    json.extend_from_slice(b"}\n");
+    Some(json)
+}
+
+fn osc8_terminal_supports(
+    term: Option<&str>,
+    terminal_program: Option<&str>,
+    terminal_program_version: Option<&str>,
+    vte_version: Option<&str>,
+    windows_terminal_session: Option<&str>,
+    inside_tmux: bool,
+) -> bool {
+    if inside_tmux {
+        return false;
+    }
+
+    let known_term = matches!(
+        term,
+        Some(
+            "xterm-kitty"
+                | "xterm-ghostty"
+                | "foot"
+                | "foot-extra"
+                | "wezterm"
+                | "wezterm-256color"
+                | "alacritty"
+                | "contour"
+        )
+    );
+    let known_program = matches!(terminal_program, Some("WezTerm" | "ghostty"));
+    let iterm_supports_osc8 = terminal_program == Some("iTerm.app")
+        && terminal_program_version.is_some_and(|version| version_at_least(version, (3, 1, 0)));
+    let alacritty_supports_osc8 = terminal_program == Some("Alacritty")
+        && terminal_program_version.is_some_and(|version| version_at_least(version, (0, 13, 0)));
+    let vscode_supports_osc8 = terminal_program == Some("vscode")
+        && terminal_program_version.is_some_and(|version| version_at_least(version, (1, 72, 0)));
+    let vte_supports_osc8 = vte_version
+        .and_then(|version| version.parse::<u32>().ok())
+        .is_some_and(|version| version >= 5000);
+    let windows_terminal_supports_osc8 =
+        windows_terminal_session.is_some_and(|session| !session.is_empty());
+
+    known_term
+        || known_program
+        || iterm_supports_osc8
+        || alacritty_supports_osc8
+        || vscode_supports_osc8
+        || vte_supports_osc8
+        || windows_terminal_supports_osc8
+}
+
+fn version_at_least(version: &str, minimum: (u32, u32, u32)) -> bool {
+    let mut components = version.split('.');
+    let Some(major) = components.next().and_then(|part| part.parse::<u32>().ok()) else {
+        return false;
+    };
+    let Some(minor) = components.next().and_then(|part| part.parse::<u32>().ok()) else {
+        return false;
+    };
+    let patch = match components.next() {
+        Some(part) => match part.parse::<u32>() {
+            Ok(patch) => patch,
+            Err(_) => return false,
+        },
+        None => 0,
+    };
+    (major, minor, patch) >= minimum
+}
+
+fn terminal_supports_osc8() -> bool {
+    let term = std::env::var("TERM").ok();
+    let terminal_program = std::env::var("TERM_PROGRAM").ok();
+    let terminal_program_version = std::env::var("TERM_PROGRAM_VERSION").ok();
+    let vte_version = std::env::var("VTE_VERSION").ok();
+    let windows_terminal_session = std::env::var("WT_SESSION").ok();
+    let inside_tmux = std::env::var_os("TMUX").is_some();
+    osc8_terminal_supports(
+        term.as_deref(),
+        terminal_program.as_deref(),
+        terminal_program_version.as_deref(),
+        vte_version.as_deref(),
+        windows_terminal_session.as_deref(),
+        inside_tmux,
+    )
+}
+
+fn file_url_for_status_path(root: &std::path::Path, display_token: &[u8]) -> Option<String> {
+    if !root.is_absolute()
+        || display_token.is_empty()
+        || display_token.first() == Some(&b'"')
+        || display_token.iter().any(u8::is_ascii_control)
+    {
+        return None;
+    }
+    let path_text = std::str::from_utf8(display_token).ok()?;
+    if path_text.chars().any(char::is_control) {
+        return None;
+    }
+
+    let relative_path = std::path::Path::new(path_text);
+    if relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let absolute_path = root.join(relative_path);
+    let absolute_path = absolute_path.to_str()?;
+    let absolute_path = if cfg!(windows) {
+        absolute_path.replace('\\', "/")
+    } else {
+        absolute_path.to_owned()
+    };
+    let mut url = String::with_capacity(7 + absolute_path.len().saturating_mul(3));
+    if cfg!(windows) {
+        url.push_str("file:///");
+    } else {
+        url.push_str("file://");
+    }
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for byte in absolute_path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            url.push(char::from(byte));
+        } else {
+            url.push('%');
+            url.push(char::from(HEX[usize::from(byte >> 4)]));
+            url.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    Some(url)
+}
+
+fn write_status_path<W: io::Write>(
+    writer: &mut W,
+    color: AnsiColor,
+    path: &[u8],
+    color_enabled: bool,
+    link_root: Option<&std::path::Path>,
+) -> io::Result<()> {
+    let Some(url) = link_root.and_then(|root| file_url_for_status_path(root, path)) else {
+        return write_styled(writer, color, path, color_enabled);
+    };
+    writer.write_all(b"\x1b]8;;")?;
+    writer.write_all(url.as_bytes())?;
+    writer.write_all(b"\x1b\\")?;
+    write_styled(writer, color, path, color_enabled)?;
+    writer.write_all(b"\x1b]8;;\x1b\\")
+}
+
+fn write_human_status_path<W: io::Write>(
+    writer: &mut W,
+    color: AnsiColor,
+    action: &[u8],
+    path: &[u8],
+    color_enabled: bool,
+    link_root: Option<&std::path::Path>,
+) -> io::Result<()> {
+    if matches!(action, b"renamed" | b"copied") {
+        let separator = b" -> ";
+        let Some(separator_start) = path
+            .windows(separator.len())
+            .position(|window| window == separator)
+        else {
+            return write_styled(writer, color, path, color_enabled);
+        };
+        if path[separator_start + separator.len()..]
+            .windows(separator.len())
+            .any(|window| window == separator)
+        {
+            return write_styled(writer, color, path, color_enabled);
+        }
+        write_status_path(
+            writer,
+            color,
+            &path[..separator_start],
+            color_enabled,
+            link_root,
+        )?;
+        writer.write_all(separator)?;
+        return write_status_path(
+            writer,
+            color,
+            &path[separator_start + separator.len()..],
+            color_enabled,
+            link_root,
+        );
+    }
+    write_status_path(writer, color, path, color_enabled, link_root)
+}
+
+fn write_human_status<W: io::Write>(
+    output: &[u8],
+    writer: &mut W,
+    color_enabled: bool,
+    link_root: Option<&std::path::Path>,
+) -> io::Result<()> {
+    for line in output.split_inclusive(|byte| *byte == b'\n') {
+        let has_newline = line.last() == Some(&b'\n');
+        let content = &line[..line.len() - usize::from(has_newline)];
+        if let Some(branch) = content.strip_prefix(b"On branch ") {
+            writer.write_all(b"On branch ")?;
+            write_styled(writer, AnsiColor::Cyan, branch, color_enabled)?;
+        } else if content.starts_with(b"Changes to be committed:")
+            || content.starts_with(b"Changes not staged for commit:")
+            || content.starts_with(b"Untracked files:")
+        {
+            write_styled(writer, AnsiColor::Yellow, content, color_enabled)?;
+        } else if content.starts_with(b"nothing to commit") {
+            write_styled(writer, AnsiColor::Green, content, color_enabled)?;
+        } else if content.starts_with(b"Your branch ") || content.starts_with(b"  (use ") {
+            write_styled(writer, AnsiColor::Dim, content, color_enabled)?;
+        } else if content.first() == Some(&b'\t')
+            && let Some(colon) = content.iter().position(|byte| *byte == b':')
+        {
+            let action = &content[1..colon];
+            let rest = &content[colon + 1..];
+            let path_start = rest
+                .iter()
+                .position(|byte| !matches!(*byte, b' ' | b'\t'))
+                .unwrap_or(rest.len());
+            let color = if action.starts_with(b"both ")
+                || action.starts_with(b"unmerged")
+                || action.starts_with(b"added by ")
+                || action.starts_with(b"deleted by ")
+            {
+                AnsiColor::Red
+            } else {
+                AnsiColor::Yellow
+            };
+            writer.write_all(b"\t")?;
+            write_styled(writer, color, action, color_enabled)?;
+            writer.write_all(b":")?;
+            writer.write_all(&rest[..path_start])?;
+            write_human_status_path(
+                writer,
+                AnsiColor::Cyan,
+                action,
+                &rest[path_start..],
+                color_enabled,
+                link_root,
+            )?;
+        } else if content.first() == Some(&b'\t') && content.len() > 1 {
+            let rest = &content[1..];
+            let path_start = rest
+                .iter()
+                .position(|byte| !matches!(*byte, b' ' | b'\t'))
+                .unwrap_or(rest.len());
+            writer.write_all(b"\t")?;
+            writer.write_all(&rest[..path_start])?;
+            let path = &rest[path_start..];
+            if path.first() == Some(&b'(') {
+                write_styled(writer, AnsiColor::Cyan, path, color_enabled)?;
+            } else {
+                write_human_status_path(
+                    writer,
+                    AnsiColor::Cyan,
+                    b"",
+                    path,
+                    color_enabled,
+                    link_root,
+                )?;
+            }
+        } else {
+            writer.write_all(content)?;
+        }
+        if has_newline {
+            writer.write_all(b"\n")?;
+        }
+    }
+    Ok(())
+}
+
+fn write_short_status<W: io::Write>(
+    output: &[u8],
+    writer: &mut W,
+    color_enabled: bool,
+) -> io::Result<()> {
+    for line in output.split_inclusive(|byte| *byte == b'\n') {
+        let has_newline = line.last() == Some(&b'\n');
+        let content = &line[..line.len() - usize::from(has_newline)];
+        if content.len() >= 3 && content[2] == b' ' {
+            let code = &content[..2];
+            let color = if code[0] == b'U'
+                || code[1] == b'U'
+                || matches!(
+                    (code[0], code[1]),
+                    (b'D', b'D')
+                        | (b'A', b'A')
+                        | (b'A', b'U')
+                        | (b'U', b'A')
+                        | (b'D', b'U')
+                        | (b'U', b'D')
+                )
+            {
+                AnsiColor::Red
+            } else {
+                AnsiColor::Yellow
+            };
+            write_styled(writer, color, code, color_enabled)?;
+            writer.write_all(b" ")?;
+            write_styled(writer, AnsiColor::Cyan, &content[3..], color_enabled)?;
+        } else {
+            writer.write_all(content)?;
+        }
+        if has_newline {
+            writer.write_all(b"\n")?;
+        }
+    }
+    Ok(())
+}
+
+
+fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
+    let path = local_project_path(endpoint)?;
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree could not be discovered",
+            "run the command inside a Git worktree or provide a local project path",
+        )
+    })?;
+    let unpublished_count = unpublished_mutation_count(&repository)?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository.worktree())
+        .args(["-c", "color.status=false", "status"])
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
@@ -975,7 +1419,23 @@ fn run_status_human(endpoint: &Endpoint) -> Result<(), Diagnostic> {
             "check that Git can read the local worktree, then retry `status`",
         ));
     }
-    io::stdout().write_all(&output.stdout).map_err(|_| {
+    let stdout = io::stdout();
+    let link_root = if stdout.is_terminal() && terminal_supports_osc8() {
+        repository.worktree().canonicalize().ok()
+    } else {
+        None
+    };
+    let mut stdout = stdout.lock();
+    write_human_status(&output.stdout, &mut stdout, color_enabled, link_root.as_deref()).map_err(
+        |_| {
+            Diagnostic::target(
+                "E2100",
+                "local Git worktree status could not be written",
+                "retry `status`",
+            )
+        },
+    )?;
+    write_unpublished_summary(&mut stdout, unpublished_count).map_err(|_| {
         Diagnostic::target(
             "E2100",
             "local Git worktree status could not be written",
@@ -985,7 +1445,7 @@ fn run_status_human(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-fn run_status_short(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+fn run_status_short(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
@@ -1038,7 +1498,7 @@ fn run_status_short(endpoint: &Endpoint) -> Result<(), Diagnostic> {
         .arg(&git_dir)
         .arg("--work-tree")
         .arg(repository.worktree())
-        .args(["status", "--short"])
+        .args(["-c", "color.status=false", "status", "--short"])
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
@@ -1060,7 +1520,8 @@ fn run_status_short(endpoint: &Endpoint) -> Result<(), Diagnostic> {
             "check that Git can read the local worktree, then retry `status --short`",
         ));
     }
-    io::stdout().write_all(&output.stdout).map_err(|_| {
+    let mut stdout = io::stdout().lock();
+    write_short_status(&output.stdout, &mut stdout, color_enabled).map_err(|_| {
         Diagnostic::target(
             "E2100",
             "local Git worktree status could not be written",
@@ -1069,6 +1530,7 @@ fn run_status_short(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     })?;
     Ok(())
 }
+
 
 fn load_project(endpoint: &Endpoint) -> Result<orna_project_v1::LoadedProject, Diagnostic> {
     let project = load_project_without_standard_rejection(endpoint)?;
@@ -1115,13 +1577,12 @@ fn semantic_catalogue() -> orna_semantic_v1::Catalogue {
     orna_semantic_v1::Catalogue::authoritative_core()
 }
 
-fn check_project(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue();
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if analysis.is_ok() {
-        println!("project valid");
-        Ok(())
+        write_success_line("project valid", color_enabled)
     } else {
         let first = analysis
             .diagnostics
@@ -1229,8 +1690,17 @@ fn invocation_owner_id(identity: RuntimeIdentity) -> [u8; 16] {
     identity.repository_id
 }
 
-fn run_project_invocation(endpoint: &Endpoint, root_entry: &str) -> Result<(), Diagnostic> {
-    run_project_invocation_with_arguments(endpoint, root_entry, &Environment::new())
+fn run_project_invocation(
+    endpoint: &Endpoint,
+    root_entry: &str,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
+    run_project_invocation_with_arguments(
+        endpoint,
+        root_entry,
+        &Environment::new(),
+        color_enabled,
+    )
 }
 
 fn public_project_function(analysis: &orna_semantic_v1::Analysis, target: &str) -> bool {
@@ -1251,7 +1721,11 @@ fn public_project_function(analysis: &orna_semantic_v1::Analysis, target: &str) 
         .and_then(|module| module.exports.get(function))
         .is_some_and(|symbol| symbol.kind == orna_semantic_v1::SymbolKind::Function)
 }
-fn run_public_project_function(endpoint: &Endpoint, target: &str) -> Result<(), Diagnostic> {
+fn run_public_project_function(
+    endpoint: &Endpoint,
+    target: &str,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue();
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
@@ -1270,12 +1744,20 @@ fn run_public_project_function(endpoint: &Endpoint, target: &str) -> Result<(), 
     }
     let execution = execution_project(&project);
     if DurableTransactionalEvaluator::default().project_stream_root_admitted(&execution, target) {
-        return run_project_stream_invocation_with_project(endpoint, target, &execution);
+        return run_project_stream_invocation_with_project(
+            endpoint,
+            target,
+            &execution,
+            color_enabled,
+        );
     }
-    run_project_invocation(endpoint, target)
+    run_project_invocation(endpoint, target, color_enabled)
 }
-
-fn run_project_stream_invocation(endpoint: &Endpoint, root_entry: &str) -> Result<(), Diagnostic> {
+fn run_project_stream_invocation(
+    endpoint: &Endpoint,
+    root_entry: &str,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue();
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
@@ -1287,13 +1769,13 @@ fn run_project_stream_invocation(endpoint: &Endpoint, root_entry: &str) -> Resul
         ));
     }
     let execution = execution_project(&project);
-    run_project_stream_invocation_with_project(endpoint, root_entry, &execution)
+    run_project_stream_invocation_with_project(endpoint, root_entry, &execution, color_enabled)
 }
-
 fn run_project_invocation_with_arguments(
     endpoint: &Endpoint,
     root_entry: &str,
     arguments: &Environment,
+    color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let repository = orna_repository_v1::Repository::discover(local_project_path(endpoint)?)
         .map_err(|_| {
@@ -1363,10 +1845,7 @@ fn run_project_invocation_with_arguments(
             )
         })?;
     match outcome {
-        StageOutcome::Passed => {
-            println!("invocation completed");
-            Ok(())
-        }
+        StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
         StageOutcome::Failed(_) => Err(Diagnostic::target(
             "E2200",
             "durable project invocation was rejected",
@@ -1378,7 +1857,7 @@ fn run_project_invocation_with_arguments(
                 && reason
                     == "project transaction admission does not run stream roots; use the explicit finite-list stream seam" =>
         {
-            run_project_stream_invocation(endpoint, root_entry)
+            run_project_stream_invocation(endpoint, root_entry, color_enabled)
         }
         StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "durable project invocation is not available",
@@ -1386,11 +1865,11 @@ fn run_project_invocation_with_arguments(
         )),
     }
 }
-
 fn run_project_stream_invocation_with_project(
     endpoint: &Endpoint,
     root_entry: &str,
     project: &ProjectUnit,
+    color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let repository = orna_repository_v1::Repository::discover(local_project_path(endpoint)?)
         .map_err(|_| {
@@ -1430,10 +1909,7 @@ fn run_project_stream_invocation_with_project(
             )
         })?;
     match outcome {
-        StageOutcome::Passed => {
-            println!("invocation completed");
-            Ok(())
-        }
+        StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
         StageOutcome::Failed(_) => Err(Diagnostic::target(
             "E2200",
             "durable project stream delivery failed",
@@ -1446,8 +1922,11 @@ fn run_project_stream_invocation_with_project(
         )),
     }
 }
-
-fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnostic> {
+fn run_pure_invocation(
+    endpoint: &Endpoint,
+    target: &str,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     if project.modules().len() == 1 {
         let identity = &project.identities()[0];
@@ -1471,17 +1950,41 @@ fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnost
                         error.to_string(),
                     )
                 })?;
-            authority
-                .evaluate(&admitted, &Environment::new())
-                .map_err(|error| {
-                    Diagnostic::target_with_detail(
-                        "E2200",
-                        "pure project invocation failed",
-                        "fix the admitted function or retry the invocation",
-                        error.to_string(),
+            if admitted.requires_publication_metadata() {
+                let publication_rows = runtime_publication_metadata_rows(endpoint)?;
+                let activation = authority
+                    .evaluate_staged_with_publication_rows(
+                        &admitted,
+                        &Environment::new(),
+                        publication_rows,
                     )
-                })?;
-            println!("invocation completed");
+                    .map_err(|error| {
+                        Diagnostic::target_with_detail(
+                            "E2200",
+                            "pure project invocation failed",
+                            "fix the admitted function or retry the invocation",
+                            error.to_string(),
+                        )
+                    })?;
+                if !activation.mutations().is_empty() {
+                    return Err(Diagnostic::unavailable(
+                        "one-shot invocation cannot commit table mutations",
+                        "use a supported table transaction; stream roots require the explicit stream runtime",
+                    ));
+                }
+            } else {
+                authority
+                    .evaluate(&admitted, &Environment::new())
+                    .map_err(|error| {
+                        Diagnostic::target_with_detail(
+                            "E2200",
+                            "pure project invocation failed",
+                            "fix the admitted function or retry the invocation",
+                            error.to_string(),
+                        )
+                    })?;
+            }
+            write_success_line("invocation completed", color_enabled)?;
             return Ok(());
         }
     }
@@ -1507,10 +2010,7 @@ fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnost
         }
     }
     match evaluator.invoke(target) {
-        StageOutcome::Passed => {
-            println!("invocation completed");
-            Ok(())
-        }
+        StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "requested invocation is not available",
@@ -1518,6 +2018,10 @@ fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnost
         )),
     }
 }
+
+
+
+
 
 fn repl_session(endpoint: &Endpoint) -> Result<AdmittedReplSession, Diagnostic> {
     let project_context = match endpoint {
@@ -1614,17 +2118,37 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
     }
 }
 
-fn run_repl_submission<W: std::io::Write>(
+fn run_repl_submission<W: io::Write>(
     session: &mut AdmittedReplSession,
     source: &str,
     writer: &mut W,
+    color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     if source.trim() == ":quit" {
         return Ok(());
     }
     match session.submit(source) {
         Ok(Some(value)) => {
-            writeln!(writer, "{}", repl::inspect(&value)).map_err(|_| {
+            let rendered = repl::inspect(&value);
+            let (result, ty) = rendered
+                .rsplit_once(" : ")
+                .unwrap_or((rendered.as_str(), ""));
+            write_styled(
+                writer,
+                AnsiColor::Green,
+                result.as_bytes(),
+                color_enabled,
+            )
+            .and_then(|()| {
+                if ty.is_empty() {
+                    Ok(())
+                } else {
+                    writer.write_all(b" : ")?;
+                    write_styled(writer, AnsiColor::Dim, ty.as_bytes(), color_enabled)
+                }
+            })
+            .and_then(|()| writer.write_all(b"\n"))
+            .map_err(|_| {
                 Diagnostic::target(
                     "E2200",
                     "REPL console I/O failed",
@@ -1654,8 +2178,11 @@ fn run_repl_submission<W: std::io::Write>(
         }
     }
 }
-
-fn run_repl(endpoint: &Endpoint, expression: Option<&str>) -> Result<(), Diagnostic> {
+fn run_repl(
+    endpoint: &Endpoint,
+    expression: Option<&str>,
+    color_mode: ColorMode,
+) -> Result<(), Diagnostic> {
     if matches!(endpoint, Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_)) {
         return Err(Diagnostic::target(
             "E2100",
@@ -1664,17 +2191,24 @@ fn run_repl(endpoint: &Endpoint, expression: Option<&str>) -> Result<(), Diagnos
         ));
     }
     let mut session = repl_session(endpoint)?;
+    let color_enabled = color_mode.stdout_enabled();
     if let Some(source) = expression {
-        return run_repl_submission(&mut session, source, &mut io::stdout().lock());
+        return run_repl_submission(
+            &mut session,
+            source,
+            &mut io::stdout().lock(),
+            color_enabled,
+        );
     }
     let stdin = io::stdin();
     let stdout = io::stdout();
     let loader = ReplSnapshotSessionLoader { endpoint };
-    repl::run_with_snapshot_loader(
+    repl::run_with_snapshot_loader_and_color(
         &mut BufReader::new(stdin.lock()),
         &mut stdout.lock(),
         &mut session,
         &loader,
+        color_enabled,
     )
     .map_err(|_| {
         Diagnostic::target(
@@ -1684,6 +2218,33 @@ fn run_repl(endpoint: &Endpoint, expression: Option<&str>) -> Result<(), Diagnos
         )
     })
 }
+fn main() -> ExitCode {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let requested_color = requested_color_mode(&args);
+    let parsed = match parse_cli(&args) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = write_diagnostic(
+                &mut io::stderr().lock(),
+                &error,
+                requested_color.stderr_enabled(),
+            );
+            return ExitCode::from(error.exit as u8);
+        }
+    };
+    match execute(&parsed) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let _ = write_diagnostic(
+                &mut io::stderr().lock(),
+                &error,
+                parsed.color.stderr_enabled(),
+            );
+            ExitCode::from(error.exit as u8)
+        }
+    }
+}
+
 
 fn repository_init_diagnostic(error: &orna_repository_v1::RepositoryInitError) -> Diagnostic {
     let code = error.code();
@@ -1732,14 +2293,21 @@ fn repository_init_diagnostic(error: &orna_repository_v1::RepositoryInitError) -
     Diagnostic::target(code, title, help)
 }
 
-fn initialize_repository(target: Option<&std::path::Path>) -> Result<(), Diagnostic> {
+fn initialize_repository(
+    target: Option<&std::path::Path>,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
     let target = target.unwrap_or_else(|| std::path::Path::new("."));
     orna_repository_v1::initialize_repository(target)
         .map_err(|error| repository_init_diagnostic(&error))?;
-    println!("initialized Orna repository");
-    Ok(())
+    write_success_line("initialized Orna repository", color_enabled)
 }
-fn run_fetch(endpoint: &Endpoint, remote: &str, branch: &str) -> Result<(), Diagnostic> {
+fn run_fetch(
+    endpoint: &Endpoint,
+    remote: &str,
+    branch: &str,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
@@ -1782,113 +2350,60 @@ fn run_fetch(endpoint: &Endpoint, remote: &str, branch: &str) -> Result<(), Diag
             "check the configured remote and retry `fetch`",
         )
     })?;
-    let state = if fetched.updated() {
-        "updated"
+    let (state, state_color) = if fetched.updated() {
+        ("updated", AnsiColor::Yellow)
     } else {
-        "unchanged"
+        ("unchanged", AnsiColor::Dim)
     };
-    println!(
-        "fetched {} -> {} ({state})",
-        fetched.source(),
-        fetched.destination()
-    );
+    let mut stdout = io::stdout().lock();
+    write_styled(&mut stdout, AnsiColor::Green, b"fetched ", color_enabled)
+        .and_then(|()| {
+            write_styled_display(
+                &mut stdout,
+                AnsiColor::Cyan,
+                fetched.source(),
+                color_enabled,
+            )
+        })
+        .and_then(|()| stdout.write_all(b" -> "))
+        .and_then(|()| {
+            write_styled_display(
+                &mut stdout,
+                AnsiColor::Cyan,
+                fetched.destination(),
+                color_enabled,
+            )
+        })
+        .and_then(|()| stdout.write_all(b" ("))
+        .and_then(|()| write_styled_display(&mut stdout, state_color, state, color_enabled))
+        .and_then(|()| stdout.write_all(b")\n"))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "could not write command output",
+                "check that stdout is available, then retry the command",
+            )
+        })?;
     Ok(())
 }
 
 
-fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
-    match parsed.command.clone() {
-        Command::Help => {
-            println!(
-                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|status|status --porcelain|status --short|fetch [REMOTE] [BRANCH]|check|explain CODE|invoke TARGET|run [QUALIFIED_FUNCTION]|run seed|run exercise|run sensors.ingest|run library.lend BOOK_ID BORROWER]"
-            );
-            println!("orna-cli-v1 init [DIRECTORY]");
-            Ok(())
-        }
-        Command::Version => {
-            println!("orna-cli-v1 0.1.0");
-            Ok(())
-        }
-        Command::Init(ref target) => initialize_repository(target.as_deref()),
-        Command::Fetch { ref remote, ref branch } => run_fetch(&parsed.endpoint, remote, branch),
-        Command::Status {
-            format: StatusFormat::Human,
-        } => run_status_human(&parsed.endpoint),
-        Command::Status {
-            format: StatusFormat::Porcelain,
-        } => run_status(&parsed.endpoint),
-        Command::Status {
-            format: StatusFormat::Short,
-        } => run_status_short(&parsed.endpoint),
-        Command::Check => check_project(&parsed.endpoint),
-        Command::Invoke(ref target) => run_pure_invocation(&parsed.endpoint, target),
-        Command::Explain(code) => {
-            println!("{}", explain_diagnostic(&code)?);
-            Ok(())
-        }
-        Command::Repl(ref expression) => run_repl(&parsed.endpoint, expression.as_deref()),
-        Command::Run(Invocation::Seed) => run_project_invocation(&parsed.endpoint, "main.seed"),
-        Command::Run(Invocation::Exercise) => {
-            run_project_invocation(&parsed.endpoint, "main.exercise")
-        }
-        Command::Run(Invocation::SensorsIngest) => {
-            run_project_stream_invocation(&parsed.endpoint, "sensors.ingest")
-        }
-        Command::Run(Invocation::LibraryLend {
-            ref book_id,
-            ref borrower,
-        }) => {
-            let arguments = Environment::from([
-                (
-                    "book_id".into(),
-                    Value::new(OvbRaw::Text(book_id.clone())).map_err(|_| {
-                        Diagnostic::usage(
-                            "E1002",
-                            "`run library.lend` received an invalid book ID",
-                            "supply a valid Orna string value for the book ID",
-                        )
-                    })?,
-                ),
-                (
-                    "borrower".into(),
-                    Value::new(OvbRaw::Text(borrower.clone())).map_err(|_| {
-                        Diagnostic::usage(
-                            "E1002",
-                            "`run library.lend` received an invalid borrower",
-                            "supply a valid Orna string value for the borrower",
-                        )
-                    })?,
-                ),
-            ]);
-            run_project_invocation_with_arguments(&parsed.endpoint, "library.lend", &arguments)
-        }
-        Command::Run(Invocation::ProjectFunction(ref target)) => {
-            run_public_project_function(&parsed.endpoint, target)
-        }
-    }
-}
-
-fn main() -> ExitCode {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let parsed = match parse_cli(&args) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("{error}");
-            return ExitCode::from(error.exit as u8);
-        }
-    };
-    match execute(&parsed) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("{error}");
-            ExitCode::from(error.exit as u8)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use orna_runtime_v1::{Mutation, NoFault, RunObservationStatus, RuntimeState};
+    use sha2::{Digest, Sha256};
+    #[test]
+    fn color_mode_respects_stream_tty_and_explicit_overrides() {
+        assert!(!ColorMode::Auto.enabled(false));
+        assert!(ColorMode::Auto.enabled(true));
+        assert!(ColorMode::Always.enabled(false));
+        assert!(ColorMode::Always.enabled(true));
+        assert!(!ColorMode::Never.enabled(false));
+        assert!(!ColorMode::Never.enabled(true));
+    }
+
     #[test]
     #[allow(
         clippy::too_many_lines,
@@ -1906,6 +2421,41 @@ mod tests {
         assert_eq!(
             parsed.endpoint,
             Endpoint::RemoteTls("orna://host/reference".into())
+        );
+        assert_eq!(
+            parse_cli(&["status".into()]).expect("default color mode parses").color,
+            ColorMode::Auto
+        );
+        let colored = parse_cli(&[
+            "--color".into(),
+            "always".into(),
+            "--db".into(),
+            "project".into(),
+            "status".into(),
+        ])
+        .expect("global color and database options parse before the command");
+        assert_eq!(colored.color, ColorMode::Always);
+        assert_eq!(colored.endpoint, Endpoint::Path("project".into()));
+        assert_eq!(
+            parse_cli(&["--color".into(), "never".into(), "status".into()])
+                .expect("never mode parses")
+                .color,
+            ColorMode::Never
+        );
+        let error = parse_cli(&["--color".into(), "invalid".into(), "status".into()])
+            .expect_err("invalid color mode is rejected");
+        assert_eq!(
+            (error.code, error.title, error.help),
+            (
+                "E1002",
+                "unsupported value for `--color`",
+                "choose `auto`, `always`, or `never`"
+            )
+        );
+        let error = parse_cli(&["--color".into()]).expect_err("color mode value is required");
+        assert_eq!(
+            (error.code, error.title),
+            ("E1001", "option `--color` needs a value")
         );
         assert_eq!(
             parse_cli(&["check".into()]).unwrap().command,
@@ -1947,14 +2497,22 @@ mod tests {
                 format: StatusFormat::Short,
             }
         );
+        assert_eq!(
+            parse_cli(&["status".into(), "--format".into(), "json".into()])
+                .expect("JSON status parses")
+                .command,
+            Command::Status {
+                format: StatusFormat::Json,
+            }
+        );
         let error = parse_cli(&["status".into(), "--porcelain=v2".into()])
             .expect_err("status format is exact");
         assert_eq!(error.code, "E1002");
         assert_eq!(
             (error.title, error.help),
             (
-                "`status` supports no option, `--porcelain`, or `--short`",
-                "use `status`, `status --porcelain`, or `status --short`"
+                "unsupported `status` option or option placement",
+                "use `status`, `status --porcelain`, `status --short`, `status --format human|short|json`, or `--format human|short|json status`"
             )
         );
         assert_eq!(
@@ -2064,6 +2622,200 @@ mod tests {
     }
 
     #[test]
+    fn human_status_links_safe_paths_only_for_supported_terminal_capabilities() {
+        const FIXTURE: &str = include_str!("../tests/fixtures/function-expression.orna");
+        let directory = tempfile::tempdir().expect("status repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git init")
+                .success()
+        );
+        for name in ["function-expression.orna", "function expression#?.orna"] {
+            std::fs::write(directory.path().join(name), FIXTURE).expect("fixture source");
+        }
+
+        let human_output = std::process::Command::new("git")
+            .args(["-c", "color.status=false", "status", "--untracked-files=all"])
+            .current_dir(directory.path())
+            .output()
+            .expect("human Git status");
+        assert!(human_output.status.success());
+        let root = directory.path().canonicalize().expect("absolute repository root");
+        let mut without_links = Vec::new();
+        write_human_status(&human_output.stdout, &mut without_links, true, None)
+            .expect("unlinked human status");
+        let mut linked = Vec::new();
+        write_human_status(
+            &human_output.stdout,
+            &mut linked,
+            true,
+            Some(&root),
+        )
+        .expect("linked human status");
+
+        let linked_text = std::str::from_utf8(&linked).expect("UTF-8 human status");
+        for (name, encoded_suffix) in [
+            ("function-expression.orna", "/function-expression.orna"),
+            ("function expression#?.orna", "/function%20expression%23%3F.orna"),
+        ] {
+            let url = file_url_for_status_path(&root, name.as_bytes()).expect("safe file URL");
+            assert!(url.starts_with("file:///"));
+            assert!(url.ends_with(encoded_suffix), "{url}");
+            assert!(
+                linked_text.contains(&format!("\x1b]8;;{url}\x1b\\")),
+                "missing OSC 8 URL for {name:?}"
+            );
+            assert!(linked_text.contains(name), "missing visible path {name:?}");
+        }
+        assert_eq!(visible_without_osc8(&linked), without_links);
+        assert!(file_url_for_status_path(&root, b"\"quoted path\"").is_none());
+        assert!(file_url_for_status_path(&root, b"control\npath").is_none());
+        assert!(file_url_for_status_path(&root, b"../outside").is_none());
+        assert!(file_url_for_status_path(&root, &[0xff]).is_none());
+
+        assert!(osc8_terminal_supports(
+            Some("xterm-kitty"),
+            None,
+            None,
+            None,
+            None,
+            false,
+        ));
+        assert!(!osc8_terminal_supports(
+            Some("xterm-256color"),
+            None,
+            None,
+            None,
+            None,
+            false,
+        ));
+        assert!(!osc8_terminal_supports(
+            Some("xterm-kitty"),
+            None,
+            None,
+            None,
+            None,
+            true,
+        ));
+        assert!(osc8_terminal_supports(
+            None,
+            Some("iTerm.app"),
+            Some("3.1.0"),
+            None,
+            None,
+            false,
+        ));
+        assert!(!osc8_terminal_supports(
+            None,
+            Some("iTerm.app"),
+            Some("3.0.9"),
+            None,
+            None,
+            false,
+        ));
+
+        let short_output = std::process::Command::new("git")
+            .args(["status", "--short", "--untracked-files=all"])
+            .current_dir(directory.path())
+            .output()
+            .expect("short Git status");
+        assert!(short_output.status.success());
+        let mut rendered_short = Vec::new();
+        write_short_status(&short_output.stdout, &mut rendered_short, false)
+            .expect("rendered short status");
+        assert_eq!(rendered_short, short_output.stdout);
+    }
+
+    #[test]
+    fn unpublished_status_summary_reports_zero_and_remaining_runtime_mutations() {
+        let mut rendered = Vec::new();
+        write_unpublished_summary(&mut rendered, 0).expect("empty unpublished summary");
+        write_unpublished_summary(&mut rendered, 1).expect("singular unpublished summary");
+        write_unpublished_summary(&mut rendered, 2).expect("plural unpublished summary");
+        assert_eq!(
+            rendered,
+            b"Unpublished CWD changes: 0 runtime mutations\nUnpublished CWD changes: 1 runtime mutation\nUnpublished CWD changes: 2 runtime mutations\n"
+        );
+    }
+
+    #[test]
+    fn json_status_includes_unpublished_runtime_mutation_count() {
+        assert_eq!(
+            append_unpublished_count_json(
+                b"{\"branch\":\"main\",\"changes\":[]}\n".to_vec(),
+                4,
+            )
+            .expect("JSON status terminator"),
+            b"{\"branch\":\"main\",\"changes\":[],\"unpublished_runtime_mutations\":4}\n"
+        );
+        assert!(append_unpublished_count_json(b"{}".to_vec(), 0).is_none());
+    }
+
+    #[test]
+    fn unpublished_mutation_count_reads_the_runtime_pending_tail() {
+        let directory = tempfile::tempdir().expect("status repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git init")
+                .success()
+        );
+        orna_repository_v1::initialize_repository(directory.path())
+            .expect("initialize Orna repository");
+        let repository = orna_repository_v1::Repository::discover(directory.path())
+            .expect("discover initialized repository");
+        let (identity, initial_digest) = runtime_identity(&repository).expect("runtime identity");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime executor");
+        let state = runtime
+            .block_on(RuntimeState::open(&repository, identity, initial_digest))
+            .expect("open runtime state");
+        assert_eq!(unpublished_mutation_count(&repository), Ok(0));
+
+        let payload = b"pending table mutation".to_vec();
+        let mutation = Mutation {
+            id: [1; 16],
+            digest: Sha256::digest(&payload).into(),
+            payload,
+        };
+        runtime
+            .block_on(async {
+                let lease = state.acquire_lease(identity.repository_id).await?;
+                let capture = state.capture().await?;
+                state
+                    .commit(lease, &capture, &mutation, [2; 32], &NoFault)
+                    .await
+            })
+            .expect("append durable runtime mutation");
+        drop(state);
+
+        assert_eq!(unpublished_mutation_count(&repository), Ok(1));
+    }
+
+    fn visible_without_osc8(output: &[u8]) -> Vec<u8> {
+        let mut visible = Vec::with_capacity(output.len());
+        let mut remaining = output;
+        while let Some(start) = remaining.windows(4).position(|window| window == b"\x1b]8;") {
+            visible.extend_from_slice(&remaining[..start]);
+            let link = &remaining[start..];
+            let end = link
+                .windows(2)
+                .position(|window| window == b"\x1b\\")
+                .expect("OSC 8 terminator");
+            remaining = &link[end + 2..];
+        }
+        visible.extend_from_slice(remaining);
+        visible
+    }
+
+    #[test]
     fn bare_status_dispatches_to_git_human_status() {
         let directory = tempfile::tempdir().expect("status repository");
         assert!(
@@ -2079,6 +2831,7 @@ mod tests {
             execute(&Parsed {
                 endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
                 command: parsed.command,
+                color: ColorMode::Auto,
             }),
             Ok(())
         );
@@ -2453,14 +3206,38 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_output_preserves_detail_help_and_final_newline() {
+        let diagnostic = Diagnostic::target_with_detail(
+            "E2300",
+            "request failed",
+            "retry the operation",
+            "the expected remote response was unavailable",
+        );
+        let mut plain = Vec::new();
+        write_diagnostic(&mut plain, &diagnostic, false).expect("plain diagnostic write");
+        assert_eq!(
+            plain,
+            format!("{diagnostic}\n").as_bytes(),
+            "plain CLI diagnostic stays identical to Display plus eprintln's final newline"
+        );
+
+        let mut colored = Vec::new();
+        write_diagnostic(&mut colored, &diagnostic, true).expect("colored diagnostic write");
+        assert_eq!(
+            String::from_utf8(colored).expect("diagnostic is UTF-8"),
+            "\x1b[31merror\x1b[0m[\x1b[31mE2300\x1b[0m]: \x1b[31mrequest failed\x1b[0m\n  \x1b[2mthe expected remote response was unavailable\x1b[0m\nhelp: \x1b[2mretry the operation\x1b[0m\n"
+        );
+    }
+
+    #[test]
     fn single_expression_repl_reports_visible_success_failure_and_quit() {
         let mut session = AdmittedReplSession::new(Limits::default());
         let mut output = Vec::new();
         assert_eq!(
-            run_repl_submission(&mut session, "1 + 2", &mut output),
+            run_repl_submission(&mut session, "1 + 2", &mut output, false),
             Ok(())
         );
-        let error = run_repl_submission(&mut session, "missing()", &mut output)
+        let error = run_repl_submission(&mut session, "missing()", &mut output, false)
             .expect_err("failure is reported");
         assert_eq!(error.code, "ORNA-S012-UNRESOLVED");
         assert_eq!(error.title, "name could not be resolved");
@@ -2474,7 +3251,7 @@ mod tests {
             "error[ORNA-S012-UNRESOLVED]: name could not be resolved\nhelp: declare the name or add the matching `use` import before using it"
         );
         assert_eq!(
-            run_repl_submission(&mut session, ":quit", &mut output),
+            run_repl_submission(&mut session, ":quit", &mut output, false),
             Ok(())
         );
         assert_eq!(
@@ -2499,7 +3276,8 @@ mod tests {
     fn single_expression_repl_converts_writer_failure_to_console_diagnostic() {
         let mut session = AdmittedReplSession::new(Limits::default());
         let error =
-            run_repl_submission(&mut session, "1", &mut BrokenWriter).expect_err("writer failure");
+            run_repl_submission(&mut session, "1", &mut BrokenWriter, false)
+                .expect_err("writer failure");
         assert_eq!((error.code, error.exit), ("E2200", Exit::Target));
     }
     #[test]
@@ -2565,7 +3343,7 @@ mod tests {
         );
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        assert_eq!(check_project(&endpoint), Ok(()));
+        assert_eq!(check_project(&endpoint, false), Ok(()));
     }
 
     #[test]
@@ -2605,6 +3383,7 @@ mod tests {
             execute(&Parsed {
                 endpoint: endpoint.clone(),
                 command: Command::Check,
+                color: ColorMode::Auto,
             }),
             Ok(())
         );
@@ -2612,6 +3391,7 @@ mod tests {
             execute(&Parsed {
                 endpoint: endpoint.clone(),
                 command: Command::Run(Invocation::Seed),
+                color: ColorMode::Auto,
             }),
             Ok(())
         );
@@ -2636,6 +3416,7 @@ mod tests {
         let error = execute(&Parsed {
             endpoint: endpoint.clone(),
             command: Command::Run(Invocation::Seed),
+            color: ColorMode::Auto,
         })
         .expect_err("duplicate seed must be rejected");
         assert_eq!((error.code, error.exit), ("E2200", Exit::Target));
@@ -2643,6 +3424,7 @@ mod tests {
             execute(&Parsed {
                 endpoint: endpoint.clone(),
                 command: Command::Run(Invocation::Exercise),
+                color: ColorMode::Auto,
             }),
             Ok(())
         );
@@ -2650,6 +3432,7 @@ mod tests {
             execute(&Parsed {
                 endpoint,
                 command: Command::Run(Invocation::SensorsIngest),
+                color: ColorMode::Auto,
             }),
             Ok(())
         );
@@ -2681,6 +3464,7 @@ mod tests {
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Run(Invocation::Seed),
+            color: ColorMode::Auto,
         };
         assert_eq!(execute(&parsed), Ok(()));
     }
@@ -2709,6 +3493,7 @@ mod tests {
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Invoke("library.value".into()),
+            color: ColorMode::Auto,
         };
         assert_eq!(execute(&parsed), Ok(()));
     }
@@ -2731,7 +3516,7 @@ mod tests {
         );
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let error = check_project(&endpoint).expect_err("uncaptured standard module");
+        let error = check_project(&endpoint, false).expect_err("uncaptured standard module");
         assert_eq!(
             (error.code, error.exit, error.title, error.help),
             (
@@ -2761,7 +3546,7 @@ mod tests {
         );
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let error = check_project(&endpoint).expect_err("unbundled standard module");
+        let error = check_project(&endpoint, false).expect_err("unbundled standard module");
         assert_eq!(
             (error.code, error.exit, error.title, error.help),
             (
@@ -2792,6 +3577,7 @@ mod tests {
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Invoke("seed".into()),
+            color: ColorMode::Auto,
         };
         let error = execute(&parsed).expect_err("uncaptured standard module");
         assert_eq!(
@@ -2824,6 +3610,7 @@ mod tests {
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Invoke("seed".into()),
+            color: ColorMode::Auto,
         };
         let error = execute(&parsed).expect_err("uncaptured standard module");
         assert_eq!(
@@ -2855,7 +3642,7 @@ mod tests {
         );
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let error = check_project(&endpoint).expect_err("semantic error");
+        let error = check_project(&endpoint, false).expect_err("semantic error");
         let rendered = error.to_string();
         assert_eq!((error.code, error.exit), ("E2101", Exit::Target));
         assert!(rendered.contains("ORNA-S021-TYPE"));
@@ -3234,6 +4021,7 @@ mod tests {
                 remote: "origin".into(),
                 branch: "main".into(),
             },
+            color: ColorMode::Auto,
         })
         .expect("fetch command");
         assert_eq!(git(&local, &["rev-parse", "HEAD"]), initial);

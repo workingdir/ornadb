@@ -1,0 +1,2 @@
+pub fn start_erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+    sys.start(function, arguments);

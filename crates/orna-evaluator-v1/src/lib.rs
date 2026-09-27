@@ -44,26 +44,18 @@ pub use timezone::{
 pub use repl::{ReplSession, parse_admitted_repl};
 
 /// The verified standard-source bundle used by the bounded local and remote
-/// REPL boundaries. The source is included from the same canonical module
-/// file as the executable local REPL, while this crate owns verification of
-/// its profile before either boundary admits an import.
-const REFERENCE_STD_MATH_LOGICAL_PATH: &str = "std/math.orna";
-const REFERENCE_STD_MATH_SOURCE: &str = include_str!("../../orna-cli-v1/src/stdlib/std/math.orna");
-
+/// REPL boundaries. `orna-standard` owns the canonical module source; this
+/// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
 pub fn reference_standard_sources() -> [(String, String); 1] {
-    [(
-        REFERENCE_STD_MATH_LOGICAL_PATH.into(),
-        REFERENCE_STD_MATH_SOURCE.into(),
-    )]
+    orna_standard::reference_standard_sources_v1()
 }
 
 /// Returns the immutable profile that verifies [`reference_standard_sources`].
 #[must_use]
 pub fn reference_standard_profile() -> StandardDependencyProfile {
-    StandardDependencyProfile::from_sources("orna.std/v1-pure-math", reference_standard_sources())
-        .expect("the bundled reference standard sources are valid")
+    orna_standard::reference_standard_profile_v1()
 }
 
 const DEFAULT_SOURCE_BYTES: usize = 65_536;
@@ -1838,6 +1830,7 @@ struct Scope(
     BTreeSet<String>,
     BTreeSet<String>,
     NominalDefinitions,
+    BTreeSet<String>,
 );
 impl Scope {
     fn from_environment(
@@ -1869,6 +1862,7 @@ impl Scope {
             BTreeSet::new(),
             BTreeSet::new(),
             nominal_definitions.clone(),
+            BTreeSet::new(),
         ))
     }
 }
@@ -2187,6 +2181,50 @@ impl Context<'_, '_> {
                 arms,
                 ..
             } => self.case(condition, arms, scope, depth),
+            Expr::Control {
+                kind: ControlKind::While,
+                binding: None,
+                condition: Some(condition),
+                body: Some(body),
+                arms,
+                alternate: None,
+                ..
+            } if arms.is_empty() => loop {
+                match self.evaluate(condition, scope, depth + 1)? {
+                    _ if self.transfer.is_some() => return Ok(Value::Null),
+                    Value::Bool(false) => break Ok(Value::Unit),
+                    Value::Bool(true) => {}
+                    _ => break Err(error("ORNA-EVAL-TYPE")),
+                }
+                self.evaluate(body, scope, depth + 1)?;
+                match self.transfer.take() {
+                    None | Some(Transfer::Continue) => {}
+                    Some(Transfer::Break(value)) => break Ok(value),
+                    Some(transfer @ Transfer::Return(_)) => {
+                        self.transfer = Some(transfer);
+                        break Ok(Value::Null);
+                    }
+                }
+            },
+            Expr::Control {
+                kind: ControlKind::Loop,
+                binding: None,
+                condition: None,
+                body: Some(body),
+                arms,
+                alternate: None,
+                ..
+            } if arms.is_empty() => loop {
+                self.evaluate(body, scope, depth + 1)?;
+                match self.transfer.take() {
+                    None | Some(Transfer::Continue) => {}
+                    Some(Transfer::Break(value)) => break Ok(value),
+                    Some(transfer @ Transfer::Return(_)) => {
+                        self.transfer = Some(transfer);
+                        break Ok(Value::Null);
+                    }
+                }
+            },
             Expr::Control {
                 kind: ControlKind::For,
                 binding: Some(binding),
@@ -2691,7 +2729,10 @@ impl Context<'_, '_> {
                 self.range_contains(value, range)
             }
             "|" => {
-                let input = self.evaluate(lhs, scope, depth + 1)?;
+                let input = match system_relation_source(lhs) {
+                    Some(source) => Value::Relation(RelationPlan::new(source.to_owned())),
+                    None => self.evaluate(lhs, scope, depth + 1)?,
+                };
                 if self.transfer.is_some() {
                     return Ok(Value::Null);
                 }
@@ -5021,9 +5062,11 @@ impl Context<'_, '_> {
                 };
                 self.exact_decimal_result(value, preserve_decimal)
             }
-            Err(failure) if failure.code() == "ORNA-EVAL-VALUE" => {
+            Err(failure)
+                if matches!(failure.code(), "InexactDivision" | "ORNA-EVAL-VALUE") =>
+            {
                 let Some((scale, _)) = options else {
-                    return Err(failure);
+                    return Err(error("ORNA-EVAL-VALUE"));
                 };
                 self.exact_decimal_result(left.divide_rounded(right, scale)?, preserve_decimal)
             }
@@ -6491,6 +6534,14 @@ fn function_name(expression: &Expr) -> Option<String> {
     }
 }
 
+fn system_relation_source(expression: &Expr) -> Option<&'static str> {
+    match function_name(expression)?.as_str() {
+        "sys.Storage" => Some("sys.Storage"),
+        "sys.MaintenanceJob" => Some("sys.MaintenanceJob"),
+        _ => None,
+    }
+}
+
 fn function_namespace(name: &str) -> Option<String> {
     name.rsplit_once('.')
         .map(|(namespace, _)| namespace.to_owned())
@@ -6508,7 +6559,9 @@ fn is_static_effect_path(callee: &Expr, scope: &Scope) -> bool {
     matches!(callee, Expr::Field { base, .. }
         if matches!(base.as_ref(), Expr::ReplBinding { text, .. } if text == "$__orna_relation"))
         || matches!(callee, Expr::Field { .. })
-            && function_root_name(callee).is_some_and(|root| !scope.0.contains_key(root))
+            && function_root_name(callee).is_some_and(|root| {
+                scope.4.contains(root) || !scope.0.contains_key(root)
+            })
 }
 
 fn one_like(value: &Value) -> Result<Value, EvaluationError> {
@@ -7061,6 +7114,7 @@ mod tests {
             BTreeSet::new(),
             BTreeSet::new(),
             NominalDefinitions::from([("Thing".into(), definition)]),
+            BTreeSet::new(),
         );
         let fields = vec![
             (object_id_raw([2; 16]), Value::Int(1.into())),
@@ -7550,6 +7604,7 @@ mod tests {
             BTreeSet::new(),
             BTreeSet::new(),
             NominalDefinitions::new(),
+            BTreeSet::new(),
         );
         scope.0.insert("failure".into(), Value::Error(failure));
         context.evaluate(&parsed.value, &mut scope, 0)
@@ -7622,6 +7677,7 @@ mod tests {
             BTreeSet::new(),
             BTreeSet::new(),
             NominalDefinitions::new(),
+            BTreeSet::new(),
         );
         context.evaluate(&parsed.value, &mut scope, 0)
     }
@@ -7770,6 +7826,7 @@ mod tests {
             BTreeSet::new(),
             BTreeSet::new(),
             NominalDefinitions::new(),
+            BTreeSet::new(),
         );
         context.evaluate(&parsed.value, &mut scope, 0)
     }
@@ -7913,6 +7970,7 @@ mod tests {
             BTreeSet::new(),
             BTreeSet::new(),
             NominalDefinitions::new(),
+            BTreeSet::new(),
         );
 
         assert_eq!(
@@ -8091,5 +8149,23 @@ mod tests {
             .expect_err("one third has no finite decimal representation");
 
         assert_eq!(failure.code(), "InexactDivision");
+    }
+
+    #[test]
+    fn source_while_and_loop_execute_with_continue_break_and_step_bounds() {
+        let source = include_str!("../tests/fixtures/control_flow_loop_gap.orna");
+        let parsed = parse_expression(source);
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+        let value = evaluate_expression(source, &Environment::new(), Limits::default())
+            .expect("while statement and loop value should evaluate");
+        assert_eq!(value.raw(), &Raw::Int(5.into()));
+
+        let limits = Limits {
+            max_steps: 4,
+            ..Limits::default()
+        };
+        let failure = evaluate_expression(source, &Environment::new(), limits)
+            .expect_err("the same loop must stop when its activation budget is exhausted");
+        assert_eq!(failure.code(), "ORNA-EVAL-LIMIT");
     }
 }

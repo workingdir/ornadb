@@ -1387,7 +1387,7 @@ fn reference_root_loader_isolated_by_principal_revision_and_unknown_field() {
 }
 
 fn assert_reordered_client_plan_rejects_before_executor(source: &str, function_name: &str) {
-    let prepared = prepared_client_source_v6(source);
+    let prepared = prepared_client_source_v5(source);
     let (active, function) = active_with_reordered_client_call_references(&prepared, function_name);
     let mut executor = RecordingActionExecutor::new(Some(RuntimeValue::Integer(1)));
     let error = super::super::evaluate_client_function_with_executor(
@@ -1438,7 +1438,7 @@ RETURN value;
 
 #[test]
 fn programmable_client_control_flow_executes_compiled_source() {
-    let prepared = prepared_client_source_v6(
+    let prepared = prepared_client_source_v5(
         r#"CREATE SCHEMA app;
 CREATE CLIENT FUNCTION app.counter() RETURNS INTEGER IS
   LET total INTEGER := 0;
@@ -1470,232 +1470,8 @@ END IF;
 }
 
 #[test]
-fn retained_v11_math_functions_execute_through_the_normal_client_path() {
-    let snapshot = orna_standard::retained_standard_library_v11_snapshot()
-        .expect("retained V11 standard snapshot");
-    let verified = orna_standard::verify_standard_library_v11_snapshot(snapshot)
-        .expect("verified V11 standard snapshot");
-    let standard = orna_compiler::check_standard_library_source(&verified)
-        .expect("checked V11 standard source");
-    let application_active = empty_version_two_active(&verified);
-    let context = orna_compiler::StandardApplicationCheckContext::try_new(
-        application_active.catalogue(),
-        &standard,
-    )
-    .expect("V11 standard application context");
-    let bundle = SourceBundle::new([SourceUnit::new(
-        "application.orna",
-        "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.entry() RETURNS INTEGER RETURN std.math.increment(4);",
-    )])
-    .expect("dogfood source bundle");
-    let report = orna_compiler::check_standard_application(&bundle, &context);
-    assert!(
-        report.diagnostics().is_empty(),
-        "{:?}",
-        report.diagnostics()
-    );
-    let prepared = orna_compiler::prepare_standard_application(
-        &report,
-        application_active.pair(),
-        &application_active,
-    )
-    .expect("prepared dogfood source");
-    let active = active_from_prepared_with_references(&prepared, prepared.references().to_vec());
-    let function = active
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|function| function.name().to_string() == "app.entry")
-        .expect("dogfood entry function")
-        .id();
-    let result = evaluate_client_function(&active, function).expect("dogfood function evaluates");
-    assert_eq!(result.value(), &RuntimeValue::Integer(5));
-
-    let authorisation = authorise(active.pair(), function);
-    let limits =
-        super::super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
-    let runtime_offer = super::super::vm::RuntimeOfferWitness::from_parts(
-        1,
-        0,
-        "orna-runtime-test",
-        "0.1.0",
-        "test-build",
-        "linux-x86_64",
-        3,
-        1,
-        &[],
-        &[],
-    )
-    .expect("valid runtime offer");
-    let registry = super::super::vm::ClientVmInvocationRegistry::new();
-    let mut host = super::super::vm::ClientVmHostContext::new(&registry, runtime_offer, limits)
-        .expect("valid VM host");
-    let admission = super::super::vm::admit_client_function(
-        &active,
-        &authorisation,
-        &mut host,
-        limits,
-        &[],
-        &[],
-    )
-    .expect("canonical V11 math caller should be admitted");
-    let admitted = super::super::vm::execute_admitted_pure_client_function(
-        &active,
-        &authorisation,
-        &host,
-        &admission,
-        &[],
-    )
-    .expect("admitted V11 math caller should execute");
-    assert_eq!(admitted.value(), &RuntimeValue::Integer(5));
-}
-
-#[test]
-fn retained_v11_standard_math_function_is_admitted_as_a_direct_root() {
-    let standard = orna_standard::verify_standard_library_v11_snapshot(
-        orna_standard::retained_standard_library_v11_snapshot().expect("retained V11 snapshot"),
-    )
-    .expect("verified V11 standard snapshot");
-    let active = empty_version_two_active(&standard);
-    let definition = standard
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|function| function.name().to_string() == "std.math.increment")
-        .expect("standard increment definition");
-    let executable = standard
-        .executables()
-        .iter()
-        .find(|executable| executable.function() == definition.id())
-        .expect("standard increment executable");
-    let principal = PrincipalId::from_bytes([0x7b; 16]);
-    let security = SecuritySnapshot::new_with_function_targets(
-        active.pair(),
-        vec![
-            orna_core::security::SecurityFunctionTarget::verified_standard(
-                definition.id(),
-                standard.revision(),
-                executable.revision().id(),
-            ),
-        ],
-        vec![Principal::new(
-            principal,
-            PrincipalKind::User,
-            PrincipalStatus::Active,
-        )],
-        vec![],
-        vec![ExecuteGrant::new(principal, definition.id())],
-    )
-    .expect("standard security target");
-    let session = security
-        .bind_authenticated_session(principal, vec![])
-        .expect("standard security session");
-    let target = InvocationTarget::verified_standard(
-        definition.id(),
-        active.pair(),
-        standard.revision(),
-        executable.revision().id(),
-    );
-    let ExecuteDecision::Allowed(authorisation) = security.authorise_execute(&session, target)
-    else {
-        panic!("standard root must be authorised");
-    };
-    let parameter = definition.parameters()[0].id();
-    let argument = FunctionArgument::new(parameter, RuntimeValue::Integer(4))
-        .expect("standard integer argument");
-    let limits =
-        super::super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
-    let runtime_offer = super::super::vm::RuntimeOfferWitness::from_parts(
-        1,
-        0,
-        "orna-runtime-test",
-        "0.1.0",
-        "test-build",
-        "linux-x86_64",
-        3,
-        1,
-        &[],
-        &[],
-    )
-    .expect("valid runtime offer");
-    let registry = super::super::vm::ClientVmInvocationRegistry::new();
-    let mut host = super::super::vm::ClientVmHostContext::new(&registry, runtime_offer, limits)
-        .expect("valid VM host");
-    let admission = super::super::vm::admit_client_function(
-        &active,
-        &authorisation,
-        &mut host,
-        limits,
-        &[],
-        &[],
-    )
-    .expect("verified standard root must be admitted");
-    let result = super::super::vm::execute_admitted_pure_client_function(
-        &active,
-        &authorisation,
-        &host,
-        &admission,
-        &[argument],
-    )
-    .expect("verified standard root must execute");
-
-    assert_eq!(result.value(), &RuntimeValue::Integer(5));
-}
-
-#[test]
-fn retained_v11_math_fixture_evaluates_all_functions() {
-    let snapshot = orna_standard::retained_standard_library_v11_snapshot()
-        .expect("retained V11 standard snapshot");
-    let verified = orna_standard::verify_standard_library_v11_snapshot(snapshot)
-        .expect("verified V11 standard snapshot");
-    let standard = orna_compiler::check_standard_library_source(&verified)
-        .expect("checked V11 standard source");
-    let application_active = empty_version_two_active(&verified);
-    let context = orna_compiler::StandardApplicationCheckContext::try_new(
-        application_active.catalogue(),
-        &standard,
-    )
-    .expect("V11 standard application context");
-    let fixture = include_str!("../../../orna-standard/src/tests/fixtures/v11_math_dogfood.orna");
-    let bundle = SourceBundle::new([SourceUnit::new("v11_math_dogfood.orna", fixture)])
-        .expect("dogfood fixture source bundle");
-    let report = orna_compiler::check_standard_application(&bundle, &context);
-    assert!(
-        report.diagnostics().is_empty(),
-        "{:?}",
-        report.diagnostics()
-    );
-    let prepared = orna_compiler::prepare_standard_application(
-        &report,
-        application_active.pair(),
-        &application_active,
-    )
-    .expect("prepared dogfood fixture");
-    let active = active_from_prepared_with_references(&prepared, prepared.references().to_vec());
-    let expected = [
-        ("app.incremented", RuntimeValue::Integer(5)),
-        ("app.decremented", RuntimeValue::Integer(3)),
-        ("app.zero_check", RuntimeValue::Boolean(true)),
-        ("app.minimum", RuntimeValue::Integer(2)),
-        ("app.maximum", RuntimeValue::Integer(5)),
-        ("app.clamped", RuntimeValue::Integer(10)),
-    ];
-    for (name, expected_value) in expected {
-        let function = active
-            .catalogue()
-            .functions()
-            .iter()
-            .find(|function| function.name().to_string() == name)
-            .expect("dogfood function")
-            .id();
-        let result =
-            evaluate_client_function(&active, function).expect("dogfood function evaluates");
-        assert_eq!(result.value(), &expected_value, "{name}");
-    }
-}
-#[test]
 fn recursive_client_control_flow_uses_shared_execution_fuel() {
-    let prepared = prepared_client_source_v6(
+    let prepared = prepared_client_source_v5(
         r#"CREATE SCHEMA app;
 CREATE CLIENT FUNCTION app.factorial(p_n INTEGER) RETURNS INTEGER IS
   BEGIN
@@ -1772,7 +1548,7 @@ END IF;
 }
 #[test]
 fn recursive_client_control_flow_stops_at_depth_limit() {
-    let prepared = prepared_client_source_v6(
+    let prepared = prepared_client_source_v5(
         r#"CREATE SCHEMA app;
 CREATE CLIENT FUNCTION app.loop(p_n INTEGER) RETURNS INTEGER IS
   BEGIN
@@ -1839,7 +1615,7 @@ fn rejects_non_boolean_short_circuit_operands_before_execution() {
             .encode()
             .expect("malformed Boolean plan encodes structurally");
         let (active, function, pair, _) = version_two_active_with_artifact(
-            standard_v6(),
+            standard_v5(),
             orna_standard::BOOLEAN_TYPE_ID,
             DefinitionReferenceTarget::Function(FunctionId::from_bytes([6; 16])),
             DefinitionReferenceKind::FunctionCall,
@@ -1857,52 +1633,6 @@ fn rejects_non_boolean_short_circuit_operands_before_execution() {
             } if context.pair() == pair && context.function() == function
         ));
     }
-}
-
-#[test]
-fn action_plan_preflights_arguments_before_operation_target() {
-    assert_reordered_client_plan_rejects_before_executor(
-        r#"CREATE SCHEMA app;
-CREATE CLIENT FUNCTION app.first() RETURNS INTEGER RETURN 1;
-CREATE CLIENT FUNCTION app.owner() RETURNS std.Action AS
-  std.action.call(
-target => std.invoke.echo,
-arguments => std.call.args(p_value => app.first())
-  );"#,
-        "app.owner",
-    );
-}
-
-#[test]
-fn action_plan_accepts_untampered_call_reference_order_and_builds_action() {
-    let prepared = prepared_client_source_v6(
-        r#"CREATE SCHEMA app;
-CREATE CLIENT FUNCTION app.first() RETURNS INTEGER RETURN 1;
-CREATE CLIENT FUNCTION app.owner() RETURNS std.Action AS
-  std.action.call(
-target => std.invoke.echo,
-arguments => std.call.args(p_value => app.first())
-  );"#,
-    );
-    let active = active_from_prepared_candidate(&prepared);
-    let function = active
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|candidate| candidate.name().to_string() == "app.owner")
-        .expect("the action owner is present")
-        .id();
-    let mut executor = RecordingActionExecutor::new(Some(RuntimeValue::Integer(7)));
-
-    let result = super::super::evaluate_client_function_with_executor(
-        &active,
-        &authorise(active.pair(), function),
-        &mut executor,
-    )
-    .expect("an untampered action plan evaluates successfully");
-
-    assert!(matches!(result.value(), RuntimeValue::Opaque(_)));
-    assert!(executor.executed.is_empty());
 }
 
 #[test]
@@ -2358,32 +2088,6 @@ fn control_flow_source_introspection_evaluates_without_function_specific_dispatc
     );
 }
 #[test]
-fn source_reference_names_qualify_standard_parameter() {
-    let standard = orna_standard::verify_standard_library_v9_snapshot(
-        orna_standard::retained_standard_library_v9_snapshot().unwrap(),
-    )
-    .unwrap();
-    let active = empty_version_two_active(&standard);
-    let function = standard
-        .catalogue()
-        .function_by_id(orna_standard::STD_UI_TEXT_FUNCTION_ID)
-        .expect("the standard text function is present");
-    let parameter = function.parameters()[0].id();
-
-    assert_eq!(
-        super::super::source_reference_target_name(
-            &active,
-            DefinitionReferenceTarget::Parameter {
-                owner: function.id(),
-                parameter,
-            },
-        )
-        .as_deref(),
-        Some("std.ui.text.text"),
-    );
-}
-
-#[test]
 fn resource_plan_preflights_arguments_before_operation_target() {
     assert_reordered_client_plan_rejects_before_executor(
         r#"CREATE SCHEMA app;
@@ -2422,7 +2126,7 @@ fn capability_expression_calls_reject_reference_sequence_mismatch() {
     .encode()
     .expect("the capability expression plan encodes");
     let (active, function, pair, _) = version_two_active_with_artifact(
-        standard_v6(),
+        standard_v5(),
         orna_standard::BOOLEAN_TYPE_ID,
         DefinitionReferenceTarget::Function(function),
         DefinitionReferenceKind::FunctionCall,
@@ -3261,7 +2965,7 @@ fn stream_expression_rejects_scalar_literal_plan() {
     .encode()
     .unwrap();
     let (active, function, _, _) = version_two_client_stream_active_with_artifact(
-        standard_v6(),
+        standard_v5(),
         orna_standard::BOOLEAN_TYPE_ID,
         DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
         DefinitionReferenceKind::NamedType,
@@ -3328,7 +3032,7 @@ fn stream_artifact_versions_reject_scalar_roots() {
         ),
     ] {
         let (active, function, _, _) = version_two_client_stream_active_with_artifact(
-            standard_v6(),
+            standard_v5(),
             orna_standard::BOOLEAN_TYPE_ID,
             DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
             DefinitionReferenceKind::NamedType,
@@ -3567,7 +3271,7 @@ fn evaluates_a_registered_opaque_ui_client_result() {
     .encode()
     .expect("opaque UI plan encodes");
     let (active, function, _, _) = version_two_active_with_artifact(
-        standard_v6(),
+        standard_v5(),
         orna_standard::STD_UI_TYPE_ID,
         DefinitionReferenceTarget::ValueType(orna_standard::STD_UI_TYPE_ID),
         DefinitionReferenceKind::NamedType,
@@ -3583,71 +3287,6 @@ fn evaluates_a_registered_opaque_ui_client_result() {
     assert_eq!(value.opaque_type(), orna_standard::STD_UI_TYPE_ID);
     assert_eq!(value.canonical_payload(), payload);
 }
-#[test]
-fn evaluates_v7_standard_client_external_contract_with_ordered_arguments() {
-    let standard = standard_v7();
-    let active = empty_version_two_active(&standard);
-    let body = br#"{"kind":"empty"}"#;
-    let mut payload = Vec::from(b"ORNA-UI/1 ".as_slice());
-    payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    payload.extend_from_slice(body);
-    let registry = orna_standard::registered_opaque_codecs(
-        active
-            .catalogue_hash_context()
-            .standard()
-            .expect("the V7 fixture pins a standard snapshot"),
-    )
-    .expect("the V7 fixture has a registered UI codec");
-    let content = RuntimeValue::Opaque(
-        OpaqueValue::new(&active, &registry, orna_standard::STD_UI_TYPE_ID, payload)
-            .expect("the UI argument has a valid opaque payload"),
-    );
-    let arguments = vec![
-        (
-            orna_standard::STD_UI_WINDOW_TITLE_PARAMETER_ID,
-            RuntimeValue::Text("title".to_owned()),
-        ),
-        (
-            orna_standard::STD_UI_WINDOW_CONTENT_PARAMETER_ID,
-            content.clone(),
-        ),
-    ];
-    let expected_arguments = arguments.clone();
-    let returned = content.clone();
-    let mut executor = DeterministicClientResourceExecutor::new(
-        |_request: &ClientResourceRequest| -> Result<RuntimeValue, String> {
-            Err("resource executor was not used".to_owned())
-        },
-    )
-    .with_external_contract(
-        move |request: &ClientExternalContractRequest| -> Result<RuntimeValue, String> {
-            assert_eq!(
-                request.identity(),
-                orna_standard::STD_UI_WINDOW_RUNTIME_CONTRACT
-            );
-            assert_eq!(request.arguments(), expected_arguments.as_slice());
-            Ok(returned.clone())
-        },
-    );
-    let grants = capability::LocalCapabilityGrantSet::new();
-    let mut state = ClientStateStore::new();
-    let mut executor_slot: Option<&mut dyn ClientResourceExecutor> = Some(&mut executor);
-    let (_, value) = super::super::evaluate_function(
-        &active,
-        orna_standard::STD_UI_WINDOW_FUNCTION_ID,
-        arguments,
-        &[],
-        &grants,
-        &mut state,
-        0,
-        PrincipalId::from_bytes([0x5a; 16]),
-        super::super::ObserverLineage::top_level(InvocationId::from_bytes([0x5b; 16])),
-        &mut executor_slot,
-    )
-    .expect("the pinned V7 standard executable evaluates");
-    assert_eq!(value, content);
-}
-
 #[test]
 fn opaque_client_result_rejects_plan_type_and_structure_before_value_creation() {
     let payload = [0x5a; 16];
@@ -3991,7 +3630,7 @@ fn expression_like_reference_validation_accepts_declared_ref_parameter_object_re
             ResolvedType::reference(object_type),
             None,
         )],
-        FunctionReturn::Single(ResolvedType::Value(orna_standard::STD_ACTION_TYPE_ID)),
+        FunctionReturn::Single(ResolvedType::Value(TypeId::from_bytes([0x14; 16]))),
         function_revision,
         FunctionSecurity::Invoker,
         None,

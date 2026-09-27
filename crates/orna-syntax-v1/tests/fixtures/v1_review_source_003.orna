@@ -1,0 +1,1 @@
+fn f() = if ready && Status { value: raw } { 1 };

@@ -899,21 +899,11 @@ fn decode_control_flow_resource_operation(
         });
     }
     let mut arguments = Vec::with_capacity(argument_count);
-    let mut previous = None;
     for _ in 0..argument_count {
         let parameter = ParameterId::from_bytes(read_resource_identity(reader)?);
-        if let Some(previous) = previous {
-            match parameter.cmp(&previous) {
-                std::cmp::Ordering::Less => {
-                    return Err(ClientPlanError::NonCanonicalResourceArgumentOrder);
-                }
-                std::cmp::Ordering::Equal => {
-                    return Err(ClientPlanError::DuplicateResourceArgument(parameter));
-                }
-                std::cmp::Ordering::Greater => {}
-            }
+        if arguments.iter().any(|(existing, _)| *existing == parameter) {
+            return Err(ClientPlanError::DuplicateResourceArgument(parameter));
         }
-        previous = Some(parameter);
         let value =
             decode_control_flow_expression(reader, depth + 1, expression_count, resource_count)?;
         arguments.push((parameter, value));
@@ -954,21 +944,11 @@ fn decode_control_flow_action_operation(
         });
     }
     let mut arguments = Vec::with_capacity(argument_count);
-    let mut previous = None;
     for _ in 0..argument_count {
         let parameter = ParameterId::from_bytes(read_action_identity(reader)?);
-        if let Some(previous) = previous {
-            match parameter.cmp(&previous) {
-                std::cmp::Ordering::Less => {
-                    return Err(ClientPlanError::NonCanonicalActionArgumentOrder);
-                }
-                std::cmp::Ordering::Equal => {
-                    return Err(ClientPlanError::DuplicateActionArgument(parameter));
-                }
-                std::cmp::Ordering::Greater => {}
-            }
+        if arguments.iter().any(|(existing, _)| *existing == parameter) {
+            return Err(ClientPlanError::DuplicateActionArgument(parameter));
         }
-        previous = Some(parameter);
         let value =
             decode_control_flow_expression(reader, depth + 1, expression_count, resource_count)?;
         arguments.push((parameter, value));

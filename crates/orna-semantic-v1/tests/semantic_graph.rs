@@ -19,9 +19,9 @@ fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
 #[test]
 fn unresolved_legacy_result_plumbing_uses_the_targeted_diagnostic() {
     for source in [
-        "pub fn legacy(value: Result<Int, Str>) = value;",
-        "pub fn legacy() = Ok(1);",
-        "pub fn legacy() = Err(\"nope\");",
+        include_str!("fixtures/unresolved-result-type.orna"),
+        include_str!("fixtures/unresolved-ok-call.orna"),
+        include_str!("fixtures/unresolved-err-call.orna"),
     ] {
         let analysis = analyze(&[ModuleInput::new("legacy-result.orna", source)]);
         assert!(
@@ -40,8 +40,8 @@ fn unresolved_legacy_result_plumbing_uses_the_targeted_diagnostic() {
 #[test]
 fn declared_result_and_ok_names_remain_ordinary_user_declarations() {
     for source in [
-        "pub fn Ok(value: Int): Int = value; pub fn use_ok(): Int = Ok(1);",
-        "pub type Result { value: Int, } pub fn result(value: Int): Result = Result { value: value };",
+        include_str!("fixtures/ordinary-ok-function.orna"),
+        include_str!("fixtures/ordinary-result-type.orna"),
     ] {
         let analysis = analyze(&[ModuleInput::new("ordinary-result.orna", source)]);
         assert!(analysis.is_ok(), "{source}: {:?}", analysis.diagnostics);
@@ -153,18 +153,7 @@ fn standard_catalogue_retains_verified_dependency_provenance() {
 }
 
 fn collection_catalogue() -> Catalogue {
-    let source = r#"
-        pub fn first(rows: [Int]): Int? = null;
-        pub fn one(rows: [Int]): Int = 0;
-        pub fn every(rows: [Int], predicate: fn(Int): Bool): Bool = true;
-        pub fn exists(rows: [Int], predicate: fn(Int): Bool): Bool = false;
-        pub fn sum(rows: [Int]): Int = 0;
-        pub fn min(rows: [Int]): Int? = null;
-        pub fn max(rows: [Int]): Int? = null;
-        pub fn map(rows: [Int], transform: fn(Int): Int): [Int] = rows;
-        pub fn flat_map(rows: [Int], transform: fn(Int): [Int]): [Int] = rows;
-        pub fn sort_by(rows: [Int], key: fn(Int): Int): [Int] = rows;
-    "#;
+    let source = include_str!("fixtures/collection-catalogue.orna");
     let profile = StandardDependencyProfile::from_sources(
         "orna.std/v1-collection",
         [("std/collection.orna".into(), source.into())],
@@ -176,11 +165,7 @@ fn collection_catalogue() -> Catalogue {
 }
 
 fn float_collection_catalogue() -> Catalogue {
-    let source = r#"
-        pub fn sum(rows: [Float]): Float = 0.0f;
-        pub fn min(rows: [Float]): Float? = null;
-        pub fn max(rows: [Float]): Float? = null;
-    "#;
+    let source = include_str!("fixtures/float-collection-catalogue.orna");
     let profile = StandardDependencyProfile::from_sources(
         "orna.std/v1-float-collection",
         [("std/collection.orna".into(), source.into())],
@@ -259,58 +244,72 @@ fn calendar_buckets_require_typed_zones_and_do_not_conflate_elapsed_durations() 
 
 #[test]
 fn table_selectors_are_callable_and_reject_rows_from_other_tables() {
-    let declaration = "table Person(id: Str) { name: Str, } table Team(id: Str) { name: Str, }";
-    for (body, valid) in [
-        ("fn name(person: Person): Str = Person.name(person);", true),
-        ("fn name(person: Person): Str = person | Person.name;", true),
-        ("fn names() = Person | map(Person.name);", true),
+    for (source, valid) in [
         (
-            "fn local(): Int { let Person = { name: 1 }; Person.name }",
+            include_str!("fixtures/table-selector-call.orna"),
             true,
         ),
         (
-            "fn name(person: Person): Str { let selector = Person.name; selector(person) }",
+            include_str!("fixtures/table-selector-pipe.orna"),
             true,
         ),
-        ("fn wrong(team: Team) = Person.name(team);", false),
-        ("fn wrong() = Team | map(Person.name);", false),
         (
-            "fn wrong() = Person.name({ id: \"a\", name: \"Alice\" });",
+            include_str!("fixtures/table-selector-map.orna"),
+            true,
+        ),
+        (
+            include_str!("fixtures/table-selector-local-shadow.orna"),
+            true,
+        ),
+        (
+            include_str!("fixtures/table-selector-higher-order.orna"),
+            true,
+        ),
+        (
+            include_str!("fixtures/table-selector-reject-other-table-call.orna"),
+            false,
+        ),
+        (
+            include_str!("fixtures/table-selector-reject-other-table-map.orna"),
+            false,
+        ),
+        (
+            include_str!("fixtures/table-selector-reject-struct-row.orna"),
             false,
         ),
     ] {
-        let result = analyze(&[ModuleInput::new(
-            "selectors.orna",
-            format!("{declaration} {body}"),
-        )]);
+        let result = analyze(&[ModuleInput::new("selectors.orna", source)]);
         if valid {
-            assert!(result.is_ok(), "{body}: {:?}", result.diagnostics);
+            assert!(result.is_ok(), "{source}: {:?}", result.diagnostics);
         } else {
-            assert!(has(&result, DIAG_TYPE), "{body}: {:?}", result.diagnostics);
+            assert!(has(&result, DIAG_TYPE), "{source}: {:?}", result.diagnostics);
         }
     }
     let catalogue = Catalogue::authoritative_fixture();
-    for (body, valid) in [
+    for (source, valid) in [
         (
-            "use contacts as addressbook; fn name(contact: contacts.Contact): Str = addressbook.Contact.name(contact);",
+            include_str!("fixtures/table-selector-import-aliased.orna"),
             true,
         ),
         (
-            "fn names() = contacts.Contact | map(contacts.Contact.name);",
+            include_str!("fixtures/table-selector-import-qualified-map.orna"),
             true,
         ),
-        ("fn wrong() = contacts.Contact | map(Contact.name);", false),
         (
-            "fn local(contacts: { Contact: { name: Int } }): Int = contacts.Contact.name;",
+            include_str!("fixtures/table-selector-import-reject-unqualified-map.orna"),
+            false,
+        ),
+        (
+            include_str!("fixtures/table-selector-import-local-shadow.orna"),
             true,
         ),
     ] {
         let result =
-            analyze_with_catalogue(&[ModuleInput::new("selectors.orna", body)], &catalogue);
+            analyze_with_catalogue(&[ModuleInput::new("selectors.orna", source)], &catalogue);
         if valid {
-            assert!(result.is_ok(), "{body}: {:?}", result.diagnostics);
+            assert!(result.is_ok(), "{source}: {:?}", result.diagnostics);
         } else {
-            assert!(has(&result, DIAG_TYPE), "{body}: {:?}", result.diagnostics);
+            assert!(has(&result, DIAG_TYPE), "{source}: {:?}", result.diagnostics);
         }
     }
 }
@@ -319,21 +318,21 @@ fn table_selectors_are_callable_and_reject_rows_from_other_tables() {
 fn attached_table_results_preserve_nominal_identity_and_row_selectors() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
-        "pub fn create(customer: Customer): Order = Order.insert({ customer: customer, created: now() });",
-        "pub fn created(): Instant = Order.one().created;",
-        "use contacts as addressbook; pub fn read(): contacts.Contact = addressbook.Contact.one();",
-        "use contacts as addressbook; pub fn name(): Str = addressbook.Contact.one().name;",
-        "pub fn pay(order: Order) = Payment.insert({ order: order, amount: 10.GBP });",
+        include_str!("fixtures/attached-table-create-order.orna"),
+        include_str!("fixtures/attached-table-read-created.orna"),
+        include_str!("fixtures/attached-table-read-contact.orna"),
+        include_str!("fixtures/attached-table-read-contact-name.orna"),
+        include_str!("fixtures/attached-table-insert-payment.orna"),
     ] {
         let result =
             analyze_with_catalogue(&[ModuleInput::new("consumer.orna", source)], &catalogue);
         assert!(result.is_ok(), "{source}: {:?}", result.diagnostics);
     }
     for source in [
-        "pub fn bad(customer: Customer) = Payment.insert({ order: customer, amount: 10.GBP });",
-        "pub fn bad(customer: Customer) = Payment.insert({ order: { customer: customer, created: now() }, amount: 10.GBP });",
-        "pub fn bad(): Order = Contact.one();",
-        "pub fn bad(): Contact = contacts.Contact.one();",
+        include_str!("fixtures/attached-table-reject-customer-payment.orna"),
+        include_str!("fixtures/attached-table-reject-struct-payment.orna"),
+        include_str!("fixtures/attached-table-reject-contact-order.orna"),
+        include_str!("fixtures/attached-table-reject-nominal-contact.orna"),
     ] {
         let result =
             analyze_with_catalogue(&[ModuleInput::new("consumer.orna", source)], &catalogue);
@@ -350,19 +349,19 @@ fn stored_email_provider_is_typed_without_changing_connector_messages() {
     let catalogue = Catalogue::authoritative_fixture();
     for (source, expected) in [
         (
-            "pub fn store() = mail.Email.insert({ provider: \"google\", id: \"message-1\" });",
+            include_str!("fixtures/stored-email-provider-valid.orna"),
             None,
         ),
         (
-            "pub fn store() = mail.Email.insert({ provider: 42 });",
+            include_str!("fixtures/stored-email-provider-wrong-type.orna"),
             Some(DIAG_TYPE),
         ),
         (
-            "pub fn store() = mail.Email.insert({ unknown: \"google\" });",
+            include_str!("fixtures/stored-email-provider-unknown-field.orna"),
             Some(DIAG_TYPE),
         ),
         (
-            "pub fn read() = google.mail(credential: std.secret.ref(\"google.personal\")) | for_each(message => message.provider);",
+            include_str!("fixtures/stored-email-provider-connector-message.orna"),
             Some(DIAG_UNRESOLVED),
         ),
     ] {
@@ -378,12 +377,7 @@ fn stored_email_provider_is_typed_without_changing_connector_messages() {
 
 #[test]
 fn table_mutations_validate_patch_fields_and_ordered_keys_across_imports() {
-    let declaration = r#"pub table Person(id: Str) {
-        name: Str,
-        label: Str => name,
-    }
-    pub table Reading(sensor: Str, sequence: Int) { value: Int, }
-    pub table Note { text: Str, }"#;
+    let declaration = include_str!("fixtures/table-mutations-declaration.orna");
     for imported in [false, true] {
         let prefix = if imported { "data." } else { "" };
         for (operation, expected) in [
@@ -478,21 +472,19 @@ fn table_mutations_validate_patch_fields_and_ordered_keys_across_imports() {
             }
         }
     }
-    for (patch, expected) in [
+    for (source, expected) in [
         (
-            r#"{ id: "b" }"#,
+            include_str!("fixtures/table-mutation-patch-primary-key.orna"),
             "table update cannot change a primary key; use rekey",
         ),
         (
-            r#"{ label: "override" }"#,
+            include_str!("fixtures/table-mutation-patch-computed-field.orna"),
             "table update cannot change a computed field",
         ),
     ] {
         let result = analyze(&[ModuleInput::new(
             "rows.orna",
-            format!(
-                "{declaration} fn change() {{ let patch = {patch}; Person.update(\"a\", patch); }}"
-            ),
+            format!("{declaration} {source}"),
         )]);
         assert!(
             result
@@ -2339,18 +2331,7 @@ fn contextual_numeric_and_exact_money_unit_postfixes_remain_closed() {
 fn numeric_methods_and_relation_count_use_closed_intrinsic_shapes() {
     let result = analyze(&[ModuleInput::new(
         "intrinsics.orna",
-        r#"
-            pub table Note { text: Str, }
-            pub fn exact_eighth(): Decimal = 1.decimal / 8.decimal;
-            pub fn rounded_third(): Decimal = 1.decimal.divide(
-                3.decimal,
-                scale: 6,
-                rounding: half_even,
-            );
-            pub fn current(): Instant = now();
-            pub fn count_call(): Int = Note | count();
-            pub fn count_name(): Int = Note | count;
-        "#,
+        include_str!("fixtures/numeric-methods-relation-count.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -2456,6 +2437,96 @@ fn authoritative_core_types_locale_aware_money_pipeline() {
         &Catalogue::authoritative_core(),
     );
     assert!(has(&wrong_input, DIAG_TYPE));
+}
+
+#[test]
+fn parallel_callbacks_share_result_type_and_return_ordered_stream() {
+    let source = include_str!("fixtures/parallel-callback-results.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("parallel-callback-results.orna", source)],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "parallel callbacks must have compatible result types"
+    }), "incompatible callback result must be diagnosed: {:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("ordered"))
+        .expect("fixture module is analyzed");
+    assert_eq!(
+        module.symbols["ordered"].ty,
+        Type::Function {
+            parameters: vec![],
+            parameter_names: Some(vec![]),
+            default_parameters: Default::default(),
+            result: Box::new(Type::Stream(Box::new(Type::Int))),
+        }
+    );
+}
+
+#[test]
+fn race_callbacks_share_result_type_and_return_that_type() {
+    let source = include_str!("fixtures/race-callback-results.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("race-callback-results.orna", source)],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "race callbacks must have compatible result types"
+    }), "incompatible callback result must be diagnosed: {:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("winner"))
+        .expect("fixture module is analyzed");
+    assert_eq!(
+        module.symbols["winner"].ty,
+        Type::Function {
+            parameters: vec![],
+            parameter_names: Some(vec![]),
+            default_parameters: Default::default(),
+            result: Box::new(Type::Int),
+        }
+    );
+}
+
+#[test]
+fn timeout_callback_and_duration_are_admitted_and_checked() {
+    let source = include_str!("fixtures/timeout-callback-results.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("timeout-callback-results.orna", source)],
+        &Catalogue::authoritative_core(),
+    );
+    for expected in [
+        "timeout callback must be a function",
+        "timeout callback must not take parameters",
+        "timeout duration must be a Duration",
+        "timeout expects a callback and a duration",
+    ] {
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message() == expected),
+            "missing `{expected}` diagnostic: {:?}",
+            result.diagnostics
+        );
+    }
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("completed"))
+        .expect("fixture module is analyzed");
+    assert_eq!(
+        module.symbols["completed"].ty,
+        Type::Function {
+            parameters: vec![],
+            parameter_names: Some(vec![]),
+            default_parameters: Default::default(),
+            result: Box::new(Type::Int),
+        }
+    );
 }
 
 #[test]
@@ -2595,9 +2666,7 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
 
 #[test]
 fn frozen_historical_program_resolves_through_authoritative_projection() {
-    let source = include_str!(
-        "../../../../reference/Orna-1.0.0/examples/valid/historical-program.orna"
-    );
+    let source = include_str!(env!("ORNA_HISTORICAL_PROGRAM_FIXTURE"));
     let result = analyze_with_catalogue(
         &[ModuleInput::new("historical-program.orna", source)],
         &Catalogue::authoritative_fixture(),

@@ -1,0 +1,2 @@
+pub fn await_timeout(job: sys.InvocationHandle<Int>) =
+    sys.await<Int>(job, timeout: 1.s);

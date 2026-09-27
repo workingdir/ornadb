@@ -1,0 +1,14 @@
+pub table Note(id: Int) { text: Str, }
+fn default_step() = Note | window(3) | count;
+fn piped() = Note | window(3, step: 3) | count;
+fn direct() = window(Note, size: 2, step: 3) | count;
+fn parent() {
+    Note.insert({ id: 1, text: "one" });
+    Note.insert({ id: 2, text: "two" });
+    Note.insert({ id: 3, text: "three" });
+    Note.insert({ id: 4, text: "four" });
+    Note.insert({ id: 5, text: "five" });
+    assert default_step() == 3;
+    assert piped() == 1;
+    assert direct() == 2;
+}

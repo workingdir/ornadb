@@ -1,0 +1,14 @@
+ORNA-CHECKPOINT-SNAPSHOT/1
+19:urn:consumer:ledger
+8:app.root
+17:processor.consume
+12:input.orders
+8:kafka/v1
+14:orders/primary
+18:kafka-partition/v1
+1
+14:tenant:west/17
+11:offset/utf8
+42
+C
+14:offset:0001/β

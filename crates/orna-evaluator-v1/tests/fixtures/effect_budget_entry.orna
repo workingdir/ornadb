@@ -1,0 +1,1 @@
+fn entry() = Note.insert(1);

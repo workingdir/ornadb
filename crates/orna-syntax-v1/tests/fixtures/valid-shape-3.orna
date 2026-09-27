@@ -1,0 +1,1 @@
+fn map<T impl std.Show>(x: T) { let y = x | show; if true { y } else { x } }

@@ -28,6 +28,8 @@ pub struct ReplSession {
     wildcard_ambiguities: BTreeMap<String, BTreeSet<String>>,
     session_functions: BTreeSet<String>,
     namespace_bindings: BTreeSet<String>,
+    table_names: BTreeSet<String>,
+    table_bindings: BTreeSet<String>,
     last_success: Option<CanonicalValue>,
     last_status: Option<CanonicalValue>,
 }
@@ -57,6 +59,8 @@ impl ReplSession {
             wildcard_ambiguities: BTreeMap::new(),
             session_functions: BTreeSet::new(),
             namespace_bindings: BTreeSet::new(),
+            table_names: BTreeSet::new(),
+            table_bindings: BTreeSet::new(),
             last_success: None,
             last_status: None,
         }
@@ -92,9 +96,18 @@ impl ReplSession {
             wildcard_ambiguities: BTreeMap::new(),
             session_functions: BTreeSet::new(),
             namespace_bindings: BTreeSet::new(),
+            table_names: BTreeSet::new(),
+            table_bindings: BTreeSet::new(),
             last_success: None,
             last_status: None,
         })
+    }
+
+    /// Configures statically admitted table paths which may be imported into
+    /// the session for transaction-aware effect dispatch.
+    pub fn with_table_names(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.table_names.extend(names);
+        self
     }
 
     /// Submits one REPL expression or declaration. Declarations return `None`.
@@ -119,6 +132,24 @@ impl ReplSession {
         let result = candidate.submit_checked(input, None)?;
         *self = candidate;
         Ok(result)
+    }
+
+    /// Executes one already admitted effectful expression against a candidate
+    /// session. The candidate is published only after every effect handler
+    /// call and the expression complete successfully.
+    pub fn submit_admitted_with_effects(
+        &mut self,
+        input: &ReplInput,
+        effects: &mut dyn crate::EffectHandler,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        let ReplInput::Expression(expression) = input else {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        };
+        let mut candidate = self.clone();
+        let value = candidate.evaluate_with_effects(expression, effects)?;
+        candidate.last_success = Some(value.clone());
+        *self = candidate;
+        Ok(Some(value))
     }
 
     /// Executes one already-admitted input with an explicit operation token.
@@ -197,6 +228,23 @@ impl ReplSession {
         expression: &Expr,
         cancellation: Option<&CancellationToken>,
     ) -> Result<CanonicalValue, EvaluationError> {
+        self.evaluate_inner(expression, cancellation, None)
+    }
+
+    fn evaluate_with_effects(
+        &self,
+        expression: &Expr,
+        effects: &mut dyn crate::EffectHandler,
+    ) -> Result<CanonicalValue, EvaluationError> {
+        self.evaluate_inner(expression, None, Some(effects))
+    }
+
+    fn evaluate_inner(
+        &self,
+        expression: &Expr,
+        cancellation: Option<&CancellationToken>,
+        effects: Option<&mut dyn crate::EffectHandler>,
+    ) -> Result<CanonicalValue, EvaluationError> {
         self.reject_ambiguous_expression(expression)?;
         let mut environment = self.environment.clone();
         if let Some(value) = &self.last_success {
@@ -217,7 +265,7 @@ impl ReplSession {
             repl_bindings: true,
             restrict_function_names: true,
             reject_unhandled_field_calls: true,
-            effects: None,
+            effects,
             namespace: None,
             transfer: None,
             cancellation,
@@ -225,6 +273,7 @@ impl ReplSession {
         context.items(self.functions.len())?;
         let mut scope = Scope::from_environment(&environment, &mut context)?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
+        scope.4.extend(self.table_bindings.iter().cloned());
         let value = context.evaluate(expression, &mut scope, 0)?;
         if context.transfer.is_some() {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
@@ -347,6 +396,7 @@ impl ReplSession {
         };
         let mut scope = Scope::from_environment(&environment, &mut context)?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
+        scope.4.extend(self.table_bindings.iter().cloned());
         let value = context.evaluate(expression, &mut scope, 0)?;
         if context.transfer.is_some() {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
@@ -396,6 +446,17 @@ impl ReplSession {
 
     fn import_alias(&mut self, canonical: &str, alias: &str) -> Result<(), EvaluationError> {
         self.remove_wildcard_binding(alias);
+        if self.table_names.contains(canonical) {
+            if self.binding_taken(alias) {
+                return Err(error("ORNA-EVAL-NAME"));
+            }
+            self.environment.insert(
+                alias.into(),
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Null).expect("null is canonical"),
+            );
+            self.table_bindings.insert(alias.into());
+            return self.check_retained();
+        }
         if self.functions.contains_key(canonical) {
             if self.binding_taken(alias) {
                 return Err(error("ORNA-EVAL-NAME"));
@@ -480,11 +541,31 @@ impl ReplSession {
                     .map(|suffix| (suffix.to_owned(), value.clone()))
             })
             .collect::<Vec<_>>();
-        if functions.is_empty() && values.is_empty() {
+        let tables = self
+            .table_names
+            .iter()
+            .filter_map(|name| {
+                name.strip_prefix(&prefix)
+                    .filter(|suffix| !suffix.contains('.'))
+                    .map(str::to_owned)
+            })
+            .collect::<Vec<_>>();
+        if functions.is_empty() && values.is_empty() && tables.is_empty() {
             return Err(error("ORNA-EVAL-NAME"));
         }
         for (alias, canonical) in functions {
             self.import_wildcard_alias(path, &canonical, &alias)?;
+        }
+        for alias in tables {
+            if !self.prepare_wildcard_binding(path, &alias) {
+                continue;
+            }
+            self.environment.insert(
+                alias.clone(),
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Null).expect("null is canonical"),
+            );
+            self.table_bindings.insert(alias.clone());
+            self.wildcard_bindings.insert(alias, path.into());
         }
         for (alias, value) in values {
             self.import_wildcard_value(path, alias, value)?;
@@ -543,6 +624,7 @@ impl ReplSession {
         if self.wildcard_bindings.remove(name).is_some() {
             self.aliases.remove(name);
             self.environment.remove(name);
+            self.table_bindings.remove(name);
         }
         self.wildcard_ambiguities.remove(name);
     }
@@ -550,6 +632,7 @@ impl ReplSession {
     fn release_wildcard_for_local(&mut self, name: &str) {
         if self.wildcard_bindings.remove(name).is_some() {
             self.aliases.remove(name);
+            self.table_bindings.remove(name);
         }
         self.wildcard_ambiguities.remove(name);
     }
@@ -824,7 +907,7 @@ mod tests {
                 )
             })
             .collect();
-        let other = parse_module("fn add(left, right) = left + right + 100;");
+        let other = parse_module(include_str!("fixtures/repl-other-add.orna"));
         assert!(other.is_ok(), "{:?}", other.diagnostics);
         let Declaration::Function { signature, body } = other
             .value

@@ -565,10 +565,7 @@ fn typed_sys_invoke_report_maps_orna_sys_132_to_semantic_pass_evidence() {
             None,
             None,
         ),
-        r#"
-            pub fn invoke(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.invoke<Int>(function, arguments, as: Int);
-        "#,
+        include_str!("fixtures/typed-invoke-valid.orna"),
     );
     let fixture = &report.fixtures[0];
     let typecheck = fixture
@@ -606,10 +603,7 @@ fn typed_sys_invoke_report_retains_mismatched_witness_diagnostic() {
             Some("ORNA-S021-TYPE"),
             Some("sys.invoke explicit type argument must match the as: witness"),
         ),
-        r#"
-            pub fn invoke(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.invoke<Str>(function, arguments, as: Int);
-        "#,
+        include_str!("fixtures/typed-invoke-mismatch.orna"),
     );
     let typecheck = report.fixtures[0]
         .stages
@@ -695,10 +689,7 @@ fn erased_sys_invoke_report_maps_orna_sys_077_to_semantic_pass_evidence() {
             None,
             None,
         ),
-        r#"
-            pub fn erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.invoke(function, arguments);
-        "#,
+        include_str!("fixtures/erased-invoke-valid.orna"),
     );
     let typecheck = report.fixtures[0]
         .stages
@@ -740,10 +731,7 @@ fn erased_sys_invoke_report_serializes_missing_witness_diagnostic() {
             Some("ORNA-S021-TYPE"),
             Some("typed sys.invoke requires an explicit as: T witness"),
         ),
-        r#"
-            pub fn missing(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.invoke<Int>(function, arguments);
-        "#,
+        include_str!("fixtures/erased-invoke-missing-witness.orna"),
     );
     let serialized = serde_json::to_value(&report).expect("erased invoke report serializes");
     let serialized_typecheck = serialized["fixtures"][0]["stages"]
@@ -796,10 +784,7 @@ fn erased_sys_start_report_maps_orna_sys_081_to_semantic_pass_evidence() {
             None,
             None,
         ),
-        r#"
-            pub fn start(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.start(function, arguments);
-        "#,
+        include_str!("fixtures/erased-start-valid.orna"),
     );
     let fixture = &report.fixtures[0];
     let parse = fixture
@@ -886,10 +871,7 @@ fn erased_sys_start_report_serializes_missing_witness_diagnostic() {
             Some("ORNA-S021-TYPE"),
             Some("typed sys.start requires an explicit as: T witness"),
         ),
-        r#"
-            pub fn missing(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.start<Int>(function, arguments);
-        "#,
+        include_str!("fixtures/erased-start-missing-witness.orna"),
     );
     let fixture = &report.fixtures[0];
     let parse = fixture
@@ -976,10 +958,7 @@ fn typed_sys_start_report_maps_orna_sys_132_to_semantic_pass_evidence() {
             None,
             None,
         ),
-        r#"
-            pub fn start(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.start<Int>(function, arguments, as: Int);
-        "#,
+        include_str!("fixtures/typed-start-valid.orna"),
     );
     let fixture = &report.fixtures[0];
     let parse = fixture
@@ -1029,10 +1008,7 @@ fn typed_sys_start_report_retains_mismatched_witness_diagnostic() {
             Some("ORNA-S021-TYPE"),
             Some("sys.start explicit type argument must match the as: witness"),
         ),
-        r#"
-            pub fn start_wrong(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.start<Str>(function, arguments, as: Int);
-        "#,
+        include_str!("fixtures/typed-start-mismatch.orna"),
     );
     let fixture = &report.fixtures[0];
     let parse = fixture
@@ -1124,10 +1100,7 @@ fn typed_sys_await_report_maps_orna_sys_082_to_semantic_pass_evidence() {
             None,
             None,
         ),
-        r#"
-            pub fn await_timeout(job: sys.InvocationHandle<Int>) =
-                sys.await<Int>(job, timeout: 1.s);
-        "#,
+        include_str!("fixtures/typed-await-valid.orna"),
     );
     let fixture = &report.fixtures[0];
     let typecheck = fixture
@@ -1165,10 +1138,7 @@ fn typed_sys_await_report_retains_mismatched_witness_diagnostic() {
             Some("ORNA-S021-TYPE"),
             Some("sys.await explicit type argument must match the invocation handle result type"),
         ),
-        r#"
-            pub fn await_wrong(job: sys.InvocationHandle<Int>) =
-                sys.await<Str>(job, timeout: 1.s);
-        "#,
+        include_str!("fixtures/typed-await-mismatch.orna"),
     );
     let typecheck = report.fixtures[0]
         .stages
@@ -1244,12 +1214,7 @@ fn typed_sys_cancel_report_maps_orna_sys_083_to_semantic_pass_evidence() {
             None,
             None,
         ),
-        r#"
-            pub fn inferred_cancel(job: sys.InvocationHandle<Int>) =
-                sys.cancel(job);
-            pub fn explicit_cancel(job: sys.InvocationHandle<Int>) =
-                sys.cancel<Int>(job, reason: "stop");
-        "#,
+        include_str!("fixtures/typed-cancel-valid.orna"),
     );
     let fixture = &report.fixtures[0];
     let typecheck = fixture
@@ -1287,10 +1252,7 @@ fn typed_sys_cancel_report_retains_mismatched_witness_diagnostic() {
             Some("ORNA-S021-TYPE"),
             Some("sys.cancel explicit type argument must match the invocation handle result type"),
         ),
-        r#"
-            pub fn cancel_wrong(job: sys.InvocationHandle<Int>) =
-                sys.cancel<Str>(job);
-        "#,
+        include_str!("fixtures/typed-cancel-mismatch.orna"),
     );
     let typecheck = report.fixtures[0]
         .stages
@@ -2309,18 +2271,18 @@ fn harness_report_retains_imported_generic_sys_meta_evidence() {
         std::fs::create_dir_all(project_path).expect("project directory");
         std::fs::write(
             project_path.join("library.orna"),
-            "pub fn lookup<T>(value: T) = sys.meta<T>(value);",
+            include_str!("fixtures/imported-generic-sys-meta-library.orna"),
         )
         .expect("generic library module");
     }
     std::fs::write(
         accepted_path.join("consumer.orna"),
-        "use library; pub fn read(value: Int) = library.lookup<Int>(value);",
+        include_str!("fixtures/imported-generic-sys-meta-main.orna"),
     )
     .expect("accepted consumer module");
     std::fs::write(
         rejected_path.join("consumer.orna"),
-        "use library; pub fn too_many(value: Int) = library.lookup<Int, Str>(value);",
+        include_str!("fixtures/imported-generic-sys-meta-too-many-type-arguments.orna"),
     )
     .expect("rejected consumer module");
 
@@ -2482,11 +2444,11 @@ fn harness_maps_runtime_info_semantics_and_serializes_runtime_rejection() {
     for (path, source) in [
         (
             valid_path,
-            "pub fn info() = sys.rt.info();",
+            include_str!("fixtures/sys-rt-info.orna"),
         ),
         (
             invalid_path,
-            "fn active_streams() {\n    sys.runtime.streams\n}",
+            include_str!("fixtures/sys-runtime-streams-removed.orna"),
         ),
     ] {
         let path = root.path().join(path);
@@ -2750,7 +2712,7 @@ fn harness_maps_snapshot_selection_and_serializes_snapshot_type_diagnostic() {
             None,
             None,
         ),
-        r#"pub fn before_change() = sys.snapshot("HEAD~3");"#,
+        include_str!("fixtures/snapshot-valid.orna"),
         "ORNA-SYS-011",
     );
     let valid_fixture = &valid.fixtures[0];
@@ -2792,7 +2754,7 @@ fn harness_maps_snapshot_selection_and_serializes_snapshot_type_diagnostic() {
             Some("ORNA-S021-TYPE"),
             None,
         ),
-        r#"pub fn before_change() = sys.snapshot(42);"#,
+        include_str!("fixtures/snapshot-non-string.orna"),
         "ORNA-SYS-011",
     );
     let invalid_fixture = &invalid.fixtures[0];
@@ -2888,7 +2850,7 @@ fn harness_maps_sys_resolve_to_semantic_pass_evidence() {
             None,
             None,
         ),
-        r#"pub fn resolve() = sys.resolve("main.main");"#,
+        include_str!("fixtures/sys-resolve-valid.orna"),
         "ORNA-SYS-076",
     );
     let fixture = &report.fixtures[0];
@@ -2963,7 +2925,7 @@ fn harness_maps_sys_resolve_type_error_and_serializes_diagnostic_evidence() {
             Some("ORNA-S021-TYPE"),
             None,
         ),
-        "pub fn resolve() = sys.resolve(1);",
+        include_str!("fixtures/sys-resolve-type-error.orna"),
         "ORNA-SYS-076",
     );
     let fixture = &report.fixtures[0];
@@ -3053,7 +3015,7 @@ fn harness_maps_database_cwd_and_serializes_unsupported_member_diagnostic() {
             None,
             None,
         ),
-        "pub fn cwd() = sys.database.cwd;",
+        include_str!("fixtures/sys-database-cwd-direct.orna"),
         "ORNA-SYS-022",
     );
     let valid_fixture = &valid.fixtures[0];
@@ -3100,7 +3062,7 @@ fn harness_maps_database_cwd_and_serializes_unsupported_member_diagnostic() {
             Some("ORNA-S022-UNSUPPORTED"),
             None,
         ),
-        "pub fn legacy() = sys.database.legacy_member;",
+        include_str!("fixtures/sys-database-unsupported-member.orna"),
         "ORNA-SYS-022",
     );
     let invalid_fixture = &invalid.fixtures[0];
@@ -3171,7 +3133,7 @@ fn harness_maps_database_writable_and_serializes_unsupported_member_diagnostic()
             None,
             None,
         ),
-        "pub fn writable() = sys.database.writable;",
+        include_str!("fixtures/sys-database-writable-direct.orna"),
         "ORNA-SYS-023",
     );
     let valid_fixture = &valid.fixtures[0];
@@ -3245,7 +3207,7 @@ fn harness_maps_database_writable_and_serializes_unsupported_member_diagnostic()
             Some("ORNA-S022-UNSUPPORTED"),
             None,
         ),
-        "pub fn legacy() = sys.database.legacy_member;",
+        include_str!("fixtures/sys-database-unsupported-member.orna"),
         "ORNA-SYS-022",
     );
     let invalid_fixture = &invalid.fixtures[0];
@@ -3307,7 +3269,7 @@ fn harness_maps_current_snapshot_and_serializes_unsupported_member_diagnostic() 
             None,
             None,
         ),
-        "pub fn current_snapshot() = sys.current.snapshot;",
+        include_str!("fixtures/sys-current-snapshot.orna"),
         "ORNA-SYS-024",
     );
     let valid_fixture = &valid.fixtures[0];
@@ -3355,7 +3317,7 @@ fn harness_maps_current_snapshot_and_serializes_unsupported_member_diagnostic() 
             Some("ORNA-S022-UNSUPPORTED"),
             None,
         ),
-        "pub fn legacy() = sys.current.legacy_member;",
+        include_str!("fixtures/sys-current-unsupported-member.orna"),
         "ORNA-SYS-024",
     );
     let invalid_fixture = &invalid.fixtures[0];

@@ -49,7 +49,6 @@ use super::{
     CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse, ClientExpressionResultShape,
     ClientExpressionType, ConstantValue, DiagnosticCode, IdentityAssignments,
     NewApplicationCheckError, STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
-    STD_ACTION_CONTRACT, STD_ACTION_SCHEMA_ID, STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID,
     STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
     STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
     STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
@@ -65,7 +64,7 @@ use super::{
     check_standard_json_encode, check_standard_library_source,
     check_standard_library_source_v1_identity, check_standard_library_source_v2_parts,
     check_standard_library_source_v3_parts, check_standard_library_source_v4_parts,
-    check_standard_library_source_v5_parts, check_standard_library_source_v6_parts,
+    check_standard_library_source_v5_parts,
     check_standard_parameter_echo, check_standard_terminal_present_table,
     checked_standard_library_with_contract_overrides_for_test,
     client_resource_stream_type_is_supported, expected_standard_json_executable, location,
@@ -1057,10 +1056,8 @@ fn lowers_ordinary_client_call_with_canonical_target_identities_and_reference() 
 }
 
 #[test]
-fn orders_reversed_named_arguments_by_application_declaration() {
-    let source = "CREATE SCHEMA app; \
-            CREATE CLIENT FUNCTION app.target(p_first INTEGER, p_second INTEGER) RETURNS INTEGER AS p_first; \
-            CREATE CLIENT FUNCTION app.call() RETURNS INTEGER AS app.target(p_second => 22, p_first => 11);";
+fn client_call_preserves_reversed_named_argument_source_order() {
+    let source = include_str!("tests/fixtures/client-call-argument-order.orna");
     let report = check(
         &bundle([("client-call-reversed.orna", source)]),
         &empty_catalogue(),
@@ -1094,15 +1091,15 @@ fn orders_reversed_named_arguments_by_application_declaration() {
             .iter()
             .map(|(parameter, _)| *parameter)
             .collect::<Vec<_>>(),
-        target_parameter_ids
+        vec![target_parameter_ids[1], target_parameter_ids[0]]
     );
     assert!(matches!(
         &arguments[0].1,
-        CheckedClientExpression::Integer { value: 11, .. }
+        CheckedClientExpression::Integer { value: 22, .. }
     ));
     assert!(matches!(
         &arguments[1].1,
-        CheckedClientExpression::Integer { value: 22, .. }
+        CheckedClientExpression::Integer { value: 11, .. }
     ));
 }
 
@@ -1520,7 +1517,7 @@ use record_values::{
     opaque_standard_reconciliation_inputs, standard_origin, standard_reconciliation_inputs,
     verified_standard_library_for_relational_test,
     verified_standard_library_for_relational_test_with_boolean_id,
-    verified_standard_library_with_action_for_test, verified_standard_library_with_opaque_for_test,
+    verified_standard_library_with_opaque_for_test,
 };
 use standard_bundles::{
     STANDARD_V3_OUTPUT_SOURCE, STANDARD_V4_UI_SOURCE, check_v4_parts, standard_v2_executable,

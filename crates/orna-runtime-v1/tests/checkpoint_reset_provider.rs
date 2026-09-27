@@ -187,6 +187,45 @@ async fn unsupported_target_and_key_format_mismatch_fail_before_mutation() {
 }
 
 #[tokio::test]
+async fn stale_owner_provider_mismatch_preserves_error_without_failed_audit() {
+    let (_directory, state, stale_writer, key) = fixture().await;
+    let before_audits = state.admin_invocation_audits().await.unwrap();
+    let current_writer = state.takeover_lease(stale_writer, [5; 16]).await.unwrap();
+    assert_ne!(stale_writer, current_writer);
+
+    let mut mismatched_key = key.clone();
+    mismatched_key.position_format = Component::new("position-format-v2").unwrap();
+    let provider = provider(mismatched_key, true);
+    let rejected = state
+        .reset_checkpoint_with_provider(
+            stale_writer,
+            CheckpointResetRequest {
+                key: key.clone(),
+                expected: expected_initial(),
+                to: position("format-mismatch"),
+                reason: "format mismatch".into(),
+            },
+            &provider,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(rejected, RuntimeError::CheckpointNotReplayable);
+    assert_eq!(provider.validations.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        state.admin_invocation_audits().await.unwrap(),
+        before_audits
+    );
+    assert!(
+        state
+            .checkpoint_reset_audits(&key)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn supported_target_advances_once_and_audits_once() {
     let (_directory, state, writer, key) = fixture().await;
     let target = position("provider-target");

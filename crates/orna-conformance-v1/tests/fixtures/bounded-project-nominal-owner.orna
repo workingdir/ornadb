@@ -1,0 +1,8 @@
+fn private_seed() = 7;
+pub type Box {
+    pub value: Int = private_seed(),
+    secret: Int = private_seed(),
+}
+pub type Required { pub value: Int, }
+pub fn omitted() = Box { };
+pub fn missing_required() = Required { };
