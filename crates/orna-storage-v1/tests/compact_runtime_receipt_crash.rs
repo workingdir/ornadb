@@ -294,3 +294,73 @@ async fn recovery_finishes_receipt_boundary_after_runtime_consumes_only_frozen_p
     assert_eq!(runtime.pending().await.unwrap().len(), 1);
     assert_eq!(runtime.pending().await.unwrap()[0].id, [78; 16]);
 }
+
+#[tokio::test]
+async fn stale_candidate_before_ref_advance_preserves_frozen_rows_and_new_head() {
+    let (temp, repository) = repository();
+    let runtime = RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [81; 16],
+            repository_id: [82; 16],
+        },
+        [83; 32],
+    )
+    .await
+    .unwrap();
+    let lease = runtime.acquire_lease([84; 16]).await.unwrap();
+    let context = runtime.begin_activation().await.unwrap();
+    runtime
+        .commit_table_activation(
+            lease,
+            &context,
+            &[TableMutation::new(
+                [85; 16],
+                "Contact",
+                b"compact row".to_vec(),
+                Some(b"compact row".to_vec()),
+            )
+            .unwrap()],
+            [86; 32],
+            &orna_runtime_v1::NoFault,
+        )
+        .await
+        .unwrap();
+    let freeze = runtime
+        .freeze(
+            [87; 16],
+            &Checkpoint {
+                generation: 1,
+                digest: [86; 32],
+                mutation_sequence: 1,
+            },
+        )
+        .await
+        .unwrap();
+    let stale_plan = plan(&repository, &freeze);
+    let base_head = repository.head().unwrap().unwrap();
+
+    fs::write(
+        temp.path().join("ordinary.txt"),
+        "concurrent native commit\n",
+    )
+    .unwrap();
+    git(temp.path(), &["add", "ordinary.txt"]);
+    git(
+        temp.path(),
+        &["commit", "-m", "native writer advances HEAD"],
+    );
+    let native_head = repository.head().unwrap().unwrap();
+    assert_ne!(native_head, base_head);
+
+    assert!(
+        repository
+            .publish_compact_repository_boundary(stale_plan)
+            .is_err()
+    );
+
+    assert_eq!(repository.head().unwrap().as_ref(), Some(&native_head));
+    assert!(repository.read_publication_journal().unwrap().is_none());
+    assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
+    assert_eq!(runtime.pending().await.unwrap().len(), 1);
+}
