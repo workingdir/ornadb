@@ -7,5 +7,5 @@ fn parent() {
             Reading.insert({ id: 2, value: 2.0 });
             Reading.insert({ id: 3, value: 3.0 });
             minimum();
-        
+
 }

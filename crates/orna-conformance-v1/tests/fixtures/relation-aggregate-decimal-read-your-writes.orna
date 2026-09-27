@@ -6,5 +6,5 @@ fn parent() {
             assert total() == 2.003;
             Reading.insert({ id: 1, value: 1.20 });
             assert total() == 3.203;
-        
+
 }
