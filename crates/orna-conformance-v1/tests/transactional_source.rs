@@ -326,23 +326,7 @@ fn parsed_relation_windows_execute_direct_and_piped_complete_windows() {
         fixture_id: "relation-window".into(),
         source_id: "relation-window.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Note(id: Int) { text: Str, }
-            fn default_step() = Note | window(3) | count;
-            fn piped() = Note | window(3, step: 3) | count;
-            fn direct() = window(Note, size: 2, step: 3) | count;
-            fn parent() {
-                Note.insert({ id: 1, text: "one" });
-                Note.insert({ id: 2, text: "two" });
-                Note.insert({ id: 3, text: "three" });
-                Note.insert({ id: 4, text: "four" });
-                Note.insert({ id: 5, text: "five" });
-                assert default_step() == 3;
-                assert piped() == 1;
-                assert direct() == 2;
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-window-positive.orna").into(),
     };
 
     assert!(matches!(
@@ -358,15 +342,7 @@ fn parsed_relation_windows_reject_dynamic_non_positive_parameters_without_publis
         fixture_id: "relation-window-invalid".into(),
         source_id: "relation-window-invalid.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Note(id: Int) { text: Str, }
-            fn count_windows(size: Int, step: Int) = Note | window(size, step) | count;
-            fn parent() {
-                Note.insert({ id: 1, text: "one" });
-                assert count_windows(0, 1) == 0;
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-window-zero-rejected.orna").into(),
     };
 
     assert!(matches!(
@@ -383,15 +359,7 @@ fn parsed_relation_windows_reject_dynamic_negative_parameters_without_publish() 
         fixture_id: "relation-window-negative".into(),
         source_id: "relation-window-negative.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Note(id: Int) { text: Str, }
-            fn count_windows(size: Int, step: Int) = window(Note, size, step) | count;
-            fn parent() {
-                Note.insert({ id: 1, text: "one" });
-                assert count_windows(0 - 1, 1) == 0;
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-window-negative-rejected.orna").into(),
     };
 
     assert!(matches!(
