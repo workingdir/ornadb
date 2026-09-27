@@ -3585,7 +3585,7 @@ fn std_collection_float_min_and_max_use_total_order_and_ordinary_equality_separa
         }
     }
 
-    let source = "fn lowest(rows: [Float]) = min(rows); fn highest(rows: [Float]) = std.collection.max(rows);";
+    let source = include_str!("fixtures/collection_min_max_float.orna");
     assert_eq!(
         call_module(source, "lowest([-3.0f, 2.0f])", Limits::default()).unwrap(),
         Value::option(Some(Value::float_bits((-3.0f64).to_bits()))).unwrap()
@@ -3730,7 +3730,7 @@ fn std_collection_date_min_and_max_accept_all_call_forms_and_preserve_order() {
         }
     }
 
-    let source = "fn earliest(rows: [Date]) = min(rows); fn latest(rows: [Date]) = std.collection.max(rows);";
+    let source = include_str!("fixtures/collection_min_max_date.orna");
     assert_eq!(
         call_module(
             source,
@@ -3773,7 +3773,7 @@ fn std_collection_instant_min_and_max_use_normalized_utc_order() {
     }
 
     let source =
-        "fn earliest(rows: [Instant]) = min(rows); fn latest(rows: [Instant]) = max(rows);";
+        include_str!("fixtures/collection_min_max_instant.orna");
     assert_eq!(
         call_module(
             source,
@@ -3852,7 +3852,7 @@ fn std_collection_min_and_max_accept_integer_lists_in_all_call_forms() {
     }
 
     let source =
-        "fn lowest(rows: [Int]) = min(rows); fn highest(rows: [Int]) = std.collection.max(rows);";
+        include_str!("fixtures/collection_min_max_int.orna");
     assert_eq!(
         call_module(source, "lowest([3, 1, 2])", Limits::default()).unwrap(),
         Value::option(Some(Value::int(1.into()))).unwrap()
