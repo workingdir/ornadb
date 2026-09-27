@@ -1,0 +1,11 @@
+pub table Reading(id: Int) { value: Decimal, }
+fn minimum(): Decimal? = Reading | map(reading => reading.value) | min();
+fn maximum(): Decimal? = Reading | map(reading => reading.value) | max();
+fn parent() {
+
+            Reading.insert({ id: 1, value: 1.0 });
+            Reading.insert({ id: 2, value: 2.0 });
+            Reading.insert({ id: 3, value: 3.0 });
+            minimum();
+
+}
