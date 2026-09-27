@@ -2271,18 +2271,18 @@ fn harness_report_retains_imported_generic_sys_meta_evidence() {
         std::fs::create_dir_all(project_path).expect("project directory");
         std::fs::write(
             project_path.join("library.orna"),
-            "pub fn lookup<T>(value: T) = sys.meta<T>(value);",
+            include_str!("fixtures/imported-generic-sys-meta-library.orna"),
         )
         .expect("generic library module");
     }
     std::fs::write(
         accepted_path.join("consumer.orna"),
-        "use library; pub fn read(value: Int) = library.lookup<Int>(value);",
+        include_str!("fixtures/imported-generic-sys-meta-main.orna"),
     )
     .expect("accepted consumer module");
     std::fs::write(
         rejected_path.join("consumer.orna"),
-        "use library; pub fn too_many(value: Int) = library.lookup<Int, Str>(value);",
+        include_str!("fixtures/imported-generic-sys-meta-too-many-type-arguments.orna"),
     )
     .expect("rejected consumer module");
 
