@@ -7,7 +7,7 @@ mod resources;
 
 pub(super) use capabilities::validate_client_capability;
 use capabilities::{checked_client_capability, normalise_client_parameter_name};
-use constructors::{check_action_constructor, check_inspect_call, check_resource_constructor};
+use constructors::{check_inspect_call, check_resource_constructor};
 use control_flow::{
     check_client_control_flow_body, is_closed_client_boolean_return,
     is_standard_client_boolean_return,
@@ -1877,41 +1877,6 @@ fn check_client_expression(
                 locals,
             ) {
                 return inspect;
-            }
-            if name
-                == QualifiedSemanticName::new(["std", "action", "call"])
-                    .expect("std.action.call is valid")
-            {
-                return check_action_constructor(
-                    expression,
-                    input,
-                    targets,
-                    action_targets,
-                    resource_targets,
-                    query_catalogue,
-                    base,
-                    server_names,
-                    standard,
-                    diagnostics,
-                    references,
-                    used_capabilities,
-                    locals,
-                );
-            }
-            if name
-                == QualifiedSemanticName::new(["std", "action", "sequence"])
-                    .expect("std.action.sequence is valid")
-                || name
-                    == QualifiedSemanticName::new(["std", "action", "parallel"])
-                        .expect("std.action.parallel is valid")
-            {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::UnknownQualifiedName,
-                    format!("unknown CLIENT function {name}"),
-                    input.logical_path,
-                    span,
-                ));
-                return None;
             }
             if resource_constructor_kind(&name).is_some() {
                 diagnostics.push(diagnostic(

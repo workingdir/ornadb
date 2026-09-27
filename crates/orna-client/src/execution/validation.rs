@@ -53,7 +53,6 @@ pub(crate) enum ClientReturnShape {
     StreamProcedural(ResolvedType),
     ControlFlow(ResolvedType),
     StreamControlFlow(ResolvedType),
-    Action(TypeId),
     Inspect(ResolvedType),
     Source(ResolvedType),
     OtherValue,
@@ -71,7 +70,6 @@ fn classify_client_return(
             | STATE_FORMAT_VERSION
             | RESOURCE_FORMAT_VERSION
             | PROCEDURAL_FORMAT_VERSION
-            | orna_artifact::client_plan::ACTION_FORMAT_VERSION
             | orna_artifact::client_plan::INSPECT_FORMAT_VERSION
             | orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION
     );
@@ -149,11 +147,6 @@ fn classify_client_return(
         };
     }
     if let Some(type_id) = resolved_type.value_type() {
-        if artifact_version == orna_artifact::client_plan::ACTION_FORMAT_VERSION
-            && type_id == STD_ACTION_TYPE_ID
-        {
-            return ClientReturnShape::Action(type_id);
-        }
         if artifact_version == orna_artifact::client_plan::INSPECT_FORMAT_VERSION
             && is_sealed_inspect_type(type_id)
         {
@@ -214,7 +207,6 @@ pub(crate) fn validate_function_shape(
             | STATE_FORMAT_VERSION
             | RESOURCE_FORMAT_VERSION
             | PROCEDURAL_FORMAT_VERSION
-            | orna_artifact::client_plan::ACTION_FORMAT_VERSION
             | orna_artifact::client_plan::INSPECT_FORMAT_VERSION
             | orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION
     ) && !definition.parameters().is_empty()
@@ -303,7 +295,6 @@ pub(crate) fn validate_selected_references(
                     | ClientReturnShape::StreamProcedural(_)
                     | ClientReturnShape::ControlFlow(_)
                     | ClientReturnShape::StreamControlFlow(_)
-                    | ClientReturnShape::Action(_)
                     | ClientReturnShape::Inspect(_)
                     | ClientReturnShape::Source(_)
             ) {
@@ -337,12 +328,6 @@ pub(crate) fn validate_selected_references(
                             }
                             ClientReturnShape::Opaque(return_type) => {
                                 return_type == type_id
-                                    && definition
-                                        .is_some_and(|value| value.kind() == ValueTypeKind::Opaque)
-                            }
-                            ClientReturnShape::Action(return_type) => {
-                                return_type == type_id
-                                    && type_id == STD_ACTION_TYPE_ID
                                     && definition
                                         .is_some_and(|value| value.kind() == ValueTypeKind::Opaque)
                             }
@@ -599,22 +584,6 @@ fn collect_control_flow_block_call_targets(
 
 // ClientExecutionError retains its full public execution context and source error.
 #[allow(clippy::result_large_err)]
-pub(crate) fn preflight_client_action_calls(
-    active: &ActiveDatabaseRevision,
-    operation: &orna_artifact::client_plan::ActionOperationNode,
-    context: ClientExecutionContext,
-) -> Result<(), ClientExecutionError> {
-    validate_client_action_operation(active, operation, context)?;
-    let mut decoded_targets = Vec::new();
-    for (_, expression) in operation.arguments() {
-        collect_client_expression_call_targets(active, expression, context, &mut decoded_targets)?;
-    }
-    decoded_targets.push(operation.target_function());
-    preflight_client_call_targets(active, context, decoded_targets)
-}
-
-// ClientExecutionError retains its full public execution context and source error.
-#[allow(clippy::result_large_err)]
 pub(crate) fn preflight_client_inner_plan_calls(
     active: &ActiveDatabaseRevision,
     plan: &InnerClientPlan,
@@ -635,9 +604,10 @@ pub(crate) fn preflight_client_inner_plan_calls(
         InnerClientPlan::ControlFlow(inner) => {
             preflight_client_control_flow_calls(active, inner, context)
         }
-        InnerClientPlan::Action(inner) => {
-            preflight_client_action_calls(active, inner.operation(), context)
-        }
+        InnerClientPlan::Action(_) => Err(invalid_function(
+            context,
+            ClientExecutionRule::ArtifactFormat,
+        )),
     }
 }
 
@@ -702,49 +672,6 @@ fn validate_client_resource_operation(
 
 // ClientExecutionError retains its full public execution context and source error.
 #[allow(clippy::result_large_err)]
-fn validate_client_action_operation(
-    active: &ActiveDatabaseRevision,
-    operation: &orna_artifact::client_plan::ActionOperationNode,
-    context: ClientExecutionContext,
-) -> Result<(), ClientExecutionError> {
-    let raw_target =
-        InvocationTarget::new(operation.target_function(), operation.target_revision());
-    let Some(resolved) = resolve_unclassified_target(active, raw_target) else {
-        return Err(expression_error(
-            context,
-            ClientExpressionError::InvalidCall,
-        ));
-    };
-    let expected_domain = match operation.domain() {
-        ActionTargetDomain::Client => FunctionDomain::Client,
-        ActionTargetDomain::Server => FunctionDomain::Server,
-    };
-    if resolved.definition.domain() != expected_domain
-        || !operation_arguments_match_definition(resolved.definition, operation.arguments())
-    {
-        return Err(expression_error(
-            context,
-            ClientExpressionError::InvalidCall,
-        ));
-    }
-    let FunctionReturn::Single(expected) = resolved.definition.return_type() else {
-        return Err(expression_error(
-            context,
-            ClientExpressionError::InvalidCall,
-        ));
-    };
-    let expected = *expected;
-    if !resource_type_matches_id(active, expected, operation.declared_result_type()) {
-        return Err(expression_error(
-            context,
-            ClientExpressionError::InvalidCall,
-        ));
-    }
-    Ok(())
-}
-
-// ClientExecutionError retains its full public execution context and source error.
-#[allow(clippy::result_large_err)]
 fn collect_client_expression_call_targets(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
@@ -767,17 +694,8 @@ fn collect_client_expression_call_targets(
             }
             decoded_targets.push(operation.target_function());
         }
-        ClientExpressionNode::Action { operation } => {
-            validate_client_action_operation(active, operation, context)?;
-            for (_, expression) in operation.arguments() {
-                collect_client_expression_call_targets(
-                    active,
-                    expression,
-                    context,
-                    decoded_targets,
-                )?;
-            }
-            decoded_targets.push(operation.target_function());
+        ClientExpressionNode::Action { .. } => {
+            return Err(invalid_function(context, ClientExecutionRule::ArtifactFormat));
         }
         ClientExpressionNode::Inspect { operation } => {
             if let Some(expression) = operation.target() {
@@ -906,7 +824,6 @@ pub(crate) fn validate_artifact(
         ClientReturnShape::Resource(_) | ClientReturnShape::StreamResource(_) => {
             RESOURCE_FORMAT_VERSION
         }
-        ClientReturnShape::Action(_) => orna_artifact::client_plan::ACTION_FORMAT_VERSION,
         ClientReturnShape::Inspect(_) => orna_artifact::client_plan::INSPECT_FORMAT_VERSION,
         ClientReturnShape::Source(_) => artifact_version,
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),

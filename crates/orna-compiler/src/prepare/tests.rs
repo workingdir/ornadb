@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use orna_artifact::{
-    client_plan::ActionTargetDomain,
     constant_expression::ConstantExpression,
     server_mutation_plan::{
         MutationExpressionKind as DurableMutationExpressionKind, ServerDeletePlan,
