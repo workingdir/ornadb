@@ -1,3 +1,5 @@
+use orna_core::value::{OpaqueCodecRegistration, OpaqueCodecRegistry, OpaqueCodecRegistryError};
+
 use super::*;
 
 #[test]
@@ -917,6 +919,19 @@ fn registered_opaque_codec_is_bound_to_the_accepted_active_standard() {
     .expect("the accepted standard snapshot verifies");
     let registry = registered_opaque_codecs(&verified)
         .expect("the checked-in opaque codec matches the accepted standard");
+    let rows_registration = OpaqueCodecRegistration::rows(
+        super::super::STD_DATA_ROWS_TYPE_ID,
+        QualifiedSemanticName::new(["std", "data", "rows"])
+            .expect("the fixed Rows name is valid"),
+        super::super::STD_DATA_ROWS_CONTRACT,
+        "ORNA-ROWS/1 ",
+    )
+    .expect("the fixed Rows codec declaration is valid");
+    assert!(matches!(
+        OpaqueCodecRegistry::new(&verified, [rows_registration]),
+        Err(OpaqueCodecRegistryError::MissingDefinition { opaque_type })
+            if opaque_type == super::super::STD_DATA_ROWS_TYPE_ID
+    ));
     let active = empty_version_two_active_revision(&verified);
     let payload = [0xa5; 16];
 

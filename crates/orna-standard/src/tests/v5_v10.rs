@@ -678,216 +678,41 @@ fn retains_and_verifies_v7_window_standard_snapshot() {
 }
 
 #[test]
-fn prepares_the_v7_to_v8_standard_upgrade_from_an_empty_v7_active_revision() {
+fn v7_to_v8_upgrade_fails_closed_after_rows_source_retirement() {
     let version_seven = super::super::verify_standard_library_v7_snapshot(
         super::super::retained_standard_library_v7_snapshot()
             .expect("the retained V7 standard source is valid"),
     )
     .expect("the retained V7 standard source verifies");
-    let version_eight = super::super::verify_standard_library_v8_snapshot(
-        super::super::retained_standard_library_v8_snapshot()
-            .expect("the retained V8 standard source is valid"),
-    )
-    .expect("the retained V8 standard source verifies");
-    orna_compiler::check_standard_library_source(&version_seven)
-        .unwrap_or_else(|error| panic!("the V7 source must check: {error:?}"));
-
     let active = empty_version_two_active_revision(&version_seven);
-    let upgrade = super::super::prepare_standard_upgrade_v7_to_v8(&active)
-        .unwrap_or_else(|error| panic!("the V7-to-V8 upgrade must prepare: {error:?}"));
-    let verified = upgrade.verified_standard_snapshot();
-
-    assert_eq!(
-        verified.source().units(),
-        version_eight.source().units(),
-        "the V8 upgrade must retain the expected standard source units"
-    );
-    assert_eq!(
-        verified.origins(),
-        version_eight.origins(),
-        "the V8 upgrade must retain the expected source origins"
-    );
-    assert_eq!(
-        &verified.origins()[..version_seven.origins().len()],
-        version_seven.origins(),
-        "V8 must retain every V7 source origin byte-for-byte"
-    );
-    assert_eq!(
-        verified.catalogue().schemas(),
-        version_eight.catalogue().schemas(),
-        "the V8 upgrade must retain the expected standard schemas"
-    );
-    assert_eq!(
-        verified.catalogue().object_types(),
-        version_eight.catalogue().object_types(),
-        "the V8 upgrade must retain the expected object types"
-    );
-    assert_eq!(
-        verified.catalogue().enum_types(),
-        version_eight.catalogue().enum_types(),
-        "the V8 upgrade must retain the expected enum types"
-    );
-    assert_eq!(
-        verified.catalogue().record_value_types(),
-        version_eight.catalogue().record_value_types(),
-        "the V8 upgrade must retain the expected record value types"
-    );
-    assert_eq!(
-        verified.catalogue().value_types(),
-        version_eight.catalogue().value_types(),
-        "the V8 upgrade must retain the expected standard value types"
-    );
-    assert_eq!(
-        verified.catalogue().type_bindings(),
-        version_eight.catalogue().type_bindings(),
-        "the V8 upgrade must retain the expected standard type bindings"
-    );
-    assert_eq!(
-        verified.catalogue().functions(),
-        version_eight.catalogue().functions(),
-        "the V8 upgrade must retain the expected standard functions"
-    );
-    assert_eq!(
-        verified.executables(),
-        version_eight.executables(),
-        "the V8 upgrade must retain the expected executable snapshot"
-    );
-    assert_eq!(
-        verified.revision(),
-        super::super::STANDARD_LIBRARY_V8_REVISION_ID,
-        "V8 must carry the accepted standard-library revision"
-    );
-    assert_eq!(
-        verified.catalogue().revision(),
-        super::super::STANDARD_CATALOGUE_V8_REVISION_ID,
-        "V8 must carry the accepted standard catalogue revision"
-    );
-    assert_eq!(
-        verified.source().bundle(),
-        super::super::STANDARD_SOURCE_V8_BUNDLE_ID,
-        "V8 must retain its reserved source-bundle identity"
-    );
-    assert_eq!(
-        verified.source().id(),
-        super::super::STANDARD_SOURCE_V8_REVISION_ID,
-        "V8 must retain its reserved source-revision identity"
-    );
-    assert_eq!(
-        verified.source().parent(),
-        Some(super::super::STANDARD_SOURCE_V7_REVISION_ID),
-        "V8 must be the append-only child of the retained V7 source revision"
-    );
-    assert_eq!(
-        verified.source().bundle_hash(),
-        super::super::ACCEPTED_V8_SOURCE_BUNDLE_DIGEST,
-        "V8 must retain the accepted source-bundle digest"
-    );
-    assert_eq!(
-        verified.source().revision_hash(),
-        super::super::ACCEPTED_V8_SOURCE_REVISION_DIGEST,
-        "V8 must retain the accepted source-revision digest"
-    );
-    assert_eq!(
-        verified.digest(),
-        super::super::ACCEPTED_V8_STANDARD_LIBRARY_DIGEST,
-        "V8 must retain the accepted standard-library digest"
-    );
-    assert_eq!(verified.source().units().len(), 8);
-    assert_eq!(
-        &verified.source().units()[..version_seven.source().units().len()],
-        version_seven.source().units(),
-        "V8 must retain every V7 source unit byte-for-byte"
-    );
-    assert_eq!(
-        verified.source().units()[7].id(),
-        super::super::STD_DATA_SOURCE_UNIT_ID
-    );
-    assert_eq!(verified.source().units()[7].ordinal(), 7);
-    assert_eq!(
-        verified.source().units()[7].logical_path(),
-        super::super::STD_DATA_SOURCE_LOGICAL_PATH
-    );
-    assert_eq!(
-        verified.source().units()[7].content(),
-        super::super::RETAINED_STANDARD_DATA_SOURCE
-    );
-    assert_eq!(
-        upgrade.application_revision().expected_base(),
-        active.pair()
-    );
-    assert_eq!(
-        upgrade
-            .application_revision()
-            .catalogue_hash_context()
-            .standard()
-            .map(|snapshot| snapshot.revision()),
-        Some(super::super::STANDARD_LIBRARY_V8_REVISION_ID)
-    );
-    assert_eq!(
-        upgrade
-            .application_revision()
-            .catalogue_hash_context()
-            .standard()
-            .map(|snapshot| snapshot.digest()),
-        Some(verified.digest()),
-        "the V8 application caller must pin the upgraded standard digest"
-    );
-    assert_eq!(
-        upgrade
-            .application_revision()
-            .catalogue_hash_context()
-            .standard()
-            .map(|snapshot| snapshot.digest_version()),
-        Some(StandardLibraryDigestVersion::Version2)
-    );
-    let expected_catalogue_hash = catalogue_digest_with_context(
-        upgrade.application_revision().catalogue_hash_context(),
-        upgrade.application_revision().candidate(),
-        upgrade.application_revision().new_function_revisions(),
-        upgrade.application_revision().expressions(),
-        upgrade.application_revision().origins(),
-        upgrade.application_revision().references(),
-    )
-    .expect("the V8 application catalogue hash recomputes");
-    assert_eq!(
-        upgrade.application_revision().catalogue_hash(),
-        expected_catalogue_hash,
-        "the V8 application catalogue hash must cover the retained standard context"
-    );
+    let error = super::super::prepare_standard_upgrade_v7_to_v8(&active)
+        .expect_err("retired V8 source must not be installed");
+    assert!(matches!(
+        error,
+        super::super::StandardUpgradeError::StandardLibrary {
+            source: super::super::StandardLibraryError::UnsupportedRevision { revision }
+        } if revision == super::super::STANDARD_LIBRARY_V8_REVISION_ID
+    ));
 }
 
 #[test]
-fn v7_to_v8_upgrade_rejects_non_v7_parents_before_child_work() {
+fn v7_to_v8_upgrade_rejects_non_v7_parent_before_child_work() {
     let version_six = super::super::verify_standard_library_v6_snapshot(
         super::super::retained_standard_library_v6_snapshot()
             .expect("the retained V6 standard source is valid"),
     )
     .expect("the retained V6 standard source verifies");
-    let version_eight = super::super::verify_standard_library_v8_snapshot(
-        super::super::retained_standard_library_v8_snapshot()
-            .expect("the retained V8 standard source is valid"),
-    )
-    .expect("the retained V8 standard source verifies");
-
-    for (standard, actual_parent_revision) in [
-        (&version_six, super::super::STANDARD_LIBRARY_V6_REVISION_ID),
-        (
-            &version_eight,
-            super::super::STANDARD_LIBRARY_V8_REVISION_ID,
-        ),
-    ] {
-        let active = empty_version_two_active_revision(standard);
-        let error = super::super::prepare_standard_upgrade_v7_to_v8(&active)
-            .expect_err("a non-V7 parent must not enter the V7-to-V8 path");
-        assert!(matches!(
-            error,
-            super::super::StandardUpgradeError::Prepare {
-                source: orna_compiler::PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
-                    revision
-                }
-            } if revision == actual_parent_revision
-        ));
-    }
+    let active = empty_version_two_active_revision(&version_six);
+    let error = super::super::prepare_standard_upgrade_v7_to_v8(&active)
+        .expect_err("a non-V7 parent must not enter the V7-to-V8 path");
+    assert!(matches!(
+        error,
+        super::super::StandardUpgradeError::Prepare {
+            source: orna_compiler::PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                revision
+            }
+        } if revision == super::super::STANDARD_LIBRARY_V6_REVISION_ID
+    ));
 }
 
 #[test]
@@ -925,20 +750,13 @@ fn v9_retired_standard_source_fails_closed() {
 }
 
 #[test]
-fn v8_to_v9_upgrade_fails_closed_after_constructor_source_retirement() {
-    let version_eight = super::super::verify_standard_library_v8_snapshot(
-        super::super::retained_standard_library_v8_snapshot()
-            .expect("the retained V8 standard source is valid"),
-    )
-    .expect("the retained V8 standard source verifies");
-    let active = empty_version_two_active_revision(&version_eight);
-    let error = super::super::prepare_standard_upgrade_v8_to_v9(&active)
-        .expect_err("V9 source retirement closes the historical upgrade path");
+fn v8_to_v9_upgrade_fails_closed_after_rows_source_retirement() {
+    let error = super::super::retained_standard_library_v8_snapshot()
+        .expect_err("retired V8 source must not be reconstructed");
     assert!(matches!(
         error,
-        super::super::StandardUpgradeError::StandardLibrary {
-            source: super::super::StandardLibraryError::UnsupportedRevision { revision }
-        } if revision == super::super::STANDARD_LIBRARY_V9_REVISION_ID
+        super::super::StandardLibraryError::UnsupportedRevision { revision }
+            if revision == super::super::STANDARD_LIBRARY_V8_REVISION_ID
     ));
 }
 
@@ -1844,98 +1662,32 @@ fn inspect_carrier_registry_is_fixed_and_deterministic() {
 }
 
 #[test]
-fn v8_rows_snapshot_retains_canonical_source_and_digests() {
-    let snapshot = super::super::retained_standard_library_v8_snapshot()
-        .expect("the retained V8 source is valid");
-    let units = snapshot.source().units();
-    assert_eq!(units.len(), 8);
-    assert_eq!(
-        snapshot.source().parent(),
-        Some(super::super::STANDARD_SOURCE_V7_REVISION_ID)
-    );
-    assert_eq!(units[7].id(), super::super::STD_DATA_SOURCE_UNIT_ID);
-    assert_eq!(units[7].ordinal(), 7);
-    assert_eq!(
-        units[7].logical_path(),
-        super::super::STD_DATA_SOURCE_LOGICAL_PATH
-    );
-    assert_eq!(
-        units[7].content(),
-        super::super::RETAINED_STANDARD_DATA_SOURCE
-    );
-    assert_eq!(
-        source_unit_content_digest(super::super::RETAINED_STANDARD_DATA_SOURCE)
-            .expect("the data source digest is valid"),
-        units[7].content_hash()
-    );
-    assert_eq!(
-        source_bundle_digest(units).expect("the V8 bundle digest is valid"),
-        snapshot.source().bundle_hash()
-    );
-    assert_eq!(
-        source_revision_record_digest(
-            super::super::STANDARD_SOURCE_V8_BUNDLE_ID,
-            Some(super::super::STANDARD_SOURCE_V7_REVISION_ID),
-            snapshot.source().bundle_hash(),
-        )
-        .expect("the V8 source revision digest is valid"),
-        snapshot.source().revision_hash()
-    );
-    assert_eq!(
-        calculate_standard_library_digest(&snapshot).expect("the V8 standard digest recomputes"),
-        snapshot.digest()
-    );
-    assert_eq!(
-        snapshot
-            .catalogue()
-            .functions()
-            .iter()
-            .map(|function| function.id())
-            .collect::<Vec<_>>(),
-        vec![
-            super::super::STD_INVOKE_ECHO_FUNCTION_ID,
-            super::super::STD_JSON_ENCODE_FUNCTION_ID,
-            super::super::STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
-            super::super::STD_UI_WINDOW_FUNCTION_ID,
-        ]
-    );
-    assert_eq!(
-        snapshot
-            .executables()
-            .iter()
-            .map(StandardExecutable::function)
-            .collect::<Vec<_>>(),
-        snapshot
-            .catalogue()
-            .functions()
-            .iter()
-            .map(|function| function.id())
-            .collect::<Vec<_>>()
-    );
-
-    let verified = super::super::verify_standard_library_v8_snapshot(snapshot)
-        .expect("the V8 snapshot verifies");
-    let registry =
-        super::super::registered_opaque_codecs(&verified).expect("the V8 codecs register");
-    let active = empty_version_two_active_revision(&verified);
-    let mut payload = b"ORNA-ROWS/1 ".to_vec();
-    payload.extend_from_slice(&1_u16.to_be_bytes());
-    payload.extend_from_slice(&1_u32.to_be_bytes());
-    payload.extend_from_slice(&1_u32.to_be_bytes());
-    payload.push(b'x');
-    payload.push(0x01);
-    payload.extend_from_slice(&[0; 15]);
-    payload.push(0x02);
-    payload.push(0);
-    payload.extend_from_slice(&0_u32.to_be_bytes());
-    let value = OpaqueValue::new(
-        &active,
-        &registry,
-        super::super::STD_DATA_ROWS_TYPE_ID,
-        &payload,
+fn v8_rows_snapshot_fails_closed_after_source_retirement() {
+    let error = super::super::retained_standard_library_v8_snapshot()
+        .expect_err("retired V8 Rows source must not be reconstructed");
+    assert!(matches!(
+        error,
+        super::super::StandardLibraryError::UnsupportedRevision { revision }
+            if revision == super::super::STANDARD_LIBRARY_V8_REVISION_ID
+    ));
+    let supplied = super::super::retained_standard_library_snapshot()
+        .expect("the pinned reference standard snapshot remains available");
+    let supplied = super::super::verify_standard_library_v8_snapshot(supplied)
+        .expect_err("a supplied historical snapshot cannot restore retired V8");
+    assert!(matches!(
+        supplied,
+        super::super::StandardLibraryError::UnsupportedRevision { revision }
+            if revision == super::super::STANDARD_LIBRARY_V8_REVISION_ID
+    ));
+    let selected = super::super::select_verified_standard_library(
+        super::super::STANDARD_LIBRARY_V8_REVISION_ID,
     )
-    .expect("the V8 registry admits the canonical zero-row Rows frame");
-    assert_eq!(value.canonical_payload(), payload);
+    .expect_err("retired V8 selection must fail closed");
+    assert!(matches!(
+        selected,
+        super::super::StandardLibraryError::UnsupportedRevision { revision }
+            if revision == super::super::STANDARD_LIBRARY_V8_REVISION_ID
+    ));
 }
 #[test]
 fn v10_cli_source_is_not_retained_or_selected() {
