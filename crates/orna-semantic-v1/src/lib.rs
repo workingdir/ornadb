@@ -5522,13 +5522,17 @@ fn check_function(
             );
             default_effects.join(&inferred.effects);
         }
-        bind_pattern(
-            &parameter.pattern,
-            ty.unwrap_or(Type::Error),
-            scope,
-            &mut local,
-            diagnostics,
-        );
+        let ty = ty.unwrap_or(Type::Error);
+        if ty == Type::Error {
+            // Preserve a simple parameter name after an invalid annotation so
+            // references in the body do not add a misleading unresolved-name
+            // cascade. The annotation diagnostic remains authoritative.
+            if let Pattern::Name(name, _) = &parameter.pattern {
+                insert_local_binding(name, Type::Error, &mut local, diagnostics);
+                continue;
+            }
+        }
+        bind_pattern(&parameter.pattern, ty, scope, &mut local, diagnostics);
     }
     if let Some(expected) = signature
         .result

@@ -8,8 +8,8 @@
 //! arbitrary default equivalence. The three former ignored probes are active
 //! regressions.
 //!
-//! Inputs are in-memory modules with logical paths: no files, temp directories,
-//! environment changes, fixture catalogues, or runtime evaluation are needed.
+//! Inputs use in-memory modules where compact setup helps and checked-in `.orna`
+//! fixtures for source programs whose exact text is under review.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -113,12 +113,7 @@ fn underconstrained_lambda_field_inference_requires_annotation() {
 // incompatible function bodies or calls.
 #[test]
 fn unsupported_product_annotation_requires_type_diagnostic() {
-    let result = analyze_main(
-        r#"
-            pub fn bad(value: Int * Int): Bool = value;
-            pub fn caller(): Bool = bad("wrong");
-        "#,
-    );
+    let result = analyze_main(include_str!("fixtures/unsupported-product-annotation.orna"));
     expect_diagnostics(&result, &[DIAG_TYPE]);
     assert!(result
         .diagnostics
