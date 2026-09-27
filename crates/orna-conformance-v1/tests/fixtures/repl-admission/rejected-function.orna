@@ -1,0 +1,5 @@
+fn answer(): Int = "wrong";
+fn answer(): Int = 42;
+answer()
+answer(99)
+$_
