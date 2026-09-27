@@ -48,7 +48,11 @@ fn trailing_line_feeds(bytes: &[u8]) -> usize {
 fn actual_cli_diagnostic_preserves_detail_and_keeps_stderr_unlinked() {
     let project = invalid_fixture_project();
 
-    for (color, expect_ansi) in [("never", false), ("always", true)] {
+    for (color, expect_ansi) in [
+        ("never", false),
+        ("always", true),
+        ("auto", false),
+    ] {
         let output = check(&project, color);
         assert_eq!(output.status.code(), Some(1), "stderr: {:?}", output.stderr);
         assert!(output.stdout.is_empty(), "diagnostics belong on stderr");
