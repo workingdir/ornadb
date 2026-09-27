@@ -41,6 +41,9 @@ use orna_core::{
         OpaqueCodecRegistration, OpaqueCodecRegistry, OpaqueCodecRegistryError,
     },
 };
+use orna_semantic_v1::{
+    Catalogue as StandardCatalogueV1, StandardCatalogueError, StandardDependencyProfile,
+};
 use orna_syntax::{NamePart, PrimitiveValueTypePersistence, QualifiedName, TypeExportTarget};
 
 mod codecs;
@@ -107,6 +110,42 @@ pub use orna_core::inspect::INSPECT_RENDER_CONTRACT;
 
 /// The standard-library version represented by this manifest.
 pub const STANDARD_LIBRARY_VERSION_IDENTITY: &str = "orna.std/1";
+
+/// Logical source path of the pinned Orna 1.0.0 reference math module.
+pub const REFERENCE_STANDARD_MATH_PATH_V1: &str = "std/math.orna";
+
+const REFERENCE_STANDARD_MATH_SOURCE_V1: &str = include_str!("v1/std/math.orna");
+
+/// Source units for the Orna 1.0.0 reference standard dependency.
+///
+/// This is the current source-backed standard boundary. The retained `orna.std/1`–
+/// `orna.std/11` APIs below model older, explicitly versioned snapshots.
+#[must_use]
+pub fn reference_standard_sources_v1() -> [(String, String); 1] {
+    [(
+        REFERENCE_STANDARD_MATH_PATH_V1.into(),
+        REFERENCE_STANDARD_MATH_SOURCE_V1.into(),
+    )]
+}
+
+/// Profile that pins the exact 1.0.0 reference-standard source bytes.
+#[must_use]
+pub fn reference_standard_profile_v1() -> StandardDependencyProfile {
+    StandardDependencyProfile::from_sources(
+        "orna.std/v1-pure-math",
+        reference_standard_sources_v1(),
+    )
+    .expect("the bundled Orna 1.0.0 standard module path is valid")
+}
+
+/// Builds the semantic catalogue from the pinned Orna 1.0.0 source, without
+/// routing through the pre-1.0 SQL parser/compiler used by retained snapshots.
+pub fn reference_standard_catalogue_v1() -> Result<StandardCatalogueV1, StandardCatalogueError> {
+    StandardCatalogueV1::from_standard_sources(
+        &reference_standard_profile_v1(),
+        reference_standard_sources_v1(),
+    )
+}
 
 /// The language version associated with this standard-library version.
 pub const LANGUAGE_VERSION_IDENTITY: &str = "orna.language/1";
