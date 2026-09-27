@@ -6,6 +6,7 @@
 mod cli_args;
 mod cli_dispatch;
 mod cli_help;
+mod cli_status;
 mod repl;
 
 use cli_args::{Command, Invocation, Parsed, StatusFormat, parse_cli, requested_color_mode};
@@ -875,6 +876,84 @@ fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
                 "retry `status --porcelain`",
             )
         })?;
+    Ok(())
+}
+
+fn run_status_json(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+    let path = local_project_path(endpoint)?;
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree could not be discovered",
+            "run the command inside a Git worktree or provide a local project path",
+        )
+    })?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository.worktree())
+        .args([
+            "-c",
+            "color.status=false",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+        ])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .output()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "local Git worktree status could not be read",
+                "check that Git can read the local worktree, then retry `status --format json`",
+            )
+        })?;
+    if !output.status.success() {
+        return Err(Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be read",
+            "check that Git can read the local worktree, then retry `status --format json`",
+        ));
+    }
+    let branch_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository.worktree())
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .output()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "local Git worktree branch could not be read",
+                "check that Git can read the local worktree, then retry `status --format json`",
+            )
+        })?;
+    let branch =
+        cli_status::branch_name(branch_output.status.success(), &branch_output.stdout);
+    let json = cli_status::encode_status_json(branch, &output.stdout).ok_or_else(|| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be read",
+            "retry `status --format json`",
+        )
+    })?;
+    io::stdout().lock().write_all(&json).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be written",
+            "retry `status --format json`",
+        )
+    })?;
     Ok(())
 }
 
@@ -2267,14 +2346,22 @@ mod tests {
                 format: StatusFormat::Short,
             }
         );
+        assert_eq!(
+            parse_cli(&["status".into(), "--format".into(), "json".into()])
+                .expect("JSON status parses")
+                .command,
+            Command::Status {
+                format: StatusFormat::Json,
+            }
+        );
         let error = parse_cli(&["status".into(), "--porcelain=v2".into()])
             .expect_err("status format is exact");
         assert_eq!(error.code, "E1002");
         assert_eq!(
             (error.title, error.help),
             (
-                "`status` supports no option, `--porcelain`, or `--short`",
-                "use `status`, `status --porcelain`, or `status --short`"
+                "unsupported `status` option or option placement",
+                "use `status`, `status --porcelain`, `status --short`, `status --format human|short|json`, or `--format human|short|json status`"
             )
         );
         assert_eq!(
