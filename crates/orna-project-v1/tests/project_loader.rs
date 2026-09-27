@@ -1,7 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
 use orna_project_v1::{ProjectLimits, ProjectLoadError, ProjectLoader};
-use orna_repository_v1::Repository;
+use orna_repository_v1::{ManagedFileChange, ManagedPath, Repository};
 use orna_semantic_v1::{Catalogue, StandardDependencyProfile, analyze_with_catalogue};
 use tempfile::TempDir;
 
@@ -26,17 +26,19 @@ fn repository(files: &[(&str, &str)]) -> (TempDir, Repository) {
 
 fn commit_all(directory: &TempDir) {
     for (key, value) in [
-        ("user.email", "project-loader@example.invalid"),
-        ("user.name", "Project loader test"),
+        ("user.email", "kieran@drewett.dev"),
+        ("user.name", "kierandrewett"),
         ("commit.gpgsign", "false"),
     ] {
+        let output = Command::new("git")
+            .args(["config", key, value])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
         assert!(
-            Command::new("git")
-                .args(["config", key, value])
-                .current_dir(directory.path())
-                .status()
-                .unwrap()
-                .success()
+            output.status.success(),
+            "git config {key}: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
     assert!(
@@ -461,6 +463,60 @@ fn loads_reachable_modules_from_a_committed_snapshot_without_touching_git_state(
     assert_eq!(
         git_output(&directory, &["status", "--porcelain=v1"]),
         format!(" M main.orna\n{before_status}")
+    );
+}
+
+#[test]
+fn loads_private_candidate_source_without_reading_human_edits_or_changing_head() {
+    const CANDIDATE_SOURCE: &str =
+        include_str!("../../orna-semantic-v1/tests/fixtures/semantic_consumer_gap.orna");
+
+    let (directory, candidate_repository) =
+        repository(&[("main.orna", "pub fn from_head(): Int = 1;")]);
+    commit_all(&directory);
+    let base = candidate_repository.resolve_snapshot("HEAD").unwrap();
+    let candidate = candidate_repository
+        .build_private_commit(
+            &base,
+            &[ManagedFileChange::new(
+                ManagedPath::new("main.orna").unwrap(),
+                Some(CANDIDATE_SOURCE.as_bytes().to_vec()),
+            )],
+            "candidate source",
+        )
+        .unwrap();
+
+    fs::write(directory.path().join("main.orna"), "staged human edit").unwrap();
+    assert!(
+        Command::new("git")
+            .args(["add", "main.orna"])
+            .current_dir(directory.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(directory.path().join("main.orna"), "unstaged human edit").unwrap();
+    let before_head = git_output(&directory, &["rev-parse", "HEAD"]);
+    let before_index = git_output(&directory, &["ls-files", "-s"]);
+    let before_status = git_output(&directory, &["status", "--porcelain=v1"]);
+
+    assert_ne!(candidate.commit(), &base);
+    let candidate_project = ProjectLoader::default()
+        .load_private_candidate(&candidate_repository, &candidate)
+        .unwrap();
+    assert_eq!(candidate_project.modules().len(), 1);
+    assert_eq!(candidate_project.modules()[0].source, CANDIDATE_SOURCE);
+
+    let head_project = ProjectLoader::default()
+        .load_committed_snapshot(&candidate_repository, &base)
+        .unwrap();
+    assert_eq!(head_project.modules().len(), 1);
+    assert_eq!(head_project.modules()[0].source, "pub fn from_head(): Int = 1;");
+    assert_eq!(git_output(&directory, &["rev-parse", "HEAD"]), before_head);
+    assert_eq!(git_output(&directory, &["ls-files", "-s"]), before_index);
+    assert_eq!(
+        git_output(&directory, &["status", "--porcelain=v1"]),
+        before_status
     );
 }
 
