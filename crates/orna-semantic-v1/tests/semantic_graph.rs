@@ -55,8 +55,14 @@ fn declared_result_and_ok_names_remain_ordinary_user_declarations() {
 
 #[test]
 fn standard_dependency_revision_is_canonical_and_captures_provenance() {
-    let first = ("std/a.orna".to_owned(), "pub fn a() = 1;".to_owned());
-    let second = ("std/nested/b.orna".to_owned(), "pub fn b() = 2;".to_owned());
+    let first = (
+        "std/a.orna".to_owned(),
+        include_str!("fixtures/standard-dependency-a.orna").to_owned(),
+    );
+    let second = (
+        "std/nested/b.orna".to_owned(),
+        include_str!("fixtures/standard-dependency-b.orna").to_owned(),
+    );
     let ordered = StandardDependencyProfile::from_sources(
         "orna.std/snapshot-1",
         [first.clone(), second.clone()],
@@ -88,7 +94,11 @@ fn standard_dependency_revision_is_canonical_and_captures_provenance() {
         StandardDependencyProfile::from_sources(
             "orna.std/snapshot-1",
             [
-                (first.0.clone(), "pub fn a() = 3;".to_owned()),
+                (
+                    first.0.clone(),
+                    include_str!("fixtures/standard-dependency-a-content-variant.orna")
+                        .to_owned(),
+                ),
                 second.clone(),
             ],
         )
