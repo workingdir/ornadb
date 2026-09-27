@@ -1,0 +1,6 @@
+pub table Person(id: Str) {
+    name: Str,
+    label: Str => name,
+}
+pub table Reading(sensor: Str, sequence: Int) { value: Int, }
+pub table Note { text: Str, }
