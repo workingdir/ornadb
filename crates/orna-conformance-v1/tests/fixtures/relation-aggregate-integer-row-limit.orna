@@ -1,0 +1,7 @@
+pub table Reading(id: Int) { value: Int, }
+            fn parent() {
+                Reading.insert({ id: 1, value: 1 });
+                Reading.insert({ id: 2, value: 2 });
+                Reading.insert({ id: 3, value: 3 });
+                Reading | map(reading => reading.value) | sum;
+            }

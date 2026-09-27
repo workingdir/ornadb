@@ -1,0 +1,13 @@
+pub table Note(id: Int) {
+    text: Str,
+}
+
+fn child() {
+    Note.insert({ id: 7, text: "nested" });
+}
+
+fn parent() {
+    child();
+    Note.upsert({ id: 7, text: "updated" });
+    Note.upsert({ id: 8, text: "new" });
+}

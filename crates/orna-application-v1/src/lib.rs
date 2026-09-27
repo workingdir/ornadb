@@ -7,25 +7,37 @@
 //! activation context and is never published by this crate.
 
 use orna_evaluator_v1::{
-    EffectHandler, Environment, EvaluationError, Functions, Limits, PureFunction, StepBudget,
-    invoke_named, invoke_named_with_effects,
+    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
+    PureFunction, RelationPage, StepBudget, invoke_named, invoke_named_with_effects,
+    reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SafeText};
 use orna_live_v1::{
-    Error as LiveError, LiveApplication, LiveApplicationWorkLease, LiveEvalResponse,
-    LiveEvalTransaction,
+    Error as LiveError, LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkLease,
+    LiveEvalResponse, LiveEvalTransaction,
 };
 use orna_protocol_v1::{Envelope, Message, ResultStatus};
 use orna_runtime_v1::{
-    NoFault, RuntimeActivationContext, RuntimeError, StagedTableActivation, TableMutation,
+    NoFault, RuntimeActivationContext, RuntimeError, RuntimePublicationMetadataRows,
+    StagedTableActivation, TableMutation,
 };
 use orna_semantic_v1::{Catalogue, ModuleInput, SymbolKind, TableSchema, analyze_with_catalogue};
-use orna_syntax_v1::{Declaration, Expr, parse_module_with_file};
+use orna_syntax_v1::{
+    CaseArm, Declaration, Expr, Statement, StringSegment, parse_module_with_file,
+};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time::UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::UNIX_EPOCH,
+};
 
 const DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST\0";
 const SOURCE_MUTATION_DOMAIN: &[u8] = b"ORNA-SOURCE-MUTATION\0";
+const MAX_ADMITTED_REPL_SESSIONS: usize = 4096;
 
 /// Errors raised before an application is allowed to execute.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -46,6 +58,11 @@ pub enum ApplicationError {
     UnadmittedTable(String),
     /// The evaluator rejected an admitted effect outside the table boundary.
     EffectRejected(String),
+    /// The source requested an effect that could not be authorized or run.
+    SourceEffectFailed(String),
+    /// Async runtime effects are supported only as the activation's terminal
+    /// result, so their real result is available before the activation commits.
+    UnsupportedSourceEffectPlacement,
 }
 
 impl fmt::Display for ApplicationError {
@@ -71,6 +88,10 @@ impl fmt::Display for ApplicationError {
             Self::EffectRejected(code) => {
                 write!(formatter, "admitted effect was rejected: {code}")
             }
+            Self::SourceEffectFailed(code) => write!(formatter, "source effect failed: {code}"),
+            Self::UnsupportedSourceEffectPlacement => formatter.write_str(
+                "runtime-backed source effects must be the activation's terminal result",
+            ),
         }
     }
 }
@@ -153,6 +174,8 @@ impl ApplicationAuthority {
         Ok(AdmittedApplication {
             logical_path,
             source_digest: Sha256::digest(source.as_bytes()).into(),
+            requires_publication_metadata: source.contains("sys.Storage")
+                || source.contains("sys.MaintenanceJob"),
             entry,
             functions,
             limits: self.limits,
@@ -205,6 +228,78 @@ impl ApplicationAuthority {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
         let mutations = handler.into_mutations()?;
+        Ok(StagedActivation { value, mutations })
+    }
+
+    /// Evaluates admitted source with a preloaded durable publication snapshot
+    /// available to the evaluator's `sys.Storage` and `sys.MaintenanceJob`
+    /// relation scans. Snapshot loading remains asynchronous at the caller;
+    /// evaluation and relation paging stay bounded and synchronous here.
+    pub fn evaluate_staged_with_publication_rows(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        publication_rows: RuntimePublicationMetadataRows,
+    ) -> Result<StagedActivation, ApplicationError> {
+        let tables = admitted_table_schemas(&application.module_header);
+        let mut handler = SourceMutationEffectHandler::with_publication_rows(
+            tables,
+            publication_rows,
+        );
+        let value = invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            arguments,
+            application.limits,
+            &mut handler,
+        )
+        .map_err(|error: EvaluationError| {
+            ApplicationError::EffectRejected(error.code().to_owned())
+        })?;
+        let mutations = handler.into_mutations()?;
+        Ok(StagedActivation { value, mutations })
+    }
+
+    /// Evaluates admitted source while dispatching its terminal runtime effect
+    /// through an explicit trusted host capability before returning staged
+    /// writes to the runtime for commit.
+    ///
+    /// Ordinary [`Self::evaluate_staged`] and the live application adapter do
+    /// not receive this capability and continue to reject administrative
+    /// effects. The async effect must be the entry's final expression: this
+    /// keeps the evaluator's source order intact and makes the actual host
+    /// result available to the caller before any staged writes are committed.
+    pub async fn evaluate_staged_with_async_effects(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        context: &RuntimeActivationContext,
+        dispatcher: &dyn AsyncApplicationEffectDispatcher,
+    ) -> Result<StagedActivation, ApplicationError> {
+        validate_terminal_runtime_effect(application)?;
+        let tables = admitted_table_schemas(&application.module_header);
+        let publication_rows = dispatcher
+            .publication_metadata_rows()
+            .await
+            .map_err(ApplicationError::SourceEffectFailed)?;
+        let mut handler = AsyncSourceMutationEffectHandler::new(tables, publication_rows);
+        let mut value = invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            arguments,
+            application.limits,
+            &mut handler,
+        )
+        .map_err(|error: EvaluationError| {
+            ApplicationError::EffectRejected(error.code().to_owned())
+        })?;
+        let (mutations, effects) = handler.into_parts()?;
+        for effect in effects {
+            value = dispatcher
+                .dispatch(effect, context)
+                .await
+                .map_err(ApplicationError::SourceEffectFailed)?;
+        }
         Ok(StagedActivation { value, mutations })
     }
 
@@ -276,6 +371,69 @@ pub struct StagedActivation {
     mutations: Vec<TableMutation>,
 }
 
+/// A runtime operation requested by admitted application source.
+///
+/// Portable runtime handles are data only. A trusted dispatcher must resolve
+/// each handle under the current owner and pinned activation context before
+/// invoking a runtime transition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ApplicationEffectRequest {
+    PauseStream {
+        stream: CanonicalValue,
+        reason: Option<String>,
+    },
+    CancelInvocation {
+        invocation: CanonicalValue,
+        reason: Option<String>,
+    },
+}
+
+/// Async result returned by one explicitly authorized source-effect dispatch.
+pub type ApplicationEffectFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<CanonicalValue, String>> + 'a>>;
+
+pub type ApplicationPublicationRowsFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<RuntimePublicationMetadataRows>, String>> + 'a>>;
+
+/// Capability supplied only by a trusted local runtime coordinator.
+///
+/// Implementations must resolve portable references against the authenticated
+/// writer and `context`; references themselves never grant authority.
+pub trait AsyncApplicationEffectDispatcher {
+    fn publication_metadata_rows(&self) -> ApplicationPublicationRowsFuture<'_> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn dispatch<'a>(
+        &'a self,
+        effect: ApplicationEffectRequest,
+        context: &'a RuntimeActivationContext,
+    ) -> ApplicationEffectFuture<'a>;
+}
+
+struct LiveEffectAdapter<'a>(&'a dyn LiveAdminEffectDispatcher);
+
+impl AsyncApplicationEffectDispatcher for LiveEffectAdapter<'_> {
+    fn publication_metadata_rows(&self) -> ApplicationPublicationRowsFuture<'_> {
+        Box::pin(async move { self.0.publication_metadata_rows().await })
+    }
+
+    fn dispatch<'a>(
+        &'a self,
+        effect: ApplicationEffectRequest,
+        context: &'a RuntimeActivationContext,
+    ) -> ApplicationEffectFuture<'a> {
+        match effect {
+            ApplicationEffectRequest::PauseStream { stream, reason } => {
+                self.0.pause_stream(stream, reason, context)
+            }
+            ApplicationEffectRequest::CancelInvocation { .. } => {
+                Box::pin(async { Err("sys.invoke.effect_unavailable".to_owned()) })
+            }
+        }
+    }
+}
+
 impl StagedActivation {
     #[must_use]
     pub fn value(&self) -> &CanonicalValue {
@@ -295,7 +453,35 @@ impl StagedActivation {
         authority: &ApplicationAuthority,
         context: &RuntimeActivationContext,
     ) -> Result<StagedTableActivation, ApplicationError> {
-        authority.stage_mutations(context.clone(), self.mutations.clone())
+        // Mutation IDs are unique in the runtime's durable ledger. The source
+        // handler's IDs identify an ordered write within a source batch, so
+        // bind them to this captured activation before crossing that boundary.
+        // Replaying the same staged activation against the same context keeps
+        // the IDs stable, while a later activation can repeat the same write.
+        let activation_digest = ApplicationAuthority::canonical_digest(context, &self.mutations)?;
+        let mutations = self
+            .mutations
+            .iter()
+            .enumerate()
+            .map(|(ordinal, mutation)| {
+                let mut digest = Sha256::new();
+                digest.update(b"ORNA-SOURCE-ACTIVATION-MUTATION\0");
+                digest.update(activation_digest);
+                digest.update((ordinal as u64).to_be_bytes());
+                digest.update(mutation.id());
+                let id: [u8; 16] = digest.finalize()[..16]
+                    .try_into()
+                    .map_err(|_| ApplicationError::DigestEncoding)?;
+                TableMutation::new(
+                    id,
+                    mutation.table(),
+                    mutation.key().to_vec(),
+                    mutation.value().map(<[u8]>::to_vec),
+                )
+                .map_err(|error: RuntimeError| ApplicationError::Runtime(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        authority.stage_mutations(context.clone(), mutations)
     }
 }
 
@@ -310,6 +496,7 @@ pub struct SourceMutationEffectHandler {
     tables: BTreeMap<String, TableSchema>,
     mutations: Vec<TableMutation>,
     next_ordinal: u64,
+    publication_rows: Option<RuntimePublicationMetadataRows>,
 }
 
 impl SourceMutationEffectHandler {
@@ -319,11 +506,28 @@ impl SourceMutationEffectHandler {
             tables,
             mutations: Vec::new(),
             next_ordinal: 0,
+            publication_rows: None,
+        }
+    }
+
+    fn with_publication_rows(
+        tables: BTreeMap<String, TableSchema>,
+        publication_rows: RuntimePublicationMetadataRows,
+    ) -> Self {
+        Self {
+            tables,
+            mutations: Vec::new(),
+            next_ordinal: 0,
+            publication_rows: Some(publication_rows),
         }
     }
 
     /// Consumes the handler after validating every recorded mutation.
     pub fn into_mutations(self) -> Result<Vec<TableMutation>, ApplicationError> {
+        self.into_validated_mutations()
+    }
+
+    fn into_validated_mutations(self) -> Result<Vec<TableMutation>, ApplicationError> {
         for mutation in &self.mutations {
             TableMutation::new(
                 mutation.id(),
@@ -448,6 +652,312 @@ impl SourceMutationEffectHandler {
     }
 }
 
+#[derive(Debug)]
+struct AsyncSourceMutationEffectHandler {
+    mutations: SourceMutationEffectHandler,
+    effects: Vec<ApplicationEffectRequest>,
+    publication_rows: Option<RuntimePublicationMetadataRows>,
+}
+
+impl AsyncSourceMutationEffectHandler {
+    fn new(
+        tables: BTreeMap<String, TableSchema>,
+        publication_rows: Option<RuntimePublicationMetadataRows>,
+    ) -> Self {
+        Self {
+            mutations: SourceMutationEffectHandler::new(tables),
+            effects: Vec::new(),
+            publication_rows,
+        }
+    }
+
+    fn into_parts(
+        self,
+    ) -> Result<(Vec<TableMutation>, Vec<ApplicationEffectRequest>), ApplicationError> {
+        Ok((self.mutations.into_validated_mutations()?, self.effects))
+    }
+}
+
+impl EffectHandler for AsyncSourceMutationEffectHandler {
+    fn handle(
+        &mut self,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        if source_function_path(callee).as_deref() == Some("sys.admin.pause_stream") {
+            let request = match arguments {
+                [stream] => ApplicationEffectRequest::PauseStream {
+                    stream: stream.clone(),
+                    reason: None,
+                },
+                [stream, reason] => {
+                    let reason = match reason.raw() {
+                        OvbRaw::Null => None,
+                        OvbRaw::Text(reason) => Some(reason.clone()),
+                        _ => {
+                            return Err(SourceMutationEffectHandler::effect_error(
+                                "ORNA-EVAL-TYPE",
+                            ));
+                        }
+                    };
+                    ApplicationEffectRequest::PauseStream {
+                        stream: stream.clone(),
+                        reason,
+                    }
+                }
+                _ => {
+                    return Err(SourceMutationEffectHandler::effect_error(
+                        "ORNA-EVAL-ARGUMENT",
+                    ));
+                }
+            };
+            self.effects.push(request);
+            // The async host result replaces this placeholder before the
+            // staged activation is returned to its owner for publication.
+            return CanonicalValue::new(OvbRaw::Bool(false))
+                .map(Some)
+                .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"));
+        }
+        if source_function_path(callee).as_deref() == Some("sys.cancel") {
+            let request = match arguments {
+                [invocation] => ApplicationEffectRequest::CancelInvocation {
+                    invocation: invocation.clone(),
+                    reason: None,
+                },
+                [invocation, reason] => {
+                    let reason = match reason.raw() {
+                        OvbRaw::Null => None,
+                        OvbRaw::Text(reason) => Some(reason.clone()),
+                        _ => {
+                            return Err(SourceMutationEffectHandler::effect_error(
+                                "ORNA-EVAL-TYPE",
+                            ));
+                        }
+                    };
+                    ApplicationEffectRequest::CancelInvocation {
+                        invocation: invocation.clone(),
+                        reason,
+                    }
+                }
+                _ => {
+                    return Err(SourceMutationEffectHandler::effect_error(
+                        "ORNA-EVAL-ARGUMENT",
+                    ));
+                }
+            };
+            self.effects.push(request);
+            return CanonicalValue::new(OvbRaw::Bool(false))
+                .map(Some)
+                .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"));
+        }
+        self.mutations.handle(callee, arguments)
+    }
+
+    fn handle_with_budget(
+        &mut self,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+        budget: &mut StepBudget,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.handle(callee, arguments).map(|result| {
+            // The existing synchronous table handler does not debit
+            // additional work; runtime dispatch remains bounded by its
+            // own operation budget.
+            let _ = budget;
+            result
+        })
+    }
+
+    fn scan_relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        if limit == 0 {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        let Some(publication_rows) = self.publication_rows.as_ref() else {
+            return Ok(None);
+        };
+        let row = match source {
+            "sys.Storage" => &publication_rows.sys_storage,
+            "sys.MaintenanceJob" => &publication_rows.maintenance_job,
+            _ => return Ok(None),
+        };
+        if after.is_some() {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        budget.debit(1)?;
+        Ok(Some(RelationPage {
+            rows: vec![row.clone()],
+            next: None,
+        }))
+    }
+}
+
+fn source_function_path(expression: &Expr) -> Option<String> {
+    match expression {
+        Expr::Name { text, .. } => Some(text.clone()),
+        Expr::Field { base, name, .. } => Some(format!("{}.{}", source_function_path(base)?, name)),
+        _ => None,
+    }
+}
+
+fn validate_terminal_runtime_effect(
+    application: &AdmittedApplication,
+) -> Result<(), ApplicationError> {
+    for (name, function) in &application.functions {
+        let count = runtime_effect_call_count(&function.body);
+        if name == &application.entry {
+            if count > 0 && (count != 1 || !is_terminal_runtime_effect_call(&function.body)) {
+                return Err(ApplicationError::UnsupportedSourceEffectPlacement);
+            }
+        } else if count > 0 {
+            // A helper call could consume the placeholder before the async
+            // dispatcher supplies the actual operation result.
+            return Err(ApplicationError::UnsupportedSourceEffectPlacement);
+        }
+    }
+    Ok(())
+}
+
+fn is_runtime_source_effect_path(path: &str) -> bool {
+    matches!(path, "sys.admin.pause_stream" | "sys.cancel")
+}
+
+fn is_terminal_runtime_effect_call(expression: &Expr) -> bool {
+    match expression {
+        Expr::Group { inner, .. } => is_terminal_runtime_effect_call(inner),
+        Expr::Call { callee, .. } => source_function_path(callee)
+            .as_deref()
+            .is_some_and(is_runtime_source_effect_path),
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            !statements
+                .iter()
+                .any(|statement| runtime_effect_statement_count(statement) != 0)
+                && tail.as_deref().is_some_and(is_terminal_runtime_effect_call)
+        }
+        _ => false,
+    }
+}
+
+fn runtime_effect_call_count(expression: &Expr) -> usize {
+    let own = usize::from(matches!(
+        expression,
+        Expr::Call { callee, .. }
+            if source_function_path(callee).as_deref().is_some_and(is_runtime_source_effect_path)
+    ));
+    own + match expression {
+        Expr::Name { .. } | Expr::Literal { .. } | Expr::ReplBinding { .. } => 0,
+        Expr::InterpolatedString { segments, .. } => segments
+            .iter()
+            .map(|segment| match segment {
+                StringSegment::Text { .. } => 0,
+                StringSegment::Expression { value, .. } => runtime_effect_call_count(value),
+            })
+            .sum(),
+        Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => runtime_effect_call_count(rhs),
+        Expr::Binary { lhs, rhs, .. } => {
+            runtime_effect_call_count(lhs) + runtime_effect_call_count(rhs)
+        }
+        Expr::Range { lower, upper, .. } => lower
+            .iter()
+            .chain(upper.iter())
+            .map(|bound| runtime_effect_call_count(bound))
+            .sum(),
+        Expr::Call {
+            callee, arguments, ..
+        }
+        | Expr::GenericCall {
+            callee, arguments, ..
+        } => {
+            runtime_effect_call_count(callee)
+                + arguments
+                    .iter()
+                    .map(|argument| runtime_effect_call_count(&argument.value))
+                    .sum::<usize>()
+        }
+        Expr::Index { base, index, .. } => {
+            runtime_effect_call_count(base) + runtime_effect_call_count(index)
+        }
+        Expr::Field { base, .. } => runtime_effect_call_count(base),
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+            elements.iter().map(runtime_effect_call_count).sum()
+        }
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => fields
+            .iter()
+            .map(|field| runtime_effect_call_count(&field.value))
+            .sum(),
+        Expr::Lambda { body, .. } => runtime_effect_call_count(body),
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            statements
+                .iter()
+                .map(runtime_effect_statement_count)
+                .sum::<usize>()
+                + tail
+                    .as_deref()
+                    .map(runtime_effect_call_count)
+                    .unwrap_or_default()
+        }
+        Expr::Control {
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => {
+            condition
+                .as_deref()
+                .map(runtime_effect_call_count)
+                .unwrap_or_default()
+                + body
+                    .as_deref()
+                    .map(runtime_effect_call_count)
+                    .unwrap_or_default()
+                + arms.iter().map(runtime_effect_arm_count).sum::<usize>()
+                + alternate
+                    .as_deref()
+                    .map(runtime_effect_call_count)
+                    .unwrap_or_default()
+        }
+    }
+}
+
+fn runtime_effect_arm_count(arm: &CaseArm) -> usize {
+    arm.guard
+        .as_ref()
+        .map(runtime_effect_call_count)
+        .unwrap_or_default()
+        + runtime_effect_call_count(&arm.body)
+}
+
+fn runtime_effect_statement_count(statement: &Statement) -> usize {
+    match statement {
+        Statement::Let { value, .. }
+        | Statement::Assert { value, .. }
+        | Statement::Expression { value, .. }
+        | Statement::Control { value, .. }
+        | Statement::Assignment { value, .. } => runtime_effect_call_count(value),
+        Statement::Return { value, .. } | Statement::Break { value, .. } => value
+            .as_ref()
+            .map(runtime_effect_call_count)
+            .unwrap_or_default(),
+        Statement::Continue { .. } => 0,
+    }
+}
+
 impl EffectHandler for SourceMutationEffectHandler {
     fn handle(
         &mut self,
@@ -497,6 +1007,40 @@ impl EffectHandler for SourceMutationEffectHandler {
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         self.handle(callee, arguments)
     }
+
+    fn scan_relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        if limit == 0 {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        let Some(publication_rows) = self.publication_rows.as_ref() else {
+            return Ok(None);
+        };
+        let row = match source {
+            "sys.Storage" => &publication_rows.sys_storage,
+            "sys.MaintenanceJob" => &publication_rows.maintenance_job,
+            _ => return Ok(None),
+        };
+        if after.is_some() {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        budget.debit(1)?;
+        Ok(Some(RelationPage {
+            rows: vec![row.clone()],
+            next: None,
+        }))
+    }
 }
 
 fn encoded_key(key: &CanonicalValue) -> Result<Vec<u8>, EvaluationError> {
@@ -533,9 +1077,20 @@ fn admitted_table_schemas(
 }
 
 impl From<ApplicationError> for LiveError {
-    fn from(_: ApplicationError) -> Self {
-        Self::ApplicationRejected
+    fn from(error: ApplicationError) -> Self {
+        match error {
+            ApplicationError::SourceEffectFailed(code) if code == "sys.admin.busy" => {
+                Self::AdminBusy
+            }
+            _ => Self::ApplicationRejected,
+        }
     }
+}
+
+/// Mutable evaluator and admission state isolated to one remote REPL session.
+#[derive(Clone, Debug)]
+struct ApplicationReplSession {
+    repl: AdmittedReplSession,
 }
 
 /// Source-backed application adapter for the live protocol.
@@ -549,6 +1104,7 @@ pub struct ApplicationLiveAdapter {
     authority: ApplicationAuthority,
     logical_path: String,
     entry: String,
+    sessions: Arc<Mutex<BTreeMap<[u8; 16], ApplicationReplSession>>>,
 }
 
 impl ApplicationLiveAdapter {
@@ -559,6 +1115,7 @@ impl ApplicationLiveAdapter {
             authority,
             logical_path: "remote_eval.orna".to_owned(),
             entry: "main".to_owned(),
+            sessions: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -588,6 +1145,66 @@ impl ApplicationLiveAdapter {
             .map_err(LiveError::from)
     }
 
+    /// Keeps the existing complete-module entry point for clients that send
+    /// an admitted application module. Ordinary Eval input uses the per-session
+    /// ephemeral REPL below.
+    fn is_module_entry(&self, message: &Message) -> bool {
+        let Message::Eval { source, .. } = message else {
+            return false;
+        };
+        let parsed = parse_module_with_file(source, self.logical_path.clone());
+        parsed.is_ok()
+            && parsed.value.items.iter().any(|item| {
+                matches!(
+                    &item.declaration,
+                    Declaration::Function { signature, .. } if signature.name == self.entry
+                )
+            })
+    }
+
+    fn new_repl_session(&self) -> Result<AdmittedReplSession, LiveError> {
+        let sources = reference_standard_sources().into_iter().collect::<Vec<_>>();
+        let catalogue = self
+            .authority
+            .catalogue
+            .clone()
+            .with_standard_sources(&reference_standard_profile(), sources.clone())
+            .map_err(|_| LiveError::ApplicationRejected)?;
+        AdmittedReplSession::from_catalogue(&[], catalogue, sources, self.authority.limits)
+            .map_err(|_| LiveError::ApplicationRejected)
+    }
+
+    fn repl_candidate(&self, session: [u8; 16]) -> Result<AdmittedReplSession, LiveError> {
+        {
+            let sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(existing) = sessions.get(&session) {
+                return Ok(existing.repl.clone());
+            }
+            if sessions.len() >= MAX_ADMITTED_REPL_SESSIONS {
+                return Err(LiveError::ApplicationRejected);
+            }
+        }
+        self.new_repl_session()
+    }
+
+    fn publish_repl_candidate(&self, session: [u8; 16], repl: AdmittedReplSession) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session, ApplicationReplSession { repl });
+    }
+
+    fn repl_table_schemas(&self) -> BTreeMap<String, TableSchema> {
+        analyze_with_catalogue(&[], &self.authority.catalogue)
+            .modules
+            .values()
+            .flat_map(admitted_table_schemas)
+            .collect()
+    }
+
     /// Builds the success envelope for one evaluated request.
     fn success_envelope(
         &self,
@@ -612,10 +1229,24 @@ impl ApplicationLiveAdapter {
 impl LiveApplication for ApplicationLiveAdapter {
     fn eval(
         &mut self,
-        _session: [u8; 16],
+        session: [u8; 16],
         request: [u8; 16],
         message: &Message,
     ) -> std::result::Result<Envelope, LiveError> {
+        if !self.is_module_entry(message) {
+            let Message::Eval { source, .. } = message else {
+                return Err(LiveError::ApplicationRejected);
+            };
+            let mut repl = self.repl_candidate(session)?;
+            let result = repl.submit(source);
+            let value = result
+                .map_err(|error| {
+                    LiveError::from(ApplicationError::Evaluation(error.code().to_owned()))
+                })?
+                .unwrap_or_else(|| CanonicalValue::new(OvbRaw::Null).expect("null is canonical"));
+            self.publish_repl_candidate(session, repl);
+            return self.success_envelope(request, eval_fingerprint(message)?, value);
+        }
         let admitted = self.evaluate_eval_message(message)?;
         let value = self.authority.evaluate(&admitted, &Environment::new())?;
         self.success_envelope(request, eval_fingerprint(message)?, value)
@@ -623,13 +1254,69 @@ impl LiveApplication for ApplicationLiveAdapter {
 
     fn eval_with_transaction<'a>(
         &'a mut self,
-        _session: [u8; 16],
+        session: [u8; 16],
         request: [u8; 16],
         message: &'a Message,
         context: Option<&'a RuntimeActivationContext>,
         _work: &'a mut LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<LiveEvalResponse, LiveError>> + 'a>> {
         Box::pin(async move {
+            if !self.is_module_entry(message) {
+                let Message::Eval { source, .. } = message else {
+                    return Err(LiveError::ApplicationRejected);
+                };
+                let mut repl = self.repl_candidate(session)?;
+                let staged = match repl.stage_activation(source) {
+                    Ok(staged) => staged,
+                    Err(error) if error.code() == "ORNA-REPL-EFFECT" => {
+                        let value = repl
+                            .submit(source)
+                            .map_err(|error| {
+                                LiveError::from(ApplicationError::Evaluation(
+                                    error.code().to_owned(),
+                                ))
+                            })?
+                            .unwrap_or_else(|| {
+                                CanonicalValue::new(OvbRaw::Null).expect("null is canonical")
+                            });
+                        self.publish_repl_candidate(session, repl);
+                        let envelope =
+                            self.success_envelope(request, eval_fingerprint(message)?, value)?;
+                        return Ok(LiveEvalResponse::pure(envelope));
+                    }
+                    Err(_) => return Err(LiveError::ApplicationRejected),
+                };
+                let mut handler = SourceMutationEffectHandler::new(self.repl_table_schemas());
+                let (value, successor) = repl
+                    .evaluate_staged_with_effects(staged, &mut handler)
+                    .map_err(|_| LiveError::ApplicationRejected)?;
+                let mutations = handler.into_mutations().map_err(LiveError::from)?;
+                let value = value.unwrap_or_else(|| {
+                    CanonicalValue::new(OvbRaw::Null).expect("null is canonical")
+                });
+                let envelope = self.success_envelope(request, eval_fingerprint(message)?, value)?;
+                if mutations.is_empty() {
+                    self.publish_repl_candidate(session, successor);
+                    return Ok(LiveEvalResponse::pure(envelope));
+                }
+                let Some(context) = context else {
+                    return Err(LiveError::ApplicationRejected);
+                };
+                let activation = self.authority.stage_mutations(context.clone(), mutations)?;
+                let sessions = Arc::clone(&self.sessions);
+                let transaction = LiveEvalTransaction::new(
+                    activation.mutations().to_vec(),
+                    activation.next_digest(),
+                    Arc::new(NoFault),
+                )
+                .after_commit(move || {
+                    sessions
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(session, ApplicationReplSession { repl: successor });
+                });
+                return Ok(LiveEvalResponse::transaction(envelope, transaction));
+            }
             let admitted = self.evaluate_eval_message(message)?;
             let staged = self
                 .authority
@@ -673,6 +1360,53 @@ impl LiveApplication for ApplicationLiveAdapter {
         })
     }
 
+    fn dispatch_eval_with_effects<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        context: Option<&'a RuntimeActivationContext>,
+        work: &'a mut LiveApplicationWorkLease,
+        effects: Option<&'a dyn LiveAdminEffectDispatcher>,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<LiveEvalResponse, LiveError>> + 'a>> {
+        Box::pin(async move {
+            let (Some(context), Some(effects)) = (context, effects) else {
+                return self
+                    .dispatch_eval_with_work(session, request, message, context, work)
+                    .await;
+            };
+            work.check_active()?;
+            let admitted = self.evaluate_eval_message(message)?;
+            let dispatcher = LiveEffectAdapter(effects);
+            let staged = self
+                .authority
+                .evaluate_staged_with_async_effects(
+                    &admitted,
+                    &Environment::new(),
+                    context,
+                    &dispatcher,
+                )
+                .await
+                .map_err(LiveError::from)?;
+            let envelope =
+                self.success_envelope(request, eval_fingerprint(message)?, staged.value().clone())?;
+            let response = if staged.mutations().is_empty() {
+                LiveEvalResponse::pure(envelope)
+            } else {
+                let activation = staged.stage(&self.authority, context)?;
+                let transaction = LiveEvalTransaction::new(
+                    activation.mutations().to_vec(),
+                    activation.next_digest(),
+                    Arc::new(NoFault),
+                );
+                LiveEvalResponse::transaction(envelope, transaction)
+            };
+            work.complete();
+            work.check_active()?;
+            Ok(response)
+        })
+    }
+
     fn watch(
         &mut self,
         _session: [u8; 16],
@@ -697,6 +1431,7 @@ fn eval_fingerprint(message: &Message) -> std::result::Result<[u8; 32], LiveErro
 pub struct AdmittedApplication {
     logical_path: String,
     source_digest: [u8; 32],
+    requires_publication_metadata: bool,
     entry: String,
     functions: Functions,
     limits: Limits,
@@ -704,6 +1439,13 @@ pub struct AdmittedApplication {
 }
 
 impl AdmittedApplication {
+    /// Returns whether the admitted source names either runtime publication
+    /// relation and needs a durable publication snapshot at evaluation.
+    #[must_use]
+    pub const fn requires_publication_metadata(&self) -> bool {
+        self.requires_publication_metadata
+    }
+
     #[must_use]
     pub fn logical_path(&self) -> &str {
         &self.logical_path
@@ -733,8 +1475,9 @@ mod tests {
     fn source_admission_reaches_real_evaluator() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let source = include_str!("../tests/fixtures/source-admission-main.orna");
         let admitted = authority
-            .admit_module("main.orna", "pub fn main(): Int = 41;", "main")
+            .admit_module("main.orna", source, "main")
             .expect("source should be admitted");
         let result = authority
             .evaluate(&admitted, &Environment::new())
@@ -754,7 +1497,7 @@ mod tests {
         let request = [8; 16];
         let fingerprint = [9; 32];
         let message = Message::Eval {
-            source: "pub fn main(): Int = 41;".to_owned(),
+            source: include_str!("../tests/fixtures/source-admission-main.orna").to_owned(),
             database: orna_protocol_v1::DatabaseContext {
                 database: [1; 16],
                 snapshot: None,
@@ -793,6 +1536,119 @@ mod tests {
                 .expect("canonical integer"),
             )
         );
+    }
+
+    fn eval_message(source: &str, fingerprint: [u8; 32]) -> Message {
+        Message::Eval {
+            source: source.to_owned(),
+            database: orna_protocol_v1::DatabaseContext {
+                database: [1; 16],
+                snapshot: None,
+            },
+            presentation: orna_protocol_v1::PresentationContext {
+                locale: "en-US".to_owned(),
+                timezone: None,
+                width: None,
+                theme: "terminal/default".to_owned(),
+                supported_kinds: Vec::new(),
+            },
+            fingerprint,
+        }
+    }
+
+    #[test]
+    fn remote_repl_retains_bindings_and_helpers_per_session() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let mut adapter = ApplicationLiveAdapter::new(authority);
+        let session_a = [31; 16];
+        let session_b = [32; 16];
+        let binding = include_str!("../tests/fixtures/remote-repl-binding.orna");
+        let helper = include_str!("../tests/fixtures/remote-repl-helper.orna");
+        let import = include_str!("../tests/fixtures/remote-repl-wildcard-import.orna");
+        let expression = include_str!("../tests/fixtures/remote-repl-use-session-state.orna");
+
+        for (session, source) in [
+            (session_a, import),
+            (session_a, binding),
+            (session_a, helper),
+        ] {
+            LiveApplication::eval(
+                &mut adapter,
+                session,
+                [1; 16],
+                &eval_message(source, [2; 32]),
+            )
+            .expect("REPL declarations should be admitted");
+        }
+        let result = LiveApplication::eval(
+            &mut adapter,
+            session_a,
+            [3; 16],
+            &eval_message(expression, [4; 32]),
+        )
+        .expect("same session should retain its declarations");
+        assert!(matches!(
+            result.message,
+            Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                ..
+            } if value == CanonicalValue::new(OvbRaw::Int(82.into())).expect("expected result")
+        ));
+
+        let isolated = LiveApplication::eval(
+            &mut adapter,
+            session_b,
+            [5; 16],
+            &eval_message(expression, [6; 32]),
+        );
+        assert!(matches!(isolated, Err(LiveError::ApplicationRejected)));
+    }
+
+    #[test]
+    fn effectful_repl_candidate_stages_writes_without_publishing_early() {
+        let standard_sources = reference_standard_sources().into_iter().collect::<Vec<_>>();
+        let catalogue = Catalogue::authoritative_fixture()
+            .with_standard_sources(&reference_standard_profile(), standard_sources.clone())
+            .expect("reference standard modules should be admitted");
+        let mut session = AdmittedReplSession::from_catalogue(
+            &[],
+            catalogue.clone(),
+            standard_sources,
+            Limits::default(),
+        )
+        .expect("admitted catalogue should initialize a session");
+        session
+            .submit(include_str!(
+                "../tests/fixtures/remote-repl-contact-key.orna"
+            ))
+            .expect("session binding should be retained");
+        session
+            .submit(include_str!(
+                "../tests/fixtures/remote-repl-contact-import.orna"
+            ))
+            .expect("ordinary module wildcard import should be admitted");
+        let source = include_str!("../tests/fixtures/remote-repl-contact-insert.orna");
+        let staged = session
+            .stage_activation(source)
+            .expect("table insert should be admitted");
+        let tables = analyze_with_catalogue(&[], &catalogue)
+            .modules
+            .values()
+            .flat_map(admitted_table_schemas)
+            .collect();
+        let mut effects = SourceMutationEffectHandler::new(tables);
+        let (value, successor) = session
+            .evaluate_staged_with_effects(staged, &mut effects)
+            .expect("effect should evaluate only into a candidate session");
+        let mutations = effects
+            .into_mutations()
+            .expect("candidate mutations should be canonical");
+        assert_eq!(mutations.len(), 1);
+        assert!(value.is_some());
+        assert!(session.preview("key").is_ok());
+        assert!(successor.preview("$_").is_ok());
     }
 
     fn note_source(body: &str) -> String {
@@ -856,6 +1712,130 @@ mod tests {
         ))
         .expect("canonical integer");
         assert_eq!(key, expected_key);
+    }
+
+    struct SuccessfulSourceEffectDispatcher;
+
+    impl AsyncApplicationEffectDispatcher for SuccessfulSourceEffectDispatcher {
+        fn dispatch<'a>(
+            &'a self,
+            effect: ApplicationEffectRequest,
+            _context: &'a RuntimeActivationContext,
+        ) -> ApplicationEffectFuture<'a> {
+            Box::pin(async move {
+                match effect {
+                    ApplicationEffectRequest::PauseStream { .. } => {
+                        Ok(CanonicalValue::new(OvbRaw::Bool(true)).expect("canonical bool"))
+                    }
+                    ApplicationEffectRequest::CancelInvocation { .. } => {
+                        Err("unexpected cancellation".to_owned())
+                    }
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn checked_in_source_effect_stages_and_commits_with_activation_scoped_id() {
+        use futures::executor::block_on;
+        use orna_repository_v1::Repository;
+        use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "orna-source-activation-{}-{timestamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("temporary repository directory");
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&root)
+            .status()
+            .expect("git init starts");
+        assert!(status.success(), "git init creates the runtime repository");
+        let repository = Repository::discover(&root).expect("temporary Git repository");
+        let state = block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [41; 16],
+                repository_id: [42; 16],
+            },
+            [43; 32],
+        ))
+        .expect("runtime state opens");
+        let lease = block_on(state.acquire_lease([44; 16])).expect("writer lease acquired");
+        let context = block_on(state.begin_activation()).expect("activation context captured");
+
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "admin-pause.orna",
+                include_str!("../tests/fixtures/admin-pause-stream.orna"),
+                "main",
+            )
+            .expect("checked-in source fixture is admitted");
+        let dispatcher = SuccessfulSourceEffectDispatcher;
+        let staged = block_on(authority.evaluate_staged_with_async_effects(
+            &application,
+            &Environment::from([(
+                "stream".to_owned(),
+                CanonicalValue::new(OvbRaw::Text("fixture-stream".to_owned()))
+                    .expect("canonical stream argument"),
+            )]),
+            &context,
+            &dispatcher,
+        ))
+        .expect("source table write and terminal runtime effect evaluate");
+        assert_eq!(staged.value().raw(), &OvbRaw::Bool(true));
+        assert_eq!(staged.mutations().len(), 1);
+
+        let source_id = staged.mutations()[0].id();
+        let activation = staged
+            .stage(&authority, &context)
+            .expect("source mutations cross the captured transaction bridge");
+        assert_ne!(activation.mutations()[0].id(), source_id);
+        let retry = staged
+            .stage(&authority, &context)
+            .expect("same captured source activation can be staged again");
+        assert_eq!(activation.mutations()[0].id(), retry.mutations()[0].id());
+        let key = activation.mutations()[0].key().to_vec();
+
+        block_on(state.commit_table_activation(
+            lease,
+            &context,
+            activation.mutations(),
+            activation.next_digest(),
+            &NoFault,
+        ))
+        .expect("owner-fenced table activation commits");
+        let fresh_context = block_on(state.begin_activation())
+            .expect("later activation captures the committed generation");
+        let later_activation = staged
+            .stage(&authority, &fresh_context)
+            .expect("same source write stages in a later activation");
+        assert_ne!(
+            later_activation.mutations()[0].id(),
+            activation.mutations()[0].id(),
+            "later activation must receive a distinct durable mutation ID"
+        );
+        let committed = block_on(state.committed_table_row("Note", &key))
+            .expect("committed row can be read")
+            .expect("source insert is durable");
+        let row = CanonicalValue::decode(&committed).expect("committed row is canonical");
+        let OvbRaw::Map(fields) = row.raw() else {
+            panic!("committed row is a record");
+        };
+        assert!(fields.iter().any(|(field, value)| {
+            matches!(field, OvbRaw::Text(name) if name == "text")
+                && matches!(value, OvbRaw::Text(text) if text == "staged before pause")
+        }));
+
+        drop(state);
+        std::fs::remove_dir_all(root).expect("temporary runtime repository removed");
     }
 
     #[test]

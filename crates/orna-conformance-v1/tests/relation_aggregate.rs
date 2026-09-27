@@ -6,92 +6,12 @@ use orna_conformance_v1::{
 use orna_evaluator_v1::Limits;
 use orna_foundation_v1::{OvbRaw, Value};
 
-fn source(body: &str) -> SourceUnit {
+fn source(fixture_id: &str, source_id: &str, source: &str) -> SourceUnit {
     SourceUnit {
-        fixture_id: "relation-aggregate".into(),
-        source_id: "relation-aggregate.orna".into(),
+        fixture_id: fixture_id.into(),
+        source_id: source_id.into(),
         parse_as: "module_unit".into(),
-        source: format!(
-            r#"
-                pub table Reading(id: Int) {{ value: Int, }}
-                fn minimum(): Int? = Reading | map(reading => reading.value) | min();
-                fn maximum(): Int? = Reading | map(reading => reading.value) | max();
-                fn total(): Int = Reading | map(reading => reading.value) | sum;
-                fn parent() {{ {body} }}
-            "#
-        ),
-    }
-}
-fn decimal_source(body: &str) -> SourceUnit {
-    SourceUnit {
-        fixture_id: "relation-decimal-aggregate".into(),
-        source_id: "relation-decimal-aggregate.orna".into(),
-        parse_as: "module_unit".into(),
-        source: format!(
-            r#"
-                pub table Reading(id: Int) {{ value: Decimal, }}
-                fn total(): Decimal = Reading | map(reading => reading.value) | sum;
-                fn parent() {{ {body} }}
-            "#
-        ),
-    }
-}
-fn decimal_extrema_source(body: &str) -> SourceUnit {
-    SourceUnit {
-        fixture_id: "relation-decimal-extrema".into(),
-        source_id: "relation-decimal-extrema.orna".into(),
-        parse_as: "module_unit".into(),
-        source: format!(
-            r#"
-                pub table Reading(id: Int) {{ value: Decimal, }}
-                fn minimum(): Decimal? = Reading | map(reading => reading.value) | min();
-                fn maximum(): Decimal? = Reading | map(reading => reading.value) | max();
-                fn parent() {{ {body} }}
-            "#
-        ),
-    }
-}
-
-fn finite_decimal_extrema_source() -> SourceUnit {
-    SourceUnit {
-        fixture_id: "finite-decimal-extrema".into(),
-        source_id: "finite-decimal-extrema.orna".into(),
-        parse_as: "module_unit".into(),
-        source: r#"
-            fn minimum(): Decimal? = min([1.20, 1.2000, 2.003]);
-            fn maximum(): Decimal? = max([1.20, 2.003, 2.0030]);
-            fn empty_minimum(): Decimal? = min([]);
-            fn empty_maximum(): Decimal? = max([]);
-        "#
-        .into(),
-    }
-}
-
-fn table_assertion_source(assertion: &str, body: &str) -> SourceUnit {
-    SourceUnit {
-        fixture_id: "relation-assertion-budget".into(),
-        source_id: "relation-assertion-budget.orna".into(),
-        parse_as: "module_unit".into(),
-        source: format!(
-            r#"
-                pub table Reading(id: Int) {{ value: Int, assert {assertion}; }}
-                fn parent() {{ {body} }}
-            "#
-        ),
-    }
-}
-
-fn table_source(body: &str) -> SourceUnit {
-    SourceUnit {
-        fixture_id: "relation-assertion-budget".into(),
-        source_id: "relation-assertion-budget.orna".into(),
-        parse_as: "module_unit".into(),
-        source: format!(
-            r#"
-                pub table Reading(id: Int) {{ value: Int, }}
-                fn parent() {{ {body} }}
-            "#
-        ),
+        source: source.into(),
     }
 }
 
@@ -99,18 +19,9 @@ fn table_source(body: &str) -> SourceUnit {
 fn relation_integer_aggregates_read_candidate_rows_in_canonical_order() {
     let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = evaluator.execute_source(&source(
-        r#"
-            assert (minimum() ?? 0) == 0;
-            assert (maximum() ?? 0) == 0;
-            assert total() == 0;
-            Reading.insert({ id: 2, value: 9007199254740993 });
-            Reading.insert({ id: 1, value: -3 });
-            Reading.insert({ id: 3, value: -9007199254740992 });
-            Reading.insert({ id: 4, value: 9 });
-            assert (minimum() ?? 0) == -9007199254740992;
-            assert (maximum() ?? 0) == 9007199254740993;
-            assert total() == 7;
-        "#,
+        "relation-aggregate",
+        "relation-aggregate-integer-canonical.orna",
+        include_str!("fixtures/relation-aggregate-integer-canonical.orna"),
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
@@ -130,18 +41,7 @@ fn relation_float_sum_uses_empty_identity_and_canonical_row_order() {
         fixture_id: "relation-float-sum".into(),
         source_id: "relation-float-sum.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Reading(id: Int) { value: Float, }
-            fn total(): Float = Reading | map(reading => reading.value) | sum;
-            fn parent() {
-                assert total() == 0.0f;
-                Reading.insert({ id: 3, value: 1.0f });
-                Reading.insert({ id: 2, value: -10000000000000000.0f });
-                Reading.insert({ id: 1, value: 10000000000000000.0f });
-                assert total() == 1.0f;
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-aggregate-float-sum.orna").into(),
     };
     let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
 
@@ -162,14 +62,9 @@ fn relation_float_sum_uses_empty_identity_and_canonical_row_order() {
 fn relation_integer_aggregate_observes_writes_but_later_failure_rolls_back() {
     let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = evaluator.execute_source(&source(
-        r#"
-            Reading.insert({ id: 2, value: 20 });
-            Reading.insert({ id: 1, value: 10 });
-            assert total() == 30;
-            assert (minimum() ?? 0) == 10;
-            assert (maximum() ?? 0) == 20;
-            assert false;
-        "#,
+        "relation-aggregate",
+        "relation-aggregate-integer-rollback.orna",
+        include_str!("fixtures/relation-aggregate-integer-rollback.orna"),
     ));
 
     assert!(matches!(
@@ -187,22 +82,17 @@ fn relation_integer_aggregate_observes_writes_but_later_failure_rolls_back() {
 
 #[test]
 fn relation_float_min_and_max_fail_closed() {
-    for (name, operation) in [("minimum", "min"), ("maximum", "max")] {
-        let unit = SourceUnit {
-            fixture_id: format!("relation-float-{operation}"),
-            source_id: format!("relation-float-{operation}.orna"),
-            parse_as: "module_unit".into(),
-            source: format!(
-                r#"
-                    pub table Reading(id: Int) {{ value: Float, }}
-                    fn {name}() = Reading | map(reading => reading.value) | {operation}();
-                    fn parent() {{
-                        Reading.insert({{ id: 1, value: 1.5f }});
-                        {name}();
-                    }}
-                "#
-            ),
-        };
+    for operation in ["min", "max"] {
+        let fixture = format!("relation-aggregate-float-{operation}.orna");
+        let unit = source(
+            &format!("relation-float-{operation}"),
+            &fixture,
+            match operation {
+                "min" => include_str!("fixtures/relation-aggregate-float-min.orna"),
+                "max" => include_str!("fixtures/relation-aggregate-float-max.orna"),
+                _ => unreachable!(),
+            },
+        );
         let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
 
         let outcome = evaluator.execute_source(&unit);
@@ -223,13 +113,12 @@ fn relation_float_min_and_max_fail_closed() {
 fn relation_integer_aggregate_requires_a_projection_shape() {
     let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = evaluator.execute_source(&source(
-        r#"
-            Reading.insert({ id: 1, value: 2 });
-            Reading | map(reading => reading.value + 1) | sum;
-        "#,
+        "relation-aggregate",
+        "relation-aggregate-integer-shape.orna",
+        include_str!("fixtures/relation-aggregate-integer-shape.orna"),
     ));
 
-    assert!(matches!(outcome, StageOutcome::Failed(_)));
+    assert!(matches!(outcome, StageOutcome::Failed(_)), "{outcome:?}");
     assert_eq!(
         evaluator.committed_row("Reading", &Value::int(1.into())),
         None
@@ -242,16 +131,7 @@ fn relation_integer_aggregate_rejects_too_many_candidate_rows_without_publicatio
         fixture_id: "relation-aggregate-row-limit".into(),
         source_id: "relation-aggregate-row-limit.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Reading(id: Int) { value: Int, }
-            fn parent() {
-                Reading.insert({ id: 1, value: 1 });
-                Reading.insert({ id: 2, value: 2 });
-                Reading.insert({ id: 3, value: 3 });
-                Reading | map(reading => reading.value) | sum;
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-aggregate-integer-row-limit.orna").into(),
     };
     let limits = Limits {
         max_collection_items: 2,
@@ -280,15 +160,7 @@ fn relation_integer_sum_rejects_an_intermediate_integer_that_exceeds_the_limit()
         fixture_id: "relation-aggregate-integer-limit".into(),
         source_id: "relation-aggregate-integer-limit.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Reading(id: Int) { value: Int, }
-            fn parent() {
-                Reading.insert({ id: 1, value: 99 });
-                Reading.insert({ id: 2, value: 1 });
-                Reading | map(reading => reading.value) | sum;
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-aggregate-integer-digit-limit.orna").into(),
     };
     let limits = Limits {
         max_integer_digits: 2,
@@ -319,11 +191,9 @@ fn relation_scan_shares_evaluator_budget_and_rolls_back_on_exhaustion() {
     };
     let mut evaluator = TransactionalEvaluator::new("parent", limits);
     let outcome = evaluator.execute_source(&source(
-        r#"
-            Reading.insert({ id: 1, value: 2 });
-            Reading.insert({ id: 2, value: 3 });
-            Reading | map(reading => reading.value) | sum;
-        "#,
+        "relation-aggregate",
+        "relation-aggregate-integer-scan-budget.orna",
+        include_str!("fixtures/relation-aggregate-integer-scan-budget.orna"),
     ));
 
     assert!(matches!(
@@ -347,10 +217,9 @@ fn zero_step_budget_fails_before_any_publication() {
     };
     let mut evaluator = TransactionalEvaluator::new("parent", limits);
     let outcome = evaluator.execute_source(&source(
-        r#"
-            Reading.insert({ id: 1, value: 2 });
-            Reading | map(reading => reading.value) | sum;
-        "#,
+        "relation-aggregate",
+        "relation-aggregate-integer-zero-budget.orna",
+        include_str!("fixtures/relation-aggregate-integer-zero-budget.orna"),
     ));
 
     assert!(matches!(
@@ -369,17 +238,7 @@ fn assertion_scan_consumes_shared_budget_and_preserves_rollback() {
         fixture_id: "relation-assertion-step-limit".into(),
         source_id: "relation-assertion-step-limit.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Reading(id: Int) {
-                value: Int,
-                assert every(reading => reading.value > 0);
-            }
-            fn parent() {
-                Reading.insert({ id: 1, value: 2 });
-                Reading.insert({ id: 2, value: 3 });
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-aggregate-assertion-step-limit.orna").into(),
     };
     let limits = Limits {
         max_steps: 10,
@@ -410,14 +269,17 @@ fn table_assertion_predicate_vm_work_shares_one_activation_budget() {
     };
     let mut evaluator = TransactionalEvaluator::new("parent", limits);
     assert!(matches!(
-        evaluator.execute_source(&table_source(
-            "Reading.insert({ id: 1, value: 2 }); Reading.insert({ id: 2, value: 2 });",
+        evaluator.execute_source(&source(
+            "relation-assertion-budget",
+            "relation-aggregate-assertion-seed.orna",
+            include_str!("fixtures/relation-aggregate-assertion-seed.orna")
         )),
         StageOutcome::Passed
     ));
-    let outcome = evaluator.execute_source(&table_assertion_source(
-        "every(reading => reading.value + 1 + 1 + 1 + 1 == 6)",
-        "",
+    let outcome = evaluator.execute_source(&source(
+        "relation-assertion-budget",
+        "relation-aggregate-assertion-predicate-budget.orna",
+        include_str!("fixtures/relation-aggregate-assertion-predicate-budget.orna"),
     ));
 
     assert!(matches!(
@@ -440,29 +302,13 @@ fn nested_module_quantifier_cannot_reset_the_activation_budget() {
         fixture_id: "nested-assertion-budget".into(),
         source_id: "nested-assertion-budget.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Book(id: Int) { title: Str, }
-            pub table Loan(id: Int) { book_id: Int, }
-            fn parent() {
-                Book.insert({ id: 1, title: "one" });
-                Book.insert({ id: 2, title: "two" });
-                Loan.insert({ id: 10, book_id: 1 });
-                Loan.insert({ id: 11, book_id: 2 });
-            }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-aggregate-nested-seed.orna").into(),
     };
     let assertion = SourceUnit {
         fixture_id: "nested-assertion-budget".into(),
         source_id: "nested-assertion-budget.orna".into(),
         parse_as: "module_unit".into(),
-        source: r#"
-            pub table Book(id: Int) { title: Str, }
-            pub table Loan(id: Int) { book_id: Int, }
-            assert every(Loan, loan => exists(Book, book => book.id == loan.book_id));
-            fn parent() { }
-        "#
-        .into(),
+        source: include_str!("fixtures/relation-aggregate-nested-assertion.orna").into(),
     };
     let limits = Limits {
         max_steps: 20,
@@ -494,9 +340,10 @@ fn nested_module_quantifier_cannot_reset_the_activation_budget() {
 
 #[test]
 fn zero_and_exhausted_assertion_budgets_publish_nothing() {
-    let unit = table_assertion_source(
-        "every(reading => reading.value > 0)",
-        "Reading.insert({ id: 1, value: 1 }); Reading.insert({ id: 2, value: 2 });",
+    let unit = source(
+        "relation-assertion-budget",
+        "relation-aggregate-assertion-publish-budgets.orna",
+        include_str!("fixtures/relation-aggregate-assertion-publish-budgets.orna"),
     );
 
     let zero_limits = Limits {
@@ -538,9 +385,10 @@ fn generous_assertion_budget_preserves_successful_publication() {
         ..Default::default()
     };
     let mut evaluator = TransactionalEvaluator::new("parent", limits);
-    let outcome = evaluator.execute_source(&table_assertion_source(
-        "every(reading => reading.value > 0)",
-        "Reading.insert({ id: 1, value: 1 }); Reading.insert({ id: 2, value: 2 });",
+    let outcome = evaluator.execute_source(&source(
+        "relation-assertion-budget",
+        "relation-aggregate-assertion-generous-budget.orna",
+        include_str!("fixtures/relation-aggregate-assertion-generous-budget.orna"),
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
@@ -557,12 +405,10 @@ fn generous_assertion_budget_preserves_successful_publication() {
 #[test]
 fn relation_decimal_sum_normalizes_scales_through_source_execution() {
     let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = evaluator.execute_source(&decimal_source(
-        r#"
-            Reading.insert({ id: 2, value: 2.003 });
-            Reading.insert({ id: 1, value: 1.20 });
-            assert total() == 3.203;
-        "#,
+    let outcome = evaluator.execute_source(&source(
+        "relation-decimal-aggregate",
+        "relation-aggregate-decimal-normalize.orna",
+        include_str!("fixtures/relation-aggregate-decimal-normalize.orna"),
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
@@ -579,10 +425,10 @@ fn relation_decimal_sum_normalizes_scales_through_source_execution() {
 #[test]
 fn relation_decimal_sum_returns_decimal_additive_zero_for_empty_input() {
     let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = evaluator.execute_source(&decimal_source(
-        r#"
-            assert total() == 0.000;
-        "#,
+    let outcome = evaluator.execute_source(&source(
+        "relation-decimal-aggregate",
+        "relation-aggregate-decimal-empty.orna",
+        include_str!("fixtures/relation-aggregate-decimal-empty.orna"),
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
@@ -591,13 +437,10 @@ fn relation_decimal_sum_returns_decimal_additive_zero_for_empty_input() {
 #[test]
 fn relation_decimal_sum_observes_candidate_read_your_writes() {
     let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = evaluator.execute_source(&decimal_source(
-        r#"
-            Reading.insert({ id: 2, value: 2.003 });
-            assert total() == 2.003;
-            Reading.insert({ id: 1, value: 1.20 });
-            assert total() == 3.203;
-        "#,
+    let outcome = evaluator.execute_source(&source(
+        "relation-decimal-aggregate",
+        "relation-aggregate-decimal-read-your-writes.orna",
+        include_str!("fixtures/relation-aggregate-decimal-read-your-writes.orna"),
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
@@ -614,13 +457,10 @@ fn relation_decimal_sum_observes_candidate_read_your_writes() {
 #[test]
 fn relation_decimal_sum_rolls_back_candidate_rows_after_assertion_failure() {
     let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = evaluator.execute_source(&decimal_source(
-        r#"
-            Reading.insert({ id: 2, value: 2.003 });
-            Reading.insert({ id: 1, value: 1.20 });
-            assert total() == 3.203;
-            assert false;
-        "#,
+    let outcome = evaluator.execute_source(&source(
+        "relation-decimal-aggregate",
+        "relation-aggregate-decimal-rollback.orna",
+        include_str!("fixtures/relation-aggregate-decimal-rollback.orna"),
     ));
 
     assert!(matches!(
@@ -643,13 +483,10 @@ fn relation_decimal_sum_rejects_too_many_candidate_rows_at_the_limit() {
         ..Default::default()
     };
     let mut evaluator = TransactionalEvaluator::new("parent", limits);
-    let outcome = evaluator.execute_source(&decimal_source(
-        r#"
-            Reading.insert({ id: 1, value: 1.0 });
-            Reading.insert({ id: 2, value: 2.0 });
-            Reading.insert({ id: 3, value: 3.0 });
-            Reading | map(reading => reading.value) | sum;
-        "#,
+    let outcome = evaluator.execute_source(&source(
+        "relation-decimal-aggregate",
+        "relation-aggregate-decimal-row-limit.orna",
+        include_str!("fixtures/relation-aggregate-decimal-row-limit.orna"),
     ));
 
     assert!(matches!(
@@ -668,19 +505,10 @@ fn relation_decimal_sum_rejects_too_many_candidate_rows_at_the_limit() {
 #[test]
 fn relation_decimal_min_max_use_exact_order_and_preserve_first_equal_candidate() {
     let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = evaluator.execute_source(&decimal_extrema_source(
-        r#"
-            assert minimum() == null;
-            assert maximum() == null;
-            Reading.insert({ id: 2, value: 2.003 });
-            assert (minimum() ?? 0.000) == 2.0030;
-            assert (maximum() ?? 0.000) == 2.0030;
-            Reading.insert({ id: 1, value: 1.20 });
-            Reading.insert({ id: 3, value: 1.2000 });
-            Reading.insert({ id: 4, value: 2.0030 });
-            assert (minimum() ?? 0.000) == 1.200;
-            assert (maximum() ?? 0.000) == 2.003;
-        "#,
+    let outcome = evaluator.execute_source(&source(
+        "relation-decimal-extrema",
+        "relation-aggregate-decimal-extrema-order.orna",
+        include_str!("fixtures/relation-aggregate-decimal-extrema-order.orna"),
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
@@ -697,14 +525,10 @@ fn relation_decimal_min_max_use_exact_order_and_preserve_first_equal_candidate()
 #[test]
 fn relation_decimal_min_max_roll_back_candidate_rows_after_assertion_failure() {
     let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = evaluator.execute_source(&decimal_extrema_source(
-        r#"
-            Reading.insert({ id: 2, value: 2.003 });
-            Reading.insert({ id: 1, value: 1.20 });
-            assert (minimum() ?? 0.000) == 1.200;
-            assert (maximum() ?? 0.000) == 2.0030;
-            assert false;
-        "#,
+    let outcome = evaluator.execute_source(&source(
+        "relation-decimal-extrema",
+        "relation-aggregate-decimal-extrema-rollback.orna",
+        include_str!("fixtures/relation-aggregate-decimal-extrema-rollback.orna"),
     ));
 
     assert!(matches!(
@@ -727,13 +551,10 @@ fn relation_decimal_min_max_reject_too_many_candidate_rows_without_publication()
         ..Default::default()
     };
     let mut evaluator = TransactionalEvaluator::new("parent", limits);
-    let outcome = evaluator.execute_source(&decimal_extrema_source(
-        r#"
-            Reading.insert({ id: 1, value: 1.0 });
-            Reading.insert({ id: 2, value: 2.0 });
-            Reading.insert({ id: 3, value: 3.0 });
-            minimum();
-        "#,
+    let outcome = evaluator.execute_source(&source(
+        "relation-decimal-extrema",
+        "relation-aggregate-decimal-extrema-limit.orna",
+        include_str!("fixtures/relation-aggregate-decimal-extrema-limit.orna"),
     ));
 
     assert!(matches!(
@@ -752,7 +573,11 @@ fn relation_decimal_min_max_reject_too_many_candidate_rows_without_publication()
 #[test]
 fn finite_list_decimal_min_max_execute_from_source_with_exact_and_empty_results() {
     let mut evaluator = BoundedEvaluator::new(Limits::default());
-    let unit = finite_decimal_extrema_source();
+    let unit = source(
+        "finite-decimal-extrema",
+        "relation-aggregate-finite-decimal-extrema.orna",
+        include_str!("fixtures/relation-aggregate-finite-decimal-extrema.orna"),
+    );
     assert!(matches!(evaluator.evaluate(&unit), StageOutcome::Passed));
 
     let expected_min = Value::option(Some(
@@ -774,6 +599,9 @@ fn finite_list_decimal_min_max_execute_from_source_with_exact_and_empty_results(
         let actual = evaluator
             .invoke_value_with(function, &BTreeMap::new())
             .unwrap_or_else(|diagnostic| panic!("{function} failed: {diagnostic:?}"));
-        assert_eq!(actual, expected, "{function} returned an unexpected Decimal extrema");
+        assert_eq!(
+            actual, expected,
+            "{function} returned an unexpected Decimal extrema"
+        );
     }
 }

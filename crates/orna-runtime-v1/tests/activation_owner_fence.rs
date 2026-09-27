@@ -16,8 +16,9 @@ use std::{
 
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    ActivationError, ActivationWork, NoFault, RuntimeError, RuntimeIdentity, RuntimeState,
-    TableMutation, run_table_activation,
+    ActivationError, ActivationWork, CheckpointKey, Component, ConsumerIdentity, NoFault,
+    RuntimeError, RuntimeIdentity, RuntimeState, StreamAdministrationOutcome, TableMutation,
+    run_table_activation,
 };
 use tempfile::{Builder, TempDir};
 
@@ -158,4 +159,89 @@ async fn superseded_writer_is_rejected_before_evaluator_runs() {
             .expect("read checkpoint after stale activation"),
         Some(checkpoint_before)
     );
+}
+
+#[tokio::test]
+async fn activation_callback_pause_is_busy_and_does_not_mutate_runtime() {
+    let (_directory, repository) = repository();
+    let state = RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [11; 16],
+            repository_id: [12; 16],
+        },
+        [13; 32],
+    )
+    .await
+    .expect("open fresh runtime");
+    let writer = state.acquire_lease([14; 16]).await.expect("acquire writer");
+    let key = CheckpointKey {
+        consumer: ConsumerIdentity {
+            principal: Component::new("principal").unwrap(),
+            root: Component::new("root").unwrap(),
+            function: Component::new("consume").unwrap(),
+            binding: Component::new("binding").unwrap(),
+        },
+        source_format: Component::new("source-format").unwrap(),
+        source: Component::new("source").unwrap(),
+        partition_format: Component::new("partition-format").unwrap(),
+        partition: Some(Component::new("partition").unwrap()),
+        position_format: Component::new("position-format-v1").unwrap(),
+    };
+
+    let pending_before = state.pending().await.expect("read pending mutations");
+    let rows_before = state
+        .committed_table_rows("admin-bridge")
+        .await
+        .expect("read table rows");
+    let result = run_table_activation(&state, writer, &["admin-bridge"], &NoFault, |_| async {
+        let error = state
+            .pause_stream(writer, key.clone())
+            .await
+            .expect_err("pause from an activation callback must be rejected");
+        assert_eq!(error, RuntimeError::AdminBusy);
+        Err::<ActivationWork<()>, _>(error)
+    })
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(ActivationError::Evaluator(RuntimeError::AdminBusy))
+    ));
+    assert_eq!(
+        RuntimeError::AdminBusy.public_code(),
+        Some("sys.admin.busy")
+    );
+    assert_eq!(
+        state
+            .pending()
+            .await
+            .expect("read pending mutations after callback"),
+        pending_before
+    );
+    assert_eq!(
+        state
+            .committed_table_rows("admin-bridge")
+            .await
+            .expect("read table rows after callback"),
+        rows_before
+    );
+
+    assert_eq!(
+        state.pause_stream(writer, key).await.unwrap(),
+        StreamAdministrationOutcome::Paused { changed: true }
+    );
+    let audits = state
+        .admin_invocation_audits()
+        .await
+        .expect("read admin invocation audit");
+    assert_eq!(audits.len(), 2);
+    assert_eq!(audits[0].function, "sys.admin.pause_stream");
+    assert!(!audits[0].succeeded);
+    assert_eq!(
+        audits[0].terminal_outcome,
+        "failure:runtime administration callback is busy"
+    );
+    assert_eq!(audits[1].function, "sys.admin.pause_stream");
+    assert!(audits[1].succeeded);
 }

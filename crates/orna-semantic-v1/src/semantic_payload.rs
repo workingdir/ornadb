@@ -38,6 +38,18 @@ pub struct NamedSemanticParameter {
     pub annotation_explicit: bool,
 }
 
+/// Positional callable metadata, including parameters whose source pattern has
+/// no single external name. The canonical declaration payload carries the
+/// recursive pattern itself; this view keeps its resolved type and defaults.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticParameter {
+    pub position: usize,
+    pub name: Option<String>,
+    pub resolved_type: Type,
+    pub has_default: bool,
+    pub annotation_explicit: bool,
+}
+
 /// Authorship is provenance, not a component of semantic identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeclarationExplicitness {
@@ -57,6 +69,7 @@ pub struct SemanticDeclaration {
     semantic_hash: [u8; 32],
     resolved_type: Type,
     parameters: Vec<NamedSemanticParameter>,
+    semantic_parameters: Vec<SemanticParameter>,
     effects: EffectSummary,
     origin: LocalSourceOrigin,
     source_hash: [u8; 32],
@@ -83,6 +96,10 @@ impl SemanticDeclaration {
     }
     pub fn parameters(&self) -> &[NamedSemanticParameter] {
         &self.parameters
+    }
+    /// Ordered parameter metadata for every callable position.
+    pub fn semantic_parameters(&self) -> &[SemanticParameter] {
+        &self.semantic_parameters
     }
     /// Conservative effect set and may_fail, not an invented precise failure set.
     pub fn effects(&self) -> &EffectSummary {
@@ -331,43 +348,29 @@ impl Producer<'_> {
             field_annotations: Vec::new(),
         };
         let mut parameters = Vec::new();
+        let mut semantic_parameters = Vec::new();
         let (kind, resolved_type, meaning) = match &item.declaration {
             Declaration::Function { signature, body } => {
                 if !signature.generics.is_empty() {
                     return Err(self.error(key, SemanticPayloadErrorKind::OpenGenericDeclaration));
                 }
-                for (position, parameter) in signature.parameters.iter().enumerate() {
-                    match &parameter.pattern {
-                        // `_` parses as Wildcard; an identifier starting with
-                        // `_` is a name pattern the checker reports verbatim.
-                        // Neither supplies a callable parameter name, so both
-                        // fail closed instead of embedding a discard marker.
-                        Pattern::Name(name, _) if !name.starts_with('_') => {}
-                        _ => {
-                            return Err(self.error(
-                                key,
-                                SemanticPayloadErrorKind::NonNameParameter { position },
-                            ));
-                        }
-                    }
-                }
-                let Type::Function {
-                    parameter_names: Some(names),
-                    result,
-                    ..
-                } = &symbol.ty
+                let Type::Function { parameter_names, result, .. } = &symbol.ty
                 else {
                     return Err(
                         self.error(key, SemanticPayloadErrorKind::ParameterNamesUnavailable)
                     );
                 };
-                if names.len() != signature.parameters.len() {
+                if parameter_names
+                    .as_ref()
+                    .is_some_and(|names| names.len() != signature.parameters.len())
+                {
                     return Err(
                         self.error(key, SemanticPayloadErrorKind::IncompleteResolvedMeaning)
                     );
                 }
                 let mut locals = Locals::default();
                 let mut encoded_parameters = Vec::new();
+                let mut resolved_parameters = Vec::new();
                 for (position, parameter) in signature.parameters.iter().enumerate() {
                     let ty = parameter
                         .annotation
@@ -377,25 +380,46 @@ impl Producer<'_> {
                         .ok_or_else(|| {
                             self.error(key, SemanticPayloadErrorKind::IncompleteResolvedMeaning)
                         })?;
-                    let type_node = self.type_node(key, &ty, scope)?;
+                    resolved_parameters.push(ty.clone());
+                    let type_node = match &parameter.pattern {
+                        Pattern::Name(name, _) if name != "_" => self.type_node(key, &ty, scope)?,
+                        _ => self.pattern_type_node(key, &ty, scope)?,
+                    };
                     let default =
                         self.optional_expr(key, parameter.default.as_ref(), scope, &mut locals)?;
-                    let name = names[position].nfc().collect::<String>();
+                    let pattern = self.pattern(key, &parameter.pattern, &ty, scope, &mut locals)?;
+                    let name = match &parameter.pattern {
+                        Pattern::Name(name, _) if !name.starts_with('_') => {
+                            let name = name.nfc().collect::<String>();
+                            parameters.push(NamedSemanticParameter {
+                                position,
+                                name: name.clone(),
+                                resolved_type: ty.clone(),
+                                has_default: parameter.default.is_some(),
+                                annotation_explicit: parameter.annotation.is_some(),
+                            });
+                            Some(name)
+                        }
+                        _ => None,
+                    };
+                    semantic_parameters.push(SemanticParameter {
+                        position,
+                        name: name.clone(),
+                        resolved_type: ty.clone(),
+                        has_default: parameter.default.is_some(),
+                        annotation_explicit: parameter.annotation.is_some(),
+                    });
+                    let encoded_pattern = match (&parameter.pattern, name.as_ref()) {
+                        (Pattern::Name(_, _), Some(name)) => text(name),
+                        _ => pattern,
+                    };
                     encoded_parameters.push(array(vec![
                         index(position),
-                        text(&name),
+                        encoded_pattern,
                         type_node,
                         Raw::Bool(parameter.default.is_some()),
                         default,
                     ]));
-                    locals.bind(&name, ty.clone());
-                    parameters.push(NamedSemanticParameter {
-                        position,
-                        name,
-                        resolved_type: ty,
-                        has_default: parameter.default.is_some(),
-                        annotation_explicit: parameter.annotation.is_some(),
-                    });
                     explicitness
                         .parameter_annotations
                         .push(parameter.annotation.is_some());
@@ -418,9 +442,9 @@ impl Producer<'_> {
                 explicitness.result_annotation = signature.result.is_some();
                 let body = self.expr(key, body, scope, &mut locals)?;
                 let resolved = Type::Function {
-                    parameters: parameters.iter().map(|p| p.resolved_type.clone()).collect(),
-                    parameter_names: Some(parameters.iter().map(|p| p.name.clone()).collect()),
-                    default_parameters: parameters
+                    parameters: resolved_parameters,
+                    parameter_names: parameter_names.clone(),
+                    default_parameters: semantic_parameters
                         .iter()
                         .filter(|p| p.has_default)
                         .map(|p| p.position)
@@ -578,6 +602,7 @@ impl Producer<'_> {
             canonical_payload: canonical_payload.clone(),
             resolved_type,
             parameters,
+            semantic_parameters,
             effects: symbol.effects.clone(),
             origin: local_origin,
             source_hash: digest_source(&source.source),
@@ -1025,6 +1050,7 @@ impl Producer<'_> {
         locals: &mut Locals,
     ) -> Result<Raw> {
         Ok(match pattern {
+            Pattern::Name(name, _) if name == "_" => node("wildcard", Vec::new()),
             Pattern::Name(name, _) => {
                 let ty_node = self.pattern_type_node(key, ty, scope)?;
                 node("bind", vec![index(locals.bind(name, ty.clone())), ty_node])
@@ -1554,19 +1580,71 @@ mod tests {
     }
 
     #[test]
-    fn non_name_parameter_pattern_fails_without_inventing_a_name() {
-        let error = analyze_semantic_payloads(
+    fn structured_function_parameters_encode_patterns_without_inventing_names() {
+        fn has_tag(raw: &Raw, tag: &str) -> bool {
+            match raw {
+                Raw::Array(values) => values.iter().any(|value| {
+                    matches!(value, Raw::Text(text) if text == tag) || has_tag(value, tag)
+                }),
+                Raw::Tag(_, value) => has_tag(value, tag),
+                _ => false,
+            }
+        }
+        fn decoded(semantic: &SemanticDeclaration) -> Value {
+            let offset = SEMANTIC_PAYLOAD_DOMAIN.len() + 1;
+            Value::decode(&semantic.canonical_payload()[offset..]).unwrap()
+        }
+
+        let result = analyze_semantic_payloads(
             &[ModuleInput::new(
                 "payload.orna",
-                "fn ignore(_: Int): Int = 1;",
+                include_str!("fixtures/structured-parameters.orna"),
             )],
             &Catalogue::empty(),
         )
-        .unwrap_err();
+        .unwrap();
+        assert!(result.analysis().is_ok(), "{:#?}", result.analysis().diagnostics);
         assert_eq!(
-            error.kind,
-            SemanticPayloadErrorKind::NonNameParameter { position: 0 }
+            named(&result, "payload.tuple_sum").semantic_parameters().len(),
+            1
         );
+        assert!(named(&result, "payload.tuple_sum").semantic_parameters()[0].has_default);
+        assert_eq!(
+            named(&result, "payload.tuple_sum").resolved_type(),
+            &Type::Function {
+                parameters: vec![Type::Tuple(vec![
+                    Type::Int,
+                    Type::Tuple(vec![Type::Int, Type::Int]),
+                ])],
+                parameter_names: None,
+                default_parameters: BTreeSet::from([0]),
+                result: Box::new(Type::Int),
+            }
+        );
+        assert_eq!(named(&result, "payload.tuple_sum").parameters(), &[]);
+        assert_eq!(
+            named(&result, "payload.named").parameters()[0].name,
+            "value"
+        );
+        assert_eq!(
+            named(&result, "payload.tuple_sum").semantic_parameters()[0].name,
+            None
+        );
+        let tuple = named(&result, "payload.tuple_sum");
+        assert!(has_tag(decoded(tuple).raw(), "tuple_pattern"));
+        assert!(has_tag(decoded(tuple).raw(), "wildcard"), "{:#?}", decoded(tuple).raw());
+        assert!(has_tag(
+            decoded(named(&result, "payload.list_head")).raw(),
+            "list_pattern"
+        ));
+        assert!(has_tag(
+            decoded(named(&result, "payload.record_x")).raw(),
+            "record_pattern"
+        ));
+        assert!(has_tag(
+            decoded(named(&result, "payload.choice_left")).raw(),
+            "constructor_pattern"
+        ));
     }
 
     #[test]
@@ -1574,7 +1652,7 @@ mod tests {
         let error = analyze_semantic_payloads(
             &[ModuleInput::new(
                 "payload.orna",
-                "table Entry(id: Int) { value: Int, } fn inspect(entry: Entry): Int = 1;",
+                include_str!("fixtures/table-reference-type.orna"),
             )],
             &Catalogue::empty(),
         )

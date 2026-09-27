@@ -1,6 +1,6 @@
 [package]
 name = "orna-runtime-v1"
-version = "1.0.0"
+version.workspace = true
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
@@ -16,9 +16,12 @@ orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-repository-v1 = { path = "../orna-repository-v1" }
 orna-stream-v1 = { path = "../orna-stream-v1" }
 sha2 = "0.10.9"
-tokio = { version = "1.48.0", features = ["macros", "sync"] }
+tokio = { version = "1.48.0", features = ["macros", "rt", "sync"] }
 uuid = { version = "1.18.1", features = ["v4"] }
 
 [dev-dependencies]
+orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
+orna-syntax-v1 = { path = "../orna-syntax-v1" }
+orna-value-v1 = { path = "../orna-value-v1" }
 tempfile = "3.23.0"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "time"] }

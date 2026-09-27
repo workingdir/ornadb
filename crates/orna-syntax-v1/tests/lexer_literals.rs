@@ -1,4 +1,12 @@
-use orna_syntax_v1::{Expr, LiteralKind, TokenKind, lex, parse_expression};
+use orna_syntax_v1::{lex, parse_expression, Expr, LiteralKind, TokenKind};
+
+fn source(index: usize) -> &'static str {
+    std::str::from_utf8(include_bytes!("fixtures/lexer_literals.orna"))
+        .unwrap()
+        .lines()
+        .nth(index)
+        .expect("lexer literal fixture line exists")
+}
 
 fn kinds(source: &str) -> Vec<TokenKind> {
     lex(source)
@@ -10,14 +18,15 @@ fn kinds(source: &str) -> Vec<TokenKind> {
 
 #[test]
 fn plain_string_stays_a_single_lossless_token() {
-    let tokens = lex(r#""plain \u{7b} \"quoted\"""#).unwrap();
+    let source = source(0);
+    let tokens = lex(source).unwrap();
     assert_eq!(tokens[0].kind, TokenKind::String);
-    assert_eq!(tokens[0].text, r#""plain \u{7b} \"quoted\"""#);
+    assert_eq!(tokens[0].text, source);
 }
 
 #[test]
 fn interpolation_is_an_explicit_lossless_token_stream() {
-    let tokens = lex(r#""hello {person.name}!""#).unwrap();
+    let tokens = lex(source(1)).unwrap();
     assert_eq!(
         tokens.iter().map(|token| &token.kind).collect::<Vec<_>>(),
         vec![
@@ -46,7 +55,7 @@ fn interpolation_is_an_explicit_lossless_token_stream() {
 #[test]
 fn interpolation_reuses_normal_lexing_with_nested_braces_and_strings() {
     assert_eq!(
-        kinds(r#""{format({ value: "nested {name}" })}""#),
+        kinds(source(2)),
         vec![
             TokenKind::StringStart,
             TokenKind::InterpolationStart,
@@ -78,8 +87,7 @@ fn interpolation_reuses_normal_lexing_with_nested_braces_and_strings() {
 
 #[test]
 fn nested_string_interpolation_is_limited_without_recursing_unboundedly() {
-    let source = format!("{}value{}", "\"{".repeat(100), "}\"".repeat(100));
-    let errors = lex(&source).expect_err("deep string interpolation must be rejected");
+    let errors = lex(source(3)).expect_err("deep string interpolation must be rejected");
     assert!(
         errors.iter().any(|error| error.code == "ORNA-LEX-013"),
         "expected interpolation nesting diagnostic, got {errors:?}"
@@ -88,34 +96,24 @@ fn nested_string_interpolation_is_limited_without_recursing_unboundedly() {
 
 #[test]
 fn malformed_escapes_and_unclosed_interpolations_are_lexical_errors() {
-    for source in [
-        r#""\u{}""#,
-        r#""\u{110000}""#,
-        r#""\u{d800}""#,
-        r#""\u{abcdef0}""#,
-        r#""\q""#,
-        r#""open {value""#,
-    ] {
-        assert!(lex(source).is_err(), "{source}");
+    for index in 4..10 {
+        assert!(lex(source(index)).is_err(), "{}", source(index));
     }
 }
 
 #[test]
 fn numeric_separators_are_limited_to_digit_boundaries() {
-    for source in [
-        "1__2", "1_", "1_.2", "1._2", "1.2_", "1e_2", "1e2_", "1e+_2", "0x_FF", "0xFF_", "0b_1",
-        "0b1_",
-    ] {
-        assert!(lex(source).is_err(), "{source}");
+    for index in 10..22 {
+        assert!(lex(source(index)).is_err(), "{}", source(index));
     }
-    for source in ["1_000", "1_000.2_500e-3_0", "0xCA_FE", "0b10_01"] {
-        assert!(lex(source).is_ok(), "{source}");
+    for index in 22..26 {
+        assert!(lex(source(index)).is_ok(), "{}", source(index));
     }
 }
 
 #[test]
 fn adjacent_calendar_range_is_lexed_without_parser_recovery() {
-    let tokens = lex("2026-09-01..2026-09-02").unwrap();
+    let tokens = lex(source(26)).unwrap();
     assert_eq!(
         tokens
             .iter()
@@ -139,9 +137,9 @@ fn adjacent_calendar_range_is_lexed_without_parser_recovery() {
 
 #[test]
 fn calendar_literals_stop_before_adjacent_operators() {
-    for (source, expected) in [
+    for (index, expected) in [
         (
-            "fn f() = 2026-09-01+1;",
+            27,
             vec![
                 (TokenKind::Date, "2026-09-01"),
                 (TokenKind::Punct("+"), "+"),
@@ -149,7 +147,7 @@ fn calendar_literals_stop_before_adjacent_operators() {
             ],
         ),
         (
-            "2026-09-01T14:30:00Z+1",
+            28,
             vec![
                 (TokenKind::Instant, "2026-09-01T14:30:00Z"),
                 (TokenKind::Punct("+"), "+"),
@@ -157,7 +155,7 @@ fn calendar_literals_stop_before_adjacent_operators() {
             ],
         ),
         (
-            "2026-09-01T14:30:00.123456789-04:30+1",
+            29,
             vec![
                 (TokenKind::Instant, "2026-09-01T14:30:00.123456789-04:30"),
                 (TokenKind::Punct("+"), "+"),
@@ -165,6 +163,7 @@ fn calendar_literals_stop_before_adjacent_operators() {
             ],
         ),
     ] {
+        let source = source(index);
         let tokens = lex(source).unwrap();
         let actual = tokens
             .iter()
@@ -185,7 +184,7 @@ fn calendar_literals_stop_before_adjacent_operators() {
 
 #[test]
 fn calendar_literals_preserve_complete_forms_and_spans() {
-    let source = "2026-09-01T14:30:00.123456789+05:30..=2026-09-02";
+    let source = source(30);
     let tokens = lex(source).unwrap();
     assert_eq!(tokens[0].kind, TokenKind::Instant);
     assert_eq!(tokens[0].text, "2026-09-01T14:30:00.123456789+05:30");
@@ -201,10 +200,8 @@ fn calendar_literals_preserve_complete_forms_and_spans() {
 
 #[test]
 fn calendar_ast_preserves_literal_text_and_byte_spans() {
-    for (source, kind) in [
-        ("2026-09-01", LiteralKind::Date),
-        ("2026-09-01T14:30:00.123456789+05:30", LiteralKind::Instant),
-    ] {
+    for (index, kind) in [(31, LiteralKind::Date), (32, LiteralKind::Instant)] {
+        let source = source(index);
         let parsed = parse_expression(source);
         assert!(
             parsed.diagnostics.is_empty(),
@@ -228,7 +225,7 @@ fn calendar_ast_preserves_literal_text_and_byte_spans() {
 
 #[test]
 fn malformed_instant_tail_is_one_literal_diagnostic() {
-    let source = "2024-01-01T12:xx:00Z";
+    let source = source(33);
     let errors = lex(source).expect_err("a malformed instant tail must be rejected as one literal");
     let error = errors
         .iter()
@@ -240,12 +237,8 @@ fn malformed_instant_tail_is_one_literal_diagnostic() {
 
 #[test]
 fn malformed_instant_offsets_are_one_full_span_diagnostic() {
-    for source in [
-        "2024-01-01T12:30:00+xx:00",
-        "2024-01-01T12:30:00+01:xx",
-        "2024-01-01T12:30:00+24:00",
-        "2024-01-01T12:30:00+01:60",
-    ] {
+    for index in 34..38 {
+        let source = source(index);
         let errors = lex(source).expect_err("a malformed offset must be rejected");
         assert_eq!(
             errors
@@ -261,5 +254,48 @@ fn malformed_instant_offsets_are_one_full_span_diagnostic() {
             .expect("expected invalid-instant diagnostic");
         assert_eq!(error.span.start, 0, "{source}");
         assert_eq!(error.span.end, source.len(), "{source}");
+    }
+}
+
+#[test]
+fn malformed_utf8_date_reports_character_boundary_span() {
+    let source = source(38);
+    let errors = lex(source).expect_err("a date containing a non-ASCII digit must be rejected");
+    let error = errors
+        .iter()
+        .find(|error| error.code == "ORNA-LEX-007")
+        .expect("expected invalid-date diagnostic");
+    assert_eq!(error.span.start, 0);
+    assert_eq!(error.span.end, source.len());
+    assert!(source.is_char_boundary(error.span.start));
+    assert!(source.is_char_boundary(error.span.end));
+}
+
+#[test]
+fn unicode_16_fixture_preserves_nfc_and_original_utf8_spans() {
+    let fixture = include_bytes!("fixtures/unicode_17_identifier.orna");
+    let fixture = std::str::from_utf8(fixture).unwrap();
+    for (line_index, expected_text, expected_normalized, expected_span) in
+        [(0, "α", "α", (4, 6)), (2, "e\u{301}", "é", (4, 7))]
+    {
+        let source = fixture
+            .lines()
+            .nth(line_index)
+            .expect("Unicode 16 identifier source exists in the fixture");
+        let token = lex(source)
+            .unwrap()
+            .into_iter()
+            .find(|token| matches!(&token.kind, TokenKind::Identifier { .. }))
+            .expect("fixture line contains a Unicode identifier");
+        let TokenKind::Identifier { normalized } = &token.kind else {
+            unreachable!("identifier token was selected");
+        };
+        assert_eq!(normalized, expected_normalized);
+        assert_eq!(token.text, expected_text);
+        assert_eq!((token.span.start, token.span.end), expected_span);
+        assert_eq!(
+            source.get(token.span.start..token.span.end),
+            Some(expected_text)
+        );
     }
 }
