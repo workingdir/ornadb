@@ -1,2 +1,2 @@
-pub fn main(job: sys.InvocationHandle<Int>) =
-    sys.cancel<Int>(job, reason: "requested by operator");
+pub fn main(job: sys.InvocationHandle<Int>, reason: Str) =
+    sys.cancel(job, reason: reason);
