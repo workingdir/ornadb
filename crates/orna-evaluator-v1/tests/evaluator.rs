@@ -5978,15 +5978,15 @@ fn function_defaults_and_body_share_a_single_step_budget() {
 fn function_argument_admission_precedes_default_evaluation_and_redacts_errors() {
     for (source, arguments) in [
         (
-            "fn compute(first = 1 / 0, second: Int) = first;",
+            include_str!("fixtures/function_argument_missing_required.orna"),
             Environment::new(),
         ),
         (
-            "fn compute(first = 1 / 0) = first;",
+            include_str!("fixtures/function_argument_unknown_argument.orna"),
             Environment::from([("secret".into(), Value::int(1.into()))]),
         ),
         (
-            "fn compute(first: Int, first: Int) = first;",
+            include_str!("fixtures/function_argument_duplicate_parameter.orna"),
             Environment::from([("first".into(), Value::int(1.into()))]),
         ),
     ] {
