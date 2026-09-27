@@ -603,3 +603,33 @@ fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
         ["contacts/Contact/42.orna", "contacts/Contact/malformed.orna"]
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn worktree_row_discovery_skips_unreadable_git_administration() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (directory, repository) = repository(&[
+        ("main.orna", "use contacts; pub fn run() {}"),
+        ("contacts.orna", "pub table Contact(id: Int) { name: Str, }"),
+        ("contacts/Contact/42.orna", "{ name: \"reachable\" }"),
+    ]);
+
+    let unreadable = directory.path().join(".git/unreadable/nested");
+    fs::create_dir_all(&unreadable).unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0)).unwrap();
+
+    let result = ProjectLoader::default().load(&repository);
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let loaded = result.unwrap();
+    assert_eq!(
+        loaded
+            .loose_rows()
+            .iter()
+            .map(|row| row.logical_path())
+            .collect::<Vec<_>>(),
+        ["contacts/Contact/42.orna"]
+    );
+    assert_eq!(loaded.loose_rows()[0].source(), "{ name: \"reachable\" }");
+}
