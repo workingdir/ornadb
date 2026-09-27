@@ -33,21 +33,8 @@ pub use presenters::{
 pub fn check_standard_library_source(
     snapshot: &VerifiedStandardLibrarySnapshot,
 ) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
-    match snapshot.digest_version() {
-        StandardLibraryDigestVersion::Version1 => check_standard_library_source_v1(snapshot),
-        StandardLibraryDigestVersion::Version2 => match snapshot.revision() {
-            STANDARD_LIBRARY_V10_REVISION_ID | STANDARD_LIBRARY_V9_REVISION_ID => {
-                Err(StandardLibraryCheckError::SourceMismatch)
-            }
-            STANDARD_LIBRARY_V8_REVISION_ID => Err(StandardLibraryCheckError::SourceMismatch),
-            STANDARD_LIBRARY_V6_REVISION_ID => Err(StandardLibraryCheckError::SourceMismatch),
-            STANDARD_LIBRARY_V5_REVISION_ID => check_standard_library_source_v5(snapshot),
-            STANDARD_LIBRARY_V4_REVISION_ID => check_standard_library_source_v4(snapshot),
-            STANDARD_LIBRARY_V3_REVISION_ID => check_standard_library_source_v3(snapshot),
-            _ => check_standard_library_source_v2(snapshot),
-        },
-        _ => Err(StandardLibraryCheckError::SourceMismatch),
-    }
+    let _ = snapshot;
+    Err(StandardLibraryCheckError::SourceMismatch)
 }
 const STANDARD_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
