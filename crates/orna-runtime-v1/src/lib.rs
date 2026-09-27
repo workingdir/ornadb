@@ -24,12 +24,12 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use libsql::{Builder, Connection, Transaction, TransactionBehavior, params};
 use num_bigint::{BigInt, Sign};
 use orna_foundation_v1::{
-    AssertionRef, CanonicalSnapshot, CheckpointRef, CwdCapture, ExpressionRef, FailureRef,
-    InvocationRef, ObjectRef, OvbRaw, RowRef, RunRef, SYS_RUN_TABLE_ID, SYS_STREAM_TABLE_ID,
-    SafeText, Snapshot, SnapshotRef, SourceSpan, StreamRef, Value, checkpoint_reference,
-    failure_reference, invocation_reference, snapshot_reference, validate_checkpoint_reference,
-    validate_failure_reference, validate_invocation_reference, validate_run_reference,
-    validate_stream_reference,
+    AssertionRef, CanonicalSnapshot, CanonicalValue, CheckpointRef, CwdCapture, ExpressionRef,
+    FailureRef, InvocationRef, ObjectRef, OvbRaw, RowRef, RunRef, SYS_RUN_TABLE_ID,
+    SYS_STREAM_TABLE_ID, SafeText, Snapshot, SnapshotRef, SourceSpan, StreamRef, Value,
+    checkpoint_reference, failure_reference, invocation_reference, snapshot_reference,
+    validate_checkpoint_reference, validate_failure_reference, validate_invocation_reference,
+    validate_run_reference, validate_stream_reference,
 };
 #[cfg(test)]
 use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
@@ -499,11 +499,67 @@ pub struct RuntimePublicationMetadata {
     pub last_publication_ms: Option<i64>,
 }
 
-/// Runtime-maintenance view of the same durable publication snapshot.
-pub type RuntimeMaintenancePublicationMetadata = RuntimePublicationMetadata;
+/// Canonical publication field records corresponding to both system views.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimePublicationMetadataRows {
+    pub sys_storage: CanonicalValue,
+    pub maintenance_job: CanonicalValue,
+}
 
-/// Storage-relation view of the same durable publication snapshot.
-pub type SysStoragePublicationMetadata = RuntimePublicationMetadata;
+fn publication_metadata_record(
+    metadata: &RuntimePublicationMetadata,
+) -> Result<CanonicalValue, RuntimeError> {
+    let policy = publication_text_map(vec![
+        (
+            "compressed_target_bytes",
+            OvbRaw::Int(metadata.publication_policy.compressed_target_bytes.into()),
+        ),
+        (
+            "max_file_bytes",
+            OvbRaw::Int(metadata.publication_policy.max_file_bytes.into()),
+        ),
+        (
+            "max_pending_age_seconds",
+            OvbRaw::Int(metadata.publication_policy.max_pending_age_seconds.into()),
+        ),
+    ]);
+    let last_publication = match metadata.last_publication_ms {
+        Some(milliseconds) => {
+            let seconds = milliseconds.div_euclid(1_000);
+            let nanoseconds = milliseconds.rem_euclid(1_000) * 1_000_000;
+            OvbRaw::Tag(
+                60002,
+                Box::new(OvbRaw::Array(vec![
+                    OvbRaw::Int(seconds.into()),
+                    OvbRaw::Int(nanoseconds.into()),
+                ])),
+            )
+        }
+        None => OvbRaw::Null,
+    };
+    CanonicalValue::new(publication_text_map(vec![
+        ("publication_policy", policy),
+        ("pending_rows", OvbRaw::Int(metadata.pending_rows.into())),
+        ("pending_bytes", OvbRaw::Int(metadata.pending_bytes.into())),
+        ("published_rows", OvbRaw::Int(metadata.published_rows.into())),
+        ("published_bytes", OvbRaw::Int(metadata.published_bytes.into())),
+        ("last_publication", last_publication),
+    ]))
+    .map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn publication_text_map(fields: Vec<(&str, OvbRaw)>) -> OvbRaw {
+    let mut fields = fields;
+    fields.sort_by(|(left, _), (right, _)| {
+        left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+    });
+    OvbRaw::Map(
+        fields
+            .into_iter()
+            .map(|(key, value)| (OvbRaw::Text(key.into()), value))
+            .collect(),
+    )
+}
 
 const MAX_TABLE_MUTATION_BYTES: usize = 16 * 1024 * 1024;
 
@@ -7816,18 +7872,17 @@ impl RuntimeState {
         })
     }
 
-    /// Returns publication metadata for projection into `sys.Storage`.
-    pub async fn sys_storage_publication_metadata(
+    /// Reads one durable snapshot and projects its publication fields into
+    /// records corresponding to the declared `sys.Storage` and
+    /// `sys.MaintenanceJob` views.
+    pub async fn publication_metadata_rows(
         &self,
-    ) -> Result<SysStoragePublicationMetadata, RuntimeError> {
-        self.publication_metadata().await
-    }
-
-    /// Returns publication metadata for runtime maintenance reporting.
-    pub async fn runtime_maintenance_publication_metadata(
-        &self,
-    ) -> Result<RuntimeMaintenancePublicationMetadata, RuntimeError> {
-        self.publication_metadata().await
+    ) -> Result<RuntimePublicationMetadataRows, RuntimeError> {
+        let row = publication_metadata_record(&self.publication_metadata().await?)?;
+        Ok(RuntimePublicationMetadataRows {
+            sys_storage: row.clone(),
+            maintenance_job: row,
+        })
     }
 
     /// Returns only the pending mutation prefix covered by a persisted freeze.
