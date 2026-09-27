@@ -1737,7 +1737,7 @@ pub const STD_CLI_REPL_FUNCTION_REVISION_ID: FunctionRevisionId =
     FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1C]);
 /// The source-authored `std.cli.repl` function revision number.
 pub const STD_CLI_REPL_REVISION_NUMBER: u64 = 1;
-/// The fixed Work ADR 0088 `std/ui_constructors.orna` source-unit identity: `...0A`.
+/// Retired V9 source-unit identity reserved for fail-closed historical handling: `...0A`.
 pub const STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0A]);
 /// The fixed Work ADR 0087 `std/data.orna` source-unit identity: `...09`.
@@ -2080,40 +2080,6 @@ impl CheckedStandardUiWindow {
     /// Returns the fixed version-1 function-revision identity.
     pub const fn revision_id(&self) -> FunctionRevisionId {
         self.revision_id
-    }
-}
-/// The checked declaration facts for one Work ADR 0088 UI constructor.
-///
-/// The constructor set is closed and source-authored: each value retains the
-/// exact function, ordered parameter, revision, and external-contract facts
-/// checked against the V9 catalogue.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CheckedStandardUiConstructor {
-    pub(super) function_id: FunctionId,
-    pub(super) parameter_ids: Vec<ParameterId>,
-    pub(super) revision_id: FunctionRevisionId,
-    pub(super) runtime_contract: &'static str,
-}
-
-impl CheckedStandardUiConstructor {
-    /// Returns the fixed constructor function identity.
-    pub const fn function_id(&self) -> FunctionId {
-        self.function_id
-    }
-
-    /// Returns ordered constructor parameter identities.
-    pub fn parameter_ids(&self) -> &[ParameterId] {
-        &self.parameter_ids
-    }
-
-    /// Returns the fixed version-1 function-revision identity.
-    pub const fn revision_id(&self) -> FunctionRevisionId {
-        self.revision_id
-    }
-
-    /// Returns the exact external runtime-contract identity.
-    pub const fn runtime_contract(&self) -> &'static str {
-        self.runtime_contract
     }
 }
 
