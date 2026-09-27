@@ -7,6 +7,7 @@
 
 mod compact;
 mod compact_parquet;
+mod publication_policy;
 
 pub use compact::{
     apply_migration_plan_to_compact, fold_compact_committed_base, lower_publication_freeze,
@@ -17,6 +18,11 @@ pub use compact::{
     CompactWriterMutationState, COMPACT_STORAGE_PROFILE, OVB_PROFILE,
 };
 pub use compact_parquet::{CompactParquetError, CompactParquetKeySource};
+pub use publication_policy::{
+    CompactPublicationPolicy, CompactPublicationPolicyError, COMPACT_FILE_BOUND_BYTES,
+    DEFAULT_COMPRESSED_TARGET_BYTES, MAX_COMPRESSED_TARGET_BYTES,
+    MIN_COMPRESSED_TARGET_BYTES,
+};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
