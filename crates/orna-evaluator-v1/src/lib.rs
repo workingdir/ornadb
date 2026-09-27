@@ -44,26 +44,18 @@ pub use timezone::{
 pub use repl::{ReplSession, parse_admitted_repl};
 
 /// The verified standard-source bundle used by the bounded local and remote
-/// REPL boundaries. The source is included from the same canonical module
-/// file as the executable local REPL, while this crate owns verification of
-/// its profile before either boundary admits an import.
-const REFERENCE_STD_MATH_LOGICAL_PATH: &str = "std/math.orna";
-const REFERENCE_STD_MATH_SOURCE: &str = include_str!("../../orna-cli-v1/src/stdlib/std/math.orna");
-
+/// REPL boundaries. `orna-standard` owns the canonical module source; this
+/// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
 pub fn reference_standard_sources() -> [(String, String); 1] {
-    [(
-        REFERENCE_STD_MATH_LOGICAL_PATH.into(),
-        REFERENCE_STD_MATH_SOURCE.into(),
-    )]
+    orna_standard::reference_standard_sources_v1()
 }
 
 /// Returns the immutable profile that verifies [`reference_standard_sources`].
 #[must_use]
 pub fn reference_standard_profile() -> StandardDependencyProfile {
-    StandardDependencyProfile::from_sources("orna.std/v1-pure-math", reference_standard_sources())
-        .expect("the bundled reference standard sources are valid")
+    orna_standard::reference_standard_profile_v1()
 }
 
 const DEFAULT_SOURCE_BYTES: usize = 65_536;

@@ -305,6 +305,7 @@ fn empty_version_two_active_revision(
 
 mod v1;
 mod v11;
+mod v1_profile;
 mod v2_v4;
 mod v5_v10;
 
