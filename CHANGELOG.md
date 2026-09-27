@@ -98,12 +98,11 @@ release gate has passed.
   snapshots are immutable inputs to this verification; hand-editing retained
   rows is unsupported.
 - The implementation currently retains and opens standard-library snapshots
-  through `orna.std/11`, with code paths for the sequential V1-to-V11 chain.
-  However, the current maintainer runbook still records the accepted chain as
-  V1-to-V9, and the decision index has no complete tracked work decision for
-  the V10/V11 addition. V10/V11 are therefore recorded here as implementation
-  evidence, not as a 1.0 compatibility promise. This discrepancy must be
-  reconciled in the product baseline before publication.
+  through `orna.std/10`, with code paths for the sequential V1-to-V10 chain.
+  The pre-1.0 V11 SQL-shaped math addition has been retired; pure math remains
+  available from the pinned Orna 1.0 source. The maintainer runbook records
+  the accepted chain as V1-to-V9, so V10 remains implementation evidence, not
+  a 1.0 compatibility promise, until that discrepancy is reconciled.
 - Local server sockets use the private Orna protocol handshake (versions 1–5,
   with bounded fallback behavior where an opaque codec registry is unavailable)
   and local peer authentication. These are private Orna contracts, not a
