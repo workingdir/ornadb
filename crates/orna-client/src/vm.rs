@@ -23,7 +23,7 @@ pub use lease::{EphemeralCapabilityLease, LeaseError, LeaseSnapshot, LeaseState}
 pub use runtime_witness::{RuntimeOfferWitness, RuntimeOfferWitnessError};
 
 use orna_artifact::client_plan::{
-    ACTION_FORMAT_VERSION, ActionClientPlan, CAPABILITY_FORMAT_VERSION,
+    CAPABILITY_FORMAT_VERSION,
     CONTROL_FLOW_FORMAT_VERSION, CapabilityArgumentSource, CapabilityClientPlan,
     ClientExpressionNode, ClientPlan, ControlFlowClientPlan, ControlFlowStatement,
     EXPRESSION_FORMAT_VERSION, ExpressionClientPlan, FORMAT_VERSION, INSPECT_FORMAT_VERSION, MAGIC,
@@ -62,8 +62,6 @@ pub enum ClientVmDecodedPlan {
     Resource(ResourceClientPlan),
     /// A version-7 procedural plan.
     Procedural(ProceduralClientPlan),
-    /// A version-8 action plan.
-    Action(ActionClientPlan),
     /// A version-10 control-flow plan.
     ControlFlow(ControlFlowClientPlan),
 }
@@ -418,14 +416,6 @@ pub fn admit_client_function(
                     super::execution::preflight_client_procedural_calls(active, plan, context)
                         .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
                 }
-                ClientVmDecodedPlan::Action(plan) => {
-                    super::execution::preflight_client_action_calls(
-                        active,
-                        plan.operation(),
-                        context,
-                    )
-                    .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
-                }
                 ClientVmDecodedPlan::ControlFlow(plan) => {
                     super::execution::preflight_client_control_flow_calls(active, plan, context)
                         .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
@@ -476,9 +466,6 @@ fn decode_client_plan(
             .map_err(|_| ClientVmAdmissionError::DecodeRejected)?,
         PROCEDURAL_FORMAT_VERSION => ProceduralClientPlan::decode(payload)
             .map(ClientVmDecodedPlan::Procedural)
-            .map_err(|_| ClientVmAdmissionError::DecodeRejected)?,
-        ACTION_FORMAT_VERSION => ActionClientPlan::decode(payload)
-            .map(ClientVmDecodedPlan::Action)
             .map_err(|_| ClientVmAdmissionError::DecodeRejected)?,
         CONTROL_FLOW_FORMAT_VERSION => ControlFlowClientPlan::decode(payload)
             .map(ClientVmDecodedPlan::ControlFlow)
@@ -548,11 +535,6 @@ fn decoded_plan_contains_external_contract(plan: &ClientVmDecodedPlan) -> bool {
                 .any(|statement| expression_contains_external_contract(statement.expression()))
                 || expression_contains_external_contract(plan.return_expression())
         }
-        ClientVmDecodedPlan::Action(plan) => plan
-            .operation()
-            .arguments()
-            .iter()
-            .any(|(_, expression)| expression_contains_external_contract(expression)),
         ClientVmDecodedPlan::ControlFlow(plan) => {
             statements_contain_external_contract(plan.statements())
         }
@@ -587,11 +569,7 @@ fn inner_plan_contains_external_contract(
                 .any(|statement| expression_contains_external_contract(statement.expression()))
                 || expression_contains_external_contract(plan.return_expression())
         }
-        orna_artifact::client_plan::InnerClientPlan::Action(plan) => plan
-            .operation()
-            .arguments()
-            .iter()
-            .any(|(_, expression)| expression_contains_external_contract(expression)),
+        orna_artifact::client_plan::InnerClientPlan::Action(_) => false,
         orna_artifact::client_plan::InnerClientPlan::ControlFlow(plan) => {
             statements_contain_external_contract(plan.statements())
         }
@@ -660,7 +638,6 @@ fn decoded_plan_budget(plan: &ClientVmDecodedPlan) -> Result<PlanBudget, ClientV
         }
         ClientVmDecodedPlan::Resource(plan) => expression_budget(plan.expression()),
         ClientVmDecodedPlan::Procedural(plan) => procedural_plan_budget(plan),
-        ClientVmDecodedPlan::Action(plan) => action_plan_budget(plan),
         ClientVmDecodedPlan::ControlFlow(plan) => statements_budget(plan.statements()),
     }
 }
@@ -681,7 +658,7 @@ fn inner_plan_budget(
         orna_artifact::client_plan::InnerClientPlan::Procedural(plan) => {
             procedural_plan_budget(plan)
         }
-        orna_artifact::client_plan::InnerClientPlan::Action(plan) => action_plan_budget(plan),
+        orna_artifact::client_plan::InnerClientPlan::Action(_) => Ok(PlanBudget::leaf()),
         orna_artifact::client_plan::InnerClientPlan::ControlFlow(plan) => {
             statements_budget(plan.statements())
         }
@@ -770,14 +747,6 @@ fn procedural_plan_budget(
     Ok(budget)
 }
 
-fn action_plan_budget(plan: &ActionClientPlan) -> Result<PlanBudget, ClientVmAdmissionError> {
-    let mut budget = PlanBudget::leaf();
-    for (_, expression) in plan.operation().arguments() {
-        budget.include_nested(expression_budget(expression)?)?;
-    }
-    Ok(budget)
-}
-
 fn statements_budget(
     statements: &[ControlFlowStatement],
 ) -> Result<PlanBudget, ClientVmAdmissionError> {
@@ -835,10 +804,7 @@ fn expression_contains_external_contract(expression: &ClientExpressionNode) -> b
                     .snapshot_expression()
                     .is_some_and(expression_contains_external_contract)
         }
-        ClientExpressionNode::Action { operation } => operation
-            .arguments()
-            .iter()
-            .any(|(_, expression)| expression_contains_external_contract(expression)),
+        ClientExpressionNode::Action { .. } => false,
         ClientExpressionNode::Call { arguments, .. } => arguments
             .iter()
             .any(|(_, expression)| expression_contains_external_contract(expression)),
