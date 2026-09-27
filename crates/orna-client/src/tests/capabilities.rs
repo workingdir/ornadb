@@ -2134,32 +2134,6 @@ fn control_flow_source_introspection_evaluates_without_function_specific_dispatc
     );
 }
 #[test]
-fn source_reference_names_qualify_standard_parameter() {
-    let standard = orna_standard::verify_standard_library_v9_snapshot(
-        orna_standard::retained_standard_library_v9_snapshot().unwrap(),
-    )
-    .unwrap();
-    let active = empty_version_two_active(&standard);
-    let function = standard
-        .catalogue()
-        .function_by_id(orna_standard::STD_UI_TEXT_FUNCTION_ID)
-        .expect("the standard text function is present");
-    let parameter = function.parameters()[0].id();
-
-    assert_eq!(
-        super::super::source_reference_target_name(
-            &active,
-            DefinitionReferenceTarget::Parameter {
-                owner: function.id(),
-                parameter,
-            },
-        )
-        .as_deref(),
-        Some("std.ui.text.text"),
-    );
-}
-
-#[test]
 fn resource_plan_preflights_arguments_before_operation_target() {
     assert_reordered_client_plan_rejects_before_executor(
         r#"CREATE SCHEMA app;

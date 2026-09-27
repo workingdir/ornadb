@@ -357,42 +357,6 @@ impl ClientResourceExecutor for FailingActionExecutor {
     }
 }
 
-fn v9_constructor_value(
-    active: &ActiveDatabaseRevision,
-    function: FunctionId,
-    revision: FunctionRevisionId,
-    identity: &str,
-    arguments: Vec<(ParameterId, RuntimeValue)>,
-) -> RuntimeValue {
-    let context = super::ClientExecutionContext {
-        pair: active.pair(),
-        function,
-        function_revision: revision,
-        parent_invocation_id: InvocationId::from_bytes([0x92; 16]),
-        observer_lineage: None,
-    };
-    let spec = super::standard_ui_constructor_spec(active, context, identity)
-        .expect("the V9 standard constructor is intrinsically recognised");
-    super::evaluate_standard_ui_constructor(active, context, spec, &arguments)
-        .expect("the V9 standard constructor accepts its checked arguments")
-}
-
-fn v9_constructor_body(
-    active: &ActiveDatabaseRevision,
-    function: FunctionId,
-    revision: FunctionRevisionId,
-    identity: &str,
-    arguments: Vec<(ParameterId, RuntimeValue)>,
-) -> serde_json::Value {
-    let RuntimeValue::Opaque(value) =
-        v9_constructor_value(active, function, revision, identity, arguments)
-    else {
-        panic!("the constructor returns std.ui.UI");
-    };
-    super::decode_ui_constructor_body(value.canonical_payload())
-        .expect("the generated frame is canonical")
-}
-
 fn reference_field_path_fixture() -> (
     ActiveDatabaseRevision,
     ClientExecutionContext,
@@ -1170,12 +1134,6 @@ fn active_with_content(
         ),
         active.catalogue_hash_context().clone(),
     )
-}
-fn standard_v9() -> VerifiedStandardLibrarySnapshot {
-    orna_standard::verify_standard_library_v9_snapshot(
-        orna_standard::retained_standard_library_v9_snapshot().unwrap(),
-    )
-    .unwrap()
 }
 fn active_with_application_ui_text_identity() -> ActiveDatabaseRevision {
     let (base, _, pair, _) = version_one_active(true);

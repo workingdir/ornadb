@@ -37,7 +37,7 @@ pub use model::{
     CheckedStandardApplicationBundle, CheckedStandardExecutable, CheckedStandardJsonEncode,
     CheckedStandardLibrary, CheckedStandardParameterEcho, CheckedStandardSchema,
     CheckedStandardTerminalPresentTable, CheckedStandardTypeBinding, CheckedStandardTypeReference,
-    CheckedStandardUiConstructor, CheckedStandardUiWindow, CheckedStandardValueType,
+    CheckedStandardUiWindow, CheckedStandardValueType,
     CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, STANDARD_LIBRARY_V3_REVISION_ID,
     STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
     STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V7_REVISION_ID,
@@ -100,9 +100,9 @@ use standard_library::{
     validate_standard_source_origins,
 };
 pub use standard_library::{
-    check_standard_cli_repl, check_standard_json_encode, check_standard_library_source,
+    check_standard_json_encode, check_standard_library_source,
     check_standard_parameter_echo,
-    check_standard_terminal_present_table, check_standard_ui_constructor, check_standard_ui_window,
+    check_standard_terminal_present_table, check_standard_ui_window,
 };
 
 use std::{
