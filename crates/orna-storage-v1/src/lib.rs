@@ -729,6 +729,7 @@ impl RuntimePublicationCoordinator {
             .map_err(|_| Error::InvalidTransition)?;
         base.consume_writer_input(&writer_input)
             .map_err(|_| Error::InvalidTransition)?;
+        validate_manifest_generation_binding(plan.manifest(), &writer_input)?;
         Self::publish_compact_and_complete(repository, runtime, freeze, plan).await
     }
 
@@ -1040,6 +1041,16 @@ fn map_publication_repository_error(error: RepositoryError) -> Error {
         RepositoryError::RuntimeCompletionRequired => Error::InvalidTransition,
         _ => Error::RepositoryUnavailable,
     }
+}
+
+fn validate_manifest_generation_binding(
+    manifest: &CompactManifest,
+    writer_input: &CompactWriterInput,
+) -> Result<(), Error> {
+    if manifest.next_generation() != writer_input.candidate_generation {
+        return Err(Error::InvalidTransition);
+    }
+    Ok(())
 }
 
 /// Translates only the runtime outcomes reachable from the compact receipt
@@ -1639,9 +1650,25 @@ mod tests {
         repository: &Repository,
         freeze: &PublicationFreeze,
     ) -> CompactPublicationPlan {
+        compact_runtime_plan_with_base(
+            repository,
+            freeze,
+            CompactManifest::empty(
+                Uuid::from_u128(1),
+                compact_schema_fingerprint(&compact_schema()),
+            ),
+            Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001),
+        )
+    }
+
+    fn compact_runtime_plan_with_base(
+        repository: &Repository,
+        freeze: &PublicationFreeze,
+        base: CompactManifest,
+        segment_id: Uuid,
+    ) -> CompactPublicationPlan {
         let (parquet, schema) = compact_runtime_parquet();
         let table = Uuid::from_u128(1);
-        let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
         let segment_path = ManagedPath::new(format!(
             ".orna/storage/{table}/data/{}/{segment_id}.parquet",
             &segment_id.to_string()[..2]
@@ -1667,7 +1694,7 @@ mod tests {
             .prepare_compact_publication(
                 &head,
                 repository.index_generation().unwrap(),
-                CompactManifest::empty(table, schema),
+                base,
                 freeze.intent_id,
                 freeze.checkpoint.digest,
                 &[segment],
@@ -1758,6 +1785,61 @@ mod tests {
         let pending = runtime.pending().await.unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, [78; 16]);
+        assert_eq!(repository.read_publication_journal().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn validated_compact_publication_rejects_manifest_generation_mismatch() {
+        let (_temp, repository, runtime, freeze, plan) =
+            compact_runtime_unpublished_fixture().await;
+        RuntimePublicationCoordinator::publish_compact_and_complete(
+            &repository,
+            &runtime,
+            &freeze,
+            plan,
+        )
+        .await
+        .unwrap();
+
+        let next_freeze = runtime
+            .freeze(
+                [80; 16],
+                &orna_runtime_v1::Checkpoint {
+                    generation: 2,
+                    digest: [79; 32],
+                    mutation_sequence: 2,
+                },
+            )
+            .await
+            .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let manifest = repository
+            .read_compact_manifest(&head, Uuid::from_u128(1))
+            .unwrap()
+            .unwrap();
+        let next_plan = compact_runtime_plan_with_base(
+            &repository,
+            &next_freeze,
+            manifest,
+            Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0002),
+        );
+        let profile = CompactOvbProfile::new(compact_schema()).unwrap();
+
+        assert_eq!(
+            RuntimePublicationCoordinator::publish_compact_and_complete_validated(
+                &repository,
+                &runtime,
+                &profile,
+                &next_freeze,
+                next_plan,
+            )
+            .await,
+            Err(Error::InvalidTransition)
+        );
+        assert_eq!(
+            runtime.pending_through(&next_freeze).await.unwrap().len(),
+            1
+        );
         assert_eq!(repository.read_publication_journal().unwrap(), None);
     }
 
