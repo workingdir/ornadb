@@ -1,0 +1,2 @@
+pub fn preference_from_profile(storage: sys.Storage): sys.StoragePreference = storage.profile;
+pub fn profile_matches_preference(storage: sys.Storage): Bool = storage.profile == storage.preference;
