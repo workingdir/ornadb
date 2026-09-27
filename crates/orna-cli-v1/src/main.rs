@@ -992,7 +992,24 @@ fn unpublished_mutation_count(
             )
         })?;
     runtime
-        .block_on(state.pending_count())
+        .block_on(state.publication_metadata_rows())
+        .and_then(|rows| {
+            if rows.sys_storage != rows.maintenance_job {
+                return Err(orna_runtime_v1::RuntimeError::RecoveryInvalid);
+            }
+            match rows.sys_storage.raw() {
+                OvbRaw::Map(fields) => fields
+                    .iter()
+                    .find_map(|(key, value)| match (key, value) {
+                        (OvbRaw::Text(key), OvbRaw::Int(value)) if key == "pending_rows" => {
+                            usize::try_from(value.clone()).ok()
+                        }
+                        _ => None,
+                    })
+                    .ok_or(orna_runtime_v1::RuntimeError::RecoveryInvalid),
+                _ => Err(orna_runtime_v1::RuntimeError::RecoveryInvalid),
+            }
+        })
         .map_err(|_| {
             Diagnostic::target(
                 "E2200",
