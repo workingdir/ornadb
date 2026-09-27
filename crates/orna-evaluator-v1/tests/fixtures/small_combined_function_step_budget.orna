@@ -1,0 +1,2 @@
+fn small() = 1 + 2;
+fn combined() = small() + small();
