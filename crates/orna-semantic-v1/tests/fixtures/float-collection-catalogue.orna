@@ -1,0 +1,3 @@
+pub fn sum(rows: [Float]): Float = 0.0f;
+pub fn min(rows: [Float]): Float? = null;
+pub fn max(rows: [Float]): Float? = null;
