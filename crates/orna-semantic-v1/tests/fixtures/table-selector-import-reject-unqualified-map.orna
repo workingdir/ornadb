@@ -1,0 +1,1 @@
+fn wrong() = contacts.Contact | map(Contact.name);
