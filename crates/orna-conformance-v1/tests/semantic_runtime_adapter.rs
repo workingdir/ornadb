@@ -55,14 +55,7 @@ fn cancellation_project() -> ProjectUnit {
             fixture_id: "stream-cancellation".into(),
             source_id: "stream-cancellation/sensors.orna".into(),
             parse_as: "module_unit".into(),
-            source: r#"
-                pub table Reading(id: Int) { value: Int, }
-                pub fn input() = Stream.from_list([1, 2], source_identity: "example:cancellation");
-                pub fn ingest() { input() | for_each(value => {
-                    Reading.insert({ id: value, value: value });
-                }); }
-            "#
-            .into(),
+            source: include_str!("fixtures/stream-cancellation-sensors.orna").into(),
         }],
         loose_rows: Vec::new(),
         expectations: ProjectExpectations {
