@@ -5,15 +5,7 @@ use orna_semantic_v1::{
     DIAG_ASSERTION_SCOPE, DIAG_IMPORT,
 };
 
-const TABLE_HELPER: &str = r#"
-    pub table User(id: Uuid) { name: Str, }
-    pub table Account(id: Uuid) { user_id: Uuid, }
-
-    pub fn related(): Bool =
-        every(User, user =>
-            exists(Account, account => account.user_id == user.id)
-        );
-"#;
+const TABLE_HELPER: &str = include_str!("fixtures/imported_helper_dependencies/checks.orna");
 
 fn module<'a>(analysis: &'a Analysis, name: &str) -> &'a ModuleHeader {
     analysis
@@ -51,7 +43,7 @@ fn explicit_imported_helper_assertion_keeps_transitive_dependencies_and_effects(
         ModuleInput::new("checks.orna", TABLE_HELPER),
         ModuleInput::new(
             "consumer.orna",
-            "use checks.{related}; assert related();",
+            include_str!("fixtures/imported_helper_dependencies/explicit_consumer.orna"),
         ),
     ]);
 
@@ -86,7 +78,7 @@ fn aliased_imported_helper_assertion_keeps_transitive_dependencies() {
         ModuleInput::new("checks.orna", TABLE_HELPER),
         ModuleInput::new(
             "consumer.orna",
-            "use checks as c; assert c.related();",
+            include_str!("fixtures/imported_helper_dependencies/aliased_consumer.orna"),
         ),
     ]);
 
@@ -107,7 +99,10 @@ fn aliased_imported_helper_assertion_keeps_transitive_dependencies() {
 fn wildcard_imported_helper_assertion_keeps_transitive_dependencies() {
     let analysis = analyze(&[
         ModuleInput::new("checks.orna", TABLE_HELPER),
-        ModuleInput::new("consumer.orna", "use checks.*; assert related();"),
+        ModuleInput::new(
+            "consumer.orna",
+            include_str!("fixtures/imported_helper_dependencies/wildcard_consumer.orna"),
+        ),
     ]);
 
     assert_database_helper_summary(&analysis);
@@ -120,10 +115,13 @@ fn wildcard_imported_helper_assertion_keeps_transitive_dependencies() {
 #[test]
 fn private_named_import_reports_import_diagnostic_without_unresolved_name_noise() {
     let analysis = analyze(&[
-        ModuleInput::new("checks.orna", "fn hidden(): Bool = true;"),
+        ModuleInput::new(
+            "checks.orna",
+            include_str!("fixtures/imported_helper_dependencies/private_helper.orna"),
+        ),
         ModuleInput::new(
             "consumer.orna",
-            "use checks.{hidden}; pub fn ok(): Bool = true;",
+            include_str!("fixtures/imported_helper_dependencies/private_consumer.orna"),
         ),
     ]);
 
@@ -138,10 +136,13 @@ fn private_named_import_reports_import_diagnostic_without_unresolved_name_noise(
 #[test]
 fn table_free_imported_helper_reports_scope_diagnostic_and_empty_plan() {
     let analysis = analyze(&[
-        ModuleInput::new("checks.orna", "pub fn always(): Bool = true;"),
+        ModuleInput::new(
+            "checks.orna",
+            include_str!("fixtures/imported_helper_dependencies/table_free_helper.orna"),
+        ),
         ModuleInput::new(
             "consumer.orna",
-            "use checks.{always}; assert always();",
+            include_str!("fixtures/imported_helper_dependencies/table_free_consumer.orna"),
         ),
     ]);
 
