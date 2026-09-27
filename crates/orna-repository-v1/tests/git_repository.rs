@@ -1823,6 +1823,28 @@ fn checkout_preflight_classifies_a_commit_as_detached_and_rejects_ambiguity() {
 }
 
 #[test]
+fn checkout_preflight_rejects_local_branch_ambiguous_with_remote_tracking_ref() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "origin/topic"]);
+    git(
+        root.path(),
+        &["update-ref", "refs/remotes/origin/topic", "HEAD"],
+    );
+    let runtime = RuntimeGeneration::new(182);
+    let before = git_state(&repo, root.path());
+    let before_cwd = repo.cwd_generation(runtime).unwrap();
+
+    assert!(matches!(
+        repo.plan_checkout("origin/topic", runtime),
+        Err(orna_repository_v1::RepositoryError::InvalidSelector)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert_eq!(repo.cwd_generation(runtime).unwrap(), before_cwd);
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+}
+
+#[test]
 fn checkout_rejects_a_full_commit_id_branch_name_without_mutating_state() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
