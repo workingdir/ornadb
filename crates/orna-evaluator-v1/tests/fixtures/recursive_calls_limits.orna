@@ -1,0 +1,4 @@
+fn factorial(n: Int) = if n == 0 { 1 } else { n * factorial(n - 1) };
+fn recur() = recur();
+fn small() = 1 + 2;
+fn combined() = small() + small();
