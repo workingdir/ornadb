@@ -725,6 +725,7 @@ pub struct LiveEvalTransaction {
     pub mutations: Vec<TableMutation>,
     pub next_digest: [u8; 32],
     pub faults: Arc<dyn FaultInjector>,
+    after_commit: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl LiveEvalTransaction {
@@ -738,7 +739,16 @@ impl LiveEvalTransaction {
             mutations,
             next_digest,
             faults,
+            after_commit: None,
         }
+    }
+
+    /// Registers application-owned ephemeral state to publish after the host
+    /// commits this activation's durable writes and terminal request outcome.
+    #[must_use]
+    pub fn after_commit(mut self, callback: impl FnOnce() + Send + 'static) -> Self {
+        self.after_commit = Some(Box::new(callback));
+        self
     }
 }
 
@@ -3797,6 +3807,12 @@ impl LiveHost {
             return Err(Error::ApplicationRejected);
         }
         let mutating = !transaction.mutations.is_empty();
+        let LiveEvalTransaction {
+            mutations,
+            next_digest,
+            faults,
+            after_commit,
+        } = transaction;
         let lease = self.writer_lease().await?;
         let runtime = self.runtime.as_ref().ok_or(Error::UnsupportedOperation)?;
         let identity = RequestIdentity {
@@ -3809,9 +3825,9 @@ impl LiveHost {
         })?;
         let staged = StagedTableActivation::from_source(
             context.clone(),
-            transaction.mutations,
-            transaction.next_digest,
-            transaction.faults,
+            mutations,
+            next_digest,
+            faults,
         )
         .map_err(|error| map_runtime(&error))?;
         let committed = runtime
@@ -3824,6 +3840,9 @@ impl LiveHost {
             )
             .await
             .map_err(|error| map_runtime(&error))?;
+        if let Some(after_commit) = after_commit {
+            after_commit();
+        }
         let retained = committed
             .request
             .terminal_outcome
@@ -7859,7 +7878,7 @@ mod tests {
         Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText, Value,
     };
     use orna_repository_v1::Repository;
-    use orna_runtime_v1::RuntimeIdentity;
+    use orna_runtime_v1::{FaultPoint, NoFault, RuntimeIdentity};
     use std::{
         fs,
         process::Command,
@@ -7904,6 +7923,18 @@ mod tests {
 
         fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
             Err(Error::UnsupportedOperation)
+        }
+    }
+
+    struct FailBeforeTableWrite;
+
+    impl FaultInjector for FailBeforeTableWrite {
+        fn check(&self, point: FaultPoint) -> std::result::Result<(), RuntimeError> {
+            if point == FaultPoint::BeforeTableWrite {
+                Err(RuntimeError::FaultInjected(point))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -9349,6 +9380,96 @@ mod tests {
 
         drop(host);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn transaction_completion_hook_runs_only_after_durable_commit() {
+        for fail in [false, true] {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("orna-live-commit-hook-{nonce}"));
+            fs::create_dir(&root).unwrap();
+            assert!(
+                Command::new("git")
+                    .args(["init", "-b", "main"])
+                    .current_dir(&root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let repository = Repository::discover(&root).unwrap();
+            let runtime = futures::executor::block_on(RuntimeState::open(
+                &repository,
+                RuntimeIdentity {
+                    database_id: [26; 16],
+                    repository_id: [27; 16],
+                },
+                [28; 32],
+            ))
+            .unwrap();
+            let owner = futures::executor::block_on(runtime.acquire_lease([9; 16])).unwrap();
+            let identity = RequestIdentity {
+                session_id: [1; 16],
+                request_id: [29; 16],
+            };
+            let fingerprint = [30; 32];
+            let (_, capability) = futures::executor::block_on(
+                runtime.reserve_request_with_admission(identity, fingerprint),
+            )
+            .unwrap();
+            futures::executor::block_on(runtime.start_request_with_owner_and_admission(
+                identity,
+                fingerprint,
+                owner,
+                capability.expect("reservation should have an owner capability"),
+            ))
+            .unwrap();
+            let context = futures::executor::block_on(runtime.begin_activation()).unwrap();
+            let mut host = subscribed_host(Some(runtime));
+            let committed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let value = CanonicalValue::unit().encode().unwrap();
+            let mutation = TableMutation::new([23; 16], "Hook", value.clone(), Some(value)).unwrap();
+            let response = Envelope {
+                request: Some(identity.request_id),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Success,
+                    value: Some(CanonicalValue::unit()),
+                    fingerprint,
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            };
+            let committed_on_success = Arc::clone(&committed);
+            let transaction = LiveEvalTransaction::new(
+                vec![mutation],
+                [24; 32],
+                if fail {
+                    Arc::new(FailBeforeTableWrite)
+                } else {
+                    Arc::new(NoFault)
+                },
+            )
+            .after_commit(move || {
+                committed_on_success.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            let result = futures::executor::block_on(host.commit_eval_transaction(
+                identity.session_id,
+                identity.request_id,
+                fingerprint,
+                None,
+                &context,
+                response,
+                transaction,
+            ));
+            assert_eq!(result.is_ok(), !fail, "dispatch result: {result:?}");
+            assert_eq!(committed.load(std::sync::atomic::Ordering::SeqCst), !fail);
+
+            drop(host);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
