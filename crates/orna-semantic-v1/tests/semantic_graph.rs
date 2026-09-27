@@ -2466,6 +2466,32 @@ fn parallel_callbacks_share_result_type_and_return_ordered_stream() {
 }
 
 #[test]
+fn race_callbacks_share_result_type_and_return_that_type() {
+    let source = include_str!("fixtures/race-callback-results.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("race-callback-results.orna", source)],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "race callbacks must have compatible result types"
+    }), "incompatible callback result must be diagnosed: {:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("winner"))
+        .expect("fixture module is analyzed");
+    assert_eq!(
+        module.symbols["winner"].ty,
+        Type::Function {
+            parameters: vec![],
+            parameter_names: Some(vec![]),
+            default_parameters: Default::default(),
+            result: Box::new(Type::Int),
+        }
+    );
+}
+
+#[test]
 fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
     let sources = [
         (
