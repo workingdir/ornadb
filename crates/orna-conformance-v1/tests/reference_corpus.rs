@@ -603,10 +603,7 @@ fn typed_sys_invoke_report_retains_mismatched_witness_diagnostic() {
             Some("ORNA-S021-TYPE"),
             Some("sys.invoke explicit type argument must match the as: witness"),
         ),
-        r#"
-            pub fn invoke(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.invoke<Str>(function, arguments, as: Int);
-        "#,
+        include_str!("fixtures/typed-invoke-mismatch.orna"),
     );
     let typecheck = report.fixtures[0]
         .stages
