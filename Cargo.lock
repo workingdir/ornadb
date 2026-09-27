@@ -1582,6 +1582,9 @@ dependencies = [
 [[package]]
 name = "orna-table-v1"
 version = "1.0.0"
+dependencies = [
+ "num-bigint 0.4.8",
+]
 
 [[package]]
 name = "orna-traceability-v1"
