@@ -53,7 +53,7 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 mod activation;
-pub use activation::{ActivationError, ActivationWork, run_table_activation};
+pub use activation::{ActivationError, ActivationWork, run_table_activation, with_activation_scope};
 mod catalogue;
 pub use catalogue::{
     CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
@@ -1358,6 +1358,7 @@ pub enum RuntimeError {
     StreamCheckpointStale,
     CheckpointNotReplayable,
     LeaseHeld,
+    AdminBusy,
     OwnerLost,
     RecoveryPending,
     StaleCapture { current: Box<CwdCapture> },
@@ -1389,6 +1390,7 @@ impl RuntimeError {
     /// internal to this crate's existing error convention.
     pub fn public_code(&self) -> Option<&'static str> {
         match self {
+            Self::AdminBusy => Some("sys.admin.busy"),
             Self::StreamCheckpointStale => Some("sys.checkpoint.conflict"),
             Self::CheckpointNotReplayable => Some("sys.checkpoint.not_replayable"),
             _ => None,
@@ -1407,6 +1409,7 @@ impl fmt::Display for RuntimeError {
             Self::StreamCheckpointStale => "stream checkpoint is stale",
             Self::CheckpointNotReplayable => "checkpoint target is not replayable",
             Self::LeaseHeld => "runtime writer is held",
+            Self::AdminBusy => "runtime administration callback is busy",
             Self::OwnerLost => "runtime writer ownership was lost",
             Self::RecoveryPending => "runtime takeover recovery is pending",
             Self::StaleCapture { .. } => "runtime capture is stale",
@@ -3693,6 +3696,59 @@ impl RuntimeState {
         .and_then(admin_stream_result)
     }
 
+    /// Resolves an admitted portable `sys.StreamRef` against the live writer's
+    /// owner-fenced current-runtime observations, then pauses that exact stream
+    /// only while its activation capture remains current.
+    pub async fn pause_stream_reference_at_capture(
+        &self,
+        lease: WriterLease,
+        reference: Value,
+        reason: Option<String>,
+        expected_capture: &CwdCapture,
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        if activation::runtime_activation_active(self) {
+            return Err(RuntimeError::AdminBusy);
+        }
+        let row = decode_row_ref(
+            reference
+                .encode()
+                .map_err(|_| RuntimeError::InvalidObservationReference)?,
+        )?;
+        let requested = validate_stream_reference(row, expected_capture)
+            .map_err(|_| RuntimeError::InvalidObservationReference)?;
+        let fence = self.runtime_observation_fence(lease).await?;
+        if fence.capture() != expected_capture {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(fence.capture().clone()),
+            });
+        }
+        let view = self.current_runtime_observations(&fence).await?;
+        let key = view
+            .streams
+            .iter()
+            .find_map(|stream| {
+                let run = view.runs.iter().find(|run| run.id == stream.run)?;
+                (stream.reference(run).ok().as_ref() == Some(&requested))
+                    .then(|| stream.checkpoint.clone())
+            })
+            .ok_or(RuntimeError::InvalidObservationReference)?;
+        match reason {
+            Some(reason) => {
+                self.pause_stream_with_reason_at_capture(
+                    lease,
+                    key,
+                    reason,
+                    Some(expected_capture),
+                )
+                .await
+            }
+            None => {
+                self.pause_stream_at_capture(lease, key, Some(expected_capture))
+                    .await
+            }
+        }
+    }
+
     /// Applies a writer-fenced pause while retaining its supplied reason in
     /// the same local transaction that admits the pause. A no-op pause never
     /// overwrites the reason already attached to the existing pause.
@@ -3865,6 +3921,16 @@ impl RuntimeState {
         operation: AdminInvocationOperation,
     ) -> Result<AdminOperationResult, RuntimeError> {
         let descriptor = admin_invocation_descriptor(&operation);
+        if activation::runtime_activation_active(self) {
+            let error = RuntimeError::AdminBusy;
+            return match self
+                .record_failed_admin_descriptor(&descriptor, lease, &error)
+                .await
+            {
+                Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
+                Err(audit_error) => Err(audit_error),
+            };
+        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
