@@ -2256,28 +2256,13 @@ fn bounded_project_retains_owner_scoped_nominal_plans_for_functions_and_expressi
             fixture_id: "nominal-project".into(),
             source_id: "nominal/owner.orna".into(),
             parse_as: "module_unit".into(),
-            source: r#"
-                fn private_seed() = 7;
-                pub type Box {
-                    pub value: Int = private_seed(),
-                    secret: Int = private_seed(),
-                }
-                pub type Required { pub value: Int, }
-                pub fn omitted() = Box { };
-                pub fn missing_required() = Required { };
-            "#
-            .into(),
+            source: include_str!("fixtures/bounded-project-nominal-owner.orna").into(),
         },
         SourceUnit {
             fixture_id: "nominal-project".into(),
             source_id: "nominal/caller.orna".into(),
             parse_as: "module_unit".into(),
-            source: r#"
-                use nominal.owner;
-                pub fn external() = nominal.owner.Box { value: 3 };
-                pub fn external_omitted() = nominal.owner.Box { };
-            "#
-            .into(),
+            source: include_str!("fixtures/bounded-project-nominal-caller.orna").into(),
         },
     ]);
     let mut evaluator = BoundedEvaluator::default();
