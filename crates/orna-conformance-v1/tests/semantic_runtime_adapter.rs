@@ -597,7 +597,7 @@ fn semantic_project_adapter_rejects_unsupported_sys_current_member_at_typecheck(
 
 #[test]
 fn semantic_project_adapter_rejects_non_string_sys_snapshot_argument_at_typecheck() {
-    let source = "pub fn invalid() = sys.snapshot(3);";
+    let source = include_str!("fixtures/sys-snapshot-non-string-argument.orna");
     let project = snapshot_project(source);
     let mut adapter = SemanticAdapter::default();
 
