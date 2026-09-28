@@ -11,7 +11,9 @@ use std::{cmp::Ordering, collections::BTreeMap, error::Error, fmt};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
-use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
+use orna_foundation_v1::{
+    CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys,
+};
 use orna_repository_v1::{
     CompactManifest, CompactManifestEntry, CompactSegmentRole, GitCommitRef, Repository,
     RepositoryError, Uuid, validate_compact_page_uncompressed_sizes,
@@ -715,84 +717,12 @@ fn key_components(raw: &OvbRaw) -> Result<Vec<OvbRaw>, CompactParquetError> {
         | OvbRaw::Tag(37, _)
         | OvbRaw::Tag(60000, _)
         | OvbRaw::Tag(60001, _)
-        | OvbRaw::Tag(60002, _) => Ok(vec![raw.clone()]),
+        | OvbRaw::Tag(60002, _)
+        | OvbRaw::Tag(60008, _)
+        | OvbRaw::Tag(60010, _)
+        | OvbRaw::Tag(60021, _) => Ok(vec![raw.clone()]),
         _ => Err(CompactParquetError::InvalidMetadata),
     }
-}
-
-fn decimal_parts(raw: &OvbRaw) -> Result<(bool, String, i64), CompactParquetError> {
-    let OvbRaw::Tag(60000, value) = raw else {
-        return Err(CompactParquetError::InvalidMetadata);
-    };
-    let OvbRaw::Array(fields) = value.as_ref() else {
-        return Err(CompactParquetError::InvalidMetadata);
-    };
-    let [OvbRaw::Int(coefficient), OvbRaw::Int(exponent)] = fields.as_slice() else {
-        return Err(CompactParquetError::InvalidMetadata);
-    };
-    let coefficient = coefficient.to_string();
-    let negative = coefficient.starts_with('-');
-    let digits = if negative {
-        coefficient[1..].to_owned()
-    } else {
-        coefficient.clone()
-    };
-    let exponent = exponent
-        .to_string()
-        .parse::<i64>()
-        .map_err(|_| CompactParquetError::InvalidMetadata)?;
-    if digits == "0" {
-        return Ok((false, digits, 0));
-    }
-    Ok((negative, digits, exponent))
-}
-
-fn compare_decimal_values(left: &OvbRaw, right: &OvbRaw) -> Result<Ordering, CompactParquetError> {
-    let (left_negative, left_digits, left_exponent) = decimal_parts(left)?;
-    let (right_negative, right_digits, right_exponent) = decimal_parts(right)?;
-    if left_digits == "0" || right_digits == "0" {
-        return Ok(match (left_digits == "0", right_digits == "0") {
-            (true, true) => Ordering::Equal,
-            (true, false) => {
-                if right_negative {
-                    Ordering::Greater
-                } else {
-                    Ordering::Less
-                }
-            }
-            (false, true) => {
-                if left_negative {
-                    Ordering::Less
-                } else {
-                    Ordering::Greater
-                }
-            }
-            _ => unreachable!(),
-        });
-    }
-    let sign_order = left_negative.cmp(&right_negative);
-    if sign_order != Ordering::Equal {
-        return Ok(sign_order.reverse());
-    }
-    let left_position = left_exponent + left_digits.len() as i64;
-    let right_position = right_exponent + right_digits.len() as i64;
-    let mut ordering = left_position.cmp(&right_position);
-    if ordering == Ordering::Equal {
-        let width = left_digits.len().max(right_digits.len());
-        for offset in 0..width {
-            let left_digit = left_digits.as_bytes().get(offset).copied().unwrap_or(b'0');
-            let right_digit = right_digits.as_bytes().get(offset).copied().unwrap_or(b'0');
-            ordering = left_digit.cmp(&right_digit);
-            if ordering != Ordering::Equal {
-                break;
-            }
-        }
-    }
-    Ok(if left_negative {
-        ordering.reverse()
-    } else {
-        ordering
-    })
 }
 
 fn compare_key_components(
@@ -802,57 +732,17 @@ fn compare_key_components(
     if left.len() != right.len() {
         return Err(CompactParquetError::InvalidMetadata);
     }
-    for (left, right) in left.iter().zip(right) {
-        let ordering = match (left, right) {
-            (OvbRaw::Int(left), OvbRaw::Int(right)) => left.cmp(right),
-            (OvbRaw::Bool(left), OvbRaw::Bool(right)) => left.cmp(right),
-            (OvbRaw::Text(left), OvbRaw::Text(right)) => left.cmp(right),
-            (OvbRaw::Tag(37, left), OvbRaw::Tag(37, right)) => {
-                let (OvbRaw::Bytes(left), OvbRaw::Bytes(right)) = (left.as_ref(), right.as_ref())
-                else {
-                    return Err(CompactParquetError::InvalidMetadata);
-                };
-                left.cmp(right)
-            }
-            (OvbRaw::Tag(60000, _), OvbRaw::Tag(60000, _)) => {
-                compare_decimal_values(left, right)?
-            }
-            (OvbRaw::Tag(60001, left), OvbRaw::Tag(60001, right)) => {
-                let (OvbRaw::Text(left), OvbRaw::Text(right)) = (left.as_ref(), right.as_ref())
-                else {
-                    return Err(CompactParquetError::InvalidMetadata);
-                };
-                left.cmp(right)
-            }
-            (OvbRaw::Tag(60002, left), OvbRaw::Tag(60002, right)) => {
-                let (OvbRaw::Array(left), OvbRaw::Array(right)) = (left.as_ref(), right.as_ref())
-                else {
-                    return Err(CompactParquetError::InvalidMetadata);
-                };
-                if left.len() != 2 || right.len() != 2 {
-                    return Err(CompactParquetError::InvalidMetadata);
-                }
-                let (OvbRaw::Int(left_seconds), OvbRaw::Int(left_nanos)) =
-                    (&left[0], &left[1])
-                else {
-                    return Err(CompactParquetError::InvalidMetadata);
-                };
-                let (OvbRaw::Int(right_seconds), OvbRaw::Int(right_nanos)) =
-                    (&right[0], &right[1])
-                else {
-                    return Err(CompactParquetError::InvalidMetadata);
-                };
-                left_seconds
-                    .cmp(right_seconds)
-                    .then_with(|| left_nanos.cmp(right_nanos))
-            }
-            _ => return Err(CompactParquetError::InvalidMetadata),
-        };
-        if ordering != Ordering::Equal {
-            return Ok(ordering);
-        }
-    }
-    Ok(Ordering::Equal)
+    let left = CanonicalValue::new(OvbRaw::Tag(
+        60015,
+        Box::new(OvbRaw::Array(left.to_vec())),
+    ))
+    .map_err(|_| CompactParquetError::InvalidMetadata)?;
+    let right = CanonicalValue::new(OvbRaw::Tag(
+        60015,
+        Box::new(OvbRaw::Array(right.to_vec())),
+    ))
+    .map_err(|_| CompactParquetError::InvalidMetadata)?;
+    compare_primary_keys(&left, &right).map_err(|_| CompactParquetError::InvalidMetadata)
 }
 
 impl CompactExactKeySource for CompactParquetKeySource {
