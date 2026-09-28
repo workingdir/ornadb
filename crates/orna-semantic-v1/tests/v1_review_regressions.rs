@@ -1756,7 +1756,7 @@ fn table_assertion_admits_pure_relation_function_value_and_retains_plan() {
 }
 
 #[test]
-fn table_assertion_rejects_database_read_write_and_may_fail_function_values() {
+fn table_assertion_rejects_database_read_and_write_function_values() {
     for source in [
         r#"
             pub table Note(id: Int) { value: Int, assert reads; }
@@ -1769,14 +1769,28 @@ fn table_assertion_rejects_database_read_write_and_may_fail_function_values() {
                 true
             }
         "#,
-        r#"
-            pub table Note(id: Int) { value: Int, assert maybe; }
-            pub fn maybe(rows: Relation<Note>): Bool = one([true]);
-        "#,
     ] {
         let result = analyze_main(source);
         expect_diagnostics(&result, &[DIAG_ASSERTION_EFFECT]);
     }
+}
+
+#[test]
+fn table_assertion_preserves_evaluation_failure_for_the_boundary() {
+    let result = analyze(&[ModuleInput::new(
+        "assertion-failure.orna",
+        include_str!("fixtures/assertion-failure/failable_predicate.orna"),
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let plan = result
+        .assertions
+        .values()
+        .flatten()
+        .find(|plan| plan.owner == AssertionOwner::Table("Note".into()))
+        .expect("table assertion plan");
+    assert!(plan.effects.may_fail);
+    assert!(plan.effects.effects.is_empty());
 }
 
 #[test]
