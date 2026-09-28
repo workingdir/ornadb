@@ -2364,6 +2364,11 @@ fn run_fetch(
             error.to_string(),
         )
     })?;
+    if let Some(continuity) = report.continuity() {
+        if let Some(diagnostic) = fetch_continuity_diagnostic(continuity) {
+            return Err(diagnostic);
+        }
+    }
     let fetched = report.ordinary().first().ok_or_else(|| {
         Diagnostic::target(
             "E2100",
@@ -2408,6 +2413,20 @@ fn run_fetch(
     Ok(())
 }
 
+fn fetch_continuity_diagnostic(
+    continuity: orna_repository_v1::RemoteContinuity,
+) -> Option<Diagnostic> {
+    if continuity.permits_continuity_claim() {
+        return None;
+    }
+    Some(Diagnostic::target_with_detail(
+        "E2100",
+        "Orna continuity witness was rejected",
+        "do not claim allocator or checkpoint continuity until required refs/orna witnesses match",
+        format!("remote continuity state: {continuity:?}"),
+    ))
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -2423,6 +2442,33 @@ mod tests {
         assert!(ColorMode::Always.enabled(true));
         assert!(!ColorMode::Never.enabled(false));
         assert!(!ColorMode::Never.enabled(true));
+    }
+
+    #[test]
+    fn fetch_accepts_only_continuous_witnesses() {
+        assert!(
+            fetch_continuity_diagnostic(orna_repository_v1::RemoteContinuity::Continuous).is_none()
+        );
+
+        for continuity in [
+            orna_repository_v1::RemoteContinuity::Missing,
+            orna_repository_v1::RemoteContinuity::Stale,
+            orna_repository_v1::RemoteContinuity::InvalidEvidence,
+            orna_repository_v1::RemoteContinuity::Unverifiable,
+        ] {
+            let diagnostic = fetch_continuity_diagnostic(continuity)
+                .expect("non-continuous witnesses are rejected");
+            assert_eq!(diagnostic.code, "E2100");
+            assert_eq!(diagnostic.title, "Orna continuity witness was rejected");
+            assert_eq!(
+                diagnostic.help,
+                "do not claim allocator or checkpoint continuity until required refs/orna witnesses match"
+            );
+            assert_eq!(
+                diagnostic.detail.as_deref(),
+                Some(format!("remote continuity state: {continuity:?}").as_str())
+            );
+        }
     }
 
     #[test]
