@@ -253,3 +253,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Studio Security and DBA Page Boundary](0105-studio-security-dba-page-boundary.md)
 * **work ADR 0101:**
   [OrnaDB 1.0 CLIENT VM Trust Boundary](0101-client-vm-trust-boundary.md)
+* **work ADR 0108 (deferred):**
+  [Persistent Scalar and Record Backend Parity](0108-persistent-value-backend-parity-deferral.md)
