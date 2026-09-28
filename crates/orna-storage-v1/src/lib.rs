@@ -715,6 +715,9 @@ impl RuntimePublicationCoordinator {
         freeze: &PublicationFreeze,
         plan: CompactPublicationPlan,
     ) -> Result<IndexGeneration, Error> {
+        if !plan.matches_runtime_freeze(freeze.intent_id, freeze.checkpoint.digest) {
+            return Err(Error::InvalidTransition);
+        }
         let table = Uuid::from_bytes(profile.table_id());
         if plan.manifest().table() != table
             || plan.manifest().schema() != profile.schema_fingerprint()
@@ -1976,9 +1979,10 @@ mod tests {
 
     #[tokio::test]
     async fn candidate_manifest_next_generation_follows_the_published_generation() {
-        let (_temp, repository, _runtime, _freeze, plan) =
+        let (_temp, repository, _runtime, freeze, plan) =
             compact_runtime_unpublished_fixture().await;
         let profile = CompactOvbProfile::new(compact_schema()).unwrap();
+        assert!(plan.matches_runtime_freeze(freeze.intent_id, freeze.checkpoint.digest));
         let writer_input = CompactWriterInput {
             table_id: profile.table_id(),
             schema_fingerprint: profile.schema_fingerprint(),
@@ -2278,6 +2282,76 @@ mod tests {
         );
         assert_eq!(runtime.pending().await.unwrap().len(), 2);
         assert_eq!(repository.read_publication_journal().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn compact_plan_with_wrong_runtime_intent_is_rejected_before_publication() {
+        let (_temp, repository, runtime, freeze, _plan) =
+            compact_runtime_unpublished_fixture().await;
+        let wrong_plan_freeze = PublicationFreeze {
+            intent_id: [80; 16],
+            checkpoint: freeze.checkpoint.clone(),
+            candidate_digest: freeze.candidate_digest,
+            mutations: freeze.mutations.clone(),
+        };
+        let plan = compact_runtime_plan(&repository, &wrong_plan_freeze);
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+
+        assert_eq!(
+            RuntimePublicationCoordinator::publish_compact_and_complete_validated(
+                &repository,
+                &runtime,
+                &CompactOvbProfile::new(compact_schema()).unwrap(),
+                &freeze,
+                plan,
+            )
+            .await,
+            Err(Error::InvalidTransition)
+        );
+
+        assert_eq!(repository.head().unwrap(), Some(head));
+        assert_eq!(repository.index_generation().unwrap(), index);
+        assert_eq!(repository.read_publication_journal().unwrap(), None);
+        assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
+        assert_eq!(runtime.pending().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn compact_plan_with_wrong_cleanup_watermark_is_rejected_before_publication() {
+        let (_temp, repository, runtime, freeze, _plan) =
+            compact_runtime_unpublished_fixture().await;
+        let wrong_plan_freeze = PublicationFreeze {
+            intent_id: freeze.intent_id,
+            checkpoint: orna_runtime_v1::Checkpoint {
+                generation: freeze.checkpoint.generation,
+                digest: [81; 32],
+                mutation_sequence: freeze.checkpoint.mutation_sequence,
+            },
+            candidate_digest: freeze.candidate_digest,
+            mutations: freeze.mutations.clone(),
+        };
+        let plan = compact_runtime_plan(&repository, &wrong_plan_freeze);
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+
+        assert_eq!(
+            RuntimePublicationCoordinator::publish_compact_and_complete_validated(
+                &repository,
+                &runtime,
+                &CompactOvbProfile::new(compact_schema()).unwrap(),
+                &freeze,
+                plan,
+            )
+            .await,
+            Err(Error::InvalidTransition)
+        );
+
+        assert_eq!(repository.head().unwrap(), Some(head));
+        assert_eq!(repository.index_generation().unwrap(), index);
+        assert_eq!(repository.read_publication_journal().unwrap(), None);
+        assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
+        assert_eq!(runtime.pending().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
