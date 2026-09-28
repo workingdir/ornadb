@@ -1961,7 +1961,10 @@ fn counts_source_units_before_parsing_or_reconciling() {
     );
     let two = verified_empty_catalogue_fixture(
         &[
-            ("std/one.orna", "CREATE SCHEMA std.;"),
+            (
+                "std/one.orna",
+                include_str!("tests/fixtures/invalid-standard-schema.orna"),
+            ),
             ("std/two.orna", ""),
         ],
         [
