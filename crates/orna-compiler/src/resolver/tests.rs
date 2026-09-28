@@ -6,15 +6,13 @@ use orna_artifact::server_mutation_plan::{
     MutationExpressionKind as ServerMutationExpressionKind, RECORD_INSERT_FORMAT_VERSION,
     RecordFieldExpressionKind as ServerRecordFieldExpressionKind, ServerMutationPlan,
 };
-use orna_artifact::server_parameter_echo::ServerParameterEcho;
 use orna_core::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
     SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeId,
     canonical_hash::{
-        artifact_payload_digest, calculate_standard_library_digest, catalogue_digest_with_context,
-        function_declaration_digest, function_semantic_digest_with_version, source_bundle_digest,
+        calculate_standard_library_digest, catalogue_digest_with_context, source_bundle_digest,
         source_revision_record_digest, source_unit_content_digest,
-        verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
+        verify_standard_library_snapshot,
     },
     catalogue::{
         CatalogueSnapshot, CatalogueSnapshotError, EnumTypeDefinition, FieldDefinition,
@@ -26,51 +24,27 @@ use orna_core::{
     },
     revision::{
         ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
-        CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReference,
-        DefinitionReferenceKind, DefinitionReferenceTarget, DeployableRevision, ExecutableArtifact,
-        ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion, RevisionPair,
-        Sha256Digest, SourceOrigin, StandardExecutable, StandardLibraryDigestVersion,
+        CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind,
+        DeployableRevision, RevisionPair, Sha256Digest, SourceOrigin, StandardLibraryDigestVersion,
         StandardLibrarySnapshot, StoredSourceRevision, StoredSourceUnit,
         VerifiedStandardLibrarySnapshot,
     },
     source::{SourceBundle, SourceUnit},
     types::{ResolvedType, StandardScalar},
 };
-use orna_syntax::{
-    FunctionSecurity as SyntaxFunctionSecurity, FunctionTransaction as SyntaxFunctionTransaction,
-    FunctionVolatility as SyntaxFunctionVolatility, ServerFunctionDeclaration, SourceSlice,
-    SourceSpan, TypeExportTarget, TypeSpecification, parse,
-};
+use orna_syntax::{SourceSlice, SourceSpan, TypeSpecification, parse};
 
 use super::{
     CheckAssignments, CheckedApplicationTypeUse, CheckedClientReturnShape,
-    CheckedDefinitionReferenceTarget, CheckedStandardExecutable, CheckedStandardJsonEncode,
-    CheckedStandardParameterEcho, CheckedStandardTerminalPresentTable, CheckedStateDefault,
-    CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse, ClientExpressionResultShape,
-    ClientExpressionType, ConstantValue, DiagnosticCode, IdentityAssignments,
-    NewApplicationCheckError, STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
-    STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
-    STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
-    STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
-    STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_CONTRACT, STD_JSON_ENCODE_FUNCTION_ID,
-    STD_JSON_ENCODE_FUNCTION_REVISION_ID, STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID,
-    STD_JSON_SOURCE_UNIT_ID, STD_JSON_VALUE_TYPE_ID, STD_OUTPUT_SOURCE_UNIT_ID,
-    STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
-    STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID, STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
-    STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID, STD_UI_CONTRACT, STD_UI_SCHEMA_ID,
-    STD_UI_SOURCE_UNIT_ID, STD_UI_TYPE_ID, SemanticType, StandardApplicationCheckContext,
-    StandardApplicationContextError, StandardLibraryCheckError, StandardSourceFamilies, check,
-    check_new_application, check_new_application_with_catalogue, check_standard_application,
-    check_standard_json_encode, check_standard_library_source,
-    check_standard_library_source_v1_identity, check_standard_library_source_v2_parts,
-    check_standard_library_source_v3_parts, check_standard_library_source_v4_parts,
-    check_standard_library_source_v5_parts,
-    check_standard_parameter_echo, check_standard_terminal_present_table,
+    CheckedDefinitionReferenceTarget, CheckedStateDefault, CheckedTypeId, CheckedTypeUseKind,
+    CheckedValueTypeUse, ClientExpressionResultShape, ClientExpressionType, ConstantValue,
+    DiagnosticCode, IdentityAssignments, NewApplicationCheckError, SemanticType,
+    StandardApplicationCheckContext, StandardApplicationContextError, StandardLibraryCheckError,
+    check, check_new_application, check_new_application_with_catalogue, check_standard_application,
+    check_standard_library_source, check_standard_library_source_v1_identity,
     checked_standard_library_with_contract_overrides_for_test,
-    client_resource_stream_type_is_supported, expected_standard_json_executable, location,
-    reconcile_standard_executable, reconcile_standard_json_executable, reconcile_standard_source,
-    sort_standard_type_uses, supports_record_value_scalar, unquoted_prelude_name,
-    unquoted_semantic_name, validate_client_capability,
+    client_resource_stream_type_is_supported, location, reconcile_standard_source,
+    sort_standard_type_uses, supports_record_value_scalar, validate_client_capability,
 };
 use crate::mutation::{MutationExpressionKind, MutationRecordFieldExpressionKind};
 use crate::{
@@ -1259,244 +1233,6 @@ fn rejects_inspector_wrong_carrier_types_and_server_calls() {
     assert_no_checked_bundle(&report);
 }
 
-#[test]
-fn enforces_explicit_return_for_ui_expression_bodies() {
-    let standard = check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
-    let application = empty_catalogue();
-    let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
-
-    let short = check_standard_application(
-        &bundle([(
-            "ui-return.orna",
-            "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.factory() RETURNS std.UI RUNTIME CONTRACT 'app.factory@1'; CREATE CLIENT FUNCTION app.ui() RETURNS std.UI RETURN app.factory();",
-        )]),
-        &context,
-    );
-    assert!(short.diagnostics().is_empty(), "{:?}", short.diagnostics());
-    assert!(short.checked_bundle().is_some());
-
-    let as_ui = check_standard_application(
-        &bundle([(
-            "ui-as.orna",
-            "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.factory() RETURNS std.UI RUNTIME CONTRACT 'app.factory@1'; CREATE CLIENT FUNCTION app.ui() RETURNS std.UI AS app.factory();",
-        )]),
-        &context,
-    );
-    assert_eq!(
-        as_ui
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| diagnostic.message())
-            .collect::<Vec<_>>(),
-        vec!["CLIENT UI functions must use explicit RETURN instead of AS expression"],
-    );
-    assert!(as_ui.checked_bundle().is_none());
-
-    let non_ui_as = check_standard_application(
-        &bundle([(
-            "non-ui-as.orna",
-            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.text() RETURNS INTEGER AS 1;",
-        )]),
-        &context,
-    );
-    assert!(
-        non_ui_as.diagnostics().is_empty(),
-        "{:?}",
-        non_ui_as.diagnostics()
-    );
-}
-
-#[test]
-fn accepts_generic_inspect_render_contract_exact_signature() {
-    let standard = check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
-    let application = empty_catalogue();
-    let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
-    let source = "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(
-            p_snapshot sys.inspect.snapshot,
-            p_invocation_nodes sys.inspect.invocation_nodes,
-            p_calls sys.inspect.calls,
-            p_resources sys.inspect.resources,
-            p_state_cells sys.inspect.state_cells,
-            p_ui_nodes sys.inspect.ui_nodes,
-            p_presentation_candidates sys.inspect.presentation_candidates,
-            p_runtime_bindings sys.inspect.runtime_bindings,
-            p_security_decisions sys.inspect.security_decisions
-        ) RETURNS std.ui.UI RUNTIME CONTRACT 'std.inspect.render@1';";
-    let report = check_standard_application(&bundle([("inspect-render.orna", source)]), &context);
-    assert_eq!(report.diagnostics(), &[], "{:?}", report.diagnostics());
-    let function = report
-        .checked_bundle()
-        .unwrap()
-        .client_functions()
-        .next()
-        .unwrap();
-    assert_eq!(function.name().to_string(), "app.inspector_renderer");
-    assert_eq!(function.parameters().count(), 9);
-}
-
-#[test]
-fn rejects_historical_inspector_shell_contract_before_provider_dispatch() {
-    let standard = check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
-    let application = empty_catalogue();
-    let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
-    let source = "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(
-            p_snapshot sys.inspect.snapshot,
-            p_invocation_nodes sys.inspect.invocation_nodes,
-            p_calls sys.inspect.calls,
-            p_resources sys.inspect.resources,
-            p_state_cells sys.inspect.state_cells,
-            p_ui_nodes sys.inspect.ui_nodes,
-            p_presentation_candidates sys.inspect.presentation_candidates,
-            p_runtime_bindings sys.inspect.runtime_bindings,
-            p_security_decisions sys.inspect.security_decisions
-        ) RETURNS std.ui.UI RUNTIME CONTRACT 'devtools.inspector_shell@1';";
-    let report = check_standard_application(&bundle([("inspect-render.orna", source)]), &context);
-    assert_eq!(report.diagnostics().len(), 1);
-    assert_eq!(
-        report.diagnostics()[0].code(),
-        DiagnosticCode::UnknownQualifiedName
-    );
-    assert_eq!(
-        report.diagnostics()[0].message(),
-        "unregistered CLIENT external contract devtools.inspector_shell@1"
-    );
-    assert!(report.checked_bundle().is_none());
-}
-
-#[test]
-fn accepts_procedural_inspector_with_pre_begin_value_locals() {
-    let standard = check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
-    let application = empty_catalogue();
-    let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
-    let source = r#"CREATE SCHEMA inspector_app; CREATE SCHEMA app;
-            CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(
-                p_snapshot sys.inspect.snapshot,
-                p_invocation_nodes sys.inspect.invocation_nodes,
-                p_calls sys.inspect.calls,
-                p_resources sys.inspect.resources,
-                p_state_cells sys.inspect.state_cells,
-                p_ui_nodes sys.inspect.ui_nodes,
-                p_presentation_candidates sys.inspect.presentation_candidates,
-                p_runtime_bindings sys.inspect.runtime_bindings,
-                p_security_decisions sys.inspect.security_decisions
-            ) RETURNS std.ui.UI
-            RUNTIME CONTRACT 'std.inspect.render@1';
-            CREATE CLIENT FUNCTION inspector_app.inspector(p_target REF sys.inspect.invocation)
-            RETURNS std.ui.UI IS
-            LET snapshot sys.inspect.snapshot := sys.inspect.snapshot(p_target => p_target);
-            LET invocation_nodes sys.inspect.invocation_nodes :=
-                sys.inspect.invocation_nodes(p_snapshot => snapshot);
-            LET calls sys.inspect.calls := sys.inspect.calls(p_snapshot => snapshot);
-            LET resources sys.inspect.resources :=
-                sys.inspect.resources(p_snapshot => snapshot);
-            LET state_cells sys.inspect.state_cells :=
-                sys.inspect.state_cells(p_snapshot => snapshot);
-            LET ui_nodes sys.inspect.ui_nodes := sys.inspect.ui_nodes(p_snapshot => snapshot);
-            LET presentation_candidates sys.inspect.presentation_candidates :=
-                sys.inspect.presentation_candidates(p_snapshot => snapshot);
-            LET runtime_bindings sys.inspect.runtime_bindings :=
-                sys.inspect.runtime_bindings(p_snapshot => snapshot);
-            LET security_decisions sys.inspect.security_decisions :=
-                sys.inspect.security_decisions(p_snapshot => snapshot);
-            BEGIN
-                RETURN app.inspector_renderer(
-                    p_snapshot => snapshot,
-                    p_invocation_nodes => invocation_nodes,
-                    p_calls => calls,
-                    p_resources => resources,
-                    p_state_cells => state_cells,
-                    p_ui_nodes => ui_nodes,
-                    p_presentation_candidates => presentation_candidates,
-                    p_runtime_bindings => runtime_bindings,
-                    p_security_decisions => security_decisions
-                );
-            END;"#;
-    let report = check_standard_application(&bundle([("inspector.orna", source)]), &context);
-    assert_eq!(report.diagnostics(), &[], "{:?}", report.diagnostics());
-    let checked = report.preparation_view().unwrap().checked();
-    let function = checked
-        .client_functions()
-        .iter()
-        .find(|function| function.name().to_string() == "inspector_app.inspector")
-        .expect("ordinary Inspector function");
-    let CheckedClientFunctionBody::Procedural {
-        locals,
-        statements,
-        return_expression,
-    } = function.body()
-    else {
-        panic!("expected checked procedural Inspector body");
-    };
-    assert_eq!(locals.len(), 9);
-    assert_eq!(statements.len(), 9);
-    assert_eq!(
-        locals
-            .iter()
-            .map(|local| local.ordinal())
-            .collect::<Vec<_>>(),
-        (0..9).collect::<Vec<_>>()
-    );
-    assert!(
-        locals
-            .iter()
-            .all(|local| local.kind() == super::CheckedClientLocalKind::Value)
-    );
-    assert_eq!(
-        statements
-            .iter()
-            .map(|statement| statement.local())
-            .collect::<Vec<_>>(),
-        (0..9).collect::<Vec<_>>()
-    );
-    assert!(matches!(
-        statements[0].expression(),
-        CheckedClientExpression::Inspect {
-            operation: super::CheckedInspectOperation::Snapshot { target, .. }
-        } if matches!(target.as_ref(), CheckedClientExpression::ParameterRead { .. })
-    ));
-    for statement in &statements[1..] {
-        assert!(matches!(
-            statement.expression(),
-            CheckedClientExpression::Inspect {
-                operation: super::CheckedInspectOperation::Projection { snapshot, .. }
-            } if matches!(snapshot.as_ref(), CheckedClientExpression::LocalRead { local: 0, .. })
-        ));
-    }
-    let CheckedClientExpression::Call { arguments, .. } = return_expression else {
-        panic!("expected Inspector shell call");
-    };
-    assert_eq!(arguments.len(), 9);
-    for (ordinal, (_, expression)) in arguments.iter().enumerate() {
-        assert!(matches!(
-            expression,
-            CheckedClientExpression::LocalRead { local, .. }
-                if *local == ordinal as u32
-        ));
-    }
-}
-
-#[test]
-fn rejects_wrong_version_or_malformed_inspect_render_contracts() {
-    let standard = check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
-    let application = empty_catalogue();
-    let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
-    let cases = [
-        "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.calls, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings) RETURNS std.ui.UI RUNTIME CONTRACT 'std.inspect.render@1';",
-        "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.resources, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings, p_security_decisions sys.inspect.security_decisions) RETURNS std.ui.UI RUNTIME CONTRACT 'std.inspect.render@1';",
-        "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.calls, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings, p_security_decisions sys.inspect.security_decisions) RETURNS BOOLEAN RUNTIME CONTRACT 'std.inspect.render@1';",
-        "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.calls, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings, p_security_decisions sys.inspect.security_decisions) RETURNS std.ui.UI RUNTIME CONTRACT 'std.inspect.render@2';",
-    ];
-    for source in cases {
-        let report =
-            check_standard_application(&bundle([("inspect-render.orna", source)]), &context);
-        assert!(
-            !report.diagnostics().is_empty(),
-            "source unexpectedly accepted: {source}"
-        );
-        assert!(report.checked_bundle().is_none());
-    }
-}
-
 mod actions;
 mod client_functions;
 mod record_values;
@@ -1512,21 +1248,12 @@ use actions::{
     active_from_prepared, assert_type_use_span, checked_use_index, empty_version_two_active,
     expression_use, result_use,
 };
-use client_functions::{STANDARD_V2_TYPES_SOURCE, STD_INVOKE_SOURCE};
 use record_values::{
     opaque_standard_reconciliation_inputs, standard_origin, standard_reconciliation_inputs,
     verified_standard_library_for_relational_test,
     verified_standard_library_for_relational_test_with_boolean_id,
     verified_standard_library_with_opaque_for_test,
 };
-use standard_bundles::{
-    STANDARD_V3_OUTPUT_SOURCE, STANDARD_V4_UI_SOURCE, check_v4_parts, standard_v2_executable,
-    standard_v2_invoke_origins, standard_v2_types_origins, standard_v3_output_origins,
-    standard_v4_catalogue, standard_v4_catalogue_with_ui_value_type, standard_v4_ui_origins,
-    standard_v4_units, stored_v2_unit, verified_standard_v2_snapshot,
-    verified_standard_v4_snapshot,
-};
-use standard_contracts::{check_echo, standard_parameter_echo_origins};
 use standard_reconciliation::assert_no_checked_bundle;
 use type_evidence::{
     assert_standard_source_mismatch, parsed_origin, parsed_standard_unit,
