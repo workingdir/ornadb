@@ -1116,7 +1116,7 @@ fn checks_a_core_verified_non_golden_standard_source() {
     );
     assert_eq!(
         checked.verified_snapshot().source().units()[0].content(),
-        "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;"
+        include_str!("tests/fixtures/verified-standard-source.orna")
     );
 
     assert_eq!(checked.schemas().len(), 2);
@@ -2347,7 +2347,7 @@ fn active_with_history(
 }
 
 fn verified_standard_source_fixture() -> orna_core::revision::VerifiedStandardLibrarySnapshot {
-    const SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;";
+    const SOURCE: &str = include_str!("tests/fixtures/verified-standard-source.orna");
 
     let source_unit = StoredSourceUnit::new(
         SourceUnitId::from_bytes(CANONICAL_RESERVED_ID),
