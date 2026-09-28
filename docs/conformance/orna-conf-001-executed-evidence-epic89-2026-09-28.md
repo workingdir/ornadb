@@ -93,6 +93,33 @@ exit: 0
 The focused report test preserved the frozen publication digest through a
 partial requirement-evidence report, and the witness test rejected attaching
 an unrelated `ORNA-CONF-001` requirement to a fixture witness. The full
-package suite remains failed as captured above. These bounded observations do
-not assert that any conformance claim identifies all three required fields;
+package suite failed in that initial pre-PR-#1896 run, as captured above.
+These bounded observations do not assert that any conformance claim identifies
+all three required fields;
 ORNA-CONF-001 therefore remains unexecuted in the frozen reference register.
+
+## Post-witness-fixture repair rerun (2026-09-28)
+
+After witness fixture repair PR #1896 (`ornadb-nfk5`) merged, the full package
+suite was rerun against live `origin/main` at
+`f919773d80f80dd8aafc73d8065fa40c9b1ffac3` with the authoritative reference
+directory:
+
+```text
+$ ORNA_REFERENCE_DIR=/home/pbox/dev/ornadb/reference/Orna-1.0.0 cargo test -p orna-traceability-v1
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+CARGO_TEST_EXIT=0
+```
+
+The complete stdout/stderr, including build warnings, is appended to
+`orna-conf-001-cargo-test-transcripts.log`. This rerun resolves the earlier
+witness-binding failure; the prior failing output above is retained verbatim
+as the pre-PR-#1896 result. No current package failures remain. This suite
+continues to test traceability witness binding, not a complete conformance
+claim; the frozen `ORNA-CONF-001` register remains `not executed` and
+`full_implementation_coverage_claimed: false`.
