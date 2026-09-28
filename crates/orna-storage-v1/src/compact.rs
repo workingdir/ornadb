@@ -292,6 +292,61 @@ impl CompactBaseState {
         Ok(expected)
     }
 
+    /// Applies the role-classified physical writer batch to this base. Role
+    /// claims are checked against actual key presence so a caller cannot
+    /// publish an insert as a replacement or a replacement as new data.
+    pub fn apply_writer_batch(
+        &self,
+        batch: &CompactWriterBatch,
+    ) -> Result<Self, CompactBaseProjectionError> {
+        if batch.table_id != self.table_id {
+            return Err(CompactBaseProjectionError::WrongTable);
+        }
+        if batch.schema_fingerprint != self.schema_fingerprint {
+            return Err(CompactBaseProjectionError::WrongSchema);
+        }
+        if batch.generation != self.next_generation {
+            return Err(CompactBaseProjectionError::StaleGeneration);
+        }
+        let mut expected = self.clone();
+        let mut seen = BTreeSet::new();
+        for operation in &batch.rows {
+            let identity = CompactKeyIdentity {
+                encoded: operation.key.clone(),
+            };
+            if !seen.insert(identity.clone()) {
+                return Err(CompactBaseProjectionError::DuplicateKeyGeneration);
+            }
+            let key = CanonicalValue::decode(&operation.key)
+                .map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
+            let existing = self
+                .rows
+                .get(&identity)
+                .is_some_and(|row| row.value.is_some());
+            match (operation.role, operation.value.as_deref(), existing) {
+                (CompactSegmentRole::Data, Some(value), false)
+                | (CompactSegmentRole::Replacement, Some(value), true) => {
+                    let value = CanonicalValue::decode(value)
+                        .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+                    expected.rows.insert(
+                        identity,
+                        CompactBaseRow {
+                            key,
+                            value: Some(value),
+                            generation: batch.generation,
+                            role: operation.role,
+                        },
+                    );
+                }
+                (CompactSegmentRole::Deletion, None, true) => {
+                    expected.rows.remove(&identity);
+                }
+                _ => return Err(CompactBaseProjectionError::InvalidWriterRole),
+            }
+        }
+        Ok(expected)
+    }
+
     /// Compares visible logical rows while ignoring physical generations,
     /// segment roles, and retained tombstones.
     pub fn has_same_logical_rows(&self, other: &Self) -> bool {
@@ -600,6 +655,7 @@ pub enum CompactBaseProjectionError {
     MissingBaseKey,
     MissingBaseValue,
     DuplicateEvolutionKey,
+    InvalidWriterRole,
 }
 
 impl fmt::Display for CompactBaseProjectionError {
@@ -624,6 +680,7 @@ impl fmt::Display for CompactBaseProjectionError {
             Self::MissingBaseKey => "evolution rekey source is absent from the compact base",
             Self::MissingBaseValue => "evolution rekey source has no row value",
             Self::DuplicateEvolutionKey => "evolution rekey target collides with the compact base",
+            Self::InvalidWriterRole => "compact writer role does not match the authoritative base",
         })
     }
 }
@@ -2189,6 +2246,10 @@ mod tests {
         );
         let input = lower_publication_freeze(&profile, &freeze).unwrap();
         let batch = base.prepare_writer_batch(&profile, &input).unwrap();
+        let folded = base.fold_writer_input(&input).unwrap();
+        let expected_from_mutations = base.apply_writer_input(&folded).unwrap();
+        let expected_from_batch = base.apply_writer_batch(&batch).unwrap();
+        assert!(expected_from_mutations.has_same_logical_rows(&expected_from_batch));
 
         assert_eq!(batch.table_id(), profile.table_id());
         assert_eq!(batch.schema_fingerprint(), profile.schema_fingerprint());
