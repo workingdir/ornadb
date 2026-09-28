@@ -1822,7 +1822,7 @@ fn quoted_names_do_not_acquire_standard_prelude_meaning() {
     )
     .unwrap();
     let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
-    let source = "CREATE SCHEMA app; CREATE TYPE app.flag AS OBJECT (value \"BOOLEAN\");";
+    let source = include_str!("tests/fixtures/quoted-boolean-type.orna");
     let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
 
     let report = check_standard_application(&bundle, &context);
