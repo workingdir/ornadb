@@ -930,7 +930,15 @@ pub fn parse_row(source: &str) -> Parse<Expr> {
 pub fn parse_repl(source: &str) -> Parse<ReplInput> {
     let mut p = Parser::new(source);
     p.reset_syntax_budget();
-    let value = if matches!(
+    let public_table = matches!(p.keyword(), Some(Keyword::Pub))
+        && matches!(
+            p.tokens.get(p.at + 1).map(|token| &token.kind),
+            Some(TokenKind::Keyword(Keyword::Table))
+        );
+    let value = if public_table {
+        p.error_here("ORNA-PARSE-001", "public table declarations are not valid REPL input");
+        None
+    } else if matches!(
         p.keyword(),
         Some(Keyword::Use | Keyword::Let | Keyword::Fn | Keyword::Pub)
     ) {
@@ -5123,6 +5131,20 @@ mod tests {
         let nesting_limit = parse_repl(cases[9]);
         assert!(!nesting_limit.is_incomplete());
         assert!(nesting_limit.is_malformed());
+    }
+
+    #[test]
+    fn rejects_public_table_repl_input_and_preserves_public_functions() {
+        let table = include_str!("../tests/fixtures/repl_public_table.orna");
+        let rejected = parse_repl(table);
+        assert!(rejected.is_malformed());
+        assert!(rejected.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "ORNA-PARSE-001"
+                && diagnostic.message == "public table declarations are not valid REPL input"
+        }));
+
+        let function = include_str!("../tests/fixtures/generic-money-call.orna");
+        assert!(parse_repl(function).is_ok());
     }
 
     #[test]
