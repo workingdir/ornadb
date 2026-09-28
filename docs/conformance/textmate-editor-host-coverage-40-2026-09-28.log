@@ -1,0 +1,177 @@
+    Finished `test` profile [unoptimized] target(s) in 0.15s
+     Running unittests src/lib.rs (/var/tmp/pbox-build/cargo/debug/deps/orna_syntax_v1-0a2cda658740c84b)
+
+running 4 tests
+test lexer::unicode_profile_tests::unicode_16_identifiers_are_kept_and_unicode_17_additions_are_rejected ... ok
+test parser::tests::rejects_public_table_repl_input_and_preserves_public_functions ... ok
+test parser::tests::preserves_resolver_relevant_binding_assignment_and_import_structure ... ok
+test parser::tests::classifies_complete_incomplete_and_malformed_repl_inputs ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/admission.rs (/var/tmp/pbox-build/cargo/debug/deps/admission-eb2fac44c6ab8c03)
+
+running 2 tests
+test locating_a_non_boundary_offset_does_not_panic_before_admission ... ok
+test pinned_span_admits_losslessly_and_ephemeral_is_rejected ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (/var/tmp/pbox-build/cargo/debug/deps/conformance-c22dd876833ca38d)
+
+running 22 tests
+test empty_generic_call_arguments_are_rejected_at_parse_stage ... ok
+test bare_generic_call_retains_type_arguments_structurally ... ok
+test accepts_reference_language_shapes ... ok
+test entrypoints_and_precedence ... ok
+test generic_type_arguments_reject_trailing_commas_at_every_type_argument_level ... ok
+test generic_calls_require_a_qualified_name_callee ... ok
+test expression_ast_retains_control_and_postfix_structure ... ok
+test parses_bounded_and_optional_ranges_without_placeholder_endpoints ... ok
+test qualified_generic_call_retains_type_arguments_structurally ... ok
+test range_token_wins_over_numeric_dot ... ok
+test rejects_non_associative_range_chaining ... ok
+test unicode_nfc_comments_and_literals ... ok
+test stable_errors_reject_legacy_and_bad_lexemes ... ok
+test rejects_prefix_range_as_unparenthesized_endpoint ... ok
+test lexical_layout_is_semantically_inert_and_strings_are_not_comments ... ok
+test malformed_calendar_instant_and_escape_literals_are_rejected ... ok
+test generic_type_constructor_is_admitted_as_a_call_callee ... ok
+test grammar_recovery_codes_are_token_driven_under_layout_variations ... ok
+test expression_ast_observes_precedence ... ok
+test authoritative_parse_invalid_primary_codes_match_manifest ... ok
+test authoritative_parse_invalid_fixture_corpus_fails ... ok
+test authoritative_valid_fixture_corpus_parses ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/lexer_literals.rs (/var/tmp/pbox-build/cargo/debug/deps/lexer_literals-9d58971060f08d1e)
+
+running 14 tests
+test adjacent_calendar_range_is_lexed_without_parser_recovery ... ok
+test calendar_literals_preserve_complete_forms_and_spans ... ok
+test interpolation_is_an_explicit_lossless_token_stream ... ok
+test calendar_literals_stop_before_adjacent_operators ... ok
+test interpolation_reuses_normal_lexing_with_nested_braces_and_strings ... ok
+test malformed_escapes_and_unclosed_interpolations_are_lexical_errors ... ok
+test calendar_ast_preserves_literal_text_and_byte_spans ... ok
+test malformed_instant_offsets_are_one_full_span_diagnostic ... ok
+test malformed_instant_tail_is_one_literal_diagnostic ... ok
+test malformed_utf8_date_reports_character_boundary_span ... ok
+test plain_string_stays_a_single_lossless_token ... ok
+test numeric_separators_are_limited_to_digit_boundaries ... ok
+test unicode_16_fixture_preserves_nfc_and_original_utf8_spans ... ok
+test nested_string_interpolation_is_limited_without_recursing_unboundedly ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/nesting_limits.rs (/var/tmp/pbox-build/cargo/debug/deps/nesting_limits-f10aefe6c1aebe84)
+
+running 11 tests
+test ordinary_recursive_forms_below_the_budget_are_accepted ... ok
+test list_wrappers_compose_with_field_spines ... ok
+test repl_entrypoint_reports_the_same_nesting_limit_with_file_context ... ok
+test prefix_recursion_is_limited_before_stack_exhaustion ... ok
+test nested_control_blocks_are_limited_at_active_recursion_entrance ... ok
+test row_entrypoint_reports_the_same_nesting_limit_without_panicking ... ok
+test wide_shallow_lists_remain_valid ... ok
+test optional_types_and_assignment_targets_cannot_form_unbounded_spines ... ok
+test mixed_delimiters_and_postfix_spines_share_one_ast_budget ... ok
+test recursive_types_and_patterns_share_the_parser_limit ... ok
+test overdeep_control_recovers_to_the_next_top_level_declaration ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/unary_postfix_precedence.rs (/var/tmp/pbox-build/cargo/debug/deps/unary_postfix_precedence-593b42dd32aa10d7)
+
+running 5 tests
+test nested_prefixes_still_bind_outside_the_postfix_spine ... ok
+test every_prefix_operator_consumes_a_following_field ... ok
+test parentheses_continue_to_override_unary_postfix_precedence ... ok
+test unary_postfix_operand_stops_before_power_and_multiplication ... ok
+test unary_consumes_the_complete_postfix_spine ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/v1_review_regressions.rs (/var/tmp/pbox-build/cargo/debug/deps/v1_review_regressions-10cd182e74d66d8a)
+
+running 46 tests
+test adjacent_date_range_does_not_rewrite_quoted_text ... ok
+test adjacent_exclusive_date_range_is_accepted ... ok
+test adjacent_inclusive_date_range_is_accepted ... ok
+test block_tail_comparison_chain_is_rejected ... ok
+test adjacent_instant_range_is_accepted ... ok
+test boolean_comparison_chain_is_rejected ... ok
+test calendar_invalid_date_is_rejected ... ok
+test comparison_chain_with_additive_operand_is_rejected ... ok
+test comparison_chain_with_grouped_operand_is_rejected ... ok
+test comparison_conjunction_is_accepted ... ok
+test compound_case_conditions_allow_nested_nominal_constructors ... ok
+test empty_nominal_construction_is_accepted ... ok
+test constraints_remains_an_ordinary_nominal_constructor_in_nested_impl ... ok
+test control_condition_binary_rhs_leaves_body_brace_for_control ... ok
+test explicitly_grouped_comparison_is_accepted ... ok
+test compound_control_conditions_allow_nested_nominal_constructors ... ok
+test immediate_nominal_constructor_still_reserves_control_body_brace ... ok
+test field_constraint_names_remain_ordinary_outside_removed_modifiers ... ok
+test legacy_empty_pipe_closure_is_rejected ... ok
+test legacy_match_expression_remains_rejected_at_a_function_body_boundary ... ok
+test immediate_record_control_condition_requires_parentheses ... ok
+test legacy_match_expression_is_rejected_after_record_or_nominal_constructor_scrutinee ... ok
+test logical_or_is_accepted ... ok
+test legacy_match_expression_is_rejected_at_nested_expression_boundaries ... ok
+test logical_and_is_accepted ... ok
+test match_is_accepted_as_a_field_name_before_a_nested_lambda_record ... ok
+test legacy_opaque_and_currency_declarations_remain_rejected ... ok
+test match_is_accepted_as_a_lambda_parameter ... ok
+test legacy_declaration_words_are_scoped_to_removed_module_shapes ... ok
+test match_is_accepted_in_a_return_type_product_before_a_lambda_body ... ok
+test match_lambda_is_accepted_as_a_record_field_value ... ok
+test nominal_construction_punning_is_rejected ... ok
+test assertion_aliases_are_accepted_in_ordinary_identifier_positions ... ok
+test nonempty_unqualified_nominal_construction_is_accepted ... ok
+test qualified_nominal_construction_is_accepted ... ok
+test legacy_match_expression_is_rejected_after_expression_introducers ... ok
+test simple_comparison_chain_is_rejected ... ok
+test spaced_date_ranges_are_accepted ... ok
+test legacy_var_declarations_remain_rejected_at_statement_boundaries ... ok
+test var_is_accepted_in_ordinary_identifier_positions ... ok
+test match_is_accepted_in_ordinary_identifier_positions ... ok
+test membership_comparison_chain_is_rejected ... ok
+test reserved_words_cannot_start_type_references ... ok
+test where_remains_an_ordinary_name_after_a_closed_type_refinement ... ok
+test opaque_and_currency_are_accepted_in_ordinary_identifier_positions ... ok
+test legacy_assertion_aliases_remain_rejected_in_their_removed_shapes ... ok
+
+test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests orna_syntax_v1
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+EXIT_CODE=0
+
+AUDIT PROBES (current checkout at 6b958d06299859a97473fe43a29acb23068787ef)
+Reference search command:
+rg -n -i 'TextMate|Vim|Neovim|editor host|host editor|highlight capture|editor grammar' /home/pbox/dev/ornadb/reference/Orna-1.0.0
+Result: no matches.
+
+Editor asset checks:
+editors/textmate/orna.tmLanguage.json: absent
+editors/vscode/syntaxes/orna.tmLanguage.json: absent
+scripts/check-editor-tooling.py: absent
+scripts/test_check_editor_tooling.py: absent
+editors/tree-sitter-orna: absent
+editors/zed: absent
+
+Host executable probe:
+tree-sitter: unavailable
+zed: unavailable
+vim: unavailable
+nvim: unavailable
+code: unavailable
+subl: unavailable
+emacs: unavailable
