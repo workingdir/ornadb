@@ -1923,7 +1923,7 @@ fn standard_values_are_not_valid_ref_targets() {
     )
     .unwrap();
     let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
-    let source = "CREATE SCHEMA app; CREATE TYPE app.flag AS OBJECT (value REF std.BOOLEAN);";
+    let source = include_str!("tests/fixtures/ref-scalar-target.orna");
     let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
 
     let report = check_standard_application(&bundle, &context);
