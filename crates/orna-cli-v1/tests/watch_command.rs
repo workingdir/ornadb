@@ -3,17 +3,29 @@ mod repl;
 
 use std::collections::VecDeque;
 
-use orna_client::live_presentation::WatchPresentation;
+use orna_client::live_presentation::{ResyncRequest, WatchPresentation};
 use orna_conformance_v1::AdmittedReplSession;
 use orna_evaluator_v1::Limits;
 use repl::{WatchCommandState, WatchFrameSource};
 
 const WATCH: [u8; 16] = [7; 16];
+const WATCH_EXPRESSIONS: &str = include_str!("fixtures/watch-command-expressions.orna");
+
+fn expression(index: usize) -> &'static str {
+    WATCH_EXPRESSIONS
+        .lines()
+        .nth(index)
+        .expect("watch expression fixture line")
+}
 
 #[derive(Default)]
 struct FrameSource {
     subscriptions: Vec<String>,
     frames: VecDeque<Vec<u8>>,
+    resync_attempts: Vec<ResyncRequest>,
+    resyncs: Vec<ResyncRequest>,
+    failed_resyncs_remaining: usize,
+    closed_watches: Vec<[u8; 16]>,
 }
 
 impl WatchFrameSource for FrameSource {
@@ -27,6 +39,26 @@ impl WatchFrameSource for FrameSource {
     fn next_frame(&mut self, watch: [u8; 16]) -> Result<Option<Vec<u8>>, Self::Error> {
         assert_eq!(watch, WATCH, "frames belong to the subscribed watch");
         Ok(self.frames.pop_front())
+    }
+
+    fn request_resync(&mut self, request: ResyncRequest) -> Result<(), Self::Error> {
+        assert_eq!(
+            request.watch(),
+            WATCH,
+            "resync belongs to the subscribed watch"
+        );
+        self.resync_attempts.push(request);
+        if self.failed_resyncs_remaining > 0 {
+            self.failed_resyncs_remaining -= 1;
+            return Err("temporary resync failure");
+        }
+        self.resyncs.push(request);
+        Ok(())
+    }
+
+    fn close_watch(&mut self, watch: [u8; 16]) -> Result<(), Self::Error> {
+        self.closed_watches.push(watch);
+        Ok(())
     }
 }
 
@@ -115,52 +147,44 @@ fn watch_installs_snapshot_and_applies_ordered_delta_without_disrupting_expressi
         .frames
         .extend([snapshot(1, "one"), delta(1, 2, "two")]);
     let mut state = WatchCommandState::new();
-    let output = run(":watch 1 + 1\n3 + 4\n:quit\n", &mut source, &mut state);
-    assert_eq!(source.subscriptions, ["1 + 1"]);
+    let watch_expression = expression(0);
+    let submitted_expression = expression(1);
+    let input = format!(":watch {watch_expression}\n{submitted_expression}\n:quit\n");
+    let output = run(&input, &mut source, &mut state);
+    assert_eq!(source.subscriptions, [watch_expression]);
     assert!(
         output.contains("watch: snapshot installed (rev 1)"),
         "{output}"
     );
     assert!(output.contains("watch: delta applied (rev 2)"), "{output}");
     assert!(output.contains("7 : Int"), "{output}");
-    assert_eq!(state.published_revision(), Some(2));
-    assert_eq!(state.watch(), Some(WATCH));
-    assert!(!state.awaiting_snapshot());
+    assert_eq!(source.closed_watches, [WATCH]);
+    assert_eq!(state.watch(), None);
 }
 
 #[test]
-fn mismatched_delta_keeps_published_revision_until_complete_snapshot_recovers() {
+fn mismatched_delta_requests_shared_resync_until_complete_snapshot_recovers() {
     let mut source = FrameSource::default();
-    source
-        .frames
-        .extend([snapshot(1, "one"), delta(9, 10, "wrong")]);
+    source.frames.extend([
+        snapshot(1, "one"),
+        delta(9, 10, "wrong"),
+        snapshot(11, "fresh"),
+    ]);
+    source.failed_resyncs_remaining = 1;
     let mut state = WatchCommandState::new();
-    let output = run(":watch 1 + 1\n:quit\n", &mut source, &mut state);
+    let input = format!(":watch {}\n:quit\n", expression(0));
+    let output = run(&input, &mut source, &mut state);
     assert!(output.contains("watch: resync required"), "{output}");
-    assert_eq!(state.published_revision(), Some(1));
-    assert!(state.awaiting_snapshot());
-    let request = state
-        .take_resync_request()
-        .expect("resync remains pending until sent");
-    assert_eq!(request.watch(), WATCH);
-    state.acknowledge_resync_request(request);
-    assert_eq!(state.take_resync_request(), None);
-    assert!(
-        state.awaiting_snapshot(),
-        "send does not remove snapshot barrier"
-    );
-
-    source
-        .frames
-        .extend([delta(1, 2, "stale"), snapshot(11, "fresh")]);
-    let output = run("1 + 1\n:quit\n", &mut source, &mut state);
+    assert!(output.contains("error[ORNA-REPL-WATCH-SOURCE]"), "{output}");
     assert!(
         output.contains("watch: snapshot installed (rev 11)"),
         "{output}"
     );
     assert!(!output.contains("watch: delta applied"), "{output}");
-    assert_eq!(state.published_revision(), Some(11));
-    assert!(!state.awaiting_snapshot());
+    assert_eq!(source.resync_attempts.len(), 2);
+    assert_eq!(source.resyncs.len(), 1);
+    assert_eq!(source.resyncs[0].watch(), WATCH);
+    assert_eq!(source.closed_watches, [WATCH]);
 }
 
 #[test]
@@ -168,24 +192,34 @@ fn reconnect_fences_old_deltas_and_installs_replacement_snapshot() {
     let mut source = FrameSource::default();
     source.frames.push_back(snapshot(3, "before"));
     let mut state = WatchCommandState::new();
-    let output = run(":watch 1 + 1\n:quit\n", &mut source, &mut state);
+    let input = format!(":watch {}\n:quit\n", expression(0));
+    let output = run(&input, &mut source, &mut state);
     assert!(
         output.contains("watch: snapshot installed (rev 3)"),
         "{output}"
     );
-    state.begin_resubscription();
-    assert_eq!(state.published_revision(), Some(3));
-    assert!(state.awaiting_snapshot());
+    assert_eq!(state.watch(), None, "closing the REPL releases its watch");
     source
         .frames
         .extend([delta(3, 4, "old"), snapshot(8, "replacement")]);
-    let output = run("1 + 1\n:quit\n", &mut source, &mut state);
+    let input = format!(":watch {}\n:quit\n", expression(0));
+    let output = run(&input, &mut source, &mut state);
     assert!(!output.contains("watch: delta applied"), "{output}");
     assert!(
         output.contains("watch: snapshot installed (rev 8)"),
         "{output}"
     );
-    assert_eq!(state.published_revision(), Some(8));
-    assert!(!state.awaiting_snapshot());
-    assert_eq!(source.subscriptions, ["1 + 1"]);
+    assert_eq!(source.subscriptions, [expression(0), expression(0)]);
+    assert_eq!(source.resyncs.len(), 1);
+    assert_eq!(source.closed_watches, [WATCH, WATCH]);
+}
+
+#[test]
+fn end_of_input_closes_the_session_watch() {
+    let mut source = FrameSource::default();
+    let mut state = WatchCommandState::new();
+    let input = format!(":watch {}\n", expression(0));
+    let _output = run(&input, &mut source, &mut state);
+    assert_eq!(source.closed_watches, [WATCH]);
+    assert_eq!(state.watch(), None);
 }
