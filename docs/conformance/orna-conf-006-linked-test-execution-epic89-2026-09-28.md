@@ -28,9 +28,11 @@ do not claim the complete ORNA-CONF-006 obligation or a full-runtime claim.
 ## Actual runs
 
 Both commands ran from a clean worktree at the repository depth expected by
-the existing reference `include_str!` paths. Complete captured logs were retained
-at `/tmp/orna-conf-006-library-tests-captured.log` and
-`/tmp/orna-conf-006-runtime-scenarios.log` for this run.
+the existing reference `include_str!` paths. Each CLI stream was captured while
+the command ran; the outcomes, failed-test lists, and failure text below were
+transcribed into this record. Temporary logs were removed after transcription
+because `/tmp` reached capacity; no claim is made that full warning logs remain
+available as artifacts.
 
 ### Conformance library tests
 
