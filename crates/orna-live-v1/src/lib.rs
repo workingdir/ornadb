@@ -5527,6 +5527,7 @@ struct UpgradeAdmission {
 struct PendingUpgrade {
     reservation: u128,
     deadline: u64,
+    delivered: bool,
     admission: UpgradeAdmission,
 }
 
@@ -6650,6 +6651,12 @@ impl LiveTransport {
             self.abort_websocket_upgrade(&upgrade);
             return Ok(());
         }
+        if !self.finish_websocket_upgrade_delivery(&upgrade) {
+            self.abort_websocket_upgrade(&upgrade);
+            return Err(HttpIoError::Transport(HttpConnectionError::Protocol(
+                Error::Closed,
+            )));
+        }
         self.commit_websocket_upgrade(upgrade, clock())
             .await
             .map_err(HttpConnectionError::Protocol)
@@ -6752,6 +6759,15 @@ impl LiveTransport {
             Ok(upgrade) => upgrade,
             Err(response) => return response,
         };
+        // This API returns the complete response directly instead of writing a
+        // socket. Treat its in-process response handoff as delivery; the live
+        // socket driver records delivery only after write_all and flush.
+        if !self.begin_websocket_upgrade_delivery(&upgrade, now)
+            || !self.finish_websocket_upgrade_delivery(&upgrade)
+        {
+            self.abort_websocket_upgrade(&upgrade);
+            return host_error(Error::Closed);
+        }
         match self.commit_websocket_upgrade(upgrade, now).await {
             Ok(response) => response,
             Err(error) => host_error(error),
@@ -6809,6 +6825,7 @@ impl LiveTransport {
             PendingUpgrade {
                 reservation,
                 deadline,
+                delivered: false,
                 admission,
             },
         );
@@ -6841,6 +6858,7 @@ impl LiveTransport {
         if now >= pending.deadline
             || pending.reservation != upgrade.reservation
             || pending.deadline != upgrade.deadline
+            || pending.delivered
         {
             return false;
         }
@@ -6859,6 +6877,13 @@ impl LiveTransport {
         if self.delivering_upgrades.get(&upgrade.session) != Some(&upgrade.reservation) {
             return false;
         }
+        let Some(pending) = self.pending_upgrades.get_mut(&upgrade.session) else {
+            return false;
+        };
+        if pending.reservation != upgrade.reservation || pending.delivered {
+            return false;
+        }
+        pending.delivered = true;
         self.delivering_upgrades.remove(&upgrade.session);
         true
     }
@@ -6919,6 +6944,15 @@ impl LiveTransport {
             .values()
             .any(|pending| pending.reservation == upgrade.reservation)
         {
+            return Err(Error::Closed);
+        }
+        let delivered = self
+            .pending_upgrades
+            .values()
+            .find(|pending| pending.reservation == upgrade.reservation)
+            .is_some_and(|pending| pending.delivered);
+        if !delivered {
+            self.abort_websocket_upgrade(&upgrade);
             return Err(Error::Closed);
         }
         // A delivery barrier deliberately defers the periodic expiry sweep so
@@ -9987,6 +10021,7 @@ mod tests {
             PendingUpgrade {
                 reservation: 41,
                 deadline: 10,
+                delivered: false,
                 admission: UpgradeAdmission {
                     id: [12; 16],
                     origin: Origin::parse("https://app.example").unwrap(),
@@ -10006,6 +10041,7 @@ mod tests {
         assert!(transport.begin_websocket_upgrade_delivery(&upgrade, 9));
         transport.expire_pending_websocket_upgrades(10);
         assert!(transport.pending_upgrades.contains_key(&[12; 16]));
+        assert!(transport.finish_websocket_upgrade_delivery(&upgrade));
 
         // This models a Commit queued after its deadline but before the
         // executor's periodic expiry ticker. The protected reservation must
