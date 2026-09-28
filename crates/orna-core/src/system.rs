@@ -3,7 +3,7 @@
 //! Work ADR 0042 defines one compiled registry in `orna-core` for functions
 //! that must exist before an application catalogue is available. The registry
 //! is not reconstructed from application source, the standard library,
-//! PostgreSQL rows, environment values, or configuration. The first two
+//! persisted rows, environment values, or configuration. The first two
 //! entries are catalogue health and the root invocation gateway.
 //!
 //! Name comparison uses the complete case-sensitive resolved parts. It does
