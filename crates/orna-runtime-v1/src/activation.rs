@@ -2,8 +2,8 @@ use std::cell::RefCell;
 use std::future::Future;
 
 use super::{
-    FaultInjector, RuntimeError, RuntimeState, RuntimeTableActivationSnapshot, TableMutation,
-    WriterLease,
+    CatalogueAdmission, FaultInjector, RuntimeError, RuntimeState, RuntimeTableActivationSnapshot,
+    TableMutation, WriterLease,
 };
 
 tokio::task_local! {
@@ -61,6 +61,7 @@ pub struct ActivationWork<T> {
     mutations: Vec<TableMutation>,
     next_digest: [u8; 32],
     result: T,
+    catalogue_admission: Option<CatalogueAdmission>,
 }
 
 impl<T> ActivationWork<T> {
@@ -70,7 +71,17 @@ impl<T> ActivationWork<T> {
             mutations,
             next_digest,
             result,
+            catalogue_admission: None,
         }
+    }
+
+    /// Includes a complete resolved source catalogue in this activation's
+    /// atomic runtime commit. Its predecessor must be the activation's pinned
+    /// starting capture; catalogue identities are committed with the table
+    /// writes and next capture, or none of them become visible.
+    pub fn with_catalogue_admission(mut self, admission: CatalogueAdmission) -> Self {
+        self.catalogue_admission = Some(admission);
+        self
     }
 
     /// Returns the typed table mutations staged for commit.
@@ -168,10 +179,27 @@ where
         mutations,
         next_digest,
         result,
+        catalogue_admission,
     } = work;
-    state
-        .commit_table_activation(lease, snapshot.context(), &mutations, next_digest, faults)
-        .await
-        .map_err(ActivationError::Runtime)?;
+    match catalogue_admission {
+        Some(admission) => {
+            state
+                .commit_catalogue_table_activation(
+                    lease,
+                    snapshot.context(),
+                    &admission,
+                    &mutations,
+                    next_digest,
+                    faults,
+                )
+                .await
+        }
+        None => {
+            state
+                .commit_table_activation(lease, snapshot.context(), &mutations, next_digest, faults)
+                .await
+        }
+    }
+    .map_err(ActivationError::Runtime)?;
     Ok(result)
 }
