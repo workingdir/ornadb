@@ -167,7 +167,12 @@ impl CompactBaseState {
     ) -> Result<CompactWriterInput, CompactBaseProjectionError> {
         self.validate_writer_input_identity(input)?;
         let mut latest = BTreeMap::new();
+        let mut previous_sequence = 0;
         for mutation in &input.mutations {
+            if mutation.sequence == 0 || mutation.sequence <= previous_sequence {
+                return Err(CompactBaseProjectionError::SequenceOutOfOrder);
+            }
+            previous_sequence = mutation.sequence;
             latest.insert(mutation.key.clone(), mutation.clone());
         }
         let mut mutations: Vec<_> = latest
@@ -644,6 +649,7 @@ pub enum CompactBaseProjectionError {
     WrongSchema,
     WrongProfile,
     DuplicateKeyGeneration,
+    SequenceOutOfOrder,
     StaleGeneration,
     EvolutionInputMismatch,
     UnsupportedEvolutionOperation,
@@ -665,6 +671,7 @@ impl fmt::Display for CompactBaseProjectionError {
             Self::DuplicateKeyGeneration => {
                 "compact committed base repeats a key at one generation"
             }
+            Self::SequenceOutOfOrder => "compact writer mutations are not in sequence order",
             Self::StaleGeneration => {
                 "compact writer generation does not match the base next generation"
             }
@@ -2911,6 +2918,46 @@ mod tests {
             Err(CompactBaseProjectionError::DuplicateKeyGeneration)
         );
     }
+
+    #[test]
+    fn committed_base_rejects_out_of_order_writer_mutations_before_folding() {
+        let profile = scalar_profile();
+        let key = profile.decode_key(&scalar_key(7)).unwrap();
+        let state = CompactBaseState {
+            table_id: TABLE,
+            schema_fingerprint: profile.schema_fingerprint(),
+            next_generation: 2,
+            rows: BTreeMap::new(),
+        };
+        let input = CompactWriterInput {
+            table_id: TABLE,
+            schema_fingerprint: profile.schema_fingerprint(),
+            candidate_generation: 2,
+            row_encoding_identity: PublicationRowEncoding::CompactOvb1,
+            value_encoding_identity: PublicationValueEncoding::Ovb1,
+            mutations: vec![
+                CompactWriterMutation {
+                    sequence: 2,
+                    mutation_id: [2; 16],
+                    key: key.clone(),
+                    state: CompactWriterMutationState::Deletion,
+                },
+                CompactWriterMutation {
+                    sequence: 1,
+                    mutation_id: [1; 16],
+                    key,
+                    state: CompactWriterMutationState::Deletion,
+                },
+            ],
+            candidate_digest: [0x42; 32],
+        };
+
+        assert_eq!(
+            state.fold_writer_input(&input),
+            Err(CompactBaseProjectionError::SequenceOutOfOrder)
+        );
+    }
+
     #[test]
     fn evolution_rekey_consumes_verified_base_and_emits_writer_input() {
         let profile = fixture_profile();
