@@ -49,6 +49,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0097 | Normative local REPL scope and conformance boundary | The function-backed session API from 0092 remains deferred; normative `ORNA-REPL-001` through `ORNA-REPL-006` remain in scope. |
 | 0098 | Ring-1 catalogue/source/dependency/revision gateway deferral | Normative system API semantics remain; sealed Ring-1 registration is deferred pending accepted function identities and runtime authority. |
 | 0099 | OrnaDB 1.0 CLIENT capability-grant configuration boundary | Local CLIENT grant loading and its configuration contract are not defined; the built-in grants database remains explicitly outside the 1.0 profile. |
+| 0100 | Studio source tooling boundary | Orna 1.0 accepts semantic CLI diff and read-only retained source/revision APIs; Studio source editing/apply, revision browsing UI, and public revision activation remain deferred. |
 
 ## Current work ADRs
 
@@ -233,3 +234,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Ring-1 Catalogue and Revision Gateway Deferral](0098-ring1-catalogue-revision-deferral.md)
 * **work ADR 0099:**
   [OrnaDB 1.0 CLIENT Capability-Grant Configuration Boundary](0099-client-capability-grant-configuration.md)
+* **work ADR 0100 (deferred):**
+  [Studio Source Tooling Boundary](0100-studio-source-tooling-boundary.md)
