@@ -1,4 +1,4 @@
-# Work ADR 0097: Studio Source Tooling Boundary
+# Work ADR 0100: Studio Source Tooling Boundary
 
 **Status:** Accepted deferral for OrnaDB 1.0
 
