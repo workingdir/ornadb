@@ -201,10 +201,24 @@ The language slice requires focused parser/compiler tests for:
 An installed host proof must invoke one parameterised SERVER function from a
 CLIENT resource and show a checked typed result. The proof must also show a
 stale completion cannot update the resource and that a denied capability or
-server authorisation returns the redacted error form. The repository proof path
-is Compose-gated in `crates/orna-server/tests/standard_database.rs` and is
-marked `#[ignore]` until the Compose PostgreSQL development service is
-available; no local Compose result is claimed.
+server authorisation returns the redacted error form. The historical repository
+proof lived at
+`crates/orna-server/tests/standard_database/invocation/resources.rs` and was
+Compose-gated. Its procedural CLIENT resource test already ran on a named
+32 MiB thread with a current-thread Tokio runtime. The legacy `orna-server`
+package, including that test, was removed by commit `4777f6213` (#603), so the
+test and function named by issue #151 are absent from current `main`.
+
+Issue #151 is deferred as a historical test-harness request; its stack-size
+change is not a missing OrnaDB behavior. The reference audit covered
+`Orna-1.0.0.md`, all `source/` chapters (including `10-execution.md` and
+`26-security.md`), `grammar/`, `tests/`, `examples/`, and `api/`. No requirement
+defines a Rust test-thread stack size. The nearby `ORNA-TASK-004` bounds runtime
+cancellation checkpoints, while `ORNA-EXT-004` concerns coarse execution
+budgets and cancellation for portable components; neither defines test
+harness stack policy. Docker is unavailable in this environment, so no current
+Compose result is claimed. A replacement installed-host proof needs a current
+integration test target before it can be executed or sized.
 
 ## Deferred surface
 
