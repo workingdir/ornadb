@@ -53,7 +53,10 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 mod activation;
-pub use activation::{ActivationError, ActivationWork, run_table_activation, with_activation_scope};
+pub use activation::{
+    ActivationError, ActivationWork, run_table_activation, with_activation_scope,
+};
+mod checkpoint_bootstrap;
 mod catalogue;
 pub use catalogue::{
     CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
@@ -198,6 +201,10 @@ CREATE TABLE IF NOT EXISTS stream_checkpoint_history (
     generation_digest BLOB NOT NULL CHECK (length(generation_digest) = 32),
     transition INTEGER NOT NULL CHECK (transition IN (1, 2)),
     PRIMARY KEY (key_id, version)
+);
+CREATE TABLE IF NOT EXISTS stream_checkpoint_bootstrap (
+    key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
+    selected_commit TEXT NOT NULL CHECK (length(selected_commit) > 0)
 );
 CREATE TABLE IF NOT EXISTS stream_failure (
     identity_id TEXT PRIMARY KEY CHECK (length(identity_id) > 0),
@@ -17774,6 +17781,42 @@ mod tests {
         }
     }
 
+    struct FirstPollCheckpointSource {
+        key: CheckpointKey,
+        observed: Option<StreamCheckpoint>,
+    }
+
+    impl StreamSource for FirstPollCheckpointSource {
+        type NextFuture<'a>
+            = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
+        where
+            Self: 'a;
+        type WaitFuture<'a>
+            = Ready<Result<(), SafeDiagnostic>>
+        where
+            Self: 'a;
+
+        fn descriptor(&self) -> StreamSourceDescriptor {
+            StreamSourceDescriptor {
+                kind: StreamSourceKind::Finite,
+                replayable: true,
+            }
+        }
+
+        fn checkpoint_key(&self) -> CheckpointKey {
+            self.key.clone()
+        }
+
+        fn next<'a>(&'a mut self, checkpoint: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
+            self.observed = Some(checkpoint.clone());
+            ready(Ok(StreamSourcePoll::Waiting))
+        }
+
+        fn wait<'a>(&'a mut self, _: &'a dyn StreamRunControl) -> Self::WaitFuture<'a> {
+            ready(Ok(()))
+        }
+    }
+
     struct TestHandler {
         result: Option<StreamHandlerResult>,
         calls: usize,
@@ -30911,6 +30954,87 @@ mod tests {
             Err(RuntimeError::RecoveryInvalid)
         );
     }
+    #[tokio::test]
+    async fn stream_bootstrap_uses_selected_snapshot_before_first_provider_poll() {
+        let (_temp, repo) = repository();
+        let fixture = include_str!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        write_checkpoint_snapshot_file(&repo, "selected.orna", fixture.as_bytes());
+        let selected_commit = commit_checkpoint_snapshot(&repo, "selected checkpoint snapshot");
+        let state = open_state(&repo).await;
+        let key = checkpoint_snapshot_key(Some("tenant:west/17"));
+        let writer = state.acquire_lease(id(222)).await.unwrap();
+
+        ensure_stream_checkpoint(&state.connection, &key).await.unwrap();
+        state
+            .connection
+            .execute(
+                "UPDATE stream_checkpoint SET version = 91, committed_position = 'stale-local-tail'
+                 WHERE key_id = ?1",
+                params![stream_key_id(&key)],
+            )
+            .await
+            .unwrap();
+
+        let seeded = state
+            .bootstrap_stream_from_selected_snapshot(writer, &repo, &selected_commit, &key)
+            .await
+            .unwrap();
+        assert_eq!(seeded.version, 42);
+        assert_eq!(
+            seeded
+                .committed
+                .as_ref()
+                .map(|position| position.token.as_str()),
+            Some("offset:0001/β")
+        );
+
+        let mut source = FirstPollCheckpointSource {
+            key: key.clone(),
+            observed: None,
+        };
+        let mut handler = TestHandler {
+            result: None,
+            calls: 0,
+        };
+        assert_eq!(
+            state
+                .run_stream_once_from_selected_snapshot(
+                    writer,
+                    &repo,
+                    &selected_commit,
+                    &key,
+                    &mut source,
+                    &mut handler,
+                )
+                .await
+                .unwrap(),
+            StreamStep::Waiting
+        );
+        assert_eq!(source.observed, Some(seeded));
+
+        state
+            .connection
+            .execute(
+                "UPDATE stream_checkpoint SET version = 43, committed_position = 'local-progress'
+                 WHERE key_id = ?1",
+                params![stream_key_id(&key)],
+            )
+            .await
+            .unwrap();
+        let repeated = state
+            .bootstrap_stream_from_selected_snapshot(writer, &repo, &selected_commit, &key)
+            .await
+            .unwrap();
+        assert_eq!(repeated.version, 43);
+        assert_eq!(
+            repeated
+                .committed
+                .as_ref()
+                .map(|position| position.token.as_str()),
+            Some("local-progress")
+        );
+    }
+
     #[tokio::test]
     async fn staged_table_activation_keeps_one_context_and_source_work_unit() {
         let (_temp, repository) = repository();
