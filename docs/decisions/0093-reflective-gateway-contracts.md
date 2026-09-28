@@ -80,3 +80,14 @@ The following frozen reference sections control this decision:
 **Precedence:** the frozen OrnaDB 1.0.0 reference is authoritative. This work
 ADR records which existing contract the implementation must follow and what
 remains outside that contract; it does not add or modify normative language.
+
+## Work-item disposition
+
+Beads task `ornadb-1787784779221-37-0c3a890a` (GitHub #37) requested a
+JSON-RPC gateway adapter. Resolve that request as deferred for OrnaDB 1.0.0
+under this accepted decision. The controlling requirements are
+`ORNA-SERVE-001` through `ORNA-SERVE-009` and `ORNA-PROTO-001` through
+`ORNA-PROTO-004`; they specify `orna serve` and `orna.present.v1`, not a
+JSON-RPC gateway. This disposition adds no gateway endpoint, identity,
+authentication, conversion, error, or lifecycle behavior. Reconsider the
+adapter only after a separately accepted contract defines that behavior.
