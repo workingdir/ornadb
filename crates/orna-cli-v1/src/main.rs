@@ -2347,23 +2347,16 @@ fn run_fetch(
             )
         },
     )?;
-    let request = orna_repository_v1::FetchRequest::new(remote.to_owned(), [requested], [])
+    let report = repository
+        .fetch_with_local_continuity(remote.to_owned(), [requested])
         .map_err(|error| {
             Diagnostic::target_with_detail(
                 "E2100",
-                "fetch request is invalid",
-                "supply a configured remote and valid branch",
+                "Git fetch failed",
+                "check the configured remote and retry `fetch`",
                 error.to_string(),
             )
         })?;
-    let report = repository.fetch(&request).map_err(|error| {
-        Diagnostic::target_with_detail(
-            "E2100",
-            "Git fetch failed",
-            "check the configured remote and retry `fetch`",
-            error.to_string(),
-        )
-    })?;
     if let Some(continuity) = report.continuity() {
         if let Some(diagnostic) = fetch_continuity_diagnostic(continuity) {
             return Err(diagnostic);

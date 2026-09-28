@@ -132,6 +132,83 @@ impl FetchRequest {
     }
 }
 
+impl Repository {
+    /// Fetches requested refs using the repository's current `refs/orna/*`
+    /// object IDs as the exact continuity witnesses.
+    ///
+    /// Witness collection and fetch are protected by one repository
+    /// coordination lock so a local allocator/checkpoint ref cannot advance
+    /// between observing its expected ID and checking the remote. A
+    /// repository with no local Orna refs makes no continuity claim; it does
+    /// not synthesize an allocator value or infer one from the remote.
+    pub fn fetch_with_local_continuity(
+        &self,
+        remote: impl Into<String>,
+        ordinary: impl IntoIterator<Item = RequestedRef>,
+    ) -> Result<FetchReport, FetchError> {
+        let remote = remote.into();
+        if !valid_remote_name(&remote) {
+            return Err(FetchError::InvalidRemote);
+        }
+        let ordinary = ordinary.into_iter().collect::<Vec<_>>();
+        if ordinary.is_empty() {
+            return Err(FetchError::EmptyRequest);
+        }
+        if ordinary.len() > MAX_FETCH_REFS {
+            return Err(FetchError::TooManyRefs);
+        }
+
+        let _lock = self.acquire_coordination_lock()?;
+        let continuity = self.local_continuity_witnesses_locked()?;
+        let request = FetchRequest::new(remote, ordinary, continuity)?;
+        validate_request(&request)?;
+        self.fetch_locked(&request)
+    }
+
+    fn local_continuity_witnesses_locked(
+        &self,
+    ) -> Result<Vec<RequiredInternalRef>, FetchError> {
+        let mut command = self.observer_command();
+        command.args([
+            "for-each-ref",
+            "--sort=refname",
+            "--count=4097",
+            "--format=%(objectname)%09%(refname)",
+            "refs/orna/",
+        ]);
+        let output = command
+            .output()
+            .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
+        if !output.status.success() {
+            return Err(FetchError::Repository(
+                RepositoryError::GitOperationFailed,
+            ));
+        }
+        let output = String::from_utf8(output.stdout).map_err(|_| FetchError::InvalidContinuity)?;
+        if output.is_empty() {
+            return Ok(Vec::new());
+        }
+        let records = output
+            .strip_suffix('\n')
+            .ok_or(FetchError::InvalidContinuity)?;
+        let mut witnesses = Vec::new();
+        for record in records.split('\n') {
+            if witnesses.len() == MAX_FETCH_REFS {
+                return Err(FetchError::TooManyRefs);
+            }
+            let (object_id, reference) = record
+                .split_once('\t')
+                .ok_or(FetchError::InvalidContinuity)?;
+            let reference = OrnaInternalRef::new(reference.to_owned())
+                .map_err(|_| FetchError::InvalidContinuity)?;
+            let object_id = NativeObjectId::new(object_id.to_owned())
+                .map_err(|_| FetchError::InvalidContinuity)?;
+            witnesses.push(RequiredInternalRef::new(reference, object_id));
+        }
+        Ok(witnesses)
+    }
+}
+
 /// A push request whose Orna continuity refs are sent before the ordinary
 /// branch ref. The allocator ref, when present, is sent first so a later
 /// branch advertisement cannot make an allocator watermark visible too soon.
@@ -403,6 +480,10 @@ impl Repository {
     pub fn fetch(&self, request: &FetchRequest) -> Result<FetchReport, FetchError> {
         validate_request(request)?;
         let _lock = self.acquire_coordination_lock()?;
+        self.fetch_locked(request)
+    }
+
+    fn fetch_locked(&self, request: &FetchRequest) -> Result<FetchReport, FetchError> {
         let remotes = self.remote_names()?;
         if !remotes.iter().any(|remote| remote == request.remote()) {
             return Err(FetchError::InvalidRemote);
@@ -1103,6 +1184,21 @@ fn valid_fetch_full_ref(reference: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, path::Path, process::Command};
+
+    fn git(directory: &Path, arguments: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(directory)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
 
     #[test]
     fn push_request_validates_internal_refs_and_branch() {
@@ -1127,5 +1223,50 @@ mod tests {
             PushRequest::new("origin", "main", [allocator.clone(), allocator]),
             Err(FetchError::InvalidContinuity)
         ));
+    }
+
+    #[test]
+    fn fetch_with_local_continuity_produces_allocator_witness() {
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("local");
+        let remote = root.path().join("remote.git");
+        fs::create_dir(&local).unwrap();
+        git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        git(&local, &["init", "-b", "main"]);
+        git(&local, &["config", "user.name", "kierandrewett"]);
+        git(&local, &["config", "user.email", "kieran@drewett.dev"]);
+        git(&local, &["config", "commit.gpgsign", "false"]);
+        fs::write(local.join("state.txt"), "allocator state\n").unwrap();
+        git(&local, &["add", "state.txt"]);
+        git(&local, &["commit", "-m", "initial"]);
+        let head = git(&local, &["rev-parse", "HEAD"]);
+        git(&local, &["update-ref", ALLOCATOR_REF, &head]);
+        git(
+            &local,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&local, &["push", "origin", "refs/heads/main"]);
+
+        let repository = Repository::discover(&local).unwrap();
+        let request = || {
+            repository.fetch_with_local_continuity(
+                "origin",
+                [RequestedRef::branch("main").unwrap()],
+            )
+        };
+
+        let missing = request().unwrap();
+        assert_eq!(missing.continuity(), Some(RemoteContinuity::Missing));
+        assert!(missing.internal().is_empty());
+
+        git(
+            &local,
+            &["push", "origin", &format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}")],
+        );
+        let continuous = request().unwrap();
+        assert_eq!(continuous.continuity(), Some(RemoteContinuity::Continuous));
+        assert_eq!(continuous.internal().len(), 1);
+        assert_eq!(continuous.internal()[0].source(), ALLOCATOR_REF);
+        assert_eq!(continuous.internal()[0].object_id().as_str(), head);
     }
 }
