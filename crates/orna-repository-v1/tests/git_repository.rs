@@ -1697,7 +1697,7 @@ fn committed_tree_listing_is_bounded_and_does_not_mutate_repository_state() {
     fs::create_dir_all(root.path().join("nested")).unwrap();
     fs::write(
         root.path().join("nested/tool.orna"),
-        "module nested.tool;\n",
+        include_str!("fixtures/git-repository-nested-tool.orna"),
     )
     .unwrap();
     git(root.path(), &["add", "nested/tool.orna"]);
