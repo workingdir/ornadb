@@ -1,0 +1,3 @@
+pub fn dogfood_item_value(): Int = 40;
+
+pub fn read(): Int = dogfood_item_value() + 2;
