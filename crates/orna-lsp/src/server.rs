@@ -13,12 +13,12 @@ use lsp_types::{
     DiagnosticServerCapabilities, DocumentDiagnosticParams, DocumentDiagnosticReport,
     DocumentSymbolParams, DocumentSymbolResponse, FullDocumentDiagnosticReport,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, OneOf, PositionEncodingKind, PublishDiagnosticsParams, ReferenceParams,
-    RelatedFullDocumentDiagnosticReport, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
-    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, Uri,
+    InitializeParams, OneOf, Position, PositionEncodingKind, PublishDiagnosticsParams, Range,
+    ReferenceParams, RelatedFullDocumentDiagnosticReport, RenameParams, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensRangeParams, SemanticTokensServerCapabilities, ServerCapabilities,
+    SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
 };
 use orna_syntax::Parse;
 
@@ -227,6 +227,7 @@ fn server_capabilities() -> ServerCapabilities {
         }),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec![".".to_owned(), ":".to_owned()]),
@@ -263,6 +264,7 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/signatureHelp" => request_signature_help(state, request),
         "textDocument/definition" => request_definition(state, request),
         "textDocument/references" => request_references(state, request),
+        "textDocument/rename" => request_rename(state, request),
         "textDocument/documentSymbol" => request_document_symbols(state, request),
         "textDocument/semanticTokens/full" => request_semantic_tokens_full(state, request),
         "textDocument/semanticTokens/range" => request_semantic_tokens_range(state, request),
@@ -456,6 +458,301 @@ fn request_references(
         params.context.include_declaration,
     );
     Ok(serde_json::to_value(locations)?)
+}
+
+fn request_rename(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<RenameParams>("textDocument/rename")?;
+    let uri = params.text_document_position.text_document.uri;
+    let position = params.text_document_position.position;
+    let Some(changes) = semantic_rename(&state.documents, &uri, position, &params.new_name) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let workspace_edit = WorkspaceEdit {
+        changes: Some(changes),
+        document_changes: None,
+        change_annotations: None,
+    };
+    Ok(serde_json::to_value(workspace_edit)?)
+}
+
+struct SourceSegment<'a> {
+    document: &'a Document,
+    start: usize,
+    end: usize,
+}
+
+fn semantic_rename(
+    documents: &HashMap<Uri, Document>,
+    uri: &Uri,
+    position: Position,
+    new_name: &str,
+) -> Option<HashMap<Uri, Vec<TextEdit>>> {
+    // The analysis APIs accept one document at a time. A deterministic joined
+    // source view lets them resolve references between open files; offsets are
+    // projected back to the original source documents below.
+    let mut sources: Vec<_> = documents
+        .values()
+        .filter(|document| document.uri.as_str().ends_with(".orna"))
+        .collect();
+    sources.sort_unstable_by(|left, right| left.uri.as_str().cmp(right.uri.as_str()));
+
+    let mut combined_source = String::new();
+    let mut segments = Vec::with_capacity(sources.len());
+    for document in sources {
+        if !segments.is_empty() {
+            combined_source.push('\n');
+        }
+        let start = combined_source.len();
+        combined_source.push_str(&document.text);
+        let end = combined_source.len();
+        segments.push(SourceSegment {
+            document,
+            start,
+            end,
+        });
+    }
+    let selected = segments
+        .iter()
+        .find(|segment| &segment.document.uri == uri)?;
+    let selected_mapper = PositionMapper::new(&selected.document.text);
+    let combined_mapper = PositionMapper::new(&combined_source);
+    let combined_byte = selected
+        .start
+        .checked_add(selected_mapper.byte_offset(position))?;
+    let combined_position = combined_mapper.position(combined_byte);
+    let workspace_document = Document::new(uri.clone(), combined_source, selected.document.version);
+    let workspace_parse = orna_syntax::parse(&workspace_document.text);
+    let workspace_mapper = PositionMapper::new(&workspace_document.text);
+    let edits = semantic_rename_in_source(
+        &workspace_document,
+        &workspace_parse,
+        combined_position,
+        &workspace_mapper,
+        new_name,
+    )?;
+
+    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+    for edit in edits {
+        let start = workspace_mapper.byte_offset(edit.range.start);
+        let end = workspace_mapper.byte_offset(edit.range.end);
+        let segment = segments
+            .iter()
+            .find(|segment| start >= segment.start && end <= segment.end && start < end)?;
+        let source_mapper = PositionMapper::new(&segment.document.text);
+        let range = source_mapper.range(&orna_syntax::SourceSpan {
+            start: start - segment.start,
+            end: end - segment.start,
+        });
+        changes
+            .entry(segment.document.uri.clone())
+            .or_default()
+            .push(TextEdit {
+                range,
+                new_text: edit.new_text,
+            });
+    }
+    Some(changes)
+}
+
+fn semantic_rename_in_source(
+    document: &Document,
+    parse: &Parse,
+    position: Position,
+    mapper: &PositionMapper<'_>,
+    new_name: &str,
+) -> Option<Vec<TextEdit>> {
+    if !document.uri.as_str().ends_with(".orna") || !parse.diagnostics().is_empty() {
+        return None;
+    }
+    let definition = analysis::definition(document, parse, position, mapper)?;
+    if definition.uri != document.uri {
+        return None;
+    }
+    let declarations = persistent_declaration_ranges(parse, mapper);
+    let target = declarations
+        .iter()
+        .find(|(qualified_name, _)| qualified_name == &definition.range)?;
+    let target_name_range = target.1.clone();
+
+    let references = analysis::references(document, parse, position, mapper, true);
+    if references.is_empty()
+        || references
+            .iter()
+            .any(|reference| reference.uri != document.uri)
+    {
+        return None;
+    }
+    let resolved_declarations = references
+        .iter()
+        .filter(|reference| {
+            declarations
+                .iter()
+                .any(|(_, name_range)| name_range == &reference.range)
+        })
+        .count();
+    if resolved_declarations != 1
+        || !references
+            .iter()
+            .any(|reference| reference.range == target_name_range)
+        || !valid_rename_identifier(new_name)
+        || !rename_preserves_unique_resolution(
+            document,
+            &declarations,
+            &target_name_range,
+            &references,
+            mapper,
+            new_name,
+        )
+    {
+        return None;
+    }
+
+    Some(
+        references
+            .into_iter()
+            .map(|reference| TextEdit {
+                range: reference.range,
+                new_text: new_name.to_owned(),
+            })
+            .collect(),
+    )
+}
+
+fn persistent_declaration_ranges(
+    parse: &Parse,
+    mapper: &PositionMapper<'_>,
+) -> Vec<(Range, Range)> {
+    let mut ranges = Vec::new();
+    let mut push_name = |name: &orna_syntax::QualifiedName| {
+        if let Some(final_name) = name.parts.last() {
+            ranges.push((mapper.range(&name.span), mapper.range(&final_name.span)));
+        }
+    };
+    for declaration in parse.object_types() {
+        push_name(&declaration.name);
+    }
+    for declaration in parse.enum_types() {
+        push_name(&declaration.name);
+    }
+    for declaration in parse.record_value_types() {
+        push_name(&declaration.name);
+    }
+    for declaration in parse.primitive_value_types() {
+        push_name(&declaration.name);
+    }
+    for declaration in parse.opaque_value_types() {
+        push_name(&declaration.name);
+    }
+    for declaration in parse.server_functions() {
+        push_name(&declaration.name);
+    }
+    for declaration in parse.client_functions() {
+        push_name(&declaration.name);
+    }
+    ranges
+}
+
+fn valid_rename_identifier(new_name: &str) -> bool {
+    const PREFIX: &str = "CREATE SCHEMA ";
+    let source = format!("{PREFIX}{new_name};");
+    let parse = orna_syntax::parse(&source);
+    if !parse.diagnostics().is_empty() || parse.schemas().len() != 1 {
+        return false;
+    }
+    let [part] = parse.schemas()[0].name.parts.as_slice() else {
+        return false;
+    };
+    part.span.start == PREFIX.len()
+        && part.span.end == PREFIX.len() + new_name.len()
+        && source[part.span.start..part.span.end] == *new_name
+}
+
+fn rename_preserves_unique_resolution(
+    document: &Document,
+    declarations: &[(Range, Range)],
+    target_name_range: &Range,
+    references: &[lsp_types::Location],
+    mapper: &PositionMapper<'_>,
+    new_name: &str,
+) -> bool {
+    let mut byte_edits = Vec::with_capacity(references.len());
+    for reference in references {
+        let start = mapper.byte_offset(reference.range.start);
+        let end = mapper.byte_offset(reference.range.end);
+        if start >= end || end > document.text.len() {
+            return false;
+        }
+        byte_edits.push((start, end));
+    }
+    byte_edits.sort_unstable_by_key(|(start, _)| *start);
+    if byte_edits
+        .windows(2)
+        .any(|pair| pair[0].1 > pair[1].0 || pair[0].0 == pair[1].0)
+    {
+        return false;
+    }
+
+    let target_start = mapper.byte_offset(target_name_range.start);
+    let shift: i128 = byte_edits
+        .iter()
+        .filter(|(start, _)| *start < target_start)
+        .map(|(start, end)| new_name.len() as i128 - (end - start) as i128)
+        .sum();
+    let Ok(updated_target_start) = usize::try_from(target_start as i128 + shift) else {
+        return false;
+    };
+
+    let mut updated_source = document.text.clone();
+    for (start, end) in byte_edits.into_iter().rev() {
+        updated_source.replace_range(start..end, new_name);
+    }
+    let updated_document = Document::new(document.uri.clone(), updated_source, document.version);
+    let updated_parse = orna_syntax::parse(&updated_document.text);
+    if !updated_parse.diagnostics().is_empty() {
+        return false;
+    }
+    let updated_mapper = PositionMapper::new(&updated_document.text);
+    let updated_position = updated_mapper.position(updated_target_start);
+    let Some(updated_definition) = analysis::definition(
+        &updated_document,
+        &updated_parse,
+        updated_position,
+        &updated_mapper,
+    ) else {
+        return false;
+    };
+    let updated_declarations = persistent_declaration_ranges(&updated_parse, &updated_mapper);
+    let Some((_, updated_target_name_range)) = updated_declarations
+        .iter()
+        .find(|(qualified_name, _)| qualified_name == &updated_definition.range)
+    else {
+        return false;
+    };
+    let updated_references = analysis::references(
+        &updated_document,
+        &updated_parse,
+        updated_position,
+        &updated_mapper,
+        true,
+    );
+    updated_references
+        .iter()
+        .filter(|reference| {
+            updated_declarations
+                .iter()
+                .any(|(_, name_range)| name_range == &reference.range)
+        })
+        .count()
+        == 1
+        && updated_references
+            .iter()
+            .any(|reference| reference.range == *updated_target_name_range)
+        && declarations
+            .iter()
+            .any(|(_, name_range)| name_range == target_name_range)
 }
 
 fn request_document_symbols(
