@@ -1,6 +1,10 @@
 pub table Note(id: Int) { text: Str, }
 
-pub fn main(): Bool {
+fn insert_note(): Bool {
   Note.insert({ id: 7, text: "committed from admitted source" });
   true
+}
+
+pub fn main(): Bool {
+  insert_note()
 }
