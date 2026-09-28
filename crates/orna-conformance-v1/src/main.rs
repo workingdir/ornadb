@@ -1639,6 +1639,27 @@ mod tests {
     }
 
     #[test]
+    fn cp_002_skip_is_inapplicable_to_normative_cp_002() {
+        let corpus = Corpus::load_default().expect("reference corpus loads");
+        let scenario = corpus.scenarios["scenarios"]
+            .as_array()
+            .expect("scenario array")
+            .iter()
+            .find(|value| value["id"] == "CP-002")
+            .cloned()
+            .map(|value| serde_json::from_value::<Scenario>(value).expect("CP-002 shape"))
+            .expect("CP-002 scenario");
+
+        assert!(super::cp_002_contract(&scenario));
+        assert_eq!(scenario.requirements, ["ORNA-CP-006"]);
+        assert!(!scenario.requirements.contains(&"ORNA-CP-002".into()));
+        assert!(matches!(
+            run_checkpoint_atomicity_scenario(&scenario),
+            StageOutcome::Skipped { .. }
+        ));
+    }
+
+    #[test]
     fn fail_001_scenario_contract_is_exactly_wired() {
         let corpus = Corpus::load_default().expect("reference corpus loads");
         let scenario = corpus.scenarios["scenarios"]
