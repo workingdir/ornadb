@@ -1849,7 +1849,7 @@ fn unknown_qualified_aliases_and_quoted_counterparts_do_not_resolve_through_stan
     )
     .unwrap();
     let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
-    let source = "CREATE SCHEMA app; CREATE TYPE app.flag AS OBJECT (alias std.ALIAS, quoted std.\"BOOLEAN\");";
+    let source = include_str!("tests/fixtures/unknown-qualified-aliases.orna");
     let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
 
     let report = check_standard_application(&bundle, &context);
