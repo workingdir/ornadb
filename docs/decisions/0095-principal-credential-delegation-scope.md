@@ -42,10 +42,11 @@ This ADR leaves that normative protocol contract unchanged.
 
 ## Context and authority
 
-The request in issue #52 refers to a proposed broader security model. Its
-credential-provider, principal metadata, and delegated-session behavior has no
-acceptance basis in the frozen OrnaDB 1.0 source. The reference's explicit
-boundaries control this decision:
+This ADR records the acceptance resolution for contract-gate issue #20 and the
+Orna 1.0 deferral of the implementation request in issue #52. Both concern a
+proposed broader security model whose credential-provider, principal metadata,
+and delegated-session behavior has no acceptance basis in the frozen OrnaDB
+1.0 source. The reference's explicit boundaries control this decision:
 
 * `source/26-security.md`: **ORNA-TRUST-001** through **ORNA-TRUST-003**;
 * `source/28-serving.md`: **ORNA-SERVE-005**;
