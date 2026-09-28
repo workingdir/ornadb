@@ -62,7 +62,7 @@ fn reports_identifiable_language_processor_diagnostic_corpus_results() {
         checked, 78,
         "all parse, resolve, and typecheck corpus forms"
     );
-    let mut unsupported = Vec::new();
+    let mut runtime_matched = 0;
     for expected in metadata.iter().filter(|fixture| {
         matches!(
             fixture.failing_phase.as_str(),
@@ -94,21 +94,42 @@ fn reports_identifiable_language_processor_diagnostic_corpus_results() {
             .unwrap_or_else(|| panic!("{}: no {:?} result", expected.path, stage));
         assert_eq!(
             evidence.status,
-            EvidenceStatus::Skipped,
+            EvidenceStatus::Failed,
             "{}: {}",
             expected.path,
             evidence.detail
         );
-        unsupported.push(format!("{}: {:?}", expected.path, evidence.status));
+        assert!(
+            evidence.expectation_satisfied,
+            "{}: expected {} / {}, observed {:?} with diagnostic {:?}",
+            expected.path,
+            expected.failing_phase,
+            expected.diagnostic,
+            evidence
+                .diagnostic
+                .as_ref()
+                .and_then(|value| value["code"].as_str()),
+            evidence.diagnostic
+        );
+        assert_eq!(
+            evidence
+                .diagnostic
+                .as_ref()
+                .and_then(|value| value["code"].as_str()),
+            Some(expected.diagnostic.as_str()),
+            "{}: primary diagnostic",
+            expected.path
+        );
+        println!(
+            "executed: {}: {} / {} matched",
+            expected.path, expected.failing_phase, expected.diagnostic
+        );
+        runtime_matched += 1;
     }
-    assert_eq!(unsupported.len(), 2);
+    assert_eq!(runtime_matched, 2);
     println!(
-        "ORNA-CONF-005 audit: {matched}/{checked} parse, resolve, and typecheck cases matched; {} evaluate/row-validation cases were skipped by this language-processor adapter.",
-        unsupported.len()
+        "ORNA-CONF-005 audit: {matched}/{checked} parse, resolve, and typecheck cases matched; {runtime_matched}/2 evaluate/row-validation cases executed and matched."
     );
-    for skipped in unsupported {
-        println!("  skipped: {skipped}");
-    }
     println!("Primary diagnostic mismatches: {}", mismatches.len());
     for mismatch in mismatches {
         println!("  {mismatch}");
