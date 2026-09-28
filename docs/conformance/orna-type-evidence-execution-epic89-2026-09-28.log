@@ -1,0 +1,44 @@
+ORNA-TYPE selected Cargo test summaries
+Base: origin/main e18a9799adcf081145a2df751c7af992fba979c1
+
+COMMAND: cargo test --quiet --locked --offline -p orna-syntax-v1 --test conformance authoritative_parse_invalid_primary_codes_match_manifest -- --exact --nocapture
+EXIT_CODE: 0
+CAPTURED TEST OUTPUT:
+running 1 test
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.01s
+
+COMMAND: cargo test --quiet --locked --offline -p orna-semantic-v1 --test semantic_graph reference_values_module_infers_closed_enum_optional_and_interpolation_cases -- --exact --nocapture
+EXIT_CODE: 0
+CAPTURED TEST OUTPUT:
+running 1 test
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 163 filtered out; finished in 0.03s
+
+COMMAND: cargo test --quiet --locked --offline -p orna-semantic-v1 --test semantic_graph recovery_pipeline_replaces_handled_failure_effect -- --exact --nocapture
+EXIT_CODE: 0
+CAPTURED TEST OUTPUT:
+running 1 test
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 163 filtered out; finished in 0.03s
+
+COMMAND: cargo test --quiet --locked --offline -p orna-semantic-v1 --test semantic_graph declared_result_and_ok_names_remain_ordinary_user_declarations -- --exact --nocapture
+EXIT_CODE: 0
+CAPTURED TEST OUTPUT:
+running 1 test
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 163 filtered out; finished in 0.03s
+
+COMMAND: cargo test --quiet --locked --offline -p orna-semantic-v1 --test semantic_graph omitted_numeric_function_parameters_are_inferred_without_dynamic_fallback -- --exact --nocapture
+EXIT_CODE: 0
+CAPTURED TEST OUTPUT:
+running 1 test
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 163 filtered out; finished in 0.00s
+
+COMMAND: cargo test --quiet --locked --offline -p orna-runtime-v1 --test v1_replay_review_regressions failed_table_delivery_retains_failure_and_retries_same_identity -- --exact --nocapture
+EXIT_CODE: 0
+CAPTURED TEST OUTPUT:
+running 1 test
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 3.09s
