@@ -152,6 +152,52 @@ impl CompactBaseState {
         self.validate_writer_input(input)
     }
 
+    /// Applies the final folded mutations to the verified base so a published
+    /// candidate can be checked against its actual decoded rows before the
+    /// runtime consumes the frozen prefix.
+    pub fn apply_writer_input(
+        &self,
+        input: &CompactWriterInput,
+    ) -> Result<Self, CompactBaseProjectionError> {
+        self.validate_writer_input(input)?;
+        let mut expected = self.clone();
+        for mutation in &input.mutations {
+            let key_value = CanonicalValue::decode(mutation.key.encoded())
+                .map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
+            match &mutation.state {
+                CompactWriterMutationState::Replacement { value } => {
+                    let value = CanonicalValue::decode(value)
+                        .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+                    expected.rows.insert(
+                        mutation.key.clone(),
+                        CompactBaseRow {
+                            key: key_value,
+                            value: Some(value),
+                            generation: input.candidate_generation,
+                            role: CompactSegmentRole::Replacement,
+                        },
+                    );
+                }
+                CompactWriterMutationState::Deletion => {
+                    expected.rows.remove(&mutation.key);
+                }
+            }
+        }
+        Ok(expected)
+    }
+
+    /// Compares visible logical rows while ignoring physical generations,
+    /// segment roles, and retained tombstones.
+    pub fn has_same_logical_rows(&self, other: &Self) -> bool {
+        self.rows
+            .iter()
+            .filter_map(|(key, row)| row.value.as_ref().map(|value| (key, value)))
+            .eq(other
+                .rows
+                .iter()
+                .filter_map(|(key, row)| row.value.as_ref().map(|value| (key, value))))
+    }
+
     fn validate_writer_input(
         &self,
         input: &CompactWriterInput,
@@ -1864,6 +1910,7 @@ mod tests {
         assert_eq!(raw.candidate_digest, freeze.candidate_digest);
         let folded = base.fold_writer_input(&raw).unwrap();
         base.consume_writer_input(&folded).unwrap();
+        let expected = base.apply_writer_input(&folded).unwrap();
 
         assert_eq!(folded.mutations.len(), 2);
         assert_eq!(folded.mutations[0].sequence, 4);
@@ -1885,6 +1932,12 @@ mod tests {
             CanonicalValue::decode(value).unwrap(),
             fixture_row("changing", "Final", None)
         );
+        assert_eq!(expected.rows().count(), 1);
+        assert_eq!(
+            expected.rows().next().unwrap().value(),
+            Some(&fixture_row("changing", "Final", None))
+        );
+        assert!(expected.has_same_logical_rows(&expected.clone()));
         assert_eq!(folded.candidate_digest, freeze.candidate_digest);
     }
 
