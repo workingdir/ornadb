@@ -58,8 +58,11 @@ behavior unspecified.
 
 ## Relationship to existing decisions
 
-Work ADR 0066 accepts read-only semantic source diff and explicitly defers
-interactive apply. This ADR preserves that boundary and does not duplicate the
-CLI diff implementation. Existing Studio presentation decisions do not create
-a source editor, source-apply operation, or public revision-activation
-contract.
+Work ADR 0003 keeps retained revision-pair listing internal and explicitly
+defers a public revisions-list command and Studio revision browser. Work ADR
+0038 accepts the installed local `orna source apply` command against an
+expected active base; work ADR 0066 accepts read-only semantic source diff and
+explicitly defers interactive apply. This ADR links issue #7 to those existing
+boundaries and does not duplicate or change their CLI contracts. Existing
+Studio presentation decisions do not create a source editor, Studio
+source-apply workflow, or public revision-activation contract.
