@@ -198,11 +198,21 @@ not advertise list/table model contracts in this provider version. Model range,
 child, completion, and cancellation semantics remain a later provider
 extension because the current ABI has no accepted model-construction operation.
 
+The Orna-1.0.0 reference audit searched for `Qt`, `model request`,
+`cancel_request`, `model cancellation`, `virtual model`, and `table model`;
+these searches found no relevant Qt model-request contract. `ORNA-CANCEL-001`
+and `ORNA-CANCEL-002` define general execution cancellation and bounded
+cancellation checkpoints, but do not define a Qt provider status. Since this
+provider advertises no model contract and creates no model-request handles, a
+live `cancel_request` call returns `ORNA_STATUS_UNSUPPORTED` before request
+lookup; it is not a missing-request result. This remains deferred until a
+model-construction and request contract is accepted.
+
 For every model request that a later provider creates, the client completes or
 fails the request exactly once and the runtime rejects late, foreign, duplicate,
-or malformed completion data. `cancel_request` remains idempotent for that
-future request contract. Surface destruction, runtime shutdown, and client
-disconnect cancel pending requests exactly once.
+or malformed completion data. `cancel_request` is idempotent for requests
+created under that future contract. Under that contract, surface destruction,
+runtime shutdown, and client disconnect cancel pending requests exactly once.
 
 ## Shutdown and failure reporting
 
