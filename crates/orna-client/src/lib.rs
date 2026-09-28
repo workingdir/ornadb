@@ -150,6 +150,7 @@ pub mod live_transport;
 pub mod runtime_adapter;
 pub mod runtime_loader;
 pub mod session;
+pub mod studio_source_editor;
 pub mod vm;
 pub use connection::{InvocationConnection, InvocationConnectionError};
 pub use endpoint::{DEFAULT_REMOTE_PORT, DatabaseEndpoint, EndpointParseError};
