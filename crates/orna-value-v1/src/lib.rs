@@ -1488,6 +1488,10 @@ pub fn argument_identity(arguments: Vec<(String, Raw, Raw)>) -> Result<[u8; 32]>
     if a.windows(2).any(|x| x[0].0 == x[1].0) {
         return Err(Error::InvalidValue);
     };
+    for (_, ty, value) in &a {
+        validate_type(ty)?;
+        validate_value_as_type(value, ty)?;
+    }
     domain_digest(
         "orna.arguments.v1",
         &Raw::Array(
@@ -3242,21 +3246,21 @@ mod tests {
 
     #[test]
     fn argument_identity_normalizes_names_before_sorting_and_collision_check() {
+        let bool_type = Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Bool".into())]);
         let composed = "é".to_owned();
         let decomposed = "e\u{301}".to_owned();
-        let left =
-            argument_identity(vec![(composed, Raw::Int(0.into()), Raw::Int(1.into()))]).unwrap();
+        let left = argument_identity(vec![(composed, bool_type.clone(), Raw::Bool(true))]).unwrap();
         let right = argument_identity(vec![(
             decomposed.clone(),
-            Raw::Int(0.into()),
-            Raw::Int(1.into()),
+            bool_type.clone(),
+            Raw::Bool(true),
         )])
         .unwrap();
         assert_eq!(left, right);
         assert!(
             argument_identity(vec![
-                ("é".to_owned(), Raw::Int(0.into()), Raw::Int(1.into())),
-                (decomposed, Raw::Int(0.into()), Raw::Int(2.into())),
+                ("é".to_owned(), bool_type.clone(), Raw::Bool(true)),
+                (decomposed, bool_type, Raw::Bool(false)),
             ])
             .is_err()
         );
