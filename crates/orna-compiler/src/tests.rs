@@ -2869,3 +2869,27 @@ fn falls_back_to_raw_location_when_span_end_is_not_a_utf8_boundary() {
     assert!(!rendered.contains("1 |"));
     assert_eq!(report.diagnostics(), raw.as_slice());
 }
+
+#[test]
+fn renders_semantic_check_diagnostics_from_retained_source() {
+    let source =
+        include_str!("../../orna-conformance-v1/tests/fixtures/bounded-invalid-function-body.orna");
+    let bundle = SourceBundle::new([SourceUnit::new("invalid-body.orna", source)]).unwrap();
+    let base = CatalogueSnapshot::new(CatalogueRevisionId::new(), Vec::new(), Vec::new()).unwrap();
+    let report = check(&bundle, &base);
+    let raw = report.diagnostics().to_vec();
+    assert!(!raw.is_empty());
+
+    let rendered = report
+        .parse_report()
+        .render_diagnostics(report.diagnostics());
+
+    assert!(rendered.contains("error[ORNA"), "{rendered}");
+    assert!(rendered.contains("--> invalid-body.orna:"), "{rendered}");
+    assert!(
+        rendered.contains("pub fn secret() = missing;"),
+        "{rendered}"
+    );
+    assert!(rendered.contains('^'), "{rendered}");
+    assert_eq!(report.diagnostics(), raw.as_slice());
+}
