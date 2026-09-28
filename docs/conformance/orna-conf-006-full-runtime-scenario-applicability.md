@@ -1,6 +1,6 @@
 # ORNA-CONF-006 Full-Runtime Scenario Applicability
 
-Epic: `ornadb-1787968123319-16-24513f57` (GitHub #89)  
+Epic: `ornadb-1787968123319-16-24513f57` (GitHub #89)
 Reference: `/home/pbox/dev/ornadb/reference/Orna-1.0.0`
 
 ## Normative criterion and scope
