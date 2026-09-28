@@ -5905,29 +5905,7 @@ fn numeric_nested_lambdas_infer_omitted_parameters_without_dynamic_fallback() {
 fn reference_values_module_infers_closed_enum_optional_and_interpolation_cases() {
     let result = analyze(&[ModuleInput::new(
         "values.orna",
-        r#"
-            pub type Score = Int {
-                assert >= 0;
-                assert <= 100;
-            }
-
-            pub enum Availability {
-                ready,
-                waiting { reason: Str },
-            }
-
-            pub fn describe(value: Availability): Str = case value {
-                Availability.ready: "ready",
-                Availability.waiting { reason }: "waiting: {reason}",
-            };
-
-            pub fn optional_name(value: Str?): Str = case value {
-                Some(name): name,
-                null: "anonymous",
-            };
-
-            pub fn add(left: Int, right: Int): Int = left + right;
-        "#,
+        include_str!("fixtures/reference-values-type-family.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
