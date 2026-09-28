@@ -1,0 +1,1 @@
+fn local(add) = add(21, 21);
