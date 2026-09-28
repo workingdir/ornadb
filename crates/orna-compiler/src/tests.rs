@@ -2429,7 +2429,7 @@ fn verified_standard_source_fixture() -> orna_core::revision::VerifiedStandardLi
 
 fn verified_non_std_schema_standard_source_fixture()
 -> orna_core::revision::VerifiedStandardLibrarySnapshot {
-    const SOURCE: &str = "CREATE SCHEMA library;";
+    const SOURCE: &str = include_str!("tests/fixtures/non-standard-schema.orna");
     let source_unit = StoredSourceUnit::new(
         SourceUnitId::from_bytes(CANONICAL_RESERVED_ID),
         0,
