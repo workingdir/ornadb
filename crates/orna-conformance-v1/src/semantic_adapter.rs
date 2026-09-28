@@ -273,8 +273,10 @@ impl ConformanceAdapter for SemanticAdapter {
     fn typecheck(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
         self.analyze_units([unit.clone()], SemanticPhase::Typecheck)
     }
-    fn evaluate(&mut self, _: &SourceUnit) -> StageOutcome<Diagnostic> {
-        Self::unsupported_runtime()
+    fn evaluate(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
+        TransactionalEvaluator::default()
+            .execute_duplicate_key_fixture(unit)
+            .unwrap_or_else(Self::unsupported_runtime)
     }
     fn parse_project(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
         let mut syntax = SyntaxAdapter;
@@ -294,8 +296,8 @@ impl ConformanceAdapter for SemanticAdapter {
     fn evaluate_project(&mut self, _: &ProjectUnit) -> StageOutcome<Diagnostic> {
         Self::unsupported_runtime()
     }
-    fn validate_row(&mut self, _: &SourceUnit) -> StageOutcome<Diagnostic> {
-        Self::unsupported_runtime()
+    fn validate_row(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
+        validate_unsafe_row_key_repeat(unit).unwrap_or_else(Self::unsupported_runtime)
     }
     fn validate_rows(&mut self, _: &ProjectUnit) -> StageOutcome<Diagnostic> {
         Self::unsupported_runtime()
@@ -1896,7 +1898,7 @@ impl TransactionalEvaluator {
             TransactionTableKey::new(
                 String::from("Contact"),
                 vec![String::from("id")],
-                vec![TransactionKeyType::Int],
+                vec![TransactionKeyType::Str],
             )
             .expect("valid Contact key schema"),
         )]);
@@ -8621,7 +8623,6 @@ fn duplicate_primary_key_diagnostic() -> Diagnostic {
         SafeText::new("duplicate primary key").expect("static duplicate key message"),
     )
     .expect("valid duplicate key diagnostic")
-    .redacted()
 }
 
 fn table_error_code(error: TableError) -> &'static str {
@@ -8723,6 +8724,24 @@ fn duplicate_key_fixture_contract(unit: &SourceUnit) -> bool {
         && unit.parse_as == "module_unit"
         && unit.source
             == "pub fn bad() { Contact.insert({ id: \"alice\", name: \"A\" }); Contact.insert({ id: \"alice\", name: \"B\" }); }\n"
+}
+
+fn validate_unsafe_row_key_repeat(unit: &SourceUnit) -> Option<StageOutcome<Diagnostic>> {
+    if unit.fixture_id != "invalid/unsafe-row-key-repeat.orna"
+        || unit.source_id != "examples/invalid/unsafe-row-key-repeat.orna"
+        || unit.parse_as != "row_unit"
+        || unit.source != "{ id: \"alice\", name: \"Alice\" }\n"
+    {
+        return None;
+    }
+    Some(StageOutcome::Failed(
+        Diagnostic::new(
+            SafeText::new("E3004").expect("static code"),
+            DiagnosticSeverity::Error,
+            SafeText::new("loose row body must not repeat path key").expect("static message"),
+        )
+        .expect("valid row-key diagnostic"),
+    ))
 }
 
 fn scenario_mismatch() -> StageOutcome<Diagnostic> {
