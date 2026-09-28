@@ -327,7 +327,7 @@ mod tests {
                 "library.orna",
                 include_str!("fixtures/repl-import-exports.orna"),
             ),
-            ModuleInput::new("main.orna", "pub fn run(): Int = 1;"),
+            ModuleInput::new("main.orna", include_str!("fixtures/repl-import-main.orna")),
         ]);
         let mut context = ReplContext::from_analysis(&analysis).expect("project admitted");
         context
