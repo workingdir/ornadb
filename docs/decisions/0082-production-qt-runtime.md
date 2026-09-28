@@ -43,6 +43,17 @@ live-provider test. Keep live Qt/provider acceptance deferred until the
 canonical runtime ABI header and Qt build/test toolchain are available; do
 not infer such a provider contract from this implementation test.
 
+The Orna-1.0.0 reference does not define Qt offscreen rendering, screenshot
+capture, or pixel/geometry validation. The targeted search for `Qt`,
+`screenshot`, `offscreen`, `visual smoke`, and `visual test` across the
+normative source and requirements has no matches. A broader search finds only
+the general presentation-width field in `source/30-protocol.md:67`; it defines
+terminal columns or browser CSS pixels, not native visual-test behavior.
+`ORNA-PRES-010` (`source/13-presentation.md:117`) requires an
+Inspect-compatible fallback for an unrecognized rich presentation node, but
+does not require raster capture. Therefore, Qt visual smoke capture and its
+screenshot artifact are deferred and are not OrnaDB 1.0.0 conformance evidence.
+
 ## Context
 
 OrnaDB already has a TTY renderer and a test-only headless runtime fixture. It
