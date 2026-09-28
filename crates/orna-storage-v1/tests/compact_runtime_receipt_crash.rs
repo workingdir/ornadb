@@ -8,7 +8,7 @@ use orna_repository_v1::{
     CompactManifest, CompactSegment, CompactSegmentRole, ManagedPath, Repository, Uuid,
 };
 use orna_runtime_v1::{Checkpoint, RuntimeIdentity, RuntimeState, TableMutation};
-use orna_storage_v1::{CompactTailWindow, RuntimePublicationCoordinator};
+use orna_storage_v1::{CompactOvbProfile, CompactTailWindow, RuntimePublicationCoordinator};
 use parquet::file::{
     metadata::{FileMetaData, KeyValue, ParquetMetaData, ParquetMetaDataWriter},
     reader::{FileReader, SerializedFileReader},
@@ -192,7 +192,7 @@ fn plan(
 }
 
 #[tokio::test]
-async fn recovery_finishes_receipt_boundary_after_runtime_consumes_only_frozen_prefix() {
+async fn recovery_rejects_compact_freeze_without_typed_identity() {
     let (_temp, repository) = repository();
     let runtime = RuntimeState::open(
         &repository,
@@ -251,15 +251,9 @@ async fn recovery_finishes_receipt_boundary_after_runtime_consumes_only_frozen_p
         .await
         .unwrap();
 
-    let pending = repository
+    repository
         .publish_compact_repository_boundary(plan(&repository, &freeze))
         .unwrap();
-    drop(
-        runtime
-            .complete_compact_publication(&pending, &freeze)
-            .await
-            .unwrap(),
-    );
     drop(runtime);
     let runtime = RuntimeState::open(
         &repository,
@@ -276,28 +270,23 @@ async fn recovery_finishes_receipt_boundary_after_runtime_consumes_only_frozen_p
     // the repository journal accepts it. Recovery must verify that same
     // receipt, finish the journal, and leave post-freeze mutations pending.
     assert!(repository.read_publication_journal().unwrap().is_some());
-    assert!(runtime.pending_through(&freeze).await.unwrap().is_empty());
-    assert_eq!(runtime.pending().await.unwrap().len(), 1);
+    assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
+    assert_eq!(runtime.pending().await.unwrap().len(), 2);
     assert_eq!(
-        RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime)
-            .await
-            .unwrap()
-            .tail(),
-        CompactTailWindow::AfterWatermark(freeze.checkpoint.mutation_sequence),
+        RuntimePublicationCoordinator::recover_compact_validated(
+            &repository,
+            &runtime,
+            &CompactOvbProfile::new(profile()).unwrap(),
+        )
+        .await,
+        Err(orna_storage_v1::Error::InvalidTransition)
     );
-
-    RuntimePublicationCoordinator::recover(&repository, &runtime)
-        .await
-        .unwrap();
-
-    assert!(repository.read_publication_journal().unwrap().is_none());
-    assert_eq!(runtime.pending().await.unwrap().len(), 1);
-    assert_eq!(runtime.pending().await.unwrap()[0].id, [78; 16]);
+    assert!(repository.read_publication_journal().unwrap().is_some());
 }
 
 #[tokio::test]
-async fn recovery_after_ref_advance_before_runtime_receipt() {
-    let (temp, repository) = repository();
+async fn recovery_preserves_rows_when_compact_freeze_identity_is_missing() {
+    let (_temp, repository) = repository();
     let identity = RuntimeIdentity {
         database_id: [91; 16],
         repository_id: [92; 16],
@@ -376,39 +365,20 @@ async fn recovery_after_ref_advance_before_runtime_receipt() {
     let runtime = RuntimeState::open(&repository, identity, [93; 32])
         .await
         .unwrap();
-    RuntimePublicationCoordinator::recover(&repository, &runtime)
-        .await
-        .unwrap();
-
-    assert!(repository.read_publication_journal().unwrap().is_none());
-    let pending = runtime.pending().await.unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].id, [98; 16]);
-    assert!(runtime.pending_through(&freeze).await.unwrap().is_empty());
-    let visibility = RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime)
-        .await
-        .unwrap();
-    assert_eq!(visibility.snapshot(), &repository.head().unwrap().unwrap());
-    assert_eq!(visibility.tail(), CompactTailWindow::AllPending);
-    let manifest = repository
-        .read_compact_manifest(visibility.snapshot(), Uuid::from_u128(1))
-        .unwrap()
-        .unwrap();
-    assert_eq!(manifest.entries().len(), 1);
-    assert_eq!(manifest.entries()[0].row_count(), 1);
-
-    let index = repository.index_generation().unwrap();
-    assert_eq!(index.head(), Some(visibility.snapshot()));
-    let head_tree = Command::new("git")
-        .current_dir(temp.path())
-        .args(["rev-parse", "HEAD^{tree}"])
-        .output()
-        .unwrap();
-    assert!(head_tree.status.success());
     assert_eq!(
-        index.tree().unwrap().as_str(),
-        String::from_utf8_lossy(&head_tree.stdout).trim(),
+        RuntimePublicationCoordinator::recover_compact_validated(
+            &repository,
+            &runtime,
+            &CompactOvbProfile::new(profile()).unwrap(),
+        )
+        .await,
+        Err(orna_storage_v1::Error::InvalidTransition)
     );
+    assert!(repository.read_publication_journal().unwrap().is_some());
+    let pending = runtime.pending().await.unwrap();
+    assert_eq!(pending.len(), 2);
+    assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
+    assert_eq!(repository.head().unwrap().as_ref(), Some(journal.new_head()));
     assert!(repository.worktree_state().unwrap().is_clean());
 }
 
