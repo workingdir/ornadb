@@ -126,3 +126,31 @@ the renderer gains the selected-family parameter. A comment marks the seam.
 - Integration proof path: the existing Compose-Postgres proof is retained as a
   Compose-gated path to round-trip the tty offer through the sealed
   encode/dispatch/decode path; it is not a current local or live result.
+
+## OrnaDB 1.0.0 reference boundary and task disposition
+
+The frozen reference does not define automatic runtime or typed-sink
+selection precedence based on whether stdout is a terminal. `source/18-cli.md`
+defines `--color` and `ORNA-CLI-005`, which requires suppressing dynamic
+progress when output is not a terminal unless explicitly forced. That rule is
+about progress; it does not gate `std.terminal.Document` or
+`std.io.ByteStream` result sinks. `source/13-presentation.md` states
+`ORNA-PRES-001` (terminal presentation is not canonical persistence encoding),
+and `source/14-pages.md` keeps presentation trees renderer-neutral; neither
+specifies CLI sink selection.
+
+Accordingly, the unconditional installed-TTY selection and sink map in this
+work ADR remain the accepted implementation policy, while their precedence is
+not a normative OrnaDB 1.0.0 requirement. ADR 0057's precedence section yields
+the earlier terminal-gating wording to this decision. Beads task
+`ornadb-1787968161138-319-d10ca799` (GitHub #417) is resolved as this
+documentation-only reconciliation: do not infer sink behavior from
+`ORNA-CLI-005`, change `render_value`, or add pipe tests without a new
+normative requirement.
+
+The audit covered the frozen summary, `source/13-presentation.md`,
+`source/14-pages.md`, `source/18-cli.md`, and searched the remaining reference
+`source/`, `grammar/`, `tests/`, `examples/`, and `api/` trees for TTY/pipe
+sink-selection clauses. No other automatic sink-precedence requirement was
+found. A future change to the automatic sink contract requires a normative
+reference update first.
