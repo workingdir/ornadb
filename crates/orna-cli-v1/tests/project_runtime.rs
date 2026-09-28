@@ -605,12 +605,12 @@ fn binary_run_executes_a_named_public_project_function() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        "use library; pub fn main(): Int = library.answer();",
+        include_str!("fixtures/run/main.orna"),
     )
     .expect("root source");
     std::fs::write(
         directory.path().join("library.orna"),
-        "pub fn answer(): Int = 42;",
+        include_str!("fixtures/run/library.orna"),
     )
     .expect("library source");
     initialize_project(directory.path());
@@ -627,7 +627,7 @@ fn binary_run_without_a_target_executes_root_main() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        "pub fn main(): Int = 42;",
+        include_str!("fixtures/run/private-main.orna"),
     )
     .expect("root source");
     initialize_project(directory.path());
@@ -722,7 +722,7 @@ fn binary_run_without_a_target_reports_a_missing_root_main() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        "pub fn helper(): Int = 42;",
+        include_str!("fixtures/run/no-main.orna"),
     )
     .expect("root source");
     initialize_project(directory.path());
@@ -750,9 +750,14 @@ fn binary_run_rejects_private_function_targets_before_runtime_admission() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        "fn hidden(): Int = 42; pub fn main(): Int = hidden();",
+        include_str!("fixtures/run/main.orna"),
     )
     .expect("root source");
+    std::fs::write(
+        directory.path().join("library.orna"),
+        include_str!("fixtures/run/library.orna"),
+    )
+    .expect("library source");
     initialize_project(directory.path());
 
     let output = invoke(directory.path(), "run", "main.hidden");
@@ -771,14 +776,19 @@ fn binary_run_treats_a_path_like_target_as_an_ordinary_function_name() {
     std::fs::create_dir(directory.path().join("ingest")).expect("ingest directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        "pub fn main(): Int = 42;",
+        include_str!("fixtures/run/main.orna"),
     )
     .expect("root source");
     std::fs::write(
         directory.path().join("ingest/main.orna"),
-        "pub fn main(): Int = 99;",
+        include_str!("fixtures/run/main.orna"),
     )
     .expect("nested source");
+    std::fs::write(
+        directory.path().join("library.orna"),
+        include_str!("fixtures/run/library.orna"),
+    )
+    .expect("library source");
     initialize_project(directory.path());
 
     let output = invoke(directory.path(), "run", "ingest/main.orna");
