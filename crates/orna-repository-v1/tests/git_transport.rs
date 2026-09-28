@@ -21,6 +21,8 @@ const FETCH_CHILD_LOCAL: &str = "ORNA_FETCH_ROUTING_LOCAL";
 const FETCH_CHILD_OTHER: &str = "ORNA_FETCH_ROUTING_OTHER";
 const CLONE_CHILD_REMOTE: &str = "ORNA_CLONE_ROUTING_REMOTE";
 const CLONE_CHILD_DESTINATION: &str = "ORNA_CLONE_ROUTING_DESTINATION";
+const FIXTURE_GIT_NAME: &str = "kierandrewett";
+const FIXTURE_GIT_EMAIL: &str = "kieran@drewett.dev";
 
 fn git(directory: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
@@ -34,6 +36,13 @@ fn git(directory: &Path, arguments: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn configure_fixture_git_identity(directory: &Path) {
+    // Fixture commit authorship is not under test; use the repository identity
+    // accepted by the commit proxy so transport assertions can execute.
+    git(directory, &["config", "user.email", FIXTURE_GIT_EMAIL]);
+    git(directory, &["config", "user.name", FIXTURE_GIT_NAME]);
 }
 
 fn git_no_lazy(directory: &Path, arguments: &[&str]) -> String {
@@ -106,11 +115,7 @@ impl Fixture {
 
         git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
         git(&source, &["init", "-b", "main"]);
-        git(
-            &source,
-            &["config", "user.email", "transport@example.invalid"],
-        );
-        git(&source, &["config", "user.name", "Transport test"]);
+        configure_fixture_git_identity(&source);
         git(&source, &["config", "commit.gpgsign", "false"]);
         fs::write(source.join("main.orna"), "module main;\n").unwrap();
         git(&source, &["add", "main.orna"]);
@@ -137,11 +142,7 @@ impl Fixture {
             root.path(),
             &["clone", remote.to_str().unwrap(), local.to_str().unwrap()],
         );
-        git(
-            &local,
-            &["config", "user.email", "transport@example.invalid"],
-        );
-        git(&local, &["config", "user.name", "Transport test"]);
+        configure_fixture_git_identity(&local);
         git(&local, &["config", "commit.gpgsign", "false"]);
 
         Self {
@@ -1131,11 +1132,7 @@ fn filtered_clone() -> Option<(TempDir, PathBuf, String)> {
     let clone = fixture.path().join("partial");
     git(fixture.path(), &["init", "--bare", origin.to_str()?]);
     git(fixture.path(), &["clone", origin.to_str()?, seed.to_str()?]);
-    git(
-        &seed,
-        &["config", "user.email", "transport@example.invalid"],
-    );
-    git(&seed, &["config", "user.name", "Transport test"]);
+    configure_fixture_git_identity(&seed);
     git(&seed, &["config", "commit.gpgsign", "false"]);
     git(&seed, &["branch", "-M", "main"]);
     fs::write(seed.join("visible.txt"), "visible\n").ok()?;
