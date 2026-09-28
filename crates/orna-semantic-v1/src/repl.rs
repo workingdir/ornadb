@@ -325,7 +325,7 @@ mod tests {
         let analysis = analyze(&[
             ModuleInput::new(
                 "library.orna",
-                "pub fn visible(value: Int): Int = value; fn hidden(value: Int): Int = value;",
+                include_str!("fixtures/repl-import-exports.orna"),
             ),
             ModuleInput::new("main.orna", "pub fn run(): Int = 1;"),
         ]);
