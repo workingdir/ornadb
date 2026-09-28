@@ -45,6 +45,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0093 | 1.0.0 `orna serve` and `orna.present.v1` contract crosswalk | Generic reflective gateways, service discovery, JSON-RPC, MCP, custom auth, and alternate service lifecycles remain deferred; no implementation claim is made. |
 | 0094 | Reference-defined `orna run` entry selection and ownership crosswalk | `std.launch` catalogue/metadata, application argument schemas, presenter/runtime selection through metadata, launch-specific authorization, and additional lifecycle behavior remain undefined and deferred. |
 | 0095 | OrnaDB 1.0 principal, credential, and delegation scope | Built-in principal metadata, credential enrollment/providers, delegated sessions, and multi-user authorization remain deferred; `sys.Secret` exposes only its normative redacted metadata. |
+| 0096 | OrnaDB 1.0 trust policy and function security boundary | Accepts the trusted-host and network-perimeter rules in ORNA-TRUST-001..003; function ownership, policy evaluation, and SECURITY DEFINER semantics remain undefined and deferred. |
 
 ## Current work ADRs
 
@@ -221,3 +222,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Reference-Defined Run Entry Contract](0094-std-launch-contract.md)
 * **work ADR 0095:**
   [OrnaDB 1.0 Principal, Credential, and Delegation Scope](0095-principal-credential-delegation-scope.md)
+* **work ADR 0096:**
+  [OrnaDB 1.0 Trust Policy and Function Security Boundary](0096-trust-policy-function-security.md)
