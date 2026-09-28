@@ -73,11 +73,15 @@ fn repository_with_object_format(format: &str) -> Option<TempDir> {
     }
     git(
         temp.path(),
-        &["config", "user.email", "test@example.invalid"],
+        &["config", "user.email", "kieran@drewett.dev"],
     );
-    git(temp.path(), &["config", "user.name", "Repository test"]);
+    git(temp.path(), &["config", "user.name", "kierandrewett"]);
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
-    fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
+    fs::write(
+        temp.path().join("main.orna"),
+        include_str!("fixtures/git-repository-main.orna"),
+    )
+    .unwrap();
     git(temp.path(), &["add", "main.orna"]);
     git(temp.path(), &["commit", "-m", "initial"]);
     Some(temp)
@@ -88,11 +92,15 @@ fn repository() -> TempDir {
     git(temp.path(), &["init", "-b", "main"]);
     git(
         temp.path(),
-        &["config", "user.email", "test@example.invalid"],
+        &["config", "user.email", "kieran@drewett.dev"],
     );
-    git(temp.path(), &["config", "user.name", "Repository test"]);
+    git(temp.path(), &["config", "user.name", "kierandrewett"]);
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
-    fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
+    fs::write(
+        temp.path().join("main.orna"),
+        include_str!("fixtures/git-repository-main.orna"),
+    )
+    .unwrap();
     fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
     fs::create_dir_all(temp.path().join(".orna")).unwrap();
     fs::write(temp.path().join(".orna/format.orna"), "format 1\n").unwrap();
