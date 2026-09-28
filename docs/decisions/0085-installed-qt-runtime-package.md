@@ -66,3 +66,23 @@ This ADR does not accept a second runtime family, a browser runtime, runtime
 archives, database-selected native code, arbitrary production environment
 paths, UI constructor functions beyond the accepted window contract, or
 list/table model contracts.
+
+## Second runtime and M10-M12 acceptance gate
+
+The frozen OrnaDB 1.0.0 reference defines no second-runtime family and no
+acceptance scope named M10, M11, or M12. On 2026-09-28, the following targeted
+search was run against the frozen bundle (excluding provenance notes):
+
+```text
+rg -n -i --glob '!provenance/**' 'second[[:space:]-]+runtime|multiple[[:space:]-]+runtimes|runtime family|M10|M-10|M11|M-11|M12|M-12|second provider|additional provider|alternate runtime' /home/pbox/dev/ornadb/reference/Orna-1.0.0
+```
+
+It returned no matches (exit status 1). The nearest general requirement,
+`ORNA-CONF-006` (`source/01-scope.md:60`), requires applicable scenario
+execution for a full-runtime claim; it does not define a second runtime.
+`ORNA-TEST-004` (`source/32-conformance.md:23`) and `ORNA-TEST-011`
+(`source/32-conformance.md:33`) require reports to distinguish specified,
+implemented, and executed evidence. They do not supply missing M10-M12
+acceptance criteria. Therefore this expansion remains deferred until a
+canonical contract defines its scope; no second-runtime or M10-M12 completion
+is claimed for OrnaDB 1.0.0.
