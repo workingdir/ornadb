@@ -540,6 +540,27 @@ CLIENT control-flow, resource, action, Inspector, security, Rows, or package
 contracts. They state only that this V9 constructor slice does not implement
 those larger systems.
 
+### OrnaDB 1.0.0 disposition of the Studio result-grid request
+
+The request tracked by GitHub issue #32 for a Studio typed result grid is
+deferred at the OrnaDB 1.0.0 contract boundary. The audit covered the normative
+`Orna-1.0.0.md` requirement index, all `source/` chapters (including
+`13-presentation.md`, `14-pages.md`, `17-repl.md`, `28-serving.md`,
+`30-protocol.md`, and `34-system-reference.md`), `grammar/orna.ebnf`, the
+requirements, scenario, and evidence corpora under `tests/`, the reference
+programs under `examples/`, and the system API under `api/`.
+
+The nearby requirements do not define a Studio grid. `ORNA-PRES-007` specifies
+that Present returns the core typed presentation tree, and `ORNA-PRES-010`
+requires an Inspect-compatible fallback for an unrecognized rich node.
+`ORNA-REPL-004` requires bounded relation preview without complete
+enumeration, specifically for the REPL; `ORNA-SERVE-001` specifies Git,
+page/query, and WebSocket presentation-delta endpoints. None defines a Studio
+result-grid data contract or runtime consumer. Accordingly, this issue adds no
+grid behavior or API beyond the reference. The deferred models and Studio
+result-view scope above remain deferred until OrnaDB publishes a normative
+contract for them.
+
 ## Implementation artifacts
 
 The implementation of this accepted contract is ordered as follows:
