@@ -42,6 +42,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0089 | Trusted resource lineage authority: compiled evaluator and installed authenticated execution derive principal/profile/instance lineage; parent/call-site identities remain correlation-only, and direct constructors remain low-level compatibility/test seams. | Hostile external-plugin authenticated binding remains deferred; no runtime or security-surface expansion is accepted. |
 | 0090 | Local principal and authenticated-session authority boundary for local invocation, resource, raw, and USER-state paths. | Credential/provider/secret enrollment, durable sessions, role selection, definer/effective-principal transitions, delegation, EXTERNAL principals, remote gateway auth, and production CLIENT VM trust features remain deferred. |
 | 0092 | Legacy/proposal function-backed CLI-session boundary | Canonical 1.0 entry execution is `orna run` or `orna repl`; it defines no accepted `std.cli.repl` catalogue identity. Endpoint transport, persistent action loops, native session-frame wiring, remote TLS/auth, and production artifact trust remain deferred. |
+| 0093 | 1.0.0 `orna serve` and `orna.present.v1` contract crosswalk | Generic reflective gateways, service discovery, JSON-RPC, MCP, custom auth, and alternate service lifecycles remain deferred; no implementation claim is made. |
 
 ## Current work ADRs
 
@@ -212,3 +213,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [CLIENT VM Trust and Sandbox](0091-client-vm-trust-and-sandbox.md)
 * **work ADR 0092:**
   [Function-Backed CLI Sessions](0092-function-backed-cli-sessions.md)
+* **work ADR 0093:**
+  [Gateway and Protocol Contract Boundaries](0093-reflective-gateway-contracts.md)
