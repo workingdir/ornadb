@@ -1221,7 +1221,9 @@ mod tests {
 
     #[test]
     fn admitted_module_functions_cannot_read_repl_bindings() {
-        let parsed = parse_module("fn last() = $_;");
+        let parsed = parse_module(include_str!(
+            "fixtures/repl-admitted-module-binding-isolation.orna"
+        ));
         assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
         let Declaration::Function { signature, body } = parsed
             .value
