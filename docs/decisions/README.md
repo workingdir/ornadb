@@ -44,6 +44,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0092 | Legacy/proposal function-backed CLI-session boundary | Canonical 1.0 entry execution is `orna run` or `orna repl`; it defines no accepted `std.cli.repl` catalogue identity. Endpoint transport, persistent action loops, native session-frame wiring, remote TLS/auth, and production artifact trust remain deferred. |
 | 0093 | 1.0.0 `orna serve` and `orna.present.v1` contract crosswalk | Generic reflective gateways, service discovery, JSON-RPC, MCP, custom auth, and alternate service lifecycles remain deferred; no implementation claim is made. |
 | 0094 | Reference-defined `orna run` entry selection and ownership crosswalk | `std.launch` catalogue/metadata, application argument schemas, presenter/runtime selection through metadata, launch-specific authorization, and additional lifecycle behavior remain undefined and deferred. |
+| 0095 | OrnaDB 1.0 principal, credential, and delegation scope | Built-in principal metadata, credential enrollment/providers, delegated sessions, and multi-user authorization remain deferred; `sys.Secret` exposes only its normative redacted metadata. |
 
 ## Current work ADRs
 
@@ -218,3 +219,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Gateway and Protocol Contract Boundaries](0093-reflective-gateway-contracts.md)
 * **work ADR 0094:**
   [Reference-Defined Run Entry Contract](0094-std-launch-contract.md)
+* **work ADR 0095:**
+  [OrnaDB 1.0 Principal, Credential, and Delegation Scope](0095-principal-credential-delegation-scope.md)
