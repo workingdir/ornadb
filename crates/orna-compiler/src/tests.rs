@@ -2813,7 +2813,9 @@ fn renders_contextual_diagnostics_from_retained_source_without_mutating_raw_data
     // Keep the diagnostic span and syntax tree fixed while changing the retained
     // source text.  Human output must use the retained text, not reparse or
     // reconstruct a different presentation from the private syntax tree.
-    report.units[0].replace_source_text_for_test("CREATE SCHEMA CRM.;");
+    report.units[0].replace_source_text_for_test(include_str!(
+        "tests/fixtures/retained-source-uppercase-syntax-error.orna"
+    ));
     let rendered = report.render_human();
 
     assert!(rendered.contains("error[ORNA0001]:"));
