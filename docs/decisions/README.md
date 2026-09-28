@@ -52,6 +52,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0100 | Studio source tooling boundary | Orna 1.0 accepts semantic CLI diff and read-only retained source/revision APIs; Studio source editing/apply, revision browsing UI, and public revision activation remain deferred. |
 | 0101 | Deferred: CLIENT STATE dogfood is not defined by frozen Orna 1.0.0 | ORNA-PAGE-001/002 define pages and widgets as ordinary values, not CLIENT state declarations, scope/default semantics, or StateClientPlan metadata. |
 | 0102 | Qualified type editor highlighting deferral | Lowercase qualified-name capture semantics are unspecified, and the current main branch contains no editor/tree-sitter implementation to update. |
+| 0103 | Studio runtime and Inspector reference boundary | Generic Orna inspection, presentation, redaction, and snapshot rules remain required; Studio-specific runtime and explorer contracts are deferred. |
 | 0101 | OrnaDB 1.0 CLIENT VM trust boundary | Host-side remote source evaluation remains normative; production CLIENT bytecode VM, artifact trust, and CLIENT sandbox contracts are deferred. |
 
 ## Current work ADRs
@@ -243,5 +244,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Defer CLIENT STATE Dogfood as Orna 1.0.0 Conformance](0101-client-state-dogfood-reference-deferral.md)
 * **work ADR 0102 (deferred):**
   [Qualified Type Editor Highlighting Deferral](0102-qualified-type-editor-highlighting-deferral.md)
+* **work ADR 0103 (deferred):**
+  [Studio Runtime and Inspector Reference Boundary](0103-studio-runtime-inspector-reference-boundary.md)
 * **work ADR 0101:**
   [OrnaDB 1.0 CLIENT VM Trust Boundary](0101-client-vm-trust-boundary.md)
