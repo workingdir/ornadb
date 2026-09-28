@@ -931,6 +931,8 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
         .current_dir(repository.path().join("nested"))
         .output()
         .expect("git short status");
+    let mut expected_short_with_runtime_summary = expected_short.stdout.clone();
+    expected_short_with_runtime_summary.extend_from_slice(b"RM 0 runtime mutations\n");
     let actual_short = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(repository.path().join("nested"))
@@ -938,7 +940,7 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
         .output()
         .expect("CLI short status");
     assert!(actual_short.status.success());
-    assert_eq!(actual_short.stdout, expected_short.stdout);
+    assert_eq!(actual_short.stdout, expected_short_with_runtime_summary);
     assert!(actual_short.stderr.is_empty());
 
     let actual_explicit_short = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
@@ -953,7 +955,10 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
         .output()
         .expect("CLI explicit short status");
     assert!(actual_explicit_short.status.success());
-    assert_eq!(actual_explicit_short.stdout, expected_short.stdout);
+    assert_eq!(
+        actual_explicit_short.stdout,
+        expected_short_with_runtime_summary
+    );
     assert!(actual_explicit_short.stderr.is_empty());
 
     let outside = tempfile::tempdir().expect("non-repository directory");
