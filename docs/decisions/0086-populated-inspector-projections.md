@@ -1,11 +1,44 @@
-# ADR 0086: Populate the Existing Inspector Projection Rows
+# ADR 0086: Populate the Existing Inspector Projection Rows (Deferred)
 
-**Status:** Accepted
+**Status:** Deferred
 
-**Scope:** This is a work ADR for the next headless Inspector implementation
-slice. It accepts bounded population of the already-registered `@1` projection
-row types. It does not claim that the Inspector, Studio, or any graphical
-runtime is complete.
+## Decision
+
+Populated Inspector resource, UI, and presentation projections are deferred as
+an Orna 1.0.0 conformance requirement. The detailed design below records a
+possible bounded implementation, but it MUST NOT be treated as an accepted
+Orna 1.0.0 behavior contract. Reconsider this implementation only after a
+normative reference contract defines the projection rows and their capture
+semantics.
+
+## Orna 1.0.0 basis
+
+The frozen reference was checked across `Orna-1.0.0.md`, `source/`,
+`grammar/`, `tests/`, `examples/`, and the API/system reference. **ORNA-PRES-002**
+and **ORNA-PRES-006** require structural, bounded, redacted Inspect output and
+a host-derived Inspect fallback. **ORNA-PRES-009/010** require Inspect
+fallbacks for presenter failures and unknown rich nodes. **ORNA-SYS-091**
+requires a coherent snapshot for multi-relation inspection, and
+**ORNA-SYS-094** requires unavailable metadata for pruned optional detail.
+**ORNA-SYS-109** and **ORNA-SECRET-002** require secret and path redaction at
+the listed Inspect and system boundaries.
+
+These requirements do not define populated `sys.inspect` resource, UI, surface,
+node, runtime, or presentation-candidate projection schemas. `source/34-system-reference.md`
+and `api/sys.json` define other system observations, including invocation,
+stream, and runtime relations; they do not define these Inspector projection
+rows. Searches of the normative index, grammar, requirement/evidence corpus,
+and examples found no row schema, capture source, availability rule, or UI-node
+projection contract for them. The cited requirements constrain an Inspector
+implementation but do not require populating these rows.
+
+The repository-specific capture design below is not cited as an `ORNA-*`
+requirement and does not establish normative Orna 1.0.0 behavior.
+
+**Scope:** This deferred work ADR records a possible bounded population of the
+already-registered `@1` projection row types for a future headless Inspector
+implementation slice. It does not claim that the Inspector, Studio, or any
+graphical runtime is complete.
 
 ## Context
 
@@ -53,7 +86,7 @@ protected capture boundary. No projection is allowed to query the current
 catalogue, current USER state, a runtime process, a toolkit, or a mutable
 resource cache after the epoch is captured.
 
-## Decision
+## Deferred implementation proposal
 
 ### 1. Keep the canonical `@1` identities and frame
 
