@@ -1239,7 +1239,9 @@ dependencies = [
  "orna-protocol-v1",
  "orna-repository-v1",
  "orna-runtime-v1",
+ "orna-security-v1",
  "orna-semantic-v1",
+ "orna-serving-v1",
  "orna-syntax-v1",
  "sha2 0.10.9",
 ]
