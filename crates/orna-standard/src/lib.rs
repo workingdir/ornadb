@@ -7,8 +7,8 @@ use orna_compiler::{
     StandardLibraryCheckError, check_standard_library_source, prepare_checked_standard_upgrade,
 };
 use orna_core::{
-    CatalogueRevisionId, FunctionId, FunctionRevisionId, SchemaId, SourceBundleId, SourceRevisionId,
-    SourceUnitId, StandardLibraryRevisionId, TypeBindingId, TypeId,
+    CatalogueRevisionId, FunctionId, FunctionRevisionId, SchemaId, SourceBundleId,
+    SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeBindingId, TypeId,
     canonical_hash::{
         CanonicalHashError, artifact_payload_digest, calculate_standard_library_digest,
         function_declaration_digest, function_semantic_digest_with_version, source_bundle_digest,
@@ -50,11 +50,11 @@ pub use codecs::{
 
 pub use orna_compiler::StandardUpgradeIdentity;
 pub use orna_compiler::{
-    STD_DATA_ROWS_TYPE_BINDING_ID,
-    STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_DATA_SOURCE_UNIT_ID, STD_INTEGER_TYPE_ID,
-    STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
-    STD_INVOKE_SOURCE_UNIT_ID, STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+    STD_DATA_ROWS_TYPE_BINDING_ID, STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID,
+    STD_DATA_SOURCE_UNIT_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
+    STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
+    STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
+    STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
     STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID, STD_JSON_VALUE_TYPE_ID,
     STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
     STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID, STD_TYPES_SOURCE_UNIT_ID,
@@ -62,17 +62,16 @@ pub use orna_compiler::{
     STD_UI_BUTTON_FUNCTION_REVISION_ID, STD_UI_BUTTON_LABEL_PARAMETER_ID,
     STD_UI_BUTTON_RUNTIME_CONTRACT, STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
     STD_UI_COLUMN_FUNCTION_REVISION_ID, STD_UI_COLUMN_RUNTIME_CONTRACT,
-    STD_UI_PANEL_CONTENT_PARAMETER_ID,
-    STD_UI_PANEL_FUNCTION_ID, STD_UI_PANEL_FUNCTION_REVISION_ID, STD_UI_PANEL_RUNTIME_CONTRACT,
-    STD_UI_ROW_CONTENT_PARAMETER_ID, STD_UI_ROW_FUNCTION_ID, STD_UI_ROW_FUNCTION_REVISION_ID,
-    STD_UI_ROW_RUNTIME_CONTRACT, STD_UI_TABS_CONTENT_PARAMETER_ID, STD_UI_TABS_FUNCTION_ID,
-    STD_UI_TABS_FUNCTION_REVISION_ID, STD_UI_TABS_RUNTIME_CONTRACT, STD_UI_TEXT_FUNCTION_ID,
-    STD_UI_TEXT_FUNCTION_REVISION_ID, STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID,
-    STD_UI_TEXT_INPUT_FUNCTION_ID, STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID,
-    STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID, STD_UI_TEXT_INPUT_RUNTIME_CONTRACT,
-    STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID, STD_UI_TEXT_PARAMETER_ID, STD_UI_TEXT_RUNTIME_CONTRACT,
-    STD_UI_WINDOW_CONTENT_PARAMETER_ID, STD_UI_WINDOW_FUNCTION_ID,
-    STD_UI_WINDOW_FUNCTION_REVISION_ID, STD_UI_WINDOW_REVISION_NUMBER,
+    STD_UI_PANEL_CONTENT_PARAMETER_ID, STD_UI_PANEL_FUNCTION_ID, STD_UI_PANEL_FUNCTION_REVISION_ID,
+    STD_UI_PANEL_RUNTIME_CONTRACT, STD_UI_ROW_CONTENT_PARAMETER_ID, STD_UI_ROW_FUNCTION_ID,
+    STD_UI_ROW_FUNCTION_REVISION_ID, STD_UI_ROW_RUNTIME_CONTRACT, STD_UI_TABS_CONTENT_PARAMETER_ID,
+    STD_UI_TABS_FUNCTION_ID, STD_UI_TABS_FUNCTION_REVISION_ID, STD_UI_TABS_RUNTIME_CONTRACT,
+    STD_UI_TEXT_FUNCTION_ID, STD_UI_TEXT_FUNCTION_REVISION_ID,
+    STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID, STD_UI_TEXT_INPUT_FUNCTION_ID,
+    STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID, STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID,
+    STD_UI_TEXT_INPUT_RUNTIME_CONTRACT, STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID,
+    STD_UI_TEXT_PARAMETER_ID, STD_UI_TEXT_RUNTIME_CONTRACT, STD_UI_WINDOW_CONTENT_PARAMETER_ID,
+    STD_UI_WINDOW_FUNCTION_ID, STD_UI_WINDOW_FUNCTION_REVISION_ID, STD_UI_WINDOW_REVISION_NUMBER,
     STD_UI_WINDOW_RUNTIME_CONTRACT, STD_UI_WINDOW_TITLE_PARAMETER_ID,
     check_standard_terminal_present_table,
 };
@@ -251,7 +250,6 @@ const ACCEPTED_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes(
     0xe4, 0x9b, 0xc8, 0xdf, 0xe0, 0x3c, 0xd6, 0xd9, 0x64, 0x70, 0x5b, 0x30, 0x23, 0x5b, 0x08, 0x1d,
 ]);
 
-
 // The V2 digest goldens below are computed by the canonical encoders from the
 // retained source and canonical records (never copied from a handwritten
 // encoder). The digest-golden tests recompute every value from the retained
@@ -341,7 +339,6 @@ pub const TERMINAL_DOCUMENT_MAGIC: &str = "ORNA-TERMINAL-DOCUMENT/1 ";
 /// body length, and the body bytes.
 pub const BYTE_STREAM_MAGIC: &str = "ORNA-BYTE-STREAM/1 ";
 
-
 // The V3 digest goldens below are computed by the canonical encoders from the
 // retained source and canonical records (never copied from a handwritten
 // encoder). The digest-golden tests recompute every value from the retained
@@ -408,7 +405,6 @@ pub const STD_UI_CONTRACT: &str = "orna.std.value.ui@1";
 /// The canonical payload is exactly `ORNA-UI/1 ` followed by a big-endian
 /// `u32` body length and the body bytes (work ADR 0062 provisional frame).
 pub const UI_MAGIC: &str = "ORNA-UI/1 ";
-
 
 // The V4 digest goldens below are computed by the canonical encoders from the
 // retained source and canonical records (never copied from a handwritten
@@ -898,871 +894,6 @@ pub fn standard_library_manifest() -> Result<StandardLibraryManifest, StandardLi
     Ok(StandardLibraryManifest { catalogue })
 }
 
-/// The source-independent facts required to recognise the executable
-/// `orna.std/2` standard library.
-///
-/// This value does not contain standard source, origins, hashes, a digest, or
-/// authority to install or use a standard-library snapshot.
-#[derive(Clone, Debug)]
-pub struct StandardLibraryV2Manifest {
-    catalogue: CatalogueSnapshot,
-}
-
-impl StandardLibraryV2Manifest {
-    /// Returns the standard-library version label.
-    pub const fn standard_library_version(&self) -> &'static str {
-        STANDARD_LIBRARY_V2_VERSION_IDENTITY
-    }
-
-    /// Returns the standard-library revision identity.
-    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
-        STANDARD_LIBRARY_V2_REVISION_ID
-    }
-
-    /// Returns the associated language version label.
-    pub const fn language_version(&self) -> &'static str {
-        LANGUAGE_VERSION_IDENTITY
-    }
-
-    /// Returns the identity reserved for the later retained V2 source bundle.
-    pub const fn source_bundle(&self) -> SourceBundleId {
-        STANDARD_SOURCE_V2_BUNDLE_ID
-    }
-
-    /// Returns the identity reserved for the later retained V2 source revision.
-    pub const fn source_revision(&self) -> SourceRevisionId {
-        STANDARD_SOURCE_V2_REVISION_ID
-    }
-
-    /// Returns the identity of the retained `std/types.orna` unit in the V2 bundle.
-    pub const fn types_source_unit(&self) -> SourceUnitId {
-        STD_TYPES_SOURCE_UNIT_ID
-    }
-
-    /// Returns the identity of the retained `std/invoke.orna` unit in the V2 bundle.
-    pub const fn invoke_source_unit(&self) -> SourceUnitId {
-        STD_INVOKE_SOURCE_UNIT_ID
-    }
-
-    /// Returns the logical path of the retained `std/types.orna` unit.
-    pub const fn types_source_logical_path(&self) -> &'static str {
-        SOURCE_LOGICAL_PATH
-    }
-
-    /// Returns the logical path of the retained `std/invoke.orna` unit.
-    pub const fn invoke_source_logical_path(&self) -> &'static str {
-        STD_INVOKE_SOURCE_LOGICAL_PATH
-    }
-
-    /// Returns the validated source-independent V2 standard catalogue.
-    pub const fn catalogue(&self) -> &CatalogueSnapshot {
-        &self.catalogue
-    }
-}
-
-/// Builds and validates the accepted source-independent executable standard manifest.
-///
-/// The V2 catalogue extends the V1 catalogue with the `std.invoke` schema and
-/// the single `std.invoke.echo` function. It reuses the V1 schemas, value
-/// types, and type bindings unchanged; it adds no objects, fields, opaque
-/// types, codecs, or system functions.
-pub fn standard_library_v2_manifest()
--> Result<StandardLibraryV2Manifest, StandardLibraryManifestError> {
-    let version_one = standard_library_manifest()?;
-    let mut schemas = version_one.catalogue().schemas().to_vec();
-    schemas.push(SchemaDefinition::new(
-        STD_INVOKE_SCHEMA_ID,
-        semantic_name("std.invoke", ["std", "invoke"])?,
-    ));
-    let echo = FunctionDefinition::new(
-        STD_INVOKE_ECHO_FUNCTION_ID,
-        semantic_name("std.invoke.echo", ["std", "invoke", "echo"])?,
-        FunctionDomain::Server,
-        vec![ParameterDefinition::new(
-            STD_INVOKE_ECHO_PARAMETER_ID,
-            "p_value",
-            0,
-            ResolvedType::scalar(StandardScalar::Integer),
-            None,
-        )],
-        FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
-        STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-        FunctionSecurity::Invoker,
-        Some(FunctionTransaction::ReadOnly),
-        FunctionVolatility::Stable,
-    );
-    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
-        STANDARD_CATALOGUE_V2_REVISION_ID,
-        schemas,
-        Vec::new(),
-        version_one.catalogue().value_types().to_vec(),
-        version_one.catalogue().type_bindings().to_vec(),
-        vec![echo],
-    )
-    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
-
-    Ok(StandardLibraryV2Manifest { catalogue })
-}
-
-/// The source-independent facts required to recognise the output
-/// `orna.std/3` standard library (work ADR 0058).
-///
-/// This value does not contain standard source, origins, hashes, a digest, or
-/// authority to install or use a standard-library snapshot.
-#[derive(Clone, Debug)]
-pub struct StandardLibraryV3Manifest {
-    catalogue: CatalogueSnapshot,
-}
-
-impl StandardLibraryV3Manifest {
-    /// Returns the standard-library version label.
-    pub const fn standard_library_version(&self) -> &'static str {
-        STANDARD_LIBRARY_V3_VERSION_IDENTITY
-    }
-
-    /// Returns the standard-library revision identity.
-    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
-        STANDARD_LIBRARY_V3_REVISION_ID
-    }
-
-    /// Returns the associated language version label.
-    pub const fn language_version(&self) -> &'static str {
-        LANGUAGE_VERSION_IDENTITY
-    }
-
-    /// Returns the identity reserved for the later retained V3 source bundle.
-    pub const fn source_bundle(&self) -> SourceBundleId {
-        STANDARD_SOURCE_V3_BUNDLE_ID
-    }
-
-    /// Returns the identity reserved for the later retained V3 source revision.
-    pub const fn source_revision(&self) -> SourceRevisionId {
-        STANDARD_SOURCE_V3_REVISION_ID
-    }
-
-    /// Returns the identity of the retained `std/types.orna` unit in the V3 bundle.
-    pub const fn types_source_unit(&self) -> SourceUnitId {
-        STD_TYPES_SOURCE_UNIT_ID
-    }
-
-    /// Returns the identity of the retained `std/invoke.orna` unit in the V3 bundle.
-    pub const fn invoke_source_unit(&self) -> SourceUnitId {
-        STD_INVOKE_SOURCE_UNIT_ID
-    }
-
-    /// Returns the identity of the retained `std/output.orna` unit in the V3 bundle.
-    pub const fn output_source_unit(&self) -> SourceUnitId {
-        STD_OUTPUT_SOURCE_UNIT_ID
-    }
-
-    /// Returns the logical path of the retained `std/types.orna` unit.
-    pub const fn types_source_logical_path(&self) -> &'static str {
-        SOURCE_LOGICAL_PATH
-    }
-
-    /// Returns the logical path of the retained `std/invoke.orna` unit.
-    pub const fn invoke_source_logical_path(&self) -> &'static str {
-        STD_INVOKE_SOURCE_LOGICAL_PATH
-    }
-
-    /// Returns the logical path of the retained `std/output.orna` unit.
-    pub const fn output_source_logical_path(&self) -> &'static str {
-        STD_OUTPUT_SOURCE_LOGICAL_PATH
-    }
-
-    /// Returns the validated source-independent V3 standard catalogue.
-    pub const fn catalogue(&self) -> &CatalogueSnapshot {
-        &self.catalogue
-    }
-}
-
-/// Builds and validates the accepted source-independent output standard manifest.
-///
-/// The V3 catalogue extends the V2 catalogue with the `std.terminal` and
-/// `std.io` schemas and the two opaque output value types
-/// `std.terminal.document` and `std.io.bytestream`. It reuses the V2 schemas,
-/// value types, type bindings, and the single `std.invoke.echo` function
-/// unchanged.
-pub fn standard_library_v3_manifest()
--> Result<StandardLibraryV3Manifest, StandardLibraryManifestError> {
-    let version_two = standard_library_v2_manifest()?;
-    let mut schemas = version_two.catalogue().schemas().to_vec();
-    schemas.push(SchemaDefinition::new(
-        STD_TERMINAL_SCHEMA_ID,
-        semantic_name("std.terminal", ["std", "terminal"])?,
-    ));
-    schemas.push(SchemaDefinition::new(
-        STD_IO_SCHEMA_ID,
-        semantic_name("std.io", ["std", "io"])?,
-    ));
-    let mut value_types = version_two.catalogue().value_types().to_vec();
-    value_types.push(ValueTypeDefinition::opaque(
-        STD_TERMINAL_DOCUMENT_TYPE_ID,
-        semantic_name("std.terminal.document", ["std", "terminal", "document"])?,
-        STD_TERMINAL_DOCUMENT_CONTRACT,
-    ));
-    value_types.push(ValueTypeDefinition::opaque(
-        STD_IO_BYTE_STREAM_TYPE_ID,
-        semantic_name("std.io.bytestream", ["std", "io", "bytestream"])?,
-        STD_IO_BYTE_STREAM_CONTRACT,
-    ));
-    let mut type_bindings = version_two.catalogue().type_bindings().to_vec();
-    let document_name = semantic_name("std.document", ["std", "document"])?;
-    let document_lookup = TypeLookupName::qualified(document_name.clone());
-    let document_binding = TypeBinding::qualified(document_name, STD_TERMINAL_DOCUMENT_TYPE_ID)
-        .map_err(|source| StandardLibraryManifestError::TypeBinding {
-            name: document_lookup,
-            source,
-        })?;
-    type_bindings.push(document_binding);
-    let bytestream_name = semantic_name("std.bytestream", ["std", "bytestream"])?;
-    let bytestream_lookup = TypeLookupName::qualified(bytestream_name.clone());
-    let bytestream_binding = TypeBinding::qualified(bytestream_name, STD_IO_BYTE_STREAM_TYPE_ID)
-        .map_err(|source| StandardLibraryManifestError::TypeBinding {
-            name: bytestream_lookup,
-            source,
-        })?;
-    type_bindings.push(bytestream_binding);
-    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
-        STANDARD_CATALOGUE_V3_REVISION_ID,
-        schemas,
-        Vec::new(),
-        value_types,
-        type_bindings,
-        version_two.catalogue().functions().to_vec(),
-    )
-    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
-
-    Ok(StandardLibraryV3Manifest { catalogue })
-}
-
-/// The source-independent facts required to recognise the UI
-/// `orna.std/4` standard library (work ADR 0062).
-///
-/// This value does not contain standard source, origins, hashes, a digest, or
-/// authority to install or use a standard-library snapshot.
-#[derive(Clone, Debug)]
-pub struct StandardLibraryV4Manifest {
-    catalogue: CatalogueSnapshot,
-}
-
-impl StandardLibraryV4Manifest {
-    /// Returns the standard-library version label.
-    pub const fn standard_library_version(&self) -> &'static str {
-        STANDARD_LIBRARY_V4_VERSION_IDENTITY
-    }
-
-    /// Returns the standard-library revision identity.
-    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
-        STANDARD_LIBRARY_V4_REVISION_ID
-    }
-
-    /// Returns the associated language version label.
-    pub const fn language_version(&self) -> &'static str {
-        LANGUAGE_VERSION_IDENTITY
-    }
-
-    /// Returns the identity reserved for the later retained V4 source bundle.
-    pub const fn source_bundle(&self) -> SourceBundleId {
-        STANDARD_SOURCE_V4_BUNDLE_ID
-    }
-
-    /// Returns the identity reserved for the later retained V4 source revision.
-    pub const fn source_revision(&self) -> SourceRevisionId {
-        STANDARD_SOURCE_V4_REVISION_ID
-    }
-
-    /// Returns the identity of the retained `std/types.orna` unit in the V4 bundle.
-    pub const fn types_source_unit(&self) -> SourceUnitId {
-        STD_TYPES_SOURCE_UNIT_ID
-    }
-
-    /// Returns the identity of the retained `std/invoke.orna` unit in the V4 bundle.
-    pub const fn invoke_source_unit(&self) -> SourceUnitId {
-        STD_INVOKE_SOURCE_UNIT_ID
-    }
-
-    /// Returns the identity of the retained `std/output.orna` unit in the V4 bundle.
-    pub const fn output_source_unit(&self) -> SourceUnitId {
-        STD_OUTPUT_SOURCE_UNIT_ID
-    }
-
-    /// Returns the identity of the retained `std/ui.orna` unit in the V4 bundle.
-    pub const fn ui_source_unit(&self) -> SourceUnitId {
-        STD_UI_SOURCE_UNIT_ID
-    }
-
-    /// Returns the logical path of the retained `std/types.orna` unit.
-    pub const fn types_source_logical_path(&self) -> &'static str {
-        SOURCE_LOGICAL_PATH
-    }
-
-    /// Returns the logical path of the retained `std/invoke.orna` unit.
-    pub const fn invoke_source_logical_path(&self) -> &'static str {
-        STD_INVOKE_SOURCE_LOGICAL_PATH
-    }
-
-    /// Returns the logical path of the retained `std/output.orna` unit.
-    pub const fn output_source_logical_path(&self) -> &'static str {
-        STD_OUTPUT_SOURCE_LOGICAL_PATH
-    }
-
-    /// Returns the logical path of the retained `std/ui.orna` unit.
-    pub const fn ui_source_logical_path(&self) -> &'static str {
-        STD_UI_SOURCE_LOGICAL_PATH
-    }
-
-    /// Returns the validated source-independent V4 standard catalogue.
-    pub const fn catalogue(&self) -> &CatalogueSnapshot {
-        &self.catalogue
-    }
-}
-
-/// Builds and validates the accepted source-independent UI standard manifest.
-///
-/// The V4 catalogue extends the V3 catalogue with the `std.ui` schema, the
-/// opaque UI value type `std.ui.ui` (contract `orna.std.value.ui@1`), and the
-/// single `std.ui` type binding targeting `std.ui.UI`. It reuses the V3
-/// schemas, value types, type bindings, and the single `std.invoke.echo`
-/// function unchanged (work ADR 0062).
-pub fn standard_library_v4_manifest()
--> Result<StandardLibraryV4Manifest, StandardLibraryManifestError> {
-    let version_three = standard_library_v3_manifest()?;
-    let mut schemas = version_three.catalogue().schemas().to_vec();
-    schemas.push(SchemaDefinition::new(
-        STD_UI_SCHEMA_ID,
-        semantic_name("std.ui", ["std", "ui"])?,
-    ));
-    let mut value_types = version_three.catalogue().value_types().to_vec();
-    value_types.push(ValueTypeDefinition::opaque(
-        STD_UI_TYPE_ID,
-        semantic_name("std.ui.ui", ["std", "ui", "ui"])?,
-        STD_UI_CONTRACT,
-    ));
-    let mut type_bindings = version_three.catalogue().type_bindings().to_vec();
-    let ui_name = semantic_name("std.ui", ["std", "ui"])?;
-    let ui_lookup = TypeLookupName::qualified(ui_name.clone());
-    let ui_binding = TypeBinding::qualified(ui_name, STD_UI_TYPE_ID).map_err(|source| {
-        StandardLibraryManifestError::TypeBinding {
-            name: ui_lookup,
-            source,
-        }
-    })?;
-    type_bindings.push(ui_binding);
-    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
-        STANDARD_CATALOGUE_V4_REVISION_ID,
-        schemas,
-        Vec::new(),
-        value_types,
-        type_bindings,
-        version_three.catalogue().functions().to_vec(),
-    )
-    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
-
-    Ok(StandardLibraryV4Manifest { catalogue })
-}
-
-/// The source-independent facts required to recognise the JSON `orna.std/5`
-/// standard library (ADR 0075).
-#[derive(Clone, Debug)]
-pub struct StandardLibraryV5Manifest {
-    catalogue: CatalogueSnapshot,
-}
-
-impl StandardLibraryV5Manifest {
-    pub const fn standard_library_version(&self) -> &'static str {
-        STANDARD_LIBRARY_V5_VERSION_IDENTITY
-    }
-    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
-        STANDARD_LIBRARY_V5_REVISION_ID
-    }
-    pub const fn language_version(&self) -> &'static str {
-        LANGUAGE_VERSION_IDENTITY
-    }
-    pub const fn source_bundle(&self) -> SourceBundleId {
-        STANDARD_SOURCE_V5_BUNDLE_ID
-    }
-    pub const fn source_revision(&self) -> SourceRevisionId {
-        STANDARD_SOURCE_V5_REVISION_ID
-    }
-    pub const fn types_source_unit(&self) -> SourceUnitId {
-        STD_TYPES_SOURCE_UNIT_ID
-    }
-    pub const fn invoke_source_unit(&self) -> SourceUnitId {
-        STD_INVOKE_SOURCE_UNIT_ID
-    }
-    pub const fn output_source_unit(&self) -> SourceUnitId {
-        STD_OUTPUT_SOURCE_UNIT_ID
-    }
-    pub const fn ui_source_unit(&self) -> SourceUnitId {
-        STD_UI_SOURCE_UNIT_ID
-    }
-    pub const fn json_source_unit(&self) -> SourceUnitId {
-        STD_JSON_SOURCE_UNIT_ID
-    }
-    pub const fn types_source_logical_path(&self) -> &'static str {
-        SOURCE_LOGICAL_PATH
-    }
-    pub const fn invoke_source_logical_path(&self) -> &'static str {
-        STD_INVOKE_SOURCE_LOGICAL_PATH
-    }
-    pub const fn output_source_logical_path(&self) -> &'static str {
-        STD_OUTPUT_SOURCE_LOGICAL_PATH
-    }
-    pub const fn ui_source_logical_path(&self) -> &'static str {
-        STD_UI_SOURCE_LOGICAL_PATH
-    }
-    pub const fn json_source_logical_path(&self) -> &'static str {
-        STD_JSON_SOURCE_LOGICAL_PATH
-    }
-    pub const fn catalogue(&self) -> &CatalogueSnapshot {
-        &self.catalogue
-    }
-}
-
-/// Builds and validates the append-only V5 catalogue over V4.
-pub fn standard_library_v5_manifest()
--> Result<StandardLibraryV5Manifest, StandardLibraryManifestError> {
-    let version_four = standard_library_v4_manifest()?;
-    let mut schemas = version_four.catalogue().schemas().to_vec();
-    schemas.push(SchemaDefinition::new(
-        STD_JSON_SCHEMA_ID,
-        semantic_name("std.json", ["std", "json"])?,
-    ));
-    let mut value_types = version_four.catalogue().value_types().to_vec();
-    value_types.push(ValueTypeDefinition::opaque(
-        STD_JSON_VALUE_TYPE_ID,
-        semantic_name("std.json.value", ["std", "json", "value"])?,
-        STD_JSON_CONTRACT,
-    ));
-    let mut type_bindings = version_four.catalogue().type_bindings().to_vec();
-    let json_name = semantic_name("std.jsonvalue", ["std", "jsonvalue"])?;
-    let json_lookup = TypeLookupName::qualified(json_name.clone());
-    let json_binding =
-        TypeBinding::qualified(json_name, STD_JSON_VALUE_TYPE_ID).map_err(|source| {
-            StandardLibraryManifestError::TypeBinding {
-                name: json_lookup,
-                source,
-            }
-        })?;
-    type_bindings.push(json_binding);
-    let json_encode = FunctionDefinition::new(
-        STD_JSON_ENCODE_FUNCTION_ID,
-        semantic_name("std.json.encode", ["std", "json", "encode"])?,
-        FunctionDomain::Server,
-        vec![ParameterDefinition::new(
-            STD_JSON_ENCODE_PARAMETER_ID,
-            "p_value",
-            0,
-            ResolvedType::value(STD_JSON_VALUE_TYPE_ID),
-            None,
-        )],
-        FunctionReturn::Single(ResolvedType::value(STD_IO_BYTE_STREAM_TYPE_ID)),
-        STD_JSON_ENCODE_FUNCTION_REVISION_ID,
-        FunctionSecurity::Invoker,
-        Some(FunctionTransaction::ReadOnly),
-        FunctionVolatility::Stable,
-    );
-    let mut functions = version_four.catalogue().functions().to_vec();
-    functions.push(json_encode);
-    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
-        STANDARD_CATALOGUE_V5_REVISION_ID,
-        schemas,
-        Vec::new(),
-        value_types,
-        type_bindings,
-        functions,
-    )
-    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
-    Ok(StandardLibraryV5Manifest { catalogue })
-}
-
-/// The source-independent facts required to recognise the `orna.std/6`
-/// standard library (ADR 0079).
-#[derive(Clone, Debug)]
-pub struct StandardLibraryV6Manifest {
-    catalogue: CatalogueSnapshot,
-}
-
-impl StandardLibraryV6Manifest {
-    pub const fn standard_library_version(&self) -> &'static str {
-        STANDARD_LIBRARY_V6_VERSION_IDENTITY
-    }
-    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
-        STANDARD_LIBRARY_V6_REVISION_ID
-    }
-    pub const fn language_version(&self) -> &'static str {
-        LANGUAGE_VERSION_IDENTITY
-    }
-    pub const fn source_bundle(&self) -> SourceBundleId {
-        STANDARD_SOURCE_V6_BUNDLE_ID
-    }
-    pub const fn source_revision(&self) -> SourceRevisionId {
-        STANDARD_SOURCE_V6_REVISION_ID
-    }
-    pub const fn types_source_unit(&self) -> SourceUnitId {
-        STD_TYPES_SOURCE_UNIT_ID
-    }
-    pub const fn invoke_source_unit(&self) -> SourceUnitId {
-        STD_INVOKE_SOURCE_UNIT_ID
-    }
-    pub const fn output_source_unit(&self) -> SourceUnitId {
-        STD_OUTPUT_SOURCE_UNIT_ID
-    }
-    pub const fn ui_source_unit(&self) -> SourceUnitId {
-        STD_UI_SOURCE_UNIT_ID
-    }
-    pub const fn json_source_unit(&self) -> SourceUnitId {
-        STD_JSON_SOURCE_UNIT_ID
-    }
-    pub const fn types_source_logical_path(&self) -> &'static str {
-        SOURCE_LOGICAL_PATH
-    }
-    pub const fn invoke_source_logical_path(&self) -> &'static str {
-        STD_INVOKE_SOURCE_LOGICAL_PATH
-    }
-    pub const fn output_source_logical_path(&self) -> &'static str {
-        STD_OUTPUT_SOURCE_LOGICAL_PATH
-    }
-    pub const fn ui_source_logical_path(&self) -> &'static str {
-        STD_UI_SOURCE_LOGICAL_PATH
-    }
-    pub const fn json_source_logical_path(&self) -> &'static str {
-        STD_JSON_SOURCE_LOGICAL_PATH
-    }
-    pub const fn catalogue(&self) -> &CatalogueSnapshot {
-        &self.catalogue
-    }
-}
-
-/// Returns the retired V6 catalogue identity over the V5 catalogue surface.
-///
-/// The historical `std.Action` declaration is no longer reconstructed.
-pub fn standard_library_v6_manifest()
--> Result<StandardLibraryV6Manifest, StandardLibraryManifestError> {
-    let version_five = standard_library_v5_manifest()?;
-    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
-        STANDARD_CATALOGUE_V6_REVISION_ID,
-        version_five.catalogue().schemas().to_vec(),
-        Vec::new(),
-        version_five.catalogue().value_types().to_vec(),
-        version_five.catalogue().type_bindings().to_vec(),
-        version_five.catalogue().functions().to_vec(),
-    )
-    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
-    Ok(StandardLibraryV6Manifest { catalogue })
-}
-/// The source-independent facts required to recognise the `orna.std/7`
-/// standard library (ADR 0019).
-#[derive(Clone, Debug)]
-pub struct StandardLibraryV7Manifest {
-    catalogue: CatalogueSnapshot,
-}
-
-impl StandardLibraryV7Manifest {
-    pub const fn standard_library_version(&self) -> &'static str {
-        STANDARD_LIBRARY_V7_VERSION_IDENTITY
-    }
-    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
-        STANDARD_LIBRARY_V7_REVISION_ID
-    }
-    pub const fn language_version(&self) -> &'static str {
-        LANGUAGE_VERSION_IDENTITY
-    }
-    pub const fn catalogue(&self) -> &CatalogueSnapshot {
-        &self.catalogue
-    }
-}
-
-/// Builds and validates the append-only V7 catalogue over V6.
-pub fn standard_library_v7_manifest()
--> Result<StandardLibraryV7Manifest, StandardLibraryManifestError> {
-    let version_six = standard_library_v6_manifest()?;
-    let mut functions = version_six.catalogue().functions().to_vec();
-    functions.push(FunctionDefinition::new(
-        STD_UI_WINDOW_FUNCTION_ID,
-        semantic_name("std.ui.window", ["std", "ui", "window"])?,
-        FunctionDomain::Client,
-        vec![
-            ParameterDefinition::new(
-                STD_UI_WINDOW_TITLE_PARAMETER_ID,
-                "title",
-                0,
-                ResolvedType::value(CHARACTER_LARGE_OBJECT_TYPE_ID),
-                None,
-            ),
-            ParameterDefinition::new(
-                STD_UI_WINDOW_CONTENT_PARAMETER_ID,
-                "content",
-                1,
-                ResolvedType::value(STD_UI_TYPE_ID),
-                None,
-            ),
-        ],
-        FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-        STD_UI_WINDOW_FUNCTION_REVISION_ID,
-        FunctionSecurity::Invoker,
-        None,
-        FunctionVolatility::Immutable,
-    ));
-    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
-        STANDARD_CATALOGUE_V7_REVISION_ID,
-        version_six.catalogue().schemas().to_vec(),
-        Vec::new(),
-        version_six.catalogue().value_types().to_vec(),
-        version_six.catalogue().type_bindings().to_vec(),
-        functions,
-    )
-    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
-    Ok(StandardLibraryV7Manifest { catalogue })
-}
-/// The source-independent facts required to recognise the `orna.std/8`
-/// standard library (Work ADR 0087).
-#[derive(Clone, Debug)]
-pub struct StandardLibraryV8Manifest {
-    catalogue: CatalogueSnapshot,
-}
-
-impl StandardLibraryV8Manifest {
-    pub const fn standard_library_version(&self) -> &'static str {
-        STANDARD_LIBRARY_V8_VERSION_IDENTITY
-    }
-
-    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
-        STANDARD_LIBRARY_V8_REVISION_ID
-    }
-
-    pub const fn language_version(&self) -> &'static str {
-        LANGUAGE_VERSION_IDENTITY
-    }
-
-    pub const fn source_bundle(&self) -> SourceBundleId {
-        STANDARD_SOURCE_V8_BUNDLE_ID
-    }
-
-    pub const fn source_revision(&self) -> SourceRevisionId {
-        STANDARD_SOURCE_V8_REVISION_ID
-    }
-
-    pub const fn types_source_unit(&self) -> SourceUnitId {
-        STD_TYPES_SOURCE_UNIT_ID
-    }
-
-    pub const fn invoke_source_unit(&self) -> SourceUnitId {
-        STD_INVOKE_SOURCE_UNIT_ID
-    }
-
-    pub const fn output_source_unit(&self) -> SourceUnitId {
-        STD_OUTPUT_SOURCE_UNIT_ID
-    }
-
-    pub const fn ui_source_unit(&self) -> SourceUnitId {
-        STD_UI_SOURCE_UNIT_ID
-    }
-
-    pub const fn json_source_unit(&self) -> SourceUnitId {
-        STD_JSON_SOURCE_UNIT_ID
-    }
-
-    pub const fn data_source_unit(&self) -> SourceUnitId {
-        STD_DATA_SOURCE_UNIT_ID
-    }
-
-    pub const fn types_source_logical_path(&self) -> &'static str {
-        SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn invoke_source_logical_path(&self) -> &'static str {
-        STD_INVOKE_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn output_source_logical_path(&self) -> &'static str {
-        STD_OUTPUT_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn ui_source_logical_path(&self) -> &'static str {
-        STD_UI_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn json_source_logical_path(&self) -> &'static str {
-        STD_JSON_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn data_source_logical_path(&self) -> &'static str {
-        STD_DATA_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn catalogue(&self) -> &CatalogueSnapshot {
-        &self.catalogue
-    }
-}
-
-/// Builds and validates the append-only V8 catalogue over V7.
-pub fn standard_library_v8_manifest()
--> Result<StandardLibraryV8Manifest, StandardLibraryManifestError> {
-    let version_seven = standard_library_v7_manifest()?;
-    let mut schemas = version_seven.catalogue().schemas().to_vec();
-    schemas.push(SchemaDefinition::new(
-        STD_DATA_SCHEMA_ID,
-        semantic_name("std.data", ["std", "data"])?,
-    ));
-    let mut value_types = version_seven.catalogue().value_types().to_vec();
-    value_types.push(ValueTypeDefinition::opaque(
-        STD_DATA_ROWS_TYPE_ID,
-        semantic_name(STD_DATA_ROWS_SEMANTIC_NAME, ["std", "data", "rows"])?,
-        STD_DATA_ROWS_CONTRACT,
-    ));
-    let mut type_bindings = version_seven.catalogue().type_bindings().to_vec();
-    let rows_binding_name = semantic_name(STD_DATA_ROWS_EXPORT_NAME, ["std", "rows"])?;
-    let rows_binding_lookup = TypeLookupName::qualified(rows_binding_name.clone());
-    let rows_binding =
-        TypeBinding::qualified(rows_binding_name, STD_DATA_ROWS_TYPE_ID).map_err(|source| {
-            StandardLibraryManifestError::TypeBinding {
-                name: rows_binding_lookup.clone(),
-                source,
-            }
-        })?;
-    if rows_binding.id() != STD_DATA_ROWS_TYPE_BINDING_ID {
-        return Err(StandardLibraryManifestError::TypeBindingIdentityMismatch {
-            name: rows_binding_lookup,
-            expected: STD_DATA_ROWS_TYPE_BINDING_ID,
-            actual: rows_binding.id(),
-        });
-    }
-    type_bindings.push(rows_binding);
-    let mut functions = version_seven.catalogue().functions().to_vec();
-    functions.push(FunctionDefinition::new(
-        STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
-        semantic_name(
-            "std.terminal.present_table",
-            ["std", "terminal", "present_table"],
-        )?,
-        FunctionDomain::Server,
-        vec![ParameterDefinition::new(
-            STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
-            "p_rows",
-            0,
-            ResolvedType::value(STD_DATA_ROWS_TYPE_ID),
-            None,
-        )],
-        FunctionReturn::Single(ResolvedType::value(STD_TERMINAL_DOCUMENT_TYPE_ID)),
-        STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
-        FunctionSecurity::Invoker,
-        Some(FunctionTransaction::ReadOnly),
-        FunctionVolatility::Stable,
-    ));
-    functions.sort_by_key(|function| function.id());
-    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
-        STANDARD_CATALOGUE_V8_REVISION_ID,
-        schemas,
-        Vec::new(),
-        value_types,
-        type_bindings,
-        functions,
-    )
-    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
-    Ok(StandardLibraryV8Manifest { catalogue })
-}
-
-/// The source-independent facts required to recognise the `orna.std/9`
-/// standard library (Work ADR 0088).
-#[derive(Clone, Debug)]
-pub struct StandardLibraryV9Manifest {
-    catalogue: CatalogueSnapshot,
-}
-
-impl StandardLibraryV9Manifest {
-    pub const fn standard_library_version(&self) -> &'static str {
-        STANDARD_LIBRARY_V9_VERSION_IDENTITY
-    }
-
-    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
-        STANDARD_LIBRARY_V9_REVISION_ID
-    }
-
-    pub const fn language_version(&self) -> &'static str {
-        LANGUAGE_VERSION_IDENTITY
-    }
-
-    pub const fn source_bundle(&self) -> SourceBundleId {
-        STANDARD_SOURCE_V9_BUNDLE_ID
-    }
-
-    pub const fn source_revision(&self) -> SourceRevisionId {
-        STANDARD_SOURCE_V9_REVISION_ID
-    }
-
-    pub const fn types_source_unit(&self) -> SourceUnitId {
-        STD_TYPES_SOURCE_UNIT_ID
-    }
-
-    pub const fn invoke_source_unit(&self) -> SourceUnitId {
-        STD_INVOKE_SOURCE_UNIT_ID
-    }
-
-    pub const fn output_source_unit(&self) -> SourceUnitId {
-        STD_OUTPUT_SOURCE_UNIT_ID
-    }
-
-    pub const fn ui_source_unit(&self) -> SourceUnitId {
-        STD_UI_SOURCE_UNIT_ID
-    }
-
-    pub const fn json_source_unit(&self) -> SourceUnitId {
-        STD_JSON_SOURCE_UNIT_ID
-    }
-
-    pub const fn data_source_unit(&self) -> SourceUnitId {
-        STD_DATA_SOURCE_UNIT_ID
-    }
-
-    pub const fn types_source_logical_path(&self) -> &'static str {
-        SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn invoke_source_logical_path(&self) -> &'static str {
-        STD_INVOKE_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn output_source_logical_path(&self) -> &'static str {
-        STD_OUTPUT_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn ui_source_logical_path(&self) -> &'static str {
-        STD_UI_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn json_source_logical_path(&self) -> &'static str {
-        STD_JSON_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn data_source_logical_path(&self) -> &'static str {
-        STD_DATA_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn catalogue(&self) -> &CatalogueSnapshot {
-        &self.catalogue
-    }
-}
-
-/// Builds and validates the append-only V9 catalogue over V8.
-pub fn standard_library_v9_manifest()
--> Result<StandardLibraryV9Manifest, StandardLibraryManifestError> {
-    let version_eight = standard_library_v8_manifest()?;
-    let mut functions = version_eight.catalogue().functions().to_vec();
-    functions.sort_by_key(|function| function.id());
-    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
-        STANDARD_CATALOGUE_V9_REVISION_ID,
-        version_eight.catalogue().schemas().to_vec(),
-        Vec::new(),
-        version_eight.catalogue().value_types().to_vec(),
-        version_eight.catalogue().type_bindings().to_vec(),
-        functions,
-    )
-    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
-    Ok(StandardLibraryV9Manifest { catalogue })
-}
-
 fn build_type_bindings(
     expected_ids: &[[u8; 16]],
 ) -> Result<Vec<TypeBinding>, StandardLibraryManifestError> {
@@ -2134,173 +1265,6 @@ pub fn prepare_standard_upgrade(
     )
 }
 
-/// Prepares the append-only `orna.std/1` to `orna.std/2` standard upgrade.
-///
-/// This is the only path that selects `orna.std/2`. It fails closed when the
-/// active revision already pins any standard snapshot (which includes V2),
-/// when the active revision is not the empty expected base, or when the
-/// immutable V1 snapshot cannot be retained and verified first. It retains
-/// and verifies V1 before it prepares V2 so a fresh database can persist V1
-/// as retained historical standard state; it never modifies V1 semantics.
-pub fn prepare_standard_upgrade_v1_to_v2(
-    active: &ActiveDatabaseRevision,
-) -> Result<StandardUpgrade, StandardUpgradeError> {
-    if let Some(installed) = active.catalogue_hash_context().standard() {
-        return Err(StandardUpgradeError::Prepare {
-            source: PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
-                revision: installed.revision(),
-            },
-        });
-    }
-
-    let version_one = retained_standard_library_snapshot()
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    verify_standard_library_snapshot(version_one)
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-
-    prepare_standard_upgrade_with(
-        active,
-        retained_standard_library_v2_snapshot,
-        verify_standard_library_v2_snapshot,
-        check_standard_library_source,
-        prepare_checked_standard_upgrade,
-    )
-}
-
-/// Prepares the append-only `orna.std/2` to `orna.std/3` standard upgrade
-/// (work ADR 0059).
-///
-/// This is the only path that selects `orna.std/3`. It fails closed unless
-/// the active revision pins exactly `orna.std/2` (an absent parent or a wrong
-/// installed revision). It retains and verifies the
-/// immutable `orna.std/2` parent snapshot before it prepares V3: V3 is the
-/// append-only child, so the parent must be present and coherent; the
-/// PostgreSQL apply path persists the parent alongside the child in the same
-/// activation transaction. It then retains and verifies V3, checks the V3
-/// snapshot with the compiler's V3 branch, and prepares the companion
-/// application revision through the shared `prepare_checked_standard_upgrade`
-/// machinery, exactly as the V1-to-V2 path does.
-pub fn prepare_standard_upgrade_v2_to_v3(
-    active: &ActiveDatabaseRevision,
-) -> Result<StandardUpgrade, StandardUpgradeError> {
-    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V2_REVISION_ID)?;
-
-    let version_two = retained_standard_library_v2_snapshot()
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    verify_standard_library_v2_snapshot(version_two)
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-
-    prepare_standard_upgrade_with(
-        active,
-        retained_standard_library_v3_snapshot,
-        verify_standard_library_v3_snapshot,
-        check_standard_library_source,
-        prepare_checked_standard_upgrade,
-    )
-}
-
-/// Prepares the append-only `orna.std/3` to `orna.std/4` standard upgrade
-/// (work ADR 0062).
-///
-/// This is the only path that selects `orna.std/4`. It fails closed unless
-/// the active revision pins exactly `orna.std/3` (an absent parent or a wrong
-/// installed revision). It retains and verifies the
-/// immutable `orna.std/3` parent snapshot before it prepares V4: V4 is the
-/// append-only child, so the parent must be present and coherent; the
-/// PostgreSQL apply path persists the parent alongside the child in the same
-/// activation transaction. It then retains and verifies V4, checks the V4
-/// snapshot with the compiler's V4 branch, and prepares the companion
-/// application revision through the shared `prepare_checked_standard_upgrade`
-/// machinery, exactly as the V2-to-V3 path does.
-pub fn prepare_standard_upgrade_v3_to_v4(
-    active: &ActiveDatabaseRevision,
-) -> Result<StandardUpgrade, StandardUpgradeError> {
-    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V3_REVISION_ID)?;
-
-    let version_three = retained_standard_library_v3_snapshot()
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    verify_standard_library_v3_snapshot(version_three)
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-
-    prepare_standard_upgrade_with(
-        active,
-        retained_standard_library_v4_snapshot,
-        verify_standard_library_v4_snapshot,
-        check_standard_library_source,
-        prepare_checked_standard_upgrade,
-    )
-}
-
-/// Prepares the append-only `orna.std/4` to `orna.std/5` standard upgrade
-/// (ADR 0075). It fails closed unless `orna.std/4` is the installed parent;
-/// the retained V4 parent is verified before the V5 child.
-pub fn prepare_standard_upgrade_v4_to_v5(
-    active: &ActiveDatabaseRevision,
-) -> Result<StandardUpgrade, StandardUpgradeError> {
-    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V4_REVISION_ID)?;
-
-    let version_four = retained_standard_library_v4_snapshot()
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    verify_standard_library_v4_snapshot(version_four)
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    prepare_standard_upgrade_with(
-        active,
-        retained_standard_library_v5_snapshot,
-        verify_standard_library_v5_snapshot,
-        check_standard_library_source,
-        prepare_checked_standard_upgrade,
-    )
-}
-
-/// Prepares the append-only `orna.std/5` to `orna.std/6` standard upgrade
-/// (ADR 0079). It fails closed unless `orna.std/5` is the installed parent;
-/// the retained V5 parent is verified before the V6 child.
-pub fn prepare_standard_upgrade_v5_to_v6(
-    active: &ActiveDatabaseRevision,
-) -> Result<StandardUpgrade, StandardUpgradeError> {
-    let _ = active;
-    Err(StandardUpgradeError::UnsupportedStandardUpgrade {
-        from: STANDARD_LIBRARY_V5_REVISION_ID,
-        to: STANDARD_LIBRARY_V6_REVISION_ID,
-    })
-}
-/// Retired `orna.std/8` to `orna.std/9` upgrade entrypoint. Verification of
-/// the V8 parent fails closed before a V9 child can be prepared.
-pub fn prepare_standard_upgrade_v8_to_v9(
-    active: &ActiveDatabaseRevision,
-) -> Result<StandardUpgrade, StandardUpgradeError> {
-    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V8_REVISION_ID)?;
-
-    let version_eight = retained_standard_library_v8_snapshot()
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    verify_standard_library_v8_snapshot(version_eight)
-        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    prepare_standard_upgrade_with(
-        active,
-        retained_standard_library_v9_snapshot,
-        verify_standard_library_v9_snapshot,
-        check_standard_library_source,
-        prepare_checked_standard_upgrade,
-    )
-}
-
-fn require_standard_upgrade_parent(
-    active: &ActiveDatabaseRevision,
-    expected: StandardLibraryRevisionId,
-) -> Result<(), StandardUpgradeError> {
-    match active.catalogue_hash_context().standard() {
-        Some(installed) if installed.revision() == expected => Ok(()),
-        Some(installed) => Err(StandardUpgradeError::Prepare {
-            source: PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
-                revision: installed.revision(),
-            },
-        }),
-        None => Err(StandardUpgradeError::StandardLibrary {
-            source: StandardLibraryError::Unavailable,
-        }),
-    }
-}
-
 fn prepare_standard_upgrade_with<Retain, Verify, Check, Prepare>(
     active: &ActiveDatabaseRevision,
     retain: Retain,
@@ -2338,8 +1302,11 @@ where
 /// reconciles every declaration with the source-independent manifest, and
 /// verifies the accepted source and standard-library hash goldens. It does not
 /// invoke the compiler and does not grant standard-library authority.
-pub fn retained_standard_library_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_REVISION_ID })
+pub fn retained_standard_library_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError>
+{
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_REVISION_ID,
+    })
 }
 
 /// Verifies a retained standard snapshot and returns the authority capability.
@@ -2349,7 +1316,9 @@ pub fn retained_standard_library_snapshot() -> Result<StandardLibrarySnapshot, S
 pub fn verify_standard_library_snapshot(
     _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_REVISION_ID })
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_REVISION_ID,
+    })
 }
 
 /// Retains the canonical executable standard source as an unverified snapshot.
@@ -2360,8 +1329,11 @@ pub fn verify_standard_library_snapshot(
 /// the one retained `StandardExecutable` through the canonical compiler
 /// checker and canonical digest encoders. It does not run the compiler
 /// pipeline and does not grant standard-library authority.
-pub fn retained_standard_library_v2_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V2_REVISION_ID })
+pub fn retained_standard_library_v2_snapshot()
+-> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V2_REVISION_ID,
+    })
 }
 
 /// Verifies a retained executable standard snapshot and returns the authority capability.
@@ -2372,7 +1344,9 @@ pub fn retained_standard_library_v2_snapshot() -> Result<StandardLibrarySnapshot
 pub fn verify_standard_library_v2_snapshot(
     _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V2_REVISION_ID })
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V2_REVISION_ID,
+    })
 }
 
 /// Retains the canonical output standard source as an unverified snapshot.
@@ -2383,8 +1357,11 @@ pub fn verify_standard_library_v2_snapshot(
 /// the V2 `std.invoke.echo` executable unchanged through the canonical
 /// compiler checker and canonical digest encoders. It does not run the
 /// compiler pipeline and does not grant standard-library authority.
-pub fn retained_standard_library_v3_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V3_REVISION_ID })
+pub fn retained_standard_library_v3_snapshot()
+-> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V3_REVISION_ID,
+    })
 }
 
 /// Verifies a retained output standard snapshot and returns the authority
@@ -2397,7 +1374,9 @@ pub fn retained_standard_library_v3_snapshot() -> Result<StandardLibrarySnapshot
 pub fn verify_standard_library_v3_snapshot(
     _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V3_REVISION_ID })
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V3_REVISION_ID,
+    })
 }
 
 /// Retains the canonical UI standard source as an unverified snapshot.
@@ -2409,8 +1388,11 @@ pub fn verify_standard_library_v3_snapshot(
 /// compiler checker and canonical digest encoders (work ADR 0062). It does
 /// not run the compiler pipeline and does not grant standard-library
 /// authority.
-pub fn retained_standard_library_v4_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V4_REVISION_ID })
+pub fn retained_standard_library_v4_snapshot()
+-> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V4_REVISION_ID,
+    })
 }
 
 /// Verifies a retained UI standard snapshot and returns the authority
@@ -2423,171 +1405,85 @@ pub fn retained_standard_library_v4_snapshot() -> Result<StandardLibrarySnapshot
 pub fn verify_standard_library_v4_snapshot(
     _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V4_REVISION_ID })
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V4_REVISION_ID,
+    })
 }
 
 /// V5 predates the pinned Orna 1.0 profile and is no longer selectable.
-pub fn retained_standard_library_v5_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V5_REVISION_ID })
+pub fn retained_standard_library_v5_snapshot()
+-> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V5_REVISION_ID,
+    })
 }
 
 /// Rejects explicitly supplied V5 snapshots after source retirement.
 pub fn verify_standard_library_v5_snapshot(
     _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V5_REVISION_ID })
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V5_REVISION_ID,
+    })
 }
 
 /// Retains the canonical V6 action standard source as an unverified snapshot.
-pub fn retained_standard_library_v6_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V6_REVISION_ID })
+pub fn retained_standard_library_v6_snapshot()
+-> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V6_REVISION_ID,
+    })
 }
 
 /// Verifies a retained V6 action standard snapshot and returns authority.
 pub fn verify_standard_library_v6_snapshot(
     _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V6_REVISION_ID })
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V6_REVISION_ID,
+    })
 }
 /// Rejects caller-supplied historical V7 snapshots after source retirement.
 pub fn verify_standard_library_v7_snapshot(
     _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V7_REVISION_ID })
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V7_REVISION_ID,
+    })
 }
 
 /// V8 Rows source is retired; requesting its historical snapshot fails closed.
-pub fn retained_standard_library_v8_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V8_REVISION_ID })
+pub fn retained_standard_library_v8_snapshot()
+-> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V8_REVISION_ID,
+    })
 }
 
 /// Rejects supplied V8 Rows snapshots after source retirement.
 pub fn verify_standard_library_v8_snapshot(
     _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V8_REVISION_ID })
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V8_REVISION_ID,
+    })
 }
 
 /// V9 predates the pinned Orna 1.0 standard and is no longer retained.
-pub fn retained_standard_library_v9_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V9_REVISION_ID })
+pub fn retained_standard_library_v9_snapshot()
+-> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V9_REVISION_ID,
+    })
 }
 
 /// Historical V9 verification fails closed after its source bundle retired.
 pub fn verify_standard_library_v9_snapshot(
     _snapshot: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V9_REVISION_ID })
-}
-
-/// Source-independent facts required to recognise `orna.std/10`.
-#[derive(Clone, Debug)]
-pub struct StandardLibraryV10Manifest {
-    catalogue: CatalogueSnapshot,
-}
-impl StandardLibraryV10Manifest {
-    pub const fn standard_library_version(&self) -> &'static str {
-        STANDARD_LIBRARY_V10_VERSION_IDENTITY
-    }
-
-    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
-        STANDARD_LIBRARY_V10_REVISION_ID
-    }
-
-    pub const fn language_version(&self) -> &'static str {
-        LANGUAGE_VERSION_IDENTITY
-    }
-
-    pub const fn source_bundle(&self) -> SourceBundleId {
-        STANDARD_SOURCE_V10_BUNDLE_ID
-    }
-
-    pub const fn source_revision(&self) -> SourceRevisionId {
-        STANDARD_SOURCE_V10_REVISION_ID
-    }
-
-    pub const fn types_source_unit(&self) -> SourceUnitId {
-        STD_TYPES_SOURCE_UNIT_ID
-    }
-
-    pub const fn invoke_source_unit(&self) -> SourceUnitId {
-        STD_INVOKE_SOURCE_UNIT_ID
-    }
-
-    pub const fn output_source_unit(&self) -> SourceUnitId {
-        STD_OUTPUT_SOURCE_UNIT_ID
-    }
-
-    pub const fn ui_source_unit(&self) -> SourceUnitId {
-        STD_UI_SOURCE_UNIT_ID
-    }
-
-    pub const fn json_source_unit(&self) -> SourceUnitId {
-        STD_JSON_SOURCE_UNIT_ID
-    }
-
-    pub const fn data_source_unit(&self) -> SourceUnitId {
-        STD_DATA_SOURCE_UNIT_ID
-    }
-
-    pub const fn cli_source_unit(&self) -> SourceUnitId {
-        STD_CLI_SOURCE_UNIT_ID
-    }
-
-    pub const fn cli_source_logical_path(&self) -> &'static str {
-        STD_CLI_SOURCE_LOGICAL_PATH
-    }
-
-    pub const fn catalogue(&self) -> &CatalogueSnapshot {
-        &self.catalogue
-    }
-}
-/// Builds the append-only V10 catalogue over V9.
-pub fn standard_library_v10_manifest()
--> Result<StandardLibraryV10Manifest, StandardLibraryManifestError> {
-    let version_nine = standard_library_v9_manifest()?;
-    let mut schemas = version_nine.catalogue().schemas().to_vec();
-    schemas.push(SchemaDefinition::new(
-        STD_CLI_SCHEMA_ID,
-        semantic_name("std.cli", ["std", "cli"])?,
-    ));
-    let mut functions = version_nine.catalogue().functions().to_vec();
-    functions.push(FunctionDefinition::new(
-        STD_CLI_REPL_FUNCTION_ID,
-        semantic_name("std.cli.repl", ["std", "cli", "repl"])?,
-        FunctionDomain::Client,
-        Vec::new(),
-        FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-        STD_CLI_REPL_FUNCTION_REVISION_ID,
-        FunctionSecurity::Invoker,
-        None,
-        FunctionVolatility::Volatile,
-    ));
-    functions.sort_by_key(|function| function.id());
-    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
-        STANDARD_CATALOGUE_V10_REVISION_ID,
-        schemas,
-        version_nine.catalogue().object_types().to_vec(),
-        version_nine.catalogue().value_types().to_vec(),
-        version_nine.catalogue().type_bindings().to_vec(),
-        functions,
-    )
-    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
-    Ok(StandardLibraryV10Manifest { catalogue })
-}
-
-/// The pre-1.0 V10 CLI source is no longer bundled or selected as a product
-/// standard. Historical V10 snapshots can still be verified when explicitly
-/// supplied by their stored revision; no replacement source is synthesized.
-pub fn retained_standard_library_v10_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V10_REVISION_ID })
-}
-
-/// Verifies an explicitly supplied historical V10 CLI session snapshot.
-pub fn verify_standard_library_v10_snapshot(
-    _snapshot: StandardLibrarySnapshot,
-) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
-    Err(StandardLibraryError::UnsupportedRevision { revision: STANDARD_LIBRARY_V10_REVISION_ID })
+    Err(StandardLibraryError::UnsupportedRevision {
+        revision: STANDARD_LIBRARY_V9_REVISION_ID,
+    })
 }
 
 /// Selects and verifies one of the retained standard-library snapshots.
