@@ -1,0 +1,8 @@
+pub fn ingest(samples: Stream<Sample>) =
+    samples | for_each(sample => {
+        Reading.insert({
+            sensor: sample.sensor,
+            sequence: sample.sequence,
+            value: sample.value,
+        });
+    });
