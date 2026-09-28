@@ -1608,7 +1608,7 @@ mod tests {
     fn fixture_profile() -> CompactOvbProfile {
         const SOURCE: &str = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../reference/Orna-1.0.0/examples/valid/table-explicit-key.orna"
+            "/../orna-semantic-v1/tests/fixtures/contact-schema.orna"
         ));
         let header = SOURCE
             .lines()
@@ -1645,19 +1645,23 @@ mod tests {
                 .trim_end_matches(',')
                 .split_once(':')
                 .expect("fixture stored field has a type");
-            let id = match name.trim() {
-                "name" => KEY_B,
-                "email" => [0x22; 16],
+            let ty = ty.trim();
+            let (id, field_type) = match name.trim() {
+                "name" => (KEY_B, primitive(ty)),
+                "emails" => {
+                    let element_type = ty
+                        .strip_prefix('[')
+                        .and_then(|ty| ty.strip_suffix(']'))
+                        .expect("fixture email field is a list");
+                    (
+                        [0x22; 16],
+                        OvbRaw::Array(vec![
+                            OvbRaw::Int(1.into()),
+                            primitive(element_type.trim()),
+                        ]),
+                    )
+                }
                 other => panic!("unexpected Contact field {other}"),
-            };
-            let ty = ty.trim().trim_end_matches(',');
-            let optional = ty.ends_with('?');
-            let base_type = ty.trim_end_matches('?').trim();
-            let field_type = primitive(base_type);
-            let field_type = if optional {
-                OvbRaw::Array(vec![OvbRaw::Int(9.into()), field_type])
-            } else {
-                field_type
             };
             fields.push(OvbRaw::Array(vec![
                 uuid_raw(id),
@@ -1687,7 +1691,10 @@ mod tests {
                     OvbRaw::Array(vec![uuid_raw(KEY_B), OvbRaw::Text(name.to_owned())]),
                     OvbRaw::Array(vec![
                         uuid_raw([0x22; 16]),
-                        email.map_or(OvbRaw::Null, |value| OvbRaw::Text(value.to_owned())),
+                        email.map_or_else(
+                            || OvbRaw::Array(vec![]),
+                            |value| OvbRaw::Array(vec![OvbRaw::Text(value.to_owned())]),
+                        ),
                     ]),
                 ]),
             ])),
@@ -1843,11 +1850,17 @@ mod tests {
                         value: fixture_row("changing", "Final", None).encode().unwrap(),
                     },
                 ),
+                publication_mutation(
+                    &profile,
+                    7,
+                    "absent-delete",
+                    PublicationMutationState::Deletion,
+                ),
             ],
         );
 
         let raw = lower_publication_freeze(&profile, &freeze).unwrap();
-        assert_eq!(raw.mutations.len(), 6);
+        assert_eq!(raw.mutations.len(), 7);
         assert_eq!(raw.candidate_digest, freeze.candidate_digest);
         let folded = base.fold_writer_input(&raw).unwrap();
         base.consume_writer_input(&folded).unwrap();
