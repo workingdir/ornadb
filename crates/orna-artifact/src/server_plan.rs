@@ -16,7 +16,7 @@
 //! An expression begins with its kind tag, followed by its resolved type and
 //! nullability byte, then its kind payload. Identifiers are their raw opaque
 //! 16-byte Orna representations. This format contains no source names, source
-//! spans, PostgreSQL names, or Rust serialisation data.
+//! spans, backend-specific names, or Rust serialisation data.
 //!
 //! Version 2 uses the same envelope, scan, and projection encoding. It fixes
 //! selection to `REF(input 0) = selector_parameter`, adds the private selector
