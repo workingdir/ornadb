@@ -73,9 +73,9 @@ fn repository_with_object_format(format: &str) -> Option<TempDir> {
     }
     git(
         temp.path(),
-        &["config", "user.email", "kieran@drewett.dev"],
+        &["config", "user.email", "test@example.invalid"],
     );
-    git(temp.path(), &["config", "user.name", "kierandrewett"]);
+    git(temp.path(), &["config", "user.name", "Repository test"]);
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(
         temp.path().join("main.orna"),
@@ -92,9 +92,9 @@ fn repository() -> TempDir {
     git(temp.path(), &["init", "-b", "main"]);
     git(
         temp.path(),
-        &["config", "user.email", "kieran@drewett.dev"],
+        &["config", "user.email", "test@example.invalid"],
     );
-    git(temp.path(), &["config", "user.name", "kierandrewett"]);
+    git(temp.path(), &["config", "user.name", "Repository test"]);
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(
         temp.path().join("main.orna"),
