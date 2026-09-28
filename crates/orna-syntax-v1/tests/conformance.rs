@@ -23,13 +23,21 @@ fn fixture(name: &str) -> String {
 
 #[test]
 fn accepts_reference_language_shapes() {
-    for name in [
-        "valid-shape-1.orna",
-        "valid-shape-2.orna",
-        "valid-shape-3.orna",
+    for (name, source) in [
+        (
+            "valid-shape-1.orna",
+            include_str!("fixtures/valid-shape-1.orna"),
+        ),
+        (
+            "valid-shape-2.orna",
+            include_str!("fixtures/valid-shape-2.orna"),
+        ),
+        (
+            "valid-shape-3.orna",
+            include_str!("fixtures/valid-shape-3.orna"),
+        ),
     ] {
-        let source = fixture(name);
-        let parsed = parse_module(&source);
+        let parsed = parse_module(source);
         assert!(parsed.is_ok(), "{name}: {:?}", parsed.diagnostics);
     }
 }
