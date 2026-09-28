@@ -15,7 +15,8 @@ pub use compact::{
     CompactExactKeySource,
     CompactKeyError, CompactKeyIdentity, CompactLogicalKeyError, CompactLogicalReader,
     CompactLoweringError, CompactOvbProfile, CompactWriterInput, CompactWriterMutation,
-    CompactWriterMutationState, COMPACT_STORAGE_PROFILE, OVB_PROFILE,
+    CompactWriterMutationState, CompactWriterBatch, CompactWriterRow, COMPACT_STORAGE_PROFILE,
+    OVB_PROFILE,
 };
 pub use compact_parquet::{CompactParquetError, CompactParquetKeySource};
 pub use publication_policy::{
@@ -714,14 +715,17 @@ impl RuntimePublicationCoordinator {
             .ok_or(Error::InvalidTransition)?;
         let base = load_compact_base_at(repository, &expected_head, profile)?;
         let writer_input = lower_compact_freeze(profile, freeze)?;
-        let writer_input = base
+        let folded_input = base
             .fold_writer_input(&writer_input)
             .map_err(|_| Error::InvalidTransition)?;
-        base.consume_writer_input(&writer_input)
+        base.consume_writer_input(&folded_input)
             .map_err(|_| Error::InvalidTransition)?;
-        validate_manifest_generation_binding(plan.manifest(), &writer_input)?;
+        validate_manifest_generation_binding(plan.manifest(), &folded_input)?;
+        let writer_batch = base
+            .prepare_writer_batch(profile, &writer_input)
+            .map_err(|_| Error::InvalidTransition)?;
         let expected = base
-            .apply_writer_input(&writer_input)
+            .apply_writer_batch(&writer_batch)
             .map_err(|_| Error::InvalidTransition)?;
         Self::publish_compact_candidate_and_complete(
             repository,
