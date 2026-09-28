@@ -13,6 +13,7 @@ pub(super) enum Invocation {
     Exercise,
     SensorsIngest,
     LibraryLend { book_id: String, borrower: String },
+    ProjectMain,
     ProjectFunction(String),
 }
 
@@ -283,7 +284,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                 })
             }
             Some(target) => Command::Run(Invocation::ProjectFunction(target.to_owned())),
-            None => Command::Run(Invocation::ProjectFunction("main.main".into())),
+            None => Command::Run(Invocation::ProjectMain),
         },
         Some(_) => {
             return Err(Diagnostic::usage(
@@ -331,7 +332,7 @@ mod tests {
         );
         assert_eq!(
             parse_cli(&args(&["run"])).unwrap().command,
-            Command::Run(Invocation::ProjectFunction("main.main".into()))
+            Command::Run(Invocation::ProjectMain)
         );
         assert_eq!(
             parse_cli(&args(&["fetch"])).unwrap().command,
