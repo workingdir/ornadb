@@ -2740,9 +2740,10 @@ fn retains_exact_source_and_syntax_text_in_bundle_order() {
 
 #[test]
 fn parses_later_units_after_an_earlier_syntax_error() {
+    let retained_source = include_str!("tests/fixtures/retained-valid-source.orna");
     let bundle = SourceBundle::new([
         SourceUnit::new("broken.orna", "CREATE SCHEMA crm.;"),
-        SourceUnit::new("valid.orna", "-- retained\nCREATE SCHEMA tasks;"),
+        SourceUnit::new("valid.orna", retained_source),
     ])
     .unwrap();
 
@@ -2751,7 +2752,7 @@ fn parses_later_units_after_an_earlier_syntax_error() {
     assert_eq!(report.units().len(), 2);
     assert_eq!(
         report.units()[1].syntax_text(),
-        "-- retained\nCREATE SCHEMA tasks;"
+        retained_source
     );
     assert_eq!(report.diagnostics().len(), 1);
     assert_eq!(
