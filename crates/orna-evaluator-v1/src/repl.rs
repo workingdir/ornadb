@@ -1260,7 +1260,9 @@ mod tests {
     #[test]
     fn lexical_callable_shadows_an_admitted_module_sibling() {
         let mut functions = library_functions();
-        let parsed = parse_module("fn local(add) = add(21, 21);");
+        let parsed = parse_module(include_str!(
+            "fixtures/repl-lexical-callable-shadowing.orna"
+        ));
         assert!(parsed.is_ok());
         let Declaration::Function { signature, body } =
             parsed.value.items.into_iter().next().unwrap().declaration
