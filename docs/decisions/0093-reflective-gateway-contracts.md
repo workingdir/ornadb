@@ -91,3 +91,11 @@ under this accepted decision. The controlling requirements are
 JSON-RPC gateway. This disposition adds no gateway endpoint, identity,
 authentication, conversion, error, or lifecycle behavior. Reconsider the
 adapter only after a separately accepted contract defines that behavior.
+
+## Work-item disposition: authenticated transport and artifact exchange
+
+Beads task `ornadb-1787784775745-13-5e17c033` (GitHub #13) requested authenticated remote transport and artifact exchange. The accepted OrnaDB 1.0 contract already defines the interoperable authenticated live-session boundary: `orna.present.v1`, session creation/resumption/deletion, cookie-authenticated WebSocket upgrades, and the TLS/perimeter constraints in `source/30-protocol.md`, `source/26-security.md`, and `source/28-serving.md`. The existing live host and client implement those specified paths. `source/24-git-history.md` defines remote repository exchange through ordinary Git operations and synchronization of required `refs/orna/*` references; the repository transport implements that behavior.
+
+The frozen reference does not define a separate artifact upload/download API or wire format. `ORNA-SYS-072` requires source-snapshot and compatibility metadata in build artifacts; it does not define remote artifact exchange. The relevant normative search covered `Orna-1.0.0.md`, `source/15-system.md`, `source/24-git-history.md`, `source/26-security.md`, `source/28-serving.md`, `source/30-protocol.md`, `api/`, and the requirement records under `tests/`. The only artifact-transfer behavior defined for remotes is the ordinary Git path in `ORNA-REMOTE-001` through `ORNA-REMOTE-005`.
+
+Resolve this 1.0 work item by retaining the specified authenticated live and Git transport behavior and deferring any separate artifact-exchange service. Do not add endpoints, credential formats, artifact identities, or transfer semantics without an accepted normative contract. A later version may define those details in a separately accepted specification.
