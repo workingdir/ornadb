@@ -3094,6 +3094,11 @@ fn admitted_leaf_values_construct_in_option_list_and_map() {
         };
         assert_eq!(elements, std::slice::from_ref(&value));
 
+        // ORNA-FLOAT-003 excludes Float from default hash-key positions.
+        if descriptor == TypeDescriptor::named(MAP_FLOAT) {
+            continue;
+        }
+
         let map = RuntimeValue::map(
             &active,
             TypeDescriptor::map(descriptor.clone(), TypeDescriptor::named(MAP_BOOLEAN)).unwrap(),
