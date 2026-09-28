@@ -2979,12 +2979,7 @@ fn recovery_pipeline_unifies_success_type_before_later_stages() {
 fn recovery_pipeline_replaces_handled_failure_effect() {
     let result = analyze(&[ModuleInput::new(
         "recovery-effects.orna",
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            fn value(note: Note): Int = note.value;
-            pub fn recovered() = Note | one() | value |? (failure => 0);
-            pub fn still_fails() = Note | one() | value |? (failure => Note | one() | value);
-        "#,
+        include_str!("fixtures/recovery-effects-type-family.orna"),
     )]);
     assert!(result.is_ok(), "{:?}", result.diagnostics);
     let module = result
