@@ -24,6 +24,25 @@ Those parts of this ADR therefore remain a proposal for a later accepted
 contract. They must not be implemented as OrnaDB 1.0.0 behavior or inferred
 from the test-only headless fixture.
 
+### Failed surface-destroy disposition
+
+OrnaDB 1.0.0 does not define a Qt/provider surface-destroy failure contract,
+so this work ADR does not extend the normative acceptance boundary. The
+closest normative rule, `ORNA-SYS-087` in `source/15-system.md`, requires a
+failed administrative operation to retain runtime state at the last valid
+boundary described by its algorithm; it does not define this adapter's
+provider call, surface ownership, or callback-bookkeeping policy.
+
+A targeted search of the frozen `Orna-1.0.0.md`, `source/`, `api/`, `tests/`,
+`examples/`, and `profiles/` for `destroy_surface`, surface destruction or
+closure, Qt runtime, and provider failure found no normative requirement for
+this adapter behavior. The existing
+`runtime_adapter::tests::failed_surface_destroy_preserves_bookkeeping` test
+checks the implementation's failure and success transitions, but it is not a
+live-provider test. Keep live Qt/provider acceptance deferred until the
+canonical runtime ABI header and Qt build/test toolchain are available; do
+not infer such a provider contract from this implementation test.
+
 ## Context
 
 OrnaDB already has a TTY renderer and a test-only headless runtime fixture. It
