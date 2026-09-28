@@ -2761,7 +2761,10 @@ fn parses_later_units_after_an_earlier_syntax_error() {
 fn maps_syntax_codes_and_retains_owned_paths_and_byte_spans() {
     let bundle = SourceBundle::new([
         SourceUnit::new("syntax.orna", "CREATE SCHEMA crm.;"),
-        SourceUnit::new("comment.orna", "/* unfinished"),
+        SourceUnit::new(
+            "comment.orna",
+            include_str!("tests/fixtures/unterminated-comment.orna"),
+        ),
     ])
     .unwrap();
 
