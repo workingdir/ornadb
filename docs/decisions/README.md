@@ -210,7 +210,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Resource Lineage Authority](0089-resource-lineage-authority.md)
 * **work ADR 0090:**
   [Local Principal and Session Authority](0090-local-principal-session-authority.md)
-* **work ADR 0091 (proposed):**
+* **work ADR 0091 (deferred):**
   [CLIENT VM Trust and Sandbox](0091-client-vm-trust-and-sandbox.md)
 * **work ADR 0092:**
   [Function-Backed CLI Sessions](0092-function-backed-cli-sessions.md)
