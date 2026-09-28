@@ -247,6 +247,8 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Qualified Type Editor Highlighting Deferral](0102-qualified-type-editor-highlighting-deferral.md)
 * **work ADR 0103 (deferred):**
   [Studio Runtime and Inspector Reference Boundary](0103-studio-runtime-inspector-reference-boundary.md)
+* **work ADR 0104 (deferred):**
+  [Studio Catalogue Tree and Function Search Boundary](0104-studio-catalogue-tree-search-boundary.md)
 * **work ADR 0105 (deferred):**
   [Studio Security and DBA Page Boundary](0105-studio-security-dba-page-boundary.md)
 * **work ADR 0101:**
