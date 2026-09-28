@@ -658,18 +658,28 @@ impl RuntimePublicationCoordinator {
         })
     }
 
-    /// The production compact route. The repository owns ref advancement,
-    /// witness proof, and journal finalization; storage receives only the
-    /// sealed runtime operation that must consume the frozen prefix.
-    pub async fn publish_compact_and_complete(
+    /// Completes a candidate only after its verified committed logical rows
+    /// match the final fold of the durable frozen mutations.
+    async fn publish_compact_candidate_and_complete(
         repository: &Repository,
         runtime: &RuntimeState,
+        profile: &CompactOvbProfile,
         freeze: &PublicationFreeze,
         plan: CompactPublicationPlan,
+        expected: &CompactBaseState,
+        candidate_generation: u64,
     ) -> Result<IndexGeneration, Error> {
         let pending = repository
             .publish_compact_repository_boundary(plan)
             .map_err(map_publication_repository_error)?;
+        verify_compact_candidate_rows(
+            repository,
+            profile,
+            freeze,
+            &pending,
+            expected,
+            candidate_generation,
+        )?;
         runtime
             .bind_compact_publication(&pending, freeze)
             .await
@@ -702,27 +712,7 @@ impl RuntimePublicationCoordinator {
             .head()
             .map_err(map_publication_repository_error)?
             .ok_or(Error::InvalidTransition)?;
-        let manifest = repository
-            .read_compact_manifest(&expected_head, table)
-            .map_err(map_publication_repository_error)?
-            .unwrap_or_else(|| {
-                CompactManifest::empty(table, profile.schema_fingerprint())
-            });
-        let projections = repository
-            .read_compact_committed_base(
-                &expected_head,
-                table,
-                profile.schema_fingerprint(),
-                COMPACT_STORAGE_PROFILE,
-                |_entry, projection| Ok(projection.clone()),
-            )
-            .map_err(map_publication_repository_error)?;
-        let base = fold_compact_committed_base(
-            profile,
-            projections.iter(),
-            manifest.next_generation(),
-        )
-        .map_err(|_| Error::InvalidTransition)?;
+        let base = load_compact_base_at(repository, &expected_head, profile)?;
         let writer_input = lower_compact_freeze(profile, freeze)?;
         let writer_input = base
             .fold_writer_input(&writer_input)
@@ -730,7 +720,19 @@ impl RuntimePublicationCoordinator {
         base.consume_writer_input(&writer_input)
             .map_err(|_| Error::InvalidTransition)?;
         validate_manifest_generation_binding(plan.manifest(), &writer_input)?;
-        Self::publish_compact_and_complete(repository, runtime, freeze, plan).await
+        let expected = base
+            .apply_writer_input(&writer_input)
+            .map_err(|_| Error::InvalidTransition)?;
+        Self::publish_compact_candidate_and_complete(
+            repository,
+            runtime,
+            profile,
+            freeze,
+            plan,
+            &expected,
+            writer_input.candidate_generation,
+        )
+        .await
     }
 
     /// Reads the exact typed prefix named by `freeze`, then prepares its
@@ -898,6 +900,24 @@ impl RuntimePublicationCoordinator {
         repository: &Repository,
         runtime: &RuntimeState,
     ) -> Result<Option<IndexGeneration>, Error> {
+        Self::recover_inner(repository, runtime, None).await
+    }
+
+    /// Recovers compact publication only after decoding and comparing the
+    /// immutable candidate against the runtime freeze and its recorded base.
+    pub async fn recover_compact_validated(
+        repository: &Repository,
+        runtime: &RuntimeState,
+        profile: &CompactOvbProfile,
+    ) -> Result<Option<IndexGeneration>, Error> {
+        Self::recover_inner(repository, runtime, Some(profile)).await
+    }
+
+    async fn recover_inner(
+        repository: &Repository,
+        runtime: &RuntimeState,
+        compact_profile: Option<&CompactOvbProfile>,
+    ) -> Result<Option<IndexGeneration>, Error> {
         let Some(journal) = repository
             .read_publication_journal()
             .map_err(map_publication_repository_error)?
@@ -905,6 +925,7 @@ impl RuntimePublicationCoordinator {
             return Ok(None);
         };
         if journal.compact_manifest().is_some() {
+            let profile = compact_profile.ok_or(Error::InvalidTransition)?;
             let recovery = repository
                 .recover_compact_publication_boundary()
                 .map_err(map_publication_repository_error)?;
@@ -927,6 +948,22 @@ impl RuntimePublicationCoordinator {
                 .publication_freeze(pending.runtime_intent_id())
                 .await
                 .map_err(map_compact_runtime_error)?;
+            let base = load_compact_base_from_commit(repository, journal.old_head(), profile)?;
+            let writer_input = lower_compact_freeze(profile, &freeze)?;
+            let writer_input = base
+                .fold_writer_input(&writer_input)
+                .map_err(|_| Error::InvalidTransition)?;
+            let expected = base
+                .apply_writer_input(&writer_input)
+                .map_err(|_| Error::InvalidTransition)?;
+            verify_compact_candidate_rows(
+                repository,
+                profile,
+                &freeze,
+                &pending,
+                &expected,
+                writer_input.candidate_generation,
+            )?;
             runtime
                 .bind_compact_publication(&pending, &freeze)
                 .await
@@ -1021,12 +1058,15 @@ impl RuntimePublicationCoordinator {
 pub async fn complete_verified_compact_runtime_prefix(
     repository: &Repository,
     runtime: &RuntimeState,
+    profile: &CompactOvbProfile,
     freeze: &PublicationFreeze,
     plan: CompactPublicationPlan,
 ) -> Result<(), Error> {
-    RuntimePublicationCoordinator::publish_compact_and_complete(repository, runtime, freeze, plan)
-        .await
-        .map(|_| ())
+    RuntimePublicationCoordinator::publish_compact_and_complete_validated(
+        repository, runtime, profile, freeze, plan,
+    )
+    .await
+    .map(|_| ())
 }
 
 fn map_publication_repository_error(error: RepositoryError) -> Error {
@@ -1048,6 +1088,104 @@ fn validate_manifest_generation_binding(
     writer_input: &CompactWriterInput,
 ) -> Result<(), Error> {
     if manifest.next_generation() != writer_input.candidate_generation {
+        return Err(Error::InvalidTransition);
+    }
+    Ok(())
+}
+
+fn load_compact_base_at(
+    repository: &Repository,
+    head: &GitCommitRef,
+    profile: &CompactOvbProfile,
+) -> Result<CompactBaseState, Error> {
+    let table = Uuid::from_bytes(profile.table_id());
+    let manifest = repository
+        .read_compact_manifest(head, table)
+        .map_err(map_publication_repository_error)?;
+    let Some(manifest) = manifest else {
+        return fold_compact_committed_base(profile, std::iter::empty(), 1)
+            .map_err(|_| Error::InvalidTransition);
+    };
+    if manifest.schema() != profile.schema_fingerprint() {
+        return Err(Error::InvalidTransition);
+    }
+    let projections = repository
+        .read_compact_committed_base(
+            head,
+            table,
+            profile.schema_fingerprint(),
+            COMPACT_STORAGE_PROFILE,
+            |_entry, projection| Ok(projection.clone()),
+        )
+        .map_err(map_publication_repository_error)?;
+    fold_compact_committed_base(profile, projections.iter(), manifest.next_generation())
+        .map_err(|_| Error::InvalidTransition)
+}
+
+fn load_compact_base_from_commit(
+    repository: &Repository,
+    commit: &GitCommitRef,
+    profile: &CompactOvbProfile,
+) -> Result<CompactBaseState, Error> {
+    let table = Uuid::from_bytes(profile.table_id());
+    let manifest = repository
+        .read_compact_manifest(commit, table)
+        .map_err(map_publication_repository_error)?;
+    let Some(manifest) = manifest else {
+        return fold_compact_committed_base(profile, std::iter::empty(), 1)
+            .map_err(|_| Error::InvalidTransition);
+    };
+    if manifest.schema() != profile.schema_fingerprint() {
+        return Err(Error::InvalidTransition);
+    }
+    let projections = repository
+        .read_compact_committed_base_from_commit(
+            commit,
+            table,
+            profile.schema_fingerprint(),
+            COMPACT_STORAGE_PROFILE,
+            |_entry, projection| Ok(projection.clone()),
+        )
+        .map_err(map_publication_repository_error)?;
+    fold_compact_committed_base(profile, projections.iter(), manifest.next_generation())
+        .map_err(|_| Error::InvalidTransition)
+}
+
+fn verify_compact_candidate_rows(
+    repository: &Repository,
+    profile: &CompactOvbProfile,
+    freeze: &PublicationFreeze,
+    pending: &orna_repository_v1::CompactPublicationPending,
+    expected: &CompactBaseState,
+    candidate_generation: u64,
+) -> Result<(), Error> {
+    if pending.runtime_intent_id() != freeze.intent_id
+        || pending.cleanup_watermark() != freeze.checkpoint.digest
+    {
+        return Err(Error::InvalidTransition);
+    }
+    let table = Uuid::from_bytes(profile.table_id());
+    let manifest = repository
+        .read_compact_manifest(pending.commit(), table)
+        .map_err(map_publication_repository_error)?
+        .ok_or(Error::InvalidTransition)?;
+    if manifest.schema() != profile.schema_fingerprint()
+        || manifest.next_generation() != candidate_generation
+    {
+        return Err(Error::InvalidTransition);
+    }
+    let projections = repository
+        .read_compact_committed_base(
+            pending.commit(),
+            table,
+            profile.schema_fingerprint(),
+            COMPACT_STORAGE_PROFILE,
+            |_entry, projection| Ok(projection.clone()),
+        )
+        .map_err(map_publication_repository_error)?;
+    let actual = fold_compact_committed_base(profile, projections.iter(), manifest.next_generation())
+        .map_err(|_| Error::InvalidTransition)?;
+    if !expected.has_same_logical_rows(&actual) {
         return Err(Error::InvalidTransition);
     }
     Ok(())
@@ -1781,19 +1919,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_production_entrypoint_publishes_and_completes_frozen_prefix() {
+    async fn compact_production_entrypoint_rejects_freeze_without_compact_identity() {
         let (_temp, repository, runtime, freeze, plan) =
             compact_runtime_unpublished_fixture().await;
+        let profile = CompactOvbProfile::new(compact_schema()).unwrap();
         assert_eq!(repository.read_publication_journal().unwrap(), None);
 
-        complete_verified_compact_runtime_prefix(&repository, &runtime, &freeze, plan)
-            .await
-            .unwrap();
+        assert_eq!(
+            complete_verified_compact_runtime_prefix(
+                &repository,
+                &runtime,
+                &profile,
+                &freeze,
+                plan,
+            )
+            .await,
+            Err(Error::InvalidTransition)
+        );
 
-        assert!(runtime.pending_through(&freeze).await.unwrap().is_empty());
-        let pending = runtime.pending().await.unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].id, [78; 16]);
+        assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
+        assert_eq!(runtime.pending().await.unwrap().len(), 2);
         assert_eq!(repository.read_publication_journal().unwrap(), None);
     }
 
@@ -1801,71 +1946,40 @@ mod tests {
     async fn validated_compact_publication_rejects_manifest_generation_mismatch() {
         let (_temp, repository, runtime, freeze, plan) =
             compact_runtime_unpublished_fixture().await;
-        RuntimePublicationCoordinator::publish_compact_and_complete(
-            &repository,
-            &runtime,
-            &freeze,
-            plan,
-        )
-        .await
-        .unwrap();
-
-        let next_freeze = runtime
-            .freeze(
-                [80; 16],
-                &orna_runtime_v1::Checkpoint {
-                    generation: 2,
-                    digest: [79; 32],
-                    mutation_sequence: 2,
-                },
-            )
-            .await
-            .unwrap();
-        let head = repository.head().unwrap().unwrap();
-        let manifest = repository
-            .read_compact_manifest(&head, Uuid::from_u128(1))
-            .unwrap()
-            .unwrap();
-        let next_plan = compact_runtime_plan_with_base(
-            &repository,
-            &next_freeze,
-            manifest,
-            Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0002),
-        );
         let profile = CompactOvbProfile::new(compact_schema()).unwrap();
-
         assert_eq!(
             RuntimePublicationCoordinator::publish_compact_and_complete_validated(
                 &repository,
                 &runtime,
                 &profile,
-                &next_freeze,
-                next_plan,
+                &freeze,
+                plan,
             )
             .await,
             Err(Error::InvalidTransition)
         );
         assert_eq!(
-            runtime.pending_through(&next_freeze).await.unwrap().len(),
+            runtime.pending_through(&freeze).await.unwrap().len(),
             1
         );
         assert_eq!(repository.read_publication_journal().unwrap(), None);
     }
 
     #[tokio::test]
-    async fn compact_coordinator_completion_consumes_only_the_frozen_prefix() {
+    async fn compact_coordinator_rejects_legacy_freeze_without_compact_identity() {
         let (_temp, repository, runtime, freeze, plan) =
             compact_runtime_unpublished_fixture().await;
-        RuntimePublicationCoordinator::publish_compact_and_complete(
+        let profile = CompactOvbProfile::new(compact_schema()).unwrap();
+        assert_eq!(RuntimePublicationCoordinator::publish_compact_and_complete_validated(
             &repository,
             &runtime,
+            &profile,
             &freeze,
             plan,
         )
-        .await
-        .unwrap();
+        .await, Err(Error::InvalidTransition));
 
-        assert_eq!(runtime.pending().await.unwrap().len(), 1);
+        assert_eq!(runtime.pending().await.unwrap().len(), 2);
         assert_eq!(repository.read_publication_journal().unwrap(), None);
     }
 
@@ -2057,13 +2171,19 @@ mod tests {
             .publish_compact_repository_boundary(plan)
             .unwrap();
 
-        RuntimePublicationCoordinator::recover(&repository, &runtime)
-            .await
-            .unwrap()
-            .unwrap();
+        let profile = CompactOvbProfile::new(compact_schema()).unwrap();
+        assert_eq!(
+            RuntimePublicationCoordinator::recover_compact_validated(
+                &repository,
+                &runtime,
+                &profile,
+            )
+            .await,
+            Err(Error::InvalidTransition)
+        );
 
-        assert_eq!(runtime.pending().await.unwrap().len(), 1);
-        assert_eq!(repository.read_publication_journal().unwrap(), None);
+        assert_eq!(runtime.pending().await.unwrap().len(), 2);
+        assert!(repository.read_publication_journal().unwrap().is_some());
     }
 
     #[tokio::test]
@@ -2082,9 +2202,10 @@ mod tests {
         };
 
         assert_eq!(
-            RuntimePublicationCoordinator::publish_compact_and_complete(
+            RuntimePublicationCoordinator::publish_compact_and_complete_validated(
                 &repository,
                 &runtime,
+                &CompactOvbProfile::new(compact_schema()).unwrap(),
                 &mismatched,
                 plan,
             )
@@ -2092,7 +2213,7 @@ mod tests {
             Err(Error::InvalidTransition)
         );
         assert_eq!(runtime.pending().await.unwrap().len(), 2);
-        assert!(repository.read_publication_journal().unwrap().is_some());
+        assert_eq!(repository.read_publication_journal().unwrap(), None);
     }
 
     #[tokio::test]
@@ -2117,7 +2238,13 @@ mod tests {
             RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime).await,
             Err(Error::RefConflict)
         );
-        let result = RuntimePublicationCoordinator::recover(&repository, &runtime).await;
+        let profile = CompactOvbProfile::new(compact_schema()).unwrap();
+        let result = RuntimePublicationCoordinator::recover_compact_validated(
+            &repository,
+            &runtime,
+            &profile,
+        )
+        .await;
         assert_eq!(result, Err(Error::RefConflict));
         assert_eq!(runtime.pending().await.unwrap().len(), 1);
         assert!(repository.read_publication_journal().unwrap().is_some());
