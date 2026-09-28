@@ -1370,6 +1370,11 @@ impl LiveApplication for ApplicationLiveAdapter {
         effects: Option<&'a dyn LiveAdminEffectDispatcher>,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<LiveEvalResponse, LiveError>> + 'a>> {
         Box::pin(async move {
+            if !self.is_module_entry(message) {
+                return self
+                    .dispatch_eval_with_work(session, request, message, context, work)
+                    .await;
+            }
             let (Some(context), Some(effects)) = (context, effects) else {
                 return self
                     .dispatch_eval_with_work(session, request, message, context, work)
@@ -1536,6 +1541,100 @@ mod tests {
                 .expect("canonical integer"),
             )
         );
+    }
+
+    struct UnusedLiveAdminDispatcher;
+
+    impl LiveAdminEffectDispatcher for UnusedLiveAdminDispatcher {
+        fn pause_stream<'a>(
+            &'a self,
+            _stream: CanonicalValue,
+            _reason: Option<String>,
+            _context: &'a RuntimeActivationContext,
+        ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
+        {
+            Box::pin(async { Err("unexpected pause dispatch".to_owned()) })
+        }
+    }
+
+    #[test]
+    fn effect_dispatch_routes_non_module_eval_through_the_repl() {
+        use futures::executor::block_on;
+        use orna_live_v1::LiveApplicationWorkSupervisor;
+        use orna_repository_v1::Repository;
+        use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "orna-live-adapter-repl-dispatch-{}-{timestamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("temporary repository directory");
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&root)
+            .status()
+            .expect("git init starts");
+        assert!(status.success(), "git init creates the runtime repository");
+        let repository = Repository::discover(&root).expect("temporary Git repository");
+        let state = block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [61; 16],
+                repository_id: [62; 16],
+            },
+            [63; 32],
+        ))
+        .expect("runtime state opens");
+        let context = block_on(state.begin_activation()).expect("activation context captures");
+        let supervisor = LiveApplicationWorkSupervisor::new();
+        let session = [64; 16];
+        let request = [65; 16];
+        let mut work = supervisor
+            .admit(session, request)
+            .expect("work lease admits");
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let mut adapter = ApplicationLiveAdapter::new(authority);
+        let fingerprint = [66; 32];
+        let message = eval_message(
+            include_str!("../tests/fixtures/remote-repl-binding.orna"),
+            fingerprint,
+        );
+        let dispatcher = UnusedLiveAdminDispatcher;
+
+        let response = block_on(adapter.dispatch_eval_with_effects(
+            session,
+            request,
+            &message,
+            Some(&context),
+            &mut work,
+            Some(&dispatcher),
+        ))
+        .expect("effect-enabled host still dispatches REPL source");
+        let LiveEvalResponse::Pure(envelope) = response else {
+            panic!("a pure REPL declaration must not fabricate a transaction");
+        };
+        assert_eq!(envelope.request, Some(request));
+        let Message::Result {
+            status,
+            value,
+            fingerprint: returned_fingerprint,
+            ..
+        } = envelope.message
+        else {
+            panic!("REPL dispatch returns a Result envelope");
+        };
+        assert_eq!(status, ResultStatus::Success);
+        assert_eq!(returned_fingerprint, fingerprint);
+        assert_eq!(value, Some(CanonicalValue::new(OvbRaw::Null).unwrap()));
+
+        drop(context);
+        drop(state);
+        std::fs::remove_dir_all(root).expect("temporary repository is removed");
     }
 
     fn eval_message(source: &str, fingerprint: [u8; 32]) -> Message {
