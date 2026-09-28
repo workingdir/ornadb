@@ -1,0 +1,37 @@
+PAGE and LIVE focused Cargo output
+Base: origin/main 17122e127438348bd9a0cfa0f070f27861bc4944
+
+COMMAND: cargo test --quiet --locked --offline -p orna-semantic-v1 --test semantic_graph authoritative_ui_catalogue_checks_page_builder_contextually -- --exact --nocapture
+EXIT_CODE: 0
+CAPTURED OUTPUT:
+running 1 test
+.
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 163 filtered out; finished in 0.01s
+
+COMMAND: cargo test --quiet --locked --offline -p orna-conformance-v1 --bin orna-conformance live_ -- --nocapture
+EXIT_CODE: 0
+CAPTURED OUTPUT:
+running 4 tests
+....
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+COMMAND: cargo test --quiet --locked --offline -p orna-conformance-v1 --test runtime_scenarios published_report_declares_bounded_runtime_adapter_scenarios_without_an_orna_engine_witness -- --exact --nocapture
+EXIT_CODE: 101
+VERBATIM FAILURE OUTPUT:
+thread 'published_report_declares_bounded_runtime_adapter_scenarios_without_an_orna_engine_witness' (2683651) panicked at crates/orna-conformance-v1/tests/runtime_scenarios.rs:743:5:
+assertion `left == right` failed
+  left: ["ASSERT-CHECKPOINT-091", "EVAL-003", "FAIL-001", "LIVE-001", "LIVE-002", "LIVE-003", "LIVE-004", "REPL-001", "SYS-RT-RENAME-100", "TXN-001", "TXN-002"]
+ right: ["REPL-001", "TXN-001", "TXN-002", "CP-001", "LIVE-001", "LIVE-002", "LIVE-003", "LIVE-004", "SYS-RT-RENAME-100", "ASSERT-CHECKPOINT-091", "FAIL-001", "EVAL-003"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test published_report_declares_bounded_runtime_adapter_scenarios_without_an_orna_engine_witness ... FAILED
+
+failures:
+
+failures:
+    published_report_declares_bounded_runtime_adapter_scenarios_without_an_orna_engine_witness
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 15 filtered out; finished in 154.48s
+
+error: test failed, to rerun pass `-p orna-conformance-v1 --test runtime_scenarios`
