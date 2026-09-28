@@ -97,6 +97,9 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
                 parsed.color.stdout_enabled(),
             )
         }
+        Command::Run(Invocation::ProjectMain) => {
+            run_default_project_main(&parsed.endpoint, parsed.color.stdout_enabled())
+        }
         Command::Run(Invocation::ProjectFunction(ref target)) => {
             run_public_project_function(&parsed.endpoint, target, parsed.color.stdout_enabled())
         }
