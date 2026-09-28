@@ -201,6 +201,49 @@ END;"#;
     assert_ne!(operation.call_site().to_bytes(), [0; 16]);
     assert!(operation.arguments().is_empty());
 }
+
+#[test]
+fn accepted_server_function_dogfood_checks_and_prepares_catalogue_artifacts() {
+    const SOURCE: &str = include_str!("../../../tests/fixtures/server-function-dogfood.orna");
+
+    let verified = crate::tests::verified_canonical_standard_source_fixture();
+    let standard = check_standard_library_source(&verified).unwrap();
+    let active = empty_standard_application_active(&verified);
+    let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+    let bundle = SourceBundle::new([SourceUnit::new(
+        "examples/server-function-dogfood.orna",
+        SOURCE,
+    )])
+    .unwrap();
+
+    let report = check_standard_application(&bundle, &context);
+    assert!(
+        report.diagnostics().is_empty(),
+        "accepted dogfood application did not check: {:?}",
+        report.diagnostics()
+    );
+
+    let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+    let candidate = prepared.candidate();
+    let functions = ["read", "distinct_values", "stream", "read_item", "update"];
+    assert_eq!(prepared.new_function_revisions().len(), functions.len());
+    for function_name in functions {
+        let function = candidate
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["dogfood", function_name])
+            .unwrap_or_else(|| panic!("missing installed dogfood.{function_name}"));
+        assert_eq!(function.domain(), FunctionDomain::Server);
+        let revision = prepared
+            .new_function_revisions()
+            .iter()
+            .find(|revision| revision.function() == function.id())
+            .unwrap_or_else(|| panic!("missing prepared revision for dogfood.{function_name}"));
+        assert_eq!(function.current_revision(), revision.id());
+        assert_eq!(revision.artifact().kind(), ExecutableArtifactKind::Server);
+    }
+}
+
 #[test]
 fn named_record_stream_resource_preparation_preserves_nominal_result_identity() {
     let verified = resource_standard();
