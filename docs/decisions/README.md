@@ -47,6 +47,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0095 | OrnaDB 1.0 principal, credential, and delegation scope | Built-in principal metadata, credential enrollment/providers, delegated sessions, and multi-user authorization remain deferred; `sys.Secret` exposes only its normative redacted metadata. |
 | 0096 | OrnaDB 1.0 trust policy and function security boundary | Accepts the trusted-host and network-perimeter rules in ORNA-TRUST-001..003; function ownership, policy evaluation, and SECURITY DEFINER semantics remain undefined and deferred. |
 | 0097 | Normative local REPL scope and conformance boundary | The function-backed session API from 0092 remains deferred; normative `ORNA-REPL-001` through `ORNA-REPL-006` remain in scope. |
+| 0098 | Ring-1 catalogue/source/dependency/revision gateway deferral | Normative system API semantics remain; sealed Ring-1 registration is deferred pending accepted function identities and runtime authority. |
 
 ## Current work ADRs
 
@@ -227,3 +228,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [OrnaDB 1.0 Trust Policy and Function Security Boundary](0096-trust-policy-function-security.md)
 * **work ADR 0097:**
   [Normative REPL Boundary](0097-normative-repl-boundary.md)
+* **work ADR 0098:**
+  [Ring-1 Catalogue and Revision Gateway Deferral](0098-ring1-catalogue-revision-deferral.md)
