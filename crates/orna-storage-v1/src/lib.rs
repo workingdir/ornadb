@@ -1072,7 +1072,8 @@ fn map_compact_runtime_error(error: RuntimeError) -> Error {
         | RuntimeError::CompactReceiptKeyMismatch
         | RuntimeError::InvalidCompactReceipt
         | RuntimeError::RecoveryInvalid
-        | RuntimeError::CheckpointNotReplayable => Error::InvalidTransition,
+        | RuntimeError::CheckpointNotReplayable
+        | RuntimeError::StreamSourceNotReplayable => Error::InvalidTransition,
         RuntimeError::RecoveryPending | RuntimeError::AdminBusy => Error::RuntimeUnavailable,
         RuntimeError::StreamIdentityMismatch
         | RuntimeError::StreamCheckpointStale
@@ -1455,6 +1456,14 @@ mod tests {
     fn checkpoint_not_replayable_maps_to_invalid_transition() {
         assert_eq!(
             map_compact_runtime_error(RuntimeError::CheckpointNotReplayable),
+            Error::InvalidTransition
+        );
+    }
+
+    #[test]
+    fn stream_source_not_replayable_maps_to_invalid_transition() {
+        assert_eq!(
+            map_compact_runtime_error(RuntimeError::StreamSourceNotReplayable),
             Error::InvalidTransition
         );
     }
