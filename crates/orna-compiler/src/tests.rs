@@ -1879,10 +1879,7 @@ fn standard_declaration_type_uses_are_ordered_by_written_source_not_declaration_
     )
     .unwrap();
     let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
-    let source = "CREATE SCHEMA app;\
-            CREATE SERVER FUNCTION app.read() RETURNS ROWS (value BOOLEAN) \
-            AS SELECT f.value FROM app.flag f;\
-            CREATE TYPE app.flag AS OBJECT (value BOOLEAN);";
+    let source = include_str!("tests/fixtures/declaration-use-order.orna");
     let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
 
     let report = check_standard_application(&bundle, &context);
