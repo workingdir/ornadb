@@ -1299,15 +1299,15 @@ impl SysStreamProjection {
         observation: &StreamObservation,
         run: &RunObservation,
     ) -> Result<Self, RuntimeError> {
-        if observation.live
-            && (!run.live
-                || run.status.is_terminal()
-                || matches!(
-                    observation.status,
-                    StreamObservationStatus::Completed
-                        | StreamObservationStatus::Cancelled
-                        | StreamObservationStatus::Orphaned
-                ))
+        let stream_is_terminal = matches!(
+            observation.status,
+            StreamObservationStatus::Completed
+                | StreamObservationStatus::Failed
+                | StreamObservationStatus::Cancelled
+                | StreamObservationStatus::Orphaned
+        );
+        if (run.status.is_terminal() && !stream_is_terminal)
+            || (observation.live && (!run.live || stream_is_terminal))
         {
             return Err(RuntimeError::RecoveryInvalid);
         }
@@ -15706,11 +15706,8 @@ mod tests {
     fn repository() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        git(temp.path(), &["config", "user.email", "kieran@drewett.dev"]);
+        git(temp.path(), &["config", "user.name", "kierandrewett"]);
         git(temp.path(), &["config", "commit.gpgsign", "false"]);
         let repository = Repository::discover(temp.path()).unwrap();
         (temp, repository)
@@ -29800,6 +29797,85 @@ mod tests {
             run_status_code(RunObservationStatus::Completed)
         );
         assert_eq!(row.get::<Option<i64>>(1).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn retained_projection_rejects_nonterminal_stream_after_parent_run_terminal() {
+        let parsed = orna_syntax_v1::parse_module(include_str!(
+            "../tests/fixtures/parent_run_active_stream.orna"
+        ));
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "stream consumer fixture must parse: {:?}",
+            parsed.diagnostics
+        );
+
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(234)).await.unwrap();
+        let request = request(235, 236);
+        let fingerprint = digest(237);
+        let key = stream_delivery("terminal-parent", "active-child").checkpoint_key();
+        let run = state
+            .begin_observed_request(
+                RunObservationRegistration {
+                    request,
+                    consumer_identity: key.consumer.clone(),
+                    function: "pkg.ingest".into(),
+                    source_identity: Some(key.source.as_str().to_owned()),
+                    invocation_id: id(238),
+                },
+                fingerprint,
+                writer,
+            )
+            .await
+            .unwrap()
+            .run
+            .unwrap();
+        let stream = state
+            .register_stream_observation_with_owner(
+                writer,
+                StreamObservationRegistration {
+                    run: run.id,
+                    producer: "source-object".into(),
+                    consumer: None,
+                    checkpoint: key,
+                },
+            )
+            .await
+            .unwrap();
+
+        state
+            .complete_observed_request_with_owner(request, fingerprint, writer, outcome(239))
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .stream_observation(stream.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            StreamObservationStatus::Orphaned
+        );
+        state
+            .connection
+            .execute(
+                "UPDATE sys_stream_observation SET status = ?1 WHERE stream_id = ?2",
+                params![
+                    stream_observation_status_code(StreamObservationStatus::Running),
+                    stream.id.0.to_vec()
+                ],
+            )
+            .await
+            .unwrap();
+
+        let parent = state.run_observation(run.id).await.unwrap().unwrap();
+        assert_eq!(parent.status, RunObservationStatus::Completed);
+        assert_eq!(
+            state.retained_sys_observation_projections().await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
     }
 
     #[tokio::test]
