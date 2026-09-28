@@ -1469,6 +1469,7 @@ pub enum RuntimeError {
     InvalidObservationReference,
     ObservationCoordinateMismatch,
     StreamIdentityMismatch,
+    StreamSourceNotReplayable,
     StreamCheckpointStale,
     CheckpointNotReplayable,
     LeaseHeld,
@@ -1521,6 +1522,7 @@ impl fmt::Display for RuntimeError {
             Self::InvalidObservationReference => "invalid runtime observation reference",
             Self::ObservationCoordinateMismatch => "runtime observation coordinates do not match",
             Self::StreamIdentityMismatch => "stream source identity mismatch",
+            Self::StreamSourceNotReplayable => "stream source does not support durable recovery",
             Self::StreamCheckpointStale => "stream checkpoint is stale",
             Self::CheckpointNotReplayable => "checkpoint target is not replayable",
             Self::LeaseHeld => "runtime writer is held",
@@ -5325,6 +5327,11 @@ impl RuntimeState {
                 RuntimeError::StreamIdentityMismatch,
             ));
         }
+        if !source.descriptor().replayable {
+            return Err(StreamStepError::Runtime(
+                RuntimeError::StreamSourceNotReplayable,
+            ));
+        }
         self.require_owner(&self.connection, writer)
             .await
             .map_err(StreamStepError::Runtime)?;
@@ -5857,6 +5864,11 @@ impl RuntimeState {
         if source.checkpoint_key() != *key {
             return Err(StreamStepError::Runtime(
                 RuntimeError::StreamIdentityMismatch,
+            ));
+        }
+        if !source.descriptor().replayable {
+            return Err(StreamStepError::Runtime(
+                RuntimeError::StreamSourceNotReplayable,
             ));
         }
         ensure_stream_position_format_compatible(&self.connection, key)
@@ -19012,6 +19024,64 @@ mod tests {
         ));
         assert_eq!(source.polls, 0);
         assert_eq!(handler.calls, 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_stream_runner_rejects_non_replayable_sources_before_polling() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("non-replayable:one", "non-replayable:two").checkpoint_key();
+        let descriptor = StreamSourceDescriptor {
+            kind: StreamSourceKind::Unbounded,
+            replayable: false,
+        };
+        let mut once_source = SequenceSource {
+            key: key.clone(),
+            descriptor,
+            polls: 0,
+            waits: 0,
+            steps: VecDeque::from([StreamSourcePoll::Waiting]),
+        };
+        let mut once_handler = CommitHandler { calls: 0 };
+
+        assert_eq!(
+            state
+                .run_stream_once(writer, &key, &mut once_source, &mut once_handler)
+                .await,
+            Err(StreamStepError::Runtime(
+                RuntimeError::StreamSourceNotReplayable
+            ))
+        );
+        assert_eq!(once_source.polls, 0);
+        assert_eq!(once_handler.calls, 0);
+
+        let mut run_source = SequenceSource {
+            key: key.clone(),
+            descriptor,
+            polls: 0,
+            waits: 0,
+            steps: VecDeque::from([StreamSourcePoll::Waiting]),
+        };
+        let mut run_handler = CommitHandler { calls: 0 };
+        assert_eq!(
+            state
+                .run_stream(
+                    writer,
+                    &key,
+                    &mut run_source,
+                    &mut run_handler,
+                    &NeverCancelled,
+                )
+                .await,
+            Err(StreamStepError::Runtime(
+                RuntimeError::StreamSourceNotReplayable
+            ))
+        );
+        assert_eq!(run_source.polls, 0);
+        assert_eq!(run_source.waits, 0);
+        assert_eq!(run_handler.calls, 0);
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
     }
 
     #[tokio::test]
