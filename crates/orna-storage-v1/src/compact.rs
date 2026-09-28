@@ -2867,7 +2867,7 @@ mod tests {
         let input = CompactWriterInput {
             table_id: TABLE,
             schema_fingerprint: profile.schema_fingerprint(),
-            candidate_generation: 1,
+            candidate_generation: 2,
             row_encoding_identity: PublicationRowEncoding::CompactOvb1,
             value_encoding_identity: PublicationValueEncoding::Ovb1,
             mutations: vec![
