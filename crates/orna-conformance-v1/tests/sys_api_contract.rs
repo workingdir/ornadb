@@ -248,6 +248,47 @@ fn portable_sys_api_has_exact_declared_counts_and_surface() {
 }
 
 #[test]
+fn sys_admin_effects_match_the_administration_contract() {
+    let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
+    let functions = document["functions"]
+        .as_array()
+        .expect("sys API functions");
+    let mut admin_entries = 0;
+    let mut plan_checkout_entries = 0;
+
+    for function in functions.iter().filter(|function| {
+        function["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("sys.admin."))
+    }) {
+        let signature = function["signature"]
+            .as_str()
+            .expect("sys.admin function signature");
+        let name = function["name"].as_str().expect("sys.admin function name");
+        let expected_effect = if name.starts_with("sys.admin.plan_checkout") {
+            plan_checkout_entries += 1;
+            "read"
+        } else {
+            admin_entries += 1;
+            "admin"
+        };
+
+        assert_eq!(
+            function["effect"].as_str(),
+            Some(expected_effect),
+            "{signature} must have effect={expected_effect}, found {:?}",
+            function["effect"]
+        );
+    }
+
+    assert!(admin_entries > 0, "expected state-changing sys.admin entries");
+    assert!(
+        plan_checkout_entries > 0,
+        "expected sys.admin.plan_checkout overloads"
+    );
+}
+
+#[test]
 fn sys_session_schema_binds_the_live_runtime_relation_without_runtime_claims() {
     let document: Value = serde_json::from_str(SYS_API).expect("portable sys API JSON");
     let relation = document["relations"]
