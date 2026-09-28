@@ -17,7 +17,9 @@ use std::{
 
 use bytes::Bytes;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
+use orna_foundation_v1::{
+    CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys,
+};
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use parquet::{
     basic::{Compression, ConvertedType, Encoding, PageType, Type},
@@ -55,35 +57,8 @@ fn canonical_key_order(left: &[u8], right: &[u8]) -> Result<Ordering, Repository
         CanonicalValue::decode(left).map_err(|_| RepositoryError::InvalidCompactManifest)?;
     let right_value =
         CanonicalValue::decode(right).map_err(|_| RepositoryError::InvalidCompactManifest)?;
-    compare_canonical_key_raw(left_value.raw(), right_value.raw())
-}
-
-fn compare_canonical_key_raw(left: &OvbRaw, right: &OvbRaw) -> Result<Ordering, RepositoryError> {
-    if let (OvbRaw::Tag(60015, left), OvbRaw::Tag(60015, right)) = (left, right) {
-        let (OvbRaw::Array(left), OvbRaw::Array(right)) = (left.as_ref(), right.as_ref()) else {
-            return Err(RepositoryError::InvalidCompactManifest);
-        };
-        for (left, right) in left.iter().zip(right) {
-            let ordering = compare_canonical_key_raw(left, right)?;
-            if ordering != Ordering::Equal {
-                return Ok(ordering);
-            }
-        }
-        return Ok(left.len().cmp(&right.len()));
-    }
-    let ordering = match (left, right) {
-        (OvbRaw::Int(left), OvbRaw::Int(right)) => left.cmp(right),
-        (OvbRaw::Bool(left), OvbRaw::Bool(right)) => left.cmp(right),
-        (OvbRaw::Text(left), OvbRaw::Text(right)) => left.cmp(right),
-        (OvbRaw::Tag(60001, left), OvbRaw::Tag(60001, right)) => {
-            let (OvbRaw::Text(left), OvbRaw::Text(right)) = (left.as_ref(), right.as_ref()) else {
-                return Err(RepositoryError::InvalidCompactManifest);
-            };
-            left.cmp(right)
-        }
-        _ => return Err(RepositoryError::InvalidCompactManifest),
-    };
-    Ok(ordering)
+    compare_primary_keys(&left_value, &right_value)
+        .map_err(|_| RepositoryError::InvalidCompactManifest)
 }
 
 fn canonical_key_extrema<'a, I>(mut keys: I) -> Result<(&'a [u8], &'a [u8]), RepositoryError>
@@ -5324,6 +5299,31 @@ mod tests {
             canonical_key_order(&text, &integer),
             Err(RepositoryError::InvalidCompactManifest)
         ));
+    }
+
+    #[test]
+    fn compact_key_order_uses_signed_logical_integer_order() {
+        let negative_twelve = CanonicalValue::new(OvbRaw::Int((-12).into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let negative_two = CanonicalValue::new(OvbRaw::Int((-2).into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let zero = CanonicalValue::new(OvbRaw::Int(0.into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+
+        assert_eq!(
+            canonical_key_order(&negative_twelve, &negative_two).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            canonical_key_order(&negative_two, &zero).unwrap(),
+            Ordering::Less
+        );
     }
 
     #[test]
