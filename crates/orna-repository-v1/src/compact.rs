@@ -2314,6 +2314,21 @@ impl CompactPublicationPlan {
         &self.manifest
     }
 
+    /// Reports whether this candidate is durably bound to the supplied
+    /// runtime freeze. Storage checks this before allowing the candidate's
+    /// ref to become visible.
+    pub fn matches_runtime_freeze(
+        &self,
+        runtime_intent_id: [u8; 16],
+        cleanup_watermark: [u8; 32],
+    ) -> bool {
+        self.journal.runtime_intent_id() == Some(runtime_intent_id)
+            && self.journal.compact_manifest().is_some_and(|witness| {
+                witness.runtime_intent_id() == runtime_intent_id
+                    && witness.cleanup_watermark() == cleanup_watermark
+            })
+    }
+
     /// Returns only the opaque Git identity of the prepared candidate.
     pub fn candidate_commit(&self) -> &GitCommitRef {
         self.candidate.commit()
