@@ -33,8 +33,8 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0077, 0078, 0079 | Resource language/transport and `std.action.call` | Virtual models, replay/cursor/cleanup semantics, sequence/parallel actions, automatic retries, graphical bindings, and reflective gateways remain deferred. |
 | 0080, 0081 | Headless ordinary Inspector v1 and generic `std.inspect.render@1` | Graphical/native runtimes, live trace streams, durable snapshots, source editing/apply, and reflective gateways remain deferred. |
 | 0082 | Legacy/proposal Qt v1 runtime boundary | Current 1.0 does not accept a Qt provider, loader, session bridge, or installed-runtime selection; browser runtime, second toolkit/platform, production CLIENT VM, Studio database operations, and gateways remain deferred. |
-| 0083 | Retained `std.ui.window` CLIENT entry point and host-owned adapter boundary | General UI JSON-to-ABI transport, models, Studio operations, launch metadata, and second runtimes remain separately gated. |
-| 0084 | Programmable CLIENT plans and shared runtime hosts | Collection/range `FOR`, general algebraic values, second toolkit/browser deployment, launch metadata, gateways, and broader UI transport remain deferred. |
+| 0083 | Retained `std.ui.window` CLIENT entry point and host-owned adapter boundary | General UI JSON-to-ABI transport, models, Studio operations, `std.launch` metadata (bounded by 0094), and second runtimes remain separately gated. |
+| 0084 | Programmable CLIENT plans and shared runtime hosts | Collection/range `FOR`, general algebraic values, second toolkit/browser deployment, `std.launch` metadata (bounded by 0094), gateways, and broader UI transport remain deferred. |
 | 0085 | Legacy/proposal fixed Qt runtime-package selection boundary | Current 1.0 does not prescribe an installed package path or native-runtime selection policy; browser/second toolkit, arbitrary runtime paths, database-selected native code, and model contracts remain deferred. |
 | 0086 | Bounded population of existing Inspector projection rows | Resource/UI/presenter identity enrichment is accepted by 0086; request lifecycle, full UI tree, models, and richer redaction remain deferred. |
 | 0087 | Bounded `std.data.Rows` and retained table presentation | Materialised Rows, shape-preserving sealed presentation, and V8 retained table input are accepted; virtual models, Rows resources, lossless JSON, and extra presenters remain deferred. |
@@ -43,6 +43,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0090 | Local principal and authenticated-session authority boundary for local invocation, resource, raw, and USER-state paths. | Credential/provider/secret enrollment, durable sessions, role selection, definer/effective-principal transitions, delegation, EXTERNAL principals, remote gateway auth, and production CLIENT VM trust features remain deferred. |
 | 0092 | Legacy/proposal function-backed CLI-session boundary | Canonical 1.0 entry execution is `orna run` or `orna repl`; it defines no accepted `std.cli.repl` catalogue identity. Endpoint transport, persistent action loops, native session-frame wiring, remote TLS/auth, and production artifact trust remain deferred. |
 | 0093 | 1.0.0 `orna serve` and `orna.present.v1` contract crosswalk | Generic reflective gateways, service discovery, JSON-RPC, MCP, custom auth, and alternate service lifecycles remain deferred; no implementation claim is made. |
+| 0094 | Reference-defined `orna run` entry selection and ownership crosswalk | `std.launch` catalogue/metadata, application argument schemas, presenter/runtime selection through metadata, launch-specific authorization, and additional lifecycle behavior remain undefined and deferred. |
 
 ## Current work ADRs
 
@@ -215,3 +216,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Function-Backed CLI Sessions](0092-function-backed-cli-sessions.md)
 * **work ADR 0093:**
   [Gateway and Protocol Contract Boundaries](0093-reflective-gateway-contracts.md)
+* **work ADR 0094:**
+  [Reference-Defined Run Entry Contract](0094-std-launch-contract.md)
