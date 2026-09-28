@@ -2,7 +2,7 @@
 //!
 //! The format carries only stable Orna identities and the closed expression
 //! set needed by the single-object `INSERT`, `UPDATE`, and `DELETE` execution
-//! slices. It contains no source names, SQL, PostgreSQL names, runtime object
+//! slices. It contains no source names, SQL, backend-specific names, runtime object
 //! identities, or source locations.
 //!
 //! Version 1 encodes one scalar insert target, an ordered field-assignment list,
