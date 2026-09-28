@@ -1516,11 +1516,7 @@ fn authoritative_ui_catalogue_checks_page_builder_contextually() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "page.orna",
-            r#"
-                use std.ui.*;
-                pub fn values_page(values: [Str]) =
-                    Page("/values", _ => List(values));
-            "#,
+            include_str!("fixtures/page-builder-contextual.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
