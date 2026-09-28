@@ -1983,7 +1983,7 @@ fn counts_source_units_before_parsing_or_reconciling() {
 
 #[test]
 fn returns_parser_diagnostics_before_reconciliation() {
-    const SOURCE: &str = "CREATE SCHEMA std.;CREATE SCHEMA ;CREATE SCHEMA std;";
+    const SOURCE: &str = include_str!("tests/fixtures/parser-diagnostics-before-reconciliation.orna");
     let parsed =
         parse_bundle(&SourceBundle::new([SourceUnit::new("std/types.orna", SOURCE)]).unwrap());
     assert_eq!(parsed.units()[0].parsed().schemas().len(), 1);
