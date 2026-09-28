@@ -110,6 +110,8 @@ pub trait WatchFrameSource {
 
     fn start_watch(&mut self, source: &str) -> Result<WatchPresentation, Self::Error>;
     fn next_frame(&mut self, watch: [u8; 16]) -> Result<Option<Vec<u8>>, Self::Error>;
+    fn request_resync(&mut self, request: ResyncRequest) -> Result<(), Self::Error>;
+    fn close_watch(&mut self, watch: [u8; 16]) -> Result<(), Self::Error>;
 }
 
 /// Observable state for the currently subscribed REPL watch.
@@ -159,15 +161,23 @@ impl WatchCommandState {
 
     /// Retain the authoritative presentation when the same watch is
     /// re-subscribed, including its complete-snapshot barrier.
-    fn install(&mut self, presentation: WatchPresentation) {
+    fn install(&mut self, presentation: WatchPresentation) -> Option<[u8; 16]> {
         if self
             .presentation
             .as_ref()
             .is_some_and(|current| current.watch() == presentation.watch())
         {
-            return;
+            return None;
         }
-        self.presentation = Some(presentation);
+        self.presentation
+            .replace(presentation)
+            .map(|previous| previous.watch())
+    }
+
+    fn close(&mut self) -> Option<[u8; 16]> {
+        self.presentation
+            .take()
+            .map(|presentation| presentation.watch())
     }
 }
 
@@ -396,7 +406,10 @@ fn run_loop<
         )?;
         writer.flush()?;
         match read_submission(reader)? {
-            ReadSubmission::Eof => return Ok(()),
+            ReadSubmission::Eof => {
+                close_session_watch(&mut watch, writer, color_enabled)?;
+                return Ok(());
+            }
             ReadSubmission::TooLong => {
                 write_repl_error(writer, "ORNA-REPL-INPUT-LIMIT", color_enabled)?;
             }
@@ -406,6 +419,7 @@ fn run_loop<
             ReadSubmission::Source(source) => {
                 let command = source.trim();
                 if command == ":quit" {
+                    close_session_watch(&mut watch, writer, color_enabled)?;
                     return Ok(());
                 }
                 if let Some(help) = parse_help_command(command) {
@@ -460,13 +474,35 @@ fn dispatch_watch<W: Write, S: WatchFrameSource + ?Sized>(
     };
     match binding.source.start_watch(source) {
         Ok(presentation) => {
-            binding.state.install(presentation);
+            if let Some(previous) = binding.state.install(presentation)
+                && binding.source.close_watch(previous).is_err()
+            {
+                write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
+            }
             drain_available_frames(binding, writer, color_enabled)?;
         }
         Err(_) => write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?,
     }
     Ok(())
 }
+
+/// Cancels the watch owned by this session when the REPL closes.
+fn close_session_watch<W: Write, S: WatchFrameSource + ?Sized>(
+    watch: &mut Option<WatchBinding<'_, S>>,
+    writer: &mut W,
+    color_enabled: bool,
+) -> io::Result<()> {
+    let Some(binding) = watch.as_mut() else {
+        return Ok(());
+    };
+    if let Some(watch) = binding.state.close()
+        && binding.source.close_watch(watch).is_err()
+    {
+        write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
+    }
+    Ok(())
+}
+
 /// Applies one frame to the owning presentation and prints its outcome.
 fn accept_frame<W: Write>(
     state: &mut WatchCommandState,
@@ -535,17 +571,47 @@ fn drain_available_frames<W: Write, S: WatchFrameSource + ?Sized>(
     writer: &mut W,
     color_enabled: bool,
 ) -> io::Result<()> {
+    if !send_pending_resync(binding, writer, color_enabled)? {
+        return Ok(());
+    }
     let Some(watch) = binding.state.watch() else {
         return Ok(());
     };
     loop {
         match binding.source.next_frame(watch) {
-            Ok(Some(frame)) => accept_frame(binding.state, frame, writer, color_enabled)?,
+            Ok(Some(frame)) => {
+                accept_frame(binding.state, frame, writer, color_enabled)?;
+                if !send_pending_resync(binding, writer, color_enabled)? {
+                    return Ok(());
+                }
+            }
             Ok(None) => return Ok(()),
             Err(_) => {
                 write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
                 return Ok(());
             }
+        }
+    }
+}
+
+/// Sends the presentation's pending resync through its owning host source.
+/// A failed send remains pending and is retried at the next loop boundary.
+fn send_pending_resync<W: Write, S: WatchFrameSource + ?Sized>(
+    binding: &mut WatchBinding<'_, S>,
+    writer: &mut W,
+    color_enabled: bool,
+) -> io::Result<bool> {
+    let Some(request) = binding.state.take_resync_request() else {
+        return Ok(true);
+    };
+    match binding.source.request_resync(request) {
+        Ok(()) => {
+            binding.state.acknowledge_resync_request(request);
+            Ok(true)
+        }
+        Err(_) => {
+            write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
+            Ok(false)
         }
     }
 }
