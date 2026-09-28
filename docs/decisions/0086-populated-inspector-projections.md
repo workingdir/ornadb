@@ -16,20 +16,27 @@ semantics.
 The frozen reference was checked across `Orna-1.0.0.md`, `source/`,
 `grammar/`, `tests/`, `examples/`, and the API/system reference. **ORNA-PRES-002**
 and **ORNA-PRES-006** require structural, bounded, redacted Inspect output and
-a host-derived Inspect fallback. **ORNA-PRES-009/010** require Inspect
+a host-derived Inspect fallback. **ORNA-PRES-007** defines Present as the
+core typed presentation tree, while **ORNA-PRES-009/010** require Inspect
 fallbacks for presenter failures and unknown rich nodes. **ORNA-SYS-091**
 requires a coherent snapshot for multi-relation inspection, and
 **ORNA-SYS-094** requires unavailable metadata for pruned optional detail.
-**ORNA-SYS-109** and **ORNA-SECRET-002** require secret and path redaction at
-the listed Inspect and system boundaries.
+**ORNA-SYS-035**, **ORNA-SYS-109**, and **ORNA-SECRET-002** require source-path
+and secret redaction at the listed Inspect and system boundaries.
 
 These requirements do not define populated `sys.inspect` resource, UI, surface,
 node, runtime, or presentation-candidate projection schemas. `source/34-system-reference.md`
 and `api/sys.json` define other system observations, including invocation,
 stream, and runtime relations; they do not define these Inspector projection
-rows. Searches of the normative index, grammar, requirement/evidence corpus,
-and examples found no row schema, capture source, availability rule, or UI-node
-projection contract for them. The cited requirements constrain an Inspector
+rows. `source/30-protocol.md` §§30.4–30.6 does define session-scoped page
+resource handles, generic PresentNode fields and children, renderer fallback,
+and actions. Those semantics apply to a page/watch value produced for a live
+session; they do not define row identities or population rules for the separate
+headless Inspector projections. Searches of `Orna-1.0.0.md`, every chapter in
+`source/`, `grammar/`, `tests/` (including the requirement and evidence
+registries), `examples/`, `api/sys.json`, and `source/34-system-reference.md`
+found no row schema, capture source, availability rule, or UI-node projection
+contract for them. The cited requirements constrain an Inspector
 implementation but do not require populating these rows.
 
 The repository-specific capture design below is not cited as an `ORNA-*`
