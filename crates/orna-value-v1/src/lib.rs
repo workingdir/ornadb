@@ -124,6 +124,235 @@ impl Value {
     } // unencodable marker
 }
 
+/// Compares canonical table keys by their logical values, not by OVB bytes.
+///
+/// The input must be one permitted primary-key value or a non-empty OVB tuple
+/// of key components. Schema admission remains responsible for proving that
+/// every component belongs to its declared key type; this boundary rejects
+/// malformed and non-key values rather than assigning them an incidental
+/// host order.
+pub fn compare_primary_keys(left: &Value, right: &Value) -> Result<Ordering> {
+    let left = primary_key_components(left.raw())?;
+    let right = primary_key_components(right.raw())?;
+    if left.len() != right.len() {
+        return Err(Error::InvalidValue);
+    }
+    for (left, right) in left.iter().zip(right) {
+        let ordering = compare_key_component(left, right)?;
+        if ordering != Ordering::Equal {
+            return Ok(ordering);
+        }
+    }
+    Ok(Ordering::Equal)
+}
+
+fn primary_key_components(raw: &Raw) -> Result<Vec<&Raw>> {
+    match raw {
+        Raw::Tag(60015, payload) => {
+            let values = array(payload)?;
+            if values.is_empty() {
+                return Err(Error::InvalidValue);
+            }
+            Ok(values.iter().collect())
+        }
+        Raw::Array(values) if !values.is_empty() => Ok(values.iter().collect()),
+        _ if is_primary_key_component(raw) => Ok(vec![raw]),
+        _ => Err(Error::InvalidValue),
+    }
+}
+
+fn is_primary_key_component(raw: &Raw) -> bool {
+    matches!(
+        raw,
+        Raw::Bool(_)
+            | Raw::Int(_)
+            | Raw::Text(_)
+            | Raw::Tag(37, _)
+            | Raw::Tag(60000, _)
+            | Raw::Tag(60001, _)
+            | Raw::Tag(60002, _)
+            | Raw::Tag(60008, _)
+            | Raw::Tag(60010, _)
+            | Raw::Tag(60015, _)
+            | Raw::Tag(60021, _)
+    )
+}
+
+fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
+    let ordering = match (left, right) {
+        (Raw::Bool(left), Raw::Bool(right)) => left.cmp(right),
+        (Raw::Int(left), Raw::Int(right)) => left.cmp(right),
+        (Raw::Text(left), Raw::Text(right)) => left.cmp(right),
+        (Raw::Tag(37, left), Raw::Tag(37, right)) => bytes(left)?.cmp(bytes(right)?),
+        (Raw::Tag(60000, _), Raw::Tag(60000, _)) => compare_decimal_raw(left, right)?,
+        (Raw::Tag(60001, left), Raw::Tag(60001, right)) => text(left)?.cmp(text(right)?),
+        (Raw::Tag(60002, left), Raw::Tag(60002, right)) => {
+            let left = array(left)?;
+            let right = array(right)?;
+            let [Raw::Int(left_seconds), Raw::Int(left_nanos)] = left.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            let [Raw::Int(right_seconds), Raw::Int(right_nanos)] = right.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            left_seconds
+                .cmp(right_seconds)
+                .then(left_nanos.cmp(right_nanos))
+        }
+        (Raw::Tag(60008, left), Raw::Tag(60008, right)) => {
+            let left = array(left)?;
+            let right = array(right)?;
+            let [left_type, left_variant, Raw::Null] = left.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            let [right_type, right_variant, Raw::Null] = right.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            uuid_array(left_type)?
+                .cmp(&uuid_array(right_type)?)
+                .then(uuid_array(left_variant)?.cmp(&uuid_array(right_variant)?))
+        }
+        (Raw::Tag(60010, left), Raw::Tag(60010, right)) => {
+            let left = array(left)?;
+            let right = array(right)?;
+            let [left_db, left_table, left_key, left_snapshot] = left.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            let [right_db, right_table, right_key, right_snapshot] = right.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            uuid_array(left_db)?
+                .cmp(&uuid_array(right_db)?)
+                .then(uuid_array(left_table)?.cmp(&uuid_array(right_table)?))
+                .then(compare_key_component(left_key, right_key)?)
+                .then(compare_raw_order(left_snapshot, right_snapshot)?)
+        }
+        (Raw::Tag(60015, left), Raw::Tag(60015, right)) => {
+            compare_key_components(array(left)?, array(right)?)?
+        }
+        (Raw::Tag(60021, left), Raw::Tag(60021, right)) => {
+            let left = array(left)?;
+            let right = array(right)?;
+            let [left_db, left_table, left_key] = left.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            let [right_db, right_table, right_key] = right.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            uuid_array(left_db)?
+                .cmp(&uuid_array(right_db)?)
+                .then(uuid_array(left_table)?.cmp(&uuid_array(right_table)?))
+                .then(compare_key_component(left_key, right_key)?)
+        }
+        _ => return Err(Error::InvalidValue),
+    };
+    Ok(ordering)
+}
+
+fn compare_key_components(left: &[Raw], right: &[Raw]) -> Result<Ordering> {
+    for (left, right) in left.iter().zip(right) {
+        let ordering = compare_key_component(left, right)?;
+        if ordering != Ordering::Equal {
+            return Ok(ordering);
+        }
+    }
+    Ok(left.len().cmp(&right.len()))
+}
+
+fn compare_decimal_raw(left: &Raw, right: &Raw) -> Result<Ordering> {
+    let left = Decimal::from_raw(left)?;
+    let right = Decimal::from_raw(right)?;
+    let left_zero = left.coefficient.is_zero();
+    let right_zero = right.coefficient.is_zero();
+    if left_zero || right_zero {
+        return Ok(match (left_zero, right_zero) {
+            (true, true) => Ordering::Equal,
+            (true, false) => {
+                if right.coefficient.sign() == Sign::Minus {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            (false, true) => {
+                if left.coefficient.sign() == Sign::Minus {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            (false, false) => unreachable!(),
+        });
+    }
+    let left_negative = left.coefficient.sign() == Sign::Minus;
+    let right_negative = right.coefficient.sign() == Sign::Minus;
+    if left_negative != right_negative {
+        return Ok(if left_negative {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        });
+    }
+    let left_digits = left
+        .coefficient
+        .to_str_radix(10)
+        .trim_start_matches('-')
+        .to_owned();
+    let right_digits = right
+        .coefficient
+        .to_str_radix(10)
+        .trim_start_matches('-')
+        .to_owned();
+    let left_position = &left.exponent10 + BigInt::from(left_digits.len());
+    let right_position = &right.exponent10 + BigInt::from(right_digits.len());
+    let mut ordering = left_position.cmp(&right_position);
+    if ordering == Ordering::Equal {
+        for offset in 0..left_digits.len().max(right_digits.len()) {
+            let left_digit = left_digits.as_bytes().get(offset).copied().unwrap_or(b'0');
+            let right_digit = right_digits.as_bytes().get(offset).copied().unwrap_or(b'0');
+            ordering = left_digit.cmp(&right_digit);
+            if ordering != Ordering::Equal {
+                break;
+            }
+        }
+    }
+    Ok(if left_negative {
+        ordering.reverse()
+    } else {
+        ordering
+    })
+}
+
+fn compare_raw_order(left: &Raw, right: &Raw) -> Result<Ordering> {
+    match (left, right) {
+        (Raw::Null, Raw::Null) => Ok(Ordering::Equal),
+        (Raw::Bool(left), Raw::Bool(right)) => Ok(left.cmp(right)),
+        (Raw::Int(left), Raw::Int(right)) => Ok(left.cmp(right)),
+        (Raw::Bytes(left), Raw::Bytes(right)) => Ok(left.cmp(right)),
+        (Raw::Text(left), Raw::Text(right)) => Ok(left.cmp(right)),
+        (Raw::Array(left), Raw::Array(right)) => {
+            for (left, right) in left.iter().zip(right) {
+                let ordering = compare_raw_order(left, right)?;
+                if ordering != Ordering::Equal {
+                    return Ok(ordering);
+                }
+            }
+            Ok(left.len().cmp(&right.len()))
+        }
+        (Raw::Tag(left_tag, left), Raw::Tag(right_tag, right)) if left_tag == right_tag => {
+            match left_tag {
+                60000 => compare_decimal_raw(
+                    &Raw::Tag(*left_tag, left.clone()),
+                    &Raw::Tag(*right_tag, right.clone()),
+                ),
+                60015 => compare_key_components(array(left)?, array(right)?),
+                _ => compare_raw_order(left, right),
+            }
+        }
+        _ => Err(Error::InvalidValue),
+    }
+}
+
 /// A type-directed failure from a canonical value decoder.
 ///
 /// The underlying [`Error`] identifies the malformed OVB condition while
@@ -2648,12 +2877,7 @@ fn validate_schema_constructibility(
 ) -> Result<()> {
     let mut dependents = vec![Vec::new(); definitions.len()];
     for (index, definition) in definitions.iter().enumerate() {
-        collect_constructibility_dependencies(
-            definition,
-            index,
-            definition_ids,
-            &mut dependents,
-        )?;
+        collect_constructibility_dependencies(definition, index, definition_ids, &mut dependents)?;
     }
 
     let mut constructible = vec![false; definitions.len()];
@@ -2692,11 +2916,8 @@ fn definition_is_constructible(
         0 => constructible_fields(array(body)?, definition_ids, constructible),
         1 => {
             for variant in array(body)? {
-                if constructible_fields(
-                    array(&array(variant)?[2])?,
-                    definition_ids,
-                    constructible,
-                )? {
+                if constructible_fields(array(&array(variant)?[2])?, definition_ids, constructible)?
+                {
                     return Ok(true);
                 }
             }
@@ -2739,12 +2960,7 @@ fn collect_constructibility_dependencies(
                 }
             }
         }
-        2 => collect_type_dependencies(
-            &array(body)?[0],
-            dependent,
-            definition_ids,
-            dependents,
-        )?,
+        2 => collect_type_dependencies(&array(body)?[0], dependent, definition_ids, dependents)?,
         3 | 4 => {}
         _ => return Err(Error::InvalidSchema),
     }
@@ -3192,11 +3408,7 @@ mod tests {
     }
 
     fn nominal_definition(id: u8, kind: u64, body: Raw) -> Raw {
-        Raw::Array(vec![
-            uuid_raw([id; 16]),
-            Raw::Int(kind.into()),
-            body,
-        ])
+        Raw::Array(vec![uuid_raw([id; 16]), Raw::Int(kind.into()), body])
     }
 
     fn record_definition(id: u8, fields: Vec<Raw>) -> Raw {
@@ -3219,7 +3431,6 @@ mod tests {
             (Raw::Int(4.into()), Raw::Array(definitions)),
         ])
     }
-
 
     #[test]
     fn canonical_uuid_text_is_lowercase_and_round_trips() {
@@ -3847,10 +4058,7 @@ mod tests {
                     names
                         .iter()
                         .map(|name| {
-                            Raw::Array(vec![
-                                Raw::Text((*name).into()),
-                                inner_record.clone(),
-                            ])
+                            Raw::Array(vec![Raw::Text((*name).into()), inner_record.clone()])
                         })
                         .collect(),
                 ),
@@ -3867,12 +4075,7 @@ mod tests {
         let unused_id = [13; 16];
         let unconstructible = record_definition(
             13,
-            vec![schema_field(
-                23,
-                "self",
-                nominal_type(unused_id),
-                1,
-            )],
+            vec![schema_field(23, "self", nominal_type(unused_id), 1)],
         );
         let valid_root_field = schema_type(0, Raw::Text("Int".into()));
         assert!(
@@ -3892,9 +4095,7 @@ mod tests {
                 1,
             )],
         );
-        assert!(
-            SchemaDescriptor::new(schema_for_type(valid_root_field, vec![guarded])).is_ok()
-        );
+        assert!(SchemaDescriptor::new(schema_for_type(valid_root_field, vec![guarded])).is_ok());
     }
 
     #[test]
@@ -3902,14 +4103,11 @@ mod tests {
         let direct_id = [10; 16];
         let direct = record_definition(
             10,
-            vec![schema_field(
-                20,
-                "self",
-                nominal_type(direct_id),
-                1,
-            )],
+            vec![schema_field(20, "self", nominal_type(direct_id), 1)],
         );
-        assert!(SchemaDescriptor::new(schema_for_type(nominal_type(direct_id), vec![direct])).is_err());
+        assert!(
+            SchemaDescriptor::new(schema_for_type(nominal_type(direct_id), vec![direct])).is_err()
+        );
 
         let a = [10; 16];
         let b = [11; 16];
@@ -3923,12 +4121,7 @@ mod tests {
         let recursive_variant = Raw::Array(vec![
             uuid_raw([30; 16]),
             Raw::Text("recursive".into()),
-            Raw::Array(vec![schema_field(
-                31,
-                "next",
-                nominal_type(enum_id),
-                1,
-            )]),
+            Raw::Array(vec![schema_field(31, "next", nominal_type(enum_id), 1)]),
         ]);
         let recursive_enum = nominal_definition(12, 1, Raw::Array(vec![recursive_variant]));
         assert!(
@@ -3964,12 +4157,7 @@ mod tests {
                 Raw::Array(vec![
                     uuid_raw([31; 16]),
                     Raw::Text("next".into()),
-                    Raw::Array(vec![schema_field(
-                        32,
-                        "previous",
-                        nominal_type(enum_id),
-                        1,
-                    )]),
+                    Raw::Array(vec![schema_field(32, "previous", nominal_type(enum_id), 1)]),
                 ]),
             ]),
         );
@@ -3987,19 +4175,15 @@ mod tests {
             uuid_raw([9; 16]),
             Raw::Array(vec![schema_type(0, Raw::Text("Int".into()))]),
         ]);
-        assert!(
-            SchemaDescriptor::new(schema_for_type(stored_reference, vec![])).is_ok()
-        );
+        assert!(SchemaDescriptor::new(schema_for_type(stored_reference, vec![])).is_ok());
     }
 
     #[test]
     fn schema_rejects_unconstructible_nominals_across_type_compositions() {
         let bad_id = [10; 16];
         let bad_type = nominal_type(bad_id);
-        let bad_definition = record_definition(
-            10,
-            vec![schema_field(20, "self", bad_type.clone(), 1)],
-        );
+        let bad_definition =
+            record_definition(10, vec![schema_field(20, "self", bad_type.clone(), 1)]);
         let tuple = Raw::Array(vec![Raw::Int(3.into()), Raw::Array(vec![bad_type.clone()])]);
         let structural = Raw::Array(vec![
             Raw::Int(4.into()),
@@ -4010,11 +4194,8 @@ mod tests {
         ]);
         for required in [tuple, structural] {
             assert!(
-                SchemaDescriptor::new(schema_for_type(
-                    required,
-                    vec![bad_definition.clone()]
-                ))
-                .is_err()
+                SchemaDescriptor::new(schema_for_type(required, vec![bad_definition.clone()]))
+                    .is_err()
             );
         }
 
@@ -4037,11 +4218,7 @@ mod tests {
             uuid_raw([30; 16]),
         ]);
         assert!(
-            SchemaDescriptor::new(schema_for_type(
-                quantity,
-                vec![bad_definition.clone()]
-            ))
-            .is_err()
+            SchemaDescriptor::new(schema_for_type(quantity, vec![bad_definition.clone()])).is_err()
         );
 
         let reference_with_unconstructible_key = Raw::Array(vec![
@@ -4064,11 +4241,8 @@ mod tests {
             schema_type(9, bad_type),
         ] {
             assert!(
-                SchemaDescriptor::new(schema_for_type(
-                    guarded,
-                    vec![bad_definition.clone()]
-                ))
-                .is_err()
+                SchemaDescriptor::new(schema_for_type(guarded, vec![bad_definition.clone()]))
+                    .is_err()
             );
         }
     }
@@ -4444,5 +4618,136 @@ mod tests {
             mile.divide_exact(&seconds).unwrap(),
             Decimal::new(44_704.into(), (-5).into())
         );
+    }
+}
+
+#[cfg(test)]
+mod logical_primary_key_order_tests {
+    use super::*;
+
+    fn value(raw: Raw) -> Value {
+        Value::new(raw).expect("valid key value")
+    }
+
+    fn uuid_value(byte: u8) -> Raw {
+        uuid_raw([byte; 16])
+    }
+
+    fn decimal(coefficient: i64, exponent: i64) -> Value {
+        Value::decimal(coefficient.into(), exponent.into()).expect("valid decimal")
+    }
+
+    #[test]
+    fn compares_scalar_key_families_by_logical_value() {
+        assert_eq!(
+            compare_primary_keys(&Value::int((-12).into()), &Value::int((-2).into())).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_primary_keys(&decimal(-12, -1), &decimal(-11, -1)).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_primary_keys(&decimal(119, -2), &decimal(12, -1)).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_primary_keys(
+                &value(Raw::Tag(60001, Box::new(Raw::Text("2024-01-01".into())))),
+                &value(Raw::Tag(60001, Box::new(Raw::Text("2024-02-01".into())))),
+            )
+            .unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_primary_keys(
+                &value(Raw::Tag(
+                    60002,
+                    Box::new(Raw::Array(vec![Raw::Int(7.into()), Raw::Int(99.into())])),
+                )),
+                &value(Raw::Tag(
+                    60002,
+                    Box::new(Raw::Array(vec![Raw::Int(8.into()), Raw::Int(0.into())])),
+                )),
+            )
+            .unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_primary_keys(&Value::uuid([1; 16]), &Value::uuid([2; 16])).unwrap(),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compares_payload_free_enums_references_and_tuples_recursively() {
+        let enum_key = |variant| {
+            value(Raw::Tag(
+                60008,
+                Box::new(Raw::Array(vec![
+                    uuid_value(1),
+                    uuid_value(variant),
+                    Raw::Null,
+                ])),
+            ))
+        };
+        assert_eq!(
+            compare_primary_keys(&enum_key(2), &enum_key(3)).unwrap(),
+            Ordering::Less
+        );
+
+        let reference_key = |key: i64| {
+            value(Raw::Tag(
+                60021,
+                Box::new(Raw::Array(vec![
+                    uuid_value(4),
+                    uuid_value(5),
+                    Raw::Int(key.into()),
+                ])),
+            ))
+        };
+        assert_eq!(
+            compare_primary_keys(&reference_key(-2), &reference_key(0)).unwrap(),
+            Ordering::Less
+        );
+
+        let tuple = |first: i64, second: &str| {
+            value(Raw::Tag(
+                60015,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(first.into()),
+                    Raw::Text(second.into()),
+                ])),
+            ))
+        };
+        assert_eq!(
+            compare_primary_keys(&tuple(-3, "z"), &tuple(-2, "a")).unwrap(),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn rejects_non_key_and_malformed_components() {
+        assert!(
+            compare_primary_keys(&Value::float_bits(1.0f64.to_bits()), &Value::int(1.into()))
+                .is_err()
+        );
+        assert!(compare_primary_keys(&Value::unit(), &Value::unit()).is_err());
+        let malformed_enum = value(Raw::Tag(
+            60008,
+            Box::new(Raw::Array(vec![uuid_value(1), uuid_value(2), Raw::Null])),
+        ));
+        let payload_enum = value(Raw::Tag(
+            60008,
+            Box::new(Raw::Array(vec![
+                uuid_value(1),
+                uuid_value(2),
+                Raw::Tag(
+                    60009,
+                    Box::new(Raw::Array(vec![Raw::Null, Raw::Array(vec![])])),
+                ),
+            ])),
+        ));
+        assert!(compare_primary_keys(&malformed_enum, &payload_enum).is_err());
     }
 }
