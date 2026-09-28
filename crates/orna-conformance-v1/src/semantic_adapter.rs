@@ -20,7 +20,9 @@ use orna_evaluator_v1::{
     evaluate_with_functions_and_budget, evaluate_with_functions_and_nominals,
     invoke_named_with_effects_and_budget, invoke_named_with_nominals,
 };
-use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
+use orna_foundation_v1::{
+    Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value, compare_primary_keys,
+};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     CheckpointResetRequest, FaultInjector, FaultPoint, ListStreamSource, NoFault, RequestIdentity,
@@ -1169,17 +1171,6 @@ impl TransactionKeyType {
             .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-KEY"))
     }
 
-    fn compare(&self, left: &Value, right: &Value) -> Ordering {
-        match (self, left.raw(), right.raw()) {
-            (Self::Bool, OvbRaw::Bool(left), OvbRaw::Bool(right)) => left.cmp(right),
-            (Self::Int, OvbRaw::Int(left), OvbRaw::Int(right)) => left.cmp(right),
-            (Self::Str, OvbRaw::Text(left), OvbRaw::Text(right)) => left.cmp(right),
-            (Self::Decimal, OvbRaw::Tag(60000, left), OvbRaw::Tag(60000, right)) => {
-                decimal_key_cmp(left, right)
-            }
-            _ => unreachable!("validated transaction key component has its declared type"),
-        }
-    }
 }
 
 /// Declared table key metadata retained after transaction admission.
@@ -1237,7 +1228,6 @@ impl TransactionTableKey {
         Ok(TransactionKey::typed(
             encoded_table_key(values)?,
             values.to_vec(),
-            self.types.clone(),
         ))
     }
 
@@ -1246,7 +1236,6 @@ impl TransactionTableKey {
         Ok(TransactionKey::typed(
             encoded.to_vec(),
             values,
-            self.types.clone(),
         ))
     }
 
@@ -1276,7 +1265,6 @@ impl std::ops::Deref for TransactionTableKey {
 struct TransactionKey {
     encoded: Vec<u8>,
     components: Option<Vec<Value>>,
-    types: Option<Vec<TransactionKeyType>>,
 }
 
 impl TransactionKey {
@@ -1284,15 +1272,13 @@ impl TransactionKey {
         Self {
             encoded,
             components: None,
-            types: None,
         }
     }
 
-    fn typed(encoded: Vec<u8>, components: Vec<Value>, types: Vec<TransactionKeyType>) -> Self {
+    fn typed(encoded: Vec<u8>, components: Vec<Value>) -> Self {
         Self {
             encoded,
             components: Some(components),
-            types: Some(types),
         }
     }
 
@@ -1317,25 +1303,25 @@ impl Eq for TransactionKey {}
 
 impl Ord for TransactionKey {
     fn cmp(&self, other: &Self) -> Ordering {
-        if let (Some(left), Some(right), Some(types)) =
-            (&self.components, &other.components, &self.types)
-            && self.types == other.types
+        if let (Some(left), Some(right)) = (&self.components, &other.components)
+            && left.len() == right.len()
         {
-            return left
-                .iter()
-                .zip(right)
-                .zip(types)
-                .map(|((left, right), ty)| ty.compare(left, right))
-                .find(|ordering| *ordering != Ordering::Equal)
-                .unwrap_or(Ordering::Equal);
+            let tuple = |values: &[Value]| {
+                Value::new(OvbRaw::Tag(
+                    60015,
+                    Box::new(OvbRaw::Array(
+                        values.iter().map(|value| value.raw().clone()).collect(),
+                    )),
+                ))
+            };
+            if let (Ok(left), Ok(right)) = (tuple(left), tuple(right)) {
+                return compare_primary_keys(&left, &right)
+                    .unwrap_or_else(|_| self.encoded.cmp(&other.encoded));
+            }
         }
         match (Value::decode(&self.encoded), Value::decode(&other.encoded)) {
-            (Ok(left), Ok(right)) => match (left.raw(), right.raw()) {
-                (OvbRaw::Int(left), OvbRaw::Int(right)) => left.cmp(right),
-                (OvbRaw::Int(_), _) => Ordering::Less,
-                (_, OvbRaw::Int(_)) => Ordering::Greater,
-                _ => self.encoded.cmp(&other.encoded),
-            },
+            (Ok(left), Ok(right)) => compare_primary_keys(&left, &right)
+                .unwrap_or_else(|_| self.encoded.cmp(&other.encoded)),
             _ => self.encoded.cmp(&other.encoded),
         }
     }
@@ -8925,13 +8911,39 @@ mod transaction_admission_tests {
         SourceUnit, StageOutcome, TRANSACTION_CURSOR_PREFIX, TRANSACTION_INT_CURSOR_PREFIX,
         TableEffectHandler, TransactionDatabase, TransactionKey, TransactionKeyType,
         TransactionTableKey, TransactionalEvaluator, admit_transaction_project, record_field,
-        transaction_continuation_cursor, transaction_cursor_key,
+        encoded_table_key, transaction_continuation_cursor, transaction_cursor_key,
     };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use num_bigint::BigInt;
     use orna_evaluator_v1::{EffectHandler, Limits, StepBudget};
     use orna_foundation_v1::{OvbRaw, Value};
     use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn transaction_key_order_uses_logical_integer_and_composite_components() {
+        let integer_key = |integer: i64| {
+            let value = Value::int(integer.into());
+            TransactionKey::typed(
+                value.encode().expect("canonical integer encoding"),
+                vec![value],
+            )
+        };
+        assert!(integer_key(-2) < integer_key(-1));
+        assert!(integer_key(-1) < integer_key(0));
+
+        let composite_key = |integer: i64, text: &str| {
+            let values = vec![
+                Value::int(integer.into()),
+                Value::new(OvbRaw::Text(text.into())).expect("canonical text"),
+            ];
+            TransactionKey::typed(
+                encoded_table_key(&values).expect("canonical composite encoding"),
+                values,
+            )
+        };
+        assert!(composite_key(-3, "z") < composite_key(-2, "a"));
+        assert!(composite_key(-2, "a") < composite_key(-2, "b"));
+    }
 
     fn source(body: &str) -> SourceUnit {
         SourceUnit {
