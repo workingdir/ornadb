@@ -1,0 +1,75 @@
+REFERENCE SEARCH 1
+COMMAND: rg -n -i 'highlight' /home/pbox/dev/ornadb/reference/Orna-1.0.0/source
+/home/pbox/dev/ornadb/reference/Orna-1.0.0/source/17-repl.md:35:- syntax highlighting while typing;
+/home/pbox/dev/ornadb/reference/Orna-1.0.0/source/17-repl.md:36:- matching-brace highlighting;
+EXIT CODE: 0
+
+REFERENCE SEARCH 2
+COMMAND: rg -n 'client_field_path|FunctionName|@property|Tree-sitter|tree-sitter|Zed' /home/pbox/dev/ornadb/reference/Orna-1.0.0/source /home/pbox/dev/ornadb/reference/Orna-1.0.0/grammar /home/pbox/dev/ornadb/reference/Orna-1.0.0/tests /home/pbox/dev/ornadb/reference/Orna-1.0.0/examples
+EXIT CODE: 1 (no matching references)
+
+NORMATIVE FUNCTION NAME SEMANTICS
+COMMAND: rg -n 'ORNA-FN-002' /home/pbox/dev/ornadb/reference/Orna-1.0.0/source/06-expressions.md
+63:**ORNA-FN-002** A qualified function name without call parentheses denotes the function value and MUST NOT invoke it.
+EXIT CODE: 0
+
+LIVE MAIN TREE STATE
+COMMAND: git merge-base --is-ancestor 125ce896 origin/main; test -e editors/tree-sitter-orna/queries/highlights.scm; test -e editors/zed/languages/orna/highlights.scm; test -e scripts/check-editor-tooling.py; test -e scripts/test_check_editor_tooling.py
+125ce896 ancestor exit: 0
+absent: editors/tree-sitter-orna/queries/highlights.scm
+absent: editors/zed/languages/orna/highlights.scm
+absent: scripts/check-editor-tooling.py
+absent: scripts/test_check_editor_tooling.py
+
+REMOVAL COMMIT
+
+COMMAND: git show --format= --name-status d0dbd7a5 -- editors/tree-sitter-orna editors/zed scripts/check-editor-tooling.py scripts/test_check_editor_tooling.py
+D	editors/tree-sitter-orna/.gitignore
+D	editors/tree-sitter-orna/README.md
+D	editors/tree-sitter-orna/grammar.js
+D	editors/tree-sitter-orna/package.json
+D	editors/tree-sitter-orna/queries/highlights.scm
+D	editors/tree-sitter-orna/src/grammar.json
+D	editors/tree-sitter-orna/src/node-types.json
+D	editors/tree-sitter-orna/src/parser.c
+D	editors/tree-sitter-orna/src/tree_sitter/alloc.h
+D	editors/tree-sitter-orna/src/tree_sitter/array.h
+D	editors/tree-sitter-orna/src/tree_sitter/parser.h
+D	editors/tree-sitter-orna/test/accepted-corpus.txt
+D	editors/tree-sitter-orna/test/corpus/accepted_actions_inspector.txt
+D	editors/tree-sitter-orna/test/corpus/accepted_client_fixture.txt
+D	editors/tree-sitter-orna/test/corpus/alter_drop.txt
+D	editors/tree-sitter-orna/test/corpus/client_functions.txt
+D	editors/tree-sitter-orna/test/corpus/comments.txt
+D	editors/tree-sitter-orna/test/corpus/expressions.txt
+D	editors/tree-sitter-orna/test/corpus/literals_lambda.txt
+D	editors/tree-sitter-orna/test/corpus/procedural.txt
+D	editors/tree-sitter-orna/test/corpus/schema.txt
+D	editors/tree-sitter-orna/test/corpus/server_function_insert.txt
+D	editors/tree-sitter-orna/test/corpus/server_function_select.txt
+D	editors/tree-sitter-orna/test/corpus/server_function_update_delete.txt
+D	editors/tree-sitter-orna/test/corpus/strings_identifiers.txt
+D	editors/tree-sitter-orna/test/corpus/type_enum.txt
+D	editors/tree-sitter-orna/test/corpus/type_object.txt
+D	editors/tree-sitter-orna/test/corpus/type_scalar.txt
+D	editors/tree-sitter-orna/test/corpus/type_value.txt
+D	editors/tree-sitter-orna/test/corpus/unicode_identifiers.txt
+D	editors/tree-sitter-orna/test/corpus/users_roles_grants.txt
+D	editors/tree-sitter-orna/test/deferred-corpus.txt
+D	editors/tree-sitter-orna/test/highlight/accepted_actions_inspector.orna
+D	editors/tree-sitter-orna/test/highlight/accepted_resources_streams.orna
+D	editors/tree-sitter-orna/test/highlight/alter_type_rename.orna
+D	editors/tree-sitter-orna/test/highlight/keyword_qualified_names.orna
+D	editors/tree-sitter-orna/test/highlight/qualified_type_references.orna
+D	editors/tree-sitter-orna/tree-sitter.json
+D	editors/zed/Cargo.lock
+D	editors/zed/Cargo.toml
+D	editors/zed/README.md
+D	editors/zed/extension.toml
+D	editors/zed/languages/orna/config.toml
+D	editors/zed/languages/orna/highlights.scm
+D	editors/zed/languages/orna/language_servers/orna_lsp/config.toml
+D	editors/zed/src/lib.rs
+D	scripts/check-editor-tooling.py
+D	scripts/test_check_editor_tooling.py
+EXIT CODE: 0
