@@ -96,6 +96,9 @@ const ORDER_BY_SOURCE: &str = concat!(
 const ACCEPTED_CLIENT_SOURCE: &str =
     include_str!("../../orna-syntax/testdata/accepted-client.orna");
 
+/// A checked-in source with one persistent object and its resolved references.
+const PERSISTENT_RENAME_SOURCE: &str =
+    include_str!("../../orna-compiler/tests/fixtures/server-function-dogfood.orna");
 /// The broken source used for negative diagnostics tests.
 const BROKEN_SOURCE: &str = "CREATE SCHEMA broken_test;\n\
 CREATE SERVER FUNCTION broken_test.f()\n\
@@ -459,6 +462,10 @@ fn initialize(client: &mut Client) {
         "the server must advertise reference support: {result}"
     );
     assert_eq!(
+        capabilities["renameProvider"], true,
+        "the server must advertise semantic rename support: {result}"
+    );
+    assert_eq!(
         capabilities["documentSymbolProvider"], true,
         "the server must advertise document-symbol support: {result}"
     );
@@ -573,6 +580,53 @@ fn position_at_byte(source: &str, byte: usize) -> Value {
     json!({ "line": line as u64, "character": character })
 }
 
+fn final_name_range(source: &str, qualified_name: &str, final_name: &str) -> Value {
+    assert!(
+        qualified_name.ends_with(final_name),
+        "final name must suffix the qualified name"
+    );
+    let start = source
+        .find(qualified_name)
+        .unwrap_or_else(|| panic!("missing qualified name {qualified_name:?}"))
+        + qualified_name.len()
+        - final_name.len();
+    json!({
+        "start": position_at_byte(source, start),
+        "end": position_at_byte(source, start + final_name.len()),
+    })
+}
+
+fn source_name_range(source: &str, name: &str) -> Value {
+    let start = source
+        .find(name)
+        .unwrap_or_else(|| panic!("missing source name {name:?}"));
+    json!({
+        "start": position_at_byte(source, start),
+        "end": position_at_byte(source, start + name.len()),
+    })
+}
+
+fn apply_text_edits(source: &str, edits: &[Value]) -> String {
+    let mut edits = edits
+        .iter()
+        .map(|edit| {
+            (
+                byte_offset_from_lsp_position(source, &edit["range"]["start"]),
+                byte_offset_from_lsp_position(source, &edit["range"]["end"]),
+                edit["newText"]
+                    .as_str()
+                    .expect("text edit replacement")
+                    .to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    edits.sort_by(|left, right| right.0.cmp(&left.0));
+    let mut updated = source.to_owned();
+    for (start, end, replacement) in edits {
+        updated.replace_range(start..end, &replacement);
+    }
+    updated
+}
 fn line_starts(source: &str) -> Vec<usize> {
     let mut starts = vec![0usize];
     for (index, source_character) in source.char_indices() {
@@ -1759,6 +1813,149 @@ fn serves_hover_definition_and_references() {
         );
     }
 
+    client.shutdown();
+}
+
+#[test]
+fn semantic_rename_updates_references_for_one_persistent_object() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/server-function-dogfood.orna";
+    open_document(&mut client, uri, PERSISTENT_RENAME_SOURCE, 1);
+    assert_eq!(
+        client.read_notification("textDocument/publishDiagnostics")["uri"],
+        uri
+    );
+
+    let rename = client.request(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_inside(
+                PERSISTENT_RENAME_SOURCE,
+                "CREATE TYPE dogfood.",
+                "item",
+            ),
+            "newName": "renamed_item",
+        }),
+    );
+    let changes = rename["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("resolved target returns a workspace edit: {rename}"));
+    assert_eq!(changes.len(), 1, "one open source changes: {rename}");
+    let edits = changes[uri]
+        .as_array()
+        .expect("declaration and references are edited");
+    assert!(
+        edits.len() > 1,
+        "declaration and references change: {rename}"
+    );
+    assert!(edits.iter().all(|edit| edit["newText"] == "renamed_item"));
+    assert!(
+        edits.iter().any(|edit| edit["range"]
+            == final_name_range(PERSISTENT_RENAME_SOURCE, "dogfood.item", "item")),
+        "declaration final name is edited: {rename}"
+    );
+    for edit in edits {
+        let start =
+            byte_offset_from_lsp_position(PERSISTENT_RENAME_SOURCE, &edit["range"]["start"]);
+        let end = byte_offset_from_lsp_position(PERSISTENT_RENAME_SOURCE, &edit["range"]["end"]);
+        assert_eq!(
+            &PERSISTENT_RENAME_SOURCE[start..end],
+            "item",
+            "rename changes only the resolved final-name spans: {edit}"
+        );
+    }
+    let renamed_source = apply_text_edits(PERSISTENT_RENAME_SOURCE, edits);
+    assert!(!renamed_source.contains("dogfood.item"));
+    assert!(renamed_source.contains("CREATE TYPE dogfood.renamed_item"));
+    assert!(renamed_source.contains("FROM dogfood.renamed_item item"));
+    assert!(renamed_source.contains("item.value"));
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": 2 },
+            "contentChanges": [{ "text": renamed_source }],
+        }),
+    );
+    assert_eq!(
+        client.read_notification("textDocument/publishDiagnostics")["uri"],
+        uri
+    );
+
+    let definition = client.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_inside(
+                &renamed_source,
+                "FROM dogfood.",
+                "renamed_item",
+            ),
+        }),
+    );
+    assert_eq!(
+        definition["uri"], uri,
+        "same persistent object remains selected: {definition}"
+    );
+    assert_eq!(
+        definition["range"],
+        source_name_range(&renamed_source, "dogfood.renamed_item"),
+        "renamed reference resolves to the renamed declaration"
+    );
+
+    let unsupported = client.request(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_inside(
+                &renamed_source,
+                "CREATE SERVER FUNCTION dogfood.read_item(",
+                "p_item",
+            ),
+            "newName": "item_ref",
+        }),
+    );
+    assert!(
+        unsupported.is_null(),
+        "a function parameter is not a persistent object: {unsupported}"
+    );
+    client.shutdown();
+}
+
+#[test]
+fn semantic_rename_rejects_ambiguous_persistent_object() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let first_uri = "file:///test/first-dogfood.orna";
+    let second_uri = "file:///test/second-dogfood.orna";
+    open_document(&mut client, first_uri, PERSISTENT_RENAME_SOURCE, 1);
+    assert_eq!(
+        client.read_notification("textDocument/publishDiagnostics")["uri"],
+        first_uri
+    );
+    open_document(&mut client, second_uri, PERSISTENT_RENAME_SOURCE, 1);
+    assert_eq!(
+        client.read_notification("textDocument/publishDiagnostics")["uri"],
+        second_uri
+    );
+
+    let rename = client.request(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": first_uri },
+            "position": position_inside(
+                PERSISTENT_RENAME_SOURCE,
+                "CREATE TYPE dogfood.",
+                "item",
+            ),
+            "newName": "record",
+        }),
+    );
+    assert!(
+        rename.is_null(),
+        "duplicate persistent declarations are ambiguous: {rename}"
+    );
     client.shutdown();
 }
 
