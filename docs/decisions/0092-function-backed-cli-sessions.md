@@ -101,6 +101,48 @@ lifecycle, interoperability, and conformance surface, the installed CLI keeps
 remote invocation fail-closed. Endpoint parsing is not evidence of remote
 session or artifact-exchange support.
 
+## Issue #16 contract trace
+
+Issue #16 asks whether to accept remote wire sessions and verified artifact
+exchange. Accept the already specified v1 session and live-wire contract; do
+not treat that acceptance as approval of the historical artifact-transfer
+proposal:
+
+* `source/30-protocol.md:13-21` specifies trusted session creation, resume,
+  close, cookie/token roles, origin checks, limits, and lifecycle. Its
+  `ORNA-PROTO-001` and `ORNA-PROTO-002` requirements (lines 9 and 23) require
+  complete canonical validation before admission and preserve reservations and
+  outcomes across a valid session resume.
+* `source/14-pages.md:98-104` and `profiles/live-protocol.md` bind the live
+  envelope, typed values, and Present nodes to `ORNA-WIRE-009..012`. This is
+  the `orna.present.v1` page/watch protocol, not an artifact-upload API.
+* `source/14-pages.md:72` (`ORNA-EVAL-002`) makes submitted source authoritative
+  at the host; a client AST, bytecode, or plan is not trusted. The deployment
+  boundary is `ORNA-TRUST-002` and `ORNA-WIRE-011`
+  (`source/26-security.md:7`, `source/14-pages.md:102`); anonymous mutation and
+  arbitrary remote REPL execution are outside the trusted v1 profile under
+  `ORNA-TRUST-003` (`source/26-security.md:9`).
+* Repository artifacts follow Git object and ref semantics:
+  `ORNA-GIT-002` and `ORNA-GIT-006` allow promised blobs to be fetched from
+  configured promisor remotes (`source/24-git-history.md:7,25`), while
+  `ORNA-REMOTE-003..005` define `refs/orna/*` synchronization and continuity
+  diagnostics (`source/24-git-history.md:48-52`). Segment content digests are
+  addressed by `ORNA-SYS-068` (`source/15-system.md:226`); portable extension
+  identity is the pinned Git object under `ORNA-EXT-002`
+  (`source/26-security.md:17`). These contracts do not define a separate
+  client artifact request/chunk wire exchange.
+
+The reference audit used exact, case-sensitive searches for
+`HELLO|AUTH|SESSION_READY|CLIENT_ARTIFACT_REQUEST|CLIENT_ARTIFACT_CHUNK` and
+for artifact/artefact exchange, upload, download, or transfer terms across
+`Orna-1.0.0.md`, `source/`, `profiles/`, `api/`, `tests/`, and `examples/`.
+The first search returned no matching protocol names; the second found no
+separate artifact-exchange contract. Therefore this issue accepts the existing
+v1 session, live-wire, repository-object, digest, and trust requirements, and
+defers the legacy `HELLO`/`AUTH`/client-chunk proposal until an authoritative
+contract defines its identities, errors, ownership, security, limits, and
+conformance tests. No new wire identity or behavior is inferred.
+
 ## Evidence
 
 * `spec/docs/13-invocation-system.md` defines typed root invocation,
