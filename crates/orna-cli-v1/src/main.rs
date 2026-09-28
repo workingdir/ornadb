@@ -1726,6 +1726,20 @@ fn run_public_project_function(
     target: &str,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
+    run_project_function(endpoint, target, false, color_enabled)
+}
+fn run_default_project_main(
+    endpoint: &Endpoint,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
+    run_project_function(endpoint, "main.main", true, color_enabled)
+}
+fn run_project_function(
+    endpoint: &Endpoint,
+    target: &str,
+    allow_private_root_main: bool,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue();
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
@@ -1736,7 +1750,14 @@ fn run_public_project_function(
             "fix the first reported source contract error, then run the project again",
         ));
     }
-    if !public_project_function(&analysis, target) {
+    let private_default_main_present = allow_private_root_main
+        && target == "main.main"
+        && analysis
+            .modules
+            .get(&orna_semantic_v1::Namespace(Vec::new()))
+            .and_then(|module| module.symbols.get("main"))
+            .is_some_and(|symbol| symbol.kind == orna_semantic_v1::SymbolKind::Function);
+    if !private_default_main_present && !public_project_function(&analysis, target) {
         return Err(Diagnostic::unavailable(
             "durable project invocation is not available",
             "use a supported table transaction; stream roots require the explicit stream runtime",

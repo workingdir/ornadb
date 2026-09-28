@@ -1,0 +1,3 @@
+use library;
+pub fn main(): Int = library.answer();
+fn hidden(): Int = library.answer();
