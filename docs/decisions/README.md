@@ -36,7 +36,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0083 | Retained `std.ui.window` CLIENT entry point and host-owned adapter boundary | General UI JSON-to-ABI transport, models, Studio operations, `std.launch` metadata (bounded by 0094), and second runtimes remain separately gated. |
 | 0084 | Programmable CLIENT plans and shared runtime hosts | Collection/range `FOR`, general algebraic values, second toolkit/browser deployment, `std.launch` metadata (bounded by 0094), gateways, and broader UI transport remain deferred. |
 | 0085 | Legacy/proposal fixed Qt runtime-package selection boundary | Current 1.0 does not prescribe an installed package path or native-runtime selection policy; browser/second toolkit, arbitrary runtime paths, database-selected native code, and model contracts remain deferred. |
-| 0086 | Bounded population of existing Inspector projection rows | Resource/UI/presenter identity enrichment is accepted by 0086; request lifecycle, full UI tree, models, and richer redaction remain deferred. |
+| 0086 | Deferred: populated Inspector projection rows are not required by frozen Orna 1.0.0 | Structural Inspect, snapshot coherence, unavailable-detail metadata, and redaction remain required; resource/UI/presenter row schemas and capture semantics remain deferred. |
 | 0087 | Bounded `std.data.Rows` and retained table presentation | Materialised Rows, shape-preserving sealed presentation, and V8 retained table input are accepted; virtual models, Rows resources, lossless JSON, and extra presenters remain deferred. |
 | 0088 | Structural UI constructors for source-authored CLIENT work | Seven V9 pure UI constructors are accepted after Rows V8; actions, models, Studio operations, metadata, and runtime expansion remain deferred. |
 | 0089 | Trusted resource lineage authority: compiled evaluator and installed authenticated execution derive principal/profile/instance lineage; parent/call-site identities remain correlation-only, and direct constructors remain low-level compatibility/test seams. | Hostile external-plugin authenticated binding remains deferred; no runtime or security-surface expansion is accepted. |
@@ -201,7 +201,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Programmable CLIENT Plans and Shared Runtime Hosts](0084-client-control-flow.md)
 * **work ADR 0085:**
   [Install and Select the Qt Runtime from a Fixed Package Path](0085-installed-qt-runtime-package.md)
-* **work ADR 0086:**
+* **work ADR 0086 (deferred):**
   [Populate Existing Inspector Projection Rows](0086-populated-inspector-projections.md)
 * **work ADR 0087:**
   [Bounded `std.data.Rows` and Retained Table Presenter](0087-std-data-rows.md)
