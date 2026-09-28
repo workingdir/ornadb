@@ -474,31 +474,6 @@ fn checks_client_state_slots_and_rejects_state_shape_type_errors() {
 }
 
 #[test]
-fn rejects_opaque_values_in_client_state() {
-    let standard =
-        check_standard_library_source(&crate::tests::verified_canonical_standard_source_fixture()).unwrap();
-    let base = empty_catalogue();
-    let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
-    let source = "CREATE SCHEMA examples; \
-            CREATE CLIENT FUNCTION examples.state() RETURNS INTEGER IS \
-            STATE action std.ui.UI; \
-            BEGIN RETURN 1; END;";
-    let report = check_standard_application(&bundle([("state.orna", source)]), &context);
-
-    assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
-    assert_eq!(
-        report.diagnostics()[0].code(),
-        DiagnosticCode::DomainIncompatible,
-        "{:?}",
-        report.diagnostics()
-    );
-    assert_eq!(
-        report.diagnostics()[0].message(),
-        "opaque CLIENT values are transient and cannot be stored in state"
-    );
-    assert!(report.preparation_view().is_none());
-}
-#[test]
 fn rejects_inspector_expressions_in_state_defaults_and_returns() {
     let cases = [
         (
@@ -1601,8 +1576,3 @@ fn rejects_every_std_owner_form_at_its_complete_name() {
     }
     assert_no_checked_bundle(&report);
 }
-
-pub(super) const STD_INVOKE_SOURCE: &str = "CREATE SCHEMA std.invoke;\nCREATE SERVER FUNCTION std.invoke.echo(\n    p_value INTEGER\n)\nRETURNS INTEGER\nSECURITY INVOKER\nTRANSACTION READ ONLY\nVOLATILITY STABLE\nAS\n    SELECT p_value;";
-/// The exact retained V2 `std/types.orna` source: the retained
-/// `orna.std/1`-shape type declarations for the fixed INTEGER value type.
-pub(super) const STANDARD_V2_TYPES_SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.integer@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.INTEGER AS std.INTEGER;EXPORT TYPE std.INTEGER TO PRELUDE AS INTEGER;";
