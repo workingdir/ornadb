@@ -8503,7 +8503,9 @@ mod tests {
     #[test]
     fn resync_reaches_the_snapshot_application_after_replay_history_expires() {
         let mut host = subscribed_host(None);
-        for revision in 1..=257 {
+        for revision in 1_u64..=257 {
+            let mut fingerprint = [0; 32];
+            fingerprint[..8].copy_from_slice(&revision.to_be_bytes());
             host.serving
                 .apply_patch(
                     [1; 16],
@@ -8512,7 +8514,7 @@ mod tests {
                     &[],
                     orna_serving_v1::RetainedPin {
                         revision,
-                        fingerprint: [u8::try_from(revision).expect("test revision fits"); 32],
+                        fingerprint,
                     },
                 )
                 .unwrap();
