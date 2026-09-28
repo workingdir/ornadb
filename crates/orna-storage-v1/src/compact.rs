@@ -9,18 +9,18 @@
 //! exact key.
 
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fmt,
 };
 
-use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_evolution_v1::{MigrationOperation, MigrationPlan};
+use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys};
 use orna_repository_v1::{
     CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry, CompactSegmentRole,
 };
 use orna_runtime_v1::{
-    PublicationFreeze, PublicationMutationState, PublicationRowEncoding,
-    PublicationValueEncoding,
+    PublicationFreeze, PublicationMutationState, PublicationRowEncoding, PublicationValueEncoding,
 };
 use sha2::{Digest, Sha256};
 
@@ -564,10 +564,10 @@ fn rewrite_rekey_row_value(
     new_key: &CompactKeyIdentity,
     value: &CanonicalValue,
 ) -> Result<CanonicalValue, CompactBaseProjectionError> {
-    let old_components =
-        decode_key_components(profile, old_key).map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
-    let new_components =
-        decode_key_components(profile, new_key).map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
+    let old_components = decode_key_components(profile, old_key)
+        .map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
+    let new_components = decode_key_components(profile, new_key)
+        .map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
     let OvbRaw::Tag(60009, payload) = value.raw() else {
         return Err(CompactBaseProjectionError::InvalidEvolutionValue);
     };
@@ -599,10 +599,7 @@ fn rewrite_rekey_row_value(
             }
             field_value = new_components[index].clone();
         }
-        rewritten_fields.push(OvbRaw::Array(vec![
-            field_id.clone(),
-            field_value,
-        ]));
+        rewritten_fields.push(OvbRaw::Array(vec![field_id.clone(), field_value]));
     }
     if seen_keys.len() != profile.key_fields.len() {
         return Err(CompactBaseProjectionError::InvalidEvolutionValue);
@@ -768,7 +765,9 @@ impl fmt::Display for CompactLoweringError {
             Self::EmptyTable => f.write_str("compact freeze has an empty table identity"),
             Self::WrongTable => f.write_str("compact freeze mutation belongs to another table"),
             Self::WrongSchema => f.write_str("compact freeze mutation belongs to another schema"),
-            Self::WrongRowEncoding => f.write_str("compact freeze uses an unsupported row encoding"),
+            Self::WrongRowEncoding => {
+                f.write_str("compact freeze uses an unsupported row encoding")
+            }
             Self::WrongValueEncoding => {
                 f.write_str("compact freeze uses an unsupported value encoding")
             }
@@ -923,7 +922,6 @@ pub fn lower_publication_freeze(
         candidate_digest,
     })
 }
-
 
 /// A validated compact logical schema projection for primary-key admission.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1184,9 +1182,35 @@ impl CompactOvbProfile {
 }
 
 /// An immutable, canonical exact key identity.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Hash)]
 pub struct CompactKeyIdentity {
     encoded: Vec<u8>,
+}
+
+impl PartialEq for CompactKeyIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.encoded == other.encoded
+    }
+}
+
+impl Eq for CompactKeyIdentity {}
+
+impl PartialOrd for CompactKeyIdentity {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CompactKeyIdentity {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let logical = CanonicalValue::decode(&self.encoded)
+            .and_then(|left| {
+                CanonicalValue::decode(&other.encoded)
+                    .and_then(|right| compare_primary_keys(&left, &right))
+            })
+            .unwrap_or_else(|_| self.encoded.cmp(&other.encoded));
+        logical.then_with(|| self.encoded.cmp(&other.encoded))
+    }
 }
 
 impl CompactKeyIdentity {
@@ -1896,11 +1920,7 @@ mod tests {
         let (key_name, key_type) = key_declaration
             .split_once(':')
             .expect("fixture key has a type");
-        let mut fields = vec![field(
-            KEY_A,
-            key_name.trim(),
-            primitive(key_type.trim()),
-        )];
+        let mut fields = vec![field(KEY_A, key_name.trim(), primitive(key_type.trim()))];
         let body = SOURCE
             .split_once('{')
             .expect("fixture table has a body")
@@ -1923,10 +1943,7 @@ mod tests {
                         .expect("fixture email field is a list");
                     (
                         [0x22; 16],
-                        OvbRaw::Array(vec![
-                            OvbRaw::Int(1.into()),
-                            primitive(element_type.trim()),
-                        ]),
+                        OvbRaw::Array(vec![OvbRaw::Int(1.into()), primitive(element_type.trim())]),
                     )
                 }
                 other => panic!("unexpected Contact field {other}"),
@@ -1979,9 +1996,7 @@ mod tests {
         let logical_key = fixture_key(key);
         let key_digest = Sha256::digest(&logical_key).into();
         let value_digest = match &state {
-            PublicationMutationState::Replacement { value } => {
-                Some(Sha256::digest(value).into())
-            }
+            PublicationMutationState::Replacement { value } => Some(Sha256::digest(value).into()),
             PublicationMutationState::Deletion => None,
         };
         orna_runtime_v1::PublicationFreezeMutation {
@@ -2045,16 +2060,12 @@ mod tests {
     #[test]
     fn ordered_freeze_chains_fold_against_fixture_schema_and_committed_base() {
         let profile = fixture_profile();
-        let empty_base =
-            fold_compact_committed_base(&profile, std::iter::empty(), 1).unwrap();
+        let empty_base = fold_compact_committed_base(&profile, std::iter::empty(), 1).unwrap();
         assert!(empty_base.rows().next().is_none());
         let existing_value = fixture_row("present", "Before", Some("before@example.test"));
         let changing_value = fixture_row("changing", "Before", None);
         let mut rows = BTreeMap::new();
-        for (key_text, value) in [
-            ("present", existing_value),
-            ("changing", changing_value),
-        ] {
+        for (key_text, value) in [("present", existing_value), ("changing", changing_value)] {
             let encoded_key = fixture_key(key_text);
             let key = profile.decode_key(&encoded_key).unwrap();
             rows.insert(
@@ -2084,12 +2095,7 @@ mod tests {
                         value: fixture_row("new", "Temporary", None).encode().unwrap(),
                     },
                 ),
-                publication_mutation(
-                    &profile,
-                    2,
-                    "new",
-                    PublicationMutationState::Deletion,
-                ),
+                publication_mutation(&profile, 2, "new", PublicationMutationState::Deletion),
                 publication_mutation(
                     &profile,
                     3,
@@ -2098,18 +2104,8 @@ mod tests {
                         value: fixture_row("present", "Updated", None).encode().unwrap(),
                     },
                 ),
-                publication_mutation(
-                    &profile,
-                    4,
-                    "present",
-                    PublicationMutationState::Deletion,
-                ),
-                publication_mutation(
-                    &profile,
-                    5,
-                    "changing",
-                    PublicationMutationState::Deletion,
-                ),
+                publication_mutation(&profile, 4, "present", PublicationMutationState::Deletion),
+                publication_mutation(&profile, 5, "changing", PublicationMutationState::Deletion),
                 publication_mutation(
                     &profile,
                     6,
@@ -2136,18 +2132,14 @@ mod tests {
 
         assert_eq!(folded.mutations.len(), 2);
         assert_eq!(folded.mutations[0].sequence, 4);
+        assert_eq!(folded.mutations[0].key.encoded(), fixture_key("present"));
         assert_eq!(
-            folded.mutations[0].key.encoded(),
-            fixture_key("present")
+            folded.mutations[0].state,
+            CompactWriterMutationState::Deletion
         );
-        assert_eq!(folded.mutations[0].state, CompactWriterMutationState::Deletion);
         assert_eq!(folded.mutations[1].sequence, 6);
-        assert_eq!(
-            folded.mutations[1].key.encoded(),
-            fixture_key("changing")
-        );
-        let CompactWriterMutationState::Replacement { value } = &folded.mutations[1].state
-        else {
+        assert_eq!(folded.mutations[1].key.encoded(), fixture_key("changing"));
+        let CompactWriterMutationState::Replacement { value } = &folded.mutations[1].state else {
             panic!("last replacement must remain the complete final mutation");
         };
         assert_eq!(
@@ -2197,15 +2189,12 @@ mod tests {
                     1,
                     "transient",
                     PublicationMutationState::Replacement {
-                        value: fixture_row("transient", "Temporary", None).encode().unwrap(),
+                        value: fixture_row("transient", "Temporary", None)
+                            .encode()
+                            .unwrap(),
                     },
                 ),
-                publication_mutation(
-                    &profile,
-                    2,
-                    "transient",
-                    PublicationMutationState::Deletion,
-                ),
+                publication_mutation(&profile, 2, "transient", PublicationMutationState::Deletion),
                 publication_mutation(
                     &profile,
                     3,
@@ -2214,18 +2203,8 @@ mod tests {
                         value: fixture_row("present", "Temporary", None).encode().unwrap(),
                     },
                 ),
-                publication_mutation(
-                    &profile,
-                    4,
-                    "present",
-                    PublicationMutationState::Deletion,
-                ),
-                publication_mutation(
-                    &profile,
-                    5,
-                    "changing",
-                    PublicationMutationState::Deletion,
-                ),
+                publication_mutation(&profile, 4, "present", PublicationMutationState::Deletion),
+                publication_mutation(&profile, 5, "changing", PublicationMutationState::Deletion),
                 publication_mutation(
                     &profile,
                     6,
@@ -2309,7 +2288,9 @@ mod tests {
         };
 
         let mut bad_witness = valid();
-        bad_witness.mutations[0].equivalence_witness.candidate_digest = [0x99; 32];
+        bad_witness.mutations[0]
+            .equivalence_witness
+            .candidate_digest = [0x99; 32];
         assert_eq!(
             lower_publication_freeze(&profile, &bad_witness),
             Err(CompactLoweringError::CandidateWitnessMismatch)
@@ -2317,15 +2298,12 @@ mod tests {
 
         let mut bad_digest = valid();
         bad_digest.candidate_digest = [0x98; 32];
-        bad_digest.mutations[0]
-            .equivalence_witness
-            .candidate_digest = bad_digest.candidate_digest;
+        bad_digest.mutations[0].equivalence_witness.candidate_digest = bad_digest.candidate_digest;
         assert_eq!(
             lower_publication_freeze(&profile, &bad_digest),
             Err(CompactLoweringError::CandidateDigestMismatch)
         );
     }
-
 
     fn enum_profile() -> CompactOvbProfile {
         let enum_type = OvbRaw::Array(vec![OvbRaw::Int(5.into()), uuid_raw(ENUM_TYPE)]);
@@ -2725,6 +2703,48 @@ mod tests {
     }
 
     #[test]
+    fn compact_key_identity_orders_signed_integers_logically_and_keeps_bytes() {
+        let profile = scalar_profile();
+        let encoded = [-10, -1, 0, 1, 10].map(scalar_key);
+        let mut keys = encoded
+            .iter()
+            .map(|key| profile.decode_key(key).unwrap())
+            .collect::<BTreeSet<_>>();
+        let observed = keys
+            .iter()
+            .map(|key| {
+                assert!(encoded.iter().any(|bytes| bytes == key.encoded()));
+                let value = CanonicalValue::decode(key.encoded()).unwrap();
+                let OvbRaw::Int(value) = value.raw() else {
+                    panic!("test key remains an encoded integer");
+                };
+                value.to_string().parse::<i64>().unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(observed, vec![-10, -1, 0, 1, 10]);
+        assert_eq!(keys.pop_first().unwrap().encoded(), scalar_key(-10));
+    }
+
+    #[test]
+    fn compact_key_identity_orders_tuple_components_lexicographically() {
+        let profile = reordered_profile();
+        let lower = profile.decode_key(&tuple_key()).unwrap();
+        let upper = CanonicalValue::new(OvbRaw::Tag(
+            60015,
+            Box::new(OvbRaw::Array(vec![
+                OvbRaw::Text("west".into()),
+                OvbRaw::Int(8.into()),
+            ])),
+        ))
+        .unwrap()
+        .encode()
+        .unwrap();
+        let upper = profile.decode_key(&upper).unwrap();
+        assert!(lower < upper);
+        assert_ne!(lower.encoded(), upper.encoded());
+    }
+
+    #[test]
     fn corrupt_record_and_noncanonical_decimal_inputs_fail_closed() {
         let profile = scalar_profile();
         let mut corrupt = scalar_key(42);
@@ -3007,14 +3027,16 @@ mod tests {
         );
 
         let mut evolved_schema = schema.clone();
-        evolved_schema.tables[0].fields.push(orna_evolution_v1::Field {
-            id: orna_evolution_v1::ObjectId::new(KEY_B),
-            name: "label".into(),
-            ty: orna_evolution_v1::FieldType::Str,
-            role: orna_evolution_v1::FieldRole::Stored,
-            optional: true,
-            introduction_fallback: None,
-        });
+        evolved_schema.tables[0]
+            .fields
+            .push(orna_evolution_v1::Field {
+                id: orna_evolution_v1::ObjectId::new(KEY_B),
+                name: "label".into(),
+                ty: orna_evolution_v1::FieldType::Str,
+                role: orna_evolution_v1::FieldRole::Stored,
+                optional: true,
+                introduction_fallback: None,
+            });
         let schema_plan = orna_evolution_v1::plan(
             &schema,
             &evolved_schema,
