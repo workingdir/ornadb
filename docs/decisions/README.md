@@ -51,6 +51,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0099 | OrnaDB 1.0 CLIENT capability-grant configuration boundary | Local CLIENT grant loading and its configuration contract are not defined; the built-in grants database remains explicitly outside the 1.0 profile. |
 | 0100 | Studio source tooling boundary | Orna 1.0 accepts semantic CLI diff and read-only retained source/revision APIs; Studio source editing/apply, revision browsing UI, and public revision activation remain deferred. |
 | 0101 | Deferred: CLIENT STATE dogfood is not defined by frozen Orna 1.0.0 | ORNA-PAGE-001/002 define pages and widgets as ordinary values, not CLIENT state declarations, scope/default semantics, or StateClientPlan metadata. |
+| 0102 | Qualified type editor highlighting deferral | Lowercase qualified-name capture semantics are unspecified, and the current main branch contains no editor/tree-sitter implementation to update. |
 
 ## Current work ADRs
 
@@ -239,3 +240,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Studio Source Tooling Boundary](0100-studio-source-tooling-boundary.md)
 * **work ADR 0101 (deferred):**
   [Defer CLIENT STATE Dogfood as Orna 1.0.0 Conformance](0101-client-state-dogfood-reference-deferral.md)
+* **work ADR 0102 (deferred):**
+  [Qualified Type Editor Highlighting Deferral](0102-qualified-type-editor-highlighting-deferral.md)
