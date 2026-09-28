@@ -57,7 +57,10 @@ impl From<RuntimeFailure> for CatalogueError {
 #[cfg(test)]
 mod batch_tests {
     use super::*;
-    use crate::{NoFault, RuntimeIdentity, TableMutation};
+    use crate::{
+        ActivationError, ActivationWork, FaultInjector, FaultPoint, NoFault, RuntimeError,
+        RuntimeIdentity, TableMutation, run_table_activation,
+    };
     use orna_foundation_v1::CwdCapture;
     use tempfile::tempdir;
 
@@ -203,6 +206,149 @@ mod batch_tests {
                 )
                 .await,
             Err(CatalogueError::CatalogueTypeMismatch)
+        );
+    }
+
+    #[tokio::test]
+    async fn activation_commits_catalogue_identity_with_table_state_or_rolls_back_both() {
+        let (_directory, state) = state().await;
+        let writer = state.acquire_lease([16; 16]).await.unwrap();
+        let mutation =
+            TableMutation::new([17; 16], "items", b"one".to_vec(), Some(b"1".to_vec())).unwrap();
+        let committed: Result<(), ActivationError<()>> =
+            run_table_activation(&state, writer, &["items"], &NoFault, move |snapshot| {
+                let predecessor_capture = snapshot.context().capture().clone();
+                async move {
+                    let admission = CatalogueAdmission {
+                        predecessor_capture: Some(predecessor_capture),
+                        types: vec![
+                            type_declaration("pkg.Item", 21, 22, CatalogueTypeSpec::Named, None),
+                            type_declaration(
+                                "pkg.ItemRef",
+                                23,
+                                24,
+                                CatalogueTypeSpec::Reference {
+                                    target: "pkg.Item".into(),
+                                },
+                                None,
+                            ),
+                        ],
+                        functions: Vec::new(),
+                    };
+                    Ok(ActivationWork::new(vec![mutation], digest(25), ())
+                        .with_catalogue_admission(admission))
+                }
+            })
+            .await;
+        assert!(matches!(committed, Ok(())));
+
+        let named = state
+            .catalogue_type("pkg.Item", CatalogueTypeForm::Named)
+            .await
+            .unwrap()
+            .unwrap();
+        let reference = state
+            .catalogue_type(
+                "pkg.ItemRef",
+                CatalogueTypeForm::Reference {
+                    target: named.object_id(),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(named.object_id(), reference.object_id());
+        assert_eq!(
+            state.committed_table_row("items", b"one").await.unwrap(),
+            Some(b"1".to_vec())
+        );
+
+        let source_only: Result<(), ActivationError<()>> =
+            run_table_activation(&state, writer, &[], &NoFault, |snapshot| {
+                let predecessor_capture = snapshot.context().capture().clone();
+                async move {
+                    let admission = CatalogueAdmission {
+                        predecessor_capture: Some(predecessor_capture),
+                        types: vec![type_declaration(
+                            "pkg.SourceOnly",
+                            29,
+                            30,
+                            CatalogueTypeSpec::Named,
+                            None,
+                        )],
+                        functions: Vec::new(),
+                    };
+                    Ok(ActivationWork::new(Vec::new(), digest(31), ())
+                        .with_catalogue_admission(admission))
+                }
+            })
+            .await;
+        assert!(matches!(source_only, Ok(())));
+        assert!(
+            state
+                .catalogue_type("pkg.SourceOnly", CatalogueTypeForm::Named)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        struct FailAfterMutation;
+        impl FaultInjector for FailAfterMutation {
+            fn check(&self, point: FaultPoint) -> Result<(), RuntimeError> {
+                if point == FaultPoint::AfterMutation {
+                    Err(RuntimeError::StorageUnavailable)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        let before_failed_activation = state.begin_activation().await.unwrap().capture().clone();
+        let rollback_mutation =
+            TableMutation::new([18; 16], "items", b"two".to_vec(), Some(b"2".to_vec())).unwrap();
+        let failed: Result<(), ActivationError<()>> = run_table_activation(
+            &state,
+            writer,
+            &["items"],
+            &FailAfterMutation,
+            move |snapshot| {
+                let predecessor_capture = snapshot.context().capture().clone();
+                async move {
+                    let admission = CatalogueAdmission {
+                        predecessor_capture: Some(predecessor_capture),
+                        types: vec![type_declaration(
+                            "pkg.Unpublished",
+                            26,
+                            27,
+                            CatalogueTypeSpec::Named,
+                            None,
+                        )],
+                        functions: Vec::new(),
+                    };
+                    Ok(ActivationWork::new(vec![rollback_mutation], digest(28), ())
+                        .with_catalogue_admission(admission))
+                }
+            },
+        )
+        .await;
+        assert!(matches!(
+            failed,
+            Err(ActivationError::Runtime(RuntimeError::StorageUnavailable))
+        ));
+        assert_eq!(
+            state.begin_activation().await.unwrap().capture(),
+            &before_failed_activation
+        );
+        assert_eq!(
+            state
+                .catalogue_type("pkg.Unpublished", CatalogueTypeForm::Named)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            state.committed_table_row("items", b"two").await.unwrap(),
+            None
         );
     }
 
@@ -605,7 +751,6 @@ mod batch_tests {
             .unwrap()
             .expect("retained type resolves at its admitted capture");
         assert_eq!(pinned_type.object_id(), first.types[0].object_id());
-
 
         // Multiple later generations must not impose predecessor adjacency
         // on reads of an older pinned reference (ORNA-SYS-019).
@@ -1559,6 +1704,89 @@ async fn admit_catalogue_batch_tx(
 }
 
 impl RuntimeState {
+    /// Commits a resolved source catalogue and staged table changes under one
+    /// writer fence and one next-generation capture. The admission is pinned
+    /// to the activation's starting capture and a source-only activation is
+    /// supported; any admission, write, checkpoint, or capture failure drops
+    /// the same transaction.
+    pub async fn commit_catalogue_table_activation(
+        &self,
+        writer: crate::WriterLease,
+        context: &crate::RuntimeActivationContext,
+        admission: &CatalogueAdmission,
+        mutations: &[crate::TableMutation],
+        next_digest: [u8; 32],
+        faults: &dyn crate::FaultInjector,
+    ) -> Result<orna_foundation_v1::CwdCapture, crate::RuntimeError> {
+        crate::validate_id(writer.owner_id)?;
+        if writer.epoch == 0 {
+            return Err(crate::RuntimeError::InvalidIdentity);
+        }
+        let mut encoded = mutations
+            .iter()
+            .map(crate::TableMutation::runtime_mutation)
+            .collect::<Result<Vec<_>, _>>()?;
+        crate::validate_stream_mutations(&encoded, next_digest)?;
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| crate::RuntimeError::StorageUnavailable)?;
+        let current = capture_tx(&transaction).await?;
+        if &current != context.capture() {
+            return Err(crate::RuntimeError::StaleCapture {
+                current: Box::new(current),
+            });
+        }
+        self.require_owner(&transaction, writer).await?;
+        if admission.predecessor_capture.as_ref() != Some(context.capture()) {
+            return Err(crate::RuntimeError::RecoveryInvalid);
+        }
+        faults.check(crate::FaultPoint::BeforeTableWrite)?;
+
+        let next_capture = orna_foundation_v1::CwdCapture::new(
+            Snapshot::cwd(
+                current.database_id(),
+                current.runtime_id(),
+                current.generation() + num_bigint::BigInt::from(1),
+            )
+            .map_err(|_| crate::RuntimeError::RecoveryInvalid)?,
+            next_digest,
+        )
+        .map_err(|_| crate::RuntimeError::RecoveryInvalid)?;
+        let catalogue_mutation = admit_activation_catalogue_tx(
+            &transaction,
+            context.capture(),
+            &next_capture,
+            admission,
+            None,
+        )
+        .await?;
+        encoded.push(catalogue_mutation);
+        for mutation in mutations {
+            crate::apply_table_mutation_tx(&transaction, mutation).await?;
+        }
+        faults.check(crate::FaultPoint::AfterTableWrite)?;
+        let committed_capture = crate::append_mutations_with_catalogue_tx(
+            &transaction,
+            context.capture(),
+            &encoded,
+            next_digest,
+            faults,
+            false,
+        )
+        .await?;
+        if committed_capture != next_capture {
+            return Err(crate::RuntimeError::RecoveryInvalid);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| crate::RuntimeError::StorageUnavailable)?;
+        Ok(committed_capture)
+    }
+
     /// Returns the compiler/core revision pair retained for one exact source
     /// catalogue activation, if that activation was published through the
     /// bound source bridge. An absent row is deliberately distinct from a
