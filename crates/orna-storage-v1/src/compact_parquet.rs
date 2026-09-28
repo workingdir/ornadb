@@ -3156,9 +3156,9 @@ mod tests {
         git(temp.path(), &["init", "-b", "main"]);
         git(
             temp.path(),
-            &["config", "user.email", "test@example.invalid"],
+            &["config", "user.email", "kieran@drewett.dev"],
         );
-        git(temp.path(), &["config", "user.name", "storage-test"]);
+        git(temp.path(), &["config", "user.name", "kierandrewett"]);
         git(temp.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
         fs::create_dir_all(temp.path().join(".orna")).unwrap();

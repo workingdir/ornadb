@@ -670,6 +670,18 @@ impl RuntimePublicationCoordinator {
         expected: &CompactBaseState,
         candidate_generation: u64,
     ) -> Result<IndexGeneration, Error> {
+        // Logical equivalence is part of candidate admission: prove the
+        // unreferenced commit against the frozen prefix before its ref can be
+        // made visible. The Git objects and manifest are immutable after this
+        // check; the repository publication boundary still fences HEAD/index
+        // and verifies the journal binding before advancing the ref.
+        verify_compact_candidate_rows_at_commit(
+            repository,
+            profile,
+            plan.candidate_commit(),
+            expected,
+            candidate_generation,
+        )?;
         let pending = repository
             .publish_compact_repository_boundary(plan)
             .map_err(map_publication_repository_error)?;
@@ -1091,7 +1103,7 @@ fn validate_manifest_generation_binding(
     manifest: &CompactManifest,
     writer_input: &CompactWriterInput,
 ) -> Result<(), Error> {
-    if manifest.next_generation() != writer_input.candidate_generation {
+    if writer_input.candidate_generation.checked_add(1) != Some(manifest.next_generation()) {
         return Err(Error::InvalidTransition);
     }
     Ok(())
@@ -1168,19 +1180,35 @@ fn verify_compact_candidate_rows(
     {
         return Err(Error::InvalidTransition);
     }
+    verify_compact_candidate_rows_at_commit(
+        repository,
+        profile,
+        pending.commit(),
+        expected,
+        candidate_generation,
+    )
+}
+
+fn verify_compact_candidate_rows_at_commit(
+    repository: &Repository,
+    profile: &CompactOvbProfile,
+    commit: &GitCommitRef,
+    expected: &CompactBaseState,
+    candidate_generation: u64,
+) -> Result<(), Error> {
     let table = Uuid::from_bytes(profile.table_id());
     let manifest = repository
-        .read_compact_manifest(pending.commit(), table)
+        .read_compact_manifest(commit, table)
         .map_err(map_publication_repository_error)?
         .ok_or(Error::InvalidTransition)?;
     if manifest.schema() != profile.schema_fingerprint()
-        || manifest.next_generation() != candidate_generation
+        || candidate_generation.checked_add(1) != Some(manifest.next_generation())
     {
         return Err(Error::InvalidTransition);
     }
     let projections = repository
-        .read_compact_committed_base(
-            pending.commit(),
+        .read_compact_committed_base_from_commit(
+            commit,
             table,
             profile.schema_fingerprint(),
             COMPACT_STORAGE_PROFILE,
@@ -1643,9 +1671,9 @@ mod tests {
         git(temp.path(), &["init", "-b", "main"]);
         git(
             temp.path(),
-            &["config", "user.email", "test@example.invalid"],
+            &["config", "user.email", "kieran@drewett.dev"],
         );
-        git(temp.path(), &["config", "user.name", "Storage test"]);
+        git(temp.path(), &["config", "user.name", "kierandrewett"]);
         git(temp.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
         fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
@@ -1947,26 +1975,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validated_compact_publication_rejects_manifest_generation_mismatch() {
+    async fn candidate_manifest_next_generation_follows_the_published_generation() {
+        let (_temp, repository, _runtime, _freeze, plan) =
+            compact_runtime_unpublished_fixture().await;
+        let profile = CompactOvbProfile::new(compact_schema()).unwrap();
+        let writer_input = CompactWriterInput {
+            table_id: profile.table_id(),
+            schema_fingerprint: profile.schema_fingerprint(),
+            candidate_generation: 1,
+            row_encoding_identity: orna_runtime_v1::PublicationRowEncoding::CompactOvb1,
+            value_encoding_identity: orna_runtime_v1::PublicationValueEncoding::Ovb1,
+            mutations: Vec::new(),
+            candidate_digest: [0; 32],
+        };
+        assert_eq!(
+            validate_manifest_generation_binding(plan.manifest(), &writer_input),
+            Ok(())
+        );
+
+        let mut stale_input = writer_input;
+        stale_input.candidate_generation = 2;
+        assert_eq!(
+            validate_manifest_generation_binding(plan.manifest(), &stale_input),
+            Err(Error::InvalidTransition)
+        );
+        assert!(repository.read_publication_journal().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn compact_candidate_row_mismatch_is_rejected_before_ref_advancement() {
         let (_temp, repository, runtime, freeze, plan) =
             compact_runtime_unpublished_fixture().await;
         let profile = CompactOvbProfile::new(compact_schema()).unwrap();
+        let old_head = repository.head().unwrap().unwrap();
+        let empty_base = load_compact_base_at(&repository, &old_head, &profile).unwrap();
+
         assert_eq!(
-            RuntimePublicationCoordinator::publish_compact_and_complete_validated(
+            RuntimePublicationCoordinator::publish_compact_candidate_and_complete(
                 &repository,
                 &runtime,
                 &profile,
                 &freeze,
                 plan,
+                &empty_base,
+                1,
             )
             .await,
             Err(Error::InvalidTransition)
         );
-        assert_eq!(
-            runtime.pending_through(&freeze).await.unwrap().len(),
-            1
-        );
-        assert_eq!(repository.read_publication_journal().unwrap(), None);
+        assert_eq!(repository.head().unwrap(), Some(old_head));
+        assert!(repository.read_publication_journal().unwrap().is_none());
+        assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
+        assert_eq!(runtime.pending().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
