@@ -885,9 +885,7 @@ mod tests {
     use orna_value_v1::Value;
 
     fn library_functions() -> Functions {
-        let parsed = parse_module(
-            "fn twice(value) = add(value, value); fn add(left, right) = left + right;",
-        );
+        let parsed = parse_module(include_str!("fixtures/repl-library-functions.orna"));
         assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
         let mut functions: Functions = parsed
             .value
