@@ -14,7 +14,7 @@ use orna_live_v1::{
     LiveCredentialIssuer, LiveEvalResponse, LiveEvalTransaction, LiveHost, LiveListenerAcceptor,
     LiveSessionAuthority, LiveSessionChildren, LiveTransport, ResumeRequest, SUBPROTOCOL,
     SessionCredential, SessionMetadata, TransportLimits, WebSocketOutput, WebSocketState,
-    WireRequest, WireResponse, encode_websocket_output, parse_http_request,
+    WebSocketUpgrade, WireRequest, WireResponse, encode_websocket_output, parse_http_request,
 };
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Message, PresentationContext, ResultBody, ResultStatus, TargetKind,
@@ -48,6 +48,17 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 
 };
+
+fn commit_delivered(
+    transport: &mut LiveTransport,
+    upgrade: WebSocketUpgrade,
+    now: u64,
+) -> Result<WireResponse, Error> {
+    assert!(transport.begin_websocket_upgrade_delivery(&upgrade, now));
+    assert!(transport.finish_websocket_upgrade_delivery(&upgrade));
+    block_on(transport.commit_websocket_upgrade(upgrade, now))
+}
+
 struct FailFirstWriter {
     writes: usize,
 }
@@ -2567,6 +2578,50 @@ fn websocket_replacement_queues_retirement_and_close_is_idempotent() {
 }
 
 #[test]
+fn websocket_commit_without_completed_delivery_aborts_candidate_and_preserves_incumbent() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = CountingAuthority {
+        calls: 0,
+        times: Vec::new(),
+    };
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(r#"{{"database":"{}","protocol":"orna.present.v1"}}"#, uuid(2)),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let session_token = token(&created);
+    let active = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &session_token), [5; 16], 1)
+        .unwrap();
+    assert_eq!(commit_delivered(&mut transport, active, 1).unwrap().status, 101);
+
+    let candidate = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &session_token), [6; 16], 2)
+        .unwrap();
+    assert_eq!(
+        block_on(transport.commit_websocket_upgrade(candidate, 2)),
+        Err(Error::Closed)
+    );
+    assert_eq!(transport.take_retired_attachments(), vec![[6; 16]]);
+    assert_eq!(
+        transport
+            .begin_websocket_upgrade(&websocket_upgrade(1, &session_token), [5; 16], 3)
+            .unwrap_err()
+            .status,
+        503,
+        "the active incumbent must remain attached after an undelivered commit"
+    );
+}
+
+#[test]
 fn websocket_upgrade_reservation_blocks_only_its_session_until_commit() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
@@ -2610,7 +2665,7 @@ fn websocket_upgrade_reservation_blocks_only_its_session_until_commit() {
         .begin_websocket_upgrade(&websocket_upgrade(1, &first_token), [5; 16], 1)
         .unwrap();
     assert_eq!(
-        block_on(transport.commit_websocket_upgrade(active, 1))
+        commit_delivered(&mut transport, active, 1)
             .unwrap()
             .status,
         101
@@ -2657,7 +2712,7 @@ fn websocket_upgrade_reservation_blocks_only_its_session_until_commit() {
         200
     );
     assert_eq!(
-        block_on(transport.commit_websocket_upgrade(pending, 2))
+        commit_delivered(&mut transport, pending, 2)
             .unwrap()
             .status,
         101
@@ -2708,7 +2763,7 @@ fn websocket_upgrade_rejects_attachment_identity_owned_by_another_handoff() {
     let active = transport
         .begin_websocket_upgrade(&websocket_upgrade(1, &first_token), [5; 16], 1)
         .unwrap();
-    block_on(transport.commit_websocket_upgrade(active, 1)).unwrap();
+    commit_delivered(&mut transport, active, 1).unwrap();
     assert_eq!(
         transport
             .begin_websocket_upgrade(&websocket_upgrade(2, &second_token), [5; 16], 2)
@@ -2797,7 +2852,7 @@ fn websocket_upgrade_abort_preserves_attachment_and_consumes_reservation() {
         .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 1)
         .unwrap();
     assert_eq!(
-        block_on(transport.commit_websocket_upgrade(active, 1))
+        commit_delivered(&mut transport, active, 1)
             .unwrap()
             .status,
         101
@@ -2889,7 +2944,7 @@ fn websocket_upgrade_expiry_queues_and_fences_candidate_without_replacing_attach
         .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 1)
         .unwrap();
     assert_eq!(
-        block_on(transport.commit_websocket_upgrade(active, 1))
+        commit_delivered(&mut transport, active, 1)
             .unwrap()
             .status,
         101
@@ -2993,7 +3048,7 @@ fn foreign_upgrade_reservation_cannot_consume_a_local_pending_handshake() {
         503
     );
     assert_eq!(
-        block_on(second.commit_websocket_upgrade(second_pending, 1))
+        commit_delivered(&mut second, second_pending, 1)
             .unwrap()
             .status,
         101
@@ -3153,7 +3208,7 @@ fn child_aware_delete_retires_active_and_pending_websocket_candidates() {
     let active = transport
         .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 1)
         .unwrap();
-    block_on(transport.commit_websocket_upgrade(active, 1)).unwrap();
+    commit_delivered(&mut transport, active, 1).unwrap();
     let pending = transport
         .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [6; 16], 2)
         .unwrap();
@@ -3246,7 +3301,7 @@ fn child_free_delete_preserves_session_until_socket_cleanup_can_be_joined() {
     let active = transport
         .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 1)
         .unwrap();
-    block_on(transport.commit_websocket_upgrade(active, 1)).unwrap();
+    commit_delivered(&mut transport, active, 1).unwrap();
     let pending = transport
         .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [6; 16], 2)
         .unwrap();
@@ -3266,7 +3321,7 @@ fn child_free_delete_preserves_session_until_socket_cleanup_can_be_joined() {
     assert_eq!(deletion.calls, 0);
     assert!(transport.take_retired_attachments().is_empty());
     assert_eq!(
-        block_on(transport.commit_websocket_upgrade(pending, 3))
+        commit_delivered(&mut transport, pending, 3)
             .unwrap()
             .status,
         101
