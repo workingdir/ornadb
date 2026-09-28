@@ -2718,7 +2718,7 @@ fn verified_empty_catalogue_fixture(
 
 #[test]
 fn retains_exact_source_and_syntax_text_in_bundle_order() {
-    let first_source = "-- customer source\r\nCREATE SCHEMA crm;  \r\n";
+    let first_source = include_str!("tests/fixtures/retained-customer-source.orna");
     let second_source = include_str!("tests/fixtures/retained-task-source.orna");
     let bundle = SourceBundle::new([
         SourceUnit::new("crm/schema.orna", first_source),
