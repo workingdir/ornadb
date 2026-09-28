@@ -2,7 +2,7 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
-const INVALID_SOURCE: &str = include_str!("../../../../../reference/Orna-1.0.0/examples/invalid/wrong-field-type.orna");
+const INVALID_SOURCE: &str = include_str!("../../../../reference/Orna-1.0.0/examples/invalid/wrong-field-type.orna");
 
 fn invalid_fixture_project() -> TempDir {
     let directory = tempfile::tempdir().expect("diagnostic fixture project");
