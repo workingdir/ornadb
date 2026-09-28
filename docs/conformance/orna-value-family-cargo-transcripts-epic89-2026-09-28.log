@@ -1,0 +1,1444 @@
+ORNA-VALUE selected cargo test transcripts
+Base: origin/main 1e1c532fc6f2533a82695e4005604834dae49f41
+Reference: /home/pbox/dev/ornadb/reference/Orna-1.0.0
+
+COMMAND: ORNA_REFERENCE_DIR=/home/pbox/dev/ornadb/reference/Orna-1.0.0 cargo test --locked --offline -p orna-evaluator-v1 --test evaluator closures_capture_immutable_snapshots_and_support_nested_calls -- --exact --nocapture
+   Compiling orna-value-v1 v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-value-v1)
+   Compiling orna-semantic-v1 v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-semantic-v1)
+   Compiling orna-syntax v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-syntax)
+   Compiling orna-foundation-v1 v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-foundation-v1)
+   Compiling orna-core v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-core)
+   Compiling orna-syntax-v1 v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-syntax-v1)
+   Compiling orna-artifact v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-artifact)
+   Compiling orna-repository-v1 v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-repository-v1)
+warning: unused imports: `BoolType`, `ByteArrayType`, `Int32Type`, and `Int64Type`
+  --> crates/orna-repository-v1/src/compact.rs:28:26
+   |
+28 |     data_type::{AsBytes, BoolType, ByteArrayType, Int32Type, Int64Type},
+   |                          ^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^  ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `AsBytes`
+  --> crates/orna-repository-v1/src/compact.rs:28:17
+   |
+28 |     data_type::{AsBytes, BoolType, ByteArrayType, Int32Type, Int64Type},
+   |                 ^^^^^^^
+
+   Compiling orna-compiler v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-compiler)
+warning: variable does not need to be mutable
+   --> crates/orna-repository-v1/src/transport.rs:428:13
+    |
+428 |         let mut advertised =
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `STD_JSON_CONTRACT` and `STD_UI_CONTRACT`
+  --> crates/orna-compiler/src/resolver.rs:85:5
+   |
+85 |     STD_JSON_CONTRACT, STD_UI_CONTRACT,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `ServerParameterEcho` and `self`
+   --> crates/orna-compiler/src/resolver.rs:117:44
+    |
+117 | use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
+    |                                            ^^^^  ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `DefinitionReferenceTarget`, `DefinitionReference`, and `StoredSourceRevision`
+   --> crates/orna-compiler/src/resolver.rs:134:47
+    |
+134 |         DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
+    |                                               ^^^^^^^^^^^^^^^^^^^
+135 |         DefinitionReferenceTarget, EMPTY_APPLICATION_CATALOGUE_REVISION_ID, ExecutableArtifact,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+136 |         ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion, SourceOrigin,
+137 |         StandardExecutable, StandardLibraryDigestVersion, StoredSourceRevision, StoredSourceUnit,
+    |                                                           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `STD_JSON_CONTRACT` is never used
+    --> crates/orna-compiler/src/resolver/model.rs:1832:11
+     |
+1832 | pub const STD_JSON_CONTRACT: &str = "orna.std.value.json@1";
+     |           ^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `STD_UI_CONTRACT` is never used
+    --> crates/orna-compiler/src/resolver/model.rs:1837:11
+     |
+1837 | pub const STD_UI_CONTRACT: &str = "orna.std.value.ui@1";
+     |           ^^^^^^^^^^^^^^^
+
+warning: function `expected_standard_json_executable` is never used
+   --> crates/orna-compiler/src/resolver/standard_library.rs:162:15
+    |
+162 | pub(super) fn expected_standard_json_executable(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `reconcile_standard_json_executable` is never used
+   --> crates/orna-compiler/src/resolver/standard_library.rs:222:15
+    |
+222 | pub(super) fn reconcile_standard_json_executable(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `orna-repository-v1` (lib) generated 3 warnings (run `cargo fix --lib -p orna-repository-v1` to apply 2 suggestions)
+   Compiling orna-standard v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-standard)
+warning: unused imports: `DefinitionIdentity`, `DefinitionOrigin`, `ExecutableArtifactKind`, `ExecutableArtifact`, `FunctionDefinition`, `FunctionDomain`, `FunctionReturn`, `FunctionRevisionRecord`, `FunctionSecurity`, `FunctionSemanticHashVersion`, `FunctionTransaction`, `FunctionVolatility`, `ParameterDefinition`, `ResolvedType`, `SourceOrigin`, `StandardExecutable`, `StandardLibraryDigestVersion`, `StandardScalar`, `StoredSourceRevision`, `StoredSourceUnit`, `ValueTypeKind`, `artifact_payload_digest`, `calculate_standard_library_digest`, `function_declaration_digest`, `function_semantic_digest_with_version`, `source_bundle_digest`, `source_revision_record_digest`, `source_unit_content_digest`, `standard_library_digest`, `verify_standard_library_snapshot as verify_canonical_standard_library_snapshot`, and `verify_standard_library_v2_snapshot as verify_canonical_standard_library_v2_snapshot`
+  --> crates/orna-standard/src/lib.rs:13:29
+   |
+13 |         CanonicalHashError, artifact_payload_digest, calculate_standard_library_digest,
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+14 |         function_declaration_digest, function_semantic_digest_with_version, source_bundle_digest,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+15 |         source_revision_record_digest, source_unit_content_digest, standard_library_digest,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+16 |         verify_standard_library_snapshot as verify_canonical_standard_library_snapshot,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+17 |         verify_standard_library_v2_snapshot as verify_canonical_standard_library_v2_snapshot,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+20 |         CatalogueSnapshot, CatalogueSnapshotError, FunctionDefinition, FunctionDomain,
+   |                                                    ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+21 |         FunctionReturn, FunctionSecurity, FunctionTransaction, FunctionVolatility,
+   |         ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+22 |         ParameterDefinition, PreludeTypeName, PreludeTypeNameError, QualifiedSemanticName,
+   |         ^^^^^^^^^^^^^^^^^^^
+23 |         SchemaDefinition, SemanticNameError, TypeBinding, TypeBindingError, TypeLookupName,
+24 |         ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
+   |                              ^^^^^^^^^^^^^
+...
+27 |         ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
+   |                                 ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+28 |         ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord,
+   |         ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+29 |         FunctionSemanticHashVersion, RevisionInvariantError, Sha256Digest, SourceOrigin,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^                                        ^^^^^^^^^^^^
+30 |         StandardExecutable, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+   |         ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+31 |         StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
+   |         ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+32 |     },
+33 |     types::{ResolvedType, StandardScalar},
+   |             ^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `ACCEPTED_SOURCE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:236:7
+    |
+236 | const ACCEPTED_SOURCE_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `ACCEPTED_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:240:7
+    |
+240 | const ACCEPTED_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:258:7
+    |
+258 | const ACCEPTED_V2_TYPES_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:262:7
+    |
+262 | const ACCEPTED_V2_INVOKE_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:266:7
+    |
+266 | const ACCEPTED_V2_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:278:7
+    |
+278 | const ACCEPTED_V2_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:282:7
+    |
+282 | const ACCEPTED_V2_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:349:7
+    |
+349 | const ACCEPTED_V3_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_TYPES_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:350:7
+    |
+350 | const ACCEPTED_V3_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_INVOKE_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_OUTPUT_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:351:7
+    |
+351 | const ACCEPTED_V3_OUTPUT_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:355:7
+    |
+355 | const ACCEPTED_V3_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:367:7
+    |
+367 | const ACCEPTED_V3_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V2_ARTIFACT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:368:7
+    |
+368 | const ACCEPTED_V3_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V2_SEMANTIC_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:418:7
+    |
+418 | const ACCEPTED_V4_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_TYPES_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:419:7
+    |
+419 | const ACCEPTED_V4_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_INVOKE_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_OUTPUT_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:420:7
+    |
+420 | const ACCEPTED_V4_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V3_OUTPUT_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_UI_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:421:7
+    |
+421 | const ACCEPTED_V4_UI_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:425:7
+    |
+425 | const ACCEPTED_V4_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:433:7
+    |
+433 | const ACCEPTED_V4_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V3_ARTIFACT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:434:7
+    |
+434 | const ACCEPTED_V4_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V3_SEMANTIC_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:454:7
+    |
+454 | const ACCEPTED_V5_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_TYPES_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:455:7
+    |
+455 | const ACCEPTED_V5_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_INVOKE_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_OUTPUT_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:456:7
+    |
+456 | const ACCEPTED_V5_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_OUTPUT_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_UI_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:457:7
+    |
+457 | const ACCEPTED_V5_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_UI_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_JSON_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:458:7
+    |
+458 | const ACCEPTED_V5_JSON_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:462:7
+    |
+462 | const ACCEPTED_V5_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:470:7
+    |
+470 | const ACCEPTED_V5_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V4_ARTIFACT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:471:7
+    |
+471 | const ACCEPTED_V5_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V4_SEMANTIC_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_qualified_export` is never used
+    --> crates/orna-standard/src/lib.rs:1500:4
+     |
+1500 | fn matches_qualified_export(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_prelude_export` is never used
+    --> crates/orna-standard/src/lib.rs:1521:4
+     |
+1521 | fn matches_prelude_export(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_qualified_name` is never used
+    --> crates/orna-standard/src/lib.rs:1539:4
+     |
+1539 | fn matches_qualified_name(source: &QualifiedName, expected: &QualifiedSemanticName) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_prelude_words` is never used
+    --> crates/orna-standard/src/lib.rs:1548:4
+     |
+1548 | fn matches_prelude_words(source: &[NamePart], expected: &PreludeTypeName) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_unquoted` is never used
+    --> crates/orna-standard/src/lib.rs:1556:4
+     |
+1556 | fn is_unquoted(part: &NamePart) -> bool {
+     |    ^^^^^^^^^^^
+
+warning: function `decode_sql_string_literal` is never used
+    --> crates/orna-standard/src/lib.rs:1560:4
+     |
+1560 | fn decode_sql_string_literal(literal: &str) -> Option<String> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `source_persistence` is never used
+    --> crates/orna-standard/src/lib.rs:1577:4
+     |
+1577 | fn source_persistence(persistence: PrimitiveValueTypePersistence) -> ValueTypePersistence {
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: `orna-standard` (lib) generated 36 warnings (run `cargo fix --lib -p orna-standard` to apply 1 suggestion)
+   Compiling orna-project-v1 v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-project-v1)
+   Compiling orna-evaluator-v1 v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-evaluator-v1)
+warning: `orna-compiler` (lib) generated 7 warnings (run `cargo fix --lib -p orna-compiler` to apply 3 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 23.18s
+     Running tests/evaluator.rs (/var/tmp/pbox-build/cargo/debug/deps/evaluator-7f399556d56e375a)
+
+running 1 test
+test closures_capture_immutable_snapshots_and_support_nested_calls ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 229 filtered out; finished in 0.01s
+
+CAPTURED_EXIT_CODE=0
+
+COMMAND: ORNA_REFERENCE_DIR=/home/pbox/dev/ornadb/reference/Orna-1.0.0 cargo test --locked --offline -p orna-table-v1 table_snapshot_remains_stable_after_later_commit -- --exact --nocapture
+    Blocking waiting for file lock on build directory
+   Compiling orna-table-v1 v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-table-v1)
+    Finished `test` profile [unoptimized] target(s) in 26.09s
+     Running unittests src/lib.rs (/var/tmp/pbox-build/cargo/debug/deps/orna_table_v1-3ead8aea8e4d59a8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 38 filtered out; finished in 0.00s
+
+CAPTURED_EXIT_CODE=0
+
+COMMAND: ORNA_REFERENCE_DIR=/home/pbox/dev/ornadb/reference/Orna-1.0.0 cargo test --locked --offline -p orna-table-v1 --lib table_snapshot_remains_stable_after_later_commit -- --nocapture
+    Finished `test` profile [unoptimized] target(s) in 0.14s
+     Running unittests src/lib.rs (/var/tmp/pbox-build/cargo/debug/deps/orna_table_v1-3ead8aea8e4d59a8)
+
+running 1 test
+test tests::table_snapshot_remains_stable_after_later_commit ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.00s
+
+CAPTURED_EXIT_CODE=0
+
+COMMAND: ORNA_REFERENCE_DIR=/home/pbox/dev/ornadb/reference/Orna-1.0.0 cargo test --locked --offline -p orna-syntax-v1 --test v1_review_regressions legacy_var_declarations_remain_rejected_at_statement_boundaries -- --exact --nocapture
+   Compiling orna-value-v1 v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-value-v1)
+   Compiling orna-foundation-v1 v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-foundation-v1)
+   Compiling orna-syntax-v1 v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-syntax-v1)
+    Finished `test` profile [unoptimized] target(s) in 3.23s
+     Running tests/v1_review_regressions.rs (/var/tmp/pbox-build/cargo/debug/deps/v1_review_regressions-10cd182e74d66d8a)
+
+running 1 test
+test legacy_var_declarations_remain_rejected_at_statement_boundaries ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.00s
+
+CAPTURED_EXIT_CODE=0
+
+COMMAND: ORNA_REFERENCE_DIR=/home/pbox/dev/ornadb/reference/Orna-1.0.0 cargo test --locked --offline -p orna-conformance-v1 --test runtime_scenarios let_rebinding_executes_exact_runtime_checks_and_migration_diagnostic -- --exact --nocapture
+warning: unused imports: `BoolType`, `ByteArrayType`, `Int32Type`, and `Int64Type`
+  --> crates/orna-repository-v1/src/compact.rs:28:26
+   |
+28 |     data_type::{AsBytes, BoolType, ByteArrayType, Int32Type, Int64Type},
+   |                          ^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^  ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `AsBytes`
+  --> crates/orna-repository-v1/src/compact.rs:28:17
+   |
+28 |     data_type::{AsBytes, BoolType, ByteArrayType, Int32Type, Int64Type},
+   |                 ^^^^^^^
+
+warning: variable does not need to be mutable
+   --> crates/orna-repository-v1/src/transport.rs:428:13
+    |
+428 |         let mut advertised =
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orna-repository-v1` (lib) generated 3 warnings (run `cargo fix --lib -p orna-repository-v1` to apply 2 suggestions)
+warning: unused imports: `STD_JSON_CONTRACT` and `STD_UI_CONTRACT`
+  --> crates/orna-compiler/src/resolver.rs:85:5
+   |
+85 |     STD_JSON_CONTRACT, STD_UI_CONTRACT,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `ServerParameterEcho` and `self`
+   --> crates/orna-compiler/src/resolver.rs:117:44
+    |
+117 | use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
+    |                                            ^^^^  ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `DefinitionReferenceTarget`, `DefinitionReference`, and `StoredSourceRevision`
+   --> crates/orna-compiler/src/resolver.rs:134:47
+    |
+134 |         DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
+    |                                               ^^^^^^^^^^^^^^^^^^^
+135 |         DefinitionReferenceTarget, EMPTY_APPLICATION_CATALOGUE_REVISION_ID, ExecutableArtifact,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+136 |         ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion, SourceOrigin,
+137 |         StandardExecutable, StandardLibraryDigestVersion, StoredSourceRevision, StoredSourceUnit,
+    |                                                           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `STD_JSON_CONTRACT` is never used
+    --> crates/orna-compiler/src/resolver/model.rs:1832:11
+     |
+1832 | pub const STD_JSON_CONTRACT: &str = "orna.std.value.json@1";
+     |           ^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `STD_UI_CONTRACT` is never used
+    --> crates/orna-compiler/src/resolver/model.rs:1837:11
+     |
+1837 | pub const STD_UI_CONTRACT: &str = "orna.std.value.ui@1";
+     |           ^^^^^^^^^^^^^^^
+
+warning: function `expected_standard_json_executable` is never used
+   --> crates/orna-compiler/src/resolver/standard_library.rs:162:15
+    |
+162 | pub(super) fn expected_standard_json_executable(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `reconcile_standard_json_executable` is never used
+   --> crates/orna-compiler/src/resolver/standard_library.rs:222:15
+    |
+222 | pub(super) fn reconcile_standard_json_executable(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `orna-compiler` (lib) generated 7 warnings (run `cargo fix --lib -p orna-compiler` to apply 3 suggestions)
+warning: unused imports: `DefinitionIdentity`, `DefinitionOrigin`, `ExecutableArtifactKind`, `ExecutableArtifact`, `FunctionDefinition`, `FunctionDomain`, `FunctionReturn`, `FunctionRevisionRecord`, `FunctionSecurity`, `FunctionSemanticHashVersion`, `FunctionTransaction`, `FunctionVolatility`, `ParameterDefinition`, `ResolvedType`, `SourceOrigin`, `StandardExecutable`, `StandardLibraryDigestVersion`, `StandardScalar`, `StoredSourceRevision`, `StoredSourceUnit`, `ValueTypeKind`, `artifact_payload_digest`, `calculate_standard_library_digest`, `function_declaration_digest`, `function_semantic_digest_with_version`, `source_bundle_digest`, `source_revision_record_digest`, `source_unit_content_digest`, `standard_library_digest`, `verify_standard_library_snapshot as verify_canonical_standard_library_snapshot`, and `verify_standard_library_v2_snapshot as verify_canonical_standard_library_v2_snapshot`
+  --> crates/orna-standard/src/lib.rs:13:29
+   |
+13 |         CanonicalHashError, artifact_payload_digest, calculate_standard_library_digest,
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+14 |         function_declaration_digest, function_semantic_digest_with_version, source_bundle_digest,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+15 |         source_revision_record_digest, source_unit_content_digest, standard_library_digest,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+16 |         verify_standard_library_snapshot as verify_canonical_standard_library_snapshot,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+17 |         verify_standard_library_v2_snapshot as verify_canonical_standard_library_v2_snapshot,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+20 |         CatalogueSnapshot, CatalogueSnapshotError, FunctionDefinition, FunctionDomain,
+   |                                                    ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+21 |         FunctionReturn, FunctionSecurity, FunctionTransaction, FunctionVolatility,
+   |         ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+22 |         ParameterDefinition, PreludeTypeName, PreludeTypeNameError, QualifiedSemanticName,
+   |         ^^^^^^^^^^^^^^^^^^^
+23 |         SchemaDefinition, SemanticNameError, TypeBinding, TypeBindingError, TypeLookupName,
+24 |         ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
+   |                              ^^^^^^^^^^^^^
+...
+27 |         ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
+   |                                 ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+28 |         ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord,
+   |         ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+29 |         FunctionSemanticHashVersion, RevisionInvariantError, Sha256Digest, SourceOrigin,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^                                        ^^^^^^^^^^^^
+30 |         StandardExecutable, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+   |         ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+31 |         StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
+   |         ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+32 |     },
+33 |     types::{ResolvedType, StandardScalar},
+   |             ^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `ACCEPTED_SOURCE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:236:7
+    |
+236 | const ACCEPTED_SOURCE_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `ACCEPTED_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:240:7
+    |
+240 | const ACCEPTED_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:258:7
+    |
+258 | const ACCEPTED_V2_TYPES_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:262:7
+    |
+262 | const ACCEPTED_V2_INVOKE_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:266:7
+    |
+266 | const ACCEPTED_V2_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:278:7
+    |
+278 | const ACCEPTED_V2_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:282:7
+    |
+282 | const ACCEPTED_V2_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:349:7
+    |
+349 | const ACCEPTED_V3_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_TYPES_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:350:7
+    |
+350 | const ACCEPTED_V3_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_INVOKE_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_OUTPUT_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:351:7
+    |
+351 | const ACCEPTED_V3_OUTPUT_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:355:7
+    |
+355 | const ACCEPTED_V3_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:367:7
+    |
+367 | const ACCEPTED_V3_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V2_ARTIFACT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:368:7
+    |
+368 | const ACCEPTED_V3_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V2_SEMANTIC_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:418:7
+    |
+418 | const ACCEPTED_V4_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_TYPES_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:419:7
+    |
+419 | const ACCEPTED_V4_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_INVOKE_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_OUTPUT_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:420:7
+    |
+420 | const ACCEPTED_V4_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V3_OUTPUT_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_UI_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:421:7
+    |
+421 | const ACCEPTED_V4_UI_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:425:7
+    |
+425 | const ACCEPTED_V4_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:433:7
+    |
+433 | const ACCEPTED_V4_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V3_ARTIFACT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:434:7
+    |
+434 | const ACCEPTED_V4_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V3_SEMANTIC_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:454:7
+    |
+454 | const ACCEPTED_V5_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_TYPES_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:455:7
+    |
+455 | const ACCEPTED_V5_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_INVOKE_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_OUTPUT_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:456:7
+    |
+456 | const ACCEPTED_V5_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_OUTPUT_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_UI_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:457:7
+    |
+457 | const ACCEPTED_V5_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_UI_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_JSON_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:458:7
+    |
+458 | const ACCEPTED_V5_JSON_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:462:7
+    |
+462 | const ACCEPTED_V5_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:470:7
+    |
+470 | const ACCEPTED_V5_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V4_ARTIFACT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:471:7
+    |
+471 | const ACCEPTED_V5_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V4_SEMANTIC_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_qualified_export` is never used
+    --> crates/orna-standard/src/lib.rs:1500:4
+     |
+1500 | fn matches_qualified_export(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_prelude_export` is never used
+    --> crates/orna-standard/src/lib.rs:1521:4
+     |
+1521 | fn matches_prelude_export(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_qualified_name` is never used
+    --> crates/orna-standard/src/lib.rs:1539:4
+     |
+1539 | fn matches_qualified_name(source: &QualifiedName, expected: &QualifiedSemanticName) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_prelude_words` is never used
+    --> crates/orna-standard/src/lib.rs:1548:4
+     |
+1548 | fn matches_prelude_words(source: &[NamePart], expected: &PreludeTypeName) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_unquoted` is never used
+    --> crates/orna-standard/src/lib.rs:1556:4
+     |
+1556 | fn is_unquoted(part: &NamePart) -> bool {
+     |    ^^^^^^^^^^^
+
+warning: function `decode_sql_string_literal` is never used
+    --> crates/orna-standard/src/lib.rs:1560:4
+     |
+1560 | fn decode_sql_string_literal(literal: &str) -> Option<String> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `source_persistence` is never used
+    --> crates/orna-standard/src/lib.rs:1577:4
+     |
+1577 | fn source_persistence(persistence: PrimitiveValueTypePersistence) -> ValueTypePersistence {
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: `orna-standard` (lib) generated 36 warnings (run `cargo fix --lib -p orna-standard` to apply 1 suggestion)
+warning: function `relation_count` is never used
+    --> crates/orna-conformance-v1/src/semantic_adapter.rs:7465:4
+     |
+7465 | fn relation_count(
+     |    ^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orna-conformance-v1` (lib) generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 0.22s
+     Running tests/runtime_scenarios.rs (/var/tmp/pbox-build/cargo/debug/deps/runtime_scenarios-8710fbbfb130746f)
+
+running 1 test
+test let_rebinding_executes_exact_runtime_checks_and_migration_diagnostic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.12s
+
+CAPTURED_EXIT_CODE=0
+
+COMMAND: ORNA_REFERENCE_DIR=/home/pbox/dev/ornadb/reference/Orna-1.0.0 cargo test --locked --offline -p orna-conformance-v1 --test runtime_scenarios harness_distinguishes_executed_rebinding_from_unimplemented_scenarios -- --exact --nocapture
+warning: unused imports: `BoolType`, `ByteArrayType`, `Int32Type`, and `Int64Type`
+  --> crates/orna-repository-v1/src/compact.rs:28:26
+   |
+28 |     data_type::{AsBytes, BoolType, ByteArrayType, Int32Type, Int64Type},
+   |                          ^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^  ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `AsBytes`
+  --> crates/orna-repository-v1/src/compact.rs:28:17
+   |
+28 |     data_type::{AsBytes, BoolType, ByteArrayType, Int32Type, Int64Type},
+   |                 ^^^^^^^
+
+warning: variable does not need to be mutable
+   --> crates/orna-repository-v1/src/transport.rs:428:13
+    |
+428 |         let mut advertised =
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orna-repository-v1` (lib) generated 3 warnings (run `cargo fix --lib -p orna-repository-v1` to apply 2 suggestions)
+warning: unused imports: `STD_JSON_CONTRACT` and `STD_UI_CONTRACT`
+  --> crates/orna-compiler/src/resolver.rs:85:5
+   |
+85 |     STD_JSON_CONTRACT, STD_UI_CONTRACT,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `ServerParameterEcho` and `self`
+   --> crates/orna-compiler/src/resolver.rs:117:44
+    |
+117 | use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
+    |                                            ^^^^  ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `DefinitionReferenceTarget`, `DefinitionReference`, and `StoredSourceRevision`
+   --> crates/orna-compiler/src/resolver.rs:134:47
+    |
+134 |         DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
+    |                                               ^^^^^^^^^^^^^^^^^^^
+135 |         DefinitionReferenceTarget, EMPTY_APPLICATION_CATALOGUE_REVISION_ID, ExecutableArtifact,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+136 |         ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion, SourceOrigin,
+137 |         StandardExecutable, StandardLibraryDigestVersion, StoredSourceRevision, StoredSourceUnit,
+    |                                                           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `STD_JSON_CONTRACT` is never used
+    --> crates/orna-compiler/src/resolver/model.rs:1832:11
+     |
+1832 | pub const STD_JSON_CONTRACT: &str = "orna.std.value.json@1";
+     |           ^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `STD_UI_CONTRACT` is never used
+    --> crates/orna-compiler/src/resolver/model.rs:1837:11
+     |
+1837 | pub const STD_UI_CONTRACT: &str = "orna.std.value.ui@1";
+     |           ^^^^^^^^^^^^^^^
+
+warning: function `expected_standard_json_executable` is never used
+   --> crates/orna-compiler/src/resolver/standard_library.rs:162:15
+    |
+162 | pub(super) fn expected_standard_json_executable(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `reconcile_standard_json_executable` is never used
+   --> crates/orna-compiler/src/resolver/standard_library.rs:222:15
+    |
+222 | pub(super) fn reconcile_standard_json_executable(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `orna-compiler` (lib) generated 7 warnings (run `cargo fix --lib -p orna-compiler` to apply 3 suggestions)
+warning: unused imports: `DefinitionIdentity`, `DefinitionOrigin`, `ExecutableArtifactKind`, `ExecutableArtifact`, `FunctionDefinition`, `FunctionDomain`, `FunctionReturn`, `FunctionRevisionRecord`, `FunctionSecurity`, `FunctionSemanticHashVersion`, `FunctionTransaction`, `FunctionVolatility`, `ParameterDefinition`, `ResolvedType`, `SourceOrigin`, `StandardExecutable`, `StandardLibraryDigestVersion`, `StandardScalar`, `StoredSourceRevision`, `StoredSourceUnit`, `ValueTypeKind`, `artifact_payload_digest`, `calculate_standard_library_digest`, `function_declaration_digest`, `function_semantic_digest_with_version`, `source_bundle_digest`, `source_revision_record_digest`, `source_unit_content_digest`, `standard_library_digest`, `verify_standard_library_snapshot as verify_canonical_standard_library_snapshot`, and `verify_standard_library_v2_snapshot as verify_canonical_standard_library_v2_snapshot`
+  --> crates/orna-standard/src/lib.rs:13:29
+   |
+13 |         CanonicalHashError, artifact_payload_digest, calculate_standard_library_digest,
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+14 |         function_declaration_digest, function_semantic_digest_with_version, source_bundle_digest,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+15 |         source_revision_record_digest, source_unit_content_digest, standard_library_digest,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+16 |         verify_standard_library_snapshot as verify_canonical_standard_library_snapshot,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+17 |         verify_standard_library_v2_snapshot as verify_canonical_standard_library_v2_snapshot,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+20 |         CatalogueSnapshot, CatalogueSnapshotError, FunctionDefinition, FunctionDomain,
+   |                                                    ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+21 |         FunctionReturn, FunctionSecurity, FunctionTransaction, FunctionVolatility,
+   |         ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+22 |         ParameterDefinition, PreludeTypeName, PreludeTypeNameError, QualifiedSemanticName,
+   |         ^^^^^^^^^^^^^^^^^^^
+23 |         SchemaDefinition, SemanticNameError, TypeBinding, TypeBindingError, TypeLookupName,
+24 |         ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
+   |                              ^^^^^^^^^^^^^
+...
+27 |         ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
+   |                                 ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+28 |         ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord,
+   |         ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+29 |         FunctionSemanticHashVersion, RevisionInvariantError, Sha256Digest, SourceOrigin,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^                                        ^^^^^^^^^^^^
+30 |         StandardExecutable, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+   |         ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+31 |         StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
+   |         ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+32 |     },
+33 |     types::{ResolvedType, StandardScalar},
+   |             ^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `ACCEPTED_SOURCE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:236:7
+    |
+236 | const ACCEPTED_SOURCE_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `ACCEPTED_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:240:7
+    |
+240 | const ACCEPTED_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:258:7
+    |
+258 | const ACCEPTED_V2_TYPES_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:262:7
+    |
+262 | const ACCEPTED_V2_INVOKE_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:266:7
+    |
+266 | const ACCEPTED_V2_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:278:7
+    |
+278 | const ACCEPTED_V2_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:282:7
+    |
+282 | const ACCEPTED_V2_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:349:7
+    |
+349 | const ACCEPTED_V3_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_TYPES_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:350:7
+    |
+350 | const ACCEPTED_V3_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_INVOKE_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_OUTPUT_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:351:7
+    |
+351 | const ACCEPTED_V3_OUTPUT_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:355:7
+    |
+355 | const ACCEPTED_V3_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:367:7
+    |
+367 | const ACCEPTED_V3_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V2_ARTIFACT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:368:7
+    |
+368 | const ACCEPTED_V3_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V2_SEMANTIC_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:418:7
+    |
+418 | const ACCEPTED_V4_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_TYPES_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:419:7
+    |
+419 | const ACCEPTED_V4_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_INVOKE_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_OUTPUT_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:420:7
+    |
+420 | const ACCEPTED_V4_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V3_OUTPUT_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_UI_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:421:7
+    |
+421 | const ACCEPTED_V4_UI_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:425:7
+    |
+425 | const ACCEPTED_V4_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:433:7
+    |
+433 | const ACCEPTED_V4_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V3_ARTIFACT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:434:7
+    |
+434 | const ACCEPTED_V4_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V3_SEMANTIC_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:454:7
+    |
+454 | const ACCEPTED_V5_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_TYPES_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:455:7
+    |
+455 | const ACCEPTED_V5_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_INVOKE_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_OUTPUT_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:456:7
+    |
+456 | const ACCEPTED_V5_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_OUTPUT_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_UI_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:457:7
+    |
+457 | const ACCEPTED_V5_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_UI_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_JSON_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:458:7
+    |
+458 | const ACCEPTED_V5_JSON_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:462:7
+    |
+462 | const ACCEPTED_V5_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:470:7
+    |
+470 | const ACCEPTED_V5_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V4_ARTIFACT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:471:7
+    |
+471 | const ACCEPTED_V5_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V4_SEMANTIC_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_qualified_export` is never used
+    --> crates/orna-standard/src/lib.rs:1500:4
+     |
+1500 | fn matches_qualified_export(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_prelude_export` is never used
+    --> crates/orna-standard/src/lib.rs:1521:4
+     |
+1521 | fn matches_prelude_export(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_qualified_name` is never used
+    --> crates/orna-standard/src/lib.rs:1539:4
+     |
+1539 | fn matches_qualified_name(source: &QualifiedName, expected: &QualifiedSemanticName) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_prelude_words` is never used
+    --> crates/orna-standard/src/lib.rs:1548:4
+     |
+1548 | fn matches_prelude_words(source: &[NamePart], expected: &PreludeTypeName) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_unquoted` is never used
+    --> crates/orna-standard/src/lib.rs:1556:4
+     |
+1556 | fn is_unquoted(part: &NamePart) -> bool {
+     |    ^^^^^^^^^^^
+
+warning: function `decode_sql_string_literal` is never used
+    --> crates/orna-standard/src/lib.rs:1560:4
+     |
+1560 | fn decode_sql_string_literal(literal: &str) -> Option<String> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `source_persistence` is never used
+    --> crates/orna-standard/src/lib.rs:1577:4
+     |
+1577 | fn source_persistence(persistence: PrimitiveValueTypePersistence) -> ValueTypePersistence {
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: `orna-standard` (lib) generated 36 warnings (run `cargo fix --lib -p orna-standard` to apply 1 suggestion)
+warning: function `relation_count` is never used
+    --> crates/orna-conformance-v1/src/semantic_adapter.rs:7465:4
+     |
+7465 | fn relation_count(
+     |    ^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orna-conformance-v1` (lib) generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 0.23s
+     Running tests/runtime_scenarios.rs (/var/tmp/pbox-build/cargo/debug/deps/runtime_scenarios-8710fbbfb130746f)
+
+running 1 test
+test harness_distinguishes_executed_rebinding_from_unimplemented_scenarios ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 2.78s
+
+CAPTURED_EXIT_CODE=0
+
+COMMAND: ORNA_REFERENCE_DIR=/home/pbox/dev/ornadb/reference/Orna-1.0.0 cargo test --locked --offline -p orna-conformance-v1 --test reference_corpus requirement_evidence_keeps_all_authoritative_not_executed_markers -- --exact --nocapture
+warning: unused imports: `BoolType`, `ByteArrayType`, `Int32Type`, and `Int64Type`
+  --> crates/orna-repository-v1/src/compact.rs:28:26
+   |
+28 |     data_type::{AsBytes, BoolType, ByteArrayType, Int32Type, Int64Type},
+   |                          ^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^  ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `AsBytes`
+  --> crates/orna-repository-v1/src/compact.rs:28:17
+   |
+28 |     data_type::{AsBytes, BoolType, ByteArrayType, Int32Type, Int64Type},
+   |                 ^^^^^^^
+
+warning: variable does not need to be mutable
+   --> crates/orna-repository-v1/src/transport.rs:428:13
+    |
+428 |         let mut advertised =
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orna-repository-v1` (lib) generated 3 warnings (run `cargo fix --lib -p orna-repository-v1` to apply 2 suggestions)
+warning: unused imports: `STD_JSON_CONTRACT` and `STD_UI_CONTRACT`
+  --> crates/orna-compiler/src/resolver.rs:85:5
+   |
+85 |     STD_JSON_CONTRACT, STD_UI_CONTRACT,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `ServerParameterEcho` and `self`
+   --> crates/orna-compiler/src/resolver.rs:117:44
+    |
+117 | use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
+    |                                            ^^^^  ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `DefinitionReferenceTarget`, `DefinitionReference`, and `StoredSourceRevision`
+   --> crates/orna-compiler/src/resolver.rs:134:47
+    |
+134 |         DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
+    |                                               ^^^^^^^^^^^^^^^^^^^
+135 |         DefinitionReferenceTarget, EMPTY_APPLICATION_CATALOGUE_REVISION_ID, ExecutableArtifact,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+136 |         ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion, SourceOrigin,
+137 |         StandardExecutable, StandardLibraryDigestVersion, StoredSourceRevision, StoredSourceUnit,
+    |                                                           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `STD_JSON_CONTRACT` is never used
+    --> crates/orna-compiler/src/resolver/model.rs:1832:11
+     |
+1832 | pub const STD_JSON_CONTRACT: &str = "orna.std.value.json@1";
+     |           ^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `STD_UI_CONTRACT` is never used
+    --> crates/orna-compiler/src/resolver/model.rs:1837:11
+     |
+1837 | pub const STD_UI_CONTRACT: &str = "orna.std.value.ui@1";
+     |           ^^^^^^^^^^^^^^^
+
+warning: function `expected_standard_json_executable` is never used
+   --> crates/orna-compiler/src/resolver/standard_library.rs:162:15
+    |
+162 | pub(super) fn expected_standard_json_executable(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `reconcile_standard_json_executable` is never used
+   --> crates/orna-compiler/src/resolver/standard_library.rs:222:15
+    |
+222 | pub(super) fn reconcile_standard_json_executable(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `orna-compiler` (lib) generated 7 warnings (run `cargo fix --lib -p orna-compiler` to apply 3 suggestions)
+warning: unused imports: `DefinitionIdentity`, `DefinitionOrigin`, `ExecutableArtifactKind`, `ExecutableArtifact`, `FunctionDefinition`, `FunctionDomain`, `FunctionReturn`, `FunctionRevisionRecord`, `FunctionSecurity`, `FunctionSemanticHashVersion`, `FunctionTransaction`, `FunctionVolatility`, `ParameterDefinition`, `ResolvedType`, `SourceOrigin`, `StandardExecutable`, `StandardLibraryDigestVersion`, `StandardScalar`, `StoredSourceRevision`, `StoredSourceUnit`, `ValueTypeKind`, `artifact_payload_digest`, `calculate_standard_library_digest`, `function_declaration_digest`, `function_semantic_digest_with_version`, `source_bundle_digest`, `source_revision_record_digest`, `source_unit_content_digest`, `standard_library_digest`, `verify_standard_library_snapshot as verify_canonical_standard_library_snapshot`, and `verify_standard_library_v2_snapshot as verify_canonical_standard_library_v2_snapshot`
+  --> crates/orna-standard/src/lib.rs:13:29
+   |
+13 |         CanonicalHashError, artifact_payload_digest, calculate_standard_library_digest,
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+14 |         function_declaration_digest, function_semantic_digest_with_version, source_bundle_digest,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+15 |         source_revision_record_digest, source_unit_content_digest, standard_library_digest,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+16 |         verify_standard_library_snapshot as verify_canonical_standard_library_snapshot,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+17 |         verify_standard_library_v2_snapshot as verify_canonical_standard_library_v2_snapshot,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+20 |         CatalogueSnapshot, CatalogueSnapshotError, FunctionDefinition, FunctionDomain,
+   |                                                    ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+21 |         FunctionReturn, FunctionSecurity, FunctionTransaction, FunctionVolatility,
+   |         ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+22 |         ParameterDefinition, PreludeTypeName, PreludeTypeNameError, QualifiedSemanticName,
+   |         ^^^^^^^^^^^^^^^^^^^
+23 |         SchemaDefinition, SemanticNameError, TypeBinding, TypeBindingError, TypeLookupName,
+24 |         ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
+   |                              ^^^^^^^^^^^^^
+...
+27 |         ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
+   |                                 ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+28 |         ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord,
+   |         ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+29 |         FunctionSemanticHashVersion, RevisionInvariantError, Sha256Digest, SourceOrigin,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^                                        ^^^^^^^^^^^^
+30 |         StandardExecutable, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+   |         ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+31 |         StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
+   |         ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+32 |     },
+33 |     types::{ResolvedType, StandardScalar},
+   |             ^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `ACCEPTED_SOURCE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:236:7
+    |
+236 | const ACCEPTED_SOURCE_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `ACCEPTED_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:240:7
+    |
+240 | const ACCEPTED_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:258:7
+    |
+258 | const ACCEPTED_V2_TYPES_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:262:7
+    |
+262 | const ACCEPTED_V2_INVOKE_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:266:7
+    |
+266 | const ACCEPTED_V2_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:278:7
+    |
+278 | const ACCEPTED_V2_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V2_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:282:7
+    |
+282 | const ACCEPTED_V2_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:349:7
+    |
+349 | const ACCEPTED_V3_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_TYPES_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:350:7
+    |
+350 | const ACCEPTED_V3_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_INVOKE_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_OUTPUT_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:351:7
+    |
+351 | const ACCEPTED_V3_OUTPUT_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:355:7
+    |
+355 | const ACCEPTED_V3_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:367:7
+    |
+367 | const ACCEPTED_V3_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V2_ARTIFACT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V3_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:368:7
+    |
+368 | const ACCEPTED_V3_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V2_SEMANTIC_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:418:7
+    |
+418 | const ACCEPTED_V4_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_TYPES_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:419:7
+    |
+419 | const ACCEPTED_V4_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_INVOKE_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_OUTPUT_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:420:7
+    |
+420 | const ACCEPTED_V4_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V3_OUTPUT_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_UI_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:421:7
+    |
+421 | const ACCEPTED_V4_UI_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:425:7
+    |
+425 | const ACCEPTED_V4_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:433:7
+    |
+433 | const ACCEPTED_V4_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V3_ARTIFACT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V4_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:434:7
+    |
+434 | const ACCEPTED_V4_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V3_SEMANTIC_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_TYPES_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:454:7
+    |
+454 | const ACCEPTED_V5_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_TYPES_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_INVOKE_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:455:7
+    |
+455 | const ACCEPTED_V5_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_INVOKE_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_OUTPUT_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:456:7
+    |
+456 | const ACCEPTED_V5_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_OUTPUT_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_UI_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:457:7
+    |
+457 | const ACCEPTED_V5_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_UI_CONTENT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_JSON_CONTENT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:458:7
+    |
+458 | const ACCEPTED_V5_JSON_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_SOURCE_BUNDLE_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:462:7
+    |
+462 | const ACCEPTED_V5_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_ARTIFACT_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:470:7
+    |
+470 | const ACCEPTED_V5_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V4_ARTIFACT_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACCEPTED_V5_SEMANTIC_DIGEST` is never used
+   --> crates/orna-standard/src/lib.rs:471:7
+    |
+471 | const ACCEPTED_V5_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V4_SEMANTIC_DIGEST;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_qualified_export` is never used
+    --> crates/orna-standard/src/lib.rs:1500:4
+     |
+1500 | fn matches_qualified_export(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_prelude_export` is never used
+    --> crates/orna-standard/src/lib.rs:1521:4
+     |
+1521 | fn matches_prelude_export(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_qualified_name` is never used
+    --> crates/orna-standard/src/lib.rs:1539:4
+     |
+1539 | fn matches_qualified_name(source: &QualifiedName, expected: &QualifiedSemanticName) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `matches_prelude_words` is never used
+    --> crates/orna-standard/src/lib.rs:1548:4
+     |
+1548 | fn matches_prelude_words(source: &[NamePart], expected: &PreludeTypeName) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_unquoted` is never used
+    --> crates/orna-standard/src/lib.rs:1556:4
+     |
+1556 | fn is_unquoted(part: &NamePart) -> bool {
+     |    ^^^^^^^^^^^
+
+warning: function `decode_sql_string_literal` is never used
+    --> crates/orna-standard/src/lib.rs:1560:4
+     |
+1560 | fn decode_sql_string_literal(literal: &str) -> Option<String> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `source_persistence` is never used
+    --> crates/orna-standard/src/lib.rs:1577:4
+     |
+1577 | fn source_persistence(persistence: PrimitiveValueTypePersistence) -> ValueTypePersistence {
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: `orna-standard` (lib) generated 36 warnings (run `cargo fix --lib -p orna-standard` to apply 1 suggestion)
+warning: function `relation_count` is never used
+    --> crates/orna-conformance-v1/src/semantic_adapter.rs:7465:4
+     |
+7465 | fn relation_count(
+     |    ^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orna-conformance-v1` (lib) generated 1 warning
+   Compiling orna-conformance-v1 v1.0.0 (/home/pbox/dev/ornadb/wt-value-execution-epic89/crates/orna-conformance-v1)
+    Finished `test` profile [unoptimized] target(s) in 2.20s
+     Running tests/reference_corpus.rs (/var/tmp/pbox-build/cargo/debug/deps/reference_corpus-69905c3b5ca36c90)
+
+running 1 test
+test requirement_evidence_keeps_all_authoritative_not_executed_markers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 43 filtered out; finished in 1.14s
+
+CAPTURED_EXIT_CODE=0
