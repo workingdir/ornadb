@@ -2,7 +2,10 @@ use futures::executor::block_on;
 use orna_application_v1::{ApplicationAuthority, ApplicationLiveAdapter};
 use orna_evaluator_v1::Limits as EvaluatorLimits;
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
-use orna_live_v1::{LiveApplication, LiveApplicationWorkSupervisor, LiveEvalResponse};
+use orna_live_v1::{
+    CreateRequest, Frame, Limits as LiveLimits, LiveApplication, LiveApplicationWorkSupervisor,
+    LiveEvalResponse, LiveHost, ResumeRequest, SystemCredentialIssuer,
+};
 use orna_protocol_v1::{Envelope, Message, PresentationContext, ResultStatus};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
@@ -10,7 +13,9 @@ use orna_runtime_v1::{
     RunObservationRegistration, RuntimeError, RuntimeIdentity, RuntimeState, StagedTableActivation,
     TerminalOutcome, WriterLease,
 };
+use orna_security_v1::{Origin, OriginPolicy, SessionBoundary};
 use orna_semantic_v1::Catalogue;
+use orna_serving_v1::{Limits as ServingLimits, Serving};
 use std::{
     fs,
     path::PathBuf,
@@ -67,6 +72,60 @@ fn runtime() -> TestRuntime {
     .unwrap();
     let lease = block_on(state.acquire_lease([44; 16])).unwrap();
     TestRuntime { root, state, lease }
+}
+
+fn unleased_runtime() -> (PathBuf, Repository, RuntimeState) {
+    let sequence = NEXT_REPOSITORY.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "orna-served-eval-{}-{timestamp}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let status = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git init must create the test repository");
+    let repository = Repository::discover(&root).unwrap();
+    let state = block_on(RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [41; 16],
+            repository_id: [42; 16],
+        },
+        [43; 32],
+    ))
+    .unwrap();
+    (root, repository, state)
+}
+
+fn live_origin() -> Origin {
+    Origin::parse("https://app.example").unwrap()
+}
+
+fn subscribe_bytes() -> Vec<u8> {
+    Envelope {
+        request: Some([33; 16]),
+        watch: None,
+        message: Message::Subscribe {
+            resource: [34; 16],
+            presentation: PresentationContext {
+                locale: "en".to_owned(),
+                timezone: None,
+                width: None,
+                theme: "dark".to_owned(),
+                supported_kinds: Vec::new(),
+            },
+        },
+        extensions: Default::default(),
+    }
+    .encode(LiveLimits::default().protocol)
+    .unwrap()
 }
 
 fn registration(request: RequestIdentity) -> RunObservationRegistration {
@@ -410,4 +469,99 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
     );
 
     runtime.cleanup();
+}
+
+#[test]
+fn served_livehost_eval_commits_admitted_source_mutation_and_replays() {
+    let (root, repository, state) = unleased_runtime();
+    let origin = live_origin();
+    let boundary = SessionBoundary::new(OriginPolicy::new([origin.clone()], []), 10);
+    let mut host = LiveHost::with_runtime_state(
+        LiveLimits::default(),
+        boundary,
+        Serving::new(ServingLimits::default()).unwrap(),
+        state,
+    )
+    .unwrap();
+    let mut issuer = SystemCredentialIssuer::default();
+    let subscribe = subscribe_bytes();
+    let session = [1; 16];
+    let credential = block_on(host.create(
+        CreateRequest {
+            id: session,
+            origin: origin.clone(),
+            expires_at: 100,
+            now: 0,
+            subscribe: &subscribe,
+        },
+        &mut issuer,
+    ))
+    .unwrap();
+    block_on(host.resume(ResumeRequest {
+        id: session,
+        origin: &origin,
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    let identity = RequestIdentity {
+        session_id: session,
+        request_id: [52; 16],
+    };
+    let fingerprint = eval_fingerprint(identity);
+    let mut envelope = eval_envelope(identity);
+    let Message::Eval {
+        fingerprint: transmitted,
+        ..
+    } = &mut envelope.message
+    else {
+        unreachable!("the admitted source transaction is an Eval request");
+    };
+    *transmitted = fingerprint;
+    let frame = Frame::Binary(envelope.encode(LiveLimits::default().protocol).unwrap());
+
+    let mut application = source_adapter();
+    let first = block_on(host.dispatch_frame([5; 16], 2, frame.clone(), &mut application))
+        .expect("LiveHost should dispatch the checked-in source Eval");
+    assert!(matches!(
+        first.response.as_ref().unwrap().message,
+        Message::Result {
+            status: ResultStatus::Success,
+            ..
+        }
+    ));
+    let replay = block_on(host.dispatch_frame([5; 16], 3, frame, &mut application))
+        .expect("a completed Eval request should replay its terminal response");
+    assert_eq!(replay, first);
+
+    drop(host);
+    let reopened = block_on(RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [41; 16],
+            repository_id: [42; 16],
+        },
+        [43; 32],
+    ))
+    .unwrap();
+    let status = block_on(reopened.request_status_for_identity(identity))
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.state, RequestState::Completed);
+    let rows = block_on(reopened.committed_table_rows("Note")).unwrap();
+    assert_eq!(rows.len(), 1, "the served Eval mutation must commit once");
+    assert_eq!(
+        CanonicalValue::decode(&rows[0].1).unwrap().raw(),
+        &OvbRaw::Map(vec![
+            (OvbRaw::Text("id".to_owned()), OvbRaw::Int(7.into())),
+            (
+                OvbRaw::Text("text".to_owned()),
+                OvbRaw::Text("committed from admitted source".to_owned()),
+            ),
+        ])
+    );
+    drop(reopened);
+    fs::remove_dir_all(root).unwrap();
 }
