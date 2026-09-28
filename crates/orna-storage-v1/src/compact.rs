@@ -56,6 +56,57 @@ pub struct CompactWriterInput {
     pub candidate_digest: [u8; 32],
 }
 
+/// One authoritative, base-aware row operation ready for physical encoding.
+/// Replacement values are complete canonical rows; deletions carry no value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactWriterRow {
+    key: Vec<u8>,
+    value: Option<Vec<u8>>,
+    role: CompactSegmentRole,
+}
+
+impl CompactWriterRow {
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+
+    pub fn value(&self) -> Option<&[u8]> {
+        self.value.as_deref()
+    }
+
+    pub const fn role(&self) -> CompactSegmentRole {
+        self.role
+    }
+}
+
+/// Output of consuming one ordered freeze against its authoritative base.
+/// It carries no digest witness or sequence-based precedence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactWriterBatch {
+    table_id: [u8; 16],
+    schema_fingerprint: [u8; 32],
+    generation: u64,
+    rows: Vec<CompactWriterRow>,
+}
+
+impl CompactWriterBatch {
+    pub const fn table_id(&self) -> [u8; 16] {
+        self.table_id
+    }
+
+    pub const fn schema_fingerprint(&self) -> [u8; 32] {
+        self.schema_fingerprint
+    }
+
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn rows(&self) -> &[CompactWriterRow] {
+        &self.rows
+    }
+}
+
 /// One complete logical row folded from a verified committed segment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactBaseRow {
@@ -143,6 +194,61 @@ impl CompactBaseState {
         Ok(folded)
     }
 
+    /// Folds frozen mutations by logical key and classifies their final
+    /// physical roles against this verified base. Absent insert-then-delete
+    /// mutations disappear; deletion output is key-only.
+    pub fn prepare_writer_batch(
+        &self,
+        profile: &CompactOvbProfile,
+        input: &CompactWriterInput,
+    ) -> Result<CompactWriterBatch, CompactBaseProjectionError> {
+        if profile.table_id() != self.table_id {
+            return Err(CompactBaseProjectionError::WrongTable);
+        }
+        if profile.schema_fingerprint() != self.schema_fingerprint {
+            return Err(CompactBaseProjectionError::WrongSchema);
+        }
+        let folded = self.fold_writer_input(input)?;
+        let mut rows = Vec::with_capacity(folded.mutations.len());
+        for mutation in folded.mutations {
+            let key = mutation.key.encoded().to_vec();
+            match mutation.state {
+                CompactWriterMutationState::Replacement { value } => {
+                    let value = CanonicalValue::decode(&value)
+                        .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?
+                        .encode()
+                        .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+                    validate_complete_writer_row(profile, &mutation.key, &value)?;
+                    let role = if self
+                        .rows
+                        .get(&mutation.key)
+                        .is_some_and(|row| row.value.is_some())
+                    {
+                        CompactSegmentRole::Replacement
+                    } else {
+                        CompactSegmentRole::Data
+                    };
+                    rows.push(CompactWriterRow {
+                        key,
+                        value: Some(value),
+                        role,
+                    });
+                }
+                CompactWriterMutationState::Deletion => rows.push(CompactWriterRow {
+                    key,
+                    value: None,
+                    role: CompactSegmentRole::Deletion,
+                }),
+            }
+        }
+        Ok(CompactWriterBatch {
+            table_id: self.table_id,
+            schema_fingerprint: self.schema_fingerprint,
+            generation: self.next_generation,
+            rows,
+        })
+    }
+
     /// Consumes generated writer input at the schema/generation boundary used
     /// by the committed base provider.
     pub fn consume_writer_input(
@@ -227,6 +333,65 @@ impl CompactBaseState {
         }
         Ok(())
     }
+}
+
+fn validate_complete_writer_row(
+    profile: &CompactOvbProfile,
+    key: &CompactKeyIdentity,
+    value: &[u8],
+) -> Result<(), CompactBaseProjectionError> {
+    let key_components = decode_key_components(profile, key)
+        .map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
+    let value = CanonicalValue::decode(value)
+        .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+    let OvbRaw::Tag(60009, payload) = value.raw() else {
+        return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+    };
+    let Some(row) = array(payload) else {
+        return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+    };
+    let [_, OvbRaw::Array(fields)] = row else {
+        return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+    };
+    let mut row_fields = BTreeMap::new();
+    for field in fields {
+        let OvbRaw::Array(parts) = field else {
+            return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+        };
+        let [field_id, field_value] = parts.as_slice() else {
+            return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+        };
+        let field_id =
+            uuid(field_id).map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+        if row_fields.insert(field_id, field_value).is_some() {
+            return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+        }
+    }
+    for (field, expected) in profile.key_fields.iter().zip(key_components) {
+        if row_fields.get(&field.id).copied() != Some(&expected) {
+            return Err(CompactBaseProjectionError::InvalidEvolutionKey);
+        }
+    }
+    let schema_fields = integer_map(profile.schema.raw())
+        .and_then(|schema| schema.get(&3).copied())
+        .and_then(array)
+        .ok_or(CompactBaseProjectionError::InvalidEvolutionValue)?;
+    for field in schema_fields {
+        let OvbRaw::Array(parts) = field else {
+            return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+        };
+        let [field_id, _, _, role, _] = parts.as_slice() else {
+            return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+        };
+        let role =
+            integer_value(role).map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+        let field_id =
+            uuid(field_id).map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+        if matches!(role, 0 | 1) && !row_fields.contains_key(&field_id) {
+            return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+        }
+    }
+    Ok(())
 }
 
 /// Applies an already-authorized evolution plan to the verified compact base.
@@ -1939,6 +2104,130 @@ mod tests {
         );
         assert!(expected.has_same_logical_rows(&expected.clone()));
         assert_eq!(folded.candidate_digest, freeze.candidate_digest);
+    }
+
+    #[test]
+    fn physical_writer_batch_uses_base_roles_and_key_only_deletions() {
+        let profile = fixture_profile();
+        let mut rows = BTreeMap::new();
+        for (key_text, value) in [
+            ("present", fixture_row("present", "Before", None)),
+            ("changing", fixture_row("changing", "Before", None)),
+        ] {
+            let encoded_key = fixture_key(key_text);
+            let key = profile.decode_key(&encoded_key).unwrap();
+            rows.insert(
+                key,
+                CompactBaseRow {
+                    key: CanonicalValue::decode(&encoded_key).unwrap(),
+                    value: Some(value),
+                    generation: 1,
+                    role: CompactSegmentRole::Data,
+                },
+            );
+        }
+        let base = CompactBaseState {
+            table_id: profile.table_id(),
+            schema_fingerprint: profile.schema_fingerprint(),
+            next_generation: 2,
+            rows,
+        };
+        let freeze = fixture_freeze(
+            &profile,
+            vec![
+                publication_mutation(
+                    &profile,
+                    1,
+                    "transient",
+                    PublicationMutationState::Replacement {
+                        value: fixture_row("transient", "Temporary", None).encode().unwrap(),
+                    },
+                ),
+                publication_mutation(
+                    &profile,
+                    2,
+                    "transient",
+                    PublicationMutationState::Deletion,
+                ),
+                publication_mutation(
+                    &profile,
+                    3,
+                    "present",
+                    PublicationMutationState::Replacement {
+                        value: fixture_row("present", "Temporary", None).encode().unwrap(),
+                    },
+                ),
+                publication_mutation(
+                    &profile,
+                    4,
+                    "present",
+                    PublicationMutationState::Deletion,
+                ),
+                publication_mutation(
+                    &profile,
+                    5,
+                    "changing",
+                    PublicationMutationState::Deletion,
+                ),
+                publication_mutation(
+                    &profile,
+                    6,
+                    "changing",
+                    PublicationMutationState::Replacement {
+                        value: fixture_row("changing", "Final", None).encode().unwrap(),
+                    },
+                ),
+                publication_mutation(
+                    &profile,
+                    7,
+                    "inserted",
+                    PublicationMutationState::Replacement {
+                        value: fixture_row("inserted", "New", None).encode().unwrap(),
+                    },
+                ),
+            ],
+        );
+        let input = lower_publication_freeze(&profile, &freeze).unwrap();
+        let batch = base.prepare_writer_batch(&profile, &input).unwrap();
+
+        assert_eq!(batch.table_id(), profile.table_id());
+        assert_eq!(batch.schema_fingerprint(), profile.schema_fingerprint());
+        assert_eq!(batch.generation(), 2);
+        assert_eq!(batch.rows().len(), 3);
+        assert_eq!(batch.rows()[0].key(), fixture_key("present"));
+        assert_eq!(batch.rows()[0].role(), CompactSegmentRole::Deletion);
+        assert_eq!(batch.rows()[0].value(), None);
+        assert_eq!(batch.rows()[1].key(), fixture_key("changing"));
+        assert_eq!(batch.rows()[1].role(), CompactSegmentRole::Replacement);
+        assert_eq!(
+            CanonicalValue::decode(batch.rows()[1].value().unwrap()).unwrap(),
+            fixture_row("changing", "Final", None)
+        );
+        assert_eq!(batch.rows()[2].key(), fixture_key("inserted"));
+        assert_eq!(batch.rows()[2].role(), CompactSegmentRole::Data);
+        assert_eq!(
+            CanonicalValue::decode(batch.rows()[2].value().unwrap()).unwrap(),
+            fixture_row("inserted", "New", None)
+        );
+
+        let mismatched = fixture_freeze(
+            &profile,
+            vec![publication_mutation(
+                &profile,
+                1,
+                "claimed-key",
+                PublicationMutationState::Replacement {
+                    value: fixture_row("different-key", "Wrong", None)
+                        .encode()
+                        .unwrap(),
+                },
+            )],
+        );
+        let mismatched = lower_publication_freeze(&profile, &mismatched).unwrap();
+        assert_eq!(
+            base.prepare_writer_batch(&profile, &mismatched),
+            Err(CompactBaseProjectionError::InvalidEvolutionKey)
+        );
     }
 
     #[test]
