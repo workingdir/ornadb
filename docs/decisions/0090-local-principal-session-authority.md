@@ -249,6 +249,28 @@ The existing local peer mapping is therefore not credential enrollment, the
 opaque binding is not a durable session, and the current effective-principal
 equality is not a definer implementation.
 
+### Orna 1.0.0 reference boundary
+
+The frozen Orna 1.0.0 reference does not define policy evaluation or
+`SECURITY DEFINER` behavior. `source/26-security.md` requirement
+`ORNA-TRUST-001` excludes principals, grants, row ACLs, device roles, and an
+enterprise policy language. `source/28-serving.md` requirement
+`ORNA-SERVE-005` excludes principals, grants, per-device roles, and row-level
+permissions. `source/15-system.md` requirement `ORNA-SYS-088` says the 1.0
+`sys.admin` boundary must not be represented as an enterprise grants or role
+engine. `source/10-execution.md` requirements `ORNA-TXN-001` through
+`ORNA-TXN-008` define activation transaction, read, and external-effect
+semantics; they do not define security policy or definer transitions.
+
+The same boundary was cross-checked against `grammar/orna.ebnf`,
+`tests/requirements.json`, `tests/requirement-evidence.json`,
+`tests/scenarios.json`, `examples/`, `api/sys.json`, and
+`source/34-system-reference.md`; these artifacts define no policy-evaluation
+or definer contract. Policy evaluation, ownership/definer transitions, and
+their enforcement therefore remain deferred for the 1.0 profile. Any later
+implementation requires a separate accepted specification that supplies those
+semantics.
+
 ## Alternatives rejected
 
 ### Trust principal or role fields in requests
