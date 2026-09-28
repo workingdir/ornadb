@@ -2560,8 +2560,41 @@ impl Repository {
         {
             return Err(RepositoryError::StaleHead);
         }
+        let projected = self.read_compact_committed_base_from_commit(
+            expected_head,
+            table,
+            expected_schema,
+            expected_profile,
+            project,
+        )?;
+        if self.head()?.as_ref() != Some(expected_head) {
+            return Err(RepositoryError::StaleHead);
+        }
+        Ok(projected)
+    }
+
+    /// Projects rows from an immutable commit even after another commit has
+    /// advanced the selected ref. Recovery uses this only to prove the compact
+    /// candidate against its recorded base; it does not publish or finalize.
+    pub fn read_compact_committed_base_from_commit<T, F>(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+        expected_schema: [u8; 32],
+        expected_profile: &str,
+        mut project: F,
+    ) -> Result<Vec<T>, RepositoryError>
+    where
+        F: FnMut(
+            &CompactManifestEntry,
+            &CompactCommittedSegmentProjection,
+        ) -> Result<T, RepositoryError>,
+    {
+        if expected_profile != COMPACT_PROFILE {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
         let manifest = self
-            .read_compact_manifest(expected_head, table)?
+            .read_compact_manifest(commit, table)?
             .ok_or(RepositoryError::InvalidCompactManifest)?;
         if manifest.table() != table || manifest.schema() != expected_schema {
             return Err(RepositoryError::InvalidCompactManifest);
@@ -2571,7 +2604,7 @@ impl Repository {
             if entry.schema_id() != expected_schema {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
-            let bytes = self.read_verified_compact_segment(expected_head, table, entry)?;
+            let bytes = self.read_verified_compact_segment(commit, table, entry)?;
             let projection = decode_compact_segment_projection(table, entry, &bytes)?;
             if projection.profile() != expected_profile
                 || projection.schema_id() != expected_schema
@@ -2596,9 +2629,6 @@ impl Repository {
         let mut projected = Vec::with_capacity(segments.len());
         for (entry, projection) in &segments {
             projected.push(project(entry, projection)?);
-        }
-        if self.head()?.as_ref() != Some(expected_head) {
-            return Err(RepositoryError::StaleHead);
         }
         Ok(projected)
     }
