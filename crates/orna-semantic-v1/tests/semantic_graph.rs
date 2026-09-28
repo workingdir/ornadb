@@ -1726,7 +1726,7 @@ fn relation_extrema_preserve_element_type_as_optional_values() {
 fn omitted_numeric_function_parameters_are_inferred_without_dynamic_fallback() {
     let result = analyze(&[ModuleInput::new(
         "inferred.orna",
-        "pub fn square(value) = value * value;",
+        include_str!("fixtures/omitted-numeric-inference.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -2979,12 +2979,7 @@ fn recovery_pipeline_unifies_success_type_before_later_stages() {
 fn recovery_pipeline_replaces_handled_failure_effect() {
     let result = analyze(&[ModuleInput::new(
         "recovery-effects.orna",
-        r#"
-            pub table Note(id: Int) { value: Int, }
-            fn value(note: Note): Int = note.value;
-            pub fn recovered() = Note | one() | value |? (failure => 0);
-            pub fn still_fails() = Note | one() | value |? (failure => Note | one() | value);
-        "#,
+        include_str!("fixtures/recovery-effects-type-family.orna"),
     )]);
     assert!(result.is_ok(), "{:?}", result.diagnostics);
     let module = result
@@ -5910,29 +5905,7 @@ fn numeric_nested_lambdas_infer_omitted_parameters_without_dynamic_fallback() {
 fn reference_values_module_infers_closed_enum_optional_and_interpolation_cases() {
     let result = analyze(&[ModuleInput::new(
         "values.orna",
-        r#"
-            pub type Score = Int {
-                assert >= 0;
-                assert <= 100;
-            }
-
-            pub enum Availability {
-                ready,
-                waiting { reason: Str },
-            }
-
-            pub fn describe(value: Availability): Str = case value {
-                Availability.ready: "ready",
-                Availability.waiting { reason }: "waiting: {reason}",
-            };
-
-            pub fn optional_name(value: Str?): Str = case value {
-                Some(name): name,
-                null: "anonymous",
-            };
-
-            pub fn add(left: Int, right: Int): Int = left + right;
-        "#,
+        include_str!("fixtures/reference-values-type-family.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);

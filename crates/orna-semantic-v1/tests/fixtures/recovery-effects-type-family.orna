@@ -1,0 +1,4 @@
+pub table Note(id: Int) { value: Int, }
+fn value(note: Note): Int = note.value;
+pub fn recovered() = Note | one() | value |? (failure => 0);
+pub fn still_fails() = Note | one() | value |? (failure => Note | one() | value);
