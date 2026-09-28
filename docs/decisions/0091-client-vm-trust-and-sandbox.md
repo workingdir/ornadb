@@ -1,6 +1,30 @@
-# Work ADR 0091: CLIENT VM Trust and Sandbox
+# Work ADR 0091: CLIENT VM Trust and Sandbox (Deferred)
 
-**Status:** Proposed
+**Status:** Deferred
+
+## Decision
+
+The production CLIENT VM, verified-artifact trust envelope, provenance/signature
+verification, and capability sandbox broker are deferred. This work ADR does not
+define an accepted implementation contract, and its proposed design below MUST
+NOT be treated as one. Reconsider this work only after a future normative
+contract defines the artifact authority, verification failures, host boundary,
+and sandbox behavior.
+
+## Orna 1.0.0 basis
+
+Orna 1.0.0 does not specify a production CLIENT VM or an artifact trust and
+sandbox contract. **ORNA-EVAL-002** requires the host to parse, resolve,
+type-check, and execute submitted source through the same language
+implementation as the local REPL; client-supplied AST, bytecode, and query plans
+are never authoritative. **ORNA-TRUST-001** defines local commands as trusting
+the invoking OS user and does not define principals, grants, or an enterprise
+policy language. **ORNA-TRUST-003** places public anonymous mutation and
+arbitrary remote REPL execution outside the trusted v1 profile. **ORNA-EXT-003**
+and **ORNA-EXT-004** cover typed host calls, budgets, and cancellation for
+portable Wasm extensions; they do not define an Orna CLIENT VM artifact
+boundary. These requirements do not authorize the proposed production trust
+or sandbox behavior below.
 
 ## Context
 
