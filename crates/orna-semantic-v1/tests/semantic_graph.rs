@@ -1726,7 +1726,7 @@ fn relation_extrema_preserve_element_type_as_optional_values() {
 fn omitted_numeric_function_parameters_are_inferred_without_dynamic_fallback() {
     let result = analyze(&[ModuleInput::new(
         "inferred.orna",
-        "pub fn square(value) = value * value;",
+        include_str!("fixtures/omitted-numeric-inference.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
