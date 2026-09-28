@@ -2,6 +2,28 @@
 
 **Status:** Accepted for the OrnaDB v1 development boundary
 
+## OrnaDB 1.0.0 normative status
+
+The production Qt runtime described by this historical work decision is
+deferred for OrnaDB 1.0.0; it is not a behavior required by the frozen
+normative reference. The applicable requirements are narrower:
+
+- `ORNA-RUN-001` through `ORNA-RUN-003` in
+  Orna-1.0.0 `source/06-expressions.md` define `orna run` entry
+  selection and path behavior.
+- `ORNA-PRES-010` in Orna-1.0.0 `source/13-presentation.md` requires an
+  Inspect-compatible fallback for renderers that do not recognize a rich
+  presentation node.
+- `ORNA-CLI-005` in Orna-1.0.0 `source/18-cli.md` suppresses dynamic progress when
+  output is not a terminal unless explicitly forced.
+
+The normative text, grammar, conformance requirements, examples, API catalogue
+and system reference do not define a production Qt provider, native runtime
+family, `orna_runtime_query_v1` ABI, loader, or installed-runtime selection.
+Those parts of this ADR therefore remain a proposal for a later accepted
+contract. They must not be implemented as OrnaDB 1.0.0 behavior or inferred
+from the test-only headless fixture.
+
 ## Context
 
 OrnaDB already has a TTY renderer and a test-only headless runtime fixture. It
