@@ -1,4 +1,4 @@
-# Work ADR 0096: Normative REPL Boundary
+# Work ADR 0097: Normative REPL Boundary
 
 **Status:** Accepted implementation scope; function-backed session API deferred
 
