@@ -357,7 +357,7 @@ impl EffectSummary {
         self.may_fail |= other.may_fail;
     }
     fn forbidden_for_assertion(&self) -> bool {
-        !self.effects.is_empty() || self.may_fail
+        !self.effects.is_empty()
     }
 }
 
