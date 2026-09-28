@@ -615,7 +615,16 @@ impl ParseReport {
     /// Diagnostics remain available through [`Self::diagnostics`] with their raw
     /// message, byte span, and machine-readable code unchanged.
     pub fn render_human(&self) -> String {
-        self.diagnostics
+        self.render_diagnostics(&self.diagnostics)
+    }
+
+    /// Renders an ordered compiler diagnostic list against this report's retained sources.
+    ///
+    /// This is used by later compiler stages whose diagnostics are not part of
+    /// the parse-only diagnostic list. Diagnostics without a matching retained
+    /// source still render their stable code, message, path, and byte span.
+    pub fn render_diagnostics(&self, diagnostics: &[CompilerDiagnostic]) -> String {
+        diagnostics
             .iter()
             .map(|diagnostic| {
                 self.units
