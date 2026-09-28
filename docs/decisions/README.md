@@ -54,6 +54,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0102 | Qualified type editor highlighting deferral | Lowercase qualified-name capture semantics are unspecified, and the current main branch contains no editor/tree-sitter implementation to update. |
 | 0103 | Studio runtime and Inspector reference boundary | Generic Orna inspection, presentation, redaction, and snapshot rules remain required; Studio-specific runtime and explorer contracts are deferred. |
 | 0105 | Deferred: Studio security/DBA page reference and authority boundary | A production page, CLIENT-to-administration authority path, and its interaction contract are not defined by the frozen reference; existing security implementation and CLI are unchanged. |
+| 0109 | Deferred: `orna-artifact` owns no PUB-1 immutable publication-object consumer | Keep executable plan codecs separate from compact segments, manifests, Git objects, and durability barriers; continue at the accepted runtime/storage/repository publication boundary. |
 | 0101 | OrnaDB 1.0 CLIENT VM trust boundary | Host-side remote source evaluation remains normative; production CLIENT bytecode VM, artifact trust, and CLIENT sandbox contracts are deferred. |
 
 ## Current work ADRs
@@ -255,3 +256,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [OrnaDB 1.0 CLIENT VM Trust Boundary](0101-client-vm-trust-boundary.md)
 * **work ADR 0108 (deferred):**
   [Persistent Scalar and Record Backend Parity](0108-persistent-value-backend-parity-deferral.md)
+* **work ADR 0109 (deferred):**
+  [Publication Object Encoding in `orna-artifact`](0109-publication-artifact-completeness-boundary.md)
