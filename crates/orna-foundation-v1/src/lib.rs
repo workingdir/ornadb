@@ -10,7 +10,7 @@ use serde::{Serialize, Serializer, ser::SerializeStruct};
 
 pub use orna_value_v1::{
     Error as ValueError, GitHash, OVB_VERSION, Raw as OvbRaw, SchemaDescriptor, Snapshot, Value,
-    canonical_uuid_text, parse_canonical_uuid_text,
+    canonical_uuid_text, compare_primary_keys, parse_canonical_uuid_text,
 };
 
 /// Canonical values, closed descriptors and snapshot encodings are owned by
