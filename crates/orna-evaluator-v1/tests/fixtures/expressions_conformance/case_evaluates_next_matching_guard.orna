@@ -1,0 +1,1 @@
+case true { true if false: 1, true if 1 / 0 == 0: 2, _: 3 }
