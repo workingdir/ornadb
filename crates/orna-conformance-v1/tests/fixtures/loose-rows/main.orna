@@ -1,0 +1,4 @@
+pub table Contact(region: Str, id: Int) {
+    name: Str,
+    age: Int,
+}
