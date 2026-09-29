@@ -24,6 +24,7 @@ orna-client = { path = "../orna-client" }
 orna-conformance-v1 = { path = "../orna-conformance-v1" }
 orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
+orna-live-v1 = { path = "../orna-live-v1" }
 orna-project-v1 = { path = "../orna-project-v1" }
 orna-repository-v1 = { path = "../orna-repository-v1" }
 orna-runtime-v1 = { path = "../orna-runtime-v1" }
