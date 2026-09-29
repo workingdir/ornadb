@@ -9750,15 +9750,20 @@ fn bucket_by_rejects_invalid_zone_and_period() {
 #[test]
 fn admitted_eval_producer_stages_effectful_source_without_publishing() {
     let mut session = orna_evaluator_v1::AdmittedReplSession::new(Limits::default());
-    assert_eq!(session.submit("let answer: Int = 41;"), Ok(None));
     assert_eq!(
-        session.submit("answer"),
+        session.submit(include_str!("fixtures/admitted_repl_seed.orna").trim()),
+        Ok(None)
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/admitted_repl_answer.orna").trim()),
         Ok(Some(Value::int(41.into())))
     );
-    let before = session.preview("$_").expect("last result should be visible");
+    let before = session
+        .preview(include_str!("fixtures/admitted_repl_last_result.orna").trim())
+        .expect("last result should be visible");
     assert_eq!(
         session
-            .stage_activation("40 + 2")
+            .stage_activation(include_str!("fixtures/admitted_repl_answer.orna").trim())
             .unwrap_err()
             .code(),
         "ORNA-REPL-EFFECT",
@@ -9766,7 +9771,7 @@ fn admitted_eval_producer_stages_effectful_source_without_publishing() {
     );
 
     let staged = session
-        .stage_activation("std.net.http.get(\"https://example.com\")")
+        .stage_activation(include_str!("fixtures/admitted_repl_effectful_http.orna").trim())
         .expect("explicit eval source should be admitted into a staged activation");
 
     assert!(matches!(
@@ -9777,12 +9782,12 @@ fn admitted_eval_producer_stages_effectful_source_without_publishing() {
     assert!(staged.effects().effects.contains("network"));
     assert!(staged.effects().may_fail);
     assert_eq!(
-        session.preview("$_"),
+        session.preview(include_str!("fixtures/admitted_repl_last_result.orna").trim()),
         Ok(before),
         "staging must not publish a new REPL result"
     );
     assert_eq!(
-        session.preview("answer"),
+        session.preview(include_str!("fixtures/admitted_repl_answer.orna").trim()),
         Ok(Value::int(41.into())),
         "staging must not alter existing bindings"
     );
