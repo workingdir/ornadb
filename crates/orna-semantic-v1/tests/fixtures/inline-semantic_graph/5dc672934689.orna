@@ -1,0 +1,14 @@
+
+            pub fn positional(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.invoke<Int>(function, arguments, as: Int);
+            pub fn named(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.invoke(function: function, arguments: arguments, as: Int,
+                    at: null, transaction: sys.InvokeTransaction.inherit,
+                    idempotency_key: null);
+            pub fn local_generic<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.invoke<T>(function, arguments, as: T);
+            pub fn piped(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                function | sys.invoke<Int>(arguments, as: Int);
+            pub fn erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.invoke(function, arguments);
+        

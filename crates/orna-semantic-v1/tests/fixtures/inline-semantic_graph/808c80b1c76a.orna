@@ -1,0 +1,6 @@
+
+            pub table Reading(id: Int) { value: Int, }
+            pub fn poll(ready: Bool) {
+                while ready { Reading.insert({ id: 1, value: 2 }); }
+            }
+        

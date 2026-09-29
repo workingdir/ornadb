@@ -1,0 +1,6 @@
+
+                    table Reading(id: Int) { value: Int, }
+                    fn {operation}(values: Int): Int = 99;
+                    pub fn aggregate() =
+                        Reading | map(reading => reading.value) | {terminal};
+                

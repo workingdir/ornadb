@@ -1,0 +1,1 @@
+fn bad(rows: [Int]) = rows | one(positive: value => value > 0);

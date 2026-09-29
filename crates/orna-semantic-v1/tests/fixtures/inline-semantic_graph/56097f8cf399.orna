@@ -1,0 +1,5 @@
+
+            pub table Book(id: Str) { title: Str, }
+            pub table Loan(book_id: Str) { }
+            assert every(Loan, loan => exists(Book, book => book.id == loan.book_id));
+        

@@ -1,0 +1,1 @@
+fn resolve(failure: sys.Failure, reason: Str) = sys.admin.resolve_failure(failure.reference, expected_status: failure.status, reason: reason);

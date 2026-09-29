@@ -1,0 +1,1 @@
+fn mismatched(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(1);

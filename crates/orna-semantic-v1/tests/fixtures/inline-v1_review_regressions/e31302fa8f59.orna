@@ -1,0 +1,1 @@
+use alpha; use beta; pub fn bad(): alpha.Vault = beta.make();

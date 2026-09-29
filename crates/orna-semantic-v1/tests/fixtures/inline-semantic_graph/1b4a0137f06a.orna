@@ -1,0 +1,1 @@
+use contacts as mail; use energy as mail; fn misuse() = mail.Contact.one();

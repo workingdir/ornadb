@@ -1,0 +1,1 @@
+fn incompatible_pipeline() = 1 | sys.meta<Str>();

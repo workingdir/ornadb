@@ -1,0 +1,1 @@
+use std.collection; pub fn first_value(rows: [Int]) = std.collection.first(rows);

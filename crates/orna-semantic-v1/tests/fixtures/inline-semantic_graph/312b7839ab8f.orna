@@ -1,0 +1,11 @@
+
+            pub type Contact {
+                pub name: Str,
+                impl Display {
+                    fn display(self, context: DisplayContext): Str {
+                        Audit.insert({ message: "displayed contact" });
+                        self.name
+                    }
+                }
+            }
+        

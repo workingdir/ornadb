@@ -1,0 +1,10 @@
+
+            pub fn positional(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.start<Int>(function, arguments, as: Int);
+            pub fn named(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.start(function: function, arguments: arguments, as: Int,
+                    at: null, transaction: sys.InvokeTransaction.separate,
+                    idempotency_key: null);
+            pub fn local_generic<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.start<T>(function, arguments, as: T);
+        

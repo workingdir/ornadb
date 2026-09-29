@@ -1,0 +1,1 @@
+use std as _; fn f() = definitely_not_in_the_catalogue;

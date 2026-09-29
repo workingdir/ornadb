@@ -1,0 +1,1 @@
+transitive table dependencies must avoid the empty-dependency diagnostic: {:?}

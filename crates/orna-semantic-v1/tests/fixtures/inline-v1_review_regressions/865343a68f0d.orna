@@ -1,0 +1,11 @@
+
+            type Shape = { value: Str, };
+            pub protocol P {
+                fn display(self): Str;
+            }
+            pub type Box = Shape {
+                impl P {
+                    fn display(self): Str = self.value;
+                }
+            }
+        

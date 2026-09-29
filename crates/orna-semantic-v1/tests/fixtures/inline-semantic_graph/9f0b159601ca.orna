@@ -1,0 +1,1 @@
+fn bad(values: [Int]) = std.collection.flat_map(values, value => value + 1);

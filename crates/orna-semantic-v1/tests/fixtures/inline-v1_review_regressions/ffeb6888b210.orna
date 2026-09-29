@@ -1,0 +1,1 @@
+protocol bounds use `<T impl Protocol>`

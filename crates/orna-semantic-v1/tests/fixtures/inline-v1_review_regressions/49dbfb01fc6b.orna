@@ -1,0 +1,8 @@
+
+                pub type Box {
+                    value: Str,
+                    impl From<Str> {
+                        fn from(value: Int) = Box { value: "converted" };
+                    }
+                }
+            

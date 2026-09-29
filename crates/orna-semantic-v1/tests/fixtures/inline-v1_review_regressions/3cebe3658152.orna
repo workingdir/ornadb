@@ -1,0 +1,11 @@
+
+            pub protocol Reproduce {
+                fn reproduce(self): Self;
+            }
+            pub type Box {
+                value: Int,
+                impl Reproduce {
+                    fn reproduce(self): Self = { value: self.value };
+                }
+            }
+        

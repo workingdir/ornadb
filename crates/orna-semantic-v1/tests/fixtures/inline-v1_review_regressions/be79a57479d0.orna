@@ -1,0 +1,19 @@
+
+            pub protocol Display {
+                fn display(self): Str;
+            }
+            pub type Note {
+                value: Str,
+                impl Display {
+                    fn display(self): Str = self.value;
+                }
+            }
+            pub fn reads<T impl Display>(value: T): Bool =
+                std.io.fs.read_text("private-input") == "ok";
+            pub table Book(id: Int) { value: Str, }
+            pub table Loan(id: Int) { book_id: Int, }
+            assert every(Loan, loan =>
+                exists(Book, book => book.id == loan.book_id)
+                && reads<Note>(Note { value: "note" })
+            );
+        

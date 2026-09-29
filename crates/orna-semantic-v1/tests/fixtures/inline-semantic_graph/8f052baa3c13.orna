@@ -1,0 +1,1 @@
+fn bad(rows: [Int]) = exists(rows, value => value + 1);

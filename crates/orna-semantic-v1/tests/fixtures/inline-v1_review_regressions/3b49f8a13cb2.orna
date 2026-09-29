@@ -1,0 +1,7 @@
+
+            pub type Vault {
+                seed: Int = 1,
+                total: Int = seed + 1,
+            }
+            pub fn forge(): Vault = Vault {};
+        

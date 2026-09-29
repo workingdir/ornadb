@@ -1,0 +1,4 @@
+
+        pub fn min(rows: [Decimal]): Decimal? = null;
+        pub fn max(rows: [Float]): Float? = null;
+    

@@ -1,0 +1,1 @@
+pub fn bad() = 10.GBP + 5.EUR;
