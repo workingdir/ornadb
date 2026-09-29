@@ -55,6 +55,27 @@ fn requirement_evidence_keeps_all_authoritative_not_executed_markers() {
 }
 
 #[test]
+fn rejects_requirement_without_a_recorded_evidence_obligation() {
+    let mut corpus = Corpus::load_default().expect("reference corpus loads");
+    corpus
+        .requirement_evidence
+        .requirements
+        .iter_mut()
+        .find(|entry| entry.requirement == "ORNA-TEST-011")
+        .expect("conformance requirement exists")
+        .tests
+        .clear();
+
+    assert_eq!(
+        corpus
+            .validate()
+            .expect_err("a requirement without an evidence obligation is invalid")
+            .to_string(),
+        "requirement evidence must cover every requirement with a non-empty test plan"
+    );
+}
+
+#[test]
 fn requirement_mapping_is_stage_scoped_and_does_not_promote_skips() {
     let mut corpus = Corpus::load_default().expect("reference corpus loads");
     corpus
