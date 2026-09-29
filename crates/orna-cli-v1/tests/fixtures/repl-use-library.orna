@@ -1,1 +1,2 @@
+use library;
 library.answer()
