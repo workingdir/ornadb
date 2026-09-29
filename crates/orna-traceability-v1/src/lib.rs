@@ -1427,6 +1427,27 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
     #[test]
+    fn rejects_requirement_without_recorded_evidence_obligation() {
+        let root = copy_corpus();
+        let evidence_path = root.join("tests/requirement-evidence.json");
+        let mut evidence: Value =
+            serde_json::from_slice(&fs::read(&evidence_path).expect("read evidence"))
+                .expect("valid evidence JSON");
+        evidence["requirements"][0]["tests"] = Value::Array(Vec::new());
+        fs::write(
+            &evidence_path,
+            serde_json::to_vec(&evidence).expect("serialize evidence"),
+        )
+        .expect("write evidence without obligation");
+
+        let error = generate(&root).expect_err("empty evidence obligation must reject bundle");
+        assert!(
+            error.to_string().contains("broken link or empty test list"),
+            "unexpected validation error: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
     fn rejects_manifest_count_drift() {
         let root = copy_corpus();
         let manifest = root.join("tests/conformance-manifest.json");
