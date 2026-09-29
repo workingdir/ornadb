@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
-    evaluate_expression, evaluate_function, evaluate_parsed, evaluate_parsed_with_nominals,
+    evaluate_expression, evaluate_expression_with_functions, evaluate_function, evaluate_parsed,
+    evaluate_parsed_with_nominals,
     evaluate_repl, evaluate_with_functions_and_nominals, invoke_named, invoke_named_with_effects,
     invoke_named_with_effects_and_budget, invoke_named_with_nominals, EffectHandler, Environment,
     EvaluationError, Functions, Limits, NominalDefinition, NominalDefinitions, NominalField,
@@ -5923,6 +5924,58 @@ fn std_collection_sort_by_accepts_all_call_forms_and_preserves_stable_ties() {
             Raw::Int(1.into()),
         ]))
         .unwrap()
+    );
+}
+
+#[test]
+fn std_collection_asof_join_uses_nearest_match_and_last_source_row_for_ties() {
+    let collection_source = orna_standard::reference_standard_sources_v1()
+        .into_iter()
+        .find(|(path, _)| path == "std/collection.orna")
+        .expect("the collection module is in the pinned standard profile")
+        .1;
+    let functions = functions_from_source(&collection_source)
+        .into_iter()
+        .map(|(name, function)| (format!("std.collection.{name}"), function))
+        .collect();
+    let expression = include_str!("fixtures/asof_join_nearest.orna");
+
+    let actual = evaluate_expression_with_functions(
+        expression,
+        &Environment::new(),
+        &functions,
+        Limits::default(),
+    )
+    .expect("the pinned public function reaches the evaluator binding");
+    let expected = evaluate(
+        r#"[
+            ({ group: "east", at: 10, label: "left-nearest" }, { group: "east", at: 11, label: "nearest-future" }),
+            ({ group: "east", at: 20, label: "left-tie" }, { group: "east", at: 18, label: "lower-tie-later-source" }),
+            ({ group: "missing", at: 10, label: "left-no-match" }, null)
+        ]"#,
+    );
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn std_collection_asof_join_measures_instant_distance_to_the_nanosecond() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/asof_join_instant_nearest.orna")),
+        evaluate(
+            r#"[({ group: "g", at: 1970-01-01T00:00:00Z, label: "left" }, { group: "g", at: 1970-01-01T00:00:00.000000001Z, label: "one-nanosecond" })]"#,
+        )
+    );
+}
+
+#[test]
+fn std_collection_asof_join_propagates_selector_failures() {
+    assert_eq!(
+        code(evaluate_expression(
+            include_str!("fixtures/asof_join_callback_failure.orna"),
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
     );
 }
 

@@ -48,7 +48,7 @@ pub use repl::{ReplSession, parse_admitted_repl};
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 1] {
+pub fn reference_standard_sources() -> [(String, String); 2] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -4256,25 +4256,33 @@ impl Context<'_, '_> {
         }
         let root_collection =
             root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
+        let resolved_function = self.resolve_function_name(callee, scope);
+        let native_asof_join = resolved_function.as_deref() == Some("std.collection.asof_join")
+            || (collection_name(callee) == Some("asof_join")
+                && !self.restrict_function_names
+                && !scope.0.contains_key("std")
+                && resolved_function.is_none());
         if collection_name(callee).is_some()
             && self.restrict_function_names
-            && self.resolve_function_name(callee, scope).is_none()
+            && resolved_function.is_none()
+            && !native_asof_join
         {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
-        // A verified standard-source function takes precedence over the
-        // legacy bounded math fallback. This keeps admitted REPL calls on
-        // ordinary import/resolution and executes their pinned source body,
-        // including its declared argument names. The fallback remains only
-        // for the standalone evaluator surface, which has no admitted module
-        // environment.
-        if math_name(callee).is_none()
-            && bits_name(callee).is_none()
-            && text_name(callee).is_none()
-            && collection_name(callee).is_none()
-            && stats_name(callee).is_none()
-            && root_collection.is_none()
-            || self.resolve_function_name(callee, scope).is_some()
+        // `std.collection.asof_join` is a source-declared evaluator binding:
+        // once that function resolves from the admitted module (or the
+        // standalone evaluator sees the explicit qualified path), execute
+        // the bounded native implementation below instead of the fail-closed
+        // source stub. Other standard-source functions still execute their
+        // pinned bodies before any legacy native fallback.
+        if !native_asof_join
+            && (math_name(callee).is_none()
+                && bits_name(callee).is_none()
+                && text_name(callee).is_none()
+                && collection_name(callee).is_none()
+                && stats_name(callee).is_none()
+                && root_collection.is_none()
+                || resolved_function.is_some())
         {
             // Only an unresolved, statically rooted field path is an effect
             // dispatch candidate. Dynamic field callees must be evaluated by
@@ -4739,6 +4747,9 @@ impl Context<'_, '_> {
                 self.split_when(values, predicate, depth)
             }
             ("group_by", [Value::List(values), key]) => self.group_by(values, key, depth),
+            ("asof_join", [Value::List(left), Value::List(right), time, by]) => {
+                self.asof_join(left, right, time, by, depth)
+            }
             ("zip", [Value::List(left), Value::List(right)]) => self.zipped(left, right, false),
             ("zip_exact", [Value::List(left), Value::List(right)]) => {
                 self.zipped(left, right, true)
@@ -4782,8 +4793,10 @@ impl Context<'_, '_> {
             | ("partition", [_, _])
             | ("split_when", [_, _])
             | ("group_by", [_, _])
+            | ("asof_join", [_, _, _, _])
             | ("zip" | "zip_exact", [_, _])
             | ("window", [_, _] | [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
+            ("asof_join", _) => Err(error("ORNA-EVAL-ARGUMENT")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -5834,6 +5847,79 @@ impl Context<'_, '_> {
                 .collect(),
         ))
     }
+    fn asof_join(
+        &mut self,
+        left: &[Value],
+        right: &[Value],
+        time: &Value,
+        by: &Value,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        // ORNA-LIB-003 names the selectors but leaves their shape and the
+        // result schema open. This evaluator uses one callback per selector,
+        // applied to rows from either list, and returns (left, right-or-null)
+        // tuples in left input order. "Nearest" means minimum absolute time
+        // distance, so a later right time may win. Equal distances choose the
+        // last matching row in right source order, not a canonical-key order.
+        self.items(left.len())?;
+        self.items(right.len())?;
+        if left.is_empty() {
+            return Ok(Value::List(Vec::new()));
+        }
+
+        let mut left_keys = Vec::with_capacity(left.len());
+        for row in left {
+            self.step()?;
+            let time_key = self.invoke_predicate(time, row.clone(), depth + 1)?;
+            lawful_asof_time(&time_key)?;
+            self.step()?;
+            let group_key = self.invoke_predicate(by, row.clone(), depth + 1)?;
+            lawful_group_key(&group_key)?;
+            left_keys.push((time_key, group_key));
+            self.items(left_keys.len())?;
+        }
+
+        let mut right_keys = Vec::with_capacity(right.len());
+        for row in right {
+            self.step()?;
+            let time_key = self.invoke_predicate(time, row.clone(), depth + 1)?;
+            lawful_asof_time(&time_key)?;
+            self.step()?;
+            let group_key = self.invoke_predicate(by, row.clone(), depth + 1)?;
+            lawful_group_key(&group_key)?;
+            right_keys.push((time_key, group_key));
+            self.items(right_keys.len())?;
+        }
+
+        let mut joined = Vec::with_capacity(left.len());
+        for (left_row, (left_time, left_group)) in left.iter().zip(left_keys) {
+            let mut nearest = None::<(Value, Value)>;
+            for (right_row, (right_time, right_group)) in right.iter().zip(&right_keys) {
+                self.step()?;
+                if compare_group_keys(&left_group, right_group)? != std::cmp::Ordering::Equal {
+                    continue;
+                }
+                let distance = asof_time_distance(&left_time, right_time)?;
+                let replace = match &nearest {
+                    None => true,
+                    Some((best_distance, _)) => {
+                        compare_values(&distance, best_distance)? != std::cmp::Ordering::Greater
+                    }
+                };
+                if replace {
+                    // Replacing on equality makes the rightmost equal-distance
+                    // row win, matching the documented source-order tie rule.
+                    nearest = Some((distance, right_row.clone()));
+                }
+            }
+            joined.push(Value::Tuple(vec![
+                left_row.clone(),
+                nearest.map_or(Value::Null, |(_, row)| row),
+            ]));
+            self.items(joined.len())?;
+        }
+        Ok(Value::List(joined))
+    }
     fn invoke_predicate(
         &mut self,
         callable: &Value,
@@ -6290,6 +6376,7 @@ fn named_arguments(
         "rank" => &["values", "key"],
         "filter" | "partition" | "split_when" => &["values", "predicate"],
         "group_by" => &["values", "key"],
+        "asof_join" => &["left", "right", "time", "by"],
         "zip" | "zip_exact" => &["left", "right"],
         "window" => match values.len() {
             2 => &["values", "size"],
@@ -6932,6 +7019,85 @@ fn lawful_group_key(value: &Value) -> Result<(), EvaluationError> {
     match value {
         Value::Bool(_) | Value::Int(_) | Value::Decimal(_) | Value::String(_) => Ok(()),
         Value::Tuple(values) => values.iter().try_for_each(lawful_group_key),
+        _ => Err(error("ORNA-EVAL-TYPE")),
+    }
+}
+fn lawful_asof_time(value: &Value) -> Result<(), EvaluationError> {
+    match value {
+        Value::Int(_) | Value::Decimal(_) | Value::Date(_) | Value::Instant { .. } => Ok(()),
+        _ => Err(error("ORNA-EVAL-TYPE")),
+    }
+}
+fn asof_time_distance(left: &Value, right: &Value) -> Result<Value, EvaluationError> {
+    match (left, right) {
+        (Value::Int(left), Value::Int(right)) => {
+            let distance = (left - right).abs();
+            if distance.to_str_radix(10).len() > DEFAULT_INTEGER_DIGITS {
+                return Err(error("ORNA-EVAL-LIMIT"));
+            }
+            Ok(Value::Int(distance))
+        }
+        (Value::Decimal(left), Value::Decimal(right)) => {
+            let exponent = left.exponent10.clone().min(right.exponent10.clone());
+            let left_shift = (&left.exponent10 - &exponent)
+                .to_usize()
+                .filter(|shift| *shift <= DEFAULT_INTEGER_DIGITS)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            let right_shift = (&right.exponent10 - &exponent)
+                .to_usize()
+                .filter(|shift| *shift <= DEFAULT_INTEGER_DIGITS)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            let left_coefficient = &left.coefficient * BigInt::from(10u8).pow(left_shift as u32);
+            let right_coefficient = &right.coefficient * BigInt::from(10u8).pow(right_shift as u32);
+            let difference = (left_coefficient - right_coefficient).abs();
+            if difference.to_str_radix(10).len() > DEFAULT_INTEGER_DIGITS {
+                return Err(error("ORNA-EVAL-LIMIT"));
+            }
+            Ok(Value::Decimal(DecimalValue::new(difference, exponent)?))
+        }
+        (Value::Date(left), Value::Date(right)) => {
+            let date_days = |date: &str| -> Result<BigInt, EvaluationError> {
+                if !valid_date_literal(date) {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let year = date[0..4]
+                    .parse::<u32>()
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                let month = date[5..7]
+                    .parse::<u32>()
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                let day = date[8..10]
+                    .parse::<u32>()
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                days_since_unix_epoch(year, month, day)
+                    .map(BigInt::from)
+                    .ok_or_else(|| error("ORNA-EVAL-VALUE"))
+            };
+            let distance = (date_days(left)? - date_days(right)?).abs();
+            if distance.to_str_radix(10).len() > DEFAULT_INTEGER_DIGITS {
+                return Err(error("ORNA-EVAL-LIMIT"));
+            }
+            Ok(Value::Int(distance))
+        }
+        (
+            Value::Instant {
+                unix_seconds: left_seconds,
+                nanosecond: left_nanosecond,
+            },
+            Value::Instant {
+                unix_seconds: right_seconds,
+                nanosecond: right_nanosecond,
+            },
+        ) => {
+            let billion = BigInt::from(1_000_000_000u32);
+            let left = BigInt::from(*left_seconds) * &billion + BigInt::from(*left_nanosecond);
+            let right = BigInt::from(*right_seconds) * billion + BigInt::from(*right_nanosecond);
+            let distance = (left - right).abs();
+            if distance.to_str_radix(10).len() > DEFAULT_INTEGER_DIGITS {
+                return Err(error("ORNA-EVAL-LIMIT"));
+            }
+            Ok(Value::Int(distance))
+        }
         _ => Err(error("ORNA-EVAL-TYPE")),
     }
 }
