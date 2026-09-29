@@ -1,8 +1,9 @@
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_sys_v1::{
     SystemEffect, TypeId, TypedValue, ValueMetadataFacts, ValueMetadataResolver,
-    system_function_descriptor, system_value_metadata,
+    system_function_descriptor, system_secret_projection, system_value_metadata,
 };
+use orna_security_v1::{SecretMetadata, SecretRef};
 
 const SYS_META_SOURCE: &str = include_str!("fixtures/sys-meta-protected.orna");
 
@@ -41,4 +42,31 @@ fn sys_meta_executes_safe_metadata_for_a_protected_source_value() {
 
     let encoded = serde_json::to_vec(&metadata).expect("metadata serialization");
     assert!(!String::from_utf8_lossy(&encoded).contains("fixture-secret"));
+}
+
+#[test]
+fn sys_secret_projection_contains_only_stable_availability_metadata() {
+    let metadata = SecretMetadata::new(
+        SecretRef::new("google.personal").expect("valid stable secret name"),
+        "sops",
+        false,
+    );
+    let projection = system_secret_projection(&metadata);
+
+    assert_eq!(projection.name(), "google.personal");
+    assert_eq!(projection.provider(), "sops");
+    assert!(!projection.is_available());
+
+    let encoded = serde_json::to_value(&projection).expect("sys.Secret projection encoding");
+    assert_eq!(encoded["name"], "google.personal");
+    assert_eq!(encoded["provider"], "sops");
+    assert_eq!(encoded["available"], false);
+    assert_eq!(encoded.as_object().expect("record projection").len(), 3);
+
+    let available = SecretMetadata::new(
+        SecretRef::new("google.personal").expect("valid stable secret name"),
+        "sops",
+        true,
+    );
+    assert!(system_secret_projection(&available).is_available());
 }
