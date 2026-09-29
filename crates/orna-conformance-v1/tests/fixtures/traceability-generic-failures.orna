@@ -1,0 +1,29 @@
+protocol Display {
+    fn display(self): Str;
+    fn label(self): Str;
+}
+
+type MissingMember {
+    value: Int,
+
+    impl Display {
+        fn display(self): Str = "partial";
+    }
+}
+
+type DuplicateImplementation {
+    value: Int,
+
+    impl Display {
+        fn display(self): Str = "first";
+        fn label(self): Str = "first";
+    }
+
+    impl Display {
+        fn display(self): Str = "second";
+        fn label(self): Str = "second";
+    }
+}
+
+pub fn show<T impl Display>(value: T): Str = value.display();
+pub fn missing_member() = show(MissingMember { value: 1 });
