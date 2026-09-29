@@ -11,17 +11,17 @@ use std::sync::{
 };
 
 const SYSTEM_REFERENCE: &str =
-    include_str!("../../../../reference/Orna-1.0.0/source/15-system.md");
+    include_str!("fixtures/reference/source/15-system.md");
 const RESERVED_SYS: &str =
-    include_str!("../../../../reference/Orna-1.0.0/examples/invalid/reserved-sys.orna");
+    include_str!("fixtures/reference/examples/invalid/reserved-sys.orna");
 const LEGACY_SYS_RUNTIME: &str = include_str!(
-    "../../../../reference/Orna-1.0.0/examples/invalid/legacy-sys-runtime.orna"
+    "fixtures/reference/examples/invalid/legacy-sys-runtime.orna"
 );
 const LEGACY_SYS_STORAGE_CALL: &str = include_str!(
-    "../../../../reference/Orna-1.0.0/examples/invalid/legacy-sys-storage-call.orna"
+    "fixtures/reference/examples/invalid/legacy-sys-storage-call.orna"
 );
 const MUTATE_SYS_COMMIT: &str =
-    include_str!("../../../../reference/Orna-1.0.0/examples/invalid/mutate-sys-commit.orna");
+    include_str!("fixtures/reference/examples/invalid/mutate-sys-commit.orna");
 const TYPED_INVOKE_VALID: &str =
     include_str!("fixtures/typed-invoke-valid.orna");
 const TYPED_INVOKE_MISMATCH: &str =

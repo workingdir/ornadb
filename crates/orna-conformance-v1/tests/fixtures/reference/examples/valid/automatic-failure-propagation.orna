@@ -1,0 +1,4 @@
+pub fn decode_and_store(raw: Str): Message {
+    let message = std.encoding.json.decode(raw, as: Message);
+    Message.insert(message)
+}

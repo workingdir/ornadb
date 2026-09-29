@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/affine-sum.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E5003",
+  "message_contains": "cannot sum absolute affine quantities",
+  "status": "expected-not-executed"
+}

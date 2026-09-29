@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-store.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "E1003",
+  "message_contains": "`store` is not a logical declaration",
+  "status": "expected-not-executed"
+}

@@ -5,20 +5,20 @@ use orna_syntax_v1::{Expr, parse_expression, parse_repl, parse_row};
 // parse_repl assertion was conformance.rs:44-50 (expression input), and its
 // direct arithmetic AST check at conformance.rs:345-356 asserted only `+`.
 const IMPORTS: &str = include_str!(
-    "../../../../reference/Orna-1.0.0/examples/valid/imports.orna"
+    "fixtures/reference/examples/valid/imports.orna"
 );
 const CONTROL_FLOW: &str = include_str!(
-    "../../../../reference/Orna-1.0.0/examples/valid/control-flow.orna"
+    "fixtures/reference/examples/valid/control-flow.orna"
 );
 const FUNCTION_DECLARATION: &str = include_str!(
-    "../../../../reference/Orna-1.0.0/examples/valid/function-expression.orna"
+    "fixtures/reference/examples/valid/function-expression.orna"
 );
 const REPL_EXPRESSION: &str =
     include_str!("../../orna-syntax-v1/tests/fixtures/entry-repl.orna");
 const ROW_WITH_TERMINATOR: &str =
     include_str!("../../orna-syntax-v1/tests/fixtures/entry-row.orna");
 const ROW_WITHOUT_TERMINATOR: &str =
-    include_str!("../../../../reference/Orna-1.0.0/examples/valid/row-body.orna");
+    include_str!("fixtures/reference/examples/valid/row-body.orna");
 const PRECEDENCE: &str = include_str!("fixtures/grammar-precedence.orna");
 
 fn binary<'a>(expr: &'a Expr, expected_op: &str) -> (&'a Expr, &'a Expr) {

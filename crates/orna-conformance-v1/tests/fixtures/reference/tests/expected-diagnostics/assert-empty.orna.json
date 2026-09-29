@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/assert-empty.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA-A091-011",
+  "message_contains": "assertion requires a proposition before `;`",
+  "status": "expected-not-executed"
+}
