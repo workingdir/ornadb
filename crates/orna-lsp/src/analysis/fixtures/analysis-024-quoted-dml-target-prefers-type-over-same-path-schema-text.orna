@@ -1,0 +1,5 @@
+CREATE SCHEMA "app"."item";
+CREATE TYPE "app"."item" AS OBJECT ("value" BOOLEAN);
+CREATE SERVER FUNCTION insert_item() RETURNS ROWS (created BOOLEAN) AS
+INSERT INTO "app"."item" AS "target" ("value")
+VALUES (TRUE) RETURNING REF("target");

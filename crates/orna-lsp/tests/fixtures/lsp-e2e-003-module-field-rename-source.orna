@@ -1,0 +1,11 @@
+CREATE SCHEMA people;
+CREATE TYPE people.person AS OBJECT (
+    primary_email TEXT NOT NULL
+);
+ALTER TYPE people.person
+    RENAME FIELD email TO primary_email;
+CREATE SERVER FUNCTION people.list_emails()
+RETURNS ROWS (email TEXT)
+AS
+    SELECT person.primary_email
+    FROM people.person person;

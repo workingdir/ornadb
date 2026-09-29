@@ -1,0 +1,19 @@
+CREATE SCHEMA mutation_test;
+CREATE TYPE mutation_test.item AS OBJECT (
+    stored BOOLEAN NOT NULL
+);
+CREATE SERVER FUNCTION mutation_test.update_item(
+    p_item REF mutation_test.item, p_stored BOOLEAN
+)
+RETURNS ROWS (updated REF mutation_test.item)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS UPDATE mutation_test.item AS updated
+SET stored = p_stored
+WHERE REF(updated) = p_item
+RETURNING REF(updated);
+CREATE SERVER FUNCTION mutation_test.delete_item(p_item REF mutation_test.item)
+RETURNS ROWS (deleted BOOLEAN)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS DELETE FROM mutation_test.item AS deleted
+WHERE REF(deleted) = p_item
+RETURNING TRUE;

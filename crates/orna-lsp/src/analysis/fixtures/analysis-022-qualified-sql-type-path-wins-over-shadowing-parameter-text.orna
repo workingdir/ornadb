@@ -1,0 +1,5 @@
+CREATE SCHEMA "app";
+CREATE TYPE "app"."item" AS OBJECT ("value" BOOLEAN);
+CREATE SERVER FUNCTION use_item("item" BOOLEAN)
+RETURNS ROWS ("item" BOOLEAN) AS
+SELECT probe.value FROM "app"."item" probe;
