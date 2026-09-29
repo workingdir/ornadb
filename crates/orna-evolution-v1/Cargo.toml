@@ -8,3 +8,6 @@ description = "Bounded, fail-closed Orna 1.0 schema-evolution planning"
 
 [dependencies]
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
+
+[dev-dependencies]
+serde_json = "1"
