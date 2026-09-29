@@ -1,0 +1,54 @@
+// CASE: A091-001
+ type Port = Int where self >= 1;
+// CASE: A091-002
+pub table User(id: Uuid) { username: Str, assert User | all_unique(user => user.username); }
+// CASE: A091-003
+pub table User(id: Uuid) { name: Str, }
+assert every(User, user => user.name != "");
+// CASE: A091-004
+pub table User(id: Uuid) { name: Str, assert >= 0; }
+// CASE: A091-005
+pub fn bad(value: Int) { assert value > 0 }
+// CASE: A091-006
+pub fn bad(amount: Int) { assert amount > 0 else InvalidAmount; }
+// CASE: A091-007
+pub table Note(id: Int) { value: Int, assert writes; }
+pub fn writes(rows: Relation<Note>): Bool { Note.insert({ id: 1, value: 0 }); true }
+// CASE: A091-008
+pub type Positive = Int { assert >= 1; }
+// CASE: A091-009
+pub table User(id: Uuid) { name: Str, assert every(user => user.name != ""); }
+// CASE: A091-010
+pub fn bad(amount: Int) { amount > 0 |! InvalidAmount; }
+// CASE: A091-011
+pub fn bad() { assert; }
+// CASE: A091-012
+assert 1 + 1 == 2;
+// CASE: RETURN-ARROW
+pub fn square(x: Int) -> Int = x * x;
+// CASE: VAR
+pub fn bad(): Int { var value = 1; value }
+// CASE: MATCH
+pub fn bad(status: Status): Str = match status { Status.ready => "ready" };
+// CASE: RESULT
+pub fn bad(raw: Str): Result<Message, DecodeError> = Ok(decode(raw));
+// CASE: POSTFIX-QUESTION
+pub fn bad(raw: Str): Message = decode(raw)?;
+// CASE: CURRENCY
+pub currency GBP { code: "GBP", symbol: "£", minor_digits: 2 }
+// CASE: CURRENCY-SYMBOL
+pub protocol Currency { static code: Str; static symbol: Str; static minor_digits: Int; }
+// CASE: IMPL-FOR
+pub impl Display for Contact { fn display(self, context): Str = self.name; }
+// CASE: BOUND-COLON
+pub fn maximum<T: Order>(values: [T]): T? = values | last();
+// CASE: STATIC-FN
+pub protocol Currency { static fn code(): Str; }
+// CASE: TRYFROM
+pub type Port { impl TryFrom<Int> { fn from(value) = Port { value: value }; } }
+// CASE: CONVERSION-CHAIN
+pub fn bad(value: A): C = value;
+// CASE: OPAQUE
+pub opaque EmailAddress = Str;
+// CASE: FIELD-CONSTRAINT
+pub table User(id: Uuid) { username: Str unique, }
