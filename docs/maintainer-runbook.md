@@ -155,6 +155,44 @@ Record the exact command, working directory, revision, exit status, and any
 unrun checks. Do not claim language, runtime, storage, or interoperability
 completion from a CLI smoke alone.
 
+## 1.0.0 requirement evidence report
+
+From the repository root, generate the machine-readable report against the
+frozen reference bundle beside this checkout:
+
+```text
+cargo run --locked -p orna-traceability-v1 -- ../reference/Orna-1.0.0 > /tmp/orna-traceability.json
+```
+
+The report pins the specification version and publication digests. It lists
+each numbered requirement with its chapter, aggregate status, and evidence
+boundaries; it also lists normative payloads, fixture classes, behavioural
+scenarios, and any bounded production-evidence records. The command reads the
+reference bundle. It does not discover implementation or test evidence from
+the current checkout or from Beads. Its baseline can therefore mark every
+requirement `justified-gap`; that means the report has no passing execution
+witness for the obligation, not that a test-plan entry or source file is a
+passing implementation test. `implemented`, `optional`, or `out-of-scope` are
+not report statuses.
+
+Treat the report as traceability input, not a conformance claim. The checked-in
+`tests/requirement-evidence.json` associates requirements with evidence
+obligations; it does not say those tests ran. Keep any implementation and test
+references tied to captured commands and actual results, and retain partial
+status when evidence covers only a bounded subset. A generated index,
+fixture count, parsed example, or successful report command alone cannot
+establish execution or conformance. These limits follow ORNA-TEST-004
+(source/32-conformance.md:23), ORNA-TEST-010 (line 31), ORNA-TEST-011
+(line 33), and ORNA-EVIDENCE-001 (line 69), and ORNA-CONF-001 through
+ORNA-CONF-003 (Orna-1.0.0.md:56–60) in the frozen reference.
+
+Before making a conformance claim, record the claimed class and implementation
+version, the exact reference publication digest, supported optional profiles,
+mandatory facilities, and the implementation tests actually executed. Claim
+only classes for which every applicable fixture and behavioural test has a
+passing result; parser success is not runtime evidence. The baseline report
+does not supply those claim details.
+
 ## Issue ledger and historical material
 
 `.beads/` is the tracked issue ledger. Use the repository's Beads workflow for
