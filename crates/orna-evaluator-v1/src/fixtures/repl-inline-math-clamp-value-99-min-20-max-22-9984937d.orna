@@ -1,0 +1,1 @@
+math.clamp(value: 99, min: 20, max: 22)
