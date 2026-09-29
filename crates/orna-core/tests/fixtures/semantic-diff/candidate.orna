@@ -1,0 +1,3 @@
+pub table Note(id: Int) { text: Str, status: Str, }
+
+pub fn description() = "published";
