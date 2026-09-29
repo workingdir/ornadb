@@ -9,7 +9,10 @@ mod cli_help;
 mod cli_status;
 mod repl;
 
-use cli_args::{Command, Invocation, Parsed, StatusFormat, parse_cli, requested_color_mode};
+use cli_args::{
+    Command, Invocation, Parsed, StatusFormat, parse_cli, requested_color_mode,
+    requested_debug_mode,
+};
 use cli_dispatch::execute;
 use repl::{AnsiColor, write_styled, write_styled_display};
 use std::collections::{BTreeMap, BTreeSet};
@@ -426,6 +429,7 @@ fn write_diagnostic<W: io::Write>(
     writer: &mut W,
     diagnostic: &Diagnostic,
     color_enabled: bool,
+    debug_enabled: bool,
 ) -> io::Result<()> {
     write_styled(writer, AnsiColor::Red, b"error", color_enabled)?;
     writer.write_all(b"[")?;
@@ -442,7 +446,11 @@ fn write_diagnostic<W: io::Write>(
         diagnostic.title.as_bytes(),
         color_enabled,
     )?;
-    if let Some(detail) = &diagnostic.detail {
+    // Semantic source diagnostics remain user-facing. Other attached details
+    // can contain repository/runtime implementation data and require --debug.
+    if let Some(detail) = &diagnostic.detail
+        && (debug_enabled || diagnostic.code == "E2101")
+    {
         writer.write_all(b"\n  ")?;
         write_styled(writer, AnsiColor::Dim, detail.as_bytes(), color_enabled)?;
     }
@@ -2242,6 +2250,7 @@ fn run_repl(
 fn main() -> ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let requested_color = requested_color_mode(&args);
+    let debug_enabled = requested_debug_mode(&args);
     let parsed = match parse_cli(&args) {
         Ok(value) => value,
         Err(error) => {
@@ -2249,6 +2258,7 @@ fn main() -> ExitCode {
                 &mut io::stderr().lock(),
                 &error,
                 requested_color.stderr_enabled(),
+                debug_enabled,
             );
             return ExitCode::from(error.exit as u8);
         }
@@ -2260,6 +2270,7 @@ fn main() -> ExitCode {
                 &mut io::stderr().lock(),
                 &error,
                 parsed.color.stderr_enabled(),
+                debug_enabled,
             );
             ExitCode::from(error.exit as u8)
         }
@@ -3238,7 +3249,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-REPL-AT]\n> error[ORNA-REPL-AT]\n> "
+            "> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> "
         );
     }
 
@@ -3274,15 +3285,17 @@ mod tests {
             "the expected remote response was unavailable",
         );
         let mut plain = Vec::new();
-        write_diagnostic(&mut plain, &diagnostic, false).expect("plain diagnostic write");
+        write_diagnostic(&mut plain, &diagnostic, false, false)
+            .expect("plain diagnostic write");
         assert_eq!(
             plain,
-            format!("{diagnostic}\n").as_bytes(),
-            "plain CLI diagnostic stays identical to Display plus eprintln's final newline"
+            b"error[E2300]: request failed\nhelp: retry the operation\n",
+            "technical details are hidden in normal output"
         );
 
         let mut colored = Vec::new();
-        write_diagnostic(&mut colored, &diagnostic, true).expect("colored diagnostic write");
+        write_diagnostic(&mut colored, &diagnostic, true, true)
+            .expect("colored diagnostic write");
         assert_eq!(
             String::from_utf8(colored).expect("diagnostic is UTF-8"),
             "\x1b[31merror\x1b[0m[\x1b[31mE2300\x1b[0m]: \x1b[31mrequest failed\x1b[0m\n  \x1b[2mthe expected remote response was unavailable\x1b[0m\nhelp: \x1b[2mretry the operation\x1b[0m\n"
