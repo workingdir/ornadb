@@ -1,0 +1,10 @@
+
+            pub table Book(id: Str) {
+                title: Str,
+                assert every(book => book.title != "");
+            }
+            pub table Loan(book_id: Str) {
+                borrower: Str,
+                assert all_unique(loan => loan.borrower);
+            }
+        

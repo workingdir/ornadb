@@ -1,0 +1,10 @@
+
+                pub fn over(limit: Money<GBP>) =
+                    transaction => transaction.amount > limit;
+                pub fn direct(limit: Money<GBP>) =
+                    transaction => transaction > limit;
+                pub fn between(min: Int, max: Int) =
+                    value => value >= min && value <= max;
+                pub fn sync_selected(account: Account) =
+                    () => finance.openbanking.sync(account);
+            

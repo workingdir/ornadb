@@ -1,0 +1,1 @@
+pub table Bad(period: Range<Date>) { value: Str, }

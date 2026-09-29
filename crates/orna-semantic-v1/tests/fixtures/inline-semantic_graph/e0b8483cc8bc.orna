@@ -1,0 +1,5 @@
+
+        pub fn sum(rows: [Decimal]): Decimal = 0;
+        pub fn min(rows: [Decimal]): Decimal? = null;
+        pub fn max(rows: [Decimal]): Decimal? = null;
+    

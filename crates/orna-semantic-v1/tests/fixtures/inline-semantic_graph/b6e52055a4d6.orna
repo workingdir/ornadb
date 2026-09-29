@@ -1,0 +1,1 @@
+fn too_many() = sys.meta<Int, Str>(1);

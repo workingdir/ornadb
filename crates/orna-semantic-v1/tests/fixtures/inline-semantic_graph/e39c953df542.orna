@@ -1,0 +1,1 @@
+Reading | map(Reading.time) | bucket_by(period)

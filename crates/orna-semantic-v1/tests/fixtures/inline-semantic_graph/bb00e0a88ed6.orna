@@ -1,0 +1,8 @@
+
+            pub fn reset(checkpoint: sys.Checkpoint, position: sys.CheckpointPosition) =
+                checkpoint.reset(to: position);
+            pub fn replay(failure: sys.Failure) = failure.replay();
+            pub fn resolve(failure: sys.Failure) = failure.resolve();
+            pub fn retry(stream: sys.Stream) = stream.retry();
+            pub fn skip(stream: sys.Stream) = stream.skip(reason: "drop it");
+        

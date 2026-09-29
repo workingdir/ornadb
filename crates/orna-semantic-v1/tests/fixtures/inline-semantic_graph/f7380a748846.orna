@@ -1,0 +1,5 @@
+pub table Person(id: Str = "generated") {
+        name: Str,
+        country: Str = "GB",
+        label: Str => name,
+    }

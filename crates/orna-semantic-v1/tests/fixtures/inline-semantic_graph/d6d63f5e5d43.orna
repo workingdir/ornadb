@@ -1,0 +1,1 @@
+Person.update("a", 42)

@@ -1,0 +1,6 @@
+
+            table Reading(id: Int) { value: Int, }
+            pub fn member() = Reading.one();
+            pub fn pipeline() = Reading | one();
+            pub fn predicate() = Reading | one(reading => reading.value > 0);
+        

@@ -1,0 +1,1 @@
+pub table Book(id: Str) { title: Str, } fn bad() = Book.delete();

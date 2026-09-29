@@ -1,0 +1,1 @@
+table Reading(id: Int) { value: Int, } fn bad() = Reading | first(1);

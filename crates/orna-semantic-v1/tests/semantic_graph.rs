@@ -1,4 +1,11 @@
 use std::collections::BTreeMap;
+fn render_source_fixture(template: &str, replacements: &[(&str, &str)]) -> String {
+    let mut source = template.to_owned();
+    for (name, value) in replacements {
+        source = source.replace(&format!("{{{name}}}"), value);
+    }
+    source
+}
 
 use orna_semantic_v1::{
     Catalogue, DIAG_AMBIGUOUS, DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT,
@@ -83,7 +90,10 @@ fn standard_dependency_revision_is_canonical_and_captures_provenance() {
         ordered.revision_digest(),
         StandardDependencyProfile::from_sources(
             "orna.std/snapshot-1",
-            [("std/renamed.orna".to_owned(), first.1.clone()), second.clone()],
+            [
+                ("std/renamed.orna".to_owned(), first.1.clone()),
+                second.clone()
+            ],
         )
         .expect("path-sensitive profile")
         .revision_digest(),
@@ -96,8 +106,7 @@ fn standard_dependency_revision_is_canonical_and_captures_provenance() {
             [
                 (
                     first.0.clone(),
-                    include_str!("fixtures/standard-dependency-a-content-variant.orna")
-                        .to_owned(),
+                    include_str!("fixtures/standard-dependency-a-content-variant.orna").to_owned(),
                 ),
                 second.clone(),
             ],
@@ -132,11 +141,9 @@ fn standard_catalogue_retains_verified_dependency_provenance() {
         [("std/a.orna".to_owned(), source.to_owned())],
     )
     .expect("profile");
-    let catalogue = Catalogue::from_standard_sources(
-        &profile,
-        [("std/a.orna".to_owned(), source.to_owned())],
-    )
-    .expect("catalogue");
+    let catalogue =
+        Catalogue::from_standard_sources(&profile, [("std/a.orna".to_owned(), source.to_owned())])
+            .expect("catalogue");
 
     assert_eq!(catalogue.standard_dependency_profile(), Some(&profile));
     assert_eq!(
@@ -190,49 +197,62 @@ fn float_collection_catalogue() -> Catalogue {
 #[test]
 fn calendar_buckets_require_typed_zones_and_do_not_conflate_elapsed_durations() {
     for (body, expected) in [
-        ("Reading | bucket_by(1.day, zone: Europe.London)", None),
         (
-            "Reading | map(Reading.time) | bucket_by(1.day, zone: Europe.London)",
+            include_str!("fixtures/inline-semantic_graph/8cb436bc3cc8.orna"),
             None,
         ),
-        ("Reading | map(Reading.time) | bucket_by(period)", None),
-        ("Reading | bucket_by(period)", None),
-        ("Reading | bucket_by(period, zone: Europe.London)", None),
         (
-            "Reading | bucket_by(1.day)",
+            include_str!("fixtures/inline-semantic_graph/2c95da1afd29.orna"),
+            None,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/e39c953df542.orna"),
+            None,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/8205383d0b5a.orna"),
+            None,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/863bb66e578a.orna"),
+            None,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/ee1c82416217.orna"),
             Some("calendar bucketing of Instant requires a time zone"),
         ),
         (
-            "Reading | bucket_by(1.day, zone: 42)",
+            include_str!("fixtures/inline-semantic_graph/76a8137c1bd1.orna"),
             Some("bucket_by requires a named TimeZone argument"),
         ),
         (
-            "Reading | bucket_by(1.day, Europe.London)",
+            include_str!("fixtures/inline-semantic_graph/7fd0137e6f08.orna"),
             Some("bucket_by requires a named TimeZone argument"),
         ),
         (
-            "Reading | bucket_by(1.day, zone: Europe.London, extra: true)",
+            include_str!("fixtures/inline-semantic_graph/28932a517978.orna"),
             Some("bucket_by requires a named TimeZone argument"),
         ),
         (
-            "Reading | bucket_by(42, zone: Europe.London)",
+            include_str!("fixtures/inline-semantic_graph/da83880cf7a8.orna"),
             Some("bucket_by requires an elapsed Duration or calendar-day period"),
         ),
         (
-            "Reading | bucket_by(1.kWh, zone: Europe.London)",
+            include_str!("fixtures/inline-semantic_graph/42e881f8acdb.orna"),
             Some("bucket_by requires an elapsed Duration or calendar-day period"),
         ),
         (
-            "Reading | bucket_by(zone: Europe.London)",
+            include_str!("fixtures/inline-semantic_graph/1361a1247fd2.orna"),
             Some("bucket_by requires an elapsed Duration or calendar-day period"),
         ),
         (
-            "Other | bucket_by(1.day, zone: Europe.London)",
+            include_str!("fixtures/inline-semantic_graph/6fd74fa645c1.orna"),
             Some("bucket_by requires Instant values or rows with an Instant time field"),
         ),
     ] {
-        let source = format!(
-            "table Reading(id: Int) {{ time: Instant, }} table Other(id: Int) {{ time: Str, }} fn bucket(period: Duration) = {body};"
+        let source = render_source_fixture(
+            include_str!("fixtures/inline-semantic_graph/7294729a7490.orna"),
+            &[("body", &body)],
         );
         let result = analyze_with_catalogue(
             &[ModuleInput::new("buckets.orna", source)],
@@ -256,18 +276,9 @@ fn calendar_buckets_require_typed_zones_and_do_not_conflate_elapsed_durations() 
 #[test]
 fn table_selectors_are_callable_and_reject_rows_from_other_tables() {
     for (source, valid) in [
-        (
-            include_str!("fixtures/table-selector-call.orna"),
-            true,
-        ),
-        (
-            include_str!("fixtures/table-selector-pipe.orna"),
-            true,
-        ),
-        (
-            include_str!("fixtures/table-selector-map.orna"),
-            true,
-        ),
+        (include_str!("fixtures/table-selector-call.orna"), true),
+        (include_str!("fixtures/table-selector-pipe.orna"), true),
+        (include_str!("fixtures/table-selector-map.orna"), true),
         (
             include_str!("fixtures/table-selector-local-shadow.orna"),
             true,
@@ -293,7 +304,11 @@ fn table_selectors_are_callable_and_reject_rows_from_other_tables() {
         if valid {
             assert!(result.is_ok(), "{source}: {:?}", result.diagnostics);
         } else {
-            assert!(has(&result, DIAG_TYPE), "{source}: {:?}", result.diagnostics);
+            assert!(
+                has(&result, DIAG_TYPE),
+                "{source}: {:?}",
+                result.diagnostics
+            );
         }
     }
     let catalogue = Catalogue::authoritative_fixture();
@@ -320,7 +335,11 @@ fn table_selectors_are_callable_and_reject_rows_from_other_tables() {
         if valid {
             assert!(result.is_ok(), "{source}: {:?}", result.diagnostics);
         } else {
-            assert!(has(&result, DIAG_TYPE), "{source}: {:?}", result.diagnostics);
+            assert!(
+                has(&result, DIAG_TYPE),
+                "{source}: {:?}",
+                result.diagnostics
+            );
         }
     }
 }
@@ -390,73 +409,109 @@ fn stored_email_provider_is_typed_without_changing_connector_messages() {
 fn table_mutations_validate_patch_fields_and_ordered_keys_across_imports() {
     let declaration = include_str!("fixtures/table-mutations-declaration.orna");
     for imported in [false, true] {
-        let prefix = if imported { "data." } else { "" };
+        let prefix = if imported {
+            include_str!("fixtures/inline-semantic_graph/979f4931ff6e.orna")
+        } else {
+            ""
+        };
         for (operation, expected) in [
-            (r#"Person.update("a", { name: "Bob" })"#, None),
             (
-                r#"Person.update("a", { label: "override" })"#,
+                include_str!("fixtures/inline-semantic_graph/d1f276be2092.orna"),
+                None,
+            ),
+            (
+                include_str!("fixtures/inline-semantic_graph/fa1821597fea.orna"),
                 Some("table update cannot change a computed field"),
             ),
             (
-                r#"Person.update("a", { id: "b" })"#,
+                include_str!("fixtures/inline-semantic_graph/6715d5ed7a1d.orna"),
                 Some("table update cannot change a primary key; use rekey"),
             ),
             (
-                r#"Person.update("a", { name: 1 })"#,
+                include_str!("fixtures/inline-semantic_graph/68af2cd6d752.orna"),
                 Some("table write field has an incompatible type:"),
             ),
             (
-                r#"Person.update("a", { extra: true })"#,
+                include_str!("fixtures/inline-semantic_graph/ddd48f78dfad.orna"),
                 Some("table write contains an unknown field"),
             ),
             (
-                r#"Person.update("a", 42)"#,
+                include_str!("fixtures/inline-semantic_graph/d6d63f5e5d43.orna"),
                 Some("table write requires a record"),
             ),
             (
-                r#"Person.update(1, { name: "Bob" })"#,
-                Some("static types are incompatible"),
-            ),
-            (r#"Person.delete("a")"#, None),
-            (r#"Person.delete(1)"#, Some("static types are incompatible")),
-            (r#"Person.rekey("a", "b")"#, None),
-            (
-                r#"Person.rekey("a", 1)"#,
+                include_str!("fixtures/inline-semantic_graph/2c058ceddc37.orna"),
                 Some("static types are incompatible"),
             ),
             (
-                r#"Person.rekey(1, "b")"#,
-                Some("static types are incompatible"),
-            ),
-            (r#"Reading.update(("s", 1), { value: 2 })"#, None),
-            (
-                r#"Reading.delete((1, "s"))"#,
-                Some("static types are incompatible"),
+                include_str!("fixtures/inline-semantic_graph/dbc54adaeb84.orna"),
+                None,
             ),
             (
-                r#"Reading.delete("s")"#,
+                include_str!("fixtures/inline-semantic_graph/bb48c72c75b8.orna"),
                 Some("static types are incompatible"),
             ),
-            (r#"Reading.rekey(("s", 1), ("s", 2))"#, None),
-            (r#"Note.update(1, { text: "updated" })"#, None),
             (
-                r#"Note.update(1, { id: 2 })"#,
+                include_str!("fixtures/inline-semantic_graph/79f2bdf643e7.orna"),
+                None,
+            ),
+            (
+                include_str!("fixtures/inline-semantic_graph/bf485c7a51ae.orna"),
+                Some("static types are incompatible"),
+            ),
+            (
+                include_str!("fixtures/inline-semantic_graph/d79b1f5de6e4.orna"),
+                Some("static types are incompatible"),
+            ),
+            (
+                include_str!("fixtures/inline-semantic_graph/9467f9d43291.orna"),
+                None,
+            ),
+            (
+                include_str!("fixtures/inline-semantic_graph/a32861cfa835.orna"),
+                Some("static types are incompatible"),
+            ),
+            (
+                include_str!("fixtures/inline-semantic_graph/ff1377cc77b0.orna"),
+                Some("static types are incompatible"),
+            ),
+            (
+                include_str!("fixtures/inline-semantic_graph/4dcb70c4cfbc.orna"),
+                None,
+            ),
+            (
+                include_str!("fixtures/inline-semantic_graph/9dc20e5f0252.orna"),
+                None,
+            ),
+            (
+                include_str!("fixtures/inline-semantic_graph/891ba4a6674e.orna"),
                 Some("table update cannot change a primary key; use rekey"),
             ),
             (
-                r#"Note.delete("one")"#,
+                include_str!("fixtures/inline-semantic_graph/2d519362b9ce.orna"),
                 Some("static types are incompatible"),
             ),
             (
-                r#"Note.rekey(1, 2)"#,
-                Some("an automatic-key table cannot be explicitly re-keyed"),
+                include_str!("fixtures/inline-semantic_graph/0eb053853c25.orna"),
+                Some(include_str!(
+                    "fixtures/inline-semantic_graph/189790985a7e.orna"
+                )),
             ),
         ] {
-            let body = format!("fn change() = {prefix}{operation};");
+            let body = render_source_fixture(
+                include_str!("fixtures/inline-semantic_graph/01ea7c81fd2b.orna"),
+                &[("prefix", &prefix), ("operation", &operation)],
+            );
             let inputs = if imported {
                 vec![
                     ModuleInput::new("data.orna", declaration),
-                    ModuleInput::new("main.orna", format!("use data; {body}")),
+                    ModuleInput::new(
+                        "main.orna",
+                        render_source_fixture(
+                            include_str!("fixtures/inline-semantic_graph/df8535abdab0.orna"),
+                            &[("body", &body)],
+                        ),
+                    ),
                 ]
             } else {
                 vec![ModuleInput::new(
@@ -510,53 +565,92 @@ fn table_mutations_validate_patch_fields_and_ordered_keys_across_imports() {
 
 #[test]
 fn declared_table_admission_retains_required_default_and_computed_metadata_across_imports() {
-    let declaration = r#"pub table Person(id: Str = "generated") {
-        name: Str,
-        country: Str = "GB",
-        label: Str => name,
-    }"#;
+    let declaration = include_str!("fixtures/inline-semantic_graph/f7380a748846.orna");
     for imported in [false, true] {
-        for operation in ["insert", "upsert"] {
+        for operation in [
+            include_str!("fixtures/inline-semantic_graph/1e22560cee2c.orna"),
+            include_str!("fixtures/inline-semantic_graph/4e3b92fce522.orna"),
+        ] {
             for (row, expected) in [
-                (r#"{ name: "Alice" }"#, None),
-                (r#"{ id: "a", name: "Alice", country: "US" }"#, None),
                 (
-                    r#"{ country: "GB" }"#,
-                    if operation == "upsert" {
+                    include_str!("fixtures/inline-semantic_graph/8d9a64dbd5fb.orna"),
+                    None,
+                ),
+                (
+                    include_str!("fixtures/inline-semantic_graph/384c0b9e3c47.orna"),
+                    None,
+                ),
+                (
+                    include_str!("fixtures/inline-semantic_graph/5a6527ef4b65.orna"),
+                    if operation == include_str!("fixtures/inline-semantic_graph/4e3b92fce522.orna")
+                    {
                         None
                     } else {
-                        Some("table insertion omits a required field")
+                        Some(include_str!(
+                            "fixtures/inline-semantic_graph/43417f7b72f7.orna"
+                        ))
                     },
                 ),
                 (
-                    r#"{ name: "Alice", label: "override" }"#,
-                    Some("table insertion cannot supply a computed field"),
+                    include_str!("fixtures/inline-semantic_graph/f967a2fb4d5f.orna"),
+                    Some(include_str!(
+                        "fixtures/inline-semantic_graph/6878397ee5b7.orna"
+                    )),
                 ),
                 (
-                    r#"{ name: 42 }"#,
+                    include_str!("fixtures/inline-semantic_graph/a27c9b2bc6c3.orna"),
                     Some("table write field has an incompatible type:"),
                 ),
                 (
-                    r#"{ name: "Alice", extra: true }"#,
+                    include_str!("fixtures/inline-semantic_graph/d44d5d751af1.orna"),
                     Some("table write contains an unknown field"),
                 ),
             ] {
                 for indirect in [false, true] {
-                    let receiver = if imported { "people.Person" } else { "Person" };
-                    let body = if indirect {
-                        format!("{{ let row = {row}; {receiver}.{operation}(row); }}")
+                    let receiver = if imported {
+                        include_str!("fixtures/inline-semantic_graph/981417a67a3a.orna")
                     } else {
-                        format!("= {receiver}.{operation}({row});")
+                        include_str!("fixtures/inline-semantic_graph/6007db63e18e.orna")
+                    };
+                    let body = if indirect {
+                        render_source_fixture(
+                            include_str!("fixtures/inline-semantic_graph/a3ba8311f81e.orna"),
+                            &[
+                                ("row", &row),
+                                ("receiver", &receiver),
+                                ("operation", &operation),
+                            ],
+                        )
+                    } else {
+                        render_source_fixture(
+                            include_str!("fixtures/inline-semantic_graph/3f4b72b593e6.orna"),
+                            &[
+                                ("receiver", &receiver),
+                                ("operation", &operation),
+                                ("row", &row),
+                            ],
+                        )
                     };
                     let inputs = if imported {
                         vec![
                             ModuleInput::new("people.orna", declaration),
-                            ModuleInput::new("main.orna", format!("use people; fn write() {body}")),
+                            ModuleInput::new(
+                                "main.orna",
+                                render_source_fixture(
+                                    include_str!(
+                                        "fixtures/inline-semantic_graph/e4e34328e7ca.orna"
+                                    ),
+                                    &[("body", &body)],
+                                ),
+                            ),
                         ]
                     } else {
                         vec![ModuleInput::new(
                             "main.orna",
-                            format!("{declaration} fn write() {body}"),
+                            render_source_fixture(
+                                include_str!("fixtures/inline-semantic_graph/252c5ea7ddea.orna"),
+                                &[("declaration", &declaration), ("body", &body)],
+                            ),
                         )]
                     };
                     let result = analyze(&inputs);
@@ -582,26 +676,20 @@ fn declared_table_admission_retains_required_default_and_computed_metadata_acros
     }
     let missing_key = analyze(&[ModuleInput::new(
         "rows.orna",
-        r#"table Person(id: Str) { name: Str, } fn write() = Person.insert({ name: "Alice" });"#,
+        include_str!("fixtures/inline-semantic_graph/0985426c4300.orna"),
     )]);
     assert!(
         missing_key
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message() == "table insertion omits a required field")
+            .any(|diagnostic| diagnostic.message()
+                == include_str!("fixtures/inline-semantic_graph/43417f7b72f7.orna"))
     );
     let distinct_schemas = analyze(&[
         ModuleInput::new("people.orna", declaration),
         ModuleInput::new(
             "main.orna",
-            r#"
-            use people;
-            table Person(id: Int) { age: Int, }
-            fn write() {
-                people.Person.insert({ name: "Alice" });
-                Person.insert({ id: 1, age: 40 });
-            }
-        "#,
+            include_str!("fixtures/inline-semantic_graph/a64943434af8.orna"),
         ),
     ]);
     assert!(
@@ -616,7 +704,7 @@ fn table_insert_and_upsert_validate_provided_fields() {
     let attached = analyze_with_catalogue(
         &[ModuleInput::new(
             "rows.orna",
-            "pub fn bad() = Contact.insert({ name: \"Alice\", banana: 42 });",
+            include_str!("fixtures/inline-semantic_graph/d5a95f21f1ad.orna"),
         )],
         &Catalogue::authoritative_fixture(),
     );
@@ -630,27 +718,37 @@ fn table_insert_and_upsert_validate_provided_fields() {
         "{:?}",
         attached.diagnostics
     );
-    for operation in ["insert", "upsert"] {
+    for operation in [
+        include_str!("fixtures/inline-semantic_graph/1e22560cee2c.orna"),
+        include_str!("fixtures/inline-semantic_graph/4e3b92fce522.orna"),
+    ] {
         for (value, expected) in [
-            (r#"{ id: "a", speed: 1.5, tags: [] }"#, None),
             (
-                r#"{ id: "a", banana: 42 }"#,
+                include_str!("fixtures/inline-semantic_graph/c04f3ed6f331.orna"),
+                None,
+            ),
+            (
+                include_str!("fixtures/inline-semantic_graph/15970aabe980.orna"),
                 Some("table write contains an unknown field"),
             ),
             (
-                r#"{ id: "a", speed: "fast" }"#,
+                include_str!("fixtures/inline-semantic_graph/c113b2a4ccf0.orna"),
                 Some("table write field has an incompatible type"),
             ),
             (
-                r#"{ id: 42 }"#,
+                include_str!("fixtures/inline-semantic_graph/91f9f0bd5d11.orna"),
                 Some("table write field has an incompatible type"),
             ),
-            ("42", Some("table write requires a record")),
+            (
+                include_str!("fixtures/inline-semantic_graph/73475cb40a56.orna"),
+                Some("table write requires a record"),
+            ),
         ] {
             let result = analyze(&[ModuleInput::new(
                 "rows.orna",
-                format!(
-                    "table Reading(id: Str) {{ speed: Float, tags: [Str], }} fn write() = Reading.{operation}({value});"
+                render_source_fixture(
+                    include_str!("fixtures/inline-semantic_graph/808e0cc9149d.orna"),
+                    &[("operation", &operation), ("value", &value)],
                 ),
             )]);
             if let Some(expected) = expected {
@@ -672,14 +770,15 @@ fn table_insert_and_upsert_validate_provided_fields() {
         }
     }
     for value in [
-        r#"{ id: "a", banana: 42 }"#,
-        r#"{ id: "a", speed: "fast" }"#,
-        r#"{ tags: [42] }"#,
+        include_str!("fixtures/inline-semantic_graph/15970aabe980.orna"),
+        include_str!("fixtures/inline-semantic_graph/c113b2a4ccf0.orna"),
+        include_str!("fixtures/inline-semantic_graph/6666ea1f2a5c.orna"),
     ] {
         let result = analyze(&[ModuleInput::new(
             "rows.orna",
-            format!(
-                "table Reading(id: Str) {{ speed: Float, tags: [Str], }} fn write() {{ let row = {value}; Reading.insert(row); }}"
+            render_source_fixture(
+                include_str!("fixtures/inline-semantic_graph/22e14ae5d0e2.orna"),
+                &[("value", &value)],
             ),
         )]);
         assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
@@ -688,15 +787,13 @@ fn table_insert_and_upsert_validate_provided_fields() {
 
 #[test]
 fn decimal_primary_key_upsert_admits_partial_rows_but_insert_requires_completeness() {
-    let declaration = r#"table Reading(value: Decimal) {
-        label: Str,
-        note: Str,
-    }"#;
+    let declaration = include_str!("fixtures/inline-semantic_graph/bddbd7a40d42.orna");
 
     let partial_upsert = analyze(&[ModuleInput::new(
         "decimal-upsert.orna",
-        format!(
-            "{declaration} fn patch() = Reading.upsert({{ value: 1.25, label: \"after\" }});"
+        render_source_fixture(
+            include_str!("fixtures/inline-semantic_graph/b9c1b567cc20.orna"),
+            &[("declaration", &declaration)],
         ),
     )]);
     assert!(
@@ -707,28 +804,31 @@ fn decimal_primary_key_upsert_admits_partial_rows_but_insert_requires_completene
 
     let incomplete_insert = analyze(&[ModuleInput::new(
         "decimal-insert.orna",
-        format!(
-            "{declaration} fn create() = Reading.insert({{ value: 1.25, label: \"new\" }});"
+        render_source_fixture(
+            include_str!("fixtures/inline-semantic_graph/26ac9a852d79.orna"),
+            &[("declaration", &declaration)],
         ),
     )]);
     assert!(
         incomplete_insert
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message() == "table insertion omits a required field"),
+            .any(|diagnostic| diagnostic.message()
+                == include_str!("fixtures/inline-semantic_graph/43417f7b72f7.orna")),
         "absent-row insert must retain completeness admission: {:?}",
         incomplete_insert.diagnostics
     );
 
     let missing_key = analyze(&[ModuleInput::new(
         "decimal-missing-key.orna",
-        format!(
-            "{declaration} fn patch() = Reading.upsert({{ label: \"after\", note: \"kept\" }});"
+        render_source_fixture(
+            include_str!("fixtures/inline-semantic_graph/c3066bc5ad9a.orna"),
+            &[("declaration", &declaration)],
         ),
     )]);
     assert!(
         missing_key.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message() == "table upsert omits a required primary key field"
+            diagnostic.message() == include_str!("fixtures/inline-semantic_graph/a6ec790995c0.orna")
         }),
         "upsert must still require its Decimal primary key: {:?}",
         missing_key.diagnostics
@@ -736,8 +836,9 @@ fn decimal_primary_key_upsert_admits_partial_rows_but_insert_requires_completene
 
     let invalid_supplied_field = analyze(&[ModuleInput::new(
         "decimal-invalid-field.orna",
-        format!(
-            "{declaration} fn patch() = Reading.upsert({{ value: 1.25, label: 42 }});"
+        render_source_fixture(
+            include_str!("fixtures/inline-semantic_graph/d538eed4759d.orna"),
+            &[("declaration", &declaration)],
         ),
     )]);
     assert!(
@@ -747,7 +848,7 @@ fn decimal_primary_key_upsert_admits_partial_rows_but_insert_requires_completene
             .any(|diagnostic| diagnostic
                 .message()
                 .starts_with("table write field has an incompatible type")),
-        "supplied fields must retain static type validation: {:?}",
+        include_str!("fixtures/inline-semantic_graph/ccfc248d3c6c.orna"),
         invalid_supplied_field.diagnostics
     );
 }
@@ -757,7 +858,7 @@ fn attached_reading_write_diagnostics_retain_units_without_record_values() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "rows.orna",
-            "pub fn bad() = vehicle.corsa.Reading.insert({ time: now(), speed: \"private-value\", rpm: 1000 });",
+            include_str!("fixtures/inline-semantic_graph/99b7836b02e4.orna"),
         )],
         &Catalogue::authoritative_fixture(),
     );
@@ -779,22 +880,29 @@ fn attached_reading_write_diagnostics_retain_units_without_record_values() {
 fn closure_lists_do_not_erase_incompatible_return_types() {
     let result = analyze(&[ModuleInput::new(
         "closures.orna",
-        "pub fn values() = [() => 1, () => true];",
+        include_str!("fixtures/inline-semantic_graph/a57e5607a0fa.orna"),
     )]);
     assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
     let compatible = analyze(&[ModuleInput::new(
         "closures.orna",
-        "pub fn values() = [(x: Int) => x + 1, (y: Int) => y + 2];",
+        include_str!("fixtures/inline-semantic_graph/2c09cc04f4aa.orna"),
     )]);
     assert!(compatible.is_ok(), "{:?}", compatible.diagnostics);
 }
 
 #[test]
 fn relation_comparisons_require_an_explicit_comparison_operation() {
-    for expression in ["Row == Row", "Row != Row", "Row.as_of(HEAD) == Row"] {
+    for expression in [
+        "Row == Row",
+        "Row != Row",
+        include_str!("fixtures/inline-semantic_graph/241acc31bd91.orna"),
+    ] {
         let result = analyze(&[ModuleInput::new(
             "relations.orna",
-            format!("pub table Row {{ name: Str, }} pub fn compare() = {expression};"),
+            render_source_fixture(
+                include_str!("fixtures/inline-semantic_graph/1a494648dbd3.orna"),
+                &[("expression", &expression)],
+            ),
         )]);
         assert!(result.diagnostics.iter().any(|diagnostic| {
             diagnostic.code() == DIAG_TYPE
@@ -803,17 +911,24 @@ fn relation_comparisons_require_an_explicit_comparison_operation() {
     }
     let scalars = analyze(&[ModuleInput::new(
         "scalars.orna",
-        "pub fn compare(a: Int, b: Int) = a == b;",
+        include_str!("fixtures/inline-semantic_graph/101176875100.orna"),
     )]);
     assert!(scalars.is_ok(), "{:?}", scalars.diagnostics);
 }
 
 #[test]
 fn ordered_comparisons_reject_mismatched_and_unsupported_evaluator_values() {
-    for expression in ["1 < true", "[1] < [2]", "{ value: 1 } < { value: 2 }"] {
+    for expression in [
+        "1 < true",
+        "[1] < [2]",
+        include_str!("fixtures/inline-semantic_graph/804a80c4678f.orna"),
+    ] {
         let result = analyze(&[ModuleInput::new(
             "ordered-comparison.orna",
-            format!("pub fn compare() = {expression};"),
+            render_source_fixture(
+                include_str!("fixtures/inline-semantic_graph/d4d71edde22b.orna"),
+                &[("expression", &expression)],
+            ),
         )]);
         assert!(
             result.diagnostics.iter().any(|diagnostic| {
@@ -829,18 +944,19 @@ fn ordered_comparisons_reject_mismatched_and_unsupported_evaluator_values() {
 #[test]
 fn failure_skip_requires_a_typed_version_precondition() {
     for arguments in [
-        "failure.reference, expected_status: failure.status, reason: reason",
-        "failure.reference, expected_version: 1, expected_status: failure.status, reason: reason",
+        include_str!("fixtures/inline-semantic_graph/47f32d8d23d9.orna"),
+        include_str!("fixtures/inline-semantic_graph/56adeab5a94e.orna"),
     ] {
-        let source = format!(
-            "pub fn skip(failure: sys.Failure, reason: Str) = sys.admin.skip_failure({arguments});"
+        let source = render_source_fixture(
+            include_str!("fixtures/inline-semantic_graph/9638bea36fee.orna"),
+            &[("arguments", &arguments)],
         );
         let result = analyze(&[ModuleInput::new("skip.orna", source)]);
         assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
     }
     let valid = analyze(&[ModuleInput::new(
         "skip.orna",
-        "pub fn skip(failure: sys.Failure, reason: Str) = sys.admin.skip_failure(failure.reference, expected_version: failure.version, expected_status: failure.status, reason: reason);",
+        include_str!("fixtures/inline-semantic_graph/c2d71edc5480.orna"),
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
     let symbol = &valid.modules[&orna_semantic_v1::Namespace(vec!["skip".into()])].exports["skip"];
@@ -851,18 +967,20 @@ fn failure_skip_requires_a_typed_version_precondition() {
 #[test]
 fn failure_replay_requires_a_typed_version_precondition() {
     for arguments in [
-        "failure.reference, expected_status: failure.status",
-        "failure.reference, expected_version: 1, expected_status: failure.status",
-        "failure.reference, expected_version: failure.version, expected_status: true",
+        include_str!("fixtures/inline-semantic_graph/1a7027021b4e.orna"),
+        include_str!("fixtures/inline-semantic_graph/95e04191ceb1.orna"),
+        include_str!("fixtures/inline-semantic_graph/d52463678886.orna"),
     ] {
-        let source =
-            format!("pub fn replay(failure: sys.Failure) = sys.admin.replay_failure({arguments});");
+        let source = render_source_fixture(
+            include_str!("fixtures/inline-semantic_graph/67c676dcea5a.orna"),
+            &[("arguments", &arguments)],
+        );
         let result = analyze(&[ModuleInput::new("replay.orna", source)]);
         assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
     }
     let valid = analyze(&[ModuleInput::new(
         "replay.orna",
-        "pub fn replay(failure: sys.Failure) = sys.admin.replay_failure(failure.reference, expected_version: failure.version, expected_status: failure.status);",
+        include_str!("fixtures/inline-semantic_graph/a0a8de96808c.orna"),
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
     let symbol =
@@ -876,20 +994,13 @@ fn failure_replay_requires_a_typed_version_precondition() {
 fn checkpoint_and_failure_cas_admission_requires_typed_versions() {
     let valid = analyze(&[ModuleInput::new(
         "cas.orna",
-        r#"
-            pub fn reset(checkpoint: sys.Checkpoint, to: sys.CheckpointPosition, reason: Str) =
-                sys.admin.reset_checkpoint(checkpoint.reference, expected_version: checkpoint.version, expected_position: checkpoint.position, to: to, reason: reason);
-            pub fn retry(failure: sys.Failure) =
-                sys.admin.retry_failure(failure.reference, expected_version: failure.version);
-            pub fn resolve(failure: sys.Failure, reason: Str) =
-                sys.admin.resolve_failure(failure.reference, expected_version: failure.version, expected_status: failure.status, reason: reason);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/1f0342ef7d4a.orna"),
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
     for source in [
-        "fn reset(checkpoint: sys.Checkpoint, to: sys.CheckpointPosition, reason: Str) = sys.admin.reset_checkpoint(checkpoint.reference, expected_position: checkpoint.position, to: to, reason: reason);",
-        "fn retry(failure: sys.Failure) = sys.admin.retry_failure(failure.reference, expected_version: 1);",
-        "fn resolve(failure: sys.Failure, reason: Str) = sys.admin.resolve_failure(failure.reference, expected_status: failure.status, reason: reason);",
+        include_str!("fixtures/inline-semantic_graph/157cc147476b.orna"),
+        include_str!("fixtures/inline-semantic_graph/a67dd27256bb.orna"),
+        include_str!("fixtures/inline-semantic_graph/781ba6dba695.orna"),
     ] {
         let invalid = analyze(&[ModuleInput::new("cas.orna", source)]);
         assert!(
@@ -941,15 +1052,15 @@ fn conflicting_module_imports_do_not_install_hidden_qualified_roots() {
     let direct = analyze_with_catalogue(
         &[ModuleInput::new(
             "main.orna",
-            "use contacts; fn names() = contacts.Contact.one().name;",
+            include_str!("fixtures/inline-semantic_graph/6ab8843dfd67.orna"),
         )],
         &catalogue,
     );
     assert!(direct.is_ok(), "{:?}", direct.diagnostics);
 
     for source in [
-        "use contacts; fn contacts(): Int = 2; fn misuse() = contacts.Contact.one();",
-        "use contacts as mail; fn mail(): Int = 2; fn misuse() = mail.Email.one();",
+        include_str!("fixtures/inline-semantic_graph/a492c6ae666d.orna"),
+        include_str!("fixtures/inline-semantic_graph/738ce3de578f.orna"),
     ] {
         let result = analyze_with_catalogue(&[ModuleInput::new("main.orna", source)], &catalogue);
         assert!(
@@ -965,11 +1076,17 @@ fn conflicting_module_imports_do_not_install_hidden_qualified_roots() {
     }
 
     let ordered = analyze(&[
-        ModuleInput::new("contacts.orna", "pub table Contact(id: Str) { name: Str, }"),
-        ModuleInput::new("energy.orna", "pub table Reading(id: Str) { value: Int, }"),
+        ModuleInput::new(
+            "contacts.orna",
+            include_str!("fixtures/inline-semantic_graph/12669305ce1b.orna"),
+        ),
+        ModuleInput::new(
+            "energy.orna",
+            include_str!("fixtures/inline-semantic_graph/3641aa96ba18.orna"),
+        ),
         ModuleInput::new(
             "main.orna",
-            "use contacts as mail; use energy as mail; fn misuse() = mail.Contact.one();",
+            include_str!("fixtures/inline-semantic_graph/1b4a0137f06a.orna"),
         ),
     ]);
     assert!(has(&ordered, DIAG_AMBIGUOUS), "{:?}", ordered.diagnostics);
@@ -982,29 +1099,41 @@ fn qualified_module_member_calls_resolve_only_public_imported_exports() {
     let result = analyze(&[
         ModuleInput::new(
             "library.orna",
-            "pub fn seed(): Int = 1; fn hidden(): Int = 2;",
+            include_str!("fixtures/inline-semantic_graph/a9bff76d17e0.orna"),
         ),
         ModuleInput::new(
             "warehouse.orna",
-            "pub fn transfer(from: Int, to: Int, amount: Int): Int = from + to + amount;",
+            include_str!("fixtures/inline-semantic_graph/063add3ce375.orna"),
         ),
         ModuleInput::new(
             "main.orna",
-            "use library; use warehouse; fn seed() = library.seed(); fn move_stock() = warehouse.transfer(1, 2, 3);",
+            include_str!("fixtures/inline-semantic_graph/fd00f14d8437.orna"),
         ),
     ]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
 
     let private = analyze(&[
-        ModuleInput::new("library.orna", "fn hidden(): Int = 2;"),
-        ModuleInput::new("main.orna", "use library; fn f() = library.hidden();"),
+        ModuleInput::new(
+            "library.orna",
+            include_str!("fixtures/inline-semantic_graph/68ea1c5f0590.orna"),
+        ),
+        ModuleInput::new(
+            "main.orna",
+            include_str!("fixtures/inline-semantic_graph/5a4e01c5aacf.orna"),
+        ),
     ]);
     assert!(has(&private, DIAG_UNRESOLVED));
 
     let missing = analyze(&[
-        ModuleInput::new("library.orna", "pub fn seed(): Int = 1;"),
-        ModuleInput::new("main.orna", "use library; fn f() = library.missing();"),
+        ModuleInput::new(
+            "library.orna",
+            include_str!("fixtures/inline-semantic_graph/76d79a5238ee.orna"),
+        ),
+        ModuleInput::new(
+            "main.orna",
+            include_str!("fixtures/inline-semantic_graph/7b9e45b61b11.orna"),
+        ),
     ]);
     assert!(has(&missing, DIAG_UNRESOLVED));
 }
@@ -1013,7 +1142,7 @@ fn qualified_module_member_calls_resolve_only_public_imported_exports() {
 fn system_checkpoint_history_selectors_resolve_from_intrinsic_surface() {
     let result = analyze(&[ModuleInput::new(
         "sys-checkpoint.orna",
-        "pub fn published() = sys.Checkpoint.as_of(HEAD);",
+        include_str!("fixtures/inline-semantic_graph/503e0a4410f3.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -1023,7 +1152,7 @@ fn system_checkpoint_history_selectors_resolve_from_intrinsic_surface() {
 fn system_run_history_sorting_resolves_system_row_fields() {
     let result = analyze(&[ModuleInput::new(
         "sys-run-history.orna",
-        "pub fn committed_runs() = sys.Run.as_of(HEAD) | sort_by(run => -run.started);",
+        include_str!("fixtures/inline-semantic_graph/e5bca2b07069.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -1033,7 +1162,7 @@ fn system_run_history_sorting_resolves_system_row_fields() {
 fn system_storage_relation_filters_typed_status_fields() {
     let result = analyze(&[ModuleInput::new(
         "sys-storage.orna",
-        "pub fn pending() = sys.Storage | filter(storage => storage.pending_rows > 0);",
+        include_str!("fixtures/inline-semantic_graph/66a96ad6378b.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -1043,7 +1172,7 @@ fn system_storage_relation_filters_typed_status_fields() {
 fn system_file_history_uses_the_file_reference_overload() {
     let result = analyze(&[ModuleInput::new(
         "sys-file-history.orna",
-        "pub fn history(file: sys.File) = sys.history(file.reference);",
+        include_str!("fixtures/inline-semantic_graph/f7252afe1bc5.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -1054,11 +1183,11 @@ fn system_catalogue_relations_support_typed_filter_and_map_queries() {
     let result = analyze(&[
         ModuleInput::new(
             "sys-definition-file.orna",
-            "pub fn source_files(function: sys.Function) = sys.catalog.definitions | filter(definition => definition.reference == function.definition) | map(definition => definition.file);",
+            include_str!("fixtures/inline-semantic_graph/b83a6f1b1f9f.orna"),
         ),
         ModuleInput::new(
             "sys-table-query.orna",
-            "pub fn inventory_table_objects() = sys.catalog.objects | filter(object => object.kind == sys.ObjectKind.table && object.qualified_name.starts_with(\"inventory.\"));",
+            include_str!("fixtures/inline-semantic_graph/7c3f9b7ff32d.orna"),
         ),
     ]);
 
@@ -1067,29 +1196,8 @@ fn system_catalogue_relations_support_typed_filter_and_map_queries() {
 
 #[test]
 fn table_projection_stages_type_computed_and_default_fields() {
-    let source = r#"
-        pub table Contact(id: Str) {
-            first: Str,
-            last: Str,
-            country: Str = "GB",
-            full_name: Str => "{first} {last}",
-        }
-
-        pub fn names() = Contact | map(Contact.full_name);
-    "#;
-    let filtered = r#"
-        pub table Contact(id: Str) {
-            first: Str,
-            last: Str,
-            country: Str = "GB",
-            full_name: Str => "{first} {last}",
-        }
-
-        pub fn british_names() =
-            Contact
-            | filter(contact => contact.country == "GB")
-            | map(Contact.full_name);
-    "#;
+    let source = include_str!("fixtures/inline-semantic_graph/f6ee1dddf583.orna");
+    let filtered = include_str!("fixtures/inline-semantic_graph/4ab970735227.orna");
     let result = analyze(&[
         ModuleInput::new("computed-field.orna", source),
         ModuleInput::new("default-and-computed-fields.orna", filtered),
@@ -1102,7 +1210,7 @@ fn table_projection_stages_type_computed_and_default_fields() {
 fn system_dependency_queries_use_object_references() {
     let result = analyze(&[ModuleInput::new(
         "dependency-query.orna",
-        "pub fn impact(object: sys.Object) = sys.dependents(object.reference);",
+        include_str!("fixtures/inline-semantic_graph/e691a63bae25.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -1112,7 +1220,7 @@ fn system_dependency_queries_use_object_references() {
 fn system_snapshot_selectors_accept_revision_strings() {
     let result = analyze(&[ModuleInput::new(
         "historical-query.orna",
-        "pub fn before_change() = sys.snapshot(\"HEAD~3\");",
+        include_str!("fixtures/inline-semantic_graph/fd8e15317cd4.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -1121,23 +1229,13 @@ fn system_snapshot_selectors_accept_revision_strings() {
 #[test]
 fn qualified_table_operations_infer_rows_and_reach_block_expression_statements() {
     let result = analyze(&[
-        ModuleInput::new("library.orna", "pub table Book(id: Str) { title: Str, }"),
+        ModuleInput::new(
+            "library.orna",
+            include_str!("fixtures/inline-semantic_graph/08682c91628a.orna"),
+        ),
         ModuleInput::new(
             "main.orna",
-            r#"
-                use library;
-                table Stock(id: Str) { quantity: Int, }
-                table Reading(id: Str) { value: Int, }
-                fn seed() {
-                    library.Book.insert({ id: "book-1", title: "The Night Garden" });
-                    Stock.insert({ id: "north", quantity: 12 });
-                    Stock.update("north", { quantity: 9 });
-                    Reading.delete("sample-1");
-                }
-                fn read() = Stock.one();
-                fn first() = Reading.first();
-                fn count(): Int = Reading.count();
-            "#,
+            include_str!("fixtures/inline-semantic_graph/612049a47d9a.orna"),
         ),
     ]);
 
@@ -1145,13 +1243,13 @@ fn qualified_table_operations_infer_rows_and_reach_block_expression_statements()
 
     let wrong_arity = analyze(&[ModuleInput::new(
         "books.orna",
-        "pub table Book(id: Str) { title: Str, } fn bad() = Book.delete();",
+        include_str!("fixtures/inline-semantic_graph/3ae31ca0758e.orna"),
     )]);
     assert!(has(&wrong_arity, "ORNA-S021-TYPE"));
 
     let non_table = analyze(&[ModuleInput::new(
         "books.orna",
-        "type Book; fn bad() = Book.insert({ id: \"book-1\" });",
+        include_str!("fixtures/inline-semantic_graph/b43716a788c7.orna"),
     )]);
     assert!(has(&non_table, "ORNA-S021-TYPE"));
 }
@@ -1161,7 +1259,7 @@ fn table_assertion_rejects_authoritative_std_net_effect() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "consumer.orna",
-            "pub table User(id: Uuid) { name: Str, assert std.net.http.get(\"https://example.com\") == \"ok\"; }",
+            include_str!("fixtures/inline-semantic_graph/2861d1a34793.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -1177,19 +1275,7 @@ fn imported_std_net_callables_preserve_effects_and_imports_remain_analysis_only(
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "consumer.orna",
-            r#"
-                use std.net.http as http;
-                use std.net.http.{get};
-
-                pub fn aliased() = http.get("https://example.com");
-                pub fn named() = get("https://example.com");
-
-                pub table User(id: Uuid) {
-                    name: Str,
-                    assert http.get("https://example.com") == "ok";
-                    assert get("https://example.com") == "ok";
-                }
-            "#,
+            include_str!("fixtures/inline-semantic_graph/23626790f7ed.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -1221,7 +1307,7 @@ fn unused_std_net_import_is_admitted_without_execution() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "consumer.orna",
-            "use std.net.http as http; pub fn untouched() = 1;",
+            include_str!("fixtures/inline-semantic_graph/0cd09c296b82.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -1240,7 +1326,7 @@ fn unused_std_net_import_is_admitted_without_execution() {
 fn table_assertion_rejects_standard_filesystem_effect_before_admission() {
     let result = analyze(&[ModuleInput::new(
         "consumer.orna",
-        "pub table User(id: Uuid) { name: Str, assert std.io.fs.read_text(\"private-input\") == \"ok\"; }",
+        include_str!("fixtures/inline-semantic_graph/c26c115a2799.orna"),
     )]);
 
     assert!(has(&result, DIAG_ASSERTION_EFFECT));
@@ -1259,13 +1345,14 @@ fn table_assertion_rejects_standard_filesystem_effect_before_admission() {
 fn table_assertion_rejects_owner_type_mismatch() {
     let result = analyze(&[ModuleInput::new(
         "books.orna",
-        "pub table User(id: Uuid) { name: Str, assert >= 0; }",
+        include_str!("fixtures/inline-semantic_graph/7bb60161edba.orna"),
     )]);
 
     assert!(has(&result, DIAG_ASSERTION));
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic.code() == DIAG_ASSERTION
-            && diagnostic.message() == "table assertion must be a predicate over Relation<User>"
+            && diagnostic.message()
+                == include_str!("fixtures/inline-semantic_graph/0b8396270d94.orna")
     }));
 }
 
@@ -1273,20 +1360,20 @@ fn table_assertion_rejects_owner_type_mismatch() {
 fn legacy_table_assertion_owner_pipes_keep_published_diagnostics() {
     let owner = analyze(&[ModuleInput::new(
         "owner-pipe.orna",
-        "pub table User(id: Uuid) { username: Str, assert User | all_unique(user => user.username); }",
+        include_str!("fixtures/inline-semantic_graph/469ca68ac080.orna"),
     )]);
     assert!(!has(&owner, DIAG_UNRESOLVED));
     assert!(owner.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message() == "remove the repeated table owner before the assertion predicate"
+        diagnostic.message() == include_str!("fixtures/inline-semantic_graph/1496e412be87.orna")
     }));
 
     let self_pipe = analyze(&[ModuleInput::new(
         "self-pipe.orna",
-        "pub table User(id: Uuid) { username: Str, assert self | all_unique(user => user.username); }",
+        include_str!("fixtures/inline-semantic_graph/c5d195bfaae9.orna"),
     )]);
     assert!(!has(&self_pipe, DIAG_UNRESOLVED));
     assert!(self_pipe.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message() == "remove `self |`; the table already supplies its candidate relation"
+        diagnostic.message() == include_str!("fixtures/inline-semantic_graph/9f0ffbf867da.orna")
     }));
 }
 
@@ -1294,16 +1381,7 @@ fn legacy_table_assertion_owner_pipes_keep_published_diagnostics() {
 fn table_assertion_elaborates_reference_relation_predicates_without_an_evaluator() {
     let result = analyze(&[ModuleInput::new(
         "library.orna",
-        r#"
-            pub table Book(id: Str) {
-                title: Str,
-                assert every(book => book.title != "");
-            }
-            pub table Loan(book_id: Str) {
-                borrower: Str,
-                assert all_unique(loan => loan.borrower);
-            }
-        "#,
+        include_str!("fixtures/inline-semantic_graph/00c79142baf5.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -1313,13 +1391,7 @@ fn table_assertion_elaborates_reference_relation_predicates_without_an_evaluator
 fn module_assertion_elaborates_the_reference_projects_nested_relation_predicate() {
     let result = analyze(&[ModuleInput::new(
         "library.orna",
-        r#"
-            pub table Book(id: Str) { title: Str, }
-            pub table Loan(book_id: Str) { borrower: Str, }
-            assert every(Loan, loan =>
-                exists(Book, book => book.id == loan.book_id)
-            );
-        "#,
+        include_str!("fixtures/inline-semantic_graph/4de58047bfa1.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -1331,7 +1403,7 @@ fn authoritative_core_catalogue_resolves_prelude_types_and_common_functions() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "consumer.orna",
-            "use std as _; use std.math.{increment, is_zero}; use std.ui.{text}; use std.json.{encode}; fn next(value: INTEGER): INTEGER = increment(value); fn zero(): BOOLEAN = is_zero(0); fn view(): UI = text(\"hello\"); fn bytes(value: JsonValue): ByteStream = encode(value);",
+            include_str!("fixtures/inline-semantic_graph/2684ea6469f3.orna"),
         )],
         &profile,
     );
@@ -1344,7 +1416,7 @@ fn authoritative_core_resolves_text_key_helpers() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "keys.orna",
-            "use std.text.{slug, disambiguate}; fn key(name: Str, keys: JsonValue): Str = disambiguate(slug(name), keys);",
+            include_str!("fixtures/inline-semantic_graph/65c1641efc90.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -1358,7 +1430,7 @@ fn authoritative_core_resolves_nested_operations_through_an_imported_root() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "consumer.orna",
-            "use std as core; fn document(rows: Rows): Document = core.terminal.present_table(rows); fn bytes(value: JsonValue): ByteStream = core.json.encode(value);",
+            include_str!("fixtures/inline-semantic_graph/d6e1d06e0bbb.orna"),
         )],
         &profile,
     );
@@ -1368,7 +1440,7 @@ fn authoritative_core_resolves_nested_operations_through_an_imported_root() {
     let missing = analyze_with_catalogue(
         &[ModuleInput::new(
             "consumer.orna",
-            "use std as core; fn f() = core.terminal.missing();",
+            include_str!("fixtures/inline-semantic_graph/15e66ec6bc0c.orna"),
         )],
         &profile,
     );
@@ -1380,7 +1452,7 @@ fn qualified_collection_requires_an_admitted_optional_module() {
     let rejected = analyze_with_catalogue(
         &[ModuleInput::new(
             "consumer.orna",
-            "pub fn first_value(rows: [Int]) = std.collection.first(rows);",
+            include_str!("fixtures/inline-semantic_graph/906d103234a6.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -1393,7 +1465,7 @@ fn qualified_collection_requires_an_admitted_optional_module() {
     let import_rejected = analyze_with_catalogue(
         &[ModuleInput::new(
             "consumer.orna",
-            "use std.collection; pub fn first_value(rows: [Int]) = std.collection.first(rows);",
+            include_str!("fixtures/inline-semantic_graph/1f27027f871f.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -1401,12 +1473,7 @@ fn qualified_collection_requires_an_admitted_optional_module() {
 
     let bare_core = analyze(&[ModuleInput::new(
         "consumer.orna",
-        r#"
-            pub fn first_value(rows: [Int]) = first(rows);
-            pub fn one_value(rows: [Int]) = one(rows);
-            pub fn mapped(rows: [Int]) = rows | map(value => value + 1);
-            pub fn flattened(rows: [Int]) = rows | flat_map(value => [value]);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/472675e85e4c.orna"),
     )]);
     assert!(bare_core.is_ok(), "{:?}", bare_core.diagnostics);
 }
@@ -1415,13 +1482,7 @@ fn qualified_collection_requires_an_admitted_optional_module() {
 fn refined_aliases_check_owner_assertions_and_expose_static_constructors() {
     let result = analyze(&[ModuleInput::new(
         "ports.orna",
-        r#"
-            type Port = Int {
-                assert >= 1;
-                assert <= 65_535;
-            }
-            pub fn default_port(): Port = Port.from(8080);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/ab133cfae7c2.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -1457,7 +1518,7 @@ fn catalogue_is_closed_world_and_diagnostics_remain_redacted_and_stable() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "secret.orna",
-            "use std as _; fn f() = definitely_not_in_the_catalogue;",
+            include_str!("fixtures/inline-semantic_graph/08476bf4d88a.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -1490,7 +1551,7 @@ fn catalogue_does_not_relax_reserved_source_roots() {
 fn reserved_table_names_keep_typecheck_diagnostics() {
     let std_table = analyze(&[ModuleInput::new(
         "reserved-std.orna",
-        "pub table std { value: Int, }",
+        include_str!("fixtures/inline-semantic_graph/0304b2011b9f.orna"),
     )]);
     assert!(
         std_table
@@ -1501,7 +1562,7 @@ fn reserved_table_names_keep_typecheck_diagnostics() {
 
     let sys_table = analyze(&[ModuleInput::new(
         "reserved-sys.orna",
-        "pub table sys { value: Int, }",
+        include_str!("fixtures/inline-semantic_graph/8c1b51ec5b67.orna"),
     )]);
     assert!(
         sys_table
@@ -1538,14 +1599,7 @@ fn authoritative_ui_catalogue_checks_page_builder_contextually() {
 fn generic_ordering_pipeline_keeps_element_and_optional_types() {
     let result = analyze(&[ModuleInput::new(
         "generic.orna",
-        r#"
-            pub protocol Order {
-                fn compare(self, other: Self): Ordering;
-            }
-
-            pub fn maximum<T impl Order>(values: [T]): T? =
-                values | sort_by(value => value) | last();
-        "#,
+        include_str!("fixtures/inline-semantic_graph/f74bf9bbd200.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -1566,11 +1620,11 @@ fn imported_generic_calls_preserve_declared_effects_and_failure_metadata() {
     let result = analyze(&[
         ModuleInput::new(
             "library.orna",
-            "pub fn lookup<T>(value: T) = sys.meta<T>(value);",
+            include_str!("fixtures/inline-semantic_graph/34cf576507eb.orna"),
         ),
         ModuleInput::new(
             "consumer.orna",
-            "use library; pub fn read(value: Int) = library.lookup<Int>(value);",
+            include_str!("fixtures/inline-semantic_graph/c47e90557a30.orna"),
         ),
     ]);
 
@@ -1600,25 +1654,27 @@ fn imported_generic_calls_reject_invalid_explicit_type_arguments() {
     for (name, body) in [
         (
             "too_many",
-            "pub fn too_many(value: Int) = library.lookup<Int, Str>(value);",
+            include_str!("fixtures/inline-semantic_graph/e0ff416fc0e3.orna"),
         ),
         (
             "unknown",
-            "pub fn unknown(value: Int) = library.lookup<Missing>(value);",
+            include_str!("fixtures/inline-semantic_graph/c35831ebb0e3.orna"),
         ),
     ] {
         let result = analyze(&[
             ModuleInput::new(
                 "library.orna",
-                "pub fn lookup<T>(value: T) = sys.meta<T>(value);",
+                include_str!("fixtures/inline-semantic_graph/34cf576507eb.orna"),
             ),
-            ModuleInput::new("consumer.orna", format!("use library; {body}")),
+            ModuleInput::new(
+                "consumer.orna",
+                render_source_fixture(
+                    include_str!("fixtures/inline-semantic_graph/1ba59ac17631.orna"),
+                    &[("body", &body)],
+                ),
+            ),
         ]);
-        assert!(
-            has(&result, DIAG_TYPE),
-            "{name}: {:?}",
-            result.diagnostics
-        );
+        assert!(has(&result, DIAG_TYPE), "{name}: {:?}", result.diagnostics);
         let consumer = result
             .modules
             .get(&Namespace(vec!["consumer".into()]))
@@ -1636,16 +1692,11 @@ fn imported_generic_calls_reject_unsupported_protocol_bound_substitutions() {
     let result = analyze(&[
         ModuleInput::new(
             "library.orna",
-            r#"
-                pub protocol Order {
-                    fn compare(self, other: Self): Ordering;
-                }
-                pub fn choose<T impl Order>(value: T) = sys.meta<T>(value);
-            "#,
+            include_str!("fixtures/inline-semantic_graph/18f56ee1bba3.orna"),
         ),
         ModuleInput::new(
             "consumer.orna",
-            "use library; pub fn invalid(value: Str) = library.choose<Str>(value);",
+            include_str!("fixtures/inline-semantic_graph/df7bf35dfc24.orna"),
         ),
     ]);
 
@@ -1670,7 +1721,7 @@ fn relation_pairs_preserve_element_type_in_overlapping_tuples() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "pairs.orna",
-            "pub fn paired() = sys.Failure | pairs();",
+            include_str!("fixtures/inline-semantic_graph/4ffdd171862b.orna"),
         )],
         &Catalogue::authoritative_fixture(),
     );
@@ -1699,7 +1750,7 @@ fn relation_extrema_preserve_element_type_as_optional_values() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "extrema.orna",
-            "pub fn smallest() = sys.Failure | min(); pub fn largest() = sys.Failure | max();",
+            include_str!("fixtures/inline-semantic_graph/fd55146cc39c.orna"),
         )],
         &Catalogue::authoritative_fixture(),
     );
@@ -1746,13 +1797,13 @@ fn omitted_numeric_function_parameters_are_inferred_without_dynamic_fallback() {
 fn table_keys_reject_float_and_affine_temperatures_reject_addition() {
     let key = analyze(&[ModuleInput::new(
         "key.orna",
-        "pub table Bad(value: Float) { text: Str, }",
+        include_str!("fixtures/inline-semantic_graph/4bae95d858a3.orna"),
     )]);
     assert!(has(&key, DIAG_TYPE));
 
     let temperature = analyze(&[ModuleInput::new(
         "temperature.orna",
-        "pub fn bad() = 20.C + 5.C;",
+        include_str!("fixtures/inline-semantic_graph/e4d502137c61.orna"),
     )]);
     assert!(has(&temperature, DIAG_TYPE));
 }
@@ -1761,11 +1812,11 @@ fn table_keys_reject_float_and_affine_temperatures_reject_addition() {
 fn table_keys_reject_ranges_with_the_published_primary_key_rule() {
     let result = analyze(&[ModuleInput::new(
         "range-key.orna",
-        "pub table Bad(period: Range<Date>) { value: Str, }",
+        include_str!("fixtures/inline-semantic_graph/77477ebfa193.orna"),
     )]);
 
     assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message() == "Range<T> is not a primary-key type in version 1.0"
+        diagnostic.message() == include_str!("fixtures/inline-semantic_graph/a6178701fcd8.orna")
     }));
 }
 
@@ -1773,14 +1824,11 @@ fn table_keys_reject_ranges_with_the_published_primary_key_rule() {
 fn table_keys_reject_transparent_range_aliases_with_the_published_primary_key_rule() {
     let result = analyze(&[ModuleInput::new(
         "range-alias-key.orna",
-        r#"
-            type Window = Range<Instant>;
-            pub table Bad(period: Window) { value: Str, }
-        "#,
+        include_str!("fixtures/inline-semantic_graph/9018248ac127.orna"),
     )]);
 
     assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message() == "Range<T> is not a primary-key type in version 1.0"
+        diagnostic.message() == include_str!("fixtures/inline-semantic_graph/a6178701fcd8.orna")
     }));
 }
 
@@ -1788,11 +1836,11 @@ fn table_keys_reject_transparent_range_aliases_with_the_published_primary_key_ru
 fn automatic_key_tables_reject_explicit_rekey_operations() {
     let result = analyze(&[ModuleInput::new(
         "rekey.orna",
-        "pub table Note { text: Str, } pub fn bad() = Note.rekey(1, 2);",
+        include_str!("fixtures/inline-semantic_graph/a336e892e93f.orna"),
     )]);
 
     assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message() == "an automatic-key table cannot be explicitly re-keyed"
+        diagnostic.message() == include_str!("fixtures/inline-semantic_graph/189790985a7e.orna")
     }));
 }
 
@@ -1800,17 +1848,7 @@ fn automatic_key_tables_reject_explicit_rekey_operations() {
 fn display_implementations_reject_database_writes() {
     let result = analyze(&[ModuleInput::new(
         "display.orna",
-        r#"
-            pub type Contact {
-                pub name: Str,
-                impl Display {
-                    fn display(self, context: DisplayContext): Str {
-                        Audit.insert({ message: "displayed contact" });
-                        self.name
-                    }
-                }
-            }
-        "#,
+        include_str!("fixtures/inline-semantic_graph/312b7839ab8f.orna"),
     )]);
 
     assert!(result.diagnostics.iter().any(|diagnostic| {
@@ -1822,62 +1860,28 @@ fn display_implementations_reject_database_writes() {
 fn nominal_targets_reject_overlapping_protocol_implementations() {
     let distinct = analyze(&[ModuleInput::new(
         "distinct-conversions.orna",
-        r#"
-            type EmailHeader { address: Str, }
-            pub type EmailAddress {
-                value: Str,
-                impl From<Str> { fn from(value) = EmailAddress { value: value }; }
-                impl From<EmailHeader> { fn from(header) = EmailAddress { value: header.address }; }
-            }
-        "#,
+        include_str!("fixtures/inline-semantic_graph/ee4e105090e1.orna"),
     )]);
     assert!(distinct.is_ok(), "{:#?}", distinct.diagnostics);
 
     let overlapping = analyze(&[ModuleInput::new(
         "overlapping-conversions.orna",
-        r#"
-            pub type EmailAddress {
-                value: Str,
-                impl From<Str> { fn from(value) = EmailAddress { value: value }; }
-                impl From<Str> { fn from(value) = EmailAddress { value: value }; }
-            }
-        "#,
+        include_str!("fixtures/inline-semantic_graph/bba09a2efb55.orna"),
     )]);
     assert!(overlapping.diagnostics.iter().any(|diagnostic| {
         diagnostic.code() == DIAG_TYPE
-            && diagnostic.message() == "overlapping protocol implementations are invalid"
+            && diagnostic.message()
+                == include_str!("fixtures/inline-semantic_graph/529e5f255207.orna")
     }));
 }
 
 #[test]
 fn frozen_nominal_nested_impl_uses_authoritative_fixture_surface() {
-    let source = r#"
-        pub type EmailAddress {
-            value: Str,
-
-            impl From<Str> {
-                fn from(value): EmailAddress {
-                    if !valid_email(value) {
-                        fail(error(
-                            code: "email.invalid",
-                            message: "invalid email address",
-                        ));
-                    }
-                    EmailAddress { value: value }
-                }
-            }
-
-            impl From<EmailHeader> {
-                fn from(header) = EmailAddress.from(header.address);
-            }
-
-            impl Display {
-                fn display(self, context): Str = self.value;
-            }
-        }
-    "#;
-    let valid =
-        analyze_with_catalogue(&[ModuleInput::new("nominal-type-nested-impl.orna", source)], &Catalogue::authoritative_fixture());
+    let source = include_str!("fixtures/inline-semantic_graph/af7c08049c11.orna");
+    let valid = analyze_with_catalogue(
+        &[ModuleInput::new("nominal-type-nested-impl.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
     assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
 
     let unresolved_helper = analyze_with_catalogue(
@@ -1898,7 +1902,10 @@ fn frozen_nominal_nested_impl_uses_authoritative_fixture_surface() {
     );
     assert!(has(&invalid_source, DIAG_TYPE));
     assert!(!has(&invalid_source, DIAG_UNRESOLVED));
-    let nonexact_source = format!("{source}\npub fn bad() = EmailAddress.from(null);");
+    let nonexact_source = render_source_fixture(
+        include_str!("fixtures/inline-semantic_graph/787d3b77e398.orna"),
+        &[("source", &source)],
+    );
     let nonexact = analyze_with_catalogue(
         &[ModuleInput::new(
             "nominal-type-nested-impl-nonexact-source.orna",
@@ -1913,29 +1920,18 @@ fn frozen_nominal_nested_impl_uses_authoritative_fixture_surface() {
 fn table_rows_reject_overlapping_protocol_implementations() {
     let distinct = analyze(&[ModuleInput::new(
         "distinct-table-conversions.orna",
-        r#"
-            table EmailAddress {
-                value: Str,
-                impl From<Str> { fn from(value) = { value: value }; }
-                impl From<Int> { fn from(value) = { value: "converted" }; }
-            }
-        "#,
+        include_str!("fixtures/inline-semantic_graph/ddc1070ae1fd.orna"),
     )]);
     assert!(distinct.is_ok(), "{:#?}", distinct.diagnostics);
 
     let overlapping = analyze(&[ModuleInput::new(
         "overlapping-table-conversions.orna",
-        r#"
-            table EmailAddress {
-                value: Str,
-                impl From<Str> { fn from(value) = { value: value }; }
-                impl From<Str> { fn from(value) = { value: value }; }
-            }
-        "#,
+        include_str!("fixtures/inline-semantic_graph/6f9f39aac506.orna"),
     )]);
     assert!(overlapping.diagnostics.iter().any(|diagnostic| {
         diagnostic.code() == DIAG_TYPE
-            && diagnostic.message() == "overlapping protocol implementations are invalid"
+            && diagnostic.message()
+                == include_str!("fixtures/inline-semantic_graph/529e5f255207.orna")
     }));
 }
 
@@ -1944,7 +1940,7 @@ fn secret_values_reject_display_after_authoritative_open() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "secret.orna",
-            "pub fn bad() = std.secret.open(std.secret.ref(\"x\"), as: Str).display();",
+            include_str!("fixtures/inline-semantic_graph/bf3665cb2f18.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -1962,12 +1958,7 @@ fn computed_fields_reject_effectful_initializers() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "contact.orna",
-            r#"
-                pub table Contact(id: Str) {
-                    name: Str,
-                    remote: Str => std.net.http.get("https://example.com"),
-                }
-            "#,
+            include_str!("fixtures/inline-semantic_graph/281a25bf6870.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -1981,7 +1972,7 @@ fn computed_fields_reject_effectful_initializers() {
 fn system_commit_rows_reject_mutation() {
     let result = analyze(&[ModuleInput::new(
         "commit.orna",
-        "pub fn bad() = sys.Commit.insert({ hash: \"x\" });",
+        include_str!("fixtures/inline-semantic_graph/4ce1add26a29.orna"),
     )]);
 
     assert!(
@@ -1996,7 +1987,7 @@ fn system_commit_rows_reject_mutation() {
 fn money_rate_unit_resolves_before_float_exactness_check() {
     let analysis = analyze(&[ModuleInput::new(
         "rate.orna",
-        "fn cost(energy: Float<kWh>, rate: Money<GBP> / kWh) = energy * rate;",
+        include_str!("fixtures/inline-semantic_graph/459784eb93e7.orna"),
     )]);
     assert!(
         !has(&analysis, DIAG_UNRESOLVED),
@@ -2007,7 +1998,7 @@ fn money_rate_unit_resolves_before_float_exactness_check() {
 
     let unknown = analyze(&[ModuleInput::new(
         "unknown.orna",
-        "fn cost(rate: Money<GBP> / UnknownUnit) = rate;",
+        include_str!("fixtures/inline-semantic_graph/e2e3ba7cadca.orna"),
     )]);
     assert!(has(&unknown, DIAG_UNRESOLVED));
 }
@@ -2016,7 +2007,7 @@ fn money_rate_unit_resolves_before_float_exactness_check() {
 fn published_money_and_affine_diagnostics_are_preserved() {
     let affine_sum = analyze(&[ModuleInput::new(
         "sum.orna",
-        "pub fn bad(values: [Float<C>]) = values | sum;",
+        include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna"),
     )]);
     assert!(
         affine_sum
@@ -2027,7 +2018,7 @@ fn published_money_and_affine_diagnostics_are_preserved() {
 
     let currency_symbol = analyze(&[ModuleInput::new(
         "currency.orna",
-        "pub protocol Currency { static code: Str; static symbol: Str; static minor_digits: Int; }",
+        include_str!("fixtures/inline-semantic_graph/3ef85d1c9f2f.orna"),
     )]);
     assert!(currency_symbol.diagnostics.iter().any(|diagnostic| {
         diagnostic.message()
@@ -2036,7 +2027,7 @@ fn published_money_and_affine_diagnostics_are_preserved() {
 
     let float_money = analyze(&[ModuleInput::new(
         "money.orna",
-        "pub fn bad(energy: Float<kWh>, rate: Money<GBP> / kWh) = energy * rate;",
+        include_str!("fixtures/inline-semantic_graph/e6cc03beb7e7.orna"),
     )]);
     assert!(float_money.diagnostics.iter().any(|diagnostic| {
         diagnostic.message() == "binary Float cannot enter an exact Money calculation implicitly"
@@ -2044,7 +2035,7 @@ fn published_money_and_affine_diagnostics_are_preserved() {
 
     let float_constructor = analyze(&[ModuleInput::new(
         "constructor.orna",
-        "pub fn bad(value: Float) = Money<GBP>(value);",
+        include_str!("fixtures/inline-semantic_graph/7012225696c5.orna"),
     )]);
     assert!(float_constructor.diagnostics.iter().any(|diagnostic| {
         diagnostic.message()
@@ -2053,7 +2044,7 @@ fn published_money_and_affine_diagnostics_are_preserved() {
 
     let exact_constructor = analyze(&[ModuleInput::new(
         "constructor.orna",
-        "pub fn good(value: Decimal) = Money<GBP>(value);",
+        include_str!("fixtures/inline-semantic_graph/210723bc8b9b.orna"),
     )]);
     assert!(
         exact_constructor.is_ok(),
@@ -2075,14 +2066,7 @@ fn published_money_and_affine_diagnostics_are_preserved() {
 fn legacy_system_admin_methods_are_rejected_with_published_messages() {
     let result = analyze(&[ModuleInput::new(
         "legacy.orna",
-        r#"
-            pub fn reset(checkpoint: sys.Checkpoint, position: sys.CheckpointPosition) =
-                checkpoint.reset(to: position);
-            pub fn replay(failure: sys.Failure) = failure.replay();
-            pub fn resolve(failure: sys.Failure) = failure.resolve();
-            pub fn retry(stream: sys.Stream) = stream.retry();
-            pub fn skip(stream: sys.Stream) = stream.skip(reason: "drop it");
-        "#,
+        include_str!("fixtures/inline-semantic_graph/bb00e0a88ed6.orna"),
     )]);
     let messages = result
         .diagnostics
@@ -2092,12 +2076,12 @@ fn legacy_system_admin_methods_are_rejected_with_published_messages() {
     assert!(messages.contains(
         &"system rows are read-only; use `sys.admin.reset_checkpoint` with compare-and-set arguments"
     ));
-    assert!(messages.contains(
-        &"system rows are read-only; use `sys.admin.replay_failure(failure.reference, ...)`"
-    ));
-    assert!(messages.contains(
-        &"system rows are read-only; use `sys.admin.resolve_failure(failure.reference, ...)`"
-    ));
+    assert!(messages.contains(&include_str!(
+        "fixtures/inline-semantic_graph/88a7c3586e5d.orna"
+    )));
+    assert!(messages.contains(&include_str!(
+        "fixtures/inline-semantic_graph/781e42671598.orna"
+    )));
     assert!(messages.contains(
         &"system rows are read-only; use `sys.admin.retry_failure` on a `sys.FailureRef`"
     ));
@@ -2110,7 +2094,7 @@ fn legacy_system_admin_methods_are_rejected_with_published_messages() {
 fn distinct_nominal_types_require_named_conversions() {
     let result = analyze(&[ModuleInput::new(
         "conversion.orna",
-        "pub fn bad(value: A): C = value;",
+        include_str!("fixtures/inline-semantic_graph/bd8b70b891a8.orna"),
     )]);
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic.message()
@@ -2122,15 +2106,20 @@ fn distinct_nominal_types_require_named_conversions() {
 fn module_assertion_scope_distinguishes_zero_and_one_table_invariants() {
     let one_table = analyze(&[ModuleInput::new(
         "one.orna",
-        "pub table User(id: Uuid) { name: Str, } assert every(User, user => user.name != \"\");",
+        include_str!("fixtures/inline-semantic_graph/a15d9f6d89df.orna"),
     )]);
     assert!(has(&one_table, DIAG_ASSERTION_ONE_TABLE));
     assert!(one_table.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message() == "a one-table invariant belongs inside that table"
+        diagnostic.message() == include_str!("fixtures/inline-semantic_graph/35d3c54e9537.orna")
     }));
 
     let zero_table = analyze(&[ModuleInput::new("zero.orna", "assert 1 + 1 == 2;")]);
-    assert_eq!(zero_table.diagnostics.len(), 1, "{:?}", zero_table.diagnostics);
+    assert_eq!(
+        zero_table.diagnostics.len(),
+        1,
+        "{:?}",
+        zero_table.diagnostics
+    );
     assert_eq!(zero_table.diagnostics[0].code(), DIAG_ASSERTION_SCOPE);
     assert_eq!(
         zero_table.diagnostics[0].message(),
@@ -2150,22 +2139,12 @@ fn module_assertion_scope_distinguishes_zero_and_one_table_invariants() {
 fn module_assertion_invoking_pure_helper_retains_transitive_table_dependencies() {
     let result = analyze(&[ModuleInput::new(
         "transitive-helper.orna",
-        r#"
-            pub table User(id: Uuid) { name: Str, }
-            pub table Account(id: Uuid) { user_id: Uuid, }
-
-            pub fn related(): Bool =
-                every(User, user =>
-                    exists(Account, account => account.user_id == user.id)
-                );
-
-            assert related();
-        "#,
+        include_str!("fixtures/inline-semantic_graph/85af910a7e57.orna"),
     )]);
 
     assert!(
         !has(&result, DIAG_ASSERTION_SCOPE),
-        "transitive table dependencies must avoid the empty-dependency diagnostic: {:?}",
+        include_str!("fixtures/inline-semantic_graph/6cf914ae92c4.orna"),
         result.diagnostics
     );
     assert!(
@@ -2174,10 +2153,7 @@ fn module_assertion_invoking_pure_helper_retains_transitive_table_dependencies()
         result.diagnostics
     );
     let module = result.modules.values().next().expect("semantic module");
-    let helper = module
-        .exports
-        .get("related")
-        .expect("pure helper export");
+    let helper = module.exports.get("related").expect("pure helper export");
     assert_eq!(
         helper.effects.effects,
         std::collections::BTreeSet::from(["database read".into()])
@@ -2201,7 +2177,7 @@ fn module_assertion_invoking_pure_helper_retains_transitive_table_dependencies()
 fn module_assertion_dependencies_count_resolved_tables_not_uppercase_values() {
     let result = analyze(&[ModuleInput::new(
         "one-table-optional.orna",
-        "pub table User(id: Uuid) { name: Str, } assert every(User, user => Some(user.name) != null);",
+        include_str!("fixtures/inline-semantic_graph/7a3741813616.orna"),
     )]);
 
     assert!(has(&result, DIAG_ASSERTION_ONE_TABLE));
@@ -2220,13 +2196,7 @@ fn module_assertion_dependencies_count_resolved_tables_not_uppercase_values() {
 fn module_assertion_dependencies_follow_resolved_lowercase_table_names() {
     let result = analyze(&[ModuleInput::new(
         "lowercase-tables.orna",
-        r#"
-            pub table users(id: Int) { name: Str, }
-            pub table accounts(id: Int) { user_id: Int, }
-            assert every(accounts, account =>
-                exists(users, user => user.id == account.user_id)
-            );
-        "#,
+        include_str!("fixtures/inline-semantic_graph/ad9dcd04f4c7.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -2245,7 +2215,7 @@ fn module_assertion_dependencies_follow_resolved_lowercase_table_names() {
 fn legacy_system_and_result_forms_keep_phase_specific_diagnostics() {
     let runtime = analyze(&[ModuleInput::new(
         "runtime.orna",
-        "fn active_streams() { sys.runtime.streams }",
+        include_str!("fixtures/inline-semantic_graph/a4160353f082.orna"),
     )]);
     assert!(has(&runtime, DIAG_LEGACY_SYS_RUNTIME));
     assert!(
@@ -2257,7 +2227,7 @@ fn legacy_system_and_result_forms_keep_phase_specific_diagnostics() {
 
     let storage = analyze(&[ModuleInput::new(
         "storage.orna",
-        "pub fn bad() = sys.storage(contacts.Contact);",
+        include_str!("fixtures/inline-semantic_graph/d04fa7ab174f.orna"),
     )]);
     assert!(storage.diagnostics.iter().any(|diagnostic| {
         diagnostic.message()
@@ -2266,30 +2236,27 @@ fn legacy_system_and_result_forms_keep_phase_specific_diagnostics() {
 
     let result = analyze(&[ModuleInput::new(
         "result.orna",
-        "pub fn bad(raw: Str): Result<Message, DecodeError> = Ok(decode(raw));",
+        include_str!("fixtures/inline-semantic_graph/a1e7aae36a3a.orna"),
     )]);
     assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message()
-            == "Result/Ok/Err control plumbing was removed; return the success type directly"
+        diagnostic.message() == include_str!("fixtures/inline-semantic_graph/13f0339f1c09.orna")
     }));
 
     let try_from = analyze(&[ModuleInput::new(
         "try-from.orna",
-        "pub type Port { impl TryFrom<Int> { fn from(value) = Port { value: value }; } }",
+        include_str!("fixtures/inline-semantic_graph/6b8dac4b53a1.orna"),
     )]);
     assert!(has(&try_from, DIAG_LEGACY_TRYFROM));
-    assert!(
-        try_from.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message() == "use From<Source>; From may fail in Orna"
-        })
-    );
+    assert!(try_from.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == include_str!("fixtures/inline-semantic_graph/c19a6841280f.orna")
+    }));
 }
 
 #[test]
 fn closed_literal_addition_diagnostics_preserve_published_meaning() {
     let currencies = analyze(&[ModuleInput::new(
         "currency.orna",
-        "pub fn bad() = 10.GBP + 5.EUR;",
+        include_str!("fixtures/inline-semantic_graph/1b8649578d3c.orna"),
     )]);
     assert!(currencies.diagnostics.iter().any(|diagnostic| {
         diagnostic.message() == "cannot add different currencies without conversion"
@@ -2297,7 +2264,7 @@ fn closed_literal_addition_diagnostics_preserve_published_meaning() {
 
     let dimensions = analyze(&[ModuleInput::new(
         "dimensions.orna",
-        "pub fn bad() = 90.days + 4.kWh;",
+        include_str!("fixtures/inline-semantic_graph/14ce14a24d45.orna"),
     )]);
     assert!(
         dimensions
@@ -2311,31 +2278,20 @@ fn closed_literal_addition_diagnostics_preserve_published_meaning() {
 fn contextual_numeric_and_exact_money_unit_postfixes_remain_closed() {
     let result = analyze(&[ModuleInput::new(
         "literals.orna",
-        r#"
-            pub protocol Currency { static code: Str; static minor_digits: Int; }
-            pub type GBP { impl Currency { static code = "GBP"; static minor_digits = 2; } }
-            pub fn decimal_value() = 3.1415;
-            pub fn float_value(): Float = 3.1415;
-            pub fn explicit_float() = 3.1415f;
-            pub fn amount(): Money<GBP> = 12.34.GBP;
-            pub fn converted(speed: Float<mph>) = speed.mph;
-            pub fn duration() = 90.min;
-            pub table Tariff(effective_from: Date) { rate: Money<GBP> / kWh, }
-            pub fn cost(energy: Decimal<kWh>, tariff: Tariff) = energy * tariff.rate;
-        "#,
+        include_str!("fixtures/inline-semantic_graph/7f039374396b.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
 
     let non_currency = analyze(&[ModuleInput::new(
         "literals.orna",
-        "type NotCurrency; fn bad(): Money<NotCurrency> = 12.34.NotCurrency;",
+        include_str!("fixtures/inline-semantic_graph/4f50dc5cff02.orna"),
     )]);
     assert!(has(&non_currency, DIAG_TYPE));
 
     let unsupported = analyze(&[ModuleInput::new(
         "rates.orna",
-        "fn bad(energy: Decimal<kWh>, rate: Money<GBP> / hour) = energy * rate;",
+        include_str!("fixtures/inline-semantic_graph/66566070ac1a.orna"),
     )]);
     assert!(has(&unsupported, DIAG_UNSUPPORTED));
 }
@@ -2354,13 +2310,7 @@ fn numeric_methods_and_relation_count_use_closed_intrinsic_shapes() {
 fn relation_windows_admit_the_standard_size_and_step_contract() {
     let valid = analyze(&[ModuleInput::new(
         "windows.orna",
-        r#"
-            pub table Note { text: Str, }
-            pub fn default_step() = Note | window(2);
-            pub fn named_step() = Note | window(size: 2, step: 3);
-            pub fn direct() = window(Note, 2, step: 3);
-            pub fn dynamic(size: Int, step: Int) = Note | window(size, step);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/4946fa75883a.orna"),
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
     let module = valid
@@ -2380,21 +2330,27 @@ fn relation_windows_admit_the_standard_size_and_step_contract() {
     for (body, expected) in [
         (
             "Note | window()",
-            "window arguments do not match its static signature",
+            include_str!("fixtures/inline-semantic_graph/fe5fd540d62e.orna"),
         ),
         (
             "Note | window(2, 3, 4)",
-            "window arguments do not match its static signature",
+            include_str!("fixtures/inline-semantic_graph/fe5fd540d62e.orna"),
         ),
         ("Note | window(\"two\")", "window size must be an Int"),
         ("Note | window(2, \"three\")", "window step must be an Int"),
         ("Note | window(0)", "window size must be positive"),
         ("Note | window(-1)", "window size must be positive"),
-        ("Note | window(2, step: 0)", "window step must be positive"),
+        (
+            include_str!("fixtures/inline-semantic_graph/7c59678f61e8.orna"),
+            "window step must be positive",
+        ),
     ] {
         let result = analyze(&[ModuleInput::new(
             "invalid-window.orna",
-            format!("pub table Note {{ text: Str, }} fn invalid() = {body};"),
+            render_source_fixture(
+                include_str!("fixtures/inline-semantic_graph/8f6114f1e1fb.orna"),
+                &[("body", &body)],
+            ),
         )]);
         assert!(
             result
@@ -2412,17 +2368,7 @@ fn authoritative_core_exposes_implicit_encoding_and_duration_members() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "standard.orna",
-            r#"
-                pub fn json(value: JsonValue) = std.encoding.json.encode(value);
-                pub fn canonical(value: JsonValue) = std.encoding.orna.encode(value);
-                pub fn read(value: ByteStream) = std.encoding.json.decode(value, as: JsonValue);
-                pub fn formats(duration: Duration) = {
-                    compact: std.time.duration.compact.format(duration),
-                    clock: std.time.duration.clock.format(duration),
-                    words: std.time.duration.words.format(duration),
-                    iso: std.time.duration.iso.format(duration),
-                };
-            "#,
+            include_str!("fixtures/inline-semantic_graph/aeffa575d43a.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -2435,7 +2381,7 @@ fn authoritative_core_types_locale_aware_money_pipeline() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "receipt.orna",
-            "pub fn receipt_total(total: Money<GBP>, locale: Locale): Str = total | std.money.format(locale: locale);",
+            include_str!("fixtures/inline-semantic_graph/e9055e4effff.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -2445,7 +2391,7 @@ fn authoritative_core_types_locale_aware_money_pipeline() {
     let wrong_input = analyze_with_catalogue(
         &[ModuleInput::new(
             "receipt.orna",
-            "pub fn receipt_total(total: Int, locale: Locale): Str = total | std.money.format(locale: locale);",
+            include_str!("fixtures/inline-semantic_graph/97fa4e575786.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -2459,9 +2405,13 @@ fn parallel_callbacks_share_result_type_and_return_ordered_stream() {
         &[ModuleInput::new("parallel-callback-results.orna", source)],
         &Catalogue::authoritative_core(),
     );
-    assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message() == "parallel callbacks must have compatible result types"
-    }), "incompatible callback result must be diagnosed: {:?}", result.diagnostics);
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message() == "parallel callbacks must have compatible result types"
+        }),
+        "incompatible callback result must be diagnosed: {:?}",
+        result.diagnostics
+    );
     let module = result
         .modules
         .values()
@@ -2485,9 +2435,13 @@ fn race_callbacks_share_result_type_and_return_that_type() {
         &[ModuleInput::new("race-callback-results.orna", source)],
         &Catalogue::authoritative_core(),
     );
-    assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message() == "race callbacks must have compatible result types"
-    }), "incompatible callback result must be diagnosed: {:?}", result.diagnostics);
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message() == "race callbacks must have compatible result types"
+        }),
+        "incompatible callback result must be diagnosed: {:?}",
+        result.diagnostics
+    );
     let module = result
         .modules
         .values()
@@ -2549,50 +2503,28 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
             "attached tables",
             ModuleInput::new(
                 "attached_tables.orna",
-                r#"
-                    pub fn names() =
-                        contacts.Contact
-                        | filter(contact => (contact.emails | count) > 0)
-                        | map(contacts.Contact.full_name)
-                        | sort_by(value => value);
-                    pub fn days() = energy.Reading | bucket_by(1.day, zone: Europe.London);
-                "#,
+                include_str!("fixtures/inline-semantic_graph/f62473b875f3.orna"),
             ),
         ),
         (
             "attached connectors",
             ModuleInput::new(
                 "attached_connectors.orna",
-                r#"
-                    use vehicle.corsa.*;
-                    pub fn recent() = Reading | filter(reading => reading.time > now() - 1.min) | last();
-                    pub fn parallel() = std.concurrent.parallel([
-                        mail.google.sync,
-                        finance.openbanking.sync,
-                        vehicle.corsa.freematics.sync,
-                    ]);
-                    pub fn source() = google.mail(credential: std.secret.ref("google.personal"));
-                "#,
+                include_str!("fixtures/inline-semantic_graph/9ecf374d8798.orna"),
             ),
         ),
         (
             "named attached row",
             ModuleInput::new(
                 "named_row.orna",
-                r#"
-                    pub table Vehicle(id: Uuid) {
-                        registration: Str,
-                        owner: contacts.Contact,
-                    }
-                    pub fn owner_name(vehicle: Vehicle) = vehicle.owner.name;
-                "#,
+                include_str!("fixtures/inline-semantic_graph/46ea37039746.orna"),
             ),
         ),
         (
             "snapshot attached table",
             ModuleInput::new(
                 "snapshot_table.orna",
-                "pub fn counts() = { cwd: contacts.Contact.as_of(CWD) | count, head: contacts.Contact.as_of(HEAD) | count, };",
+                include_str!("fixtures/inline-semantic_graph/d3644b797367.orna"),
             ),
         ),
         (
@@ -2606,21 +2538,21 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
             "system runtime presentation",
             ModuleInput::new(
                 "system_runtime_presentation.orna",
-                "pub fn dashboard() = std.ui.Page(\"/\", _ => std.ui.Table(sys.rt.streams));",
+                include_str!("fixtures/inline-semantic_graph/0bbb6da0dccf.orna"),
             ),
         ),
         (
             "inferred relation parameter",
             ModuleInput::new(
                 "inferred_relation.orna",
-                "pub fn recent(rows, duration = 7.days) = rows | filter(row => row.time >= now() - duration);",
+                include_str!("fixtures/inline-semantic_graph/ecf247280c89.orna"),
             ),
         ),
         (
             "recovery lambda",
             ModuleInput::new(
                 "recovery.orna",
-                "pub fn decode_or_default(raw: Str): Message = std.encoding.json.decode(raw, as: Message) |? (failure => Message.default());",
+                include_str!("fixtures/inline-semantic_graph/71e0355c51eb.orna"),
             ),
         ),
     ];
@@ -2654,30 +2586,10 @@ fn frozen_historical_program_resolves_through_authoritative_projection() {
 fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
-        r#"
-            pub fn missing() {
-                let old = sys.database.as_of(sys.snapshot("HEAD~10"));
-                old.energy.missing()
-            }
-        "#,
-        r#"
-            pub fn unknown_system_member() {
-                let old = sys.database.as_of(sys.snapshot("HEAD~10"));
-                old.sys.Unknown
-            }
-        "#,
-        r#"
-            pub fn mixed() {
-                let old = sys.database.as_of(sys.snapshot("HEAD~10"));
-                old.energy.Reading.as_of(sys.snapshot("HEAD"))
-            }
-        "#,
-        r#"
-            pub fn wrong_arity() {
-                let old = sys.database.as_of(sys.snapshot("HEAD~10"));
-                old.energy.daily(1)
-            }
-        "#,
+        include_str!("fixtures/inline-semantic_graph/24210d89392f.orna"),
+        include_str!("fixtures/inline-semantic_graph/15f9fae7a062.orna"),
+        include_str!("fixtures/inline-semantic_graph/ff7746686e31.orna"),
+        include_str!("fixtures/inline-semantic_graph/c0ee105f91e4.orna"),
     ] {
         let result = analyze_with_catalogue(
             &[ModuleInput::new("historical-negative.orna", source)],
@@ -2685,12 +2597,9 @@ fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
         );
         assert!(!result.is_ok(), "{source}: {:?}", result.diagnostics);
         assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|diagnostic| {
-                    diagnostic.code() == DIAG_TYPE || diagnostic.code() == DIAG_UNRESOLVED
-                }),
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code() == DIAG_TYPE || diagnostic.code() == DIAG_UNRESOLVED
+            }),
             "{source}: {:?}",
             result.diagnostics
         );
@@ -2727,16 +2636,17 @@ fn historical_effect_catalogue(effect: &str) -> Catalogue {
 
 #[test]
 fn historical_callables_are_read_effect_only() {
-    for effect in ["database write", "checkpoint", "secret", "network", "external"] {
+    for effect in [
+        "database write",
+        "checkpoint",
+        "secret",
+        "network",
+        "external",
+    ] {
         let result = analyze_with_catalogue(
             &[ModuleInput::new(
                 "historical-effect.orna",
-                r#"
-                    pub fn invoke() {
-                        let old = sys.database.as_of(sys.snapshot("HEAD~10"));
-                        old.unsafe.run()
-                    }
-                "#,
+                include_str!("fixtures/inline-semantic_graph/4085c519acf1.orna"),
             )],
             &historical_effect_catalogue(effect),
         );
@@ -2756,14 +2666,14 @@ fn historical_callables_are_read_effect_only() {
 fn qualified_kwh_units_share_the_closed_cross_database_identity() {
     let result = analyze(&[ModuleInput::new(
         "units.orna",
-        "pub fn compatible(a: Float<std.units.si.kWh>, b: Float<work.units.kWh>) = a + b;",
+        include_str!("fixtures/inline-semantic_graph/4d774ab8f9ad.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
 
     let incompatible = analyze(&[ModuleInput::new(
         "units.orna",
-        "pub fn incompatible(a: Float<std.units.si.kWh>, b: Float<work.units.hour>) = a + b;",
+        include_str!("fixtures/inline-semantic_graph/fa031c0cc369.orna"),
     )]);
     assert!(has(&incompatible, DIAG_TYPE));
 }
@@ -2772,20 +2682,7 @@ fn qualified_kwh_units_share_the_closed_cross_database_identity() {
 fn closed_enum_case_blocks_accept_the_core_log_intrinsic() {
     let result = analyze(&[ModuleInput::new(
         "inspection.orna",
-        r#"
-            pub enum Inspection {
-                value { value: Int },
-                failed { reason: Str },
-            }
-            pub fn inspect(result: Inspection) =
-                case result {
-                    Inspection.value { value }: { value: value },
-                    Inspection.failed { reason }: {
-                        log(reason);
-                        { value: 0 }
-                    },
-                };
-        "#,
+        include_str!("fixtures/inline-semantic_graph/9d39d0050a90.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -2795,10 +2692,7 @@ fn closed_enum_case_blocks_accept_the_core_log_intrinsic() {
 fn parenthesized_pipeline_lambdas_receive_the_input_type_context() {
     let result = analyze(&[ModuleInput::new(
         "contacts.orna",
-        r#"
-            pub table Contact(id: Str) { name: Str, }
-            pub fn name(contact: Contact) = contact | (value => value.name);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/cb8a5814f124.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -2808,16 +2702,7 @@ fn authoritative_lambda_fixture_infers_comparison_shapes_and_connector_effects()
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "lambda.orna",
-            r#"
-                pub fn over(limit: Money<GBP>) =
-                    transaction => transaction.amount > limit;
-                pub fn direct(limit: Money<GBP>) =
-                    transaction => transaction > limit;
-                pub fn between(min: Int, max: Int) =
-                    value => value >= min && value <= max;
-                pub fn sync_selected(account: Account) =
-                    () => finance.openbanking.sync(account);
-            "#,
+            include_str!("fixtures/inline-semantic_graph/561e2f1487ab.orna"),
         )],
         &Catalogue::authoritative_fixture(),
     );
@@ -2871,7 +2756,7 @@ fn authoritative_lambda_fixture_infers_comparison_shapes_and_connector_effects()
 
     let invalid = analyze(&[ModuleInput::new(
         "invalid-lambda.orna",
-        "pub fn bad() = value => value.field;",
+        include_str!("fixtures/inline-semantic_graph/5b8f2ab000e7.orna"),
     )]);
     assert!(
         invalid
@@ -2884,7 +2769,7 @@ fn authoritative_lambda_fixture_infers_comparison_shapes_and_connector_effects()
     let invalid_equality = analyze_with_catalogue(
         &[ModuleInput::new(
             "invalid-lambda-equality.orna",
-            "pub fn bad() = (value: Money<GBP>) => value == 1;",
+            include_str!("fixtures/inline-semantic_graph/f3b1bc905733.orna"),
         )],
         &Catalogue::authoritative_fixture(),
     );
@@ -2902,11 +2787,7 @@ fn authoritative_lambda_fixture_infers_comparison_shapes_and_connector_effects()
 fn recovery_pipeline_unifies_success_type_before_later_stages() {
     let matching = analyze(&[ModuleInput::new(
         "recovery-matching.orna",
-        r#"
-            fn increment(value: Int): Int = value + 1;
-            pub fn recovered(value: Int) =
-                value |? (failure => 0) | increment;
-        "#,
+        include_str!("fixtures/inline-semantic_graph/2d1ced4c3962.orna"),
     )]);
     assert!(matching.is_ok(), "{:?}", matching.diagnostics);
     let module = matching
@@ -2921,7 +2802,7 @@ fn recovery_pipeline_unifies_success_type_before_later_stages() {
 
     let mismatched = analyze(&[ModuleInput::new(
         "recovery-mismatched.orna",
-        "pub fn recovered(value: Int) = value |? (failure => \"fallback\");",
+        include_str!("fixtures/inline-semantic_graph/7d0527db3744.orna"),
     )]);
     assert!(has(&mismatched, DIAG_TYPE), "{:?}", mismatched.diagnostics);
     assert!(mismatched.diagnostics.iter().any(|diagnostic| {
@@ -2970,7 +2851,7 @@ fn recovery_pipeline_replaces_handled_failure_effect() {
 fn fail_has_bottom_success_type_and_accepts_error_values() {
     let result = analyze(&[ModuleInput::new(
         "fail-bottom.orna",
-        "pub fn abort(failure: Error) = fail(failure);",
+        include_str!("fixtures/inline-semantic_graph/f4aaa7dfceb3.orna"),
     )]);
     assert!(result.is_ok(), "{:?}", result.diagnostics);
     let module = result
@@ -2989,10 +2870,7 @@ fn fail_has_bottom_success_type_and_accepts_error_values() {
 fn fail_bottom_is_compatible_with_expected_results_and_recovery() {
     let result = analyze(&[ModuleInput::new(
         "fail-recovery.orna",
-        r#"
-            pub fn abort(failure: Error): Int = fail(failure);
-            pub fn reemit(value: Int): Int = value |? (failure => fail(failure));
-        "#,
+        include_str!("fixtures/inline-semantic_graph/138fe96d3c44.orna"),
     )]);
     assert!(result.is_ok(), "{:?}", result.diagnostics);
     let module = result
@@ -3014,9 +2892,9 @@ fn fail_bottom_is_compatible_with_expected_results_and_recovery() {
 #[test]
 fn fail_rejects_wrong_argument_shape_and_type() {
     for source in [
-        "pub fn wrong() = fail();",
-        "pub fn wrong() = fail(1);",
-        "pub fn wrong(failure: Error) = fail(failure, failure);",
+        include_str!("fixtures/inline-semantic_graph/f34af47e38d3.orna"),
+        include_str!("fixtures/inline-semantic_graph/02f859c12394.orna"),
+        include_str!("fixtures/inline-semantic_graph/0d8de78d56e2.orna"),
     ] {
         let result = analyze(&[ModuleInput::new("fail-invalid.orna", source)]);
         assert!(
@@ -3031,7 +2909,7 @@ fn fail_rejects_wrong_argument_shape_and_type() {
 fn user_defined_fail_shadows_the_intrinsic() {
     let result = analyze(&[ModuleInput::new(
         "fail-shadow.orna",
-        "fn fail(value: Int): Int = value; pub fn call() = fail(1);",
+        include_str!("fixtures/inline-semantic_graph/110f48d1a998.orna"),
     )]);
     assert!(result.is_ok(), "{:?}", result.diagnostics);
     let module = result
@@ -3050,13 +2928,7 @@ fn user_defined_fail_shadows_the_intrinsic() {
 fn error_constructor_returns_an_inspectable_error_value() {
     let result = analyze(&[ModuleInput::new(
         "error-constructor.orna",
-        r#"
-            pub fn construct(code: Str, message: Str, cause: Error): Error =
-                error(code: code, message: message, cause: cause);
-            pub fn fresh(): Error = error(code: "message.invalid", message: "invalid message");
-            pub fn replacing(failure: Error): Error =
-                error(code: "message.invalid", message: "invalid message", cause: fail(failure));
-        "#,
+        include_str!("fixtures/inline-semantic_graph/1c2d70c6957f.orna"),
     )]);
     assert!(result.is_ok(), "{:#?}", result.diagnostics);
     let module = result
@@ -3076,12 +2948,12 @@ fn error_constructor_returns_an_inspectable_error_value() {
 #[test]
 fn error_constructor_rejects_invalid_named_arguments() {
     for source in [
-        "pub fn invalid() = error(\"code\", \"message\");",
-        "pub fn invalid() = error(code: \"message.invalid\");",
-        "pub fn invalid() = error(code: \"message.invalid\", message: \"invalid\", extra: \"value\");",
-        "pub fn invalid() = error(code: \"message.invalid\", message: 1);",
-        "pub fn invalid() = error(code: \"message.invalid\", message: \"invalid\", code: \"duplicate\");",
-        "pub fn invalid() = error(code: \"message.invalid\", message: \"invalid\", cause: 1);",
+        include_str!("fixtures/inline-semantic_graph/de6f16134bff.orna"),
+        include_str!("fixtures/inline-semantic_graph/00d31c7651f8.orna"),
+        include_str!("fixtures/inline-semantic_graph/7f1b2afa50c6.orna"),
+        include_str!("fixtures/inline-semantic_graph/0d82800b2ffc.orna"),
+        include_str!("fixtures/inline-semantic_graph/2d687762cf62.orna"),
+        include_str!("fixtures/inline-semantic_graph/6f93b55919a3.orna"),
     ] {
         let result = analyze(&[ModuleInput::new("error-invalid.orna", source)]);
         assert!(
@@ -3096,7 +2968,7 @@ fn error_constructor_rejects_invalid_named_arguments() {
 fn user_defined_error_shadows_the_intrinsic() {
     let result = analyze(&[ModuleInput::new(
         "error-shadow.orna",
-        "fn error(code: Str, message: Str): Int = 1; pub fn call() = error(code: \"x\", message: \"y\");",
+        include_str!("fixtures/inline-semantic_graph/74b36c5d4d1e.orna"),
     )]);
     assert!(result.is_ok(), "{:#?}", result.diagnostics);
     let module = result
@@ -3113,19 +2985,7 @@ fn user_defined_error_shadows_the_intrinsic() {
 
 #[test]
 fn root_relation_and_stream_intrinsics_cover_reference_pipelines_without_execution() {
-    let source = r#"
-            pub table Book(id: Int) { title: Str, }
-            pub table Loan(id: Int) { book_id: Int, }
-            pub table Reading(id: Int) { value: Int, }
-            fn available() = Book
-                | filter(book => !exists(Loan, loan => loan.book_id == book.id))
-                | one();
-            fn ingest() {
-                Stream.from_list([1], source_identity: "fixture") | for_each(value => {
-                    Reading.insert({ id: value, value: value });
-                });
-            }
-        "#;
+    let source = include_str!("fixtures/inline-semantic_graph/c7ae9b4c6a6b.orna");
     let result = analyze(&[ModuleInput::new("sensors.orna", source)]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -3141,19 +3001,8 @@ fn root_relation_and_stream_intrinsics_cover_reference_pipelines_without_executi
 
 #[test]
 fn authoritative_named_pipeline_fixtures_insert_the_input_before_explicit_arguments() {
-    let pipe_first_argument = r#"
-        pub fn between(value: Int, min: Int, max: Int) =
-            value >= min && value <= max;
-
-        pub fn selected(value: Int) =
-            value | between(10, 20);
-    "#;
-    let pipeline_precedence = r#"
-        pub fn square(value: Int) = value * value;
-        pub fn count_is_positive(values: [Int]) = values | count > 0;
-        pub fn square_sum(a: Int, b: Int) = a + b | square;
-        pub fn increment_count(values: [Int]) = (values | count) + 1;
-    "#;
+    let pipe_first_argument = include_str!("fixtures/inline-semantic_graph/25ccfd0cd0b6.orna");
+    let pipeline_precedence = include_str!("fixtures/inline-semantic_graph/c716531ac3a9.orna");
     let precedence_source = pipeline_precedence.to_owned();
 
     let result = analyze(&[
@@ -3183,22 +3032,25 @@ fn declared_defaults_are_checked_and_shared_by_direct_and_piped_calls() {
         "add(1)",
         "1 | add",
         "1 | add()",
-        "add(value: 1)",
-        "add(1, extra: 3)",
-        "1 | add(extra: 3)",
+        include_str!("fixtures/inline-semantic_graph/c2eaa9bcfae4.orna"),
+        include_str!("fixtures/inline-semantic_graph/2c3958f04dc0.orna"),
+        include_str!("fixtures/inline-semantic_graph/18c951f80a0b.orna"),
     ] {
         let result = analyze(&[ModuleInput::new(
             "defaults.orna",
-            format!("fn add(value: Int, extra = 2) = value + extra; fn test() = {expression};"),
+            render_source_fixture(
+                include_str!("fixtures/inline-semantic_graph/3ba4b5f57e5a.orna"),
+                &[("expression", &expression)],
+            ),
         )]);
         assert!(result.is_ok(), "{expression}: {:?}", result.diagnostics);
     }
     for source in [
-        "fn add(value: Int, extra = 2) = value + extra; fn test() = add();",
-        "fn add(value: Int, extra = 2) = value + extra; fn test() = add(extra: 3);",
-        "fn add(value: Int, extra = 2) = value + extra; fn test() = 1 | add(extra: true);",
-        "fn add(value: Int, extra = 2) = value + extra; fn test() = 1 | add(extra: 3, extra: 4);",
-        "fn bad(value: Int = true) = value;",
+        include_str!("fixtures/inline-semantic_graph/cadceb63b07d.orna"),
+        include_str!("fixtures/inline-semantic_graph/c41702fa98b9.orna"),
+        include_str!("fixtures/inline-semantic_graph/fa566d98ec5d.orna"),
+        include_str!("fixtures/inline-semantic_graph/336dda3a0db0.orna"),
+        include_str!("fixtures/inline-semantic_graph/05c95ac02a1f.orna"),
     ] {
         let result = analyze(&[ModuleInput::new("invalid-defaults.orna", source)]);
         assert!(
@@ -3209,7 +3061,7 @@ fn declared_defaults_are_checked_and_shared_by_direct_and_piped_calls() {
     }
     let unresolved = analyze(&[ModuleInput::new(
         "unresolved-default.orna",
-        "fn bad(value: Int = missing) = value;",
+        include_str!("fixtures/inline-semantic_graph/e3a8b996af16.orna"),
     )]);
     assert!(
         has(&unresolved, DIAG_UNRESOLVED),
@@ -3222,7 +3074,7 @@ fn declared_defaults_are_checked_and_shared_by_direct_and_piped_calls() {
 fn runtime_root_and_info_function_use_the_current_sys_names() {
     let current = analyze(&[ModuleInput::new(
         "runtime.orna",
-        "pub fn view() = sys.rt; pub fn info() = sys.rt.info();",
+        include_str!("fixtures/inline-semantic_graph/4640934a702f.orna"),
     )]);
     assert!(
         current.is_ok(),
@@ -3232,7 +3084,7 @@ fn runtime_root_and_info_function_use_the_current_sys_names() {
 
     let legacy = analyze(&[ModuleInput::new(
         "runtime.orna",
-        "pub fn bad() = sys.runtime_info();",
+        include_str!("fixtures/inline-semantic_graph/a137b23101a1.orna"),
     )]);
     assert!(
         legacy
@@ -3245,12 +3097,12 @@ fn runtime_root_and_info_function_use_the_current_sys_names() {
 #[test]
 fn json_described_read_only_sys_views_resolve_without_fabricating_other_members() {
     for source in [
-        "fn coordinates() = sys.database.cwd;",
-        "fn coordinates() = sys.current.snapshot;",
-        "fn coordinates() = sys.rt.id;",
-        "fn coordinates() = sys.repl.width;",
-        "fn coordinates() = sys.rt.info();",
-        "fn relation() = sys.Database;",
+        include_str!("fixtures/inline-semantic_graph/368d75dcc0d1.orna"),
+        include_str!("fixtures/inline-semantic_graph/4385f38d8244.orna"),
+        include_str!("fixtures/inline-semantic_graph/d49fdcf883d2.orna"),
+        include_str!("fixtures/inline-semantic_graph/20ea57e74fe3.orna"),
+        include_str!("fixtures/inline-semantic_graph/0222038936eb.orna"),
+        include_str!("fixtures/inline-semantic_graph/e9eb1c9aff16.orna"),
     ] {
         let supported = analyze(&[ModuleInput::new("read-only-sys.orna", source)]);
         assert!(supported.is_ok(), "{source}: {:#?}", supported.diagnostics);
@@ -3258,16 +3110,16 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
 
     let shadowed = analyze(&[ModuleInput::new(
         "shadowed-sys.orna",
-        "fn coordinates(sys: Int) = sys.rt.id;",
+        include_str!("fixtures/inline-semantic_graph/b73074596af8.orna"),
     )]);
     assert!(has(&shadowed, DIAG_RESERVED), "{:#?}", shadowed.diagnostics);
 
     for source in [
-        "fn sys() = 1;",
-        "type sys = Int;",
-        "fn local() { let sys = 1; }",
-        "fn callback() = [1] | map(sys => sys);",
-        "table Record(id: Uuid) { value: Int, assert every(sys => sys.value >= 0); }",
+        include_str!("fixtures/inline-semantic_graph/8c85c43ad3e8.orna"),
+        include_str!("fixtures/inline-semantic_graph/afe66c207bd7.orna"),
+        include_str!("fixtures/inline-semantic_graph/495e086d6e66.orna"),
+        include_str!("fixtures/inline-semantic_graph/84e7b585048e.orna"),
+        include_str!("fixtures/inline-semantic_graph/75c03044e2a8.orna"),
     ] {
         let rejected = analyze(&[ModuleInput::new("reserved-sys.orna", source)]);
         assert!(
@@ -3279,7 +3131,7 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
 
     let reserved_table = analyze(&[ModuleInput::new(
         "reserved-sys.orna",
-        "table sys { value: Int, }",
+        include_str!("fixtures/inline-semantic_graph/6b942f43b3cf.orna"),
     )]);
     assert!(
         reserved_table.diagnostics.iter().any(|diagnostic| {
@@ -3295,10 +3147,13 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
     );
 
     let alias = analyze(&[
-        ModuleInput::new("helper.orna", "pub fn value() = 1;"),
+        ModuleInput::new(
+            "helper.orna",
+            include_str!("fixtures/inline-semantic_graph/136f28c1e416.orna"),
+        ),
         ModuleInput::new(
             "alias-sys.orna",
-            "use helper as sys; fn coordinates() = sys.rt.id;",
+            include_str!("fixtures/inline-semantic_graph/d46b48e72e37.orna"),
         ),
     ]);
     assert!(has(&alias, DIAG_RESERVED), "{:#?}", alias.diagnostics);
@@ -3310,7 +3165,7 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
 
     let metadata = analyze(&[ModuleInput::new(
         "unsupported-sys.orna",
-        "fn metadata() = sys.meta(1);",
+        include_str!("fixtures/inline-semantic_graph/14bfc3dca48f.orna"),
     )]);
     assert!(metadata.is_ok(), "{:#?}", metadata.diagnostics);
     let metadata = &metadata.modules.values().next().unwrap().symbols["metadata"];
@@ -3327,7 +3182,7 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
 
     let named_metadata = analyze(&[ModuleInput::new(
         "named-metadata.orna",
-        "pub fn metadata() = sys.meta(value: 1);",
+        include_str!("fixtures/inline-semantic_graph/e0c00864b5d1.orna"),
     )]);
     assert!(named_metadata.is_ok(), "{:#?}", named_metadata.diagnostics);
     let named_metadata = &named_metadata.modules.values().next().unwrap().symbols["metadata"];
@@ -3342,7 +3197,7 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
 
     let explicit_metadata = analyze(&[ModuleInput::new(
         "explicit-metadata.orna",
-        "pub fn integer() = sys.meta<Int>(1); pub fn text() = sys.meta<Str>(\"value\"); pub fn generic<T>(value: T) = sys.meta<T>(value); pub fn piped() = 1 | sys.meta<Int>(); pub fn money() = 1 | Money<GBP>();",
+        include_str!("fixtures/inline-semantic_graph/da5d20668255.orna"),
     )]);
     assert!(
         explicit_metadata.is_ok(),
@@ -3387,10 +3242,10 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
     ));
 
     for source in [
-        "fn mismatch() = sys.meta<Str>(1);",
-        "fn unknown() = sys.meta<Missing>(1);",
-        "fn too_many() = sys.meta<Int, Str>(1);",
-        "fn incompatible_pipeline() = 1 | sys.meta<Str>();",
+        include_str!("fixtures/inline-semantic_graph/8a231b7f0234.orna"),
+        include_str!("fixtures/inline-semantic_graph/a56f3231162f.orna"),
+        include_str!("fixtures/inline-semantic_graph/b6e52055a4d6.orna"),
+        include_str!("fixtures/inline-semantic_graph/bff06d6a5b7c.orna"),
     ] {
         let rejected = analyze(&[ModuleInput::new("invalid-explicit-metadata.orna", source)]);
         assert!(
@@ -3402,7 +3257,7 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
 
     let invalid_metadata = analyze(&[ModuleInput::new(
         "unsupported-sys.orna",
-        "fn metadata() = sys.meta(value: 1, extra: 2);",
+        include_str!("fixtures/inline-semantic_graph/671e04bbded9.orna"),
     )]);
     assert!(
         has(&invalid_metadata, DIAG_TYPE),
@@ -3412,7 +3267,7 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
 
     let invalid_label = analyze(&[ModuleInput::new(
         "invalid-metadata-label.orna",
-        "fn metadata() = sys.meta(other: 1);",
+        include_str!("fixtures/inline-semantic_graph/3d892d7310cd.orna"),
     )]);
     assert!(
         has(&invalid_label, DIAG_TYPE),
@@ -3422,7 +3277,7 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
 
     let invalid_value = analyze(&[ModuleInput::new(
         "invalid-metadata-value.orna",
-        "fn metadata() = sys.meta(missing);",
+        include_str!("fixtures/inline-semantic_graph/8fcd56f0b5d4.orna"),
     )]);
     assert!(
         has(&invalid_value, DIAG_UNRESOLVED),
@@ -3436,8 +3291,8 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
     ));
 
     for source in [
-        "fn absent_on_view() = sys.database.legacy_member;",
-        "fn absent_on_row(failure: sys.Failure) = failure.legacy_member;",
+        include_str!("fixtures/inline-semantic_graph/3cc09ee1d5c1.orna"),
+        include_str!("fixtures/inline-semantic_graph/f67da7274e96.orna"),
     ] {
         let rejected = analyze(&[ModuleInput::new("unsupported-sys.orna", source)]);
         assert!(
@@ -3452,7 +3307,7 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
 fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls() {
     let valid = analyze(&[ModuleInput::new(
         "await-generic.orna",
-        "pub fn awaited(failure: sys.Failure) = sys.await(sys.admin.replay_failure(failure.reference, expected_version: failure.version));",
+        include_str!("fixtures/inline-semantic_graph/b7b19990d4e5.orna"),
     )]);
     assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
     let awaited = &valid.modules.values().next().unwrap().exports["awaited"];
@@ -3470,7 +3325,7 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
 
     let typed = analyze(&[ModuleInput::new(
         "await-generic-typed.orna",
-        "pub fn omitted(job: sys.InvocationHandle<Int>) = sys.await(invocation: job); pub fn null_timeout(job: sys.InvocationHandle<Int>) = sys.await(job, null); pub fn duration_timeout(job: sys.InvocationHandle<Int>) = sys.await(job, timeout: 1.s); pub fn explicit(job: sys.InvocationHandle<Int>) = sys.await<Int>(job); pub fn explicit_named(job: sys.InvocationHandle<Int>) = sys.await<Int>(invocation: job, timeout: null); pub fn local_generic<T>(job: sys.InvocationHandle<T>) = sys.await<T>(job);",
+        include_str!("fixtures/inline-semantic_graph/ef89978ed4a6.orna"),
     )]);
     assert!(typed.is_ok(), "{:#?}", typed.diagnostics);
     let typed = typed.modules.values().next().unwrap();
@@ -3513,14 +3368,14 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
     assert!(local_generic.effects.may_fail);
 
     for source in [
-        "fn missing() = sys.await();",
-        "fn wrong() = sys.await(1);",
-        "fn duplicate(job: sys.InvocationHandle<Int>) = sys.await(job, invocation: job);",
-        "fn wrong_label(failure: sys.Failure) = sys.await(job: sys.admin.replay_failure(failure.reference, expected_version: failure.version));",
-        "fn wrong_timeout(failure: sys.Failure) = sys.await(sys.admin.replay_failure(failure.reference, expected_version: failure.version), deadline: null);",
-        "fn positional_after_named(job: sys.InvocationHandle<Int>) = sys.await(invocation: job, null);",
-        "fn extra_generic(job: sys.InvocationHandle<Int>) = sys.await<Int, Str>(job);",
-        "fn mismatched_generic(job: sys.InvocationHandle<Int>) = sys.await<Str>(job);",
+        include_str!("fixtures/inline-semantic_graph/5a322d215d12.orna"),
+        include_str!("fixtures/inline-semantic_graph/c6eb946e8d56.orna"),
+        include_str!("fixtures/inline-semantic_graph/aa60b21ff645.orna"),
+        include_str!("fixtures/inline-semantic_graph/7d5ac0848574.orna"),
+        include_str!("fixtures/inline-semantic_graph/1f027a728b4b.orna"),
+        include_str!("fixtures/inline-semantic_graph/1a2ead28189c.orna"),
+        include_str!("fixtures/inline-semantic_graph/4a56f6b09b69.orna"),
+        include_str!("fixtures/inline-semantic_graph/8b9ef94631ca.orna"),
     ] {
         let rejected = analyze(&[ModuleInput::new("await-generic-invalid.orna", source)]);
         assert!(
@@ -3532,7 +3387,7 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
 
     let empty_generic = analyze(&[ModuleInput::new(
         "await-generic-invalid.orna",
-        "fn empty_generic(job: sys.InvocationHandle<Int>) = sys.await<>(job);",
+        include_str!("fixtures/inline-semantic_graph/0c4df1af2baa.orna"),
     )]);
     assert!(
         has(&empty_generic, "ORNA-S000-PARSE"),
@@ -3542,7 +3397,7 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
 
     let unknown_generic = analyze(&[ModuleInput::new(
         "await-generic-invalid.orna",
-        "fn unknown_generic(job: sys.InvocationHandle<Int>) = sys.await<U>(job);",
+        include_str!("fixtures/inline-semantic_graph/5e577c07bdbf.orna"),
     )]);
     assert!(
         has(&unknown_generic, DIAG_TYPE),
@@ -3552,7 +3407,7 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
 
     let malformed_cancel = analyze(&[ModuleInput::new(
         "cancel-generic-invalid.orna",
-        "fn unsupported(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(missing);",
+        include_str!("fixtures/inline-semantic_graph/e0385a574e3a.orna"),
     )]);
     assert!(
         has(&malformed_cancel, DIAG_UNRESOLVED),
@@ -3567,7 +3422,7 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
 
     let mismatched_generic = analyze(&[ModuleInput::new(
         "await-generic-unsupported.orna",
-        "fn mismatched(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(1);",
+        include_str!("fixtures/inline-semantic_graph/a78dbf203c9b.orna"),
     )]);
     assert!(
         has(&mismatched_generic, DIAG_TYPE),
@@ -3577,7 +3432,7 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
 
     let already_error = analyze(&[ModuleInput::new(
         "await-generic-error.orna",
-        "fn invalid() = sys.await(missing);",
+        include_str!("fixtures/inline-semantic_graph/18fbe5fbb6e1.orna"),
     )]);
     assert!(
         has(&already_error, DIAG_UNRESOLVED),
@@ -3595,20 +3450,7 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
 fn sys_cancel_infers_and_validates_the_invocation_handle_result_type() {
     let valid = analyze(&[ModuleInput::new(
         "cancel-generic.orna",
-        r#"
-            pub fn inferred(job: sys.InvocationHandle<Int>) = sys.cancel(job);
-            pub fn positional(job: sys.InvocationHandle<Int>) = sys.cancel(job, "stop");
-            pub fn positional_null(job: sys.InvocationHandle<Int>) = sys.cancel(job, null);
-            pub fn positional_explicit(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(job, "stop");
-            pub fn explicit(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(job, reason: "stop");
-            pub fn named(job: sys.InvocationHandle<Int>) = sys.cancel(invocation: job, reason: null);
-            pub fn local_generic<T>(job: sys.InvocationHandle<T>) = sys.cancel<T>(job);
-            pub fn piped(job: sys.InvocationHandle<Int>) = job | sys.cancel();
-            pub fn piped_positional(job: sys.InvocationHandle<Int>) = job | sys.cancel("stop");
-            pub fn piped_positional_null(job: sys.InvocationHandle<Int>) = job | sys.cancel(null);
-            pub fn piped_positional_explicit(job: sys.InvocationHandle<Int>) = job | sys.cancel<Int>("stop");
-            pub fn piped_explicit(job: sys.InvocationHandle<Int>) = job | sys.cancel<Int>(reason: "stop");
-        "#,
+        include_str!("fixtures/inline-semantic_graph/131a63b72fbd.orna"),
     )]);
     assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
     let module = valid.modules.values().next().unwrap();
@@ -3641,40 +3483,43 @@ fn sys_cancel_infers_and_validates_the_invocation_handle_result_type() {
     for (name, source) in [
         (
             "missing",
-            "fn missing(job: sys.InvocationHandle<Int>) = sys.cancel(reason: \"stop\");",
+            include_str!("fixtures/inline-semantic_graph/9ba8c6cf8261.orna"),
         ),
-        ("wrong_handle", "fn wrong_handle() = sys.cancel(1);"),
+        (
+            "wrong_handle",
+            include_str!("fixtures/inline-semantic_graph/7c420bb274eb.orna"),
+        ),
         (
             "wrong_reason",
-            "fn wrong_reason(job: sys.InvocationHandle<Int>) = sys.cancel(job, 1);",
+            include_str!("fixtures/inline-semantic_graph/8851fd64f79c.orna"),
         ),
         (
             "mismatched_generic",
-            "fn mismatched_generic(job: sys.InvocationHandle<Int>) = sys.cancel<Str>(job);",
+            include_str!("fixtures/inline-semantic_graph/cd68f64316ae.orna"),
         ),
         (
             "unknown_generic",
-            "fn unknown_generic(job: sys.InvocationHandle<Int>) = sys.cancel<Missing>(job);",
+            include_str!("fixtures/inline-semantic_graph/1d938f9387fd.orna"),
         ),
         (
             "extra_generic",
-            "fn extra_generic(job: sys.InvocationHandle<Int>) = sys.cancel<Int, Str>(job);",
+            include_str!("fixtures/inline-semantic_graph/1b3048164a64.orna"),
         ),
         (
             "duplicate",
-            "fn duplicate(job: sys.InvocationHandle<Int>) = sys.cancel(job, invocation: job);",
+            include_str!("fixtures/inline-semantic_graph/516ec625cceb.orna"),
         ),
         (
             "unknown_label",
-            "fn unknown_label(job: sys.InvocationHandle<Int>) = sys.cancel(job, why: \"stop\");",
+            include_str!("fixtures/inline-semantic_graph/efd83b5f37e7.orna"),
         ),
         (
             "positional_after_named",
-            "fn positional_after_named(job: sys.InvocationHandle<Int>) = sys.cancel(invocation: job, null);",
+            include_str!("fixtures/inline-semantic_graph/10633c1b7837.orna"),
         ),
         (
             "pipeline_positional_after_named",
-            "fn pipeline_positional_after_named(job: sys.InvocationHandle<Int>) = job | sys.cancel(reason: \"stop\", null);",
+            include_str!("fixtures/inline-semantic_graph/bf067a7cd5eb.orna"),
         ),
     ] {
         let rejected = analyze(&[ModuleInput::new("cancel-generic-invalid.orna", source)]);
@@ -3700,20 +3545,7 @@ fn sys_invoke_typed_admission_substitutes_the_explicit_result_witness() {
     // `sys.Value`. ORNA-SYS-039: the invoke effect remains conservative.
     let valid = analyze(&[ModuleInput::new(
         "invoke-generic.orna",
-        r#"
-            pub fn positional(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.invoke<Int>(function, arguments, as: Int);
-            pub fn named(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.invoke(function: function, arguments: arguments, as: Int,
-                    at: null, transaction: sys.InvokeTransaction.inherit,
-                    idempotency_key: null);
-            pub fn local_generic<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.invoke<T>(function, arguments, as: T);
-            pub fn piped(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                function | sys.invoke<Int>(arguments, as: Int);
-            pub fn erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.invoke(function, arguments);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/5dc672934689.orna"),
     )]);
     assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
     let module = valid.modules.values().next().unwrap();
@@ -3754,58 +3586,58 @@ fn sys_invoke_typed_admission_substitutes_the_explicit_result_witness() {
     for (name, source, message) in [
         (
             "missing",
-            "fn missing(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, arguments);",
-            "typed sys.invoke requires an explicit as: T witness",
+            include_str!("fixtures/inline-semantic_graph/c2cef1f532cf.orna"),
+            include_str!("fixtures/inline-semantic_graph/bfc6f8ead90d.orna"),
         ),
         (
             "malformed",
-            "fn malformed(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, arguments, as: 1);",
+            include_str!("fixtures/inline-semantic_graph/7a38ea6a06cc.orna"),
             "sys.invoke as: witness must name a known static type",
         ),
         (
             "mismatched",
-            "fn mismatched(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Str>(function, arguments, as: Int);",
-            "sys.invoke explicit type argument must match the as: witness",
+            include_str!("fixtures/inline-semantic_graph/e908908f288a.orna"),
+            include_str!("fixtures/inline-semantic_graph/42284b7f3426.orna"),
         ),
         (
             "extra_generic",
-            "fn extra_generic(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int, Str>(function, arguments, as: Int);",
-            "sys.invoke requires exactly one explicit type argument when generic arguments are supplied",
+            include_str!("fixtures/inline-semantic_graph/34d3dea337fc.orna"),
+            include_str!("fixtures/inline-semantic_graph/f1d092cfeeee.orna"),
         ),
         (
             "unknown_generic",
-            "fn unknown_generic(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Missing>(function, arguments, as: Int);",
-            "sys.invoke explicit type argument must name a known static type",
+            include_str!("fixtures/inline-semantic_graph/6304cc42595c.orna"),
+            include_str!("fixtures/inline-semantic_graph/5f46c9c50cc9.orna"),
         ),
         (
             "wrong_target",
-            "fn wrong_target(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(1, arguments, as: Int);",
-            "arguments do not match the portable sys.invoke<T> signature",
+            include_str!("fixtures/inline-semantic_graph/a3eda0e0b196.orna"),
+            include_str!("fixtures/inline-semantic_graph/6a35e14725fb.orna"),
         ),
         (
             "wrong_arguments",
-            "fn wrong_arguments(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, 1, as: Int);",
-            "arguments do not match the portable sys.invoke<T> signature",
+            include_str!("fixtures/inline-semantic_graph/d32a30130743.orna"),
+            include_str!("fixtures/inline-semantic_graph/6a35e14725fb.orna"),
         ),
         (
             "duplicate",
-            "fn duplicate(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, arguments, as: Int, as: Int);",
-            "sys.invoke requires exactly one explicit as: T witness",
+            include_str!("fixtures/inline-semantic_graph/6b4a9b8170c1.orna"),
+            include_str!("fixtures/inline-semantic_graph/3c3cd31bcb5b.orna"),
         ),
         (
             "unknown_label",
-            "fn unknown_label(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, arguments, as: Int, extra: null);",
-            "arguments do not match the portable sys.invoke<T> signature",
+            include_str!("fixtures/inline-semantic_graph/7c0e96f8aa53.orna"),
+            include_str!("fixtures/inline-semantic_graph/6a35e14725fb.orna"),
         ),
         (
             "positional_witness",
-            "fn positional_witness(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, arguments, Int);",
-            "typed sys.invoke requires an explicit as: T witness",
+            include_str!("fixtures/inline-semantic_graph/76f434b1a121.orna"),
+            include_str!("fixtures/inline-semantic_graph/bfc6f8ead90d.orna"),
         ),
         (
             "positional_after_named",
-            "fn positional_after_named(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, arguments: arguments, as: Int, null);",
-            "arguments do not match the portable sys.invoke<T> signature",
+            include_str!("fixtures/inline-semantic_graph/bdf4713fbd9e.orna"),
+            include_str!("fixtures/inline-semantic_graph/6a35e14725fb.orna"),
         ),
     ] {
         let rejected = analyze(&[ModuleInput::new("invoke-generic-invalid.orna", source)]);
@@ -3834,16 +3666,7 @@ fn sys_invoke_typed_admission_substitutes_the_explicit_result_witness() {
 fn sys_start_typed_admission_requires_a_matching_result_witness_and_exact_shape() {
     let valid = analyze(&[ModuleInput::new(
         "start-generic.orna",
-        r#"
-            pub fn positional(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.start<Int>(function, arguments, as: Int);
-            pub fn named(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.start(function: function, arguments: arguments, as: Int,
-                    at: null, transaction: sys.InvokeTransaction.separate,
-                    idempotency_key: null);
-            pub fn local_generic<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.start<T>(function, arguments, as: T);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/4a6d95bfd780.orna"),
     )]);
     assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
     let module = valid.modules.values().next().unwrap();
@@ -3881,58 +3704,58 @@ fn sys_start_typed_admission_requires_a_matching_result_witness_and_exact_shape(
     for (name, source, message) in [
         (
             "missing",
-            "fn missing(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, arguments);",
-            "typed sys.start requires an explicit as: T witness",
+            include_str!("fixtures/inline-semantic_graph/e99b32149776.orna"),
+            include_str!("fixtures/inline-semantic_graph/d06e822b49bc.orna"),
         ),
         (
             "malformed",
-            "fn malformed(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, arguments, as: 1);",
+            include_str!("fixtures/inline-semantic_graph/7c9b3341e7b2.orna"),
             "sys.start as: witness must name a known static type",
         ),
         (
             "mismatched",
-            "fn mismatched(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Str>(function, arguments, as: Int);",
-            "sys.start explicit type argument must match the as: witness",
+            include_str!("fixtures/inline-semantic_graph/a38ee8c93ed0.orna"),
+            include_str!("fixtures/inline-semantic_graph/2479d5f18ad6.orna"),
         ),
         (
             "extra_generic",
-            "fn extra_generic(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int, Str>(function, arguments, as: Int);",
-            "sys.start requires exactly one explicit type argument when generic arguments are supplied",
+            include_str!("fixtures/inline-semantic_graph/44cd4c172bb3.orna"),
+            include_str!("fixtures/inline-semantic_graph/42115eb1cd4c.orna"),
         ),
         (
             "unknown_generic",
-            "fn unknown_generic(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Missing>(function, arguments, as: Int);",
-            "sys.start explicit type argument must name a known static type",
+            include_str!("fixtures/inline-semantic_graph/2460b60192c9.orna"),
+            include_str!("fixtures/inline-semantic_graph/a83f09501fe0.orna"),
         ),
         (
             "wrong_target",
-            "fn wrong_target(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(1, arguments, as: Int);",
-            "arguments do not match the portable sys.start<T> signature",
+            include_str!("fixtures/inline-semantic_graph/ce432c541d31.orna"),
+            include_str!("fixtures/inline-semantic_graph/4b037957cbf6.orna"),
         ),
         (
             "wrong_arguments",
-            "fn wrong_arguments(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, 1, as: Int);",
-            "arguments do not match the portable sys.start<T> signature",
+            include_str!("fixtures/inline-semantic_graph/b1a39516923e.orna"),
+            include_str!("fixtures/inline-semantic_graph/4b037957cbf6.orna"),
         ),
         (
             "duplicate",
-            "fn duplicate(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, arguments, as: Int, as: Int);",
-            "sys.start requires exactly one explicit as: T witness",
+            include_str!("fixtures/inline-semantic_graph/28db0b9bd6de.orna"),
+            include_str!("fixtures/inline-semantic_graph/f05087c7aa49.orna"),
         ),
         (
             "unknown_label",
-            "fn unknown_label(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, arguments, as: Int, extra: null);",
-            "arguments do not match the portable sys.start<T> signature",
+            include_str!("fixtures/inline-semantic_graph/e031f9dff073.orna"),
+            include_str!("fixtures/inline-semantic_graph/4b037957cbf6.orna"),
         ),
         (
             "positional_witness",
-            "fn positional_witness(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, arguments, Int);",
-            "typed sys.start requires an explicit as: T witness",
+            include_str!("fixtures/inline-semantic_graph/3f6ec0078410.orna"),
+            include_str!("fixtures/inline-semantic_graph/d06e822b49bc.orna"),
         ),
         (
             "positional_after_named",
-            "fn positional_after_named(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, arguments: arguments, as: Int, null);",
-            "arguments do not match the portable sys.start<T> signature",
+            include_str!("fixtures/inline-semantic_graph/43b21a3b6599.orna"),
+            include_str!("fixtures/inline-semantic_graph/4b037957cbf6.orna"),
         ),
     ] {
         let rejected = analyze(&[ModuleInput::new("start-generic-invalid.orna", source)]);
@@ -3961,14 +3784,7 @@ fn sys_start_typed_admission_requires_a_matching_result_witness_and_exact_shape(
 fn sys_start_erased_admission_returns_a_value_handle_without_a_witness() {
     let valid = analyze(&[ModuleInput::new(
         "start-erased.orna",
-        r#"
-            pub fn positional(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.start(function, arguments);
-            pub fn named(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
-                sys.start(function: function, arguments: arguments, at: null,
-                    transaction: sys.InvokeTransaction.separate,
-                    idempotency_key: null);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/57c6974dffb2.orna"),
     )]);
     assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
     let module = valid.modules.values().next().unwrap();
@@ -3991,7 +3807,7 @@ fn sys_start_erased_admission_returns_a_value_handle_without_a_witness() {
 
     let invalid = analyze(&[ModuleInput::new(
         "start-erased-invalid.orna",
-        "fn positional_after_named(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start(function: function, arguments: arguments, null);",
+        include_str!("fixtures/inline-semantic_graph/2eea1d98d28a.orna"),
     )]);
     assert!(has(&invalid, DIAG_TYPE), "{:#?}", invalid.diagnostics);
     let symbol = &invalid.modules.values().next().unwrap().symbols["positional_after_named"];
@@ -4005,7 +3821,7 @@ fn sys_start_erased_admission_returns_a_value_handle_without_a_witness() {
 fn sys_start_generic_pipeline_preserves_handle_type_and_rejects_bad_shape() {
     let valid = analyze(&[ModuleInput::new(
         "start-generic-pipeline.orna",
-        "pub fn piped(function: sys.FunctionRef, arguments: sys.ArgumentMap) = function | sys.start<Int>(arguments, as: Int);",
+        include_str!("fixtures/inline-semantic_graph/cf3e62b9414b.orna"),
     )]);
     assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
     let piped = &valid.modules.values().next().unwrap().exports["piped"];
@@ -4026,18 +3842,18 @@ fn sys_start_generic_pipeline_preserves_handle_type_and_rejects_bad_shape() {
     for (name, source, message) in [
         (
             "malformed",
-            "fn malformed(function: sys.FunctionRef, arguments: sys.ArgumentMap) = function | sys.start<Int>(arguments, as: 1);",
+            include_str!("fixtures/inline-semantic_graph/1a1a7ae41918.orna"),
             "sys.start as: witness must name a known static type",
         ),
         (
             "mismatched",
-            "fn mismatched(function: sys.FunctionRef, arguments: sys.ArgumentMap) = function | sys.start<Str>(arguments, as: Int);",
-            "sys.start explicit type argument must match the as: witness",
+            include_str!("fixtures/inline-semantic_graph/785be4b8742f.orna"),
+            include_str!("fixtures/inline-semantic_graph/2479d5f18ad6.orna"),
         ),
         (
             "positional_after_named",
-            "fn positional_after_named(function: sys.FunctionRef, arguments: sys.ArgumentMap) = function | sys.start<Int>(arguments: arguments, as: Int, null);",
-            "arguments do not match the portable sys.start<T> signature",
+            include_str!("fixtures/inline-semantic_graph/6bdb582bcf93.orna"),
+            include_str!("fixtures/inline-semantic_graph/4b037957cbf6.orna"),
         ),
     ] {
         let rejected = analyze(&[ModuleInput::new(
@@ -4068,12 +3884,15 @@ fn sys_start_generic_pipeline_preserves_handle_type_and_rejects_bad_shape() {
 #[test]
 fn replay_status_default_does_not_waive_the_version_precondition() {
     for expression in [
-        "sys.admin.replay_failure(failure.reference, expected_version: failure.version)",
-        "failure.reference | sys.admin.replay_failure(expected_version: failure.version)",
+        include_str!("fixtures/inline-semantic_graph/ac556f9fcdb2.orna"),
+        include_str!("fixtures/inline-semantic_graph/255e48187e5d.orna"),
     ] {
         let result = analyze(&[ModuleInput::new(
             "replay-default.orna",
-            format!("pub fn replay(failure: sys.Failure) = {expression};"),
+            render_source_fixture(
+                include_str!("fixtures/inline-semantic_graph/8522f29bf6a0.orna"),
+                &[("expression", &expression)],
+            ),
         )]);
         assert!(result.is_ok(), "{expression}: {:?}", result.diagnostics);
         let symbol = &result.modules.values().next().unwrap().exports["replay"];
@@ -4086,7 +3905,7 @@ fn replay_status_default_does_not_waive_the_version_precondition() {
     }
     let invalid = analyze(&[ModuleInput::new(
         "replay-default.orna",
-        "fn replay(failure: sys.Failure) = sys.admin.replay_failure(failure.reference);",
+        include_str!("fixtures/inline-semantic_graph/b14783de0409.orna"),
     )]);
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
 }
@@ -4095,18 +3914,19 @@ fn replay_status_default_does_not_waive_the_version_precondition() {
 fn callable_list_defaults_require_every_member_to_supply_a_default() {
     for (second, expected_defaults) in [
         (
-            "fn second(value: Int) = value;",
+            include_str!("fixtures/inline-semantic_graph/372391944cb0.orna"),
             std::collections::BTreeSet::new(),
         ),
         (
-            "fn second(value: Int = 2) = value;",
+            include_str!("fixtures/inline-semantic_graph/b8e818390e20.orna"),
             std::collections::BTreeSet::from([0]),
         ),
     ] {
         let result = analyze(&[ModuleInput::new(
             "callable-defaults.orna",
-            format!(
-                "fn first(value: Int = 1) = value; {second} pub fn callbacks() = [first, second];"
+            render_source_fixture(
+                include_str!("fixtures/inline-semantic_graph/28b3f043e08d.orna"),
+                &[("second", &second)],
             ),
         )]);
         assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -4131,11 +3951,15 @@ fn callable_list_defaults_require_every_member_to_supply_a_default() {
 
 #[test]
 fn default_expression_effects_remain_visible_on_the_callable() {
-    for annotation in ["", ": sys.SnapshotRef"] {
+    for annotation in [
+        "",
+        include_str!("fixtures/inline-semantic_graph/f9a2e5617e71.orna"),
+    ] {
         let result = analyze(&[ModuleInput::new(
             "effectful-default.orna",
-            format!(
-                "pub fn pinned(snapshot: sys.SnapshotRef = sys.snapshot(\"HEAD\")){annotation} = snapshot;"
+            render_source_fixture(
+                include_str!("fixtures/inline-semantic_graph/fe8f91f175b2.orna"),
+                &[("annotation", &annotation)],
             ),
         )]);
         assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -4148,26 +3972,66 @@ fn default_expression_effects_remain_visible_on_the_callable() {
 #[test]
 fn direct_and_piped_calls_share_argument_validation() {
     for (arguments, valid) in [
-        ("10, 20", true),
-        ("min: 10, max: 20", true),
-        ("max: 20, min: 10", true),
-        ("10, max: 20", true),
-        ("min: 10", false),
-        ("min: 10, min: 20", false),
-        ("min: 10, value: 20", false),
-        ("min: 10, unknown: 20", false),
-        ("true, 20", false),
-        ("10, 20, 30", false),
-        ("min: 10, 20", false),
+        (
+            include_str!("fixtures/inline-semantic_graph/9e6b37f1c1b4.orna"),
+            true,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/dddc1ad01257.orna"),
+            true,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/2afb1cc7bbac.orna"),
+            true,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/fd3ce0985d13.orna"),
+            true,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/30232b402f61.orna"),
+            false,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/b3f9678bc727.orna"),
+            false,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/18d2a02fe748.orna"),
+            false,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/f0e86db793a2.orna"),
+            false,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/5525d0931bf7.orna"),
+            false,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/097b535a5a20.orna"),
+            false,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/1d4b3b2cbe9a.orna"),
+            false,
+        ),
     ] {
         for expression in [
-            format!("between(1, {arguments})"),
-            format!("1 | between({arguments})"),
+            render_source_fixture(
+                include_str!("fixtures/inline-semantic_graph/6c9762998de2.orna"),
+                &[("arguments", &arguments)],
+            ),
+            render_source_fixture(
+                include_str!("fixtures/inline-semantic_graph/3a5ee8f3394a.orna"),
+                &[("arguments", &arguments)],
+            ),
         ] {
             let result = analyze(&[ModuleInput::new(
                 "arguments.orna",
-                format!(
-                    "fn between(value: Int, min: Int, max: Int) = value >= min && value <= max; fn test() = {expression};"
+                render_source_fixture(
+                    include_str!("fixtures/inline-semantic_graph/b562c026bfb5.orna"),
+                    &[("expression", &expression)],
                 ),
             )]);
             assert_eq!(
@@ -4192,11 +4056,14 @@ fn logical_operators_require_boolean_operands_without_losing_effects() {
     for expression in [
         "true && false",
         "!false",
-        "sys.snapshot(\"HEAD\") == sys.snapshot(\"HEAD\") && true",
+        include_str!("fixtures/inline-semantic_graph/a46c1b44c0d3.orna"),
     ] {
         let result = analyze(&[ModuleInput::new(
             "logical-operators.orna",
-            format!("fn logical() = {expression};"),
+            render_source_fixture(
+                include_str!("fixtures/inline-semantic_graph/857baac217a5.orna"),
+                &[("expression", &expression)],
+            ),
         )]);
         assert!(result.is_ok(), "{expression}: {:?}", result.diagnostics);
         if expression.contains("snapshot") {
@@ -4209,7 +4076,10 @@ fn logical_operators_require_boolean_operands_without_losing_effects() {
     for expression in ["1 && true", "!1"] {
         let result = analyze(&[ModuleInput::new(
             "logical-operators.orna",
-            format!("fn logical() = {expression};"),
+            render_source_fixture(
+                include_str!("fixtures/inline-semantic_graph/857baac217a5.orna"),
+                &[("expression", &expression)],
+            ),
         )]);
         assert!(
             has(&result, DIAG_TYPE),
@@ -4223,7 +4093,7 @@ fn logical_operators_require_boolean_operands_without_losing_effects() {
 fn generic_and_table_pipeline_stages_remain_fail_closed() {
     let result = analyze(&[ModuleInput::new(
         "unsupported.orna",
-        "table Books(id: Int) { title: Str, } fn use_books() = 1 | Books;",
+        include_str!("fixtures/inline-semantic_graph/4956b70d7435.orna"),
     )]);
 
     assert!(has(&result, DIAG_UNSUPPORTED));
@@ -4233,7 +4103,7 @@ fn generic_and_table_pipeline_stages_remain_fail_closed() {
 fn stream_from_list_requires_the_closed_named_identity_argument() {
     let result = analyze(&[ModuleInput::new(
         "invalid.orna",
-        "fn input() = Stream.from_list([1], identity: \"fixture\");",
+        include_str!("fixtures/inline-semantic_graph/398c459ce5c0.orna"),
     )]);
 
     assert!(has(&result, DIAG_TYPE));
@@ -4243,11 +4113,7 @@ fn stream_from_list_requires_the_closed_named_identity_argument() {
 fn authoritative_ranges_fixture_accepts_numeric_membership_and_integer_list_slices() {
     let result = analyze(&[ModuleInput::new(
         "ranges.orna",
-        r#"
-            pub fn inside(value: Int) = value in 1..=5;
-            pub fn first_ten(values: [Int]) = values | take(10);
-            pub fn after_ten(values: [Int]) = values | drop(10);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/046edb1d0919.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -4268,15 +4134,30 @@ fn authoritative_ranges_fixture_accepts_numeric_membership_and_integer_list_slic
     ));
 
     let invalid = analyze(&[
-        ModuleInput::new("text-range.orna", "fn bad() = \"a\"..\"z\";"),
+        ModuleInput::new(
+            "text-range.orna",
+            include_str!("fixtures/inline-semantic_graph/2e56c757bf25.orna"),
+        ),
         ModuleInput::new(
             "table-take.orna",
-            "table Reading(id: Int) { value: Int, } fn bad() = Reading | take(0..10);",
+            include_str!("fixtures/inline-semantic_graph/4dcd6c2c94b3.orna"),
         ),
-        ModuleInput::new("range-take.orna", "fn bad() = [1, 2, 3] | take(0..10.5);"),
-        ModuleInput::new("negative-take.orna", "fn bad() = [1, 2, 3] | take(-1);"),
-        ModuleInput::new("range-drop.orna", "fn bad() = [1, 2, 3] | drop(0..10.5);"),
-        ModuleInput::new("negative-drop.orna", "fn bad() = [1, 2, 3] | drop(-1);"),
+        ModuleInput::new(
+            "range-take.orna",
+            include_str!("fixtures/inline-semantic_graph/2cb7cb735e6e.orna"),
+        ),
+        ModuleInput::new(
+            "negative-take.orna",
+            include_str!("fixtures/inline-semantic_graph/2eb13241faf0.orna"),
+        ),
+        ModuleInput::new(
+            "range-drop.orna",
+            include_str!("fixtures/inline-semantic_graph/0d4905b468e6.orna"),
+        ),
+        ModuleInput::new(
+            "negative-drop.orna",
+            include_str!("fixtures/inline-semantic_graph/ba795c386ab9.orna"),
+        ),
     ]);
     assert!(has(&invalid, DIAG_TYPE));
     assert!(has(&invalid, DIAG_UNSUPPORTED));
@@ -4286,10 +4167,7 @@ fn authoritative_ranges_fixture_accepts_numeric_membership_and_integer_list_slic
 fn authoritative_ranges_fixture_accepts_transparent_integer_range_slices() {
     let result = analyze(&[ModuleInput::new(
         "ranges.orna",
-        r#"
-            pub fn inside(value: Int) = value in 1..=5;
-            pub fn first_ten(values: [Int]) = values | take(0..10);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/2bd46722e949.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -4302,7 +4180,7 @@ fn authoritative_ranges_fixture_accepts_transparent_integer_range_slices() {
 
     let invalid = analyze(&[ModuleInput::new(
         "invalid-range-slice.orna",
-        "pub fn bad(values: [Int]) = values | take(0..10.5);",
+        include_str!("fixtures/inline-semantic_graph/a1d54ab7aa04.orna"),
     )]);
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
 }
@@ -4311,11 +4189,7 @@ fn authoritative_ranges_fixture_accepts_transparent_integer_range_slices() {
 fn finite_list_distinct_and_union_preserve_types_and_reject_invalid_inputs() {
     let valid = analyze(&[ModuleInput::new(
         "collections.orna",
-        r#"
-            pub fn dedupe(values: [Int]) = values | distinct;
-            pub fn combine(left: [Int], right: [Int]) = left | union(right);
-            pub fn combine_named(left: [Int], right: [Int]) = left | union(right: right);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/a4e284b50fb1.orna"),
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
     let module = valid.modules.values().next().unwrap();
@@ -4336,15 +4210,21 @@ fn finite_list_distinct_and_union_preserve_types_and_reject_invalid_inputs() {
     ));
 
     let invalid = analyze(&[
-        ModuleInput::new("float.orna", "fn bad(values: [Float]) = values | distinct;"),
+        ModuleInput::new(
+            "float.orna",
+            include_str!("fixtures/inline-semantic_graph/f609efc9c706.orna"),
+        ),
         ModuleInput::new(
             "mismatched.orna",
-            "fn bad(left: [Int], right: [Str]) = left | union(right);",
+            include_str!("fixtures/inline-semantic_graph/f4d2f53ab3ed.orna"),
         ),
-        ModuleInput::new("scalar.orna", "fn bad(values: [Int]) = values | union(1);"),
+        ModuleInput::new(
+            "scalar.orna",
+            include_str!("fixtures/inline-semantic_graph/f14c6f9540df.orna"),
+        ),
         ModuleInput::new(
             "relation.orna",
-            "table Reading(id: Int) { value: Int, } fn bad() = Reading | distinct;",
+            include_str!("fixtures/inline-semantic_graph/12425433bd49.orna"),
         ),
     ]);
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
@@ -4362,14 +4242,14 @@ fn finite_list_distinct_and_union_preserve_types_and_reject_invalid_inputs() {
 fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks() {
     let valid = analyze(&[ModuleInput::new(
         "relation-distinct.orna",
-        r#"
-            table Reading(id: Int) { value: Int, }
-            pub fn readings() = Reading | distinct();
-            pub fn direct() = distinct(Reading);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/d541b52cb1a8.orna"),
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
-    let module = valid.modules.values().next().expect("relation distinct module");
+    let module = valid
+        .modules
+        .values()
+        .next()
+        .expect("relation distinct module");
     let readings = &module.symbols["readings"];
     assert!(matches!(
         &readings.ty,
@@ -4390,15 +4270,11 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
     let catalogue_valid = analyze_with_catalogue(
         &[ModuleInput::new(
             "catalogue-relation-distinct.orna",
-            "pub fn readings() = energy.Reading | distinct();",
+            include_str!("fixtures/inline-semantic_graph/672b2330903b.orna"),
         )],
         &Catalogue::authoritative_fixture(),
     );
-    assert!(
-        catalogue_valid.is_ok(),
-        "{:?}",
-        catalogue_valid.diagnostics
-    );
+    assert!(catalogue_valid.is_ok(), "{:?}", catalogue_valid.diagnostics);
     let module = catalogue_valid
         .modules
         .values()
@@ -4419,7 +4295,7 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
 
     let relation_argument = analyze(&[ModuleInput::new(
         "relation-distinct-argument.orna",
-        "table Reading(id: Int) { value: Int, } fn bad() = Reading | distinct(1);",
+        include_str!("fixtures/inline-semantic_graph/4a6beb03bcb8.orna"),
     )]);
     assert!(
         has(&relation_argument, DIAG_UNSUPPORTED),
@@ -4429,13 +4305,13 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
 
     let scalar = analyze(&[ModuleInput::new(
         "scalar-distinct.orna",
-        "fn bad(value: Int) = value | distinct();",
+        include_str!("fixtures/inline-semantic_graph/b3b9826e3d10.orna"),
     )]);
     assert!(has(&scalar, DIAG_UNSUPPORTED), "{:?}", scalar.diagnostics);
 
     let float_list = analyze(&[ModuleInput::new(
         "float-list-distinct.orna",
-        "fn bad(values: [Float]) = values | distinct();",
+        include_str!("fixtures/inline-semantic_graph/2cc0ac814808.orna"),
     )]);
     assert!(has(&float_list, DIAG_TYPE), "{:?}", float_list.diagnostics);
     assert!(!float_list.is_ok(), "{:?}", float_list.diagnostics);
@@ -4445,12 +4321,7 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
 fn finite_list_filter_types_predicate_and_preserves_effects() {
     let valid = analyze(&[ModuleInput::new(
         "filter.orna",
-        r#"
-            table Reading(id: Int) { value: Int, }
-            pub fn positive(values: [Int]) = values | filter(value => value > 0);
-            pub fn positive_named(values: [Int]) = values | filter(predicate: value => value > 0);
-            pub fn reads(values: [Int]) = values | filter(value => Reading.count() > 0 && value > 0);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/ebaa746fc8f6.orna"),
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
     let module = valid.modules.values().next().expect("filter module");
@@ -4473,22 +4344,25 @@ fn finite_list_filter_types_predicate_and_preserves_effects() {
 #[test]
 fn finite_list_filter_rejects_wrong_callback_shape_without_affecting_relations() {
     let invalid = analyze(&[
-        ModuleInput::new("arity.orna", "fn bad(values: [Int]) = values | filter;"),
+        ModuleInput::new(
+            "arity.orna",
+            include_str!("fixtures/inline-semantic_graph/8ac44df17930.orna"),
+        ),
         ModuleInput::new(
             "too-many.orna",
-            "fn bad(values: [Int]) = values | filter(value => value > 0, value => true);",
+            include_str!("fixtures/inline-semantic_graph/88ab58ea5e4a.orna"),
         ),
         ModuleInput::new(
             "wrong-result.orna",
-            "fn bad(values: [Int]) = values | filter(value => value + 1);",
+            include_str!("fixtures/inline-semantic_graph/da7a7f4b5dc9.orna"),
         ),
         ModuleInput::new(
             "wrong-name.orna",
-            "fn bad(values: [Int]) = values | filter(test: value => value > 0);",
+            include_str!("fixtures/inline-semantic_graph/0e552f81e3ee.orna"),
         ),
         ModuleInput::new(
             "wrong-parameter.orna",
-            "fn bad(values: [Int]) = values | filter((left, right) => left > right);",
+            include_str!("fixtures/inline-semantic_graph/24e714ddd56c.orna"),
         ),
     ]);
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
@@ -4496,7 +4370,7 @@ fn finite_list_filter_rejects_wrong_callback_shape_without_affecting_relations()
 
     let relation = analyze(&[ModuleInput::new(
         "relation.orna",
-        "table Reading(id: Int) { value: Int, } fn recent() = Reading | filter(reading => reading.value > 0);",
+        include_str!("fixtures/inline-semantic_graph/ebabcc0f91fe.orna"),
     )]);
     assert!(relation.is_ok(), "{:?}", relation.diagnostics);
     let module = relation.modules.values().next().expect("relation module");
@@ -4512,15 +4386,7 @@ fn finite_list_map_and_flat_map_preserve_list_types_and_callback_effects() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "map.orna",
-            r#"
-            table Reading(id: Int) { value: Int, }
-            fn increment(value: Int) = value + 1;
-            pub fn direct(values: [Int]) = std.collection.map(values, increment);
-            pub fn pipeline(values: [Int]) = values | std.collection.map(transform: value => value + 1);
-            pub fn named(values: [Int]) = std.collection.map(transform: value => value + 1, rows: values);
-            pub fn flattened(values: [Int]) = std.collection.flat_map(rows: values, transform: value => [value, value + 1]);
-            pub fn reads(values: [Int]) = std.collection.map(values, value => Reading.count() + value);
-        "#,
+            include_str!("fixtures/inline-semantic_graph/167a254e0171.orna"),
         )],
         &collection_catalogue(),
     );
@@ -4552,23 +4418,23 @@ fn finite_list_map_and_flat_map_reject_invalid_callbacks_and_collections() {
     let invalid = analyze(&[
         ModuleInput::new(
             "wrong-result.orna",
-            "fn bad(values: [Int]) = std.collection.flat_map(values, value => value + 1);",
+            include_str!("fixtures/inline-semantic_graph/9f0b159601ca.orna"),
         ),
         ModuleInput::new(
             "wrong-arity.orna",
-            "fn bad(values: [Int]) = std.collection.map(values, (left, right) => left + right);",
+            include_str!("fixtures/inline-semantic_graph/ed6057c5f866.orna"),
         ),
         ModuleInput::new(
             "wrong-name.orna",
-            "fn bad(values: [Int]) = std.collection.map(rows: values, callback: value => value);",
+            include_str!("fixtures/inline-semantic_graph/637075f9d858.orna"),
         ),
         ModuleInput::new(
             "wrong-collection.orna",
-            "fn bad() = std.collection.map(1, value => value);",
+            include_str!("fixtures/inline-semantic_graph/c5f3196baa1f.orna"),
         ),
         ModuleInput::new(
             "pipeline-shape.orna",
-            "fn bad(values: [Int]) = values | std.collection.flat_map(rows: values, transform: value => [value]);",
+            include_str!("fixtures/inline-semantic_graph/5acf0d21e70d.orna"),
         ),
     ]);
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
@@ -4576,7 +4442,7 @@ fn finite_list_map_and_flat_map_reject_invalid_callbacks_and_collections() {
 
     let relation = analyze(&[ModuleInput::new(
         "relation.orna",
-        "table Reading(id: Int) { value: Int, } fn mapped() = Reading | map(reading => reading.value);",
+        include_str!("fixtures/inline-semantic_graph/030cd0bb5ee7.orna"),
     )]);
     assert!(relation.is_ok(), "{:?}", relation.diagnostics);
     let module = relation.modules.values().next().expect("relation module");
@@ -4592,15 +4458,7 @@ fn finite_list_sort_by_admits_direct_pipeline_and_named_keys() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "sort-by.orna",
-            r#"
-            table Reading(id: Int) { value: Int, }
-            fn float_key(value: Int): Float = 0.0f;
-            pub fn direct(values: [Int]) = sort_by(values, value => value);
-            pub fn pipeline(values: [Int]) = values | sort_by(value => value);
-            pub fn named(values: [Int]) = sort_by(key: float_key, rows: values);
-            pub fn qualified(values: [Int]) = std.collection.sort_by(rows: values, key: float_key);
-            pub fn reads(values: [Int]) = values | sort_by(key: value => Reading.count() + value);
-        "#,
+            include_str!("fixtures/inline-semantic_graph/ad544da997bc.orna"),
         )],
         &collection_catalogue(),
     );
@@ -4627,30 +4485,33 @@ fn finite_list_sort_by_admits_direct_pipeline_and_named_keys() {
 fn finite_list_sort_by_rejects_bad_callbacks_keys_and_boundaries() {
     let invalid = analyze_with_catalogue(
         &[
-            ModuleInput::new("missing.orna", "fn bad(values: [Int]) = values | sort_by;"),
+            ModuleInput::new(
+                "missing.orna",
+                include_str!("fixtures/inline-semantic_graph/f3cc30dbe47c.orna"),
+            ),
             ModuleInput::new(
                 "wrong-arity.orna",
-                "fn bad(values: [Int]) = values | sort_by(value => value, value => value);",
+                include_str!("fixtures/inline-semantic_graph/f3b573c70fd0.orna"),
             ),
             ModuleInput::new(
                 "wrong-name.orna",
-                "fn bad(values: [Int]) = values | sort_by(transform: value => value);",
+                include_str!("fixtures/inline-semantic_graph/f60c136a881e.orna"),
             ),
             ModuleInput::new(
                 "wrong-parameter.orna",
-                "fn bad(values: [Int]) = values | sort_by((left, right) => left);",
+                include_str!("fixtures/inline-semantic_graph/e5a285cdc8cb.orna"),
             ),
             ModuleInput::new(
                 "wrong-key.orna",
-                "fn bad(values: [Int]) = values | sort_by(value => [value]);",
+                include_str!("fixtures/inline-semantic_graph/64921356cc6f.orna"),
             ),
             ModuleInput::new(
                 "wrong-annotation.orna",
-                "fn bad(values: [Int]) = values | sort_by((value: Str) => value);",
+                include_str!("fixtures/inline-semantic_graph/d7cb57c731c9.orna"),
             ),
             ModuleInput::new(
                 "relation.orna",
-                "table Reading(id: Int) { value: Int, } fn bad() = sort_by(Reading, reading => reading.value);",
+                include_str!("fixtures/inline-semantic_graph/6911644978f0.orna"),
             ),
         ],
         &collection_catalogue(),
@@ -4661,7 +4522,7 @@ fn finite_list_sort_by_rejects_bad_callbacks_keys_and_boundaries() {
     let unprofiled = analyze_with_catalogue(
         &[ModuleInput::new(
             "unprofiled.orna",
-            "fn bad(values: [Int]) = std.collection.sort_by(values, value => value);",
+            include_str!("fixtures/inline-semantic_graph/d58035e5f3f6.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -4677,14 +4538,7 @@ fn finite_list_first_returns_an_optional_element_for_all_supported_call_forms() 
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "first.orna",
-            r#"
-            pub fn direct(rows: [Int]) = first(rows);
-            pub fn pipeline(rows: [Int]) = rows | first();
-            pub fn named(rows: [Int]) = first(rows: rows);
-            pub fn qualified(rows: [Int]) = std.collection.first(rows);
-            pub fn qualified_pipeline(rows: [Int]) = rows | std.collection.first();
-            pub fn qualified_named(rows: [Int]) = std.collection.first(rows: rows);
-        "#,
+            include_str!("fixtures/inline-semantic_graph/d3e9b7a21e1f.orna"),
         )],
         &collection_catalogue(),
     );
@@ -4715,35 +4569,40 @@ fn finite_list_first_returns_an_optional_element_for_all_supported_call_forms() 
 #[test]
 fn finite_list_first_rejects_invalid_arity_names_and_types_without_changing_relation_members() {
     let invalid = analyze(&[
-        ModuleInput::new("arity.orna", "fn bad(rows: [Int]) = first();"),
-        ModuleInput::new("extra.orna", "fn bad(rows: [Int]) = first(rows, rows);"),
+        ModuleInput::new(
+            "arity.orna",
+            include_str!("fixtures/inline-semantic_graph/b63bd4a335bc.orna"),
+        ),
+        ModuleInput::new(
+            "extra.orna",
+            include_str!("fixtures/inline-semantic_graph/44011e7d1fba.orna"),
+        ),
         ModuleInput::new(
             "unknown-name.orna",
-            "fn bad(rows: [Int]) = first(values: rows);",
+            include_str!("fixtures/inline-semantic_graph/bf90750f6163.orna"),
         ),
-        ModuleInput::new("wrong-type.orna", "fn bad() = first(1);"),
+        ModuleInput::new(
+            "wrong-type.orna",
+            include_str!("fixtures/inline-semantic_graph/1aa5439d22c8.orna"),
+        ),
         ModuleInput::new(
             "pipeline-argument.orna",
-            "fn bad(rows: [Int]) = rows | first(1);",
+            include_str!("fixtures/inline-semantic_graph/232074d43014.orna"),
         ),
         ModuleInput::new(
             "pipeline-row-name.orna",
-            "fn bad(rows: [Int]) = rows | first(rows: rows);",
+            include_str!("fixtures/inline-semantic_graph/1f43f9b2b0eb.orna"),
         ),
         ModuleInput::new(
             "qualified-name.orna",
-            "fn bad(rows: [Int]) = std.collection.first(values: rows);",
+            include_str!("fixtures/inline-semantic_graph/4704221c1646.orna"),
         ),
     ]);
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
 
     let relation = analyze(&[ModuleInput::new(
         "relation-first.orna",
-        r#"
-            table Reading(id: Int) { value: Int, }
-            pub fn first_reading() = Reading.first();
-            pub fn first_pipeline() = Reading | first();
-        "#,
+        include_str!("fixtures/inline-semantic_graph/720dee153345.orna"),
     )]);
     assert!(relation.is_ok(), "{:?}", relation.diagnostics);
     let module = relation.modules.values().next().expect("relation module");
@@ -4769,15 +4628,15 @@ fn finite_list_first_rejects_invalid_arity_names_and_types_without_changing_rela
     let invalid_relation = analyze(&[
         ModuleInput::new(
             "relation-first-arity.orna",
-            "table Reading(id: Int) { value: Int, } fn bad() = Reading | first(1);",
+            include_str!("fixtures/inline-semantic_graph/e9996c4ee0d4.orna"),
         ),
         ModuleInput::new(
             "relation-first-name.orna",
-            "table Reading(id: Int) { value: Int, } fn bad() = Reading | first(rows: Reading);",
+            include_str!("fixtures/inline-semantic_graph/d3aae47fa6dc.orna"),
         ),
         ModuleInput::new(
             "relation-first-unknown.orna",
-            "table Reading(id: Int) { value: Int, } fn bad() = Reading | first(extra: 1);",
+            include_str!("fixtures/inline-semantic_graph/176d56995eda.orna"),
         ),
     ]);
     assert!(
@@ -4792,21 +4651,7 @@ fn finite_list_one_returns_exactly_the_element_type_and_preserves_callback_effec
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "one.orna",
-            r#"
-            table Reading(id: Int) { value: Int, }
-            fn positive(value: Int) = value > 0;
-            fn reads_predicate(value: Int) = Reading.count() > 0 && value > 0;
-            pub fn direct(rows: [Int]) = one(rows);
-            pub fn direct_named(rows: [Int]) = one(rows: rows);
-            pub fn direct_predicate(rows: [Int]) = one(rows, positive);
-            pub fn unused_predicate(rows: [Int]) = one(rows, value => true);
-            pub fn qualified(rows: [Int]) = std.collection.one(rows: rows, predicate: positive);
-            pub fn pipeline(rows: [Int]) = rows | one();
-            pub fn pipeline_predicate(rows: [Int]) = rows | one(positive);
-            pub fn qualified_pipeline(rows: [Int]) = rows | std.collection.one(predicate: positive);
-            pub fn reads(rows: [Int]) = rows | one(predicate: value => Reading.count() > 0 && value > 0);
-            pub fn named_reads(rows: [Int]) = one(predicate: reads_predicate, rows: rows);
-        "#,
+            include_str!("fixtures/inline-semantic_graph/35635da1fb4a.orna"),
         )],
         &collection_catalogue(),
     );
@@ -4856,56 +4701,60 @@ fn finite_list_one_returns_exactly_the_element_type_and_preserves_callback_effec
 #[test]
 fn finite_list_one_rejects_invalid_signatures_and_keeps_relation_one_behavior() {
     let invalid = analyze(&[
-        ModuleInput::new("arity.orna", "fn bad(rows: [Int]) = one();"),
+        ModuleInput::new(
+            "arity.orna",
+            include_str!("fixtures/inline-semantic_graph/52ad419d8ed0.orna"),
+        ),
         ModuleInput::new(
             "extra.orna",
-            "fn bad(rows: [Int]) = one(rows, value => value > 0, value => true);",
+            include_str!("fixtures/inline-semantic_graph/fa0d33beb90b.orna"),
         ),
         ModuleInput::new(
             "unknown-row-name.orna",
-            "fn bad(rows: [Int]) = one(values: rows);",
+            include_str!("fixtures/inline-semantic_graph/c8870ff4e121.orna"),
         ),
         ModuleInput::new(
             "unknown-predicate-name.orna",
-            "fn bad(rows: [Int]) = one(rows, test: value => value > 0);",
+            include_str!("fixtures/inline-semantic_graph/2e4362a8e06b.orna"),
         ),
-        ModuleInput::new("wrong-collection.orna", "fn bad() = one(1);"),
+        ModuleInput::new(
+            "wrong-collection.orna",
+            include_str!("fixtures/inline-semantic_graph/b3d23c35edee.orna"),
+        ),
         ModuleInput::new(
             "wrong-result.orna",
-            "fn bad(rows: [Int]) = one(rows, value => value + 1);",
+            include_str!("fixtures/inline-semantic_graph/5bc07006fca7.orna"),
         ),
         ModuleInput::new(
             "wrong-parameter-count.orna",
-            "fn bad(rows: [Int]) = one(rows, (left, right) => left > right);",
+            include_str!("fixtures/inline-semantic_graph/47a06fd4f598.orna"),
         ),
         ModuleInput::new(
             "wrong-parameter-type.orna",
-            "fn bad(rows: [Int]) = one(rows, (value: Str) => value == \"x\");",
+            include_str!("fixtures/inline-semantic_graph/ed99cd38996d.orna"),
         ),
-        ModuleInput::new("non-callback.orna", "fn bad(rows: [Int]) = one(rows, 1);"),
+        ModuleInput::new(
+            "non-callback.orna",
+            include_str!("fixtures/inline-semantic_graph/50004bb89c76.orna"),
+        ),
         ModuleInput::new(
             "pipeline-row-name.orna",
-            "fn bad(rows: [Int]) = rows | one(rows: rows);",
+            include_str!("fixtures/inline-semantic_graph/711273c0ab98.orna"),
         ),
         ModuleInput::new(
             "pipeline-extra.orna",
-            "fn bad(rows: [Int]) = rows | one(positive: value => value > 0);",
+            include_str!("fixtures/inline-semantic_graph/a162d17f61a6.orna"),
         ),
         ModuleInput::new(
             "qualified-name.orna",
-            "fn bad(rows: [Int]) = std.collection.one(values: rows);",
+            include_str!("fixtures/inline-semantic_graph/42b463000a95.orna"),
         ),
     ]);
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
 
     let relation = analyze(&[ModuleInput::new(
         "relation-one.orna",
-        r#"
-            table Reading(id: Int) { value: Int, }
-            pub fn member() = Reading.one();
-            pub fn pipeline() = Reading | one();
-            pub fn predicate() = Reading | one(reading => reading.value > 0);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/8dc5593a6a47.orna"),
     )]);
     assert!(relation.is_ok(), "{:?}", relation.diagnostics);
     let module = relation
@@ -4930,20 +4779,7 @@ fn finite_list_every_and_exists_return_bool_for_all_supported_call_forms_and_pre
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "every-exists.orna",
-            r#"
-            table Reading(id: Int) { value: Int, }
-            fn positive(value: Int) = value > 0;
-            fn reads_predicate(value: Int) = Reading.count() > 0 && value > 0;
-            pub fn direct(rows: [Int]) = every(rows, positive);
-            pub fn direct_lambda(rows: [Int]) = exists(rows, value => value > 0);
-            pub fn named(rows: [Int]) = every(predicate: positive, rows: rows);
-            pub fn pipeline(rows: [Int]) = rows | every(positive);
-            pub fn pipeline_named(rows: [Int]) = rows | exists(predicate: value => value > 0);
-            pub fn qualified(rows: [Int]) = std.collection.every(rows: rows, predicate: positive);
-            pub fn qualified_pipeline(rows: [Int]) = rows | std.collection.exists(predicate: positive);
-            pub fn reads(rows: [Int]) = every(rows, reads_predicate);
-            pub fn relation_exists() = exists(Reading, reading => reading.value > 0);
-        "#,
+            include_str!("fixtures/inline-semantic_graph/34799fd41331.orna"),
         )],
         &collection_catalogue(),
     );
@@ -4987,43 +4823,43 @@ fn finite_list_every_and_exists_reject_invalid_signatures_without_changing_asser
     let invalid = analyze(&[
         ModuleInput::new(
             "missing-predicate.orna",
-            "fn bad(rows: [Int]) = every(rows);",
+            include_str!("fixtures/inline-semantic_graph/ffd51d1440e3.orna"),
         ),
         ModuleInput::new(
             "extra.orna",
-            "fn bad(rows: [Int]) = exists(rows, value => true, value => false);",
+            include_str!("fixtures/inline-semantic_graph/5c296e0000fd.orna"),
         ),
         ModuleInput::new(
             "wrong-row-name.orna",
-            "fn bad(rows: [Int]) = every(values: rows, predicate: value => true);",
+            include_str!("fixtures/inline-semantic_graph/2d61d3f5aa4b.orna"),
         ),
         ModuleInput::new(
             "wrong-predicate-name.orna",
-            "fn bad(rows: [Int]) = exists(rows: rows, test: value => true);",
+            include_str!("fixtures/inline-semantic_graph/080243e7126b.orna"),
         ),
         ModuleInput::new(
             "wrong-collection.orna",
-            "fn bad() = every(1, value => true);",
+            include_str!("fixtures/inline-semantic_graph/26df8196b02e.orna"),
         ),
         ModuleInput::new(
             "wrong-result.orna",
-            "fn bad(rows: [Int]) = exists(rows, value => value + 1);",
+            include_str!("fixtures/inline-semantic_graph/8f052baa3c13.orna"),
         ),
         ModuleInput::new(
             "wrong-parameter-count.orna",
-            "fn bad(rows: [Int]) = every(rows, (left, right) => left > right);",
+            include_str!("fixtures/inline-semantic_graph/f9848322e43d.orna"),
         ),
         ModuleInput::new(
             "wrong-parameter-type.orna",
-            "fn bad(rows: [Int]) = exists(rows, (value: Str) => value == \"x\");",
+            include_str!("fixtures/inline-semantic_graph/b7fcb818f349.orna"),
         ),
         ModuleInput::new(
             "pipeline-row-name.orna",
-            "fn bad(rows: [Int]) = rows | exists(rows: rows, predicate: value => true);",
+            include_str!("fixtures/inline-semantic_graph/95136702a0c9.orna"),
         ),
         ModuleInput::new(
             "pipeline-extra.orna",
-            "fn bad(rows: [Int]) = rows | every(value => true, value => false);",
+            include_str!("fixtures/inline-semantic_graph/9a240bc8be28.orna"),
         ),
     ]);
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
@@ -5032,7 +4868,7 @@ fn finite_list_every_and_exists_reject_invalid_signatures_without_changing_asser
     let qualified = analyze_with_catalogue(
         &[ModuleInput::new(
             "unprofiled.orna",
-            "fn bad(rows: [Int]) = std.collection.every(rows, value => true);",
+            include_str!("fixtures/inline-semantic_graph/ccadb756aac0.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -5044,11 +4880,7 @@ fn finite_list_every_and_exists_reject_invalid_signatures_without_changing_asser
 
     let assertions = analyze(&[ModuleInput::new(
         "assertions.orna",
-        r#"
-            pub table Book(id: Str) { title: Str, }
-            pub table Loan(book_id: Str) { }
-            assert every(Loan, loan => exists(Book, book => book.id == loan.book_id));
-        "#,
+        include_str!("fixtures/inline-semantic_graph/56097f8cf399.orna"),
     )]);
     assert!(assertions.is_ok(), "{:?}", assertions.diagnostics);
 }
@@ -5058,22 +4890,7 @@ fn finite_list_sum_returns_exact_int_for_supported_forms_and_preserves_effects()
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "sum.orna",
-            r#"
-            table Reading(id: Int) { value: Int, }
-            table Other(id: Int) { value: Int, }
-            pub fn direct(rows: [Int]): Int = sum(rows);
-            pub fn direct_literal(): Int = sum([1, 2, 3]);
-            pub fn direct_empty(): Int = sum([]);
-            pub fn named(rows: [Int]): Int = sum(rows: rows);
-            pub fn pipeline(rows: [Int]): Int = rows | sum();
-            pub fn pipeline_empty(): Int = [] | sum();
-            pub fn qualified(rows: [Int]): Int = std.collection.sum(rows: rows);
-            pub fn qualified_pipeline(rows: [Int]): Int = rows | std.collection.sum();
-            pub fn reads(rows: [Int]): Int =
-                rows | map(transform: value => Reading.count() + value) | sum();
-            assert every(Reading, reading =>
-                exists(Other, other => sum([reading.value]) >= 0));
-        "#,
+            include_str!("fixtures/inline-semantic_graph/3416adec0c46.orna"),
         )],
         &collection_catalogue(),
     );
@@ -5116,19 +4933,37 @@ fn finite_list_sum_returns_exact_int_for_supported_forms_and_preserves_effects()
 #[test]
 fn finite_list_sum_rejects_unsupported_kinds_arguments_and_unprofiled_qualified_names() {
     let invalid = analyze(&[
-        ModuleInput::new("decimal.orna", "fn bad(values: [Decimal]) = sum(values);"),
-        ModuleInput::new("float.orna", "fn bad(values: [Float]) = sum(values);"),
-        ModuleInput::new("money.orna", "fn bad(values: [Money<GBP>]) = sum(values);"),
-        ModuleInput::new("affine.orna", "fn bad(values: [Float<C>]) = sum(values);"),
-        ModuleInput::new("wrong-collection.orna", "fn bad() = sum(1);"),
-        ModuleInput::new("missing-rows.orna", "fn bad() = sum();"),
+        ModuleInput::new(
+            "decimal.orna",
+            include_str!("fixtures/inline-semantic_graph/d8643613e10f.orna"),
+        ),
+        ModuleInput::new(
+            "float.orna",
+            include_str!("fixtures/inline-semantic_graph/8ce3e1a56c8b.orna"),
+        ),
+        ModuleInput::new(
+            "money.orna",
+            include_str!("fixtures/inline-semantic_graph/0964864e7523.orna"),
+        ),
+        ModuleInput::new(
+            "affine.orna",
+            include_str!("fixtures/inline-semantic_graph/c2bdc967d0b1.orna"),
+        ),
+        ModuleInput::new(
+            "wrong-collection.orna",
+            include_str!("fixtures/inline-semantic_graph/9ca7dcc01524.orna"),
+        ),
+        ModuleInput::new(
+            "missing-rows.orna",
+            include_str!("fixtures/inline-semantic_graph/53c474bb0ffa.orna"),
+        ),
         ModuleInput::new(
             "unknown-name.orna",
-            "fn bad(values: [Int]) = sum(values: values, extra: 1);",
+            include_str!("fixtures/inline-semantic_graph/548d586af4ef.orna"),
         ),
         ModuleInput::new(
             "pipeline-argument.orna",
-            "fn bad(values: [Int]) = values | sum(rows: values);",
+            include_str!("fixtures/inline-semantic_graph/5184f4549245.orna"),
         ),
     ]);
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
@@ -5137,7 +4972,7 @@ fn finite_list_sum_rejects_unsupported_kinds_arguments_and_unprofiled_qualified_
     let qualified = analyze_with_catalogue(
         &[ModuleInput::new(
             "unprofiled.orna",
-            "fn bad(values: [Int]) = std.collection.sum(values);",
+            include_str!("fixtures/inline-semantic_graph/8fac65264f2b.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -5153,27 +4988,7 @@ fn finite_list_integer_min_max_return_optional_int_for_all_call_forms() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "min-max.orna",
-            r#"
-            table Reading(id: Int) { value: Int, }
-            table Other(id: Int) { value: Int, }
-            pub fn direct_min(rows: [Int]): Int? = min(rows);
-            pub fn direct_max(rows: [Int]): Int? = max([3, 1, 2]);
-            pub fn named_min(rows: [Int]): Int? = min(rows: rows);
-            pub fn named_max(rows: [Int]): Int? = max(rows: rows);
-            pub fn bare_pipeline_min(rows: [Int]): Int? = rows | min;
-            pub fn bare_pipeline_max(rows: [Int]): Int? = rows | std.collection.max;
-            pub fn call_pipeline_min(rows: [Int]): Int? = rows | min();
-            pub fn call_pipeline_max(rows: [Int]): Int? = rows | std.collection.max();
-            pub fn qualified_min(rows: [Int]): Int? = std.collection.min(rows);
-            pub fn qualified_max(rows: [Int]): Int? = std.collection.max(rows: rows);
-            pub fn empty_min(): Int? = min([]);
-            pub fn empty_max(): Int? = [] | max;
-            pub fn reads(rows: [Int]): Int? =
-                rows | map(transform: value => Reading.count() + value) | min();
-            assert every(Reading, reading =>
-                exists(Other, other =>
-                    min([reading.value]) == min([other.value])));
-        "#,
+            include_str!("fixtures/inline-semantic_graph/b448d65fb856.orna"),
         )],
         &collection_catalogue(),
     );
@@ -5220,23 +5035,41 @@ fn finite_list_integer_min_max_return_optional_int_for_all_call_forms() {
 #[test]
 fn finite_list_integer_min_max_reject_unsupported_shapes_and_preserve_relation_behavior() {
     let invalid = analyze(&[
-        ModuleInput::new("decimal.orna", "fn bad(values: [Decimal]) = min(values);"),
-        ModuleInput::new("float.orna", "fn bad(values: [Float]) = max(values);"),
-        ModuleInput::new("money.orna", "fn bad(values: [Money<GBP>]) = min(values);"),
-        ModuleInput::new("affine.orna", "fn bad(values: [Float<C>]) = max(values);"),
-        ModuleInput::new("wrong-collection.orna", "fn bad() = min(1);"),
-        ModuleInput::new("missing-rows.orna", "fn bad() = max();"),
+        ModuleInput::new(
+            "decimal.orna",
+            include_str!("fixtures/inline-semantic_graph/544555dc4039.orna"),
+        ),
+        ModuleInput::new(
+            "float.orna",
+            include_str!("fixtures/inline-semantic_graph/324759d97bd2.orna"),
+        ),
+        ModuleInput::new(
+            "money.orna",
+            include_str!("fixtures/inline-semantic_graph/0e3d00f2bc80.orna"),
+        ),
+        ModuleInput::new(
+            "affine.orna",
+            include_str!("fixtures/inline-semantic_graph/4249a94f6114.orna"),
+        ),
+        ModuleInput::new(
+            "wrong-collection.orna",
+            include_str!("fixtures/inline-semantic_graph/93ddf69e4c59.orna"),
+        ),
+        ModuleInput::new(
+            "missing-rows.orna",
+            include_str!("fixtures/inline-semantic_graph/09ab00e83ab4.orna"),
+        ),
         ModuleInput::new(
             "unknown-name.orna",
-            "fn bad(values: [Int]) = min(values: values, extra: 1);",
+            include_str!("fixtures/inline-semantic_graph/60ee2007e200.orna"),
         ),
         ModuleInput::new(
             "pipeline-argument.orna",
-            "fn bad(values: [Int]) = values | max(rows: values);",
+            include_str!("fixtures/inline-semantic_graph/838ce8cf0c6c.orna"),
         ),
         ModuleInput::new(
             "pipeline-extra.orna",
-            "fn bad(values: [Int]) = values | min(1);",
+            include_str!("fixtures/inline-semantic_graph/34a586b7e0b2.orna"),
         ),
     ]);
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
@@ -5244,7 +5077,7 @@ fn finite_list_integer_min_max_reject_unsupported_shapes_and_preserve_relation_b
     let qualified = analyze_with_catalogue(
         &[ModuleInput::new(
             "unprofiled.orna",
-            "fn bad(values: [Int]) = std.collection.min(values);",
+            include_str!("fixtures/inline-semantic_graph/a161fc681171.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -5256,11 +5089,7 @@ fn finite_list_integer_min_max_reject_unsupported_shapes_and_preserve_relation_b
 
     let relation = analyze(&[ModuleInput::new(
         "relation-min-max.orna",
-        r#"
-            table Reading(id: Int) { value: Int, }
-            pub fn minimum() = Reading | min();
-            pub fn maximum() = Reading | max();
-        "#,
+        include_str!("fixtures/inline-semantic_graph/127592a42d9e.orna"),
     )]);
     assert!(relation.is_ok(), "{:?}", relation.diagnostics);
     let module = relation.modules.values().next().expect("relation module");
@@ -5280,20 +5109,28 @@ fn finite_list_integer_min_max_reject_unsupported_shapes_and_preserve_relation_b
 #[test]
 fn root_relation_aggregates_respect_shadowed_bindings() {
     for (operation, terminal) in [
-        ("map", "sum"),
-        ("min", "min()"),
-        ("max", "max()"),
-        ("sum", "sum"),
+        (
+            include_str!("fixtures/inline-semantic_graph/60be9861750f.orna"),
+            include_str!("fixtures/inline-semantic_graph/09f5ffef2830.orna"),
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/1f6fa6f69d18.orna"),
+            include_str!("fixtures/inline-semantic_graph/949b743dfb54.orna"),
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/9baf3a40312f.orna"),
+            include_str!("fixtures/inline-semantic_graph/d0a75dd6ed1e.orna"),
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/09f5ffef2830.orna"),
+            include_str!("fixtures/inline-semantic_graph/09f5ffef2830.orna"),
+        ),
     ] {
         let result = analyze(&[ModuleInput::new(
             format!("shadowed-{operation}.orna"),
-            format!(
-                r#"
-                    table Reading(id: Int) {{ value: Int, }}
-                    fn {operation}(values: Int): Int = 99;
-                    pub fn aggregate() =
-                        Reading | map(reading => reading.value) | {terminal};
-                "#
+            render_source_fixture(
+                include_str!("fixtures/inline-semantic_graph/11875dc9243f.orna"),
+                &[("operation", &operation), ("terminal", &terminal)],
             ),
         )]);
         assert!(
@@ -5314,27 +5151,7 @@ fn finite_list_float_aggregates_return_exact_types_for_all_call_forms_and_effect
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "float-aggregates.orna",
-            r#"
-            table Reading(id: Int) { value: Float, }
-            pub fn direct_sum(rows: [Float]): Float = sum(rows);
-            pub fn direct_min(rows: [Float]): Float? = min([3.0f, 1.0f, 2.0f]);
-            pub fn direct_max(rows: [Float]): Float? = max([3.0f, 1.0f, 2.0f]);
-            pub fn named_sum(rows: [Float]): Float = sum(rows: rows);
-            pub fn named_min(rows: [Float]): Float? = min(rows: rows);
-            pub fn named_max(rows: [Float]): Float? = max(rows: rows);
-            pub fn pipeline_sum(rows: [Float]): Float = rows | sum();
-            pub fn pipeline_min(rows: [Float]): Float? = rows | min;
-            pub fn pipeline_max(rows: [Float]): Float? = rows | std.collection.max();
-            pub fn call_pipeline_min(rows: [Float]): Float? = rows | min();
-            pub fn empty_sum(): Float = sum([]);
-            pub fn empty_min(): Float? = min([]);
-            pub fn empty_max(): Float? = [] | max;
-            pub fn reads(rows: [Float]): Float =
-                rows | map(transform: value => if Reading.count() > 0 { value } else { value }) | sum;
-            pub fn qualified_sum(rows: [Float]): Float = std.collection.sum(rows);
-            pub fn qualified_min(rows: [Float]): Float? = std.collection.min(rows: rows);
-            pub fn qualified_max(rows: [Float]): Float? = rows | std.collection.max;
-        "#,
+            include_str!("fixtures/inline-semantic_graph/1f57c9931545.orna"),
         )],
         &float_collection_catalogue(),
     );
@@ -5396,14 +5213,29 @@ fn finite_list_float_aggregates_return_exact_types_for_all_call_forms_and_effect
 #[test]
 fn finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_names() {
     let invalid = analyze(&[
-        ModuleInput::new("mixed-sum.orna", "fn bad() = sum([1, 2.0f]);"),
-        ModuleInput::new("mixed-min.orna", "fn bad() = min([1.0f, 2]);"),
-        ModuleInput::new("mixed-max.orna", "fn bad() = [1, 2.0f] | max;"),
-        ModuleInput::new("decimal.orna", "fn bad(values: [Decimal]) = sum(values);"),
-        ModuleInput::new("int-min.orna", "fn bad(values: [Int]) = min(values);"),
+        ModuleInput::new(
+            "mixed-sum.orna",
+            include_str!("fixtures/inline-semantic_graph/43b2485ad0be.orna"),
+        ),
+        ModuleInput::new(
+            "mixed-min.orna",
+            include_str!("fixtures/inline-semantic_graph/7405493b91fc.orna"),
+        ),
+        ModuleInput::new(
+            "mixed-max.orna",
+            include_str!("fixtures/inline-semantic_graph/e4a9fea69b8d.orna"),
+        ),
+        ModuleInput::new(
+            "decimal.orna",
+            include_str!("fixtures/inline-semantic_graph/d8643613e10f.orna"),
+        ),
+        ModuleInput::new(
+            "int-min.orna",
+            include_str!("fixtures/inline-semantic_graph/a29cf5eb2e3f.orna"),
+        ),
         ModuleInput::new(
             "wrong-name.orna",
-            "fn bad(values: [Float]) = max(rows: values, extra: 1);",
+            include_str!("fixtures/inline-semantic_graph/8c006f368079.orna"),
         ),
     ]);
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
@@ -5411,7 +5243,7 @@ fn finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_nam
     let qualified = analyze_with_catalogue(
         &[ModuleInput::new(
             "unprofiled.orna",
-            "fn bad(values: [Float]) = std.collection.sum(values);",
+            include_str!("fixtures/inline-semantic_graph/45acf201d157.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -5421,11 +5253,7 @@ fn finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_nam
         qualified.diagnostics
     );
 
-    let incompatible_source = r#"
-        pub fn sum(rows: [Decimal]): Decimal = 0;
-        pub fn min(rows: [Decimal]): Decimal? = null;
-        pub fn max(rows: [Decimal]): Decimal? = null;
-    "#;
+    let incompatible_source = include_str!("fixtures/inline-semantic_graph/e0b8483cc8bc.orna");
     let incompatible_profile = StandardDependencyProfile::from_sources(
         "orna.std/v1-incompatible-float-collection",
         [("std/collection.orna".into(), incompatible_source.into())],
@@ -5440,7 +5268,7 @@ fn finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_nam
     let incompatible = analyze_with_catalogue(
         &[ModuleInput::new(
             "incompatible.orna",
-            "fn bad(values: [Float]) = std.collection.sum(values);",
+            include_str!("fixtures/inline-semantic_graph/45acf201d157.orna"),
         )],
         &incompatible_catalogue,
     );
@@ -5453,10 +5281,7 @@ fn finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_nam
 
 #[test]
 fn qualified_integer_aggregate_admission_requires_compatible_pinned_exports() {
-    let source = r#"
-        pub fn min(rows: [Decimal]): Decimal? = null;
-        pub fn max(rows: [Float]): Float? = null;
-    "#;
+    let source = include_str!("fixtures/inline-semantic_graph/4440fcd92f93.orna");
     let profile = StandardDependencyProfile::from_sources(
         "orna.std/incompatible-collection",
         [("std/collection.orna".into(), source.into())],
@@ -5468,10 +5293,7 @@ fn qualified_integer_aggregate_admission_requires_compatible_pinned_exports() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "consumer.orna",
-            r#"
-                pub fn minimum(rows: [Int]) = std.collection.min(rows);
-                pub fn maximum(rows: [Int]) = std.collection.max(rows);
-            "#,
+            include_str!("fixtures/inline-semantic_graph/8be4f4900cfc.orna"),
         )],
         &catalogue,
     );
@@ -5498,12 +5320,7 @@ fn qualified_integer_aggregate_admission_requires_compatible_pinned_exports() {
 fn relation_flat_map_preserves_relation_output_and_accepts_finite_inner_collections() {
     let valid = analyze(&[ModuleInput::new(
         "relation-flat-map.orna",
-        r#"
-            table Reading(id: Int) { value: Int, }
-            table Child(id: Int) { value: Int, }
-            pub fn list_inner() = Reading | flat_map(reading => [reading.value]);
-            pub fn relation_inner() = Reading | flat_map(transform: reading => Child | map(child => child.value));
-        "#,
+        include_str!("fixtures/inline-semantic_graph/7d0fdeec7b50.orna"),
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
     let module = valid
@@ -5532,23 +5349,23 @@ fn relation_flat_map_rejects_noncollections_and_keeps_existing_callback_rules() 
     let invalid = analyze(&[
         ModuleInput::new(
             "scalar-inner.orna",
-            "table Reading(id: Int) { value: Int, } fn bad() = Reading | flat_map(reading => reading.value);",
+            include_str!("fixtures/inline-semantic_graph/945025842cd0.orna"),
         ),
         ModuleInput::new(
             "stream-inner.orna",
-            "table Reading(id: Int) { value: Int, } fn bad() = Reading | flat_map(reading => Stream.from_list([reading.value], source_identity: \"reading\"));",
+            include_str!("fixtures/inline-semantic_graph/cf66ecf95db7.orna"),
         ),
         ModuleInput::new(
             "wrong-name.orna",
-            "table Reading(id: Int) { value: Int, } fn bad() = Reading | flat_map(predicate: reading => [reading.value]);",
+            include_str!("fixtures/inline-semantic_graph/a98fd90b3f73.orna"),
         ),
         ModuleInput::new(
             "wrong-callback.orna",
-            "table Reading(id: Int) { value: Int, } fn project(reading: Reading) = [reading.value]; fn bad() = Reading | flat_map(project);",
+            include_str!("fixtures/inline-semantic_graph/49f6db21da79.orna"),
         ),
         ModuleInput::new(
             "unrelated-callback.orna",
-            "table Reading(id: Int) { value: Int, } fn project(reading: Reading) = reading.value; fn bad() = Reading | map(project);",
+            include_str!("fixtures/inline-semantic_graph/bdcc49a08507.orna"),
         ),
     ]);
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
@@ -5559,10 +5376,13 @@ fn relation_flat_map_rejects_noncollections_and_keeps_existing_callback_rules() 
 fn optional_numeric_ranges_infer_from_endpoints_or_expected_range_context() {
     let result = analyze(&[ModuleInput::new(
         "optional-ranges.orna",
-        "fn lower() = ..5; fn upper() = 1..; fn bounded() = 1..5;",
+        include_str!("fixtures/inline-semantic_graph/8749bee1f13e.orna"),
     )]);
     assert!(result.is_ok(), "{:?}", result.diagnostics);
-    let invalid = analyze(&[ModuleInput::new("untyped-range.orna", "fn invalid() = ..;")]);
+    let invalid = analyze(&[ModuleInput::new(
+        "untyped-range.orna",
+        include_str!("fixtures/inline-semantic_graph/4c43c7187d95.orna"),
+    )]);
     assert!(has(&invalid, DIAG_TYPE));
 }
 
@@ -5570,15 +5390,7 @@ fn optional_numeric_ranges_infer_from_endpoints_or_expected_range_context() {
 fn typed_date_ranges_are_ordered_values_with_contextual_unbounded_endpoints() {
     let valid = analyze(&[ModuleInput::new(
         "date-ranges.orna",
-        r#"
-            fn half_open(): Range<Date> = 2026-01-01..2027-01-01;
-            fn closed(): Range<Date> = 2026-01-01..=2027-01-01;
-            fn lower_unbounded(): Range<Date> = ..2027-01-01;
-            fn upper_unbounded(): Range<Date> = 2026-01-01..;
-            fn equal_half_open(): Range<Date> = 2026-01-01..2026-01-01;
-            fn equal_closed(): Range<Date> = 2026-01-01..=2026-01-01;
-            fn reversed(): Range<Date> = 2027-01-01..2026-01-01;
-        "#,
+        include_str!("fixtures/inline-semantic_graph/d147c8995e75.orna"),
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
 
@@ -5600,11 +5412,11 @@ fn typed_date_ranges_are_ordered_values_with_contextual_unbounded_endpoints() {
 
     for (source, expected) in [
         (
-            "fn invalid() = 2026-01-01..1;",
+            include_str!("fixtures/inline-semantic_graph/f289f294e1b0.orna"),
             "range bounds must have the same ordered type",
         ),
         (
-            "fn invalid() = 1..2026-01-01;",
+            include_str!("fixtures/inline-semantic_graph/98e718f92120.orna"),
             "range bounds must have the same ordered type",
         ),
     ] {
@@ -5627,15 +5439,7 @@ fn typed_date_ranges_are_ordered_values_with_contextual_unbounded_endpoints() {
 fn typed_instant_ranges_are_ordered_values_with_contextual_unbounded_endpoints() {
     let valid = analyze(&[ModuleInput::new(
         "instant-ranges.orna",
-        r#"
-            fn half_open(): Range<Instant> = 2026-01-01T00:00:00Z..2027-01-01T00:00:00Z;
-            fn closed(): Range<Instant> = 2026-01-01T00:00:00Z..=2027-01-01T00:00:00Z;
-            fn lower_unbounded(): Range<Instant> = ..2027-01-01T00:00:00Z;
-            fn upper_unbounded(): Range<Instant> = 2026-01-01T00:00:00Z..;
-            fn equal_half_open(): Range<Instant> = 2026-01-01T00:00:00Z..2026-01-01T00:00:00Z;
-            fn equal_closed(): Range<Instant> = 2026-01-01T00:00:00Z..=2026-01-01T00:00:00Z;
-            fn reversed(): Range<Instant> = 2027-01-01T00:00:00Z..2026-01-01T00:00:00Z;
-        "#,
+        include_str!("fixtures/inline-semantic_graph/f90c2be94218.orna"),
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
 
@@ -5656,8 +5460,8 @@ fn typed_instant_ranges_are_ordered_values_with_contextual_unbounded_endpoints()
     }
 
     for source in [
-        "fn invalid() = 2026-01-01T00:00:00Z..1;",
-        "fn invalid() = 2026-01-01T00:00:00Z..2026-01-01;",
+        include_str!("fixtures/inline-semantic_graph/0bf4d1c4eb22.orna"),
+        include_str!("fixtures/inline-semantic_graph/fa401ab79408.orna"),
     ] {
         let invalid = analyze(&[ModuleInput::new("mixed-instant-range.orna", source)]);
         let diagnostic = invalid
@@ -5678,7 +5482,7 @@ fn typed_instant_ranges_are_ordered_values_with_contextual_unbounded_endpoints()
 fn contextual_empty_instant_ranges_are_rejected() {
     let result = analyze(&[ModuleInput::new(
         "empty-instant-range.orna",
-        "fn empty(): Range<Instant> = ..;",
+        include_str!("fixtures/inline-semantic_graph/6eeaeb515bc4.orna"),
     )]);
 
     assert!(result.diagnostics.iter().any(|diagnostic| {
@@ -5692,31 +5496,31 @@ fn contextual_empty_instant_ranges_are_rejected() {
 fn affine_collection_aggregates_keep_mean_and_admit_extrema() {
     let valid = analyze(&[ModuleInput::new(
         "average.orna",
-        "pub fn average_temperature(values: [Float<C>]) = values | mean;",
+        include_str!("fixtures/inline-semantic_graph/3d83cc57ba3a.orna"),
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
 
     let extrema = analyze(&[
         ModuleInput::new(
             "maximum.orna",
-            "pub fn hottest(values: [Float<C>]) = values | max;",
+            include_str!("fixtures/inline-semantic_graph/da1404c4638d.orna"),
         ),
         ModuleInput::new(
             "minimum.orna",
-            "pub fn coldest(values: [Float<C>]) = values | min;",
+            include_str!("fixtures/inline-semantic_graph/a95ed1c30da6.orna"),
         ),
     ]);
     assert!(extrema.is_ok(), "{:?}", extrema.diagnostics);
 
     let shadowed = analyze(&[ModuleInput::new(
         "shadowed-max.orna",
-        "pub fn max(value: Int) = value; pub fn caller(values: [Float<C>]) = values | max;",
+        include_str!("fixtures/inline-semantic_graph/584bf3a8693a.orna"),
     )]);
     assert!(has(&shadowed, DIAG_TYPE));
 
     let invalid = analyze(&[ModuleInput::new(
         "sum.orna",
-        "pub fn bad(values: [Float<C>]) = values | sum;",
+        include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna"),
     )]);
     assert!(has(&invalid, DIAG_TYPE));
     assert!(!has(&invalid, DIAG_UNSUPPORTED));
@@ -5726,17 +5530,13 @@ fn affine_collection_aggregates_keep_mean_and_admit_extrema() {
 fn relation_sum_preserves_numeric_exactness_and_rejects_invalid_elements() {
     let exact = analyze(&[ModuleInput::new(
         "readings.orna",
-        r#"
-            pub table Reading(id: Int) { decimal: Decimal, money: Money<GBP>, }
-            pub fn decimal_total(): Decimal = Reading | map(reading => reading.decimal) | sum;
-            pub fn money_total(): Money<GBP> = Reading | map(reading => reading.money) | sum;
-        "#,
+        include_str!("fixtures/inline-semantic_graph/2a9f6781afdb.orna"),
     )]);
     assert!(exact.is_ok(), "{:?}", exact.diagnostics);
 
     let absolute = analyze(&[ModuleInput::new(
         "temperatures.orna",
-        "pub table Temperature(id: Int) { value: Float<C>, } pub fn total() = Temperature | map(row => row.value) | sum;",
+        include_str!("fixtures/inline-semantic_graph/c64bb707dc52.orna"),
     )]);
     assert!(
         absolute
@@ -5747,7 +5547,7 @@ fn relation_sum_preserves_numeric_exactness_and_rejects_invalid_elements() {
 
     let non_numeric = analyze(&[ModuleInput::new(
         "labels.orna",
-        "pub table Label(id: Int) { value: Str, } pub fn total() = Label | map(row => row.value) | sum;",
+        include_str!("fixtures/inline-semantic_graph/227167ccdf09.orna"),
     )]);
     assert!(
         non_numeric
@@ -5762,30 +5562,11 @@ fn inferred_function_summaries_propagate_through_project_calls_independent_of_in
     let result = analyze(&[
         ModuleInput::new(
             "main.orna",
-            "use sensors; pub fn run() { sensors.ingest(); }",
+            include_str!("fixtures/inline-semantic_graph/e7d69b2dc2a2.orna"),
         ),
         ModuleInput::new(
             "sensors.orna",
-            r#"
-                pub type Sample {
-                    pub sensor: Str,
-                    pub sequence: Int,
-                    pub value: Decimal,
-                }
-                pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }
-                pub fn input() = Stream.from_list([
-                    Sample { sensor: "greenhouse", sequence: 0, value: 18.25 },
-                ], source_identity: "example:sensors:v1");
-                pub fn ingest() {
-                    input() | for_each(sample => {
-                        Reading.insert({
-                            sensor: sample.sensor,
-                            sequence: sample.sequence,
-                            value: sample.value,
-                        });
-                    });
-                }
-            "#,
+            include_str!("fixtures/inline-semantic_graph/d9e8cb815bd8.orna"),
         ),
     ]);
 
@@ -5825,7 +5606,7 @@ fn inferred_function_summaries_propagate_through_project_calls_independent_of_in
 fn numeric_nested_lambdas_infer_omitted_parameters_without_dynamic_fallback() {
     let result = analyze(&[ModuleInput::new(
         "lambda.orna",
-        "pub fn curried_add() = x => y => x + y;",
+        include_str!("fixtures/inline-semantic_graph/28ead27d36dc.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -5859,7 +5640,7 @@ fn numeric_nested_lambdas_infer_omitted_parameters_without_dynamic_fallback() {
 
     let underconstrained = analyze(&[ModuleInput::new(
         "lambda.orna",
-        "fn identity() = value => value;",
+        include_str!("fixtures/inline-semantic_graph/0a3f0c2a9637.orna"),
     )]);
     assert!(has(&underconstrained, "ORNA-S020-ANNOTATION"));
 }
@@ -5889,41 +5670,25 @@ fn reference_values_module_infers_closed_enum_optional_and_interpolation_cases()
 fn case_inference_rejects_non_exhaustive_and_malformed_reference_patterns() {
     let non_exhaustive = analyze(&[ModuleInput::new(
         "values.orna",
-        r#"
-            enum Availability { ready, waiting { reason: Str }, }
-            fn describe(value: Availability): Str = case value {
-                Availability.ready: "ready",
-            };
-        "#,
+        include_str!("fixtures/inline-semantic_graph/9f3f7de9d269.orna"),
     )]);
     assert!(has(&non_exhaustive, DIAG_TYPE));
 
     let malformed_enum = analyze(&[ModuleInput::new(
         "values.orna",
-        r#"
-            enum Availability { ready, waiting { reason: Str }, }
-            fn describe(value: Availability): Str = case value {
-                Availability.ready: "ready",
-                Availability.waiting(reason): reason,
-            };
-        "#,
+        include_str!("fixtures/inline-semantic_graph/45734a07b8f8.orna"),
     )]);
     assert!(has(&malformed_enum, DIAG_UNSUPPORTED));
 
     let malformed_optional = analyze(&[ModuleInput::new(
         "values.orna",
-        r#"
-            fn optional_name(value: Str?): Str = case value {
-                Some(): "missing",
-                null: "anonymous",
-            };
-        "#,
+        include_str!("fixtures/inline-semantic_graph/36bc75af5558.orna"),
     )]);
     assert!(has(&malformed_optional, DIAG_TYPE));
 
     let non_text_interpolation = analyze(&[ModuleInput::new(
         "values.orna",
-        "fn label(): Str = \"value: {1}\";",
+        include_str!("fixtures/inline-semantic_graph/1d47e5a8882e.orna"),
     )]);
     assert!(has(&non_text_interpolation, DIAG_TYPE));
 }
@@ -5932,21 +5697,7 @@ fn case_inference_rejects_non_exhaustive_and_malformed_reference_patterns() {
 fn case_arms_preserve_call_effects_and_named_calls_use_declared_parameter_names() {
     let result = analyze(&[ModuleInput::new(
         "values.orna",
-        r#"
-            table Reading(id: Str) { value: Int, }
-            enum Availability { ready, waiting { reason: Str }, }
-
-            fn touch(value: Str): Str {
-                Reading.count();
-                value
-            }
-            fn describe(value: Availability): Str = case value {
-                Availability.ready: touch(value: "ready"),
-                Availability.waiting { reason }: touch(value: reason),
-            };
-            fn add(left: Int, right: Int): Int = left + right;
-            fn total(): Int = add(right: 2, left: 1);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/8aa881052835.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -5961,10 +5712,7 @@ fn case_arms_preserve_call_effects_and_named_calls_use_declared_parameter_names(
 
     let malformed = analyze(&[ModuleInput::new(
         "values.orna",
-        r#"
-            fn add(left: Int, right: Int): Int = left + right;
-            fn bad(): Int = add(left: 1, left: 2);
-        "#,
+        include_str!("fixtures/inline-semantic_graph/335086c676b1.orna"),
     )]);
     assert!(has(&malformed, DIAG_TYPE));
 }
@@ -5973,21 +5721,7 @@ fn case_arms_preserve_call_effects_and_named_calls_use_declared_parameter_names(
 fn control_flow_infers_list_for_and_local_assignment_while_other_shapes_fail_closed() {
     let fixture = analyze(&[ModuleInput::new(
         "control-flow.orna",
-        r#"
-            pub fn describe(values: [Int]): Str {
-                let total = 0;
-
-                for value in values {
-                    total = total + value;
-                }
-
-                if total > 100 {
-                    "large"
-                } else {
-                    "small"
-                }
-            }
-        "#,
+        include_str!("fixtures/inline-semantic_graph/7761cedbc2bc.orna"),
     )]);
     let module = fixture.modules.values().next().unwrap();
     assert!(matches!(
@@ -5998,19 +5732,19 @@ fn control_flow_infers_list_for_and_local_assignment_while_other_shapes_fail_clo
 
     let mismatched_branches = analyze(&[ModuleInput::new(
         "mismatched-if.orna",
-        "fn choose(value: Int): Str { if value > 0 { \"positive\" } else { 0 } }",
+        include_str!("fixtures/inline-semantic_graph/b27ae74efe72.orna"),
     )]);
     assert!(has(&mismatched_branches, DIAG_TYPE));
 
     let missing_else = analyze(&[ModuleInput::new(
         "missing-else.orna",
-        "fn choose(value: Int): Str { if value > 0 { \"positive\" } }",
+        include_str!("fixtures/inline-semantic_graph/9cb8dc333a32.orna"),
     )]);
     assert!(has(&missing_else, DIAG_UNSUPPORTED));
 
     let compound_assignment = analyze(&[ModuleInput::new(
         "compound-assignment.orna",
-        "fn update() { let value = 0; value += 1; }",
+        include_str!("fixtures/inline-semantic_graph/55dcfbed2380.orna"),
     )]);
     assert!(
         compound_assignment.is_ok(),
@@ -6020,19 +5754,19 @@ fn control_flow_infers_list_for_and_local_assignment_while_other_shapes_fail_clo
 
     let mismatched_compound = analyze(&[ModuleInput::new(
         "mismatched-compound-assignment.orna",
-        "fn update() { let value = 0; value += true; }",
+        include_str!("fixtures/inline-semantic_graph/7f30f77a4e31.orna"),
     )]);
     assert!(has(&mismatched_compound, DIAG_TYPE));
 
     let field_assignment = analyze(&[ModuleInput::new(
         "field-assignment.orna",
-        "fn update() { let value = { count: 0 }; value.count = 1; }",
+        include_str!("fixtures/inline-semantic_graph/e593b788dcd4.orna"),
     )]);
     assert!(has(&field_assignment, DIAG_UNSUPPORTED));
 
     let non_list_for = analyze(&[ModuleInput::new(
         "non-list-for.orna",
-        "fn update() { for value in 1 { value } }",
+        include_str!("fixtures/inline-semantic_graph/8604bcd1d5e1.orna"),
     )]);
     assert!(has(&non_list_for, DIAG_UNSUPPORTED));
 }
@@ -6041,23 +5775,7 @@ fn control_flow_infers_list_for_and_local_assignment_while_other_shapes_fail_clo
 fn for_over_canonical_integer_ranges_binds_int_and_rejects_other_iterables() {
     let valid = analyze(&[ModuleInput::new(
         "integer-range-for.orna",
-        r#"
-            pub table Reading(id: Int) { value: Int, }
-
-            pub fn sum_to(limit: Int): Int {
-                let total = 0;
-                for value in 0..limit {
-                    total += value;
-                }
-                total
-            }
-
-            pub fn populate() {
-                for value in 0..2 {
-                    Reading.insert({ id: value, value: value });
-                }
-            }
-        "#,
+        include_str!("fixtures/inline-semantic_graph/ffef8f5d45ae.orna"),
     )]);
     let module = valid.modules.values().next().unwrap();
     assert!(matches!(
@@ -6071,20 +5789,20 @@ fn for_over_canonical_integer_ranges_binds_int_and_rejects_other_iterables() {
 
     let typed_break = analyze(&[ModuleInput::new(
         "integer-range-break.orna",
-        "fn invalid() { for value in 0..2 { break value; } }",
+        include_str!("fixtures/inline-semantic_graph/00506306aa89.orna"),
     )]);
     assert!(has(&typed_break, DIAG_TYPE));
     assert!(!has(&typed_break, DIAG_UNSUPPORTED));
 
     let decimal_range = analyze(&[ModuleInput::new(
         "decimal-range-for.orna",
-        "fn invalid() { for value in 0.0..1.0 { value } }",
+        include_str!("fixtures/inline-semantic_graph/912d8d2b3ffa.orna"),
     )]);
     assert!(has(&decimal_range, DIAG_UNSUPPORTED));
 
     let generic_range = analyze(&[ModuleInput::new(
         "generic-range-for.orna",
-        "fn invalid(values: Range<Int>) { for value in values { value } }",
+        include_str!("fixtures/inline-semantic_graph/88f95aff5ce0.orna"),
     )]);
     assert!(has(&generic_range, DIAG_UNSUPPORTED));
 }
@@ -6093,12 +5811,7 @@ fn for_over_canonical_integer_ranges_binds_int_and_rejects_other_iterables() {
 fn while_requires_a_boolean_condition_preserves_body_effects_and_validates_transfers() {
     let valid = analyze(&[ModuleInput::new(
         "while.orna",
-        r#"
-            pub table Reading(id: Int) { value: Int, }
-            pub fn poll(ready: Bool) {
-                while ready { Reading.insert({ id: 1, value: 2 }); }
-            }
-        "#,
+        include_str!("fixtures/inline-semantic_graph/808c80b1c76a.orna"),
     )]);
     let module = valid
         .modules
@@ -6116,32 +5829,32 @@ fn while_requires_a_boolean_condition_preserves_body_effects_and_validates_trans
 
     let non_boolean = analyze(&[ModuleInput::new(
         "while-non-boolean.orna",
-        "pub table Reading(id: Int) { value: Int, } fn poll() { while 1 { Reading.insert({ id: 1, value: 2 }); } }",
+        include_str!("fixtures/inline-semantic_graph/9864616820ba.orna"),
     )]);
     assert!(has(&non_boolean, DIAG_TYPE));
 
     let nearest_loop = analyze(&[ModuleInput::new(
         "nearest-loop.orna",
-        "fn poll(outer: Bool, inner: Bool) { while outer { while inner { continue; break; } break; } }",
+        include_str!("fixtures/inline-semantic_graph/ff658761b05b.orna"),
     )]);
     assert!(nearest_loop.is_ok(), "{:?}", nearest_loop.diagnostics);
 
     let outside_loop = analyze(&[ModuleInput::new(
         "outside-loop.orna",
-        "fn poll() { break; continue; }",
+        include_str!("fixtures/inline-semantic_graph/3a902689de0f.orna"),
     )]);
     assert!(has(&outside_loop, DIAG_UNSUPPORTED));
 
     let mismatched_break_value = analyze(&[ModuleInput::new(
         "mismatched-break-value.orna",
-        "fn poll(ready: Bool) { while ready { break 1; } }",
+        include_str!("fixtures/inline-semantic_graph/a27e1e4bb24c.orna"),
     )]);
     assert!(has(&mismatched_break_value, DIAG_TYPE));
     assert!(!has(&mismatched_break_value, DIAG_UNSUPPORTED));
 
     let lambda_boundary = analyze(&[ModuleInput::new(
         "lambda-boundary.orna",
-        "fn poll(ready: Bool) { while ready { let stop = () => { break; }; } }",
+        include_str!("fixtures/inline-semantic_graph/de6174121729.orna"),
     )]);
     assert!(has(&lambda_boundary, DIAG_UNSUPPORTED));
 }
@@ -6151,23 +5864,18 @@ fn coalesce_types_optional_values_with_precedence_and_grouping() {
     let valid = analyze(&[
         ModuleInput::new(
             "coalesce-precedence.orna",
-            r#"
-                pub fn threshold(value: Int?, days: Int?) = {
-                    above: value ?? 0 > 5,
-                    default_days: days ?? 90 == 90,
-                };
-            "#,
+            include_str!("fixtures/inline-semantic_graph/3b08fdd554d2.orna"),
         ),
         ModuleInput::new(
             "grouped-coalesce.orna",
-            "pub fn value(input: Int?): Int = (input ?? 0);",
+            include_str!("fixtures/inline-semantic_graph/7a2126efc26a.orna"),
         ),
     ]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
 
     let incompatible = analyze(&[ModuleInput::new(
         "incompatible-coalesce.orna",
-        "pub fn bad(input: Int?): Int = input ?? \"fallback\";",
+        include_str!("fixtures/inline-semantic_graph/61979de51695.orna"),
     )]);
     assert!(has(&incompatible, DIAG_TYPE));
 }
@@ -6175,7 +5883,7 @@ fn coalesce_types_optional_values_with_precedence_and_grouping() {
 fn uuid7_intrinsic_infers_std_uuid_type() {
     let result = analyze(&[ModuleInput::new(
         "uuid7.orna",
-        "pub fn generated() = uuid7();",
+        include_str!("fixtures/inline-semantic_graph/3a7503af7186.orna"),
     )]);
     assert!(result.is_ok(), "{:?}", result.diagnostics);
 
@@ -6194,9 +5902,9 @@ fn uuid7_intrinsic_infers_std_uuid_type() {
 #[test]
 fn uuid7_intrinsic_rejects_wrong_arity_and_argument_type() {
     for source in [
-        "pub fn invalid() = uuid7(1);",
-        "pub fn invalid() = uuid7(1, 2);",
-        "pub fn invalid() = uuid7(\"not-a-uuid\");",
+        include_str!("fixtures/inline-semantic_graph/684c8c574f93.orna"),
+        include_str!("fixtures/inline-semantic_graph/3042c8be3167.orna"),
+        include_str!("fixtures/inline-semantic_graph/c4bc27f7eca5.orna"),
     ] {
         let result = analyze(&[ModuleInput::new("uuid7-invalid.orna", source)]);
         assert!(
@@ -6211,7 +5919,7 @@ fn uuid7_intrinsic_rejects_wrong_arity_and_argument_type() {
 fn user_defined_uuid7_shadows_the_root_intrinsic() {
     let result = analyze(&[ModuleInput::new(
         "uuid7-shadow.orna",
-        "fn uuid7(value: Int): Str = \"shadowed\"; pub fn generated() = uuid7(1);",
+        include_str!("fixtures/inline-semantic_graph/5a6cc7aecba9.orna"),
     )]);
     assert!(result.is_ok(), "{:?}", result.diagnostics);
 

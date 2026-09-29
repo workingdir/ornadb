@@ -1,0 +1,1 @@
+use contacts; fn names() = contacts.Contact.one().name;

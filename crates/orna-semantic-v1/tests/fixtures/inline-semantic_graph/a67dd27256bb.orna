@@ -1,0 +1,1 @@
+fn retry(failure: sys.Failure) = sys.admin.retry_failure(failure.reference, expected_version: 1);

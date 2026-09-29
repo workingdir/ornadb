@@ -1,0 +1,1 @@
+fn update() { for value in 1 { value } }

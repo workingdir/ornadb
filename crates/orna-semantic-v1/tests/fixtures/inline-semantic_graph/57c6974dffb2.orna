@@ -1,0 +1,8 @@
+
+            pub fn positional(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.start(function, arguments);
+            pub fn named(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+                sys.start(function: function, arguments: arguments, at: null,
+                    transaction: sys.InvokeTransaction.separate,
+                    idempotency_key: null);
+        

@@ -1,0 +1,1 @@
+use library; pub fn invalid(value: Str) = library.choose<Str>(value);

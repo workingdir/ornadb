@@ -1,0 +1,9 @@
+
+            table Reading(id: Int) { value: Int, }
+            fn float_key(value: Int): Float = 0.0f;
+            pub fn direct(values: [Int]) = sort_by(values, value => value);
+            pub fn pipeline(values: [Int]) = values | sort_by(value => value);
+            pub fn named(values: [Int]) = sort_by(key: float_key, rows: values);
+            pub fn qualified(values: [Int]) = std.collection.sort_by(rows: values, key: float_key);
+            pub fn reads(values: [Int]) = values | sort_by(key: value => Reading.count() + value);
+        

@@ -1,0 +1,14 @@
+
+            pub fn inferred(job: sys.InvocationHandle<Int>) = sys.cancel(job);
+            pub fn positional(job: sys.InvocationHandle<Int>) = sys.cancel(job, "stop");
+            pub fn positional_null(job: sys.InvocationHandle<Int>) = sys.cancel(job, null);
+            pub fn positional_explicit(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(job, "stop");
+            pub fn explicit(job: sys.InvocationHandle<Int>) = sys.cancel<Int>(job, reason: "stop");
+            pub fn named(job: sys.InvocationHandle<Int>) = sys.cancel(invocation: job, reason: null);
+            pub fn local_generic<T>(job: sys.InvocationHandle<T>) = sys.cancel<T>(job);
+            pub fn piped(job: sys.InvocationHandle<Int>) = job | sys.cancel();
+            pub fn piped_positional(job: sys.InvocationHandle<Int>) = job | sys.cancel("stop");
+            pub fn piped_positional_null(job: sys.InvocationHandle<Int>) = job | sys.cancel(null);
+            pub fn piped_positional_explicit(job: sys.InvocationHandle<Int>) = job | sys.cancel<Int>("stop");
+            pub fn piped_explicit(job: sys.InvocationHandle<Int>) = job | sys.cancel<Int>(reason: "stop");
+        

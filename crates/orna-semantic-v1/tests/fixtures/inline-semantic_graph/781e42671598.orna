@@ -1,0 +1,1 @@
+system rows are read-only; use `sys.admin.resolve_failure(failure.reference, ...)`

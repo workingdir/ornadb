@@ -1,0 +1,14 @@
+
+                use library;
+                table Stock(id: Str) { quantity: Int, }
+                table Reading(id: Str) { value: Int, }
+                fn seed() {
+                    library.Book.insert({ id: "book-1", title: "The Night Garden" });
+                    Stock.insert({ id: "north", quantity: 12 });
+                    Stock.update("north", { quantity: 9 });
+                    Reading.delete("sample-1");
+                }
+                fn read() = Stock.one();
+                fn first() = Reading.first();
+                fn count(): Int = Reading.count();
+            

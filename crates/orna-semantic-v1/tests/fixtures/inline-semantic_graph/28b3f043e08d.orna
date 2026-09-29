@@ -1,0 +1,1 @@
+fn first(value: Int = 1) = value; {second} pub fn callbacks() = [first, second];

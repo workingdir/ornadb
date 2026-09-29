@@ -1,0 +1,1 @@
+fn active_streams() { sys.runtime.streams }

@@ -1,0 +1,8 @@
+
+            pub fn reset(checkpoint: sys.Checkpoint, to: sys.CheckpointPosition, reason: Str) =
+                sys.admin.reset_checkpoint(checkpoint.reference, expected_version: checkpoint.version, expected_position: checkpoint.position, to: to, reason: reason);
+            pub fn retry(failure: sys.Failure) =
+                sys.admin.retry_failure(failure.reference, expected_version: failure.version);
+            pub fn resolve(failure: sys.Failure, reason: Str) =
+                sys.admin.resolve_failure(failure.reference, expected_version: failure.version, expected_status: failure.status, reason: reason);
+        

@@ -1,0 +1,1 @@
+fn bad(values: [Int]) = std.collection.map(values, (left, right) => left + right);

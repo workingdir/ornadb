@@ -1,0 +1,1 @@
+fn bad(rows: [Int]) = rows | exists(rows: rows, predicate: value => true);

@@ -1,0 +1,1 @@
+fn uuid7(value: Int): Str = "shadowed"; pub fn generated() = uuid7(1);

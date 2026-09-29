@@ -1,0 +1,1 @@
+fn add(value: Int, extra = 2) = value + extra; fn test() = 1 | add(extra: 3, extra: 4);

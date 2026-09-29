@@ -1,0 +1,1 @@
+pub fn good(value: Decimal) = Money<GBP>(value);

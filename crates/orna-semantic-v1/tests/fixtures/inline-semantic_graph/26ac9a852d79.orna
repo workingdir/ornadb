@@ -1,0 +1,1 @@
+{declaration} fn create() = Reading.insert({ value: 1.25, label: "new" });

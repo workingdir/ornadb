@@ -1,0 +1,1 @@
+pub table Reading(id: Int) { value: Int, } fn poll() { while 1 { Reading.insert({ id: 1, value: 2 }); } }

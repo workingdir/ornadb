@@ -1,0 +1,1 @@
+type NotCurrency; fn bad(): Money<NotCurrency> = 12.34.NotCurrency;

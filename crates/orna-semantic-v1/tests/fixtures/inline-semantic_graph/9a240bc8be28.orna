@@ -1,0 +1,1 @@
+fn bad(rows: [Int]) = rows | every(value => true, value => false);

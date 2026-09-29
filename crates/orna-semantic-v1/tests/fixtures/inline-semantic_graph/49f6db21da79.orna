@@ -1,0 +1,1 @@
+table Reading(id: Int) { value: Int, } fn project(reading: Reading) = [reading.value]; fn bad() = Reading | flat_map(project);

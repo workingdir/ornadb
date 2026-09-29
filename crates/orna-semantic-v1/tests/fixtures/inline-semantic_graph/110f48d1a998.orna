@@ -1,0 +1,1 @@
+fn fail(value: Int): Int = value; pub fn call() = fail(1);

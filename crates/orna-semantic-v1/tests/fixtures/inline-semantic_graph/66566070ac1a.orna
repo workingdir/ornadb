@@ -1,0 +1,1 @@
+fn bad(energy: Decimal<kWh>, rate: Money<GBP> / hour) = energy * rate;

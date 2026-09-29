@@ -1,0 +1,1 @@
+table Person(id: Str) { name: Str, } fn write() = Person.insert({ name: "Alice" });
