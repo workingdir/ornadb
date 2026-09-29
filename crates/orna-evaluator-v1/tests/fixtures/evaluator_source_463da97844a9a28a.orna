@@ -1,0 +1,1 @@
+fn early() { return 7; 9 }

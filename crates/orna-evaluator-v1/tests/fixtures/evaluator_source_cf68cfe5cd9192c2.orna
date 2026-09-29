@@ -1,0 +1,1 @@
+std.collection.filter([1, 2], value => true)

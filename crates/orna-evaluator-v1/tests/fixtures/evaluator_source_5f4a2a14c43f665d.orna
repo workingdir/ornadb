@@ -1,0 +1,1 @@
+case max([]) { Some(value): value, null: 10 }

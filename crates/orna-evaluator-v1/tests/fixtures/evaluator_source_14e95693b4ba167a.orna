@@ -1,0 +1,1 @@
+sort_by([{key: 2024-02-29, label: "later"}, {key: 2024-01-01, label: "first"}, {key: 2024-01-01, label: "second"}], row => row.key)
