@@ -1,0 +1,5 @@
+pub type PublicToken {
+    pub value: Str,
+}
+
+pub fn reveal(token: PublicToken): Str = token.value;
