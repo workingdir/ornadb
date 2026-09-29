@@ -97,9 +97,9 @@ fn run<F: Future>(future: F) -> F::Output {
         })
 }
 
-fn subscribe() -> Envelope {
+fn subscribe(request: [u8; 16]) -> Envelope {
     Envelope {
-        request: Some([1; 16]),
+        request: Some(request),
         watch: None,
         message: Message::Subscribe {
             resource: [2; 16],
@@ -244,6 +244,7 @@ async fn websocket_snapshot(
     response: ReplacementResponse,
     token: &str,
     watch: [u8; 16],
+    subscribe_request: [u8; 16],
 ) -> Option<tokio_tungstenite::WebSocketStream<TcpStream>> {
     let expected_path = format!("/orna/live/{SESSION}");
     let expected_cookie = format!("orna_session=opaque-{token}");
@@ -286,13 +287,13 @@ async fn websocket_snapshot(
         };
         assert_eq!(
             Envelope::decode(&request, Limits::default()).unwrap(),
-            subscribe()
+            subscribe(subscribe_request)
         );
         let revision = u8::from(matches!(response, ReplacementResponse::NonzeroFreshWatch));
         let text = if token == FIRST_TOKEN { "old" } else { "new" };
         socket
             .send(WebSocketMessage::Binary(
-                snapshot(watch, revision, text).into(),
+                snapshot_with_request(watch, revision, text, Some(subscribe_request)).into(),
             ))
             .await
             .unwrap();
@@ -370,9 +371,10 @@ async fn spawn_server(
         } else {
             ReplacementResponse::Resubscribe
         };
-        let old_socket = websocket_snapshot(old_socket, initial_response, FIRST_TOKEN, [7; 16])
-            .await
-            .expect("initial attachment socket");
+        let old_socket =
+            websocket_snapshot(old_socket, initial_response, FIRST_TOKEN, [7; 16], [1; 16])
+                .await
+                .expect("initial attachment socket");
 
         let (mut resume, _) = listener.accept().await.unwrap();
         let resume_request = String::from_utf8(read_http(&mut resume).await).unwrap();
@@ -401,7 +403,7 @@ async fn spawn_server(
             assert!(retry_request.contains(SECOND_TOKEN));
             respond(&mut retry, "200 OK", THIRD_TOKEN, runtime, limits).await;
         } else {
-            let _ = websocket_snapshot(replacement, response, SECOND_TOKEN, [8; 16]).await;
+            let _ = websocket_snapshot(replacement, response, SECOND_TOKEN, [8; 16], [2; 16]).await;
         }
     });
     (Url::parse(&format!("http://{address}")).unwrap(), task)
@@ -421,9 +423,10 @@ fn client(endpoint: Url) -> LiveClient {
 async fn initial_driver(client: &LiveClient) -> (orna_client::LiveSession, Driver) {
     let session = client.create_session([2; 16]).await.unwrap();
     let transport = client.connect(&session).await.unwrap();
-    let attachment = BootstrappedLiveAttachment::start(transport, subscribe(), session.limits())
-        .await
-        .unwrap();
+    let attachment =
+        BootstrappedLiveAttachment::start(transport, subscribe([1; 16]), session.limits())
+            .await
+            .unwrap();
     (
         session,
         attachment
@@ -443,8 +446,14 @@ fn reconnect_resubscribes_with_a_new_watch() {
             driver.receive_once().await,
             Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
         ));
+        assert!(matches!(
+            client
+                .reconnect_driver(&session, &mut driver, subscribe([1; 16]))
+                .await,
+            Err(LiveReconnectError::InvalidRequest)
+        ));
         let rotated = match client
-            .reconnect_driver(&session, &mut driver, subscribe())
+            .reconnect_driver(&session, &mut driver, subscribe([2; 16]))
             .await
         {
             Ok(session) => session,
@@ -457,6 +466,12 @@ fn reconnect_resubscribes_with_a_new_watch() {
             Ok(LiveSessionEvent::SnapshotPublished { revision: 0 })
         ));
         server.await.unwrap();
+        assert!(matches!(
+            client
+                .reconnect_driver(&rotated, &mut driver, subscribe([1; 16]))
+                .await,
+            Err(LiveReconnectError::InvalidRequest)
+        ));
     });
 }
 
@@ -477,7 +492,7 @@ fn reconnect_rejects_nonzero_revision_for_a_fresh_watch() {
         ));
         assert!(matches!(
             client
-                .reconnect_driver(&session, &mut driver, subscribe())
+                .reconnect_driver(&session, &mut driver, subscribe([2; 16]))
                 .await,
             Err(LiveReconnectError::AfterResume(_))
         ));
@@ -508,7 +523,7 @@ fn reconnect_resubscribe_accepts_fresh_watch_revision_zero_then_delta() {
         ));
 
         let rotated = match client
-            .reconnect_driver(&session, &mut driver, subscribe())
+            .reconnect_driver(&session, &mut driver, subscribe([2; 16]))
             .await
         {
             Ok(session) => session,
@@ -680,7 +695,7 @@ fn reconnect_resubscribe_rejects_runtime_generation_change_before_socket() {
         ));
         assert!(matches!(
             client
-                .reconnect_driver(&session, &mut driver, subscribe())
+                .reconnect_driver(&session, &mut driver, subscribe([2; 16]))
                 .await,
             Err(LiveReconnectError::AfterResume(_))
         ));
@@ -707,7 +722,7 @@ fn reconnect_failure_returns_rotated_retry_session_without_mutating_visible_driv
         ));
 
         let error = match client
-            .reconnect_driver(&session, &mut driver, subscribe())
+            .reconnect_driver(&session, &mut driver, subscribe([2; 16]))
             .await
         {
             Err(error) => error,
