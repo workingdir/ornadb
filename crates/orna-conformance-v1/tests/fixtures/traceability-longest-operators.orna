@@ -1,0 +1,7 @@
+pub fn fallback(value: Int?, bound: Int) = value ?? bound;
+pub fn compare(value: Int) = value <= 10 || value >= 20 || value == 15 || value != 0;
+pub fn inside(value: Int) = value in 1..=10;
+pub fn identity(value: Int) = value;
+pub fn mapped(value: Int) = value | identity;
+pub fn invoke(value: Int) = (item => item)(value);
+pub fn recover(raw: Str) = raw |? (failure => failure);
