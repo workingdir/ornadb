@@ -1,0 +1,12 @@
+// Same semantic source label and canonical list, but a different source layout.
+pub table Reading(id: Int) { value: Int, }
+
+pub fn main() {
+    Stream.from_list(
+        [1, 2],
+        source_identity: "fixture:streams-pa0p-finite"
+    )
+        | for_each(value => {
+            Reading.insert({ id: value, value: value });
+        });
+}
