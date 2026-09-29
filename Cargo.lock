@@ -1564,6 +1564,7 @@ dependencies = [
 name = "orna-syntax"
 version = "1.0.0"
 dependencies = [
+ "orna-syntax-v1",
  "proptest",
  "rowan",
 ]
