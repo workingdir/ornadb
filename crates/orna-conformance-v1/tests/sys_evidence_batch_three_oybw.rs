@@ -8,7 +8,7 @@ use orna_sys_v1::{
 use std::{thread, time::Duration};
 
 const SYSTEM_REFERENCE: &str =
-    include_str!("../../../../reference/Orna-1.0.0/source/15-system.md");
+    include_str!("fixtures/reference/source/15-system.md");
 const START_FIXTURE: &str = include_str!("fixtures/typed-start-valid.orna");
 
 struct Case {

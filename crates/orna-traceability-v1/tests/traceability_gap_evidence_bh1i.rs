@@ -34,47 +34,47 @@ const PUBLICATION_DIGEST: &str =
 const FIXTURE_SOURCES: &[(&str, &str)] = &[
     (
         "examples/valid/presentation-watch.orna",
-        include_str!("../../../../reference/Orna-1.0.0/examples/valid/presentation-watch.orna"),
+        include_str!("fixtures/reference/examples/valid/presentation-watch.orna"),
     ),
     (
         "examples/valid/table-composite-key.orna",
-        include_str!("../../../../reference/Orna-1.0.0/examples/valid/table-composite-key.orna"),
+        include_str!("fixtures/reference/examples/valid/table-composite-key.orna"),
     ),
     (
         "examples/valid/table-reference.orna",
-        include_str!("../../../../reference/Orna-1.0.0/examples/valid/table-reference.orna"),
+        include_str!("fixtures/reference/examples/valid/table-reference.orna"),
     ),
     (
         "examples/valid/row-body.orna",
-        include_str!("../../../../reference/Orna-1.0.0/examples/valid/row-body.orna"),
+        include_str!("fixtures/reference/examples/valid/row-body.orna"),
     ),
     (
         "examples/valid/explicit-rekey.orna",
-        include_str!("../../../../reference/Orna-1.0.0/examples/valid/explicit-rekey.orna"),
+        include_str!("fixtures/reference/examples/valid/explicit-rekey.orna"),
     ),
     (
         "examples/valid/table-explicit-key.orna",
-        include_str!("../../../../reference/Orna-1.0.0/examples/valid/table-explicit-key.orna"),
+        include_str!("fixtures/reference/examples/valid/table-explicit-key.orna"),
     ),
     (
         "examples/reference/main.orna",
-        include_str!("../../../../reference/Orna-1.0.0/examples/reference/main.orna"),
+        include_str!("fixtures/reference/examples/reference/main.orna"),
     ),
     (
         "examples/reference/library.orna",
-        include_str!("../../../../reference/Orna-1.0.0/examples/reference/library.orna"),
+        include_str!("fixtures/reference/examples/reference/library.orna"),
     ),
     (
         "examples/reference/sensors.orna",
-        include_str!("../../../../reference/Orna-1.0.0/examples/reference/sensors.orna"),
+        include_str!("fixtures/reference/examples/reference/sensors.orna"),
     ),
     (
         "examples/reference/values.orna",
-        include_str!("../../../../reference/Orna-1.0.0/examples/reference/values.orna"),
+        include_str!("fixtures/reference/examples/reference/values.orna"),
     ),
     (
         "examples/reference/warehouse.orna",
-        include_str!("../../../../reference/Orna-1.0.0/examples/reference/warehouse.orna"),
+        include_str!("fixtures/reference/examples/reference/warehouse.orna"),
     ),
 ];
 

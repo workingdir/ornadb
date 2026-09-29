@@ -1,0 +1,6 @@
+type Port = Int {
+    assert >= 1;
+    assert <= 65_535;
+}
+
+pub fn default_port(): Port = Port.from(8080);

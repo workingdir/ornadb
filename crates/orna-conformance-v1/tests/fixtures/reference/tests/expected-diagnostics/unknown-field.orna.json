@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/unknown-field.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E2003",
+  "message_contains": "unknown field `banana`",
+  "status": "expected-not-executed"
+}

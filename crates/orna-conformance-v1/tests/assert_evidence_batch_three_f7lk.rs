@@ -41,7 +41,7 @@ fn mapped_semantic_diagnostic(source: &str) -> (String, String) {
 
 #[test]
 fn assert_003_table_assertion_plan_is_owned_by_its_lexical_table() {
-    let source = include_str!("../../../../reference/Orna-1.0.0/examples/valid/table-assertions.orna");
+    let source = include_str!("fixtures/reference/examples/valid/table-assertions.orna");
     let analysis = analyze(&[ModuleInput::new("table-assertions.orna", source)]);
     assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
     let plans = analysis.assertions.values().flatten().collect::<Vec<_>>();
@@ -60,7 +60,7 @@ fn assert_015_table_and_module_assertions_see_one_coherent_cross_table_candidate
 
 #[test]
 fn assert_016_legacy_self_pipeline_receives_the_mapped_diagnostic_and_specific_guidance() {
-    let source = include_str!("../../../../reference/Orna-1.0.0/examples/invalid/legacy-assert-self-pipe.orna");
+    let source = include_str!("fixtures/reference/examples/invalid/legacy-assert-self-pipe.orna");
     let (code, message) = mapped_semantic_diagnostic(source);
     assert_eq!(code, "ORNA-A091-002");
     assert!(message.contains("remove `self |`"), "{message}");
@@ -68,7 +68,7 @@ fn assert_016_legacy_self_pipeline_receives_the_mapped_diagnostic_and_specific_g
 
 #[test]
 fn assert_017_legacy_repeated_owner_pipeline_receives_the_mapped_diagnostic_and_guidance() {
-    let source = include_str!("../../../../reference/Orna-1.0.0/examples/invalid/legacy-assert-owner-pipe.orna");
+    let source = include_str!("fixtures/reference/examples/invalid/legacy-assert-owner-pipe.orna");
     let (code, message) = mapped_semantic_diagnostic(source);
     assert_eq!(code, "ORNA-A091-002");
     assert!(message.contains("remove the repeated table owner"), "{message}");
@@ -109,7 +109,7 @@ fn assert_028_preserves_source_span_order_within_one_module() {
 
 #[test]
 fn assert_030_cross_table_assertion_has_module_not_table_ownership() {
-    let source = include_str!("../../../../reference/Orna-1.0.0/examples/valid/cross-table-assertion.orna");
+    let source = include_str!("fixtures/reference/examples/valid/cross-table-assertion.orna");
     let analysis = analyze(&[ModuleInput::new("cross-table-assertion.orna", source)]);
     assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
     let plan = analysis.assertions.values().flatten().next().expect("module assertion plan");
@@ -119,7 +119,7 @@ fn assert_030_cross_table_assertion_has_module_not_table_ownership() {
 
 #[test]
 fn assert_055_recognized_legacy_owner_form_has_specific_migration_guidance() {
-    let source = include_str!("../../../../reference/Orna-1.0.0/examples/invalid/legacy-assert-self-pipe.orna");
+    let source = include_str!("fixtures/reference/examples/invalid/legacy-assert-self-pipe.orna");
     let (_, message) = mapped_semantic_diagnostic(source);
     assert!(message.contains("remove `self |`"), "{message}");
 }

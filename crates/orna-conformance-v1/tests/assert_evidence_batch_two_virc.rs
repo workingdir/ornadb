@@ -57,7 +57,7 @@ fn assert_014_table_assertion_failure_rolls_back_all_candidate_writes() {
 
 #[test]
 fn assert_021_valid_module_assertion_resolves_two_distinct_tables() {
-    let source = include_str!("../../../../reference/Orna-1.0.0/examples/valid/cross-table-assertion.orna");
+    let source = include_str!("fixtures/reference/examples/valid/cross-table-assertion.orna");
     let analysis = analyze(&[ModuleInput::new("cross-table-assertion.orna", source)]);
     assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
     let plans = analysis.assertions.values().flat_map(|plans| plans.iter()).collect::<Vec<_>>();
@@ -67,14 +67,14 @@ fn assert_021_valid_module_assertion_resolves_two_distinct_tables() {
 
 #[test]
 fn assert_022_module_assertion_with_one_table_dependency_is_rejected() {
-    let source = include_str!("../../../../reference/Orna-1.0.0/examples/invalid/module-single-table-assertion.orna");
+    let source = include_str!("fixtures/reference/examples/invalid/module-single-table-assertion.orna");
     let analysis = analyze(&[ModuleInput::new("module-single-table-assertion.orna", source)]);
     assert!(analysis.diagnostics.iter().any(|diagnostic| diagnostic.code() == DIAG_ASSERTION_ONE_TABLE), "{:?}", analysis.diagnostics);
 }
 
 #[test]
 fn assert_023_module_assertion_without_table_dependencies_is_rejected() {
-    let source = include_str!("../../../../reference/Orna-1.0.0/examples/invalid/module-zero-table-assertion.orna");
+    let source = include_str!("fixtures/reference/examples/invalid/module-zero-table-assertion.orna");
     let analysis = analyze(&[ModuleInput::new("module-zero-table-assertion.orna", source)]);
     assert!(analysis.diagnostics.iter().any(|diagnostic| diagnostic.code() == DIAG_ASSERTION_SCOPE), "{:?}", analysis.diagnostics);
 }

@@ -1,0 +1,1 @@
+pub fn bad() = vehicle.corsa.Reading.insert({ time: now(), speed: "fast", rpm: 1000 });
