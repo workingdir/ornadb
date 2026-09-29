@@ -1,0 +1,6 @@
+std.collection.asof_join(
+    left: [{ group: "g", at: 1 }],
+    right: [{ group: "g", at: 1 }],
+    time: row => 1 / 0,
+    by: row => row.group
+)
