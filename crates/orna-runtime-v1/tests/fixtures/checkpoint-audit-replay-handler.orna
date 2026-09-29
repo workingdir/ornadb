@@ -1,0 +1,1 @@
+pub fn replay_handler(value: Int): Int = value + 1;
